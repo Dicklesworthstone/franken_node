@@ -216,6 +216,172 @@ if (false) {{ lookup.resolve('./never.json'); }}
 }
 
 #[test]
+fn extracted_metadata_resolvers_match_node_conditions_and_replay_original_observations() {
+    for (entry, source, esm) in [
+        ("app.cjs", r#"
+const lookup = require.resolve;
+const next = lookup;
+const {resolve: fromObject} = require;
+console.log(next('dual/asset'));
+console.log(fromObject('#asset'));
+console.log(lookup('./poison.cjs'));
+"#, false),
+        ("app.mjs", r#"
+import {createRequire} from 'node:module';
+const load = createRequire(import.meta.url);
+const locate = import.meta.resolve;
+const next = locate;
+const {resolve: fromMeta} = import.meta;
+const lookup = load.resolve;
+const nextLookup = lookup;
+const {resolve: fromLoader} = load;
+console.log(next('dual/asset'));
+console.log(fromMeta('#asset'));
+console.log(locate('./missing.json?rev=1#view'));
+console.log(fromMeta('./assets/'));
+console.log(nextLookup('dual/asset'));
+console.log(fromLoader('#asset'));
+console.log(lookup('./poison.cjs'));
+"#, true),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project with spaces");
+        put(&project, "package.json",
+            r##"{"imports":{"#asset":{"import":"./private/import.css","require":"./private/require.css"}}}"##);
+        put(&project, "node_modules/dual/package.json",
+            r#"{"exports":{"./asset":{"import":"./import.css","require":"./require.css"}}}"#);
+        for path in [
+            "private/import.css", "private/require.css",
+            "node_modules/dual/import.css", "node_modules/dual/require.css",
+        ] {
+            put(&project, path, "opaque CSS, not JavaScript: }");
+        }
+        put(&project, "poison.cjs",
+            "throw Error('metadata target executed'); require('./not-a-real-dependency.cjs');");
+        std::fs::create_dir(project.join("assets")).unwrap();
+        put(&project, entry, source);
+        let reference = Command::new("node")
+            .env_remove("NODE_OPTIONS").env_remove("NODE_PATH")
+            .current_dir(&project).arg(entry).output().unwrap();
+        assert!(reference.status.success(), "{}", String::from_utf8_lossy(&reference.stderr));
+
+        let capsule = temp.path().join("metadata-aliases.fnsc");
+        let (code, captured) = export_capsule(&project, entry, &capsule, &[]);
+        // The ESM program's createRequire import remains a runtime-required
+        // builtin edge. Its metadata requests are independently resolved.
+        assert_eq!(code, i32::from(esm), "{captured}");
+        assert_eq!(paths(&captured), [entry]);
+        assert_eq!(captured["execution_performed"], false);
+        assert!(captured["source_graph"]["diagnostics"].as_array().unwrap().is_empty());
+        let edges = captured["source_graph"]["edges"].as_array().unwrap();
+        let lookups = edges.iter().filter(|edge|
+            edge["kind"] == "require_resolve" || edge["kind"] == "import_meta_resolve"
+        ).collect::<Vec<_>>();
+        let mut expected = Vec::new();
+        if esm {
+            expected.extend([
+                ("import_meta_resolve", "dual/asset"),
+                ("import_meta_resolve", "#asset"),
+                ("import_meta_resolve", "./missing.json?rev=1#view"),
+                ("import_meta_resolve", "./assets/"),
+            ]);
+        }
+        expected.extend([
+            ("require_resolve", "dual/asset"),
+            ("require_resolve", "#asset"),
+            ("require_resolve", "./poison.cjs"),
+        ]);
+        assert_eq!(lookups.len(), expected.len());
+        let canonical_root = project.canonicalize().unwrap();
+        let root_url = url::Url::from_directory_path(&canonical_root).unwrap();
+        let mut actual = Vec::new();
+        for (edge, (kind, request)) in lookups.iter().zip(expected) {
+            assert_eq!(edge["kind"], kind);
+            assert_eq!(edge["specifier"], request);
+            assert_eq!(edge["state"], "resolved");
+            assert_eq!(edge["conditions"], serde_json::json!([
+                "node", if kind == "require_resolve" { "require" } else { "import" }
+            ]));
+            if request == "#asset" {
+                assert_eq!(edge["mappings"][0]["kind"], "imports");
+            } else if request == "dual/asset" {
+                assert_eq!(edge["mappings"][0]["kind"], "exports");
+            }
+            if kind == "require_resolve" {
+                assert!(edge["resolved_url"].is_null());
+                actual.push(canonical_root.join(edge["target"]["path"].as_str().unwrap())
+                    .to_string_lossy().into_owned());
+            } else {
+                assert!(edge["target"].is_null());
+                let target = &edge["resolved_url"];
+                assert_eq!(target["kind"], "file");
+                let mut url = root_url.clone();
+                url.path_segments_mut().unwrap().pop_if_empty()
+                    .extend(target["id"]["path"].as_str().unwrap().split('/'));
+                let mut serialized = url.to_string();
+                serialized.push_str(target["id"]["url_suffix"].as_str().unwrap());
+                actual.push(serialized);
+            }
+        }
+        assert_eq!(String::from_utf8(reference.stdout).unwrap(),
+            format!("{}\n", actual.join("\n")));
+        let targets = captured["source_graph"]["resolution_targets"].as_array().unwrap();
+        assert_eq!(targets.len(), 3);
+        let probes = captured["source_graph"]["probes"].as_array().unwrap();
+        assert!(!probes.iter().any(|probe|
+            probe["path"].as_str().unwrap().contains("not-a-real-dependency")));
+        if esm {
+            for path in ["private/import.css", "node_modules/dual/import.css"] {
+                let probe = probes.iter().find(|probe| probe["path"] == path).unwrap();
+                assert_eq!(probe["kind"], "file_metadata");
+                assert!(probe["bytes"].is_null());
+                assert!(probe["sha256"].is_null());
+            }
+        }
+
+        std::fs::rename(&project, temp.path().join("original-project")).unwrap();
+        put(&project, entry, "throw Error('replacement source must not reopen');");
+        put(&project, "package.json", r##"{"imports":{"#asset":"./replacement.css"}}"##);
+        put(&project, "node_modules/dual/package.json", r#"{"exports":"./replacement.cjs"}"#);
+        put(&project, "poison.cjs", "throw Error('replacement target');");
+        put(&project, "missing.json", "{}");
+        let unrelated = temp.path().join("unrelated");
+        std::fs::create_dir(&unrelated).unwrap();
+        let (replay_code, replayed) = replay_capsule(&capsule,
+            captured["capsule_hash"].as_str().unwrap(), &unrelated);
+        assert_eq!(replay_code, code, "{replayed}");
+        assert_eq!(replayed["source_graph"], captured["source_graph"]);
+        assert_eq!(replayed["replay_verified"], true);
+        assert_eq!(replayed["execution_performed"], false);
+        assert_eq!(std::fs::read_dir(&unrelated).unwrap().count(), 0);
+    }
+}
+
+#[test]
+fn extracted_metadata_resolvers_keep_unproved_binding_and_search_paths_incomplete() {
+    let root = tempfile::tempdir().unwrap();
+    put(root.path(), "asset.cjs", "throw Error('metadata target must not execute');");
+    for (entry, source) in [
+        ("app.mjs", "const locate=import.meta.resolve; function shadow(locate){locate('./asset.cjs');}"),
+        ("app.mjs", "const locate=import.meta.resolve; locate=other; locate('./asset.cjs');"),
+        ("app.mjs", "locate('./asset.cjs'); const locate=import.meta.resolve;"),
+        ("app.mjs", "const next=locate; const locate=import.meta.resolve; next('./asset.cjs');"),
+        ("app.cjs", "const lookup=load.resolve; const load=require; lookup('./asset.cjs');"),
+        ("app.cjs", "const lookup=require.resolve; lookup('./asset.cjs',{paths:['./elsewhere']});"),
+        ("app.mjs", "const {resolve:locate,url}=import.meta; locate('./asset.cjs');"),
+    ] {
+        put(root.path(), entry, source);
+        let (code, report) = run(root.path(), entry, &[]);
+        assert_eq!(code, 1, "{source}: {report}");
+        assert_eq!(report["source_graph"]["fully_resolved"], false, "{source}: {report}");
+        assert_eq!(paths(&report), [entry]);
+        assert!(!report["source_graph"]["diagnostics"].as_array().unwrap().is_empty(),
+            "{source}: {report}");
+        assert_eq!(report["execution_performed"], false);
+    }
+}
+
+#[test]
 fn required_custom_extension_package_graphs_match_live_node_without_esm_format_widening() {
     for package_type in ["commonjs", "module", ""] {
         let root = tempfile::tempdir().unwrap();

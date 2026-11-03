@@ -431,6 +431,27 @@ Mutation, shadowing, escaped loader references, mutable bindings, alternate
 resolve search paths and unbounded requests keep the graph incomplete. This
 does not grant a loader permission to open another route at execution time.
 
+Metadata resolver functions also support ordered top-level `const` aliases.
+For example, `const locate = import.meta.resolve; const next = locate;`
+allows `next('package-name')`, and
+`const lookup = require.resolve; lookup('package-name')` keeps CommonJS
+filename lookup. Extracting `.resolve` from an already proved loader alias or
+`createRequire` loader preserves that loader's captured origin. Exact
+one-member destructuring is supported too: `const {resolve} = import.meta`
+or `const {resolve: lookup} = require`. Default values, rest properties and
+additional members are outside this proof. Single-assignment `var` and `let`
+bindings also participate when their declarations complete in the uninterrupted
+initialization prelude and every use follows initialization.
+
+Each function retains its original lookup purpose: import metadata selects
+import conditions and returns a URL; require metadata selects require
+conditions and returns a filename. The binding and its origin must remain
+unshadowed and unchanged. Forward reads, aliases initialized before their
+loader, reassignment, escaping a resolver and custom require search paths keep
+the graph incomplete. The proof consumes the existing bounded syntax and
+binding budgets; it does not evaluate initialization code or widen load
+authority.
+
 `require.resolve(...)` and supported loader-alias `.resolve(...)` calls have
 their own `require_resolve` edge kind. They use CommonJS conditions and retain
 the selected ordinary files in `resolution_targets`, with identity, byte count
@@ -468,10 +489,11 @@ All loaded modules, filename targets and distinct URL targets share the same
 256-target limit. URL lookup cannot authorize an import, require or filename
 lookup, including a later request for the identical target.
 
-Direct calls and their supported finite string requests are captured. Additional
-arguments are evaluated normally but do not change the default module origin.
-Escaping or mutating `import.meta`, indirect resolver calls and unproved computed
-members remain explicit analysis refusals. Absolute filesystem paths and
+Direct calls and calls through the proved resolver bindings above capture the
+same supported finite string requests. Additional arguments to import metadata
+resolution are evaluated normally but do not change the default module origin.
+Escaping or mutating `import.meta`, calls through unproved resolver aliases and
+unproved computed members remain explicit analysis refusals. Absolute filesystem paths and
 `file:` URLs remain outside this project-contained capture contract; they need
 an explicit root mapping before they can be replayed correctly.
 

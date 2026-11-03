@@ -79,8 +79,8 @@ fn resolve_options_are_not_silently_resolved_from_the_importer_directory() {
 #[test]
 fn indirect_or_mutated_resolve_members_and_shadowed_loaders_stay_incomplete() {
     for source in [
-        "const resolve = require.resolve; resolve('./dep.cjs');",
-        "const { resolve } = require; resolve('./dep.cjs');",
+        "const resolve = require[member]; resolve('./dep.cjs');",
+        "const { resolve = fallback } = require; resolve('./dep.cjs');",
         "require[name]('./dep.cjs');",
         "require['res' + name]('./dep.cjs');",
         "require.resolve.call(null, './dep.cjs');",

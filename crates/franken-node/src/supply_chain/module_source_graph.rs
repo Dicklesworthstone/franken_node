@@ -46,6 +46,10 @@ pub mod engine_resolver;
 #[path = "module_require_resolve_tests.rs"]
 mod require_resolve_tests;
 
+#[cfg(test)]
+#[path = "module_metadata_resolver_tests.rs"]
+mod metadata_resolver_tests;
+
 const MAX_MODULES: usize = 256;
 const MAX_SITES: usize = 4096;
 const MAX_AST_NODES: usize = 262_144;
@@ -755,6 +759,9 @@ struct CreateRequireBindings<'source> {
     loaders: BTreeSet<&'source str>,
     created_loaders: BTreeMap<&'source str, usize>,
     commonjs_aliases: BTreeSet<&'source str>,
+    metadata_resolvers: BTreeMap<&'source str, MetadataResolverBinding>,
+    resolver_origins: BTreeSet<usize>,
+    commonjs_metadata_origin: bool,
     allowed_identifiers: BTreeSet<usize>,
     factory_members: BTreeSet<usize>,
     factory_patterns: BTreeSet<usize>,
@@ -774,6 +781,12 @@ struct LoaderInitialization {
     declaration_name: usize,
     available_after: usize,
     in_prelude: bool,
+}
+
+struct MetadataResolverBinding {
+    kind: LoadKind,
+    declaration_name: usize,
+    available_after: usize,
 }
 
 impl<'source> CreateRequireBindings<'source> {
@@ -855,6 +868,7 @@ impl<'source> CreateRequireBindings<'source> {
         }
         if bindings.factories.is_empty() {
             bindings.discover_commonjs_aliases(root, source)?;
+            bindings.discover_metadata_resolvers(root, source)?;
             bindings.prove_initialization_prelude(root);
             return Ok(bindings);
         }
@@ -932,6 +946,7 @@ impl<'source> CreateRequireBindings<'source> {
             }
         }
         bindings.discover_commonjs_aliases(root, source)?;
+        bindings.discover_metadata_resolvers(root, source)?;
         bindings.prove_initialization_prelude(root);
         Ok(bindings)
     }
@@ -1182,6 +1197,165 @@ impl<'source> CreateRequireBindings<'source> {
         Ok(())
     }
 
+    /// Extracted resolvers retain their bound origin and their metadata-only
+    /// purpose. Admit ordered top-level aliases and exact one-member patterns;
+    /// the ordinary scan rejects mutation, shadowing and every other escape.
+    /// Loader discovery has already visited the whole source, so keep a separate
+    /// ordered set here: a later loader must not authenticate an earlier read.
+    fn discover_metadata_resolvers(
+        &mut self,
+        root: Node<'_>,
+        source: &'source str,
+    ) -> Result<()> {
+        let mut available_loaders = BTreeSet::new();
+        let mut statements = root.walk();
+        for statement in root.named_children(&mut statements) {
+            if !loader_declaration(statement) {
+                continue;
+            }
+            let mut declarations = statement.walk();
+            for declaration in statement.named_children(&mut declarations) {
+                if declaration.kind() != "variable_declarator" {
+                    continue;
+                }
+                let Some(pattern) = declaration.child_by_field_name("name") else {
+                    continue;
+                };
+                let Some(value) = declaration.child_by_field_name("value") else {
+                    continue;
+                };
+                let value = runtime_operand(value);
+                let pattern_name = pattern.utf8_text(source.as_bytes()).unwrap_or("");
+                if pattern.kind() == "identifier"
+                    && self.loaders.contains(pattern_name)
+                    && self.allowed_identifiers.contains(&pattern.id())
+                {
+                    available_loaders.insert(pattern_name);
+                    continue;
+                }
+
+                let (name, origin, kind, commonjs) = if pattern.kind() == "identifier" {
+                    if let Some(binding) = value
+                        .utf8_text(source.as_bytes())
+                        .ok()
+                        .filter(|_| value.kind() == "identifier")
+                        .and_then(|name| self.metadata_resolvers.get(name))
+                        .filter(|binding| binding.available_after <= value.start_byte())
+                    {
+                        (pattern, value, binding.kind, false)
+                    } else {
+                        if !named_member(value, "resolve", source) {
+                            continue;
+                        }
+                        let Some(origin) = value.child_by_field_name("object") else {
+                            continue;
+                        };
+                        let origin = runtime_operand(origin);
+                        let Some((kind, commonjs)) =
+                            self.metadata_origin(origin, source, &available_loaders)
+                        else {
+                            continue;
+                        };
+                        (pattern, origin, kind, commonjs)
+                    }
+                } else if pattern.kind() == "object_pattern" {
+                    let mut properties = pattern.walk();
+                    let mut properties = pattern
+                        .named_children(&mut properties)
+                        .filter(|property| property.kind() != "comment");
+                    let Some(property) = properties.next() else {
+                        continue;
+                    };
+                    if properties.next().is_some() {
+                        continue;
+                    }
+                    let name = if property.kind() == "shorthand_property_identifier_pattern"
+                        && property.utf8_text(source.as_bytes()) == Ok("resolve")
+                    {
+                        property
+                    } else if property.kind() == "pair_pattern"
+                        && property.child_by_field_name("key").is_some_and(|key| {
+                            key.utf8_text(source.as_bytes()) == Ok("resolve")
+                                || literal(key, source).as_deref() == Some("resolve")
+                        })
+                    {
+                        let Some(name) = property.child_by_field_name("value") else {
+                            continue;
+                        };
+                        if name.kind() != "identifier" {
+                            continue;
+                        }
+                        name
+                    } else {
+                        continue;
+                    };
+                    let Some((kind, commonjs)) =
+                        self.metadata_origin(value, source, &available_loaders)
+                    else {
+                        continue;
+                    };
+                    (name, value, kind, commonjs)
+                } else {
+                    continue;
+                };
+                let spelling = name.utf8_text(source.as_bytes()).unwrap_or("");
+                if spelling.contains('\\')
+                    || matches!(
+                        spelling,
+                        "require" | "createRequire" | "__filename" | "eval" | "Function"
+                    )
+                    || self.factories.contains_key(spelling)
+                    || self.loaders.contains(spelling)
+                    || self.origin_converters.contains_key(spelling)
+                    || self.filename_aliases.contains_key(spelling)
+                    || self.metadata_resolvers.contains_key(spelling)
+                {
+                    continue;
+                }
+                self.reserve_binding()?;
+                self.metadata_resolvers.insert(
+                    spelling,
+                    MetadataResolverBinding {
+                        kind,
+                        declaration_name: name.id(),
+                        available_after: declaration.end_byte(),
+                    },
+                );
+                self.allowed_identifiers.insert(name.id());
+                self.resolver_origins.insert(origin.id());
+                self.commonjs_metadata_origin |= commonjs;
+                self.record_declaration(name, declaration, source);
+            }
+        }
+        Ok(())
+    }
+
+    fn metadata_origin(
+        &self,
+        origin: Node<'_>,
+        source: &str,
+        available_loaders: &BTreeSet<&str>,
+    ) -> Option<(LoadKind, bool)> {
+        if origin.kind() == "meta_property" && keyword(origin, "import") {
+            return Some((LoadKind::ImportMetaResolve, false));
+        }
+        if origin.kind() != "identifier" {
+            return None;
+        }
+        let spelling = origin.utf8_text(source.as_bytes()).ok()?;
+        let native = spelling == "require"
+            && !self.factories.contains_key("require")
+            && !self.loaders.contains("require");
+        if native || available_loaders.contains(spelling) {
+            Some((
+                LoadKind::RequireResolve,
+                native || self.commonjs_aliases.contains(spelling),
+            ))
+        } else {
+            None
+        }
+    }
+
     /// Keep the ordinary require('node:module') edge in the graph. Only a
     /// direct builtin load into a top-level declaration proves a factory. Defaults,
     /// rest patterns, computed properties and other origins remain opaque.
@@ -1313,7 +1487,10 @@ impl<'source> CreateRequireBindings<'source> {
     }
 
     fn initialized_use(&self, node: Node<'_>, spelling: &str) -> bool {
-        self.mutable_bindings.get(spelling).is_none_or(|binding| {
+        self.metadata_resolvers.get(spelling).is_none_or(|binding| {
+            binding.declaration_name == node.id()
+                || node.start_byte() >= binding.available_after
+        }) && self.mutable_bindings.get(spelling).is_none_or(|binding| {
             binding.in_prelude
                 && (binding.declaration_name == node.id()
                     || node.start_byte() >= binding.available_after)
@@ -1345,6 +1522,7 @@ impl<'source> CreateRequireBindings<'source> {
             + self.loaders.len()
             + self.origin_converters.len()
             + self.filename_aliases.len()
+            + self.metadata_resolvers.len()
             >= MAX_SITES
         {
             return Err(limit());
@@ -1425,6 +1603,16 @@ impl<'source> CreateRequireBindings<'source> {
             && node
                 .utf8_text(source.as_bytes())
                 .is_ok_and(|name| self.loaders.contains(name))
+    }
+
+    fn metadata_resolver_kind(&self, node: Node<'_>, source: &str) -> Option<LoadKind> {
+        let node = runtime_operand(node);
+        if node.kind() != "identifier" {
+            return None;
+        }
+        self.metadata_resolvers
+            .get(node.utf8_text(source.as_bytes()).ok()?)
+            .map(|binding| binding.kind)
     }
 
     fn is_resolve(&self, node: Node<'_>, source: &str) -> bool {
@@ -1818,6 +2006,8 @@ fn scan(
                         Some(LoadKind::DynamicImport)
                     } else if is_import_meta_resolve(f, text) {
                         Some(LoadKind::ImportMetaResolve)
+                    } else if let Some(kind) = bindings.metadata_resolver_kind(f, text) {
+                        Some(kind)
                     } else if resolve {
                         Some(LoadKind::RequireResolve)
                     } else if is_require(f, bytes) || bindings.is_loader(f, text) {
@@ -1835,7 +2025,7 @@ fn scan(
                                 .named_children(&mut walk)
                                 .filter(|n| n.kind() != "comment");
                             let first = args.next();
-                            if resolve && args.next().is_some() {
+                            if kind == LoadKind::RequireResolve && args.next().is_some() {
                                 // `paths` changes the lookup origin. Do not
                                 // guess a route from just the first argument.
                                 if !erased {
@@ -1860,7 +2050,7 @@ fn scan(
                 if !erased =>
             {
                 let spelling = node.utf8_text(bytes).unwrap_or("");
-                if !bindings.commonjs_aliases.is_empty()
+                if (!bindings.commonjs_aliases.is_empty() || bindings.commonjs_metadata_origin)
                     && spelling == "arguments"
                     && commonjs_wrapper_arguments(node)
                 {
@@ -1885,11 +2075,13 @@ fn scan(
                 } else if !bindings.initialized_use(node, spelling) {
                     issue = Some((
                         "UNPROVED_LOADER_INITIALIZATION",
-                        "var/let loaders require an uninterrupted initialization prelude and reads after initialization",
+                        "loader aliases require reads after initialization; var/let bindings also need an uninterrupted initialization prelude",
                     ));
-                } else if bindings.allowed_identifiers.contains(&node.id()) {
-                    // Exactly the immutable import, proved declaration and
-                    // factory callee proved by discovery above.
+                } else if bindings.allowed_identifiers.contains(&node.id())
+                    || bindings.resolver_origins.contains(&node.id())
+                {
+                    // Exactly the immutable import, proved declaration,
+                    // factory callee or bound metadata resolver origin.
                 } else if !bindings.factories.is_empty() && spelling.contains('\\') {
                     issue = Some((
                         "UNSUPPORTED_CREATE_REQUIRE_BINDING",
@@ -1899,6 +2091,11 @@ fn scan(
                     issue = Some((
                         "UNSUPPORTED_REQUIRE_ALIAS_BINDING",
                         "escaped identifiers need decoded scope analysis before require alias capture",
+                    ));
+                } else if !bindings.metadata_resolvers.is_empty() && spelling.contains('\\') {
+                    issue = Some((
+                        "UNSUPPORTED_METADATA_RESOLVER_BINDING",
+                        "escaped identifiers need decoded scope analysis before metadata resolver capture",
                     ));
                 } else if bindings.used_origin_converters.contains(spelling) {
                     issue = Some((
@@ -1919,6 +2116,13 @@ fn scan(
                         "INDIRECT_CREATE_REQUIRE",
                         "createRequire factory must initialize a proved top-level binding from this module's unchanged origin",
                     ));
+                } else if bindings.metadata_resolvers.contains_key(spelling) {
+                    if !direct_callee(node, text) && !loader_typeof_probe(node) {
+                        issue = Some((
+                            "INDIRECT_METADATA_RESOLVER",
+                            "metadata resolver is shadowed, mutated or escapes its captured direct calls",
+                        ));
+                    }
                 } else if bindings.loaders.contains(spelling) {
                     if !bindings.direct_loader_use(node, text)
                         && !loader_typeof_probe(node)
@@ -1969,7 +2173,8 @@ fn scan(
                 if !erased
                     && keyword(node, "import")
                     && !immutable_import_meta_use(node, text)
-                    && !direct_import_meta_resolve_use(node, text) =>
+                    && !direct_import_meta_resolve_use(node, text)
+                    && !bindings.resolver_origins.contains(&node.id()) =>
             {
                 issue = Some(if bindings.loaders.is_empty() {
                     (
@@ -3130,7 +3335,7 @@ if (false) { import.meta.resolve('./unused.node'); }
     fn import_meta_resolve_does_not_promote_dynamic_or_mutable_calls() {
         let root = tempfile::tempdir().unwrap();
         for source in [
-            "const lookup=import.meta.resolve; lookup('./asset');",
+            "const lookup=import.meta[member]; lookup('./asset');",
             "import.meta[member]('./asset');",
             "import.meta.resolve=()=>''; import.meta.resolve('./asset');",
             "import /* origin */ . meta.resolve=()=>''; import.meta.resolve('./asset');",
@@ -4441,7 +4646,7 @@ module.exports={load,lookup,optional};
                 "var load;",
                 "load.call(null,'./dep.cjs');",
                 "load.apply(null,['./dep.cjs']);",
-                "const resolve=load.resolve; resolve('./dep.cjs');",
+                "const resolve=load.resolve; resolve.call(null,'./dep.cjs');",
                 "require=other;",
                 "arguments[1]=other;",
                 "(()=>{arguments[1]=other;})();",
@@ -4697,7 +4902,7 @@ module.exports={load,lookup,optional};
             "for(load of values){}",
             "load.call(null, './dep.cjs');",
             "load.apply(null, ['./dep.cjs']);",
-            "const resolve=load.resolve; resolve('./dep.cjs');",
+            "const resolve=load.resolve; resolve.call(null,'./dep.cjs');",
             "load.resolve('./dep.cjs', {paths:['other']});",
             "load[property]('./dep.cjs');",
             "eval('require=replacement');",
@@ -5529,7 +5734,7 @@ module.exports={load,lookup,optional};
             "export {local};",
             "consume(local);",
             "local.call(null, './dep.cjs');",
-            "const resolve=local.resolve; resolve('./dep.cjs');",
+            "const resolve=local.resolve; resolve.call(null,'./dep.cjs');",
             "local.resolve('./dep.cjs', {paths:['other']});",
             "function shadow(lo\\u0063al){local('./dep.cjs');}",
             "import.meta.url='file:///other.mjs';",
@@ -8084,7 +8289,7 @@ require!('./dep.cjs');
             "const local=make(import.meta.url); const load=local; consume(load); load('./dep.cjs');",
             "const local=make(import.meta.url); const load=local; export {load}; load('./dep.cjs');",
             "const local=make(import.meta.url); const load=local; load.call(null,'./dep.cjs');",
-            "const local=make(import.meta.url); const load=local; const resolve=load.resolve; resolve('./dep.cjs');",
+            "const local=make(import.meta.url); const load=local; const resolve=load.resolve; resolve.call(null,'./dep.cjs');",
             "const local=make(import.meta.url); const load=local; load.resolve('./dep.cjs',{paths:['other']});",
             "const local=make(import.meta.url); const load=local; function shadow(lo\\u0061d){} load('./dep.cjs');",
             "const local=make(import.meta.url); const lo\\u0061d=local; lo\\u0061d('./dep.cjs');",

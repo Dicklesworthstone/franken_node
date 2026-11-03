@@ -3399,6 +3399,66 @@ catch (error) { console.log('private', error.code); }
     }
 
     #[test]
+    fn native_extracted_metadata_resolvers_keep_child_origins_after_replay() {
+        use frankenengine_engine::baseline_interpreter::LaneChoice;
+
+        for lane in [LaneChoice::QuickJs, LaneChoice::V8] {
+            let parent = tempfile::tempdir().unwrap();
+            let root = parent.path().join("project with spaces");
+            put(&root, "app.mjs", r#"
+import { locateUrl, locateFile } from './lib/paths.mjs';
+import locateCommonJs from './lib/paths.cjs';
+console.log('url', locateUrl().endsWith('/lib/url.bin'));
+console.log('created', locateFile().endsWith('/lib/file.bin'));
+console.log('commonjs', locateCommonJs().endsWith('/lib/common.bin'));
+"#);
+            put(&root, "lib/paths.mjs", r#"
+import { createRequire } from 'node:module';
+const local = createRequire(import.meta.url);
+const lookup = local.resolve;
+const { resolve: locate } = import.meta;
+const next = locate;
+export function locateUrl() { return next('./url.bin'); }
+export function locateFile() { return lookup('./file.bin'); }
+"#);
+            put(&root, "lib/paths.cjs", r#"
+const { resolve: lookup } = require;
+const next = lookup;
+module.exports = function locateCommonJs() { return next('./common.bin'); };
+"#);
+            for path in ["lib/url.bin", "lib/file.bin", "lib/common.bin"] {
+                std::fs::write(root.join(path), [0, 255, 128, 1]).unwrap();
+            }
+            let reference = node_reference_output(&root, "app.mjs");
+            assert_eq!(reference, "url true\ncreated true\ncommonjs true\n");
+            let graph = capture(&root, "app.mjs", GraphOptions::default()).unwrap();
+            assert!(graph.report().diagnostics.is_empty(), "{:?}", graph.report());
+            assert_eq!(graph.report().modules.len(), 3);
+            assert_eq!(graph.report().resolution_targets.len(), 2);
+            let encoded = capsule::encode(&graph).unwrap();
+            std::fs::rename(&root, parent.path().join("original-project")).unwrap();
+            put(&root, "app.mjs", "throw Error('ambient replacement was opened');");
+            let replayed = capsule::replay(encoded.bytes(), encoded.digest()).unwrap();
+            assert_eq!(replayed.report(), graph.report());
+            let result = execute_module_graph_with_policy_for_test(
+                &root,
+                replayed,
+                lane,
+                Arc::new(CapabilityPolicyHook::new(BTreeSet::from([
+                    RuntimeCapability::ModuleLoad,
+                    RuntimeCapability::Builtin,
+                ]))),
+                || {},
+            ).expect("bound resolver aliases execute using their captured child module origins");
+            let actual = result.console_output.iter()
+                .map(|line| line.message.as_str())
+                .collect::<Vec<_>>()
+                .join("\n") + "\n";
+            assert_eq!(actual, reference, "{lane:?}");
+        }
+    }
+
+    #[test]
     fn native_required_custom_extensions_match_node_after_source_changes() {
         use frankenengine_engine::baseline_interpreter::LaneChoice;
 
