@@ -1418,6 +1418,34 @@ fn decoded_url_path(path: &str) -> Result<String> {
 /// root. Keep URL empty segments, unlike canonical physical probe paths.
 fn metadata_url_path(directory: &str, request: &str) -> Result<(String, String)> {
     const ROOT: &str = "/__franken_node_captured_project__/";
+    // WHATWG trims trailing spaces from the whole input, not from the path
+    // before a query or fragment. Match that before checking dot segments.
+    let request = request.trim_end_matches(' ');
+    // Check the walk before URL normalization: a request must not escape and
+    // then re-enter the synthetic root by spelling its implementation name.
+    // Empty URL segments count here; a//.. removes the empty segment, not a.
+    let path_end = request.find(['?', '#']).unwrap_or(request.len());
+    let lexical = decoded_url_path(&request[..path_end])?;
+    let mut depth = directory.split('/').filter(|part| !part.is_empty()).count();
+    for part in lexical.split('/') {
+        match part {
+            "." => {}
+            ".." => {
+                depth = depth.checked_sub(1).ok_or_else(|| error(
+                    "ERR_MODULE_OUTSIDE_PROJECT", "module URL escapes the captured project root",
+                ))?;
+            }
+            _ => {
+                if !part.is_empty() {
+                    validate_path(part)?;
+                }
+                depth += 1;
+                if depth > MAX_DEPTH {
+                    return Err(limit());
+                }
+            }
+        }
+    }
     let base = url::Url::from_directory_path(Path::new(ROOT).join(directory))
         .map_err(|_| error("ERR_INVALID_MODULE_SPECIFIER", "invalid captured URL origin"))?;
     let url = base.join(request)
@@ -1636,6 +1664,16 @@ mod tests {
             Entry::FileMetadata { version: Some(_) }));
         put(root.path(), "asset.css", b"changed after metadata observation");
         assert_eq!(resolver.locate("asset.css").err().unwrap().code, "ERR_MODULE_INPUT_CHANGED");
+    }
+
+    #[test]
+    fn import_meta_resolve_url_walk_preserves_space_and_suffix_boundaries() {
+        assert_eq!(metadata_url_path("a", "../.. ").unwrap_err().code,
+            "ERR_MODULE_OUTSIDE_PROJECT");
+        assert_eq!(metadata_url_path("", "./a//../missing ").unwrap(),
+            ("a/missing".into(), String::new()));
+        assert_eq!(metadata_url_path("", "./a/.. ?query#fragment ").unwrap(),
+            ("a/.. ".into(), "?query#fragment".into()));
     }
 
     #[test]

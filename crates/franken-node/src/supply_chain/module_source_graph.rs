@@ -3105,7 +3105,7 @@ if (false) { import.meta.resolve('./unused.node'); }
             ("./linkdir/missing", "linkdir/missing"),
             ("./linkdir/file.css", "real/file.css"),
             ("./linkfile/", "linkfile/"), ("./a//missing", "a//missing"),
-            ("./a//", "a//"), ("./", ""),
+            ("./a//", "a//"), ("./a//../missing", "a/missing"), ("./", ""),
             ("./missing%3Fname%23piece", "missing?name#piece"),
         ];
         let source = cases.iter().map(|(request, _)|
@@ -3152,6 +3152,20 @@ if (false) { import.meta.resolve('./unused.node'); }
             assert_eq!(captured.report.edges[0].error.as_ref().unwrap().code,
                 "ERR_UNSUPPORTED_MODULE_SPECIFIER");
             assert!(captured.report.edges[0].resolved_url.is_none());
+        }
+    }
+
+    #[test]
+    fn import_meta_resolve_cannot_escape_and_reenter_the_synthetic_url_root() {
+        let root = tempfile::tempdir().unwrap();
+        for request in [
+            "../__franken_node_captured_project__/asset",
+            "./%2e%2e/__franken_node_captured_project__/asset",
+            "./a/../../__franken_node_captured_project__/asset",
+        ] {
+            put(root.path(), "app.mjs", &format!("import.meta.resolve({request:?});"));
+            assert_eq!(capture(root.path(), "app.mjs", GraphOptions::default()).err().unwrap().code,
+                "ERR_MODULE_OUTSIDE_PROJECT", "{request}");
         }
     }
 
