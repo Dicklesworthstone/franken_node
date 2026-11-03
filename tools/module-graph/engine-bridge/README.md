@@ -32,7 +32,7 @@ Neither pin identifies a publisher or grants capabilities.
 ## Required sibling revision
 
 The native JSON foundation landed in `franken_engine` commit
-[`4fe03210c4d2a102a985a150901d358e8f763a6e`](https://github.com/Dicklesworthstone/franken_engine/commit/4fe03210c4d2a102a985a150901d358e8f763a6e)
+[`eccb440d246089086106c02be5a0acea84147f4e`](https://github.com/Dicklesworthstone/franken_engine/commit/eccb440d246089086106c02be5a0acea84147f4e)
 with `ModuleSyntax::Json` and the intrinsic JSON module loader. This bridge now
 also requires the static-attribute contract: `import_attributes::ImportAttributes`,
 attribute-bearing `ModuleRequest` and `ModuleDependency`, static import/reexport
