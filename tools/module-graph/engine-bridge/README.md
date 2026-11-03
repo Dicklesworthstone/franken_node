@@ -32,10 +32,10 @@ Neither pin identifies a publisher or grants capabilities.
 ## Required sibling revision
 
 This bridge requires `franken_engine` commit
-[`c3a65dd598a9e0f9f7fa78240fe943545be90140`](https://github.com/Dicklesworthstone/franken_engine/commit/c3a65dd598a9e0f9f7fa78240fe943545be90140)
-or a descendant that retains `ModuleMetadataTarget`,
-`ModuleResolver::resolve_metadata`, `ModulePolicyHook::authorize_metadata`
-and the native `import.meta.resolve` runtime. The Cargo path dependency on the
+[`ca797fecd5395e818ce9b9b05cbcf295785d2e94`](https://github.com/Dicklesworthstone/franken_engine/commit/ca797fecd5395e818ce9b9b05cbcf295785d2e94)
+or a descendant that retains `ModuleSyntax::Json`, the intrinsic JSON module
+loader, `ModuleMetadataTarget`, `ModuleResolver::resolve_metadata`,
+`ModulePolicyHook::authorize_metadata` and the native `import.meta.resolve` runtime. The Cargo path dependency on the
 sibling checkout is intentional; it does not select or enforce a Git revision.
 An older sibling checkout does not provide the metadata-resolution contract
 required by this bridge.
@@ -130,8 +130,8 @@ prepares the following captured sources using the real sibling front end:
   unmarked-scope observation permits engine syntax detection. No live manifest
   read or implicit `.ts` extension/index search is added during preparation.
 - JavaScript hashbangs: the same engine source-preparation function handles them.
-- JSON dependencies: the require-only contract below delivers a quoted
-  JavaScript adapter, validated by the engine and the same dependency scanner.
+- JSON dependencies: the require-only contract below delivers the original JSON
+  text as an explicit native JSON module, without a generated JavaScript adapter.
 
 Preparation runs after independent pin and closed-graph checks, once per
 physical source. A changed source is rescanned by the production dependency
@@ -164,40 +164,37 @@ suffix. Filename-only and URL-only lookup edges do not change this loading contr
 This covers explicit JSON files, existing CommonJS extension/index
 search and JSON-valued package entrypoints. A bare JSON graph entrypoint, static
 or dynamic ESM JSON import, reexport, or mixed require/import access is refused
-with `ERR_MODULE_ENGINE_JSON_IMPORT`. The graph has no import-attribute evidence
-or shared ESM/CJS JSON namespace contract; knowing a target is JSON is not enough
-to authorize those semantics. No optional fallback loader is added.
+with `ERR_MODULE_ENGINE_JSON_IMPORT`. The captured request contract does not yet
+carry import attributes, so these forms remain unsupported.
 
-The original JSON text is encoded into one string literal in
-`module.exports = JSON.parse(<literal>);`. It is never emitted as a JavaScript
-object literal or reconstructed from a host `serde_json::Value`. Value creation
-therefore belongs to the engine's `JSON.parse`, as in its native CommonJS JSON
-loader: the adapter does not erase duplicate members, round numbers on the host,
-turn `__proto__` into object-literal prototype syntax, or interpret code-looking
-JSON strings as dependency requests. The engine frontend must preserve the
-adapter exactly and accept its CommonJS parse goal. The generated JavaScript
-is rescanned and must still have no dependency routes.
+The registry classifies admitted JSON as `ModuleKind::Json`; the engine receives
+`ModuleSyntax::Json` and the exact original text. The engine's intrinsic JSON
+parser creates the value without consulting the guest's mutable `JSON.parse`.
+A leading BOM is handled inside that parser. Original text preserves duplicate
+members, numeric spelling, `__proto__` data keys and code-looking strings until
+the engine parses them. The canonical engine record hash covers these original
+bytes and the explicit JSON format.
 
-The existing graph JSON validator remains authoritative for executable JSON dependencies. This change does not
-expand its accepted JSON syntax or resource envelope; invalid or unsupported
-capture inputs still prevent registry admission. It does not evaluate JSON while
-constructing the resolver, implement module evaluation caches, or certify an
-engine's complete JSON conformance.
+JSON bypasses JavaScript source generation, string escaping, JavaScript parsing,
+normalization and transformed-source storage. It has no preparation report,
+TypeScript witness or source map. The graph's original `content_sha256` remains
+the source pin; JSON does not masquerade as a JavaScript ingestion witness.
+Normal source-delivery and per-chain limits count the actual original bytes,
+including a BOM. Runtime parsing remains subject to engine cancellation,
+memory and work limits.
 
-For these modules, `json_source_sha256` in the preparation report pins the
-original captured JSON bytes. `source_ingestion` hashes describe the generated
-JavaScript adapter, not an original JSON parser witness. No TypeScript witness
-or source map is invented. Original graph pins and canonical identities remain
-unchanged, while the engine record hash covers the delivered adapter. Source
-text is absent from these summaries.
+The graph's existing JSON validator remains authoritative for captured
+executable dependencies. Invalid or unsupported capture inputs still prevent
+registry admission; this change does not expand that syntax or resource envelope.
+The resolver does not evaluate JSON during construction. At execution, the
+engine retains one value per canonical module identity, returns it to repeated
+`require` calls, and exposes only `default` through a JSON namespace. Module
+authorization still runs for each request, including cache hits.
 
-Escaping writes directly to a bounded output buffer using the remaining shared
-prepared-source budget. Oversized adapters return no partial success. Repeated
-physical targets share one preparation; incoming-mode validation is indexed
-once alongside the graph routes rather than rescanning every edge per file.
-The per-chain limit counts delivered adapter bytes, including escaping and the
-wrapper, not only original JSON byte lengths. These are logical byte bounds,
-not a process-RSS guarantee or a measured throughput claim.
+Incoming-mode validation is indexed once alongside graph routes. Repeated
+physical targets share the original registered text without allocating an
+escaped wrapper. These are removed allocation and parsing steps, not measured
+throughput or RSS results.
 
 ## Filename resolution without executable source
 
@@ -334,10 +331,12 @@ hash reuse, per-edge authorization and normalized-source budgets. Native readlin
 and diagnostics tests execute captured CommonJS and ESM packages in both engine
 lanes after live sources change, verify shared identities and subscriptions, and
 exercise missing capabilities, subscriber filesystem-write denial and refused
-getter mutations. JSON tests also
-cover package/extension/index routes, cycles, contained aliases, capsule replay
-after source mutation, TypeScript consumers, independent source pins, and refusal
-of unsupported ESM and partial-budget cases. With sibling checkouts adjacent:
+getter mutations. JSON tests cover package/extension/index routes, cycles,
+contained aliases, capsule replay after source mutation, TypeScript consumers,
+independent source pins, raw-byte budgets and refusal of unsupported ESM.
+The native JSON fixture poisons the guest's `JSON.parse`, requires one payload
+through package and relative routes, and checks shared mutation visibility,
+BOM handling, duplicate keys and `__proto__` data. With sibling checkouts adjacent:
 
 ```sh
 cargo test --manifest-path tools/module-graph/engine-bridge/Cargo.toml \

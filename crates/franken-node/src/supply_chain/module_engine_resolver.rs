@@ -277,6 +277,7 @@ impl CapturedEngineResolver {
         let syntax = match module.kind() {
             ModuleKind::EsModule => ModuleSyntax::EsModule,
             ModuleKind::CommonJs => ModuleSyntax::CommonJs,
+            ModuleKind::Json => ModuleSyntax::Json,
             ModuleKind::NativeBuiltin => {
                 return NativeBuiltinModule::from_specifier(&module.origin().path)
                     .expect("native terminal was admitted by the engine provider inventory")
@@ -3450,6 +3451,53 @@ module.exports = function locateCommonJs() { return next('./common.bin'); };
                 ]))),
                 || {},
             ).expect("bound resolver aliases execute using their captured child module origins");
+            let actual = result.console_output.iter()
+                .map(|line| line.message.as_str())
+                .collect::<Vec<_>>()
+                .join("\n") + "\n";
+            assert_eq!(actual, reference, "{lane:?}");
+        }
+    }
+
+    #[test]
+    fn native_json_dependencies_ignore_guest_parser_and_share_identity_after_replay() {
+        use frankenengine_engine::baseline_interpreter::LaneChoice;
+
+        for lane in [LaneChoice::QuickJs, LaneChoice::V8] {
+            let parent = tempfile::tempdir().unwrap();
+            let root = parent.path().join("json project");
+            put(&root, "app.cjs", r#"
+JSON.parse = function() { throw new Error('guest JSON.parse must not run'); };
+const first = require('data-kit');
+const second = require('./node_modules/data-kit/payload.json');
+first.counter = 7;
+console.log(first === second, second.counter, first.answer, first.__proto__.safe, first.list.length);
+console.log('parser', typeof JSON.parse);
+"#);
+            put(&root, "node_modules/data-kit/package.json",
+                r#"{"exports":"./payload.json"}"#);
+            put(&root, "node_modules/data-kit/payload.json",
+                "\u{feff}{\"answer\":1,\"answer\":42,\"__proto__\":{\"safe\":\"yes\"},\"list\":[1,2,3],\"code\":\"require('uncaptured-package')\"}");
+            let reference = node_reference_output(&root, "app.cjs");
+            assert_eq!(reference, "true 7 42 yes 3\nparser function\n");
+            let graph = capture(&root, "app.cjs", GraphOptions::default()).unwrap();
+            assert!(graph.report().fully_resolved, "{:?}", graph.report());
+            assert_eq!(graph.report().modules.len(), 2);
+            assert_eq!(graph.report().edges.len(), 2);
+            let encoded = capsule::encode(&graph).unwrap();
+            std::fs::rename(&root, parent.path().join("original-project")).unwrap();
+            put(&root, "app.cjs", "throw Error('ambient replacement was opened');");
+            let replayed = capsule::replay(encoded.bytes(), encoded.digest()).unwrap();
+            assert_eq!(replayed.report(), graph.report());
+            let result = execute_module_graph_with_policy_for_test(
+                &root,
+                replayed,
+                lane,
+                Arc::new(CapabilityPolicyHook::new(BTreeSet::from([
+                    RuntimeCapability::ModuleLoad,
+                ]))),
+                || {},
+            ).expect("native JSON bypasses mutable guest parsing and retains cached value identity");
             let actual = result.console_output.iter()
                 .map(|line| line.message.as_str())
                 .collect::<Vec<_>>()

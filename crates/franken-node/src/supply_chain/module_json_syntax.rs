@@ -9,7 +9,7 @@ const MAX_JSON_DEPTH: usize = 127;
 
 pub(super) fn valid(bytes: &[u8]) -> bool {
     // Ignore exactly one leading BOM for syntax checking, not in the captured
-    // bytes or identity. JSON module preparation performs the same removal.
+    // bytes or identity. The engine's intrinsic JSON loader removes it too.
     let Ok(text) = std::str::from_utf8(bytes) else {
         return false;
     };
@@ -108,9 +108,10 @@ mod engine_tests {
         ExecutionOrchestrator, ExtensionPackage, OrchestratorConfig,
     };
     use frankenengine_engine::module_resolver::{
-        CapabilityPolicyHook, ModuleResolver, ResolutionContext,
+        CapabilityPolicyHook, ModuleResolver, ModuleSyntax, ResolutionContext,
     };
     use frankenengine_engine::runtime_config::RuntimeConfig;
+    use sha2::{Digest, Sha256};
     use std::collections::{BTreeMap, BTreeSet};
     use std::sync::Arc;
 
@@ -126,7 +127,7 @@ mod engine_tests {
     }
 
     #[test]
-    fn json_reaches_engine_preparation_with_original_bytes_and_pins() {
+    fn json_reaches_engine_record_with_original_bytes_and_pins() {
         for payload in [
             "\u{feff}{\"answer\":42}",
             "{\"large\":1e400,\"small\":1e-4000,\"negativeZero\":-0}",
@@ -146,12 +147,15 @@ mod engine_tests {
             let outcomes = resolver.resolve_chain(&resolver.entry_request(), &context(), &policy()).unwrap();
             assert_eq!(outcomes.len(), 2);
             let delivered = outcomes.iter()
-                .find(|o| o.module.record.source.starts_with("module.exports = JSON.parse(")).unwrap();
-            let text = payload.strip_prefix('\u{feff}').unwrap_or(payload);
-            let expected = format!("module.exports = JSON.parse({});\n", serde_json::to_string(text).unwrap());
-            assert_eq!(delivered.module.record.source, expected);
-            let summary = resolver.preparation_reports().find(|s| s.path == "data.json").unwrap();
-            assert_eq!(summary.json_source_sha256.as_deref(), Some(original_pin.as_str()));
+                .find(|o| o.module.record.syntax == ModuleSyntax::Json).unwrap();
+            assert_eq!(delivered.module.record.source, payload);
+            assert_eq!(
+                hex::encode(Sha256::digest(delivered.module.record.source.as_bytes())),
+                original_pin
+            );
+            assert_eq!(delivered.module.content_hash, delivered.module.record.canonical_hash());
+            assert_eq!(resolver.summary().graph_input_hash, pin);
+            assert_eq!(resolver.preparation_reports().count(), 0);
         }
     }
 

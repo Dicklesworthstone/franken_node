@@ -48,6 +48,8 @@ impl RequestStyle {
 pub enum ModuleKind {
     EsModule,
     CommonJs,
+    /// Original captured JSON text; the engine creates its value intrinsically.
+    Json,
     /// Engine-owned terminal descriptor; it has no captured source file.
     NativeBuiltin,
 }
@@ -56,7 +58,7 @@ impl ModuleKind {
     pub fn entry_style(self) -> RequestStyle {
         match self {
             Self::EsModule => RequestStyle::Import,
-            Self::CommonJs | Self::NativeBuiltin => RequestStyle::Require,
+            Self::CommonJs | Self::Json | Self::NativeBuiltin => RequestStyle::Require,
         }
     }
 }

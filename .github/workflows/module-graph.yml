@@ -13,6 +13,8 @@ on:
       - 'crates/franken-node/src/supply_chain/module_file_resolution.rs'
       - 'crates/franken-node/src/supply_chain/module_source_graph.rs'
       - 'crates/franken-node/src/supply_chain/module_require_resolve_tests.rs'
+      - 'crates/franken-node/src/supply_chain/module_metadata_resolver_tests.rs'
+      - 'crates/franken-node/src/supply_chain/module_json_syntax.rs'
       - 'crates/franken-node/src/supply_chain/module_graph_capsule.rs'
       - 'crates/franken-node/src/supply_chain/module_source_registry.rs'
       - 'crates/franken-node/src/supply_chain/module_engine_resolver.rs'
@@ -81,7 +83,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: Dicklesworthstone/franken_engine
-          ref: c3a65dd598a9e0f9f7fa78240fe943545be90140
+          ref: ca797fecd5395e818ce9b9b05cbcf295785d2e94
           path: franken_engine
           persist-credentials: false
       - name: Test the product resolver against the actual engine contract

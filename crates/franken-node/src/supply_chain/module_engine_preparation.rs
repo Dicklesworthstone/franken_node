@@ -4,10 +4,10 @@
 //! requiring syntax detection, hashbang handling or TypeScript normalization
 //! goes through the actual FrankenEngine front end exactly once per physical
 //! source. Original graph pins and routes remain authoritative.
-//! JSON dependencies reached exclusively through require are delivered as a
-//! quoted JSON.parse adapter, so value construction belongs to the engine,
-//! not serde's numeric/object representation. ESM JSON needs import-attribute
-//! and shared-namespace contracts which this captured graph does not carry.
+//! JSON dependencies reached exclusively through require retain their original
+//! text and use the engine's native JSON syntax. They never enter JavaScript
+//! normalization or source-format detection. ESM JSON still needs an
+//! import-attribute contract which this captured graph does not carry.
 
 use super::super::{
     Budget, EdgeState, LoadKind, ModuleId, SourceGraphReport, SourceLanguage, SourceModule, error, scan,
@@ -21,7 +21,6 @@ use frankenengine_engine::ts_normalization::{
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::{self, Write};
 use std::sync::Arc;
 
 type Result<T> = std::result::Result<T, CaptureError>;
@@ -36,10 +35,6 @@ pub struct ModulePreparationSummary {
     pub path: String,
     pub kind: ModuleKind,
     pub prepared_source_bytes: usize,
-    /// For JSON, ingestion hashes describe the generated JavaScript adapter.
-    /// This separate pin identifies the original JSON bytes in the graph.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub json_source_sha256: Option<String>,
     pub source_ingestion: SourceIngestionSummary,
     pub normalization_witness: Option<TsNormalizationWitness>,
     pub source_map: Vec<SourceMapEntry>,
@@ -133,12 +128,18 @@ impl SourcePreparer {
             .as_ref()
             .ok_or_else(invalid_preparation)?;
         let expected = index.modules.get(&module.id).ok_or_else(invalid_preparation)?;
-        let json = module.source_language == SourceLanguage::Json;
-        if json && (!index.json_require_only.contains(&module.id) || !expected.is_empty()) {
-            return Err(error(
-                "ERR_MODULE_ENGINE_JSON_IMPORT",
-                "captured JSON requires exclusively CommonJS incoming routes; JSON entrypoints and ESM attributes need a separate engine contract",
-            ));
+        if module.source_language == SourceLanguage::Json {
+            if !index.json_require_only.contains(&module.id) || !expected.is_empty() {
+                return Err(error(
+                    "ERR_MODULE_ENGINE_JSON_IMPORT",
+                    "captured JSON requires exclusively CommonJS incoming routes; JSON entrypoints and ESM attributes need a separate engine contract",
+                ));
+            }
+            // The graph has already validated and pinned the original JSON.
+            // Its value belongs to the engine's intrinsic JSON loader, not to
+            // JavaScript source normalization or the guest-visible JSON object.
+            // Retain no transformed copy and invent no JS-ingestion report.
+            return Ok(ModuleKind::Json);
         }
         if let Some(prepared) = self.prepared.modules.get(&module.id.path) {
             if prepared.language != module.source_language
@@ -151,21 +152,8 @@ impl SourcePreparer {
             return Ok(prepared.summary.kind);
         }
 
-        // A JSON value is NOT emitted as an object literal: that would change
-        // __proto__, duplicate-member behavior and number semantics. Serialize
-        // only the original text into one inert string literal. The graph's
-        // existing JSON syntax admission and original source pin stay intact.
-        let json_adapter = if json {
-            Some(json_commonjs_source(
-                source,
-                MAX_PREPARED_SOURCE_BYTES.saturating_sub(self.retained_bytes),
-            )?)
-        } else {
-            None
-        };
-        let input = json_adapter.as_deref().unwrap_or(source);
         let prepared = prepare_source_entry_for_public_entrypoints(
-            input,
+            source,
             &module.id.path,
             "captured-module-preparation",
             &report.input_hash,
@@ -186,7 +174,7 @@ impl SourcePreparer {
                 "typed capability intents require an engine ingestion witness contract",
             ));
         }
-        if matches!(module.source_language, SourceLanguage::JavaScript | SourceLanguage::Json)
+        if module.source_language == SourceLanguage::JavaScript
             && prepared.source_ingestion.source_language
                 != frankenengine_engine::ts_normalization::SourceLanguage::JavaScript
         {
@@ -199,12 +187,6 @@ impl SourcePreparer {
             ));
         }
         let normalized = prepared.prepared_source;
-        if json && normalized != input {
-            return Err(error(
-                "ERR_MODULE_ENGINE_JSON_PREPARATION",
-                "engine preparation must preserve the generated JSON adapter exactly",
-            ));
-        }
         if normalized.len() > MAX_PREPARED_SOURCE_BYTES {
             return Err(preparation_limit());
         }
@@ -265,7 +247,6 @@ impl SourcePreparer {
                     path: module.id.path.clone(),
                     kind,
                     prepared_source_bytes: normalized.len(),
-                    json_source_sha256: json.then(|| module.content_sha256.clone()),
                     source_ingestion: prepared.source_ingestion,
                     normalization_witness,
                     source_map,
@@ -292,7 +273,7 @@ fn captured_kind(module: &SourceModule) -> Result<Option<ModuleKind>> {
         (SourceLanguage::JavaScript, "commonjs") => Ok(Some(ModuleKind::CommonJs)),
         (SourceLanguage::JavaScript, "javascript_unspecified") => Ok(None),
         (SourceLanguage::Json, "json") if module.id.path.ends_with(".json") => {
-            Ok(Some(ModuleKind::CommonJs))
+            Ok(Some(ModuleKind::Json))
         }
         (SourceLanguage::TypeScript, _) if module.id.path.ends_with(".mts") => {
             Ok(Some(ModuleKind::EsModule))
@@ -363,36 +344,6 @@ fn expected_routes(report: &SourceGraphReport) -> Result<ExpectedRoutes> {
     Ok(ExpectedRoutes { modules: routes, json_require_only })
 }
 
-/// Encoding goes straight into one bounded buffer. Do not first allocate an
-/// unbounded escaped copy and check its size afterwards. Errors never include
-/// private JSON text, and the caller drops partial output on every failure.
-fn json_commonjs_source(source: &str, limit: usize) -> Result<String> {
-    struct BoundedSource {
-        bytes: Vec<u8>,
-        limit: usize,
-    }
-    impl Write for BoundedSource {
-        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-            let end = self.bytes.len().checked_add(bytes.len())
-                .filter(|end| *end <= self.limit)
-                .ok_or_else(|| io::Error::other("JSON adapter byte limit"))?;
-            self.bytes.try_reserve(end - self.bytes.len())
-                .map_err(|_| io::Error::other("JSON adapter allocation failed"))?;
-            self.bytes.extend_from_slice(bytes);
-            Ok(bytes.len())
-        }
-        fn flush(&mut self) -> io::Result<()> { Ok(()) }
-    }
-    let mut output = BoundedSource { bytes: Vec::new(), limit };
-    output.write_all(b"module.exports = JSON.parse(").map_err(|_| preparation_limit())?;
-    // Same text-to-JSON.parse value boundary as the sibling engine's native
-    // CommonJS JSON loader. No host JSON Value enters the delivered module.
-    let text = source.strip_prefix('\u{feff}').unwrap_or(source);
-    serde_json::to_writer(&mut output, text).map_err(|_| preparation_limit())?;
-    output.write_all(b");\n").map_err(|_| preparation_limit())?;
-    String::from_utf8(output.bytes).map_err(|_| invalid_preparation())
-}
-
 fn request_style(kind: LoadKind) -> RequestStyle {
     match kind {
         LoadKind::Require => RequestStyle::Require,
@@ -419,6 +370,12 @@ pub fn detect_kind_with_options(
     explicit: Option<ModuleKind>,
     options: &ParserOptions,
 ) -> Result<ModuleKind> {
+    if matches!(explicit, Some(ModuleKind::Json | ModuleKind::NativeBuiltin)) {
+        return Err(error(
+            "ERR_MODULE_REGISTRY_FORMAT",
+            "native JSON and builtin descriptors cannot enter JavaScript format detection",
+        ));
+    }
     let parser = CanonicalEs2020Parser;
     if explicit != Some(ModuleKind::EsModule) {
         let wrapper = format!(
@@ -594,51 +551,50 @@ mod tests {
     }
 
     #[test]
-    fn json_adapter_preserves_text_instead_of_reconstructing_values_or_code() {
+    fn native_json_preserves_captured_text_without_reconstructing_values_or_code() {
+        use super::super::CapturedEngineResolver;
+        use super::super::super::{GraphOptions, capture};
+        use frankenengine_engine::capability::RuntimeCapability;
+        use frankenengine_engine::module_resolver::{
+            CapabilityPolicyHook, ModuleResolver, ModuleSyntax, ResolutionContext,
+        };
+
+        let root = tempfile::tempdir().unwrap();
+        put_json_fixture(root.path(), "app.cjs", "require('./data.json');");
+        let policy = CapabilityPolicyHook::new(BTreeSet::from([RuntimeCapability::ModuleLoad]));
         for text in [
             "null", "false", "-0", "9007199254740993",
             r#"{"same":1,"same":2,"__proto__":{"value":7}}"#,
             r#"{"text":"\"); require('unseen'); //","type":"const x: number = 1"}"#,
             r#"["line\nfeed","slash\\","\u0000","\ud83d\ude00"]"#,
             "{\"unicode\":\"é\u{2028}\u{2029}😀\"}",
+            "\u{feff}{\"answer\":42}",
         ] {
-            let adapter = json_commonjs_source(text, MAX_PREPARED_SOURCE_BYTES).unwrap();
-            let literal = adapter.strip_prefix("module.exports = JSON.parse(").unwrap()
-                .strip_suffix(");\n").unwrap();
-            // Parse only the outer string, not the original JSON value. Exact
-            // equality detects duplicate-key, numeric and escape rewriting.
-            assert_eq!(serde_json::from_str::<String>(literal).unwrap(), text);
-            assert_eq!(detect_kind(&adapter, Some(ModuleKind::CommonJs)).unwrap(), ModuleKind::CommonJs);
-            let mut parser = tree_sitter::Parser::new();
-            let (loads, notices, analyzed) = scan(
-                &mut parser, adapter.as_bytes(), SourceLanguage::JavaScript, &mut Budget::default(),
-            ).unwrap();
-            assert!(analyzed && loads.is_empty() && notices.is_empty());
-            let engine = prepare_source_entry_for_public_entrypoints(
-                &adapter, "data.json", "test", "decision", "policy",
-            ).unwrap();
-            assert_eq!(engine.prepared_source, adapter);
-            assert_eq!(engine.source_ingestion.ts_capability_intent_count, 0);
-            assert_eq!(engine.source_ingestion.source_language,
-                frankenengine_engine::ts_normalization::SourceLanguage::JavaScript);
+            put_json_fixture(root.path(), "data.json", text);
+            let graph = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
+            assert!(graph.report().fully_resolved);
+            let pin = graph.report().input_hash.clone();
+            let resolver = CapturedEngineResolver::new(graph, &pin).ok().unwrap();
+            let outcomes = resolver.resolve_chain(&resolver.entry_request(),
+                &ResolutionContext::new("trace", "decision", "policy"), &policy).unwrap();
+            assert_eq!(outcomes.len(), 2);
+            let record = &outcomes[1].module.record;
+            assert_eq!(record.syntax, ModuleSyntax::Json);
+            // The engine receives the original JSON, including duplicate keys,
+            // numeric spelling and escapes, without a generated JavaScript wrapper.
+            assert_eq!(record.source, text);
+            assert!(record.dependencies.is_empty());
+            assert_eq!(outcomes[1].module.content_hash, record.canonical_hash());
+            assert_eq!(resolver.preparation_reports().count(), 0);
         }
     }
 
     #[test]
-    fn json_adapter_budget_includes_escaping_and_never_returns_partial_source() {
-        let source = r#"{"private":"\"\\\n"}"#;
-        let full = json_commonjs_source(source, MAX_PREPARED_SOURCE_BYTES).unwrap();
-        assert!(full.len() > source.len());
-        assert_eq!(json_commonjs_source(source, full.len()).unwrap(), full);
-        for limit in [0, 1, source.len(), full.len() - 1] {
-            let failure = json_commonjs_source(source, limit).unwrap_err();
-            assert_eq!(failure.code, "ERR_MODULE_ENGINE_PREPARATION_LIMIT");
-            assert!(!failure.detail.contains("private"));
+    fn native_data_kinds_cannot_enter_javascript_format_detection() {
+        for kind in [ModuleKind::Json, ModuleKind::NativeBuiltin] {
+            let failure = detect_kind_with_options("{}", Some(kind), &source_budget(0)).unwrap_err();
+            assert_eq!(failure.code, "ERR_MODULE_REGISTRY_FORMAT");
         }
-        // The live graph currently applies its existing JSON admission rules;
-        // adapter BOM handling also agrees with the native JSON loader.
-        assert_eq!(json_commonjs_source("\u{feff}null", full.len()).unwrap(),
-            "module.exports = JSON.parse(\"null\");\n");
     }
 
     fn put_json_fixture(root: &std::path::Path, path: &str, text: &str) {
@@ -663,23 +619,21 @@ mod tests {
         assert!(graph.report().fully_resolved);
         let pin = graph.report().input_hash.clone();
         let original_hash = hex::encode(Sha256::digest(json.as_bytes()));
+        assert_eq!(graph.report().modules.iter()
+            .find(|module| module.id.path == "data.json").unwrap().content_sha256, original_hash);
         let resolver = CapturedEngineResolver::new(graph, &pin).ok().unwrap();
         let policy = CapabilityPolicyHook::new(BTreeSet::from([RuntimeCapability::ModuleLoad]));
         let outcomes = resolver.resolve_chain(&resolver.entry_request(),
             &ResolutionContext::new("trace", "decision", "policy"), &policy).unwrap();
         assert_eq!(outcomes.len(), 2);
-        assert_eq!(outcomes[1].module.record.syntax, ModuleSyntax::CommonJs);
-        assert_eq!(outcomes[1].module.record.source,
-            "module.exports = JSON.parse(\"{\\\"answer\\\":42}\");\n");
+        assert_eq!(outcomes[1].module.record.syntax, ModuleSyntax::Json);
+        assert_eq!(outcomes[1].module.record.source, json);
+        assert_eq!(hex::encode(Sha256::digest(outcomes[1].module.record.source.as_bytes())),
+            original_hash);
         assert!(outcomes[1].module.record.dependencies.is_empty());
         assert_eq!(outcomes[1].module.content_hash, outcomes[1].module.record.canonical_hash());
         assert_eq!(resolver.summary().graph_input_hash, pin);
-        let summaries: Vec<_> = resolver.preparation_reports().collect();
-        assert_eq!(summaries.len(), 1);
-        assert_eq!(summaries[0].path, "data.json");
-        assert_eq!(summaries[0].json_source_sha256.as_deref(), Some(original_hash.as_str()));
-        assert!(summaries[0].normalization_witness.is_none());
-        assert!(summaries[0].source_map.is_empty());
+        assert_eq!(resolver.preparation_reports().count(), 0);
         assert!(!resolver.summary().execution_performed);
         assert!(!resolver.summary().policy_admission_performed);
     }
@@ -771,20 +725,20 @@ mod tests {
             put(root.path(), "node_modules/data-package/value.json", r#"{"source":"package"}"#);
             let resolver = resolver(root.path(), "app.cjs");
             for (request, expected) in [
-                ("./value", "module.exports = JSON.parse(\"{\\\"source\\\":\\\"extension\\\"}\");\n"),
-                ("./data-dir", "module.exports = JSON.parse(\"{\\\"source\\\":\\\"index\\\"}\");\n"),
-                ("data-package", "module.exports = JSON.parse(\"{\\\"source\\\":\\\"package\\\"}\");\n"),
-                ("./package.json", "module.exports = JSON.parse(\"{\\\"type\\\":\\\"commonjs\\\"}\");\n"),
+                ("./value", r#"{"source":"extension"}"#),
+                ("./data-dir", r#"{"source":"index"}"#),
+                ("data-package", r#"{"source":"package"}"#),
+                ("./package.json", r#"{"type":"commonjs"}"#),
             ] {
                 let request = ModuleRequest::new(request, ImportStyle::Require)
                     .with_referrer(resolver.entry_request().specifier)
                     .with_compatibility_mode(CompatibilityMode::NodeCompat);
                 let outcome = resolver.resolve(&request, &context(), &granted()).unwrap();
                 assert_eq!(outcome.module.record.source, expected);
-                assert_eq!(outcome.module.record.syntax, ModuleSyntax::CommonJs);
+                assert_eq!(outcome.module.record.syntax, ModuleSyntax::Json);
                 assert_eq!(outcome.module.content_hash, outcome.module.record.canonical_hash());
             }
-            assert_eq!(resolver.preparation_reports().count(), 4);
+            assert_eq!(resolver.preparation_reports().count(), 0);
         }
 
         struct ChangingPolicy { allow: Cell<bool>, calls: Cell<usize> }
@@ -800,7 +754,7 @@ mod tests {
         }
 
         #[test]
-        fn shared_json_in_a_cycle_is_prepared_once_but_each_load_is_authorized() {
+        fn shared_json_in_a_cycle_retains_original_data_and_rechecks_each_load() {
             let root = tempfile::tempdir().unwrap();
             put(root.path(), "app.cjs", "require('./dep.cjs'); require('./value.json'); require('./value');");
             put(root.path(), "dep.cjs", "require('./app.cjs'); module.exports=require('./value.json');");
@@ -810,7 +764,7 @@ mod tests {
             let outputs = resolver.resolve_chain(&resolver.entry_request(), &context(), &policy).unwrap();
             assert_eq!(outputs.len(), 3);
             assert_eq!(policy.calls.get(), 6); // Entry plus five captured incoming routes.
-            assert_eq!(resolver.preparation_reports().count(), 1);
+            assert_eq!(resolver.preparation_reports().count(), 0);
             let request = ModuleRequest::new("./value.json", ImportStyle::Require)
                 .with_referrer(resolver.entry_request().specifier)
                 .with_compatibility_mode(CompatibilityMode::NodeCompat);
@@ -824,12 +778,11 @@ mod tests {
             let now = ResolutionContext::new("new-trace", "new-decision", "new-policy");
             let after = resolver.resolve(&request, &now, &policy).unwrap();
             assert_eq!(after.module.content_hash, expected_hash);
-            assert_eq!(after.module.record.source,
-                "module.exports = JSON.parse(\"{\\\"private_label\\\":42}\");\n");
+            assert_eq!(after.module.record.source, r#"{"private_label":42}"#);
+            assert_eq!(after.module.record.syntax, ModuleSyntax::Json);
             assert_eq!(after.event.trace_id, "new-trace");
             assert_eq!(policy.calls.get(), 9);
-            assert!(!serde_json::to_string(&resolver.preparation_reports().collect::<Vec<_>>())
-                .unwrap().contains("private_label"));
+            assert_eq!(resolver.preparation_reports().count(), 0);
             // Knowing the data module's ID is not authority for another route.
             let invented = ModuleRequest::new("./not-captured.json", ImportStyle::Require)
                 .with_referrer(resolver.entry_request().specifier)
@@ -861,7 +814,9 @@ mod tests {
             let live = CapturedEngineResolver::new(graph, &pin).ok().unwrap();
             let before = live.resolve_chain(&live.entry_request(), &context(), &granted()).unwrap();
             assert_eq!(before.len(), 2);
-            assert_eq!(live.preparation_reports().count(), 1);
+            assert_eq!(before[1].module.record.syntax, ModuleSyntax::Json);
+            assert_eq!(before[1].module.record.source, r#"{"original":true}"#);
+            assert_eq!(live.preparation_reports().count(), 0);
             put(root.path(), "value.json", r#"{"replacement":true}"#);
             std::fs::rename(root.path().join("app.cjs"), root.path().join("moved.cjs")).unwrap();
             let graph = capsule::replay(encoded.bytes(), encoded.digest()).unwrap();
@@ -872,7 +827,7 @@ mod tests {
         }
 
         #[test]
-        fn retained_json_adapter_budget_is_shared_and_cache_hits_do_not_charge_twice() {
+        fn native_json_does_not_consume_javascript_preparation_budget() {
             let root = tempfile::tempdir().unwrap();
             put(root.path(), "app.cjs", "require('./a.json'); require('./b.json');");
             put(root.path(), "a.json", "{}");
@@ -880,22 +835,18 @@ mod tests {
             let graph = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
             let a = graph.report().modules.iter().find(|module| module.id.path == "a.json").unwrap();
             let b = graph.report().modules.iter().find(|module| module.id.path == "b.json").unwrap();
-            let mut preparer = SourcePreparer::default();
-            let size = "module.exports = JSON.parse(\"{}\");\n".len();
-            preparer.retained_bytes = MAX_PREPARED_SOURCE_BYTES - size;
-            assert_eq!(preparer.prepare(a, "{}", graph.report()).unwrap(), ModuleKind::CommonJs);
+            let mut preparer = SourcePreparer::with_parser_options(source_budget(0));
+            preparer.retained_bytes = MAX_PREPARED_SOURCE_BYTES;
+            assert_eq!(preparer.prepare(a, "{}", graph.report()).unwrap(), ModuleKind::Json);
+            assert_eq!(preparer.prepare(a, "{}", graph.report()).unwrap(), ModuleKind::Json);
+            assert_eq!(preparer.prepare(b, "[]", graph.report()).unwrap(), ModuleKind::Json);
+            assert!(preparer.prepared.modules.is_empty());
             assert_eq!(preparer.retained_bytes, MAX_PREPARED_SOURCE_BYTES);
-            let allocation = Arc::clone(preparer.prepared.modules["a.json"].source.as_ref().unwrap());
-            assert_eq!(preparer.prepare(a, "{}", graph.report()).unwrap(), ModuleKind::CommonJs);
-            assert!(Arc::ptr_eq(&allocation, preparer.prepared.modules["a.json"].source.as_ref().unwrap()));
-            assert_eq!(preparer.prepare(b, "[]", graph.report()).unwrap_err().code,
-                "ERR_MODULE_ENGINE_PREPARATION_LIMIT");
-            assert_eq!(preparer.prepared.modules.len(), 1);
-            assert_eq!(preparer.retained_bytes, MAX_PREPARED_SOURCE_BYTES);
+            assert_eq!(preparer.finish().summaries().count(), 0);
         }
 
         #[test]
-        fn chain_budget_counts_the_delivered_adapter_not_only_original_json_bytes() {
+        fn chain_budget_counts_original_json_bytes_exactly() {
             let root = tempfile::tempdir().unwrap();
             let app = "require('./value.json');";
             let json = r#"{"escaped":"\"\\"}"#;
@@ -904,8 +855,8 @@ mod tests {
             let mut resolver = resolver(root.path(), "app.cjs");
             let outputs = resolver.resolve_chain(&resolver.entry_request(), &context(), &granted()).unwrap();
             let delivered: usize = outputs.iter().map(|outcome| outcome.module.record.source.len()).sum();
-            assert!(delivered > app.len() + json.len());
-            resolver.chain_source_budget = app.len() + json.len();
+            assert_eq!(delivered, app.len() + json.len());
+            resolver.chain_source_budget = delivered - 1;
             let failure = resolver.resolve_chain(&resolver.entry_request(), &context(), &granted()).unwrap_err();
             assert!(failure.message.contains("source budget"));
             resolver.chain_source_budget = delivered;
@@ -923,12 +874,14 @@ mod tests {
                 let resolver = resolver(root.path(), entry);
                 let outputs = resolver.resolve_chain(&resolver.entry_request(), &context(), &granted()).unwrap();
                 assert_eq!(outputs.len(), 2);
-                assert!(outputs.iter().all(|outcome| outcome.module.record.syntax == ModuleSyntax::CommonJs));
+                assert_eq!(outputs[0].module.record.syntax, ModuleSyntax::CommonJs);
+                assert_eq!(outputs[1].module.record.syntax, ModuleSyntax::Json);
+                assert_eq!(outputs[1].module.record.source, r#"{"answer":42}"#);
                 assert!(!outputs[0].module.record.source.contains("absent.d.ts"));
                 assert!(!outputs[0].module.record.source.contains(": number"));
                 assert_eq!(outputs[0].module.record.dependencies.len(), 1);
                 assert_eq!(outputs[0].module.record.dependencies[0].specifier, "./value.json");
-                assert_eq!(resolver.preparation_reports().count(), 2);
+                assert_eq!(resolver.preparation_reports().count(), 1);
             }
         }
     }
