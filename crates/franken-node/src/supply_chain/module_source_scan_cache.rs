@@ -142,6 +142,8 @@ mod tests {
     fn cached_results_match_uncached_scans_including_diagnostics_and_budgets() {
         for (text, language) in [
             ("import './child.mjs'; export const n = 42;", SourceLanguage::JavaScript),
+            ("import data from './data.json' with {type:'json'};", SourceLanguage::JavaScript),
+            ("export {default} from './data.json' with {type:'json'};", SourceLanguage::JavaScript),
             ("import type {T} from 'types'; const x: number = 1;", SourceLanguage::TypeScript),
             ("export const = ;", SourceLanguage::JavaScript),
             ("const load = require; load('hidden');", SourceLanguage::JavaScript),

@@ -19,6 +19,7 @@ use super::registry::{
 use super::{CapturedModuleGraph, ResolutionError as CaptureError, ResolutionUrl};
 use frankenengine_engine::capability::RuntimeCapability;
 use frankenengine_engine::hash_tiers::ContentHash;
+use frankenengine_engine::import_attributes::ImportAttributes as EngineImportAttributes;
 use frankenengine_engine::module_compatibility_matrix::CompatibilityMode;
 use frankenengine_engine::module_resolver::{
     ExecutionModuleResolver, ImportStyle, ModuleDependency, ModulePolicyHook, ModuleProvenance,
@@ -28,6 +29,7 @@ use frankenengine_engine::module_resolver::{
     ResolutionError, ResolutionErrorCode, ResolutionEvent, ResolutionOutcome, ResolutionResult,
     ResolvedModule, ResolvedModuleMetadata, SharedModuleRecord, node_builtin_specifier,
     SharedResolutionOutcome, SharedResolvedModule,
+    validate_import_attributes, validate_metadata_import_attributes,
 };
 use frankenengine_engine::parser::ParserOptions;
 use std::collections::{BTreeMap, BTreeSet};
@@ -231,6 +233,10 @@ impl CapturedEngineResolver {
         request: &ModuleRequest,
         context: &ResolutionContext,
     ) -> ResolutionResult<()> {
+        request.import_attributes.validate().map_err(|failure| {
+            denied(ResolutionErrorCode::UnsupportedSpecifier, &failure.to_string(),
+                request, context, None)
+        })?;
         if request.compatibility_mode != CompatibilityMode::NodeCompat {
             return Err(denied(
                 ResolutionErrorCode::UnsupportedSpecifier,
@@ -265,10 +271,11 @@ impl CapturedEngineResolver {
         context: &ResolutionContext,
     ) -> ResolutionResult<&'a RegisteredModule> {
         self.registry
-            .lookup(
+            .lookup_with_attributes(
                 request.referrer.as_deref(),
                 &request.specifier,
                 source_style(request.style),
+                request.import_attributes.as_map(),
             )
             .map_err(|error| registry_error(error, request, context))
     }
@@ -293,7 +300,8 @@ impl CapturedEngineResolver {
             dependencies: module
                 .dependencies()
                 .iter()
-                .map(|d| ModuleDependency::new(&d.specifier, engine_style(d.style)))
+                .map(|d| ModuleDependency::new(&d.specifier, engine_style(d.style))
+                    .with_import_attributes(engine_attributes(&d.import_attributes)))
                 .collect(),
             required_capabilities: BTreeSet::from([RuntimeCapability::ModuleLoad]),
             provenance: ModuleProvenance {
@@ -315,6 +323,9 @@ impl CapturedEngineResolver {
         context: &ResolutionContext,
         policy: &dyn ModulePolicyHook,
     ) -> ResolutionResult<()> {
+        validate_import_attributes(request.style, record.syntax, &request.import_attributes)
+            .map_err(|failure| denied(ResolutionErrorCode::UnsupportedSpecifier,
+                &failure.to_string(), request, context, Some(&record.id)))?;
         policy.authorize(request, record, context).map_err(|error| {
             denied(
                 // A policy refusal never means a captured file was absent.
@@ -400,6 +411,9 @@ impl ModuleResolver for CapturedEngineResolver {
         policy: &dyn ModulePolicyHook,
     ) -> ResolutionResult<MetadataResolutionOutcome> {
         self.validate_request(request, context)?;
+        validate_metadata_import_attributes(&request.import_attributes)
+            .map_err(|failure| denied(ResolutionErrorCode::UnsupportedSpecifier,
+                &failure.to_string(), request, context, None))?;
         let metadata = match request.style {
             ImportStyle::Require => {
                 let target = self.registry
@@ -535,10 +549,11 @@ impl ModuleResolver for CapturedEngineResolver {
         self.validate_request(entry_request, context)?;
         let requests = self
             .registry
-            .walk_requests(
+            .walk_requests_with_attributes(
                 entry_request.referrer.as_deref(),
                 &entry_request.specifier,
                 source_style(entry_request.style),
+                entry_request.import_attributes.as_map(),
             )
             .map_err(|error| registry_error(error, entry_request, context))?;
         let mut outcomes: Vec<ResolutionOutcome> = Vec::new();
@@ -547,6 +562,7 @@ impl ModuleResolver for CapturedEngineResolver {
         for route in requests {
             let route = route.map_err(|error| registry_error(error, entry_request, context))?;
             let mut request = ModuleRequest::new(route.specifier, engine_style(route.style))
+                .with_import_attributes(engine_attributes(route.import_attributes))
                 .with_compatibility_mode(CompatibilityMode::NodeCompat);
             request.referrer = route.referrer.map(str::to_owned);
             let module = route.module;
@@ -585,6 +601,11 @@ impl ModuleResolver for CapturedEngineResolver {
         // not an ESM instantiation/evaluation order or a linkage certificate.
         Ok(outcomes)
     }
+}
+
+fn engine_attributes(attributes: &super::ImportAttributes) -> EngineImportAttributes {
+    EngineImportAttributes::new(attributes.clone())
+        .expect("captured attribute maps obey the shared engine bounds")
 }
 
 fn source_style(style: ImportStyle) -> RequestStyle {
@@ -1959,6 +1980,122 @@ mod tests {
                 .syntax,
             ModuleSyntax::CommonJs
         );
+    }
+
+    #[test]
+    fn static_json_attributes_share_data_records_without_sharing_route_authority() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "app.mjs", r#"
+import data from './data.json' with {type:'json'};
+import consumer from './consumer.cjs';
+import.meta.resolve('./data.json');
+"#);
+        put(root.path(), "consumer.cjs", "module.exports=require('./data.json');");
+        put(root.path(), "data.json", "\u{feff}{\"answer\":42}");
+        let r = resolver(root.path());
+        let attributes = EngineImportAttributes::new(BTreeMap::from([
+            ("type".into(), "json".into()),
+        ])).unwrap();
+        let entry = r.resolve(&r.entry_request(), &context(), &granted()).unwrap();
+        assert!(entry.module.record.dependencies.contains(
+            &ModuleDependency::new("./data.json", ImportStyle::Import)
+                .with_import_attributes(attributes.clone())
+        ));
+        let request = |specifier: &str, style, referrer: &str| ModuleRequest::new(specifier, style)
+            .with_referrer(referrer)
+            .with_compatibility_mode(CompatibilityMode::NodeCompat);
+        let typed = request("./data.json", ImportStyle::Import, &entry.module.record.id)
+            .with_import_attributes(attributes.clone());
+        let policy = ChangingPolicy { allowed: Cell::new(true), calls: Cell::new(0) };
+        let first = r.resolve_shared(&typed, &context(), &policy).unwrap();
+        assert_eq!(first.module.record.syntax, ModuleSyntax::Json);
+        assert_eq!(first.module.record.source, "\u{feff}{\"answer\":42}");
+        let again = r.resolve_shared(&typed, &context(), &policy).unwrap();
+        assert!(Arc::ptr_eq(&first.module.record, &again.module.record));
+        let consumer = r.resolve(
+            &request("./consumer.cjs", ImportStyle::Import, &entry.module.record.id),
+            &context(), &granted(),
+        ).unwrap();
+        let required = request("./data.json", ImportStyle::Require, &consumer.module.record.id);
+        let from_require = r.resolve_shared(&required, &context(), &policy).unwrap();
+        assert!(Arc::ptr_eq(&first.module.record, &from_require.module.record));
+        assert_eq!(first.module.content_hash, from_require.module.content_hash);
+
+        // An exact typed route and an initialized value do not approve another
+        // request to the same specifier, importer or canonical data identity.
+        for rejected in [
+            request("./data.json", ImportStyle::Import, &entry.module.record.id),
+            typed.clone().with_import_attributes(EngineImportAttributes::new(BTreeMap::from([
+                ("type".into(), "text".into()),
+            ])).unwrap()),
+            typed.clone().with_import_attributes(EngineImportAttributes::new(BTreeMap::from([
+                ("type".into(), "json".into()), ("extra".into(), "yes".into()),
+            ])).unwrap()),
+            required.with_import_attributes(attributes.clone()),
+            r.entry_request().with_import_attributes(attributes.clone()),
+        ] {
+            assert_eq!(r.resolve_shared(&rejected, &context(), &policy).unwrap_err().code,
+                ResolutionErrorCode::UnsupportedSpecifier);
+        }
+        assert_eq!(policy.calls.get(), 3);
+        assert_eq!(r.resolve_metadata(&typed, &context(), &policy).unwrap_err().code,
+            ResolutionErrorCode::UnsupportedSpecifier);
+        assert_eq!(policy.calls.get(), 3);
+        policy.allowed.set(false);
+        assert_eq!(r.resolve_shared(&typed, &context(), &policy).unwrap_err().code,
+            ResolutionErrorCode::PolicyDenied);
+        assert_eq!(policy.calls.get(), 4);
+
+        struct AttributePolicy(RefCell<Vec<(String, ImportStyle, EngineImportAttributes)>>);
+        impl ModulePolicyHook for AttributePolicy {
+            fn authorize(&self, request: &ModuleRequest, _: &ModuleRecord,
+                _: &ResolutionContext) -> ResolutionResult<()> {
+                self.0.borrow_mut().push((request.specifier.clone(), request.style,
+                    request.import_attributes.clone()));
+                Ok(())
+            }
+        }
+        let edges = AttributePolicy(RefCell::new(Vec::new()));
+        assert_eq!(r.resolve_chain(&r.entry_request(), &context(), &edges).unwrap().len(), 3);
+        let calls = edges.0.borrow();
+        let json_calls = calls.iter().filter(|(specifier, _, _)| specifier == "./data.json")
+            .collect::<Vec<_>>();
+        assert_eq!(json_calls.len(), 2);
+        assert!(json_calls.iter().any(|(_, style, attrs)| *style == ImportStyle::Import
+            && *attrs == attributes));
+        assert!(json_calls.iter().any(|(_, style, attrs)| *style == ImportStyle::Require
+            && attrs.is_empty()));
+    }
+
+    #[test]
+    fn captured_attributes_cannot_reclassify_javascript_on_shared_cache_hits() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "app.mjs", r#"
+import './plain.mjs';
+import './plain.mjs' with {type:'json'};
+import './plain.mjs' with {purpose:'configuration'};
+"#);
+        put(root.path(), "plain.mjs", "export default 42;");
+        let r = resolver(root.path());
+        let request = ModuleRequest::new("./plain.mjs", ImportStyle::Import)
+            .with_referrer(r.entry_request().specifier)
+            .with_compatibility_mode(CompatibilityMode::NodeCompat);
+        let policy = ChangingPolicy { allowed: Cell::new(true), calls: Cell::new(0) };
+        let plain = r.resolve_shared(&request, &context(), &policy).unwrap();
+        assert_eq!(plain.module.record.syntax, ModuleSyntax::EsModule);
+        for map in [
+            BTreeMap::from([("type".into(), "json".into())]),
+            BTreeMap::from([("purpose".into(), "configuration".into())]),
+        ] {
+            let attributed = request.clone().with_import_attributes(
+                EngineImportAttributes::new(map).unwrap());
+            assert_eq!(r.resolve_shared(&attributed, &context(), &policy).unwrap_err().code,
+                ResolutionErrorCode::UnsupportedSpecifier);
+            assert_eq!(r.resolve(&attributed, &context(), &policy).unwrap_err().code,
+                ResolutionErrorCode::UnsupportedSpecifier);
+        }
+        assert_eq!(policy.calls.get(), 1);
+        assert!(r.resolve_chain(&r.entry_request(), &context(), &granted()).is_err());
     }
 
     struct EdgePolicy {
@@ -3503,6 +3640,61 @@ console.log('parser', typeof JSON.parse);
                 .collect::<Vec<_>>()
                 .join("\n") + "\n";
             assert_eq!(actual, reference, "{lane:?}");
+        }
+    }
+
+    #[test]
+    fn native_static_json_imports_and_reexports_match_node_in_both_cache_orders_after_replay() {
+        use frankenengine_engine::baseline_interpreter::LaneChoice;
+
+        for lane in [LaneChoice::QuickJs, LaneChoice::V8] {
+            for commonjs_first in [false, true] {
+                let parent = tempfile::tempdir().unwrap();
+                let root = parent.path().join("typed json project");
+                let loads = if commonjs_first {
+                    "import common from './consumer.cjs';\nimport data from 'data-kit' with {type:'json'};"
+                } else {
+                    "import data from 'data-kit' with {type:'json'};\nimport common from './consumer.cjs';"
+                };
+                put(&root, "app.mjs", &format!(r#"
+import './poison.cjs';
+{loads}
+import * as namespace from 'data-kit' with {{type:'json'}};
+import {{default as forwarded}} from './bridge.mjs';
+console.log(data === common, data === forwarded, data === namespace.default);
+console.log(data.counter, data.answer, data.__proto__.safe, Object.keys(namespace).join(','));
+"#));
+                put(&root, "poison.cjs",
+                    "JSON.parse=function(){throw Error('guest JSON.parse must not run');};");
+                put(&root, "consumer.cjs",
+                    "const value=require('data-kit'); value.counter=7; module.exports=value;");
+                put(&root, "bridge.mjs",
+                    "export {default} from 'data-kit' with {'type':'json'};");
+                put(&root, "node_modules/data-kit/package.json",
+                    r#"{"exports":{"import":"./payload.json","require":"./payload.json"}}"#);
+                put(&root, "node_modules/data-kit/payload.json",
+                    "\u{feff}{\"answer\":1,\"answer\":42,\"__proto__\":{\"safe\":\"yes\"}}");
+                let reference = node_reference_output(&root, "app.mjs");
+                assert_eq!(reference, "true true true\n7 42 yes default\n");
+                let graph = capture(&root, "app.mjs", GraphOptions::default()).unwrap();
+                assert!(graph.report().fully_resolved, "{:?}", graph.report());
+                assert_eq!(graph.report().modules.iter()
+                    .filter(|module| module.source_language == super::super::SourceLanguage::Json)
+                    .count(), 1);
+                let encoded = capsule::encode(&graph).unwrap();
+                std::fs::rename(&root, parent.path().join("original-project")).unwrap();
+                put(&root, "app.mjs", "throw Error('ambient replacement was opened');");
+                put(&root, "node_modules/data-kit/package.json", r#"{"exports":"./wrong.cjs"}"#);
+                put(&root, "node_modules/data-kit/wrong.cjs", "throw Error('replacement package');");
+                let replayed = capsule::replay(encoded.bytes(), encoded.digest()).unwrap();
+                assert_eq!(replayed.report(), graph.report());
+                let result = execute_module_graph_with_policy_for_test(
+                    &root, replayed, lane, Arc::new(granted()), || {},
+                ).expect("typed imports, reexports and require share native captured JSON data");
+                let actual = result.console_output.iter()
+                    .map(|line| line.message.as_str()).collect::<Vec<_>>().join("\n") + "\n";
+                assert_eq!(actual, reference, "{lane:?}, commonjs first: {commonjs_first}");
+            }
         }
     }
 

@@ -31,14 +31,18 @@ Neither pin identifies a publisher or grants capabilities.
 
 ## Required sibling revision
 
-This bridge requires `franken_engine` commit
-[`ca797fecd5395e818ce9b9b05cbcf295785d2e94`](https://github.com/Dicklesworthstone/franken_engine/commit/ca797fecd5395e818ce9b9b05cbcf295785d2e94)
-or a descendant that retains `ModuleSyntax::Json`, the intrinsic JSON module
-loader, `ModuleMetadataTarget`, `ModuleResolver::resolve_metadata`,
-`ModulePolicyHook::authorize_metadata` and the native `import.meta.resolve` runtime. The Cargo path dependency on the
+The native JSON foundation landed in `franken_engine` commit
+[`4fe03210c4d2a102a985a150901d358e8f763a6e`](https://github.com/Dicklesworthstone/franken_engine/commit/4fe03210c4d2a102a985a150901d358e8f763a6e)
+with `ModuleSyntax::Json` and the intrinsic JSON module loader. This bridge now
+also requires the static-attribute contract: `import_attributes::ImportAttributes`,
+attribute-bearing `ModuleRequest` and `ModuleDependency`, static import/reexport
+transport, and the resolver's shared format-validation helpers. The earlier
+JSON foundation commit alone is insufficient. The metadata contract includes
+`ModuleMetadataTarget`, `ModuleResolver::resolve_metadata`,
+`ModulePolicyHook::authorize_metadata` and native `import.meta.resolve`.
+The Cargo path dependency on the
 sibling checkout is intentional; it does not select or enforce a Git revision.
-An older sibling checkout does not provide the metadata-resolution contract
-required by this bridge.
+The CI checkout pins the sibling revision used to verify these APIs together.
 
 ## Closed-world behavior
 
@@ -130,13 +134,13 @@ prepares the following captured sources using the real sibling front end:
   unmarked-scope observation permits engine syntax detection. No live manifest
   read or implicit `.ts` extension/index search is added during preparation.
 - JavaScript hashbangs: the same engine source-preparation function handles them.
-- JSON dependencies: the require-only contract below delivers the original JSON
+- JSON dependencies: require and attributed static imports/reexports below deliver the original JSON
   text as an explicit native JSON module, without a generated JavaScript adapter.
 
 Preparation runs after independent pin and closed-graph checks, once per
 physical source. A changed source is rescanned by the production dependency
 scanner without filesystem or network authority. Its runtime importer-local
-specifier/style/purpose routes must exactly equal the captured routes; adding a load or
+specifier/style/purpose/attribute routes must exactly equal the captured routes; adding a load or
 removing a side-effect dependency is an admission error. Type-only edges remain
 non-authorizing. Original source pins and URL identities are not rewritten;
 engine canonical hashes cover the actual delivered prepared source.
@@ -156,16 +160,36 @@ engine obligation metadata. Implicit reclassification of JavaScript as
 TypeScript is likewise rejected. These are admission errors, not empty module
 shims. The broader inspection/capsule functionality remains available unchanged.
 
-## CommonJS JSON dependencies
+## Native JSON imports and CommonJS dependencies
 
 A captured `.json` dependency can be delivered when every executable incoming
-edge is `require`, it has no outgoing runtime routes, and it has no URL-instance
-suffix. Filename-only and URL-only lookup edges do not change this loading contract.
-This covers explicit JSON files, existing CommonJS extension/index
-search and JSON-valued package entrypoints. A bare JSON graph entrypoint, static
-or dynamic ESM JSON import, reexport, or mixed require/import access is refused
-with `ERR_MODULE_ENGINE_JSON_IMPORT`. The captured request contract does not yet
-carry import attributes, so these forms remain unsupported.
+edge is either `require` with no attributes or a static import/reexport with the
+exact map `{ type: 'json' }`, and it has no outgoing runtime routes. Filename-only
+and URL-only lookup edges do not change this loading contract. This covers
+explicit JSON files, CommonJS extension/index search and JSON-valued package
+entrypoints, including bare requests whose conditional exports select `.json`.
+For example:
+
+```js
+import settings from 'settings-package' with { type: 'json' };
+export { default as defaults } from './defaults.json' with { type: 'json' };
+```
+
+The captured target's format is authoritative. Attribute spelling cannot turn
+an actual extensionless or JavaScript file into JSON. A bare JSON graph entrypoint,
+untyped or differently attributed JSON import, and dynamic JSON import remain
+outside admission. Dynamic options are explicitly unsupported by capture;
+they cannot inherit attributes from another static request. Adding an admitted
+typed or require route does not approve an unsupported incoming route.
+
+The sealed registry indexes the complete cooked map alongside importer,
+specifier and request style. Dependency records, normalized-source checks and
+engine requests retain that map. Every load validates attributes and format
+before cached source or an initialized value can be returned. Unsupported
+attributes on JavaScript, require and metadata-only requests are refused too.
+The source graph and registry schemas are v3 so old attribute-free evidence
+cannot approve these routes. Capsules retain raw source observations and rescan
+them; changing an attribute changes the graph pin.
 
 The registry classifies admitted JSON as `ModuleKind::Json`; the engine receives
 `ModuleSyntax::Json` and the exact original text. The engine's intrinsic JSON
@@ -188,7 +212,10 @@ executable dependencies. Invalid or unsupported capture inputs still prevent
 registry admission; this change does not expand that syntax or resource envelope.
 The resolver does not evaluate JSON during construction. At execution, the
 engine retains one value per canonical module identity, returns it to repeated
-`require` calls, and exposes only `default` through a JSON namespace. Module
+`require` calls and attributed static imports, and exposes only `default` through
+a JSON namespace. Require and ESM access to the same canonical module share
+object identity and mutations in either initialization order. ESM URL suffixes
+continue to select distinct module identities. Module
 authorization still runs for each request, including cache hits.
 
 Incoming-mode validation is indexed once alongside graph routes. Repeated
@@ -333,10 +360,14 @@ lanes after live sources change, verify shared identities and subscriptions, and
 exercise missing capabilities, subscriber filesystem-write denial and refused
 getter mutations. JSON tests cover package/extension/index routes, cycles,
 contained aliases, capsule replay after source mutation, TypeScript consumers,
-independent source pins, raw-byte budgets and refusal of unsupported ESM.
-The native JSON fixture poisons the guest's `JSON.parse`, requires one payload
-through package and relative routes, and checks shared mutation visibility,
-BOM handling, duplicate keys and `__proto__` data. With sibling checkouts adjacent:
+independent source pins, raw-byte budgets, static attributes and reexports, and
+refusal of missing/mismatched attributes even after a valid request was cached.
+Native JSON fixtures poison the guest's `JSON.parse`, load one payload through
+package, relative, require and typed ESM routes, and check both cache orders,
+shared mutation visibility, a default-only namespace, BOM handling, duplicate
+keys and `__proto__` data against Node. Replay runs after live project sources
+and manifests are replaced. These tests use Node 24 as the reference runtime.
+With sibling checkouts adjacent:
 
 ```sh
 cargo test --manifest-path tools/module-graph/engine-bridge/Cargo.toml \

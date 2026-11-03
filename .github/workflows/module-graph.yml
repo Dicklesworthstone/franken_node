@@ -12,6 +12,8 @@ on:
       - 'crates/franken-node/src/supply_chain/package_target_resolution.rs'
       - 'crates/franken-node/src/supply_chain/module_file_resolution.rs'
       - 'crates/franken-node/src/supply_chain/module_source_graph.rs'
+      - 'crates/franken-node/src/supply_chain/module_import_attributes.rs'
+      - 'crates/franken-node/src/supply_chain/module_source_scan_cache.rs'
       - 'crates/franken-node/src/supply_chain/module_require_resolve_tests.rs'
       - 'crates/franken-node/src/supply_chain/module_metadata_resolver_tests.rs'
       - 'crates/franken-node/src/supply_chain/module_json_syntax.rs'
@@ -33,6 +35,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
       - name: Execute the production graph builder and native command
         shell: bash
         run: |
@@ -59,6 +64,8 @@ jobs:
           git show HEAD:crates/franken-node/src/supply_chain/module_source_registry.rs > evidence/module_source_registry.rs
           git show HEAD:crates/franken-node/src/supply_chain/module_engine_resolver.rs > evidence/module_engine_resolver.rs
           git show HEAD:crates/franken-node/src/supply_chain/module_engine_preparation.rs > evidence/module_engine_preparation.rs
+          git show HEAD:crates/franken-node/src/supply_chain/module_import_attributes.rs > evidence/module_import_attributes.rs
+          git show HEAD:crates/franken-node/src/supply_chain/module_source_scan_cache.rs > evidence/module_source_scan_cache.rs
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -83,9 +90,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: Dicklesworthstone/franken_engine
-          ref: ca797fecd5395e818ce9b9b05cbcf295785d2e94
+          ref: 4fe03210c4d2a102a985a150901d358e8f763a6e
           path: franken_engine
           persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
       - name: Test the product resolver against the actual engine contract
         shell: bash
         run: |

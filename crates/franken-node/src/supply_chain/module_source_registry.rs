@@ -7,7 +7,7 @@
 //! engine consumers must authorize every lookup through ModulePolicyHook.
 
 use super::{
-    CapturedModuleGraph, EdgeState, LoadKind, ModuleId, ResolutionError, ResolutionUrl, SourceLanguage,
+    CapturedModuleGraph, EdgeState, ImportAttributes, LoadKind, ModuleId, ResolutionError, ResolutionUrl, SourceLanguage,
     error,
 };
 use serde::Serialize;
@@ -19,7 +19,8 @@ type Result<T> = std::result::Result<T, ResolutionError>;
 const ID_DOMAIN: &[u8] = b"franken-node/sealed-module-id/v1\0";
 const BUILTIN_ID_DOMAIN: &[u8] = b"franken-node/sealed-native-builtin/v1\0";
 const URL_ID_DOMAIN: &[u8] = b"franken-node/sealed-resolution-url/v1\0";
-type ImporterRoutes = BTreeMap<RequestStyle, BTreeMap<String, RegisteredTarget>>;
+type ImporterRoutes = BTreeMap<RequestStyle, BTreeMap<String, BTreeMap<ImportAttributes, RegisteredTarget>>>;
+static EMPTY_IMPORT_ATTRIBUTES: ImportAttributes = ImportAttributes::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -81,6 +82,8 @@ pub enum RegisteredTarget {
 pub struct RegisteredDependency {
     pub specifier: String,
     pub style: RequestStyle,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub import_attributes: ImportAttributes,
     pub target: RegisteredTarget,
 }
 
@@ -187,6 +190,7 @@ pub struct RegisteredRequest<'a> {
     pub referrer: Option<&'a str>,
     pub specifier: &'a str,
     pub style: RequestStyle,
+    pub import_attributes: &'a ImportAttributes,
     pub module: &'a RegisteredModule,
 }
 
@@ -250,6 +254,7 @@ impl<'a> Iterator for ReachableRequests<'a> {
                 referrer: Some(importer.id()),
                 specifier: &dependency.specifier,
                 style: dependency.style,
+                import_attributes: &dependency.import_attributes,
                 module,
             }));
         }
@@ -345,6 +350,12 @@ impl PinnedModuleRegistry {
             return Err(incomplete());
         }
         for edge in &report.edges {
+            super::import_attributes::validate(&edge.import_attributes)?;
+            if !edge.import_attributes.is_empty()
+                && !matches!(edge.kind, LoadKind::StaticImport | LoadKind::Reexport)
+            {
+                return Err(invalid_graph());
+            }
             if edge.kind == LoadKind::ImportMetaResolve {
                 if edge.target.is_some()
                     || (edge.state == EdgeState::Resolved) != edge.resolved_url.is_some()
@@ -644,18 +655,20 @@ impl PinnedModuleRegistry {
             {
                 return Err(invalid_graph());
             }
-            let by_specifier = routes
+            let by_attributes = routes
                 .entry(importer.clone())
                 .or_default()
                 .entry(style)
+                .or_default()
+                .entry(specifier.clone())
                 .or_default();
-            if let Some(previous) = by_specifier.get(specifier) {
+            if let Some(previous) = by_attributes.get(&edge.import_attributes) {
                 if previous != &target {
                     return Err(invalid_graph());
                 }
                 continue;
             }
-            by_specifier.insert(specifier.clone(), target.clone());
+            by_attributes.insert(edge.import_attributes.clone(), target.clone());
             route_count += 1;
             missing_routes += usize::from(matches!(target, RegisteredTarget::Missing { .. }));
             modules
@@ -665,6 +678,7 @@ impl PinnedModuleRegistry {
                 .push(RegisteredDependency {
                     specifier: specifier.clone(),
                     style,
+                    import_attributes: edge.import_attributes.clone(),
                     target,
                 });
         }
@@ -673,7 +687,7 @@ impl PinnedModuleRegistry {
             .ok_or_else(invalid_graph)?
             .clone();
         let summary = RegistrySummary {
-            schema_version: "franken-node/sealed-module-registry/v2",
+            schema_version: "franken-node/sealed-module-registry/v3",
             graph_input_hash: report.input_hash.clone(),
             entrypoint,
             modules: modules.len(),
@@ -808,7 +822,20 @@ impl PinnedModuleRegistry {
         specifier: &str,
         style: RequestStyle,
     ) -> Result<&RegisteredModule> {
+        self.lookup_with_attributes(referrer, specifier, style, &EMPTY_IMPORT_ATTRIBUTES)
+    }
+
+    /// Select a route by its complete decoded attribute map. A typed import
+    /// cannot authorize an untyped request, including after the target is cached.
+    pub fn lookup_with_attributes(
+        &self,
+        referrer: Option<&str>,
+        specifier: &str,
+        style: RequestStyle,
+        import_attributes: &ImportAttributes,
+    ) -> Result<&RegisteredModule> {
         validate_specifier(specifier)?;
+        super::import_attributes::validate(import_attributes)?;
         if matches!(style, RequestStyle::RequireResolve | RequestStyle::ImportMetaResolve) {
             return Err(error(
                 "ERR_MODULE_REGISTRY_ROUTE",
@@ -816,7 +843,8 @@ impl PinnedModuleRegistry {
             ));
         }
         let id = match referrer {
-            None if specifier == self.entrypoint() && style == self.entry_style() => {
+            None if specifier == self.entrypoint() && style == self.entry_style()
+                && import_attributes.is_empty() => {
                 self.entrypoint()
             }
             None => {
@@ -836,10 +864,11 @@ impl PinnedModuleRegistry {
                     .get(importer)
                     .and_then(|styles| styles.get(&style))
                     .and_then(|specifiers| specifiers.get(specifier))
+                    .and_then(|attributes| attributes.get(import_attributes))
                     .ok_or_else(|| {
                         error(
                             "ERR_MODULE_REGISTRY_ROUTE",
-                            "module request was not captured for this importer and load style",
+                            "module request was not captured for this importer, load style and attributes",
                         )
                     })?;
                 match target {
@@ -860,13 +889,26 @@ impl PinnedModuleRegistry {
         specifier: &'a str,
         style: RequestStyle,
     ) -> Result<ReachableRequests<'a>> {
-        let module = self.lookup(referrer, specifier, style)?;
+        self.walk_requests_with_attributes(referrer, specifier, style, &EMPTY_IMPORT_ATTRIBUTES)
+    }
+
+    /// Traverse complete request identities without allocating request strings
+    /// or attribute maps at each edge. Target identity deduplication is separate.
+    pub fn walk_requests_with_attributes<'a>(
+        &'a self,
+        referrer: Option<&'a str>,
+        specifier: &'a str,
+        style: RequestStyle,
+        import_attributes: &'a ImportAttributes,
+    ) -> Result<ReachableRequests<'a>> {
+        let module = self.lookup_with_attributes(referrer, specifier, style, import_attributes)?;
         Ok(ReachableRequests {
             registry: self,
             entry: Some(RegisteredRequest {
                 referrer,
                 specifier,
                 style,
+                import_attributes,
                 module,
             }),
             pending: VecDeque::from([module]),
@@ -887,7 +929,7 @@ impl PinnedModuleRegistry {
         referrer: Option<&str>,
         specifier: &str,
         style: RequestStyle,
-    ) -> Result<Vec<(Option<String>, String, RequestStyle)>> {
+    ) -> Result<Vec<(Option<String>, String, RequestStyle, ImportAttributes)>> {
         self.walk_requests(referrer, specifier, style)?
             .map(|request| {
                 request.map(|request| {
@@ -895,6 +937,7 @@ impl PinnedModuleRegistry {
                         request.referrer.map(str::to_owned),
                         request.specifier.to_owned(),
                         request.style,
+                        request.import_attributes.clone(),
                     )
                 })
             })
@@ -1002,6 +1045,37 @@ mod tests {
             .lookup(None, registry.entrypoint(), registry.entry_style())
             .ok()
             .unwrap()
+    }
+
+    #[test]
+    fn complete_attribute_maps_distinguish_routes_before_engine_format_admission() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "app.mjs", r#"
+import first from './dep.mjs' with {color:'red',type:'json'};
+import second from './dep.mjs' with {type:'json',color:'red'};
+import third from './dep.mjs' with {color:'blue',type:'json'};
+"#);
+        put(root.path(), "dep.mjs", "export default 42;");
+        // The registry preserves request authority. The engine subsequently
+        // rejects these unsupported attributes and the non-JSON format.
+        let registry = registry(root.path(), "app.mjs");
+        assert_eq!(registry.summary().routes, 2);
+        assert_eq!(entry(&registry).dependencies().len(), 2);
+        let red = ImportAttributes::from([("color".into(), "red".into()), ("type".into(), "json".into())]);
+        let blue = ImportAttributes::from([("color".into(), "blue".into()), ("type".into(), "json".into())]);
+        let first = registry.lookup_with_attributes(Some(registry.entrypoint()), "./dep.mjs",
+            RequestStyle::Import, &red).unwrap();
+        let second = registry.lookup_with_attributes(Some(registry.entrypoint()), "./dep.mjs",
+            RequestStyle::Import, &blue).unwrap();
+        assert!(std::ptr::eq(first, second));
+        for attributes in [ImportAttributes::new(), ImportAttributes::from([("type".into(), "json".into())])] {
+            assert_eq!(registry.lookup_with_attributes(Some(registry.entrypoint()), "./dep.mjs",
+                RequestStyle::Import, &attributes).err().unwrap().code, "ERR_MODULE_REGISTRY_ROUTE");
+        }
+        let requests = registry.reachable_requests(None, registry.entrypoint(), RequestStyle::Import).unwrap();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[1].3, red);
+        assert_eq!(requests[2].3, blue);
     }
 
     #[test]
@@ -1890,7 +1964,7 @@ mod tests {
         assert_eq!(
             requests
                 .iter()
-                .filter(|(_, s, _)| s == "./shared.mjs")
+                .filter(|(_, s, _, _)| s == "./shared.mjs")
                 .count(),
             2
         );
@@ -1948,13 +2022,15 @@ mod tests {
         for request in walk.by_ref() {
             let request = request.unwrap();
             let looked_up = r
-                .lookup(request.referrer, request.specifier, request.style)
+                .lookup_with_attributes(request.referrer, request.specifier, request.style,
+                    request.import_attributes)
                 .unwrap();
             assert!(std::ptr::eq(looked_up, request.module));
             order.push((
                 request.referrer.map(str::to_owned),
                 request.specifier.to_owned(),
                 request.style,
+                request.import_attributes.clone(),
             ));
         }
         assert_eq!(
@@ -1965,7 +2041,7 @@ mod tests {
         assert_eq!(
             order
                 .iter()
-                .map(|(_, specifier, _)| specifier.as_str())
+                .map(|(_, specifier, _, _)| specifier.as_str())
                 .collect::<Vec<_>>(),
             vec![
                 r.entrypoint(),

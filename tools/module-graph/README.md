@@ -527,6 +527,28 @@ JavaScript. TypeScript and TSX use their own grammars and the explicit erasure
 contract below. Native addon and Wasm loads, and other unsupported loaded
 formats, produce explicit diagnostics; resolution-only targets need no grammar.
 
+Static imports and reexports retain their cooked import attributes on each
+edge, for example `import data from 'settings' with { type: 'json' }` and
+`export { default } from './settings.json' with { type: 'json' }`. Attribute
+keys and values must be literal strings (identifier keys are also accepted).
+Duplicate decoded keys, computed keys, spreads, accessors, shorthand members and
+non-string values are refused. Each map is bounded to 16 entries, 128 UTF-8 bytes
+per key, 1,024 per value and 4,096 aggregate bytes. Strings that cannot be
+represented as UTF-8 are refused explicitly. Quoted commas, colons and escapes
+are decoded as string content. Supported TypeScript erasure preserves the same
+maps and original source spans.
+
+Capture records valid attribute syntax and selected file format. It preserves
+unknown keys and values as evidence; the engine adapter decides whether a
+request is permitted for that format. An extensionless package request can
+select a `.json` file through `exports`, while `type: 'json'` cannot reclassify
+an actual JavaScript or extensionless target as JSON. Attribute maps participate
+in route identity: a typed route does not approve a separate untyped or
+differently attributed request to the same target. Empty maps are omitted from
+the JSON report. Dynamic `import()` options are outside this static increment
+and produce `DYNAMIC_IMPORT_ATTRIBUTES_UNSUPPORTED`; their attributes are never
+inferred from a static import elsewhere in the graph.
+
 One resolver owns the entire graph capture. Sources, manifests, link text and
 negative probes are cached once across all edges, not captured independently
 from mutable paths. The `CapturedModuleGraph` owner provides a read-only report
@@ -542,8 +564,9 @@ Missing entrypoints return `UNRESOLVED`, exit 1. Unsafe capture and resource
 failures return `ERROR`, exit 2, without a partial successful graph.
 
 `fully_resolved` is **not runtime completeness**. Arbitrary aliases beyond the
-bounded forms above, generated code, general binding/control-flow analysis, import-attribute
-validation and module evaluation/linking semantics are outside the scanner.
+bounded forms above, generated code, general binding/control-flow analysis,
+runtime import-attribute/format admission and module evaluation/linking semantics
+are outside the scanner.
 Shadowed direct require calls can be conservative false positives. A tree-sitter
 parse is not an engine compatibility result. `runtime_completeness`,
 `execution_performed` and `release_certification` remain false on every result.
@@ -617,9 +640,12 @@ return `INCOMPLETE` while retaining their explicit edges. Declaration files
 (`.d.ts`, `.d.mts`, `.d.cts`) selected as runtime sources are not accepted as empty
 implementations. Syntax failures retain source identity without claiming analysis.
 
-The graph schema/hash domain is v2, binding language classification, erased-edge
-decisions, source spellings and all runtime evidence. v1 pins must be reviewed
-again. Changing an unread type dependency does not change this runtime-syntax
+The graph schema/hash domain is v3, binding language classification, erased-edge
+decisions, cooked attribute maps, source spellings and all runtime evidence.
+v1 and v2 pins must be reviewed again; an older scan that omitted attributes
+cannot authorize a new graph. The scan cache is capture-local and retains the
+complete attribute-bearing loads and their analysis charges. Changing an unread
+type dependency does not change this runtime-syntax
 pin; changing its reference in captured source does. This remains neither a type
 dependency graph nor a complete emitted-program or runtime execution graph.
 

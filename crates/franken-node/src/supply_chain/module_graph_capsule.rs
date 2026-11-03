@@ -444,6 +444,38 @@ mod tests {
     }
 
     #[test]
+    fn static_attributes_replay_from_raw_source_and_cannot_reuse_an_older_graph_pin() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "app.mjs", "import './bridge.mjs'; import data from './data.json' with {type:'json'};");
+        put(root.path(), "bridge.mjs", "export {default} from './data.json' with {'type':'json'};");
+        put(root.path(), "data.json", "{\"answer\":42}");
+        let graph = capture(root.path(), "app.mjs", GraphOptions::default()).unwrap();
+        assert!(graph.report().fully_resolved);
+        assert_eq!(graph.report().schema_version, "franken-node/module-source-graph/v3");
+        let encoded = encode(&graph).unwrap();
+        put(root.path(), "app.mjs", "import './bridge.mjs'; import data from './data.json' with {type:'text'};");
+        put(root.path(), "data.json", "{\"answer\":99}");
+        let restored = replay(encoded.bytes(), encoded.digest()).unwrap();
+        assert_eq!(restored.report(), graph.report());
+        assert_eq!(restored.report().edges.iter().filter(|edge|
+            edge.import_attributes.get("type").map(String::as_str) == Some("json")).count(), 2);
+        let changed = capture(root.path(), "app.mjs", GraphOptions::default()).unwrap();
+        assert_ne!(changed.report().input_hash, graph.report().input_hash);
+        assert!(changed.report().edges.iter().any(|edge|
+            edge.import_attributes.get("type").map(String::as_str) == Some("text")));
+        let forged = modify(&encode(&changed).unwrap(), |header|
+            header.graph_hash = graph.report().input_hash.clone());
+        assert_eq!(failure(&forged), "ERR_MODULE_CAPSULE_REPLAY_MISMATCH");
+        put(root.path(), "app.mjs", r#"import './data.json' with {type:'json','t\u0079pe':'json'};"#);
+        let duplicate = capture(root.path(), "app.mjs", GraphOptions::default()).unwrap();
+        assert!(!duplicate.report().fully_resolved);
+        let encoded = encode(&duplicate).unwrap();
+        let replayed = replay(encoded.bytes(), encoded.digest()).unwrap();
+        assert_eq!(replayed.report(), duplicate.report());
+        assert!(replayed.report().diagnostics.iter().any(|notice| notice.code == "INVALID_IMPORT_ATTRIBUTES"));
+    }
+
+    #[test]
     fn incomplete_graph_preserves_missing_builtin_computed_and_parse_failures() {
         let root = tempfile::tempdir().unwrap();
         put(

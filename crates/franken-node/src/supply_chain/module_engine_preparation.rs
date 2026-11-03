@@ -4,13 +4,13 @@
 //! requiring syntax detection, hashbang handling or TypeScript normalization
 //! goes through the actual FrankenEngine front end exactly once per physical
 //! source. Original graph pins and routes remain authoritative.
-//! JSON dependencies reached exclusively through require retain their original
+//! JSON dependencies reached through require or attributed static imports retain their original
 //! text and use the engine's native JSON syntax. They never enter JavaScript
-//! normalization or source-format detection. ESM JSON still needs an
-//! import-attribute contract which this captured graph does not carry.
+//! normalization or source-format detection. Static attributes remain part of
+//! every dependency route; dynamic JSON options require a separate contract.
 
 use super::super::{
-    Budget, EdgeState, LoadKind, ModuleId, SourceGraphReport, SourceLanguage, SourceModule, error, scan,
+    Budget, EdgeState, ImportAttributes, LoadKind, ModuleId, SourceGraphReport, SourceLanguage, SourceModule, error, scan,
 };
 use super::{CaptureError, ModuleKind, RegisteredModule, RequestStyle};
 use frankenengine_engine::ast::ParseGoal;
@@ -24,7 +24,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 type Result<T> = std::result::Result<T, CaptureError>;
-type Routes = BTreeSet<(String, RequestStyle)>;
+type Routes = BTreeSet<(String, RequestStyle, ImportAttributes)>;
 const MAX_PREPARED_SOURCE_BYTES: usize = 32 * 1024 * 1024;
 
 /// Source-free engine preparation evidence. A report identifies an original
@@ -129,10 +129,10 @@ impl SourcePreparer {
             .ok_or_else(invalid_preparation)?;
         let expected = index.modules.get(&module.id).ok_or_else(invalid_preparation)?;
         if module.source_language == SourceLanguage::Json {
-            if !index.json_require_only.contains(&module.id) || !expected.is_empty() {
+            if !index.json_admitted.contains(&module.id) || !expected.is_empty() {
                 return Err(error(
                     "ERR_MODULE_ENGINE_JSON_IMPORT",
-                    "captured JSON requires exclusively CommonJS incoming routes; JSON entrypoints and ESM attributes need a separate engine contract",
+                    "captured JSON requires require() or static imports with type=json; entrypoints, untyped imports and dynamic JSON are not admitted",
                 ));
             }
             // The graph has already validated and pinned the original JSON.
@@ -215,7 +215,7 @@ impl SourcePreparer {
                     return Err(invalid_preparation());
                 }
                 let specifier = load.specifier.ok_or_else(invalid_preparation)?;
-                routes.insert((specifier, request_style(load.kind)));
+                routes.insert((specifier, request_style(load.kind), load.import_attributes));
             }
             routes
         };
@@ -265,7 +265,7 @@ impl SourcePreparer {
 /// In particular, .ts inherits its captured package scope, while .mts/.cts are
 /// explicit. An absent or legacy unknown hint is not evidence of an unmarked
 /// package: only the resolver's typescript_unspecified observation permits
-/// syntax detection. JSON additionally requires graph-wide require-only
+/// syntax detection. JSON additionally requires graph-wide attributed-route
 /// admission above. JSX, declarations and addons need other contracts.
 fn captured_kind(module: &SourceModule) -> Result<Option<ModuleKind>> {
     match (module.source_language, module.format_hint.as_str()) {
@@ -301,7 +301,7 @@ fn captured_kind(module: &SourceModule) -> Result<Option<ModuleKind>> {
 
 struct ExpectedRoutes {
     modules: BTreeMap<ModuleId, Routes>,
-    json_require_only: BTreeSet<ModuleId>,
+    json_admitted: BTreeSet<ModuleId>,
 }
 
 fn expected_routes(report: &SourceGraphReport) -> Result<ExpectedRoutes> {
@@ -313,10 +313,9 @@ fn expected_routes(report: &SourceGraphReport) -> Result<ExpectedRoutes> {
     // Index incoming JSON modes together with outgoing routes once, rather
     // than rescanning all edges for every data file or alias. Never collapse
     // require and import based on a shared physical path or content hash.
-    let mut json_require_only: BTreeSet<_> = report.modules.iter()
+    let mut json_admitted: BTreeSet<_> = report.modules.iter()
         .filter(|module| module.source_language == SourceLanguage::Json
-            && module.id != report.resolved_entrypoint
-            && module.id.url_suffix.is_empty())
+            && module.id != report.resolved_entrypoint)
         .map(|module| module.id.clone())
         .collect();
     let mut required = BTreeSet::new();
@@ -328,20 +327,24 @@ fn expected_routes(report: &SourceGraphReport) -> Result<ExpectedRoutes> {
             .get_mut(&edge.importer)
             .ok_or_else(invalid_preparation)?;
         let specifier = edge.specifier.as_ref().ok_or_else(invalid_preparation)?;
-        importer.insert((specifier.clone(), request_style(edge.kind)));
+        importer.insert((specifier.clone(), request_style(edge.kind), edge.import_attributes.clone()));
         if matches!(edge.kind, LoadKind::RequireResolve | LoadKind::ImportMetaResolve) {
             continue;
         }
         if let Some(target) = &edge.target {
-            if edge.kind == LoadKind::Require {
+            let admitted = (edge.kind == LoadKind::Require && edge.import_attributes.is_empty())
+                || (matches!(edge.kind, LoadKind::StaticImport | LoadKind::Reexport)
+                    && edge.import_attributes.len() == 1
+                    && edge.import_attributes.get("type").map(String::as_str) == Some("json"));
+            if admitted {
                 required.insert(target.clone());
             } else {
-                json_require_only.remove(target);
+                json_admitted.remove(target);
             }
         }
     }
-    json_require_only.retain(|id| required.contains(id));
-    Ok(ExpectedRoutes { modules: routes, json_require_only })
+    json_admitted.retain(|id| required.contains(id));
+    Ok(ExpectedRoutes { modules: routes, json_admitted })
 }
 
 fn request_style(kind: LoadKind) -> RequestStyle {
@@ -639,7 +642,7 @@ mod tests {
     }
 
     #[test]
-    fn json_esm_routes_or_entrypoints_cannot_borrow_commonjs_admission() {
+    fn untyped_json_imports_or_entrypoints_cannot_borrow_an_admitted_route() {
         use super::super::CapturedEngineResolver;
         use super::super::super::{GraphOptions, capture};
 
@@ -650,6 +653,11 @@ mod tests {
             "require('./data.json'); import('./data.json');",
             "import('./data.json'); require('./data.json');",
             "require('./data.json'); import('./data.json?other');",
+            "import value from './data.json' with {type:'json'}; import './data.json';",
+            "import value from './data.json' with {type:'json'}; export {default} from './data.json';",
+            "import value from './data.json' with {type:'json'}; import('./data.json');",
+            "import value from './data.json' with {type:'text'};",
+            "import value from './data.json' with {type:'json', extra:'unsupported'};",
         ] {
             let root = tempfile::tempdir().unwrap();
             put_json_fixture(root.path(), "app.mjs", source);
@@ -666,6 +674,49 @@ mod tests {
         let pin = graph.report().input_hash.clone();
         assert_eq!(CapturedEngineResolver::new(graph, &pin).err().unwrap().code,
             "ERR_MODULE_ENGINE_JSON_IMPORT");
+    }
+
+    #[test]
+    fn static_json_routes_survive_typescript_normalization_with_exact_attributes() {
+        use super::super::CapturedEngineResolver;
+        use super::super::super::{GraphOptions, capture};
+        use frankenengine_engine::capability::RuntimeCapability;
+        use frankenengine_engine::module_resolver::{CapabilityPolicyHook, ModuleResolver,
+            ModuleSyntax, ResolutionContext};
+
+        let root = tempfile::tempdir().unwrap();
+        put_json_fixture(root.path(), "app.mts", r#"
+import data from './data.json' with {type:'json'};
+export {default as forwarded} from './data.json' with {'type':'json'};
+const answer: number=data.answer;
+export {answer};
+"#);
+        let json = "\u{feff}{\"answer\":42}";
+        put_json_fixture(root.path(), "data.json", json);
+        let graph = capture(root.path(), "app.mts", GraphOptions::default()).unwrap();
+        assert!(graph.report().fully_resolved, "{:?}", graph.report());
+        let pin = graph.report().input_hash.clone();
+        let resolver = CapturedEngineResolver::new(graph, &pin).ok().unwrap();
+        let policy = CapabilityPolicyHook::new(BTreeSet::from([RuntimeCapability::ModuleLoad]));
+        let records = resolver.resolve_chain(&resolver.entry_request(),
+            &ResolutionContext::new("trace", "decision", "policy"), &policy).unwrap();
+        assert_eq!(records.len(), 2);
+        let entry = &records[0].module.record;
+        assert_eq!(entry.syntax, ModuleSyntax::EsModule);
+        assert!(!entry.source.contains(": number"));
+        assert!(entry.source.contains("with {type:'json'}"));
+        assert!(entry.source.contains("with {'type':'json'}"));
+        assert!(entry.dependencies.iter().all(|dependency|
+            dependency.import_attributes.get("type") == Some("json")
+                && dependency.import_attributes.len() == 1));
+        assert_eq!(entry.dependencies.len(), 1);
+        assert_eq!(records[1].module.record.syntax, ModuleSyntax::Json);
+        assert_eq!(records[1].module.record.source, json);
+        assert_eq!(resolver.summary().graph_input_hash, pin);
+        let reports = resolver.preparation_reports().collect::<Vec<_>>();
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].path, "app.mts");
+        assert!(reports[0].normalization_witness.is_some());
     }
 
     #[test]

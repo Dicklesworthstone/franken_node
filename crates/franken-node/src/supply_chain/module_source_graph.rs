@@ -32,6 +32,9 @@ pub mod capsule;
 #[path = "module_json_syntax.rs"]
 mod json_syntax;
 
+#[path = "module_import_attributes.rs"]
+mod import_attributes;
+
 #[path = "module_source_registry.rs"]
 pub mod registry;
 
@@ -58,8 +61,12 @@ const MAX_STRING_EXPRESSION_DEPTH: usize = 64;
 const MAX_STRING_EXPRESSION_NODES: usize = 4096;
 const MAX_STRING_EXPRESSION_BYTES: usize = 16 * super::MAX_PATH;
 const MAX_STRING_ALTERNATIVES: usize = 32;
-const HASH_DOMAIN: &[u8] = b"franken-node/module-source-graph/v2\0";
+const HASH_DOMAIN: &[u8] = b"franken-node/module-source-graph/v3\0";
 type Result<T> = std::result::Result<T, ResolutionError>;
+
+/// Decoded static attributes are part of a request's authority, not its target
+/// module identity. Keep the standalone graph independent of the engine crate.
+pub type ImportAttributes = BTreeMap<String, String>;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub struct ModuleId {
@@ -165,6 +172,8 @@ pub struct SourceEdge {
     /// Potential loads only; the scanner does not evaluate control flow.
     pub deferred_or_conditional: bool,
     pub specifier: Option<String>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub import_attributes: ImportAttributes,
     pub conditions: Vec<String>,
     pub state: EdgeState,
     pub target: Option<ModuleId>,
@@ -522,6 +531,7 @@ fn build(
                             | LoadKind::DynamicImport
                     ),
                 specifier: load.specifier,
+                import_attributes: load.import_attributes,
                 conditions,
                 state: if load.type_only {
                     EdgeState::TypeOnly
@@ -659,7 +669,7 @@ fn build(
     let probes = resolver.probes();
     budget.retain(&probes)?;
     let mut report = SourceGraphReport {
-        schema_version: "franken-node/module-source-graph/v2".into(),
+        schema_version: "franken-node/module-source-graph/v3".into(),
         scope: "static-and-literal-module-requests".into(),
         entrypoint: entrypoint.into(),
         resolved_entrypoint: first,
@@ -722,6 +732,7 @@ struct Load {
     site: SourceSite,
     kind: LoadKind,
     specifier: Option<String>,
+    import_attributes: ImportAttributes,
     type_only: bool,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1936,9 +1947,25 @@ fn scan(
     parser
         .set_language(&grammar.into())
         .map_err(|e| error("ERR_MODULE_GRAPH_PARSER", e.to_string()))?;
-    let tree = parser
+    let mut tree = parser
         .parse(bytes, None)
         .ok_or_else(|| error("ERR_MODULE_GRAPH_PARSER", "parser did not return a tree"))?;
+    let mut reexport_attributes = BTreeMap::new();
+    if tree.root_node().has_error() {
+        match import_attributes::recover_reexports(parser, &tree, text, budget) {
+            Ok(Some((reparsed, attributes))) => {
+                tree = reparsed;
+                reexport_attributes = attributes;
+            }
+            Ok(None) => {}
+            Err(failure) if failure.code == "ERR_MODULE_GRAPH_IMPORT_ATTRIBUTES" => {
+                budget.site()?;
+                return Ok((Vec::new(), vec![notice("INVALID_IMPORT_ATTRIBUTES",
+                    "static import attributes are malformed, duplicated or exceed their bounds")], false));
+            }
+            Err(failure) => return Err(failure),
+        }
+    }
     if tree.root_node().has_error() {
         budget.site()?;
         let code = if language.is_typescript() {
@@ -2035,6 +2062,14 @@ fn scan(
                                     ));
                                 }
                                 None
+                            } else if kind == LoadKind::DynamicImport && args.next().is_some() {
+                                if !erased {
+                                    issue = Some((
+                                        "DYNAMIC_IMPORT_ATTRIBUTES_UNSUPPORTED",
+                                        "dynamic import options require a separate request-attribute contract",
+                                    ));
+                                }
+                                first
                             } else {
                                 first
                             }
@@ -2267,6 +2302,23 @@ fn scan(
             }
         }
         if let Some((kind, argument)) = request {
+            let mut site = SourceSite::of(node);
+            let attributes = if let Some(clause) = reexport_attributes.get(&argument.start_byte()) {
+                site.end_byte = site.end_byte.max(clause.end_byte);
+                clause.attributes.clone()
+            } else if matches!(kind, LoadKind::StaticImport | LoadKind::Reexport) {
+                match import_attributes::capture(node, text, budget) {
+                    Ok(attributes) => attributes,
+                    Err(failure) if failure.code == "ERR_MODULE_GRAPH_IMPORT_ATTRIBUTES" => {
+                        issue = Some(("INVALID_IMPORT_ATTRIBUTES",
+                            "static import attributes are malformed, duplicated or exceed their bounds"));
+                        ImportAttributes::new()
+                    }
+                    Err(failure) => return Err(failure),
+                }
+            } else {
+                ImportAttributes::new()
+            };
             let mut specifiers = request_literals(argument, text, &strings);
             if specifiers.is_none() && !erased && !strings_discovered {
                 // Keep ordinary literal/finite-expression graphs on their
@@ -2289,9 +2341,10 @@ fn scan(
             {
                 budget.site()?;
                 loads.push(Load {
-                    site: SourceSite::of(node),
+                    site: site.clone(),
                     kind,
                     specifier,
+                    import_attributes: attributes.clone(),
                     type_only: erased,
                 });
             }

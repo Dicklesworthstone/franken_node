@@ -62,6 +62,157 @@ console.log(path.relative(root,selected));
 }
 
 #[test]
+fn static_json_import_attributes_match_node_routes_and_survive_capsule_replay() {
+    for commonjs_first in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("typed JSON project");
+        let loads = if commonjs_first {
+            "import common from './consumer.cjs';\nimport data from 'data-kit' with {type:'json'};"
+        } else {
+            "import data from 'data-kit' with {type:'json'};\nimport common from './consumer.cjs';"
+        };
+        put(&project, "app.mjs", &format!(r#"
+import './poison.cjs';
+{loads}
+import * as namespace from 'data-kit' with {{type:'json'}};
+import {{default as forwarded}} from './bridge.mjs';
+console.log(data === common, data === forwarded, data === namespace.default);
+console.log(data.counter, data.answer, data.__proto__.safe, Object.keys(namespace).join(','));
+"#));
+        put(&project, "poison.cjs",
+            "JSON.parse=function(){throw Error('guest JSON.parse must not run');};");
+        put(&project, "consumer.cjs",
+            "const value=require('data-kit'); value.counter=7; module.exports=value;");
+        put(&project, "bridge.mjs",
+            "export {default} from 'data-kit' with {'type':'json'};");
+        put(&project, "node_modules/data-kit/package.json",
+            r#"{"exports":{"import":"./payload.json","require":"./payload.json"}}"#);
+        put(&project, "node_modules/data-kit/payload.json",
+            "\u{feff}{\"answer\":1,\"answer\":42,\"__proto__\":{\"safe\":\"yes\"}}");
+        let reference = Command::new("node")
+            .env_remove("NODE_OPTIONS").env_remove("NODE_PATH")
+            .current_dir(&project).arg("app.mjs").output().unwrap();
+        assert!(reference.status.success(), "{reference:?}");
+        assert!(reference.stderr.is_empty(), "{reference:?}");
+        assert_eq!(reference.stdout, b"true true true\n7 42 yes default\n");
+        let capsule = temp.path().join("typed-json.fnsc");
+        let (code, captured) = export_capsule(&project, "app.mjs", &capsule, &[]);
+        assert_eq!(code, 0, "{captured}");
+        assert_eq!(captured["source_graph"]["schema_version"], "franken-node/module-source-graph/v3");
+        assert_eq!(paths(&captured).len(), 5);
+        let edges = captured["source_graph"]["edges"].as_array().unwrap();
+        let data_edges = edges.iter().filter(|edge| edge["specifier"] == "data-kit")
+            .collect::<Vec<_>>();
+        assert_eq!(data_edges.len(), 4);
+        for edge in data_edges {
+            assert_eq!(edge["target"]["path"], "node_modules/data-kit/payload.json");
+            if edge["kind"] == "require" {
+                assert!(edge["import_attributes"].is_null());
+                assert_eq!(edge["conditions"], serde_json::json!(["node", "require"]));
+            } else {
+                assert_eq!(edge["import_attributes"], serde_json::json!({"type":"json"}));
+                assert_eq!(edge["conditions"], serde_json::json!(["node", "import"]));
+            }
+        }
+        assert!(edges.iter().any(|edge| edge["kind"] == "reexport"
+            && edge["import_attributes"] == serde_json::json!({"type":"json"})));
+        assert_node_edges(&project, &captured);
+        assert_eq!(captured["execution_performed"], false);
+
+        std::fs::rename(&project, temp.path().join("captured-project")).unwrap();
+        put(&project, "app.mjs", "throw Error('ambient replacement');");
+        put(&project, "node_modules/data-kit/package.json", r#"{"exports":"./wrong.cjs"}"#);
+        put(&project, "node_modules/data-kit/wrong.cjs", "throw Error('replacement package');");
+        let unrelated = temp.path().join("unrelated");
+        std::fs::create_dir(&unrelated).unwrap();
+        let (code, replayed) = replay_capsule(&capsule,
+            captured["capsule_hash"].as_str().unwrap(), &unrelated);
+        assert_eq!(code, 0, "{replayed}");
+        assert_eq!(replayed["source_graph"], captured["source_graph"]);
+        assert_eq!(std::fs::read_dir(&unrelated).unwrap().count(), 0);
+    }
+}
+
+#[test]
+fn static_attributes_preserve_source_format_and_missing_attribute_evidence() {
+    let root = tempfile::tempdir().unwrap();
+    put(root.path(), "package.json", r#"{"type":"module"}"#);
+    put(root.path(), "data.json", r#"{"answer":42}"#);
+    put(root.path(), "plain.js", "export default {answer:42};");
+    put(root.path(), "extensionless", "export default {answer:42};");
+    for (target, format, language, succeeds) in [
+        ("data.json", "json", "json", true),
+        ("plain.js", "module", "javascript", false),
+        ("extensionless", "module", "javascript", false),
+    ] {
+        put(root.path(), "app.mjs", &format!(
+            "import data from './{target}' with {{type:'json'}}; console.log(data.answer);"));
+        let reference = Command::new("node")
+            .env_remove("NODE_OPTIONS").env_remove("NODE_PATH")
+            .current_dir(root.path()).arg("app.mjs").output().unwrap();
+        assert_eq!(reference.status.success(), succeeds, "{target}: {reference:?}");
+        if succeeds {
+            assert_eq!(reference.stdout, b"42\n");
+        } else {
+            assert!(String::from_utf8_lossy(&reference.stderr)
+                .contains("ERR_IMPORT_ATTRIBUTE_TYPE_INCOMPATIBLE"), "{reference:?}");
+        }
+        // Capture records syntax and resolution, not a runtime-format grant.
+        let (code, captured) = run(root.path(), "app.mjs", &[]);
+        assert_eq!(code, 0, "{target}: {captured}");
+        assert_eq!(captured["source_graph"]["edges"][0]["import_attributes"],
+            serde_json::json!({"type":"json"}));
+        let selected = captured["source_graph"]["modules"].as_array().unwrap().iter()
+            .find(|module| module["id"]["path"] == target).unwrap();
+        assert_eq!(selected["format_hint"], format);
+        assert_eq!(selected["source_language"], language);
+    }
+    put(root.path(), "app.mjs", r#"
+import data from './data.json' with {type:'json'};
+console.log(data.answer);
+try { await import('./data.json'); } catch (error) { console.log(error.code); }
+"#);
+    let reference = Command::new("node")
+        .env_remove("NODE_OPTIONS").env_remove("NODE_PATH")
+        .current_dir(root.path()).arg("app.mjs").output().unwrap();
+    assert!(reference.status.success(), "{reference:?}");
+    assert_eq!(reference.stdout, b"42\nERR_IMPORT_ATTRIBUTE_MISSING\n");
+    let (code, captured) = run(root.path(), "app.mjs", &[]);
+    assert_eq!(code, 0, "{captured}");
+    let edges = captured["source_graph"]["edges"].as_array().unwrap();
+    assert_eq!(edges.len(), 2);
+    assert_eq!(edges[0]["import_attributes"], serde_json::json!({"type":"json"}));
+    assert!(edges[1]["import_attributes"].is_null());
+    assert_eq!(edges[1]["kind"], "dynamic_import");
+    assert_eq!(edges[0]["target"], edges[1]["target"]);
+}
+
+#[test]
+fn malformed_static_attributes_and_dynamic_options_never_capture_as_typed_routes() {
+    let root = tempfile::tempdir().unwrap();
+    put(root.path(), "data.json", "{}");
+    for source in [
+        r#"import data from './data.json' with {type:'json', 't\u0079pe':'json'};"#,
+        "export {default} from './data.json' with {[type]:'json'};",
+        "export {default} from './data.json' with {type};",
+        "export {default} from './data.json' with {type:42};",
+        "export {default} from './data.json' with {type:'json', ...other};",
+        "export {default} from './data.json' with {get type(){return 'json';}};",
+        "const text='./data.json' with {type:'json'};",
+        "import('./data.json', {with:{type:'json'}});",
+    ] {
+        put(root.path(), "app.mjs", source);
+        let (code, captured) = run(root.path(), "app.mjs", &[]);
+        assert_eq!(code, 1, "{source}: {captured}");
+        assert_eq!(captured["source_graph"]["fully_resolved"], false);
+        if source.starts_with("import(") {
+            assert!(captured.to_string().contains("DYNAMIC_IMPORT_ATTRIBUTES_UNSUPPORTED"));
+            assert!(captured["source_graph"]["edges"][0]["import_attributes"].is_null());
+        }
+    }
+}
+
+#[test]
 fn import_meta_resolve_urls_match_node_and_replay_without_asset_contents() {
     let temp = tempfile::tempdir().unwrap();
     let project = temp.path().join("project with spaces");
