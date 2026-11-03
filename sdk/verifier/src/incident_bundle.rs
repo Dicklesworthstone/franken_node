@@ -20,7 +20,9 @@
 //!    are independently checked against the authenticated events.
 //! 5. an embedded native capture has a supported envelope, an exact raw-payload
 //!    digest, unambiguous nested JSON and a structurally consistent terminal
-//!    declaration. This does not certify that the guest was re-executed.
+//!    declaration. Embedded module-source capsules also pass independent frame,
+//!    digest, path and per-file byte-integrity checks. This does not rebuild the
+//!    module graph or certify that the guest was re-executed.
 //!
 //! The signature envelope's human-readable `signing_identity` label is outside
 //! the signed integrity view. Verified signer identity is therefore the

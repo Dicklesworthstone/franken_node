@@ -3,8 +3,9 @@
 //! Called only after the enclosing incident bundle passes the auditor-supplied
 //! Ed25519 anchor and replay-structure checks. Raw JSON is signed as a string:
 //! outer duplicate-key checks cannot see duplicate members inside that string.
-//! This module checks its own envelope/digest and terminal declaration, not IR
-//! correctness, provider outcomes, cleanup certification or replayability.
+//! This module checks its own envelope/digest, embedded source-capsule byte
+//! integrity and terminal declaration, not graph resolution, IR correctness,
+//! provider outcomes, cleanup certification or replayability.
 //! Run references and terminal events must agree with the capture when present.
 //! These are consistency checks on signed assertions, not independent signature
 //! verification of an original run receipt that the bundle does not contain.
@@ -13,6 +14,9 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
 use super::{IncidentBundleError, UnambiguousJson, ct_str_eq};
+
+#[path = "incident_module_capsule.rs"]
+mod module_capsule;
 
 const CAPTURE_SCHEMA: &str = "franken-node/native-replay-capture/v3";
 const MAX_PAYLOAD_BYTES: usize = 4 * 1024 * 1024;
@@ -55,6 +59,8 @@ impl CapturedNativeTerminalState {
 /// No source, arguments, environment values or diagnostics are returned. A
 /// successful inspection is NOT a claim of native-execution equivalence or a
 /// substitute for `incident replay --execute` and its consumption checks.
+/// Embedded module sources, when present, pass independent capsule framing,
+/// digest and byte-integrity checks; graph resolution is not re-executed here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedNativeCaptureMetadata {
     pub payload_sha256: String,
@@ -298,18 +304,7 @@ pub(super) fn verify(initial: &Value) -> Result<Option<VerifiedNativeCaptureMeta
         &["process", "module_sources"],
     )?;
     if let Some(sources) = payload.get("module_sources") {
-        // Inspect authenticated metadata only. The product must decode the
-        // capsule, verify its independent pin, rebuild resolution and execute;
-        // this SDK never claims those native semantics from a signed string.
-        let sources = exact(
-            sources,
-            ".payload.module_sources",
-            &["capsule_base64", "capsule_digest", "graph_input_hash"],
-            &[],
-        )?;
-        for field in ["capsule_base64", "capsule_digest", "graph_input_hash"] {
-            nonblank(&sources[field], ".payload.module_sources.identity")?;
-        }
+        module_capsule::verify(sources)?;
     }
     for field in ["package", "orchestrator", "runtime"] {
         object(&payload[field], ".payload.settings")?;
@@ -413,18 +408,14 @@ mod tests {
     }
 
     #[test]
-    fn frozen_source_metadata_is_authenticated_but_does_not_certify_a_capsule() {
+    fn frozen_source_byte_integrity_is_checked_without_claiming_native_execution() {
         let mut value = payload("completed");
-        // Deliberately metadata-only: these bytes are not an executable source
-        // graph. Successful inspection must never be presented as replay proof.
-        value["module_sources"] = json!({
-            "capsule_base64":"PRIVATE-SOURCE-SENTINEL",
-            "capsule_digest":"sha256:claimed-capsule",
-            "graph_input_hash":"sha256:claimed-graph"
-        });
+        // The source capsule comes from the real producer. The surrounding
+        // metadata remains a structural fixture, not an executed guest run.
+        value["module_sources"] = module_capsule::tests::producer_sources();
         let original = captured(&value);
         let metadata = verify(&original).unwrap().unwrap();
-        assert!(!format!("{metadata:?}").contains("PRIVATE-SOURCE-SENTINEL"));
+        assert!(!format!("{metadata:?}").contains(value["module_sources"]["capsule_base64"].as_str().unwrap()));
         let mut changed = original.clone();
         let mut altered = value.clone();
         altered["module_sources"]["capsule_base64"] = json!("changed");
@@ -669,6 +660,33 @@ mod tests {
             assert_eq!(verified.event_count, 1);
             let stranger = ed25519_dalek::SigningKey::from_bytes(&[0x12; 32]);
             assert!(matches!(verify_incident_bundle(&raw, &stranger.verifying_key()), Err(IncidentBundleError::SignerNotTrusted)));
+        }
+    }
+
+    #[test]
+    fn valid_outer_signatures_cannot_authorize_corrupted_embedded_source_capsules() {
+        use super::super::verify_incident_bundle;
+
+        let with_sources = |sources: Value| {
+            let mut initial = with_run_context("completed");
+            let mut payload: Value = serde_json::from_str(
+                initial["native_replay"]["payload_json"].as_str().unwrap()
+            ).unwrap();
+            payload["module_sources"] = sources;
+            initial["native_replay"] = captured(&payload)["native_replay"].clone();
+            initial
+        };
+        let valid = signed_bundle(with_sources(module_capsule::tests::producer_sources()));
+        verify_incident_bundle(&valid, &signing_key().verifying_key()).unwrap();
+        for (case, sources) in module_capsule::tests::negative_sources() {
+            // Recompute payload, timeline and bundle hashes, and sign with the
+            // trusted test key. Only independent capsule checks can reject an
+            // internally inconsistent source record supplied by this producer.
+            let bytes = signed_bundle(with_sources(sources));
+            let error = verify_incident_bundle(&bytes, &signing_key().verifying_key()).unwrap_err();
+            assert!(matches!(error, IncidentBundleError::Structure { ref path, .. }
+                if path == "$.initial_state_snapshot.native_replay.payload.module_sources"), "{case}: {error:?}");
+            assert!(!format!("{error:?}").contains("PRIVATE-SOURCE-SENTINEL"), "{case}");
         }
     }
 

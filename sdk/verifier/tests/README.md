@@ -54,6 +54,35 @@ cargo test -p frankenengine-verifier-sdk bundle_roundtrip
 cargo test -p frankenengine-verifier-sdk signed_bundle
 ```
 
+### Embedded Native Module Sources
+
+`verify_incident_bundle` independently checks any embedded FNSGCAP1 source
+capsule after authenticating the enclosing bundle against the caller's Ed25519
+anchor. It verifies canonical base64 and header encoding, the domain-separated
+capsule digest, the captured graph identity, bounded project-relative
+observations, recorded parent directories, each file/link digest, and exact
+payload consumption. No captured pathname is opened and no file is extracted.
+
+The producer vectors in `fixtures/module_source_capsules.json` contain nested
+CommonJS/ESM package selection, additive conditions and contained workspace
+symlinks. They were emitted by the real production graph builder through
+`tools/module-graph`, then reconstructed with the original projects moved. Each
+vector records its original test fixture, input files, command and source
+hashes. Tests also recompute capsule, native payload, timeline and bundle hashes
+and sign corrupted candidates with the trusted test key, so a valid outer
+signature cannot hide missing inner integrity checks.
+
+```bash
+cargo test -p frankenengine-verifier-sdk module_capsule
+cargo test -p frankenengine-verifier-sdk valid_outer_signatures_cannot_authorize_corrupted_embedded_source_capsules
+```
+
+These tests establish source-byte integrity, not native execution equivalence.
+The SDK binds the declared graph hash but does not recompute resolution, prove
+that all loads were captured, check engine IR, or verify replay consumption.
+Those properties still require production graph reconstruction and native
+`incident replay --execute` under the intended policy.
+
 ## Conformance Testing
 
 ### What is Tested
