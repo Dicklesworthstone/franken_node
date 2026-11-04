@@ -29860,9 +29860,20 @@ fn handle_verify_source_graph(args: &VerifySourceGraphArgs) -> Result<i32> {
         )?;
         let report = captured.report();
         let capsule = if let Some(path) = &args.write_source_capsule {
+            // Native builtins and sealed optional-dependency failures do not
+            // become source files merely because a capsule can replay them.
+            // Share the native resolver's closure check and preserve the
+            // report's fully_resolved flag instead of inventing resolution.
+            #[cfg(feature = "engine")]
+            frankenengine_node::supply_chain::module_resolution_graph::file_resolution::source_graph::engine_resolver::CapturedEngineResolver::validate_source_closure(
+                &captured,
+                &report.input_hash,
+            )
+            .context("cannot export a source capsule without a closed native request surface")?;
+            #[cfg(not(feature = "engine"))]
             anyhow::ensure!(
                 report.fully_resolved,
-                "cannot export a source capsule with unresolved module routes"
+                "native source-closure admission is unavailable; cannot export unresolved module routes"
             );
             let capsule = frankenengine_node::supply_chain::module_resolution_graph::file_resolution::source_graph::capsule::encode(&captured)?;
             supply_chain::registry_artifact::write_new_source_capsule(path, capsule.bytes())
@@ -29878,6 +29889,7 @@ fn handle_verify_source_graph(args: &VerifySourceGraphArgs) -> Result<i32> {
             if let Some((path, capsule)) = &capsule {
                 output["capsule_path"] = serde_json::json!(path);
                 output["capsule_digest"] = serde_json::json!(capsule.digest());
+                output["capsule_closure_verified"] = serde_json::json!(true);
             }
             println!("{}", serde_json::to_string_pretty(&output)?);
         } else {
@@ -29885,6 +29897,8 @@ fn handle_verify_source_graph(args: &VerifySourceGraphArgs) -> Result<i32> {
                 "Source graph: {} (bounded static requests; no guest execution)",
                 if report.fully_resolved {
                     "CAPTURED"
+                } else if capsule.is_some() {
+                    "CAPTURED WITH NATIVE TERMINAL ROUTES"
                 } else {
                     "INCOMPLETE"
                 }
@@ -29901,7 +29915,9 @@ fn handle_verify_source_graph(args: &VerifySourceGraphArgs) -> Result<i32> {
                 println!("Source capsule: {} ({})", path.display(), capsule.digest());
             }
         }
-        Ok(i32::from(!report.fully_resolved))
+        // Successful explicit export certifies the closed request surface,
+        // while a plain source-only inspection retains its existing status.
+        Ok(i32::from(!report.fully_resolved && capsule.is_none()))
     }
 }
 

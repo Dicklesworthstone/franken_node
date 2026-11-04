@@ -281,6 +281,13 @@ pub struct PinnedModuleRegistry {
     url_resolution_routes: BTreeMap<String, BTreeMap<String, RegisteredTarget>>,
 }
 
+/// The shared closure check admits only captured routes and engine-recognized
+/// terminal outcomes. It does not parse, transform or authorize execution.
+pub(super) struct ValidatedSourceClosure {
+    builtin_targets: BTreeMap<(ModuleId, RequestStyle, String), (String, &'static str)>,
+    missing_builtin_resolutions: BTreeMap<(ModuleId, String), ResolutionError>,
+}
+
 impl PinnedModuleRegistry {
     pub fn new(graph: CapturedModuleGraph, independent_graph_pin: &str) -> Result<Self> {
         Self::new_with_kind_resolver(graph, independent_graph_pin, |module, _, _| {
@@ -298,22 +305,15 @@ impl PinnedModuleRegistry {
         }, |_, _| Ok(None))
     }
 
-    /// Engine-owned preparation may assign a runtime kind to captured source.
-    /// The ordinary constructor remains transform-free. Crucially, pins and
-    /// graph completeness are checked BEFORE the callback sees source bytes.
-    /// The callback cannot rewrite identities, routes, source bytes or pins.
-    /// A separate engine callback may admit an exact captured builtin load as
-    /// a source-free terminal. Static imports, reexports, dynamic imports and
-    /// CommonJS requires retain their captured importer and request style.
-    /// This never changes the report or admits unknown/computed runtime loads.
-    pub(super) fn new_with_kind_resolver<F, B>(
-        graph: CapturedModuleGraph,
+    /// Validate the pin and complete source closure before source preparation.
+    /// Export and publisher admission use this same check, without imposing a
+    /// second parser budget on the later, profile-governed native execution.
+    pub(super) fn validate_source_closure<B>(
+        graph: &CapturedModuleGraph,
         independent_graph_pin: &str,
-        mut kind_of: F,
         native_builtin: B,
-    ) -> Result<Self>
+    ) -> Result<ValidatedSourceClosure>
     where
-        F: FnMut(&super::SourceModule, &str, &super::SourceGraphReport) -> Result<ModuleKind>,
         B: Fn(&str, RequestStyle) -> Result<Option<&'static str>>,
     {
         let digest = independent_graph_pin.strip_prefix("sha256:").unwrap_or("");
@@ -453,6 +453,35 @@ impl PinnedModuleRegistry {
         if !report.fully_resolved && builtin_targets.is_empty() && !has_missing_routes {
             return Err(incomplete());
         }
+        Ok(ValidatedSourceClosure {
+            builtin_targets,
+            missing_builtin_resolutions,
+        })
+    }
+
+    /// Engine-owned preparation may assign a runtime kind to captured source.
+    /// The ordinary constructor remains transform-free. Crucially, pins and
+    /// graph completeness are checked BEFORE the callback sees source bytes.
+    /// The callback cannot rewrite identities, routes, source bytes or pins.
+    /// A separate engine callback may admit an exact captured builtin load as
+    /// a source-free terminal. Static imports, reexports, dynamic imports and
+    /// CommonJS requires retain their captured importer and request style.
+    /// This never changes the report or admits unknown/computed runtime loads.
+    pub(super) fn new_with_kind_resolver<F, B>(
+        graph: CapturedModuleGraph,
+        independent_graph_pin: &str,
+        mut kind_of: F,
+        native_builtin: B,
+    ) -> Result<Self>
+    where
+        F: FnMut(&super::SourceModule, &str, &super::SourceGraphReport) -> Result<ModuleKind>,
+        B: Fn(&str, RequestStyle) -> Result<Option<&'static str>>,
+    {
+        let ValidatedSourceClosure {
+            builtin_targets,
+            missing_builtin_resolutions,
+        } = Self::validate_source_closure(&graph, independent_graph_pin, native_builtin)?;
+        let report = graph.report();
         let identities: BTreeMap<_, _> = report
             .modules
             .iter()
@@ -1045,6 +1074,53 @@ mod tests {
             .lookup(None, registry.entrypoint(), registry.entry_style())
             .ok()
             .unwrap()
+    }
+
+    #[test]
+    fn source_closure_admission_preserves_native_and_sealed_missing_routes() {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "app.cjs", "require('node:path'); try { require('optional-addon'); } catch (error) {} require('./side.cjs');");
+        put(root.path(), "side.cjs", "module.exports = 42;");
+        let captured = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
+        let capsule = capsule::encode(&captured).unwrap();
+        let graph = capsule::replay(capsule.bytes(), capsule.digest()).unwrap();
+        let pin = graph.report().input_hash.clone();
+        let provider = |specifier: &str, _: RequestStyle| {
+            Ok((specifier == "node:path").then_some("node:path"))
+        };
+        let closure = PinnedModuleRegistry::validate_source_closure(&graph, &pin, provider).unwrap();
+        assert!(!graph.report().fully_resolved);
+        assert_eq!(closure.builtin_targets.len(), 1);
+        let registry = PinnedModuleRegistry::new_with_kind_resolver(
+            graph, &pin, |_, _, _| Ok(ModuleKind::CommonJs), provider,
+        ).ok().unwrap();
+        assert_eq!(registry.lookup(Some(registry.entrypoint()), "node:path", RequestStyle::Require)
+            .unwrap().kind(), ModuleKind::NativeBuiltin);
+        assert_eq!(registry.lookup(Some(registry.entrypoint()), "optional-addon", RequestStyle::Require)
+            .err().unwrap().code, "MODULE_NOT_FOUND");
+        assert_eq!(registry.lookup(Some(registry.entrypoint()), "optional-addon", RequestStyle::Import)
+            .err().unwrap().code, "ERR_MODULE_REGISTRY_ROUTE");
+    }
+
+    #[test]
+    fn source_closure_admission_refuses_unknown_routes_before_source_preparation() {
+        let root = tempfile::tempdir().unwrap();
+        for source in [
+            "import 'node:unimplemented';",
+            "import 'node:path'; import './missing.mjs';",
+            "import 'node:path'; import(request);",
+            "import 'node:path'; const broken = ;",
+        ] {
+            put(root.path(), "app.mjs", source);
+            let graph = capture(root.path(), "app.mjs", GraphOptions::default()).unwrap();
+            let pin = graph.report().input_hash.clone();
+            assert_eq!(PinnedModuleRegistry::validate_source_closure(&graph, &pin,
+                |specifier, _| Ok((specifier == "node:path").then_some("node:path")))
+                .err().unwrap().code, "ERR_MODULE_REGISTRY_INCOMPLETE", "{source}");
+            assert_eq!(PinnedModuleRegistry::validate_source_closure(&graph,
+                &format!("sha256:{}", "0".repeat(64)), |_, _| panic!("pin must precede provider selection"))
+                .err().unwrap().code, "ERR_MODULE_REGISTRY_PIN_MISMATCH");
+        }
     }
 
     #[test]

@@ -4088,6 +4088,16 @@ one pass.
   `--frozen-module-graph-hash` must agree with it. Manifest, artifact and key
   reads are bounded and reject symlinks in every path component.
 
+  Native-enabled builds also export and admit capsules containing supported Node
+  builtins and captured failures for optional `require()` or `import()` requests.
+  These source-free terminal routes use the same admission rules as the native
+  loader. The source report retains `fully_resolved: false`; successful explicit
+  export adds `capsule_closure_verified: true`. Missing static imports, unknown
+  builtin providers and unbounded computed loads remain refused. A dependency
+  that appears after capture changes the graph pin and requires new approval.
+  Capsule admission grants no capabilities and does not replace the worker's
+  source preparation or current policy checks.
+
   The frozen graph report and run receipt retain the authenticated publisher key
   ID, package name/version and artifact hash. The `native_module_graph` receipt
   field participates in both the receipt hash and its deterministic identity;

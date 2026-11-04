@@ -353,6 +353,8 @@ impl PublisherSourceGraphApproval {
         }
         #[cfg(unix)]
         {
+            #[cfg(feature = "engine")]
+            use super::module_resolution_graph::file_resolution::source_graph::engine_resolver::CapturedEngineResolver;
             use super::module_resolution_graph::file_resolution::{
                 SymlinkPolicy, source_graph::capsule,
             };
@@ -376,9 +378,21 @@ impl PublisherSourceGraphApproval {
             let graph = capsule::replay(&bytes, &capsule_digest)
                 .context("registry artifact is not a valid module source capsule")?;
             let report = graph.report();
+            // A closed native graph can contain source-free builtin providers
+            // and sealed, catchable failures for optional dependencies. Those
+            // observations deliberately leave `fully_resolved` false. Use the
+            // same closure admission as execution instead of rejecting useful
+            // signed packages or maintaining a second provider allowlist here.
+            // This performs no source normalization and grants no capabilities;
+            // the worker still prepares this graph with its current parser and
+            // policy limits before evaluation.
+            #[cfg(feature = "engine")]
+            CapturedEngineResolver::validate_source_closure(&graph, &report.input_hash)
+                .context("registry source capsule is not admitted by the native module resolver")?;
+            #[cfg(not(feature = "engine"))]
             anyhow::ensure!(
                 report.fully_resolved,
-                "registry source capsule contains unresolved module routes"
+                "registry source capsule requires native engine closure admission"
             );
             anyhow::ensure!(
                 report.options.conditions.is_none(),
@@ -526,10 +540,14 @@ mod tests {
 
     impl Fixture {
         fn new(source: &str) -> Self {
+            Self::with_entrypoint("app.cjs", source)
+        }
+
+        fn with_entrypoint(entrypoint: &str, source: &str) -> Self {
             let directory = tempfile::tempdir().unwrap();
-            std::fs::write(directory.path().join("app.cjs"), source).unwrap();
+            std::fs::write(directory.path().join(entrypoint), source).unwrap();
             std::fs::write(directory.path().join("side.cjs"), "module.exports = 42;\n").unwrap();
-            let graph = capture(directory.path(), "app.cjs", GraphOptions::default()).unwrap();
+            let graph = capture(directory.path(), entrypoint, GraphOptions::default()).unwrap();
             let graph_hash = graph.report().input_hash.clone();
             let bytes = capsule::encode(&graph).unwrap().bytes().to_vec();
             let key = ed25519_dalek::SigningKey::from_bytes(&[42; 32]);
@@ -636,6 +654,107 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "engine")]
+    fn publisher_approval_admits_native_builtins_and_sealed_optional_dependencies() {
+        use super::super::module_resolution_graph::file_resolution::source_graph::EdgeState;
+
+        for (entrypoint, source) in [
+            (
+                "app.cjs",
+                "const path = require('node:path');\n\
+                 const value = require('./side.cjs');\n\
+                 try { require('./optional.cjs'); } catch (error) {}\n\
+                 console.log(path.join('signed', String(value)));\n",
+            ),
+            (
+                "app.mjs",
+                "import {join} from 'node:path';\n\
+                 import('./optional.mjs').catch(error => {});\n\
+                 export default join('signed', 'module');\n",
+            ),
+        ] {
+            let fixture = Fixture::with_entrypoint(entrypoint, source);
+            let graph = capsule::replay(&fixture.bytes, &capsule::digest(&fixture.bytes)).unwrap();
+            assert!(!graph.report().fully_resolved, "{source}");
+            assert!(graph.report().diagnostics.is_empty(), "{source}");
+            assert!(
+                graph
+                    .report()
+                    .edges
+                    .iter()
+                    .any(|edge| edge.state == EdgeState::RuntimeRequired)
+            );
+            assert!(
+                graph
+                    .report()
+                    .edges
+                    .iter()
+                    .any(|edge| edge.state == EdgeState::Unresolved)
+            );
+            let approval = fixture.approval();
+            assert_eq!(approval.graph_input_hash(), fixture.graph_hash);
+            assert_eq!(approval.identity().publisher_id, "publisher");
+            approval
+                .validate_run(entrypoint, true, false, &[], Some(&fixture.graph_hash))
+                .unwrap();
+
+            // Reauthentication uses only the signed capsule. Native execution
+            // separately recaptures the live project and enforces its graph pin.
+            // Moving sources preserves them while proving that this approval
+            // does not silently consult live dependency bytes or missing paths.
+            std::fs::rename(
+                fixture.directory.path().join(entrypoint),
+                fixture.directory.path().join("retained-entrypoint"),
+            )
+            .unwrap();
+            std::fs::rename(
+                fixture.directory.path().join("side.cjs"),
+                fixture.directory.path().join("retained-dependency"),
+            )
+            .unwrap();
+            std::fs::write(
+                fixture.directory.path().join("optional.cjs"),
+                "throw new Error('not part of the signed capture');",
+            )
+            .unwrap();
+            std::fs::write(
+                fixture.directory.path().join("optional.mjs"),
+                "throw new Error('not part of the signed capture');",
+            )
+            .unwrap();
+            approval.revalidate().unwrap();
+        }
+    }
+
+    #[test]
+    #[cfg(not(feature = "engine"))]
+    fn publisher_approval_does_not_guess_native_closure_without_the_engine() {
+        for source in [
+            "require('node:path');",
+            "try { require('./optional.cjs'); } catch (error) {}",
+            "import('./optional.mjs').catch(error => {});",
+        ] {
+            let fixture = Fixture::new(source);
+            verify_artifact_bytes(
+                &fixture.manifest,
+                &fixture.bytes,
+                Some(&fixture.key.verifying_key()),
+            )
+            .unwrap();
+            let error = PublisherSourceGraphApproval::load(
+                &fixture.manifest_path,
+                &fixture.key.verifying_key(),
+            )
+            .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("requires native engine closure admission")
+            );
+        }
+    }
+
+    #[test]
     fn publisher_approval_requires_external_key_and_rejects_signature_substitution() {
         let fixture = Fixture::new("console.log(require('./side.cjs'));\n");
         let attacker = ed25519_dalek::SigningKey::from_bytes(&[13; 32]);
@@ -728,22 +847,39 @@ mod tests {
 
     #[test]
     fn signed_incomplete_capsule_is_not_an_executable_graph_approval() {
-        let fixture = Fixture::new("require(globalThis.unboundedRequest);\n");
-        verify_artifact_bytes(
-            &fixture.manifest,
-            &fixture.bytes,
-            Some(&fixture.key.verifying_key()),
-        )
-        .unwrap();
-        assert!(
-            PublisherSourceGraphApproval::load(
-                &fixture.manifest_path,
-                &fixture.key.verifying_key()
+        for (entrypoint, source) in [
+            ("app.cjs", "require(globalThis.unboundedRequest);\n"),
+            ("app.cjs", "const load = require; unknown(load);\n"),
+            ("app.cjs", "require('node:unsupported_registry_fixture');\n"),
+            ("app.mjs", "import './missing.mjs';\n"),
+            ("app.mjs", "export * from './missing.mjs';\n"),
+            ("app.cjs", "const broken = ;\n"),
+        ] {
+            let fixture = Fixture::with_entrypoint(entrypoint, source);
+            verify_artifact_bytes(
+                &fixture.manifest,
+                &fixture.bytes,
+                Some(&fixture.key.verifying_key()),
             )
-            .unwrap_err()
-            .to_string()
-            .contains("unresolved module routes")
-        );
+            .unwrap();
+            let error = PublisherSourceGraphApproval::load(
+                &fixture.manifest_path,
+                &fixture.key.verifying_key(),
+            )
+            .unwrap_err();
+            #[cfg(feature = "engine")]
+            assert!(
+                format!("{error:#}").contains("ERR_MODULE_REGISTRY_INCOMPLETE"),
+                "{source}: {error:#}",
+            );
+            #[cfg(not(feature = "engine"))]
+            assert!(
+                error
+                    .to_string()
+                    .contains("requires native engine closure admission"),
+                "{source}: {error:#}",
+            );
+        }
     }
 
     #[test]

@@ -65,6 +65,23 @@ pub struct CapturedEngineResolver {
 }
 
 impl CapturedEngineResolver {
+    /// Check that the captured graph has a closed native request surface.
+    /// Supported builtins and sealed optional-dependency failures are terminal
+    /// routes, not missing source. This uses exactly the constructor's closure
+    /// rules and builtin inventory, without parsing under an unrelated budget.
+    /// Source preparation, per-request policy and execution remain separate.
+    pub fn validate_source_closure(
+        graph: &CapturedModuleGraph,
+        independent_graph_pin: &str,
+    ) -> Result<(), CaptureError> {
+        PinnedModuleRegistry::validate_source_closure(
+            graph,
+            independent_graph_pin,
+            native_builtin_provider,
+        )
+        .map(|_| ())
+    }
+
     pub fn new(
         graph: CapturedModuleGraph,
         independent_graph_pin: &str,
@@ -84,22 +101,7 @@ impl CapturedEngineResolver {
             graph,
             independent_graph_pin,
             |module, source, report| preparer.prepare(module, source, report),
-            |specifier, style| {
-                if style == RequestStyle::RequireResolve {
-                    if let Some(name) = node_builtin_specifier(specifier) {
-                        return Ok(Some(name));
-                    }
-                    if specifier.starts_with("node:") {
-                        return Err(super::error(
-                            "MODULE_NOT_FOUND",
-                            "reserved Node name is absent from the engine builtin inventory",
-                        ));
-                    }
-                    return Ok(None);
-                }
-                Ok(NativeBuiltinModule::from_specifier(specifier)
-                    .map(NativeBuiltinModule::canonical_specifier))
-            },
+            native_builtin_provider,
         )?;
         let mut resolver = Self::from_registry(registry);
         resolver.prepared_sources = preparer.finish();
@@ -601,6 +603,26 @@ impl ModuleResolver for CapturedEngineResolver {
         // not an ESM instantiation/evaluation order or a linkage certificate.
         Ok(outcomes)
     }
+}
+
+fn native_builtin_provider(
+    specifier: &str,
+    style: RequestStyle,
+) -> Result<Option<&'static str>, CaptureError> {
+    if style == RequestStyle::RequireResolve {
+        if let Some(name) = node_builtin_specifier(specifier) {
+            return Ok(Some(name));
+        }
+        if specifier.starts_with("node:") {
+            return Err(super::error(
+                "MODULE_NOT_FOUND",
+                "reserved Node name is absent from the engine builtin inventory",
+            ));
+        }
+        return Ok(None);
+    }
+    Ok(NativeBuiltinModule::from_specifier(specifier)
+        .map(NativeBuiltinModule::canonical_specifier))
 }
 
 fn engine_attributes(attributes: &super::ImportAttributes) -> EngineImportAttributes {

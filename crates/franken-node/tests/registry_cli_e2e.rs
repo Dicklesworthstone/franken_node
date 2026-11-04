@@ -192,12 +192,6 @@ struct PublishedSourceFixture {
 #[cfg(all(feature = "engine", unix))]
 impl PublishedSourceFixture {
     fn new(esm: bool) -> Self {
-        let registry = registry_workspace();
-        let project = tempfile::tempdir().unwrap();
-        // Runtime evidence belongs outside the guest authority. Retain a
-        // separate private state home instead of touching operator state.
-        let state_home = tempfile::tempdir().unwrap();
-        let entrypoint = if esm { "app.mjs" } else { "app.cjs" }.to_owned();
         let (source, dependency) = if esm {
             (
                 "import value from './side.mjs'; console.log('PUBLISHER_APPROVED_WORKLOAD', value);\n",
@@ -209,14 +203,27 @@ impl PublishedSourceFixture {
                 "module.exports = 42;\n",
             )
         };
-        fs::write(project.path().join(&entrypoint), source).unwrap();
-        fs::write(
-            project
-                .path()
-                .join(if esm { "side.mjs" } else { "side.cjs" }),
-            dependency,
+        Self::with_modules(
+            if esm { "app.mjs" } else { "app.cjs" },
+            &[
+                (if esm { "app.mjs" } else { "app.cjs" }, source),
+                (if esm { "side.mjs" } else { "side.cjs" }, dependency),
+            ],
         )
-        .unwrap();
+    }
+
+    fn with_modules(entrypoint: &str, modules: &[(&str, &str)]) -> Self {
+        let registry = registry_workspace();
+        let project = tempfile::tempdir().unwrap();
+        // Runtime evidence belongs outside the guest authority. Retain a
+        // separate private state home instead of touching operator state.
+        let state_home = tempfile::tempdir().unwrap();
+        let entrypoint = entrypoint.to_owned();
+        for (path, source) in modules {
+            let path = project.path().join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, source).unwrap();
+        }
         fs::write(
             project.path().join("package.json"),
             "{\"name\":\"publisher-capsule-test\",\"version\":\"1.0.0\"}\n",
@@ -255,6 +262,7 @@ impl PublishedSourceFixture {
         let graph_hash = report["input_hash"].as_str().unwrap().to_owned();
         assert_eq!(report["execution_performed"], false);
         assert_eq!(report["capsule_path"], "application.capsule");
+        assert_eq!(report["capsule_closure_verified"], true);
         let signing_key_path = registry.path().join("publisher.ed25519");
         write_signing_key(&signing_key_path);
         let key = ed25519_dalek::SigningKey::from_bytes(&[42; 32]);
@@ -347,8 +355,18 @@ impl PublishedSourceFixture {
 fn registry_source_capsule_admits_native_cjs_and_esm() {
     use frankenengine_node::ops::engine_dispatcher::RunDispatchReport;
     use frankenengine_node::tools::replay_bundle::parse_verified_run_ledger_record;
-    for esm in [false, true] {
-        let fixture = PublishedSourceFixture::new(esm);
+    for (esm, native_terminals) in [(false, false), (true, false), (false, true), (true, true)] {
+        let (fixture, expected_output) = match (esm, native_terminals) {
+            (false, true) => (PublishedSourceFixture::with_modules("app.cjs", &[
+                ("app.cjs", "const path = require('node:path'); const value = require('./side.cjs'); console.log('PUBLISHER_APPROVED_WORKLOAD', path.join('value', String(value))); try { require('./optional.cjs'); } catch (error) { console.log('OPTIONAL', error.code); }\n"),
+                ("side.cjs", "module.exports = 42;\n"),
+            ]), "PUBLISHER_APPROVED_WORKLOAD value/42\nOPTIONAL MODULE_NOT_FOUND\n"),
+            (true, true) => (PublishedSourceFixture::with_modules("app.mjs", &[
+                ("app.mjs", "import {join} from 'node:path'; import value from './side.mjs'; console.log('PUBLISHER_APPROVED_WORKLOAD', join('value', String(value))); import('./optional.mjs').catch(error => console.log('OPTIONAL', error.code));\n"),
+                ("side.mjs", "export default 42;\n"),
+            ]), "PUBLISHER_APPROVED_WORKLOAD value/42\nOPTIONAL ERR_MODULE_NOT_FOUND\n"),
+            _ => (PublishedSourceFixture::new(esm), "PUBLISHER_APPROVED_WORKLOAD 42\n"),
+        };
         let output = fixture.run(&["--frozen-module-graph-hash", &fixture.graph_hash]);
         assert!(
             output.status.success(),
@@ -359,10 +377,7 @@ fn registry_source_capsule_admits_native_cjs_and_esm() {
         let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
         let dispatch: RunDispatchReport =
             serde_json::from_value(report["dispatch"].clone()).unwrap();
-        assert_eq!(
-            dispatch.captured_output.stdout,
-            "PUBLISHER_APPROVED_WORKLOAD 42\n"
-        );
+        assert_eq!(dispatch.captured_output.stdout, expected_output);
         let graph = dispatch.engine_decision.unwrap().frozen_modules.unwrap();
         let graph_value = serde_json::to_value(&graph).unwrap();
         assert_eq!(graph.graph_input_hash, fixture.graph_hash);
@@ -443,6 +458,16 @@ fn registry_source_capsule_admits_native_cjs_and_esm() {
                 .is_err(),
                 "even a matching edited receipt cannot authorize a changed source/publisher in the signed record"
             );
+        }
+        if native_terminals {
+            // The negative filesystem observation is part of the publisher's
+            // commitment too. A newly installed optional module cannot borrow
+            // the old signature, even when the entry source stays unchanged.
+            fs::write(
+                fixture.project.path().join(if esm { "optional.mjs" } else { "optional.cjs" }),
+                "console.log('UNAPPROVED_OPTIONAL_MODULE');\n",
+            ).unwrap();
+            fixture.assert_denied(&[], "ERR_MODULE_REGISTRY_PIN_MISMATCH");
         }
     }
 }
