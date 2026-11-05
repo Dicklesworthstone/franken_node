@@ -75,6 +75,87 @@ fn write_signing_key(path: &Path) {
     fs::write(path, hex::encode([42_u8; 32])).expect("write signing key");
 }
 
+fn publisher_runtime_authority() -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": "franken-node/artifact-runtime-authority/v1",
+        "policy_revision": "publisher-policy-7",
+        "allowed_capabilities": [
+            "builtin", "console", "fs_read", "heap_allocate", "module_load", "timer", "vm_dispatch"
+        ],
+        "allow_process_shape": false,
+        "max_instructions": 2_000_000,
+        "max_registers": 1_024,
+        "max_call_depth": 32,
+        "max_heap_objects": 4_096,
+        "max_total_memory_bytes": 33_554_432,
+        "max_console_entries": 16,
+        "max_parse_source_bytes": 65_536,
+        "max_parse_tokens": 16_384,
+        "max_parse_recursion_depth": 128
+    })
+}
+
+#[test]
+fn registry_publish_runtime_authority_rejects_invalid_policy_before_persistence() {
+    let workspace = registry_workspace();
+    let signing_key = workspace.path().join("publisher.ed25519");
+    write_signing_key(&signing_key);
+    let policy_path = workspace.path().join("runtime-authority.json");
+    let mut unknown_field = publisher_runtime_authority();
+    unknown_field["unrecognized_permission"] = serde_json::json!(true);
+    let mut missing_field = publisher_runtime_authority();
+    missing_field
+        .as_object_mut()
+        .unwrap()
+        .remove("max_instructions");
+    let mut zero_budget = publisher_runtime_authority();
+    zero_budget["max_instructions"] = serde_json::json!(0);
+    let mut missing_ambient = publisher_runtime_authority();
+    missing_ambient["allowed_capabilities"] = serde_json::json!(["module_load"]);
+    let cases = [
+        serde_json::to_vec(&unknown_field).unwrap(),
+        serde_json::to_vec(&missing_field).unwrap(),
+        serde_json::to_vec(&zero_budget).unwrap(),
+        serde_json::to_vec(&missing_ambient).unwrap(),
+        vec![b' '; (64 << 10) + 1],
+    ];
+    for (case, bytes) in cases.iter().enumerate() {
+        fs::write(&policy_path, bytes).unwrap();
+        let output = run_cli_in_workspace(
+            workspace.path(),
+            &[
+                "registry",
+                "publish",
+                "plugin.fnext",
+                "--version",
+                "1.2.3",
+                "--signing-key",
+                signing_key.to_str().unwrap(),
+                "--runtime-authority",
+                policy_path.to_str().unwrap(),
+                "--json",
+            ],
+        );
+        assert!(
+            !output.status.success(),
+            "invalid authority case {case} was published"
+        );
+        let report: serde_json::Value =
+            serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+                panic!(
+                    "case {case}: {error}; stdout={} stderr={}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                )
+            });
+        assert_eq!(
+            report["schema_version"],
+            "franken-node/registry-publish-error/v1"
+        );
+        assert!(collect_manifest_paths(&registry_artifacts_root(workspace.path())).is_empty());
+    }
+}
+
 fn registry_state_root(workspace: &Path) -> PathBuf {
     workspace.join(".franken-node/state/registry")
 }
@@ -170,6 +251,7 @@ fn run_source_fixture_cli(workspace: &Path, state_home: &Path, args: &[&str]) ->
         .current_dir(workspace)
         .env("XDG_STATE_HOME", state_home)
         .env("XDG_CONFIG_HOME", state_home.join("config"))
+        .env("PUBLISHER_TEST_VALUE", "VISIBLE_FROM_OPERATOR")
         .env_remove("FRANKEN_NODE_PROFILE")
         .env_remove("FRANKEN_NODE_SECURITY_DECISION_RECEIPT_SIGNING_KEY_PATH")
         .args(args)
@@ -213,6 +295,14 @@ impl PublishedSourceFixture {
     }
 
     fn with_modules(entrypoint: &str, modules: &[(&str, &str)]) -> Self {
+        Self::with_modules_and_authority(entrypoint, modules, None)
+    }
+
+    fn with_modules_and_authority(
+        entrypoint: &str,
+        modules: &[(&str, &str)],
+        authority: Option<&serde_json::Value>,
+    ) -> Self {
         let registry = registry_workspace();
         let project = tempfile::tempdir().unwrap();
         // Runtime evidence belongs outside the guest authority. Retain a
@@ -268,19 +358,22 @@ impl PublishedSourceFixture {
         let key = ed25519_dalek::SigningKey::from_bytes(&[42; 32]);
         let public_key = registry.path().join("publisher.pub");
         fs::write(&public_key, hex::encode(key.verifying_key().as_bytes())).unwrap();
-        let publish = run_cli_in_workspace(
-            registry.path(),
-            &[
-                "registry",
-                "publish",
-                "application.capsule",
-                "--version",
-                "1.2.3",
-                "--signing-key",
-                signing_key_path.to_str().unwrap(),
-                "--json",
-            ],
-        );
+        let authority_path = registry.path().join("runtime-authority.json");
+        let mut publish_args = vec![
+            "registry",
+            "publish",
+            "application.capsule",
+            "--version",
+            "1.2.3",
+            "--signing-key",
+            signing_key_path.to_str().unwrap(),
+            "--json",
+        ];
+        if let Some(authority) = authority {
+            fs::write(&authority_path, serde_json::to_vec(authority).unwrap()).unwrap();
+            publish_args.extend(["--runtime-authority", authority_path.to_str().unwrap()]);
+        }
+        let publish = run_cli_in_workspace(registry.path(), &publish_args);
         assert!(
             publish.status.success(),
             "publish: {}\n{}",
@@ -289,6 +382,11 @@ impl PublishedSourceFixture {
         );
         let report: serde_json::Value = serde_json::from_slice(&publish.stdout).unwrap();
         assert_eq!(report["integrity"], "verified");
+        if let Some(authority) = authority {
+            assert_eq!(&report["runtime_authority"], authority);
+        } else {
+            assert!(report.get("runtime_authority").is_none());
+        }
         let manifest = registry
             .path()
             .join(report["manifest_path"].as_str().unwrap());
@@ -469,6 +567,354 @@ fn registry_source_capsule_admits_native_cjs_and_esm() {
             ).unwrap();
             fixture.assert_denied(&[], "ERR_MODULE_REGISTRY_PIN_MISMATCH");
         }
+    }
+}
+
+#[test]
+#[cfg(all(feature = "engine", unix))]
+fn registry_runtime_authority_executes_signed_modules_under_narrowed_limits() {
+    use frankenengine_node::ops::engine_dispatcher::RunDispatchReport;
+    use frankenengine_node::tools::replay_bundle::parse_verified_run_ledger_record;
+    let authority = publisher_runtime_authority();
+    for esm in [false, true] {
+        let modules = if esm {
+            [
+                (
+                    "app.mjs",
+                    "import value from './side.mjs'; console.log('PUBLISHER_APPROVED_WORKLOAD', value);\n",
+                ),
+                ("side.mjs", "export default 42;\n"),
+            ]
+        } else {
+            [
+                (
+                    "app.cjs",
+                    "console.log('PUBLISHER_APPROVED_WORKLOAD', require('./side.cjs'));\n",
+                ),
+                ("side.cjs", "module.exports = 42;\n"),
+            ]
+        };
+        let fixture = PublishedSourceFixture::with_modules_and_authority(
+            modules[0].0,
+            &modules,
+            Some(&authority),
+        );
+        let output = fixture.run(&[]);
+        assert!(
+            output.status.success(),
+            "stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let dispatch: RunDispatchReport =
+            serde_json::from_value(report["dispatch"].clone()).unwrap();
+        assert_eq!(
+            dispatch.captured_output.stdout,
+            "PUBLISHER_APPROVED_WORKLOAD 42\n"
+        );
+        let settings = dispatch.invocation_settings.unwrap();
+        assert!(!settings.process_shape_read_allowed);
+        assert_eq!(settings.parser_budget.max_source_bytes, 65_536);
+        assert_eq!(settings.parser_budget.max_token_count, 16_384);
+        assert_eq!(settings.parser_budget.max_recursion_depth, 128);
+        for lane in [
+            settings.execution_limits.deterministic,
+            settings.execution_limits.throughput,
+        ] {
+            assert_eq!(lane.max_instructions, 2_000_000);
+            assert!(lane.max_registers.unwrap() <= 1_024);
+            assert!(lane.max_call_depth.unwrap() <= 32);
+            assert!(lane.max_heap_objects <= 4_096);
+            assert!(lane.max_total_memory_bytes <= 33_554_432);
+            assert!(lane.max_console_entries <= 16);
+        }
+        assert_eq!(
+            report["receipt"]["native_module_graph"]["publisher_artifact"]["runtime_authority"],
+            authority
+        );
+
+        let receipt = &report["receipt"];
+        let day = chrono::DateTime::parse_from_rfc3339(receipt["end_time_utc"].as_str().unwrap())
+            .unwrap()
+            .format("%Y-%m-%d")
+            .to_string();
+        let record_path = fixture
+            .project
+            .path()
+            .join(".franken-node/state/run-ledgers")
+            .join(day)
+            .join(format!("{}.json", receipt["receipt_id"].as_str().unwrap()));
+        let public = fs::read_to_string(
+            fixture
+                .project
+                .path()
+                .join(".franken-node/keys/receipt-signing.pub"),
+        )
+        .unwrap();
+        let key: [u8; 32] = hex::decode(public.trim()).unwrap().try_into().unwrap();
+        let key = ed25519_dalek::VerifyingKey::from_bytes(&key).unwrap();
+        let record =
+            parse_verified_run_ledger_record(&fs::read(record_path).unwrap(), receipt, &key)
+                .expect("run authority authenticates actual publisher ceilings");
+        for change in ["max_instructions", "policy_revision"] {
+            let mut forged = record.clone();
+            forged["receipt_snapshot"]["native_module_graph"]["publisher_artifact"]["runtime_authority"]
+                [change] = if change == "max_instructions" {
+                serde_json::json!(u64::MAX)
+            } else {
+                serde_json::json!("substituted-policy")
+            };
+            assert!(
+                parse_verified_run_ledger_record(
+                    &serde_json::to_vec(&forged).unwrap(),
+                    &forged["receipt_snapshot"],
+                    &key
+                )
+                .is_err(),
+                "changed {change} must invalidate the signed run record"
+            );
+        }
+
+        // The same signed ceiling cannot relax a stricter local operator limit.
+        let config_path = fixture.project.path().join("franken_node.toml");
+        let mut config: frankenengine_node::config::Config =
+            toml::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        config.runtime.max_instructions = Some(100_000);
+        config.runtime.max_console_entries = Some(2);
+        fs::write(config_path, config.to_toml().unwrap()).unwrap();
+        let narrower = fixture.run(&[]);
+        assert!(
+            narrower.status.success(),
+            "stdout={} stderr={}",
+            String::from_utf8_lossy(&narrower.stdout),
+            String::from_utf8_lossy(&narrower.stderr)
+        );
+        let report: serde_json::Value = serde_json::from_slice(&narrower.stdout).unwrap();
+        let dispatch: RunDispatchReport =
+            serde_json::from_value(report["dispatch"].clone()).unwrap();
+        let settings = dispatch.invocation_settings.unwrap();
+        for lane in [
+            settings.execution_limits.deterministic,
+            settings.execution_limits.throughput,
+        ] {
+            assert_eq!(lane.max_instructions, 100_000);
+            assert_eq!(lane.max_console_entries, 2);
+        }
+    }
+}
+
+#[test]
+#[cfg(all(feature = "engine", unix))]
+fn registry_runtime_authority_enforces_output_instruction_and_dependency_parser_limits() {
+    for (field, limit, entry, dependency, expected) in [
+        (
+            "max_console_entries",
+            2,
+            "require('./side.cjs'); console.log('PUBLISHER_APPROVED_WORKLOAD');\n".to_owned(),
+            "console.log('one'); console.log('two'); console.log('three');\n".to_owned(),
+            "console output budget exceeded",
+        ),
+        (
+            "max_instructions",
+            100,
+            "require('./side.cjs'); console.log('PUBLISHER_APPROVED_WORKLOAD');\n".to_owned(),
+            "let i = 0; while (i < 10000) { i = i + 1; } module.exports = i;\n".to_owned(),
+            "budget",
+        ),
+        (
+            "max_parse_source_bytes",
+            256,
+            "require('./side.cjs'); console.log('PUBLISHER_APPROVED_WORKLOAD');\n".to_owned(),
+            format!("{}\nmodule.exports = 42;\n", ";".repeat(512)),
+            "configured parser source-byte budget",
+        ),
+    ] {
+        let mut authority = publisher_runtime_authority();
+        authority[field] = serde_json::json!(limit);
+        let fixture = PublishedSourceFixture::with_modules_and_authority(
+            "app.cjs",
+            &[("app.cjs", &entry), ("side.cjs", &dependency)],
+            Some(&authority),
+        );
+        let output = fixture.run(&[]);
+        let diagnostics = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!output.status.success(), "{field}: {diagnostics}");
+        assert!(diagnostics.contains(expected), "{field}: {diagnostics}");
+        // Prefix effects can occur before a runtime ceiling; the success marker cannot.
+        assert!(
+            !diagnostics.contains("PUBLISHER_APPROVED_WORKLOAD"),
+            "{field}: {diagnostics}"
+        );
+    }
+}
+
+#[test]
+#[cfg(all(feature = "engine", unix))]
+fn registry_runtime_authority_denies_filesystem_effect_in_loaded_module() {
+    let mut authority = publisher_runtime_authority();
+    authority["allowed_capabilities"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|value| value != "fs_read");
+    let fixture = PublishedSourceFixture::with_modules_and_authority(
+        "app.cjs",
+        &[
+            (
+                "app.cjs",
+                "require('./side.cjs'); console.log('PUBLISHER_APPROVED_WORKLOAD');\n",
+            ),
+            (
+                "side.cjs",
+                "require('node:fs').readFileSync('data.txt', 'utf8');\n",
+            ),
+        ],
+        Some(&authority),
+    );
+    fs::write(
+        fixture.project.path().join("data.txt"),
+        "PUBLIC_FIXTURE_DATA",
+    )
+    .unwrap();
+    let output = fixture.run(&[]);
+    let diagnostics = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!output.status.success(), "{diagnostics}");
+    assert!(diagnostics.contains("fs_read"), "{diagnostics}");
+    assert!(
+        !diagnostics.contains("PUBLISHER_APPROVED_WORKLOAD"),
+        "{diagnostics}"
+    );
+}
+
+#[test]
+#[cfg(all(feature = "engine", unix))]
+fn registry_runtime_authority_controls_environment_reads_in_loaded_modules() {
+    for permitted in [true, false] {
+        let mut authority = publisher_runtime_authority();
+        if permitted {
+            let capabilities = authority["allowed_capabilities"].as_array_mut().unwrap();
+            capabilities.push(serde_json::json!("env_read"));
+            capabilities.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
+        }
+        let fixture = PublishedSourceFixture::with_modules_and_authority(
+            "app.cjs",
+            &[
+                (
+                    "app.cjs",
+                    "require('./side.cjs'); console.log('PUBLISHER_APPROVED_WORKLOAD');\n",
+                ),
+                (
+                    "side.cjs",
+                    "void process.env.PUBLISHER_TEST_VALUE; console.log('ENV_READ_COMPLETED');\n",
+                ),
+            ],
+            Some(&authority),
+        );
+        // The operator grants this single public fixture name in both runs.
+        // Only the publisher's signed ceiling differs.
+        let config_path = fixture.project.path().join("franken_node.toml");
+        let mut config: frankenengine_node::config::Config =
+            toml::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        config
+            .runtime
+            .environment_allowlist
+            .insert("PUBLISHER_TEST_VALUE".into());
+        fs::write(config_path, config.to_toml().unwrap()).unwrap();
+        let output = fixture.run(&["--capture-replay"]);
+        let diagnostics = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.status.success(), permitted, "{diagnostics}");
+        if permitted {
+            let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(
+                report["dispatch"]["captured_output"]["stdout"],
+                "ENV_READ_COMPLETED\nPUBLISHER_APPROVED_WORKLOAD\n"
+            );
+            let captured: serde_json::Value = serde_json::from_str(
+                report["dispatch"]["native_replay"]["payload_json"]
+                    .as_str()
+                    .unwrap(),
+            )
+            .unwrap();
+            assert!(
+                captured["package"]["capabilities"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|capability| capability == "env_read")
+            );
+            let transcript = serde_json::to_string(&captured["host_effect_transcript"]).unwrap();
+            assert!(transcript.contains("PUBLISHER_TEST_VALUE"), "{transcript}");
+            assert!(transcript.contains("VISIBLE_FROM_OPERATOR"), "{transcript}");
+        } else {
+            assert!(diagnostics.contains("env_read"), "{diagnostics}");
+            assert!(!diagnostics.contains("ENV_READ_COMPLETED"), "{diagnostics}");
+            assert!(
+                !diagnostics.contains("PUBLISHER_APPROVED_WORKLOAD"),
+                "{diagnostics}"
+            );
+        }
+    }
+}
+
+#[test]
+#[cfg(all(feature = "engine", unix))]
+fn registry_runtime_authority_cannot_be_expanded_or_stripped_without_resigning() {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    let authority = publisher_runtime_authority();
+    let fixture = PublishedSourceFixture::with_modules_and_authority(
+        "app.cjs",
+        &[("app.cjs", "console.log('PUBLISHER_APPROVED_WORKLOAD');\n")],
+        Some(&authority),
+    );
+    let original: serde_json::Value =
+        serde_json::from_slice(&fs::read(&fixture.manifest).unwrap()).unwrap();
+    let signed_bytes = STANDARD
+        .decode(original["manifest_bytes_b64"].as_str().unwrap())
+        .unwrap();
+    let signed: serde_json::Value = serde_json::from_slice(&signed_bytes).unwrap();
+    assert_eq!(
+        signed["schema_version"],
+        "franken-node/extension-registration-manifest/v2"
+    );
+    for mutation in ["budget", "capability", "revision", "strip", "downgrade"] {
+        let mut changed = signed.clone();
+        match mutation {
+            "budget" => {
+                changed["runtime_authority"]["max_instructions"] = serde_json::json!(u64::MAX)
+            }
+            "capability" => changed["runtime_authority"]["allowed_capabilities"]
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::json!("fs_write")),
+            "revision" => {
+                changed["runtime_authority"]["policy_revision"] = serde_json::json!("substituted")
+            }
+            "strip" => {
+                changed.as_object_mut().unwrap().remove("runtime_authority");
+            }
+            "downgrade" => {
+                changed["schema_version"] =
+                    serde_json::json!("franken-node/extension-registration-manifest/v1")
+            }
+            _ => unreachable!(),
+        }
+        let mut envelope = original.clone();
+        envelope["manifest_bytes_b64"] =
+            serde_json::json!(STANDARD.encode(serde_json::to_vec(&changed).unwrap()));
+        fs::write(&fixture.manifest, serde_json::to_vec(&envelope).unwrap()).unwrap();
+        fixture.assert_denied(&[], "manifest signature verification failed");
     }
 }
 

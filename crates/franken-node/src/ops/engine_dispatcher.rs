@@ -6,6 +6,8 @@ use crate::ops::telemetry_bridge::{
 };
 use crate::runtime::lockstep_harness::LockstepHarness;
 use crate::storage::frankensqlite_adapter::FrankensqliteAdapter;
+#[cfg(feature = "engine")]
+use crate::supply_chain::registry_artifact::ArtifactRuntimeAuthority;
 use crate::supply_chain::registry_artifact::{
     PublisherArtifactIdentity, PublisherSourceGraphApproval,
 };
@@ -3140,8 +3142,9 @@ pub struct RunTrustRequirements {
     /// name-only library callers retain risk checks without artifact claims.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     dependency_capture: Option<CapturedDependencyTrust>,
-    /// Caller-pinned publisher approval for the exact frozen source graph.
-    /// Does not replace current dependency trust or runtime capability policy.
+    /// Caller-pinned publisher approval for the exact frozen source graph and,
+    /// when present, its signed runtime ceiling. This can only narrow current
+    /// dependency trust, operator capabilities, and execution limits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     registry_artifact_approval: Option<PublisherSourceGraphApproval>,
 }
@@ -3201,7 +3204,8 @@ impl RunTrustRequirements {
     }
 
     /// Both the dispatcher and worker reauthenticate the retained artifact,
-    /// preserving the explicit operator pin and the current resolution policy.
+    /// including any signed execution ceiling, preserving the explicit
+    /// operator pin and the current resolution policy.
     pub fn verify_registry_artifact(&self, paths: &RunProjectPaths, config: &Config) -> Result<()> {
         self.validate()?;
         if let Some(approval) = &self.registry_artifact_approval {
@@ -5621,6 +5625,85 @@ struct FrozenNativeModules {
     resolver: frankenengine_engine::module_resolver::ExecutionModuleResolver,
     summary: NativeModuleGraphSummary,
     replay_sources: Option<crate::ops::native_replay::CapturedModuleSources>,
+}
+
+/// Apply an authenticated publisher ceiling to the exact inputs used by both
+/// module resolution and native execution. No capability is added, and no
+/// profile, operator or fleet limit is widened. The engine exposes shared
+/// memory/allocation/output overrides, so those use the stricter existing lane
+/// default before applying the publisher ceiling.
+#[cfg(feature = "engine")]
+fn apply_publisher_runtime_authority(
+    authority: Option<&ArtifactRuntimeAuthority>,
+    capabilities: &mut Vec<String>,
+    orchestrator: &mut OrchestratorConfig,
+    runtime: &mut EngineRuntimeConfig,
+    ambient_authority: &mut AmbientAuthorityGrant,
+) -> Result<()> {
+    use sha2::{Digest, Sha256};
+
+    let Some(authority) = authority else {
+        return Ok(());
+    };
+    authority.validate()?;
+
+    // Keep source-only policy IDs byte-identical. For a signed ceiling, bind
+    // its revision and every restriction into the context used by module and
+    // effect evidence without exposing the policy text in the identifier.
+    let commitment = authority.commitment()?;
+    let mut policy = Sha256::new();
+    policy.update(b"franken-node/publisher-runtime-policy/v1:");
+    policy.update(u64::try_from(orchestrator.policy_id.len())?.to_le_bytes());
+    policy.update(orchestrator.policy_id.as_bytes());
+    policy.update(commitment.as_bytes());
+    orchestrator.policy_id = format!("franken-policy-{}", hex::encode(policy.finalize()));
+
+    capabilities.retain(|capability| authority.allowed_capabilities.contains(capability));
+    if !authority.allow_process_shape {
+        *ambient_authority = AmbientAuthorityGrant::DenyAll;
+    }
+    let parser = &mut orchestrator.parser_options.budget;
+    parser.max_source_bytes = parser
+        .max_source_bytes
+        .min(authority.max_parse_source_bytes);
+    parser.max_token_count = parser.max_token_count.min(authority.max_parse_tokens);
+    parser.max_recursion_depth = parser
+        .max_recursion_depth
+        .min(authority.max_parse_recursion_depth);
+
+    let current = EngineExecutionLimitsReport::from_execution_config(&runtime.execution);
+    let execution = &mut runtime.execution;
+    execution.deterministic_budget = execution
+        .deterministic_budget
+        .min(authority.max_instructions);
+    execution.throughput_budget = execution.throughput_budget.min(authority.max_instructions);
+    execution.deterministic_max_registers = execution
+        .deterministic_max_registers
+        .min(authority.max_registers);
+    execution.throughput_max_registers = execution
+        .throughput_max_registers
+        .min(authority.max_registers);
+    execution.max_call_depth = execution
+        .max_call_depth
+        .min(usize::try_from(authority.max_call_depth)?);
+    execution.max_heap_objects = Some(
+        authority
+            .max_heap_objects
+            .min(current.deterministic.max_heap_objects)
+            .min(current.throughput.max_heap_objects),
+    );
+    execution.max_total_memory_bytes = Some(
+        authority
+            .max_total_memory_bytes
+            .min(current.deterministic.max_total_memory_bytes)
+            .min(current.throughput.max_total_memory_bytes),
+    );
+    execution.max_console_entries = Some(
+        usize::try_from(authority.max_console_entries)?
+            .min(current.deterministic.max_console_entries)
+            .min(current.throughput.max_console_entries),
+    );
+    Ok(())
 }
 
 /// Capture only after the worker's project, trust and fleet-policy rechecks.
@@ -9663,8 +9746,6 @@ impl EngineDispatcher {
                 &mut telemetry_guard,
             )
         })?;
-        let parser_budget = config.runtime.effective_parse_budget(config.profile);
-
         // Process and environment authority both have typed replay inputs:
         // process preparation/journal plus the ordinary host-I/O transcript.
 
@@ -9743,7 +9824,7 @@ impl EngineDispatcher {
             Self::map_config_to_orchestrator_config_for_entrypoint(config, &project_paths);
         orchestrator_config.policy_id =
             Self::generate_opaque_policy_id(config.profile, Some(policy_mode));
-        let capabilities =
+        let mut capabilities =
             Self::resolve_capabilities_for_execution(config, process_spawn_admission.as_ref())
                 .map_err(|error| {
                     native_engine_spawn_error_with_telemetry_cleanup(
@@ -9751,6 +9832,32 @@ impl EngineDispatcher {
                         &mut telemetry_guard,
                     )
                 })?;
+        let mut runtime_config = Self::map_config_to_runtime_config(config);
+        let mut ambient_authority_grant = Self::map_config_to_ambient_authority_grant(config);
+        apply_publisher_runtime_authority(
+            trust_requirements
+                .registry_artifact_approval
+                .as_ref()
+                .and_then(PublisherSourceGraphApproval::runtime_authority),
+            &mut capabilities,
+            &mut orchestrator_config,
+            &mut runtime_config,
+            &mut ambient_authority_grant,
+        )
+        .map_err(|error| {
+            native_engine_spawn_error_with_telemetry_cleanup(
+                format!("Publisher runtime authority admission failed: {error:#}"),
+                &mut telemetry_guard,
+            )
+        })?;
+        let parser_budget = RuntimeParseBudget {
+            max_source_bytes: orchestrator_config.parser_options.budget.max_source_bytes,
+            max_token_count: orchestrator_config.parser_options.budget.max_token_count,
+            max_recursion_depth: orchestrator_config
+                .parser_options
+                .budget
+                .max_recursion_depth,
+        };
         let frozen_modules = if config.runtime.frozen_modules == Some(true) {
             Some(
                 prepare_native_frozen_modules(
@@ -9819,11 +9926,9 @@ impl EngineDispatcher {
         // bd-656a2: capture a stable trace label for the SSRF gate's audit records
         // before `orchestrator_config` is moved into the orchestrator below.
         let run_egress_trace = orchestrator_config.policy_id.clone();
-        let runtime_config = Self::map_config_to_runtime_config(config); // bd-1nkf8: Map from franken-node config
         let execution_limits =
             EngineExecutionLimitsReport::from_execution_config(&runtime_config.execution);
 
-        let ambient_authority_grant = Self::map_config_to_ambient_authority_grant(config);
         let expected_evidence_identity = evidence_authority.verification_identity();
         let host_effect_ledger_authority = evidence_authority.clone();
         let host_effect_ledger_epoch = security_epoch_for_profile(config.profile);
@@ -11248,6 +11353,321 @@ impl EngineDispatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "engine")]
+    fn publisher_authority_for_test() -> ArtifactRuntimeAuthority {
+        ArtifactRuntimeAuthority {
+            schema_version:
+                crate::supply_chain::registry_artifact::ARTIFACT_RUNTIME_AUTHORITY_SCHEMA.into(),
+            policy_revision: "native-review-1".into(),
+            allowed_capabilities: [
+                "builtin",
+                "console",
+                "fs_read",
+                "heap_allocate",
+                "module_load",
+                "vm_dispatch",
+            ]
+            .map(str::to_owned)
+            .to_vec(),
+            allow_process_shape: false,
+            max_instructions: 100_000,
+            max_registers: 128,
+            max_call_depth: 16,
+            max_heap_objects: 10_000,
+            max_total_memory_bytes: 16 * 1024 * 1024,
+            max_console_entries: 128,
+            max_parse_source_bytes: 64 * 1024,
+            max_parse_tokens: 8192,
+            max_parse_recursion_depth: 64,
+        }
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn publisher_runtime_authority_intersects_every_native_ceiling_without_granting_rights() {
+        let authority = publisher_authority_for_test();
+        for profile in [Profile::Strict, Profile::Balanced, Profile::LegacyRisky] {
+            for tighter_operator in [false, true] {
+                let mut config = Config::for_profile(profile);
+                config.runtime.allow_process_shape = Some(true);
+                config
+                    .runtime
+                    .environment_allowlist
+                    .insert("PUBLIC_FIXTURE".into());
+                if tighter_operator {
+                    config.runtime.max_instructions = Some(2000);
+                    config.runtime.max_registers = Some(64);
+                    config.runtime.max_call_depth = Some(8);
+                    config.runtime.max_heap_objects = Some(1000);
+                    config.runtime.max_total_memory_bytes = Some(1024 * 1024);
+                    config.runtime.max_console_entries = Some(16);
+                    config.runtime.max_parse_source_bytes = Some(8192);
+                    config.runtime.max_parse_tokens = Some(1024);
+                }
+                let original = EngineDispatcher::resolve_capabilities_for_execution(&config, None)
+                    .expect("profile capabilities");
+                let mut capabilities = original.clone();
+                let mut orchestrator = EngineDispatcher::map_config_to_orchestrator_config(&config);
+                let mut runtime = EngineDispatcher::map_config_to_runtime_config(&config);
+                let before = EngineExecutionLimitsReport::from_execution_config(&runtime.execution);
+                let mut ambient = EngineDispatcher::map_config_to_ambient_authority_grant(&config);
+                apply_publisher_runtime_authority(
+                    Some(&authority),
+                    &mut capabilities,
+                    &mut orchestrator,
+                    &mut runtime,
+                    &mut ambient,
+                )
+                .unwrap();
+                assert_eq!(capabilities, vec!["module_load", "fs_read", "builtin"]);
+                assert!(
+                    capabilities
+                        .iter()
+                        .all(|capability| original.contains(capability))
+                );
+                assert_eq!(ambient, AmbientAuthorityGrant::DenyAll);
+                assert!(!orchestrator.auto_size_register_window);
+                let parser = &orchestrator.parser_options.budget;
+                assert_eq!(
+                    parser.max_source_bytes,
+                    if tighter_operator { 8192 } else { 64 * 1024 }
+                );
+                assert_eq!(
+                    parser.max_token_count,
+                    if tighter_operator { 1024 } else { 8192 }
+                );
+                assert_eq!(parser.max_recursion_depth, 64);
+                let after = EngineExecutionLimitsReport::from_execution_config(&runtime.execution);
+                for (old, effective) in [
+                    (before.deterministic, after.deterministic),
+                    (before.throughput, after.throughput),
+                ] {
+                    assert_eq!(
+                        effective.max_instructions,
+                        old.max_instructions.min(authority.max_instructions)
+                    );
+                    assert_eq!(
+                        effective.max_registers,
+                        old.max_registers
+                            .map(|value| value.min(authority.max_registers))
+                    );
+                    assert_eq!(
+                        effective.max_call_depth,
+                        old.max_call_depth
+                            .map(|value| value.min(authority.max_call_depth as usize))
+                    );
+                    assert_eq!(
+                        effective.max_heap_objects,
+                        if tighter_operator { 1000 } else { 10_000 }
+                    );
+                    assert_eq!(
+                        effective.max_total_memory_bytes,
+                        if tighter_operator {
+                            1024 * 1024
+                        } else {
+                            16 * 1024 * 1024
+                        }
+                    );
+                    assert_eq!(
+                        effective.max_console_entries,
+                        if tighter_operator { 16 } else { 128 }
+                    );
+                    assert_eq!(effective.max_console_bytes, old.max_console_bytes);
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn publisher_runtime_authority_cannot_expand_profile_defaults_or_ambient_rights() {
+        let config = Config::for_profile(Profile::Strict);
+        let mut authority = publisher_authority_for_test();
+        authority.allowed_capabilities.extend(
+            [
+                "env_read",
+                "fs_write",
+                "network_egress",
+                "process_spawn",
+                "random_read",
+                "timer",
+            ]
+            .map(str::to_owned),
+        );
+        authority.allow_process_shape = true;
+        authority.max_instructions = u64::MAX;
+        authority.max_registers = crate::config::MAX_NATIVE_REGISTERS;
+        authority.max_call_depth = crate::config::MAX_NATIVE_CALL_DEPTH as u32;
+        authority.max_heap_objects = u32::MAX;
+        authority.max_total_memory_bytes = u64::MAX;
+        authority.max_console_entries = u32::MAX;
+        authority.max_parse_source_bytes = crate::config::MAX_PARSE_SOURCE_BYTES;
+        authority.max_parse_tokens = crate::config::MAX_PARSE_TOKENS;
+        authority.max_parse_recursion_depth = 384;
+        let mut capabilities =
+            EngineDispatcher::resolve_capabilities_for_execution(&config, None).unwrap();
+        let before_capabilities = capabilities.clone();
+        let mut orchestrator = EngineDispatcher::map_config_to_orchestrator_config(&config);
+        let before_parser = orchestrator.parser_options.budget.clone();
+        let mut runtime = EngineDispatcher::map_config_to_runtime_config(&config);
+        let before = EngineExecutionLimitsReport::from_execution_config(&runtime.execution);
+        let mut ambient = EngineDispatcher::map_config_to_ambient_authority_grant(&config);
+        apply_publisher_runtime_authority(
+            Some(&authority),
+            &mut capabilities,
+            &mut orchestrator,
+            &mut runtime,
+            &mut ambient,
+        )
+        .unwrap();
+        assert_eq!(capabilities, before_capabilities);
+        assert_eq!(orchestrator.parser_options.budget, before_parser);
+        assert_eq!(ambient, AmbientAuthorityGrant::DenyAll);
+        let after = EngineExecutionLimitsReport::from_execution_config(&runtime.execution);
+        for (old, effective) in [
+            (before.deterministic, after.deterministic),
+            (before.throughput, after.throughput),
+        ] {
+            assert_eq!(effective.max_instructions, old.max_instructions);
+            assert_eq!(effective.max_registers, old.max_registers);
+            assert_eq!(effective.max_call_depth, old.max_call_depth);
+            assert!(effective.max_heap_objects <= old.max_heap_objects);
+            assert!(effective.max_total_memory_bytes <= old.max_total_memory_bytes);
+            assert!(effective.max_console_entries <= old.max_console_entries);
+        }
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn publisher_runtime_authority_binds_native_policy_identity_without_changing_source_only_ids() {
+        let config = Config::for_profile(Profile::Balanced);
+        let resolve = |authority: Option<&ArtifactRuntimeAuthority>| {
+            let mut capabilities =
+                EngineDispatcher::resolve_capabilities_for_execution(&config, None).unwrap();
+            let mut orchestrator = EngineDispatcher::map_config_to_orchestrator_config(&config);
+            let mut runtime = EngineDispatcher::map_config_to_runtime_config(&config);
+            let mut ambient = EngineDispatcher::map_config_to_ambient_authority_grant(&config);
+            apply_publisher_runtime_authority(
+                authority,
+                &mut capabilities,
+                &mut orchestrator,
+                &mut runtime,
+                &mut ambient,
+            )
+            .unwrap();
+            orchestrator.policy_id
+        };
+        let source_only = EngineDispatcher::map_config_to_orchestrator_config(&config).policy_id;
+        assert_eq!(resolve(None), source_only);
+        let authority = publisher_authority_for_test();
+        let identity = resolve(Some(&authority));
+        assert_ne!(identity, source_only);
+        assert_eq!(identity, resolve(Some(&authority)));
+        assert!(!identity.contains(&authority.policy_revision));
+        let mut reordered = authority.clone();
+        reordered.allowed_capabilities.reverse();
+        assert_eq!(identity, resolve(Some(&reordered)));
+        for mutate in [
+            (|authority: &mut ArtifactRuntimeAuthority| authority.policy_revision.push_str("-next"))
+                as fn(&mut ArtifactRuntimeAuthority),
+            |authority| authority.max_instructions += 1,
+            |authority| authority.allowed_capabilities.push("network_egress".into()),
+        ] {
+            let mut changed = authority.clone();
+            mutate(&mut changed);
+            assert_ne!(identity, resolve(Some(&changed)));
+        }
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn publisher_runtime_authority_limits_are_enforced_by_actual_native_execution() {
+        use frankenengine_engine::baseline_interpreter::InterpreterError;
+        use frankenengine_engine::execution_orchestrator::OrchestratorError;
+
+        let run = |authority: &ArtifactRuntimeAuthority, source: &str| {
+            let mut config = Config::for_profile(Profile::Balanced);
+            config.runtime.allow_process_shape = Some(true);
+            let mut capabilities =
+                EngineDispatcher::resolve_capabilities_for_execution(&config, None).unwrap();
+            let mut orchestrator = EngineDispatcher::map_config_to_orchestrator_config(&config);
+            let mut runtime = EngineDispatcher::map_config_to_runtime_config(&config);
+            let mut ambient = EngineDispatcher::map_config_to_ambient_authority_grant(&config);
+            apply_publisher_runtime_authority(
+                Some(authority),
+                &mut capabilities,
+                &mut orchestrator,
+                &mut runtime,
+                &mut ambient,
+            )
+            .unwrap();
+            let mut orchestrator =
+                ExecutionOrchestrator::try_new_with_runtime_config_and_authority(
+                    orchestrator,
+                    runtime,
+                    ambient,
+                    host_effect_ledger_authority_for_test(),
+                )
+                .unwrap();
+            orchestrator.execute(&ExtensionPackage {
+                extension_id: "publisher-runtime-authority-fixture".into(),
+                source: source.into(),
+                source_file: None,
+                module_root: None,
+                capabilities,
+                version: "1.0.0".into(),
+                metadata: Default::default(),
+            })
+        };
+        let mut authority = publisher_authority_for_test();
+        authority.max_console_entries = 2;
+        let source = "console.log('first'); console.log('second');";
+        let output = run(&authority, source).expect("bounded useful execution");
+        assert_eq!(
+            output
+                .console_output
+                .iter()
+                .map(|entry| entry.message.as_str())
+                .collect::<Vec<_>>(),
+            ["first", "second"]
+        );
+        authority.max_console_entries = 1;
+        let error = run(&authority, source)
+            .expect_err("signed console ceiling must fail, not evict output");
+        assert!(
+            matches!(
+                error.primary_error(),
+                OrchestratorError::Interpreter(InterpreterError::ConsoleBudgetExceeded { .. })
+            ),
+            "{error}"
+        );
+
+        authority.max_instructions = 100;
+        let error = run(
+            &authority,
+            "let n = 0; while (n < 10000) { n = n + 1; } console.log(n);",
+        )
+        .expect_err("signed instruction ceiling must stop work");
+        assert!(
+            matches!(
+                error.primary_error(),
+                OrchestratorError::Interpreter(InterpreterError::BudgetExhausted {
+                    budget: 100,
+                    ..
+                })
+            ),
+            "{error}"
+        );
+
+        authority = publisher_authority_for_test();
+        authority.allow_process_shape = true;
+        assert!(run(&authority, "console.log(process.platform);").is_ok());
+        authority.allow_process_shape = false;
+        let error =
+            run(&authority, "console.log(process.platform);").expect_err("signed ambient denial");
+        assert!(error.to_string().contains("process.shape_read"), "{error}");
+    }
 
     #[cfg(feature = "engine")]
     #[test]

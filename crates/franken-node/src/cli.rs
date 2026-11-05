@@ -2774,6 +2774,11 @@ pub struct RegistryPublishArgs {
     #[arg(long)]
     pub signing_key: Option<PathBuf>,
 
+    /// JSON publisher ceilings for native capabilities and resources, signed
+    /// with the package in a v2 manifest. Execution also enforces local policy.
+    #[arg(long)]
+    pub runtime_authority: Option<PathBuf>,
+
     /// Maximum active artifacts retained per publisher/name lineage before publish requires GC.
     #[arg(long, default_value_t = DEFAULT_REGISTRY_MAX_ACTIVE_ARTIFACTS_PER_LINEAGE)]
     pub max_active_artifacts: usize,
@@ -5175,6 +5180,32 @@ mod tests {
             }
             other => panic!("expected registry publish, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn registry_publish_accepts_explicit_runtime_authority() {
+        let cli = <Cli as clap::Parser>::try_parse_from([
+            "franken-node",
+            "registry",
+            "publish",
+            "application.capsule",
+            "--version",
+            "1.2.3",
+            "--signing-key",
+            "publisher.ed25519",
+            "--runtime-authority",
+            "runtime-authority.json",
+            "--json",
+        ])
+        .expect("publisher runtime authority option");
+        let Command::Registry(RegistryCommand::Publish(args)) = cli.command else {
+            panic!("expected registry publish");
+        };
+        assert_eq!(
+            args.runtime_authority,
+            Some(PathBuf::from("runtime-authority.json"))
+        );
+        assert_eq!(args.signing_key, Some(PathBuf::from("publisher.ed25519")));
     }
 
     #[test]

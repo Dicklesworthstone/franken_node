@@ -11,6 +11,7 @@ const MAX_POLICY_FILE_BYTES: u64 = 2 << 20; // 2 MiB for policy files
 const MAX_LOCKFILE_BYTES: u64 = 1 << 20; // 1 MiB for lockfiles
 const MAX_GENERAL_FILE_BYTES: u64 = 10 << 20; // 10 MiB for general CLI input files
 const MAX_SIGNING_KEY_BYTES: u64 = 64 << 10; // 64 KiB for signing keys
+const MAX_RUNTIME_AUTHORITY_BYTES: u64 = 64 << 10; // Bounded publisher policy JSON
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     if cap == 0 {
@@ -182,8 +183,11 @@ use frankenengine_node::{
             AdmissionKernel, ExtensionSignature, ExtensionStatus, RegistrationRequest,
             SignedExtension, SignedExtensionRegistry, VersionEntry,
             canonical_registration_manifest_bytes,
+            canonical_registration_manifest_bytes_with_authority,
         },
-        registry_artifact::{LocalRegistryArtifactManifest, PublisherSourceGraphApproval},
+        registry_artifact::{
+            ArtifactRuntimeAuthority, LocalRegistryArtifactManifest, PublisherSourceGraphApproval,
+        },
         trust_card::{
             BehavioralProfile, CapabilityDeclaration, CapabilityRisk, CertificationLevel,
             DependencyTrustStatus, ExtensionIdentity, ProvenanceSummary, PublisherIdentity,
@@ -17702,6 +17706,7 @@ mod registry_command_tests {
                 Some("aabbccddeeff00112233445566778899aabbccdd"),
                 Some(false),
             ),
+            None,
         )
         .expect("publish request");
         assert!(!request.name.is_empty());
@@ -17766,6 +17771,7 @@ mod registry_command_tests {
             "0.1.2",
             &signing_material,
             registry_publish_context("builder-host", None, None, None),
+            None,
         )
         .expect("publish request");
         assert_eq!(request.initial_version.content_hash, "abc123");
@@ -17797,6 +17803,7 @@ mod registry_command_tests {
             "1.0.0-alpha",
             &signing_material,
             registry_publish_context("builder-host", None, None, None),
+            None,
         )
         .expect_err("pre-release versions are not accepted by registry monotonic rules");
 
@@ -17830,6 +17837,7 @@ mod registry_command_tests {
                 Some("11223344556677889900aabbccddeeff00112233"),
                 Some(false),
             ),
+            None,
         )
         .expect("publish request");
 
@@ -24988,6 +24996,7 @@ fn build_registry_publish_request(
     content_hash: &str,
     version: &str,
     signing_material: &Ed25519SigningMaterial,
+    runtime_authority: Option<&ArtifactRuntimeAuthority>,
 ) -> Result<RegistrationRequest> {
     let provenance_context = collect_registry_publish_provenance_context(package_path);
     build_registry_publish_request_with_context(
@@ -24996,6 +25005,7 @@ fn build_registry_publish_request(
         version,
         signing_material,
         provenance_context,
+        runtime_authority,
     )
 }
 
@@ -25033,6 +25043,7 @@ fn build_registry_publish_request_with_context(
     version: &str,
     signing_material: &Ed25519SigningMaterial,
     provenance_context: RegistryPublishProvenanceContext,
+    runtime_authority: Option<&ArtifactRuntimeAuthority>,
 ) -> Result<RegistrationRequest> {
     let version = validate_registry_publish_version(version)?;
     let inferred_name = package_path
@@ -25073,9 +25084,20 @@ fn build_registry_publish_request_with_context(
         compatible_with: vec!["franken-node".to_string()],
     };
     let tags_vec = vec!["cli-publish".to_string(), "local".to_string()];
-    let manifest_bytes =
-        canonical_registration_manifest_bytes(&name, &publisher_id, &initial_version, &tags_vec)
-            .map_err(|e| anyhow::anyhow!("failed building registry publish manifest: {e}"))?;
+    let manifest_bytes = match runtime_authority {
+        Some(authority) => canonical_registration_manifest_bytes_with_authority(
+            &name,
+            &publisher_id,
+            &initial_version,
+            &tags_vec,
+            authority,
+        )
+        .context("failed building publisher-authorized registry manifest")?,
+        None => {
+            canonical_registration_manifest_bytes(&name, &publisher_id, &initial_version, &tags_vec)
+                .context("failed building registry publish manifest")?
+        }
+    };
     let signature_bytes =
         supply_chain::artifact_signing::sign_bytes(&signing_material.signing_key, &manifest_bytes);
 
@@ -25357,6 +25379,21 @@ fn handle_registry_publish(args: &cli::RegistryPublishArgs) -> Result<()> {
     let package_bytes = crate::bounded_read(&args.package_path, MAX_MANIFEST_FILE_BYTES)
         .with_context(|| format!("failed reading package {}", args.package_path.display()))?;
     let content_hash = compute_registry_artifact_sha256(&package_bytes);
+    let runtime_authority = args
+        .runtime_authority
+        .as_deref()
+        .map(|path| -> Result<ArtifactRuntimeAuthority> {
+            let bytes = crate::bounded_read(path, MAX_RUNTIME_AUTHORITY_BYTES)
+                .with_context(|| format!("failed reading runtime authority {}", path.display()))?;
+            let mut authority: ArtifactRuntimeAuthority = serde_json::from_slice(&bytes)
+                .context("invalid publisher runtime authority JSON")?;
+            authority.allowed_capabilities.sort();
+            authority
+                .validate()
+                .context("invalid publisher runtime authority")?;
+            Ok(authority)
+        })
+        .transpose()?;
     let signing_key_path = match args.signing_key.as_deref() {
         Some(path) => path,
         None => {
@@ -25374,6 +25411,7 @@ fn handle_registry_publish(args: &cli::RegistryPublishArgs) -> Result<()> {
         &content_hash,
         &args.version,
         &signing_material,
+        runtime_authority.as_ref(),
     )?;
     ensure_local_registry_artifact_capacity(
         &project_root,
@@ -25441,6 +25479,7 @@ fn handle_registry_publish(args: &cli::RegistryPublishArgs) -> Result<()> {
         revocations: registry.revocations().len(),
         audit_records: registry.audit_log().len(),
         state_content_hash: registry.content_hash().to_string(),
+        runtime_authority: runtime_authority.as_ref(),
     };
     emit_json_or_human(&report, args.json, || {
         format!(
@@ -25485,6 +25524,8 @@ struct RegistryPublishCliReport<'a> {
     revocations: usize,
     audit_records: usize,
     state_content_hash: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    runtime_authority: Option<&'a ArtifactRuntimeAuthority>,
 }
 
 fn handle_registry_search(args: &cli::RegistrySearchArgs) -> Result<()> {
@@ -37924,6 +37965,7 @@ mod run_trust_gate_tests {
                 name: "application".to_string(),
                 version: "1.2.3".to_string(),
                 artifact_sha256: format!("sha256:{}", "cd".repeat(32)),
+                runtime_authority: None,
             }),
         };
         core.native_module_graph = Some(graph.clone());

@@ -2,8 +2,10 @@
 //!
 //! The local storage envelope is not a registry-service endorsement. Execution
 //! admission requires a separately supplied publisher key, the signed package
-//! identity, and the exact capsule bytes. It grants no capabilities or resources
-//! and does not interpret the envelope's unsigned lifecycle or provenance claims.
+//! identity, and the exact capsule bytes. A signed runtime authority can only
+//! narrow the operator's capabilities and resource limits; it cannot grant new
+//! rights. The envelope's unsigned lifecycle and provenance claims confer no
+//! execution authority.
 
 use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -13,13 +15,136 @@ use sha2::{Digest, Sha256};
 use std::path::{Component, Path, PathBuf};
 
 use super::artifact_signing::{KeyId, verify_signature};
-use super::extension_registry::{
-    EXTENSION_REGISTRATION_MANIFEST_SCHEMA, ExtensionRegistrationManifest, SignedExtension,
-};
+use super::extension_registry::{ExtensionRegistrationManifest, SignedExtension};
 
 pub const LOCAL_ARTIFACT_SCHEMA: &str = "franken-node/local-registry-artifact-manifest/v1";
 /// Match the installed registry's artifact and manifest input bound.
 pub const MAX_ARTIFACT_BYTES: u64 = 5 << 20;
+
+pub const ARTIFACT_RUNTIME_AUTHORITY_SCHEMA: &str = "franken-node/artifact-runtime-authority/v1";
+
+/// Publisher-signed upper bounds for one complete source capsule execution.
+///
+/// All fields are mandatory. These are ceilings, never grants: execution also
+/// requires the operator profile, current fleet policy, and any separate signed
+/// process-spawn admission. Parser limits apply independently to every module;
+/// instruction, allocation, memory and output limits apply to the native run.
+/// Memory is engine-accounted estimated memory, not process RSS, and heap
+/// objects count allocations until the engine supports live-object reclamation.
+///
+/// The current engine always grants VM dispatch, heap allocation and console
+/// output. Their canonical capability names must therefore appear explicitly;
+/// a publisher cannot request an unenforceable denial. Console output can be
+/// narrowed using its entry ceiling; the engine's separate byte cap still
+/// applies. This schema does not claim per-hostcall quotas or path scopes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactRuntimeAuthority {
+    pub schema_version: String,
+    pub policy_revision: String,
+    pub allowed_capabilities: Vec<String>,
+    pub allow_process_shape: bool,
+    pub max_instructions: u64,
+    pub max_registers: u32,
+    pub max_call_depth: u32,
+    pub max_heap_objects: u32,
+    pub max_total_memory_bytes: u64,
+    pub max_console_entries: u32,
+    pub max_parse_source_bytes: u64,
+    pub max_parse_tokens: u64,
+    pub max_parse_recursion_depth: u64,
+}
+
+impl ArtifactRuntimeAuthority {
+    /// Reject ambiguous, incomplete, or unsupported authority before signing,
+    /// registry admission, and parent/worker execution admission.
+    pub fn validate(&self) -> Result<()> {
+        use crate::config::{
+            MAX_NATIVE_CALL_DEPTH, MAX_NATIVE_REGISTERS, MAX_PARSE_SOURCE_BYTES, MAX_PARSE_TOKENS,
+        };
+        const CAPABILITIES: &[&str] = &[
+            "builtin",
+            "console",
+            "env_read",
+            "fs_read",
+            "fs_write",
+            "heap_allocate",
+            "module_load",
+            "network_egress",
+            "process_spawn",
+            "random_read",
+            "timer",
+            "vm_dispatch",
+        ];
+        anyhow::ensure!(
+            self.schema_version == ARTIFACT_RUNTIME_AUTHORITY_SCHEMA,
+            "unsupported artifact runtime authority schema"
+        );
+        anyhow::ensure!(
+            !self.policy_revision.is_empty()
+                && self.policy_revision.len() <= 128
+                && self.policy_revision.trim() == self.policy_revision
+                && !self.policy_revision.chars().any(char::is_control),
+            "artifact runtime authority requires a bounded policy revision"
+        );
+        anyhow::ensure!(
+            self.allowed_capabilities.len() <= CAPABILITIES.len()
+                && self
+                    .allowed_capabilities
+                    .iter()
+                    .all(|capability| CAPABILITIES.contains(&capability.as_str())),
+            "artifact runtime authority contains an unsupported capability"
+        );
+        let unique = self
+            .allowed_capabilities
+            .iter()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>();
+        anyhow::ensure!(
+            unique.len() == self.allowed_capabilities.len(),
+            "artifact runtime authority repeats a capability"
+        );
+        anyhow::ensure!(
+            ["console", "heap_allocate", "vm_dispatch"]
+                .into_iter()
+                .all(|capability| unique.contains(capability)),
+            "artifact runtime authority must explicitly permit the engine's console, heap_allocate, and vm_dispatch capabilities"
+        );
+        anyhow::ensure!(
+            self.max_instructions > 0
+                && self.max_heap_objects > 0
+                && self.max_total_memory_bytes > 0
+                && self.max_console_entries > 0,
+            "artifact runtime authority execution ceilings must be positive"
+        );
+        anyhow::ensure!(
+            (1..=MAX_NATIVE_REGISTERS).contains(&self.max_registers)
+                && usize::try_from(self.max_call_depth)
+                    .is_ok_and(|depth| (1..=MAX_NATIVE_CALL_DEPTH).contains(&depth)),
+            "artifact runtime authority register or call-depth ceiling is unsupported"
+        );
+        anyhow::ensure!(
+            (1..=MAX_PARSE_SOURCE_BYTES).contains(&self.max_parse_source_bytes)
+                && (1..=MAX_PARSE_TOKENS).contains(&self.max_parse_tokens)
+                && (1..=384).contains(&self.max_parse_recursion_depth),
+            "artifact runtime authority parser ceilings are outside the native envelope"
+        );
+        Ok(())
+    }
+
+    /// Stable source-free commitment, independent of capability list ordering.
+    /// Authentication comes from the enclosing signed registration manifest.
+    pub fn commitment(&self) -> Result<String> {
+        self.validate()?;
+        let mut canonical = self.clone();
+        canonical.allowed_capabilities.sort();
+        let bytes = serde_json::to_vec(&canonical)?;
+        let mut digest = Sha256::new();
+        digest.update(b"franken-node/artifact-runtime-authority/v1:");
+        digest.update(bytes);
+        Ok(format!("sha256:{}", hex::encode(digest.finalize())))
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct LocalRegistryArtifactManifest {
@@ -80,6 +205,10 @@ pub struct PublisherArtifactIdentity {
     pub name: String,
     pub version: String,
     pub artifact_sha256: String,
+    /// Present only when authenticated as part of a v2 registration. An older
+    /// source-only artifact makes no publisher claim about runtime authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_authority: Option<ArtifactRuntimeAuthority>,
 }
 
 /// The registry inspector may check self-consistency without a trust anchor.
@@ -194,9 +323,10 @@ pub fn verify_artifact_bytes(
             )
         })?;
     let extension = &envelope.extension;
-    let binding_error = if signed.schema_version != EXTENSION_REGISTRATION_MANIFEST_SCHEMA {
-        Some("unsupported signed extension registration manifest schema")
-    } else if signed.name != extension.name {
+    signed
+        .validate_schema()
+        .map_err(|detail| failure(InvalidMetadata, detail))?;
+    let binding_error = if signed.name != extension.name {
         Some("signed manifest name does not match stored extension name")
     } else if signed.publisher_id != extension.publisher_id {
         Some("signed manifest publisher_id does not match stored extension publisher")
@@ -218,6 +348,7 @@ pub fn verify_artifact_bytes(
         name: signed.name,
         version: signed.initial_version.version,
         artifact_sha256: actual_hash,
+        runtime_authority: signed.runtime_authority,
     })
 }
 
@@ -421,7 +552,14 @@ impl PublisherSourceGraphApproval {
         &self.identity
     }
 
+    pub fn runtime_authority(&self) -> Option<&ArtifactRuntimeAuthority> {
+        self.identity.runtime_authority.as_ref()
+    }
+
     pub fn validate(&self) -> Result<()> {
+        if let Some(authority) = self.runtime_authority() {
+            authority.validate()?;
+        }
         fn valid_hash(value: &str) -> bool {
             value.strip_prefix("sha256:").is_some_and(|digest| {
                 digest.len() == 64
@@ -524,6 +662,7 @@ mod tests {
         extension_registry::{
             ExtensionSignature, ExtensionStatus, VersionEntry,
             canonical_registration_manifest_bytes,
+            canonical_registration_manifest_bytes_with_authority,
         },
         module_resolution_graph::file_resolution::source_graph::{GraphOptions, capsule, capture},
         provenance::{AttestationEnvelopeFormat, ProvenanceAttestation},
@@ -536,6 +675,33 @@ mod tests {
         bytes: Vec<u8>,
         key: ed25519_dalek::SigningKey,
         graph_hash: String,
+    }
+
+    fn runtime_authority() -> ArtifactRuntimeAuthority {
+        ArtifactRuntimeAuthority {
+            schema_version: ARTIFACT_RUNTIME_AUTHORITY_SCHEMA.into(),
+            policy_revision: "review-7".into(),
+            allowed_capabilities: [
+                "builtin",
+                "console",
+                "fs_read",
+                "heap_allocate",
+                "module_load",
+                "vm_dispatch",
+            ]
+            .map(str::to_owned)
+            .to_vec(),
+            allow_process_shape: false,
+            max_instructions: 100_000,
+            max_registers: 128,
+            max_call_depth: 32,
+            max_heap_objects: 10_000,
+            max_total_memory_bytes: 16 * 1024 * 1024,
+            max_console_entries: 128,
+            max_parse_source_bytes: 64 * 1024,
+            max_parse_tokens: 8192,
+            max_parse_recursion_depth: 64,
+        }
     }
 
     impl Fixture {
@@ -624,6 +790,214 @@ mod tests {
             PublisherSourceGraphApproval::load(&self.manifest_path, &self.key.verifying_key())
                 .unwrap()
         }
+
+        fn with_runtime_authority(mut self, authority: &ArtifactRuntimeAuthority) -> Self {
+            let signed = canonical_registration_manifest_bytes_with_authority(
+                &self.manifest.extension.name,
+                &self.manifest.extension.publisher_id,
+                &self.manifest.extension.versions[0],
+                &self.manifest.extension.tags,
+                authority,
+            )
+            .unwrap();
+            self.manifest.manifest_bytes_b64 = STANDARD.encode(&signed);
+            self.manifest.extension.signature.signature_bytes = sign_bytes(&self.key, &signed);
+            std::fs::write(
+                &self.manifest_path,
+                serde_json::to_vec(&self.manifest).unwrap(),
+            )
+            .unwrap();
+            self
+        }
+    }
+
+    #[test]
+    fn publisher_runtime_authority_requires_complete_supported_ceiling() {
+        let authority = runtime_authority();
+        authority.validate().unwrap();
+        let value = serde_json::to_value(&authority).unwrap();
+        for field in value.as_object().unwrap().keys() {
+            let mut omitted = value.clone();
+            omitted.as_object_mut().unwrap().remove(field);
+            assert!(
+                serde_json::from_value::<ArtifactRuntimeAuthority>(omitted).is_err(),
+                "missing {field} must not obtain a permissive default"
+            );
+        }
+        for mutate in [
+            (|authority: &mut ArtifactRuntimeAuthority| authority.max_instructions = 0)
+                as fn(&mut ArtifactRuntimeAuthority),
+            |authority| authority.max_registers = 65_537,
+            |authority| authority.max_call_depth = 10_001,
+            |authority| authority.max_heap_objects = 0,
+            |authority| authority.max_total_memory_bytes = 0,
+            |authority| authority.max_console_entries = 0,
+            |authority| authority.max_parse_source_bytes = 0,
+            |authority| authority.max_parse_tokens = 0,
+            |authority| authority.max_parse_recursion_depth = 0,
+            |authority| authority.policy_revision = " ".into(),
+            |authority| authority.schema_version.push_str("-unknown"),
+            |authority| authority.allowed_capabilities.push("net".into()),
+            |authority| authority.allowed_capabilities.push("console".into()),
+            |authority| {
+                authority
+                    .allowed_capabilities
+                    .retain(|capability| capability != "console")
+            },
+            |authority| {
+                authority
+                    .allowed_capabilities
+                    .retain(|capability| capability != "heap_allocate")
+            },
+            |authority| {
+                authority
+                    .allowed_capabilities
+                    .retain(|capability| capability != "vm_dispatch")
+            },
+        ] {
+            let mut invalid = authority.clone();
+            mutate(&mut invalid);
+            assert!(invalid.validate().is_err(), "{invalid:?}");
+        }
+        let mut unknown = value;
+        unknown["max_network_requests"] = 1.into();
+        assert!(serde_json::from_value::<ArtifactRuntimeAuthority>(unknown).is_err());
+    }
+
+    #[test]
+    fn publisher_runtime_authority_is_bound_to_signature_and_retained_approval() {
+        let authority = runtime_authority();
+        let fixture = Fixture::new("console.log(require('./side.cjs'));\n")
+            .with_runtime_authority(&authority);
+        let approval = fixture.approval();
+        assert_eq!(approval.runtime_authority(), Some(&authority));
+        assert_eq!(approval.graph_input_hash(), fixture.graph_hash);
+        let encoded = serde_json::to_vec(&approval).unwrap();
+        let handoff: PublisherSourceGraphApproval = serde_json::from_slice(&encoded).unwrap();
+        handoff.revalidate().unwrap();
+        assert_eq!(handoff, approval);
+
+        let original: serde_json::Value = serde_json::from_slice(
+            &STANDARD
+                .decode(&fixture.manifest.manifest_bytes_b64)
+                .unwrap(),
+        )
+        .unwrap();
+        for (field, replacement) in [
+            ("policy_revision", serde_json::json!("review-forged")),
+            ("allow_process_shape", serde_json::json!(true)),
+            (
+                "allowed_capabilities",
+                serde_json::json!([
+                    "builtin",
+                    "console",
+                    "fs_read",
+                    "heap_allocate",
+                    "module_load",
+                    "network_egress",
+                    "vm_dispatch"
+                ]),
+            ),
+            ("max_instructions", serde_json::json!(200_000)),
+            ("max_registers", serde_json::json!(256)),
+            ("max_call_depth", serde_json::json!(64)),
+            ("max_heap_objects", serde_json::json!(20_000)),
+            (
+                "max_total_memory_bytes",
+                serde_json::json!(32 * 1024 * 1024),
+            ),
+            ("max_console_entries", serde_json::json!(256)),
+            ("max_parse_source_bytes", serde_json::json!(128 * 1024)),
+            ("max_parse_tokens", serde_json::json!(16_384)),
+            ("max_parse_recursion_depth", serde_json::json!(128)),
+        ] {
+            let mut signed = original.clone();
+            signed["runtime_authority"][field] = replacement;
+            let mut substituted = fixture.manifest.clone();
+            substituted.manifest_bytes_b64 = STANDARD.encode(serde_json::to_vec(&signed).unwrap());
+            let error = verify_artifact_bytes(
+                &substituted,
+                &fixture.bytes,
+                Some(&fixture.key.verifying_key()),
+            )
+            .unwrap_err();
+            assert_eq!(
+                error.kind,
+                ArtifactVerificationFailure::InvalidSignature,
+                "{field}"
+            );
+        }
+
+        // A legitimately re-signed wider policy is still a different admission.
+        let mut wider = authority;
+        wider.allowed_capabilities.push("network_egress".into());
+        let fixture = fixture.with_runtime_authority(&wider);
+        fixture.approval().revalidate().unwrap();
+        assert!(
+            approval
+                .revalidate()
+                .unwrap_err()
+                .to_string()
+                .contains("changed after publisher admission")
+        );
+    }
+
+    #[test]
+    fn publisher_runtime_authority_cannot_be_downgraded_to_source_only_schema() {
+        use super::super::extension_registry::{
+            EXTENSION_REGISTRATION_AUTHORITY_MANIFEST_SCHEMA,
+            EXTENSION_REGISTRATION_MANIFEST_SCHEMA,
+        };
+        let fixture = Fixture::new("console.log(42);\n");
+        assert!(fixture.approval().runtime_authority().is_none());
+        let original: serde_json::Value = serde_json::from_slice(
+            &STANDARD
+                .decode(&fixture.manifest.manifest_bytes_b64)
+                .unwrap(),
+        )
+        .unwrap();
+        for (schema, authority) in [
+            (
+                EXTENSION_REGISTRATION_MANIFEST_SCHEMA,
+                Some(runtime_authority()),
+            ),
+            (EXTENSION_REGISTRATION_AUTHORITY_MANIFEST_SCHEMA, None),
+            (
+                "franken-node/extension-registration-manifest/v3",
+                Some(runtime_authority()),
+            ),
+        ] {
+            let mut signed = original.clone();
+            signed["schema_version"] = schema.into();
+            signed["runtime_authority"] = serde_json::to_value(authority).unwrap();
+            let signed = serde_json::to_vec(&signed).unwrap();
+            let mut manifest = fixture.manifest.clone();
+            manifest.manifest_bytes_b64 = STANDARD.encode(&signed);
+            manifest.extension.signature.signature_bytes = sign_bytes(&fixture.key, &signed);
+            assert_eq!(
+                verify_artifact_bytes(
+                    &manifest,
+                    &fixture.bytes,
+                    Some(&fixture.key.verifying_key())
+                )
+                .unwrap_err()
+                .kind,
+                ArtifactVerificationFailure::InvalidMetadata,
+                "{schema}"
+            );
+        }
+        let authority = runtime_authority();
+        let mut reordered = authority.clone();
+        reordered.allowed_capabilities.reverse();
+        assert_eq!(
+            authority.commitment().unwrap(),
+            reordered.commitment().unwrap()
+        );
+        reordered.max_instructions += 1;
+        assert_ne!(
+            authority.commitment().unwrap(),
+            reordered.commitment().unwrap()
+        );
     }
 
     #[test]

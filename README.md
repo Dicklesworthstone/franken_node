@@ -4111,8 +4111,54 @@ one pass.
   from the run receipt authority. It does not authenticate unsigned registry
   lifecycle/provenance fields, attest registry-service approval, grant capabilities
   or increase resource limits. Existing dependency trust-card revocation and
-  quarantine, fleet policy and runtime controls still govern execution. The broader
-  signed capability and resource contract remains separate work.
+  quarantine, fleet policy and runtime controls still govern execution.
+
+  **Publisher-bounded native authority.** To bind execution ceilings to those
+  same signed package bytes, supply `--runtime-authority /operator/runtime-authority.json`
+  to `registry publish`. The JSON must contain every field below; unknown fields,
+  duplicate or unsupported capabilities, missing ceilings and zero limits are refused:
+
+  ```json
+  {
+    "schema_version": "franken-node/artifact-runtime-authority/v1",
+    "policy_revision": "publisher-policy-7",
+    "allowed_capabilities": [
+      "builtin", "console", "fs_read", "heap_allocate", "module_load", "timer", "vm_dispatch"
+    ],
+    "allow_process_shape": false,
+    "max_instructions": 2000000,
+    "max_registers": 1024,
+    "max_call_depth": 32,
+    "max_heap_objects": 4096,
+    "max_total_memory_bytes": 33554432,
+    "max_console_entries": 16,
+    "max_parse_source_bytes": 65536,
+    "max_parse_tokens": 16384,
+    "max_parse_recursion_depth": 128
+  }
+  ```
+
+  This produces a v2 registration manifest whose publisher signature covers
+  the source capsule and the complete authority object. Older binaries refuse
+  that manifest version. Publishing without the option retains the existing
+  v1 source-only contract. Keep the publisher's signing key and the operator's
+  independently pinned public key outside guest-writable source.
+
+  The authenticated worker intersects these capabilities and ceilings with its
+  current operator, profile, fleet and process-token authority before preparing
+  or evaluating the frozen graph. The restrictions apply to loaded modules as
+  well as the entrypoint. A broad publisher ceiling cannot relax a tighter
+  local limit or manufacture a process-spawn grant. The engine always grants
+  `console`, `heap_allocate` and `vm_dispatch`; they must be explicit in the
+  signed set. Bound console output with `max_console_entries` rather than
+  claiming that omitting `console` disables it. Memory limits describe the
+  engine's allocation accounting, not a process-RSS guarantee.
+
+  Publish JSON and the signed run receipt retain the authenticated authority;
+  native invocation settings report the effective resource limits. The policy
+  revision identifies the signed policy, but does not by itself establish
+  freshness, publisher revocation or registry-service endorsement. Those
+  broader authority and independent-verification obligations remain open.
 
   The broader host-effect
   "runtime-of-record" — the full Node/Bun host-API surface with

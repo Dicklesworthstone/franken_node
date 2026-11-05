@@ -44,6 +44,7 @@ use uuid::Uuid;
 
 use crate::supply_chain::artifact_signing::{self, KeyId, KeyRing};
 use crate::supply_chain::provenance as prov;
+use crate::supply_chain::registry_artifact::ArtifactRuntimeAuthority;
 use crate::supply_chain::transparency_verifier as tv;
 
 use crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
@@ -459,6 +460,8 @@ pub struct RegistrationRequest {
 
 pub const EXTENSION_REGISTRATION_MANIFEST_SCHEMA: &str =
     "franken-node/extension-registration-manifest/v1";
+pub const EXTENSION_REGISTRATION_AUTHORITY_MANIFEST_SCHEMA: &str =
+    "franken-node/extension-registration-manifest/v2";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -468,6 +471,25 @@ pub struct ExtensionRegistrationManifest {
     pub publisher_id: String,
     pub initial_version: VersionEntry,
     pub tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_authority: Option<ArtifactRuntimeAuthority>,
+}
+
+impl ExtensionRegistrationManifest {
+    /// A new signed schema is mandatory when execution ceilings are present.
+    /// Older runtimes must reject the artifact instead of verifying a v1
+    /// signature and then silently ignoring a publisher's restrictions.
+    pub(crate) fn validate_schema(&self) -> Result<(), String> {
+        match (self.schema_version.as_str(), &self.runtime_authority) {
+            (EXTENSION_REGISTRATION_MANIFEST_SCHEMA, None) => Ok(()),
+            (EXTENSION_REGISTRATION_AUTHORITY_MANIFEST_SCHEMA, Some(authority)) => authority
+                .validate()
+                .map_err(|error| format!("invalid signed artifact runtime authority: {error}")),
+            _ => {
+                Err("unsupported signed extension registration manifest schema or authority".into())
+            }
+        }
+    }
 }
 
 pub fn canonical_registration_manifest_bytes(
@@ -482,7 +504,30 @@ pub fn canonical_registration_manifest_bytes(
         publisher_id: publisher_id.to_string(),
         initial_version: initial_version.clone(),
         tags: tags.to_vec(),
+        runtime_authority: None,
     })
+}
+
+/// Sign the source capsule identity and its complete execution ceiling in one
+/// canonical v2 registration. The source-only v1 helper retains its exact bytes.
+pub fn canonical_registration_manifest_bytes_with_authority(
+    name: &str,
+    publisher_id: &str,
+    initial_version: &VersionEntry,
+    tags: &[String],
+    authority: &ArtifactRuntimeAuthority,
+) -> anyhow::Result<Vec<u8>> {
+    authority.validate()?;
+    let mut authority = authority.clone();
+    authority.allowed_capabilities.sort();
+    Ok(serde_json::to_vec(&ExtensionRegistrationManifest {
+        schema_version: EXTENSION_REGISTRATION_AUTHORITY_MANIFEST_SCHEMA.to_string(),
+        name: name.to_string(),
+        publisher_id: publisher_id.to_string(),
+        initial_version: initial_version.clone(),
+        tags: tags.to_vec(),
+        runtime_authority: Some(authority),
+    })?)
 }
 
 #[cfg(feature = "test-support")]
@@ -498,15 +543,7 @@ pub fn parse_signed_registration_manifest(
             );
             "invalid signed extension registration manifest".to_string()
         })?;
-    if manifest.schema_version != EXTENSION_REGISTRATION_MANIFEST_SCHEMA {
-        // SECURITY: Log schema version internally but don't expose in client error
-        tracing::warn!(
-            expected_version = %EXTENSION_REGISTRATION_MANIFEST_SCHEMA,
-            actual_version = %manifest.schema_version,
-            "unsupported extension registration manifest schema version"
-        );
-        return Err("unsupported signed extension registration manifest schema".to_string());
-    }
+    manifest.validate_schema()?;
     Ok(manifest)
 }
 
@@ -523,15 +560,7 @@ fn parse_signed_registration_manifest(
             );
             "invalid signed extension registration manifest".to_string()
         })?;
-    if manifest.schema_version != EXTENSION_REGISTRATION_MANIFEST_SCHEMA {
-        // SECURITY: Log schema version internally but don't expose in client error
-        tracing::warn!(
-            expected_version = %EXTENSION_REGISTRATION_MANIFEST_SCHEMA,
-            actual_version = %manifest.schema_version,
-            "unsupported extension registration manifest schema version"
-        );
-        return Err("unsupported signed extension registration manifest schema".to_string());
-    }
+    manifest.validate_schema()?;
     Ok(manifest)
 }
 
@@ -1828,6 +1857,86 @@ mod tests {
         );
         assert!(result.success, "detail: {}", result.detail);
         assert!(result.extension_id.is_some());
+    }
+
+    #[test]
+    fn register_authenticates_runtime_authority_and_refuses_schema_downgrade() {
+        let (sk, vk) = test_keypair();
+        let now = now_epoch();
+        let authority: ArtifactRuntimeAuthority = serde_json::from_value(serde_json::json!({
+            "schema_version": crate::supply_chain::registry_artifact::ARTIFACT_RUNTIME_AUTHORITY_SCHEMA,
+            "policy_revision": "publisher-review-3",
+            "allowed_capabilities": ["vm_dispatch", "heap_allocate", "console", "module_load", "builtin"],
+            "allow_process_shape": false,
+            "max_instructions": 100_000,
+            "max_registers": 128,
+            "max_call_depth": 32,
+            "max_heap_objects": 10_000,
+            "max_total_memory_bytes": 16_777_216,
+            "max_console_entries": 128,
+            "max_parse_source_bytes": 65_536,
+            "max_parse_tokens": 8192,
+            "max_parse_recursion_depth": 64
+        })).unwrap();
+        let mut request = valid_request("bounded-extension", &sk, now);
+        let old_bytes = request.manifest_bytes.clone();
+        request.manifest_bytes = canonical_registration_manifest_bytes_with_authority(
+            &request.name,
+            &request.publisher_id,
+            &request.initial_version,
+            &request.tags,
+            &authority,
+        )
+        .unwrap();
+        request.signature.signature_bytes =
+            artifact_signing::sign_bytes(&sk, &request.manifest_bytes);
+        let parsed = parse_signed_registration_manifest(&request.manifest_bytes).unwrap();
+        assert_eq!(
+            parsed.schema_version,
+            EXTENSION_REGISTRATION_AUTHORITY_MANIFEST_SCHEMA
+        );
+        assert_eq!(
+            parsed
+                .runtime_authority
+                .as_ref()
+                .unwrap()
+                .commitment()
+                .unwrap(),
+            authority.commitment().unwrap()
+        );
+        let admitted = test_registry(&vk).register(request.clone(), &make_trace(), now);
+        assert!(admitted.success, "{}", admitted.detail);
+
+        let mut changed: serde_json::Value =
+            serde_json::from_slice(&request.manifest_bytes).unwrap();
+        changed["runtime_authority"]["max_instructions"] = serde_json::json!(1_000_000);
+        let mut forged = request.clone();
+        forged.manifest_bytes = serde_json::to_vec(&changed).unwrap();
+        let rejected = test_registry(&vk).register(forged, &make_trace(), now);
+        assert!(!rejected.success);
+        assert_eq!(
+            rejected.error_code.as_deref(),
+            Some(event_codes::SER_ERR_INVALID_SIGNATURE)
+        );
+
+        changed["schema_version"] = EXTENSION_REGISTRATION_MANIFEST_SCHEMA.into();
+        request.manifest_bytes = serde_json::to_vec(&changed).unwrap();
+        request.signature.signature_bytes =
+            artifact_signing::sign_bytes(&sk, &request.manifest_bytes);
+        let rejected = test_registry(&vk).register(request, &make_trace(), now);
+        assert!(!rejected.success);
+        assert!(rejected.detail.contains("schema"), "{}", rejected.detail);
+
+        // Source-only registrations must not acquire a null authority field.
+        let old = parse_signed_registration_manifest(&old_bytes).unwrap();
+        assert!(old.runtime_authority.is_none());
+        assert_eq!(old.schema_version, EXTENSION_REGISTRATION_MANIFEST_SCHEMA);
+        assert!(
+            serde_json::from_slice::<serde_json::Value>(&old_bytes)
+                .unwrap()
+                .get("runtime_authority")
+                .is_none()
+        );
     }
 
     #[test]
