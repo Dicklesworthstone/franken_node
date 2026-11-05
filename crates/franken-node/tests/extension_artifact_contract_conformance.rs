@@ -5,10 +5,12 @@
 
 use std::collections::BTreeSet;
 
+use ed25519_dalek::SigningKey;
 use frankenengine_node::extensions::artifact_contract::{
     AdmissionConfig, AdmissionDenialReason, AdmissionGate, AdmissionOutcome, CapabilityContract,
     CapabilityEntry, DriftCheckResult, EnforcementEngine, ExtensionArtifact, SCHEMA_VERSION,
-    error_codes, event_codes, invariants, make_artifact, make_contract,
+    compute_contract_digest, compute_contract_signature, error_codes, event_codes, invariants,
+    make_artifact, make_contract,
 };
 use frankenengine_node::supply_chain::certification::{EvidenceType, VerifiedEvidenceRef};
 use frankenengine_node::supply_chain::trust_card::{
@@ -74,6 +76,10 @@ struct CaseResult {
     detail: String,
 }
 
+fn signing_key() -> SigningKey {
+    SigningKey::from_bytes(&[42; 32])
+}
+
 fn capabilities() -> Vec<CapabilityEntry> {
     vec![
         CapabilityEntry {
@@ -92,7 +98,7 @@ fn capabilities() -> Vec<CapabilityEntry> {
 fn trusted_gate() -> Result<AdmissionGate, String> {
     let mut config = AdmissionConfig::new(SCHEMA_VERSION);
     config
-        .with_signer("signer-A")
+        .with_signer("signer-A", &signing_key().verifying_key())
         .map_err(|error| format!("trusted signer fixture should register: {error}"))?;
     Ok(AdmissionGate::new(config))
 }
@@ -168,11 +174,12 @@ fn signed_contract() -> CapabilityContract {
         "signer-A",
         SCHEMA_VERSION,
         1,
+        &signing_key(),
     )
 }
 
 fn signed_artifact() -> ExtensionArtifact {
-    make_artifact("artifact-1", "ext-alpha", signed_contract())
+    make_artifact("artifact-1", "ext-alpha", signed_contract(), &signing_key())
 }
 
 fn require(condition: bool, message: impl Into<String>) -> Result<(), String> {
@@ -250,9 +257,39 @@ fn case_signature_tamper_denies() -> Result<(), String> {
     )
 }
 
+fn case_public_digest_forgery_denies() -> Result<(), String> {
+    let mut artifact = signed_artifact();
+    let contract = artifact
+        .capability_contract
+        .as_mut()
+        .ok_or_else(|| "signed fixture lacks contract".to_string())?;
+    contract.capabilities[0].max_calls_per_epoch = u64::MAX;
+    let digest = compute_contract_digest(contract);
+    contract.signature = format!("ed25519-v1:{digest}{digest}");
+    let (reason, _) = denied(evaluate_with_trust(&artifact)?)?;
+    require(
+        reason == AdmissionDenialReason::SignatureInvalid,
+        format!("public digest must not authenticate an expanded capability budget: {reason:?}"),
+    )
+}
+
+fn case_same_name_foreign_key_denies() -> Result<(), String> {
+    let mut artifact = signed_artifact();
+    let contract = artifact
+        .capability_contract
+        .as_mut()
+        .ok_or_else(|| "signed fixture lacks contract".to_string())?;
+    contract.signature = compute_contract_signature(contract, &SigningKey::from_bytes(&[7; 32]));
+    let (reason, _) = denied(evaluate_with_trust(&artifact)?)?;
+    require(
+        reason == AdmissionDenialReason::SignatureInvalid,
+        format!("a trusted signer name must not admit a foreign signing key: {reason:?}"),
+    )
+}
+
 fn case_capability_envelope_only_allows_declared_ids() -> Result<(), String> {
     let contract = signed_contract();
-    let artifact = make_artifact("artifact-1", "ext-alpha", contract.clone());
+    let artifact = make_artifact("artifact-1", "ext-alpha", contract.clone(), &signing_key());
     let (contract_id, extension_id, event_code) = accepted(evaluate_with_trust(&artifact)?)?;
     require(
         event_code == event_codes::ARTIFACT_ADMISSION_ACCEPTED,
@@ -338,8 +375,14 @@ fn case_duplicate_capability_denies() -> Result<(), String> {
         "signer-A",
         SCHEMA_VERSION,
         1,
+        &signing_key(),
     );
-    let artifact = make_artifact("artifact-duplicate-capability", "ext-alpha", contract);
+    let artifact = make_artifact(
+        "artifact-duplicate-capability",
+        "ext-alpha",
+        contract,
+        &signing_key(),
+    );
 
     let (reason, event_code) = denied(evaluate_with_trust(&artifact)?)?;
     require(
@@ -364,8 +407,14 @@ fn case_schema_mismatch_denies() -> Result<(), String> {
         "signer-A",
         "capability-artifact-v0.9",
         1,
+        &signing_key(),
     );
-    let artifact = make_artifact("artifact-schema-mismatch", "ext-alpha", contract);
+    let artifact = make_artifact(
+        "artifact-schema-mismatch",
+        "ext-alpha",
+        contract,
+        &signing_key(),
+    );
 
     let (reason, event_code) = denied(evaluate_with_trust(&artifact)?)?;
     require(
@@ -407,6 +456,22 @@ fn conformance_cases() -> Vec<ConformanceCase> {
             fixture: "accepted_contract_runtime_envelope",
             expected_code: event_codes::ARTIFACT_ADMISSION_ACCEPTED,
             run: case_capability_envelope_only_allows_declared_ids,
+        },
+        ConformanceCase {
+            id: "artifact_public_digest_forgery_fails_closed",
+            invariant: invariants::INV_ARTIFACT_SIGNED_CONTRACT,
+            level: RequirementLevel::Must,
+            fixture: "trusted_signer_name_public_digest_with_expanded_budget",
+            expected_code: error_codes::ERR_ARTIFACT_SIGNATURE_INVALID,
+            run: case_public_digest_forgery_denies,
+        },
+        ConformanceCase {
+            id: "artifact_same_name_foreign_key_fails_closed",
+            invariant: invariants::INV_ARTIFACT_SIGNED_CONTRACT,
+            level: RequirementLevel::Must,
+            fixture: "trusted_signer_name_foreign_signing_key",
+            expected_code: error_codes::ERR_ARTIFACT_SIGNATURE_INVALID,
+            run: case_same_name_foreign_key_denies,
         },
         ConformanceCase {
             id: "artifact_exact_active_set_has_no_drift",

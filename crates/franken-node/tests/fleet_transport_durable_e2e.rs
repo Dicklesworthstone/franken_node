@@ -914,7 +914,10 @@ mod http_origin_boundary {
 
     #[test]
     fn fleet_http_redirects_never_contact_another_origin() {
-        for status in [301, 302, 303, 307, 308] {
+        for (status, body_length) in [301, 302, 303, 307, 308]
+            .into_iter()
+            .flat_map(|status| [0, 1_048_576].map(|body_length| (status, body_length)))
+        {
             for operation in ["health", "actions", "publish", "heartbeat"] {
                 let target = TcpListener::bind("127.0.0.1:0").expect("bind redirect target");
                 target
@@ -924,10 +927,10 @@ mod http_origin_boundary {
                     "http://{}/untrusted-fleet",
                     target.local_addr().expect("redirect address")
                 );
-                // No response body follows the declared length. Refusal must
-                // happen on the status, before attempting body consumption.
+                // A complete empty body permits automatic redirects; a
+                // truncated nonempty body proves refusal precedes body reads.
                 let (origin, peer) = serve_responses([format!(
-                    "HTTP/1.1 {status} Redirect\r\nLocation: {destination}\r\nContent-Length: 1048576\r\nConnection: close\r\n\r\n"
+                    "HTTP/1.1 {status} Redirect\r\nLocation: {destination}\r\nContent-Length: {body_length}\r\nConnection: close\r\n\r\n"
                 )]);
                 let mut client = HttpFleetTransport::new(&origin, TOKEN, Duration::from_secs(2))
                     .expect("client");
@@ -941,6 +944,10 @@ mod http_origin_boundary {
                     _ => unreachable!("fixed operation table"),
                 };
                 let [request] = peer.join().expect("HTTP peer finished");
+                let contact = target
+                    .accept()
+                    .expect_err("redirect target must never be contacted");
+                assert_eq!(contact.kind(), std::io::ErrorKind::WouldBlock);
                 let error = result.expect_err("redirect must not succeed");
                 assert!(
                     matches!(&error, FleetTransportError::IoError { .. }),
@@ -956,10 +963,6 @@ mod http_origin_boundary {
                     !error.to_string().contains(&destination),
                     "untrusted redirect target must not be promoted into diagnostics"
                 );
-                let contact = target
-                    .accept()
-                    .expect_err("redirect target must never be contacted");
-                assert_eq!(contact.kind(), std::io::ErrorKind::WouldBlock);
                 let has_token = request.contains(TOKEN);
                 assert_eq!(has_token, operation != "health", "{operation}");
                 if operation == "publish" || operation == "heartbeat" {

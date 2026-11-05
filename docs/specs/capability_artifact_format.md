@@ -21,9 +21,41 @@ the enforced capability envelope must match the admitted contract without drift.
 1. Artifact must contain a `capability_contract` field.
 2. Capability contract must include `contract_id`, `extension_id`, `capabilities`, `signer_id`, `signature`, and `schema_version`.
 3. Every capability entry must specify `capability_id`, `scope`, and `max_calls_per_epoch`.
-4. Contract signature must verify against a trusted signer.
+4. Contract signature must pass strict Ed25519 verification against the independently configured public key for its signer ID.
 5. Contract `schema_version` must match the expected admission schema.
 6. If any rule fails, admission is denied (fail-closed).
+
+### Signature and trust-anchor encoding
+
+`signature` is `ed25519-v1:` followed by exactly 128 lowercase hexadecimal
+digits (the 64-byte Ed25519 signature). The signed message is the UTF-8 bytes of
+`franken-node/capability-contract-signature/v1:` followed by the 64 lowercase
+hexadecimal digits returned by `compute_contract_digest`. That digest retains
+the existing `artifact_contract_digest_v1:` domain and length-prefixed byte
+layout, binding the contract ID, extension ID/version, artifact ID, payload
+hash, signer ID, schema, ordered capability IDs/scopes/call budgets, and issue
+epoch. Its historical digest vectors remain unchanged.
+
+The digest alone is public integrity metadata and is never an admission
+signature. Historical unkeyed digest strings are rejected; they gain no signing
+authority from a trusted-looking signer name or an existing trust card.
+
+`AdmissionConfig.trusted_signers` maps independently supplied signer IDs to
+32-byte Ed25519 public keys encoded as 64 lowercase hexadecimal digits.
+`with_signer(id, &verifying_key)` registers a bounded trust anchor; registering
+the same ID/key is idempotent, while replacing an existing ID with a different
+key is rejected. Contract fields cannot supply or replace an admission key.
+Malformed or absent selected anchors, foreign signing keys, and over-capacity
+signer registries fail closed.
+Legacy configurations containing only signer-name lists must be replaced with
+explicit public-key mappings.
+
+`compute_contract_signature`, `make_contract`, and `make_artifact` require an
+explicit signing key. The artifact constructors remain fixture utilities;
+their synthetic payload hashes do not verify externally installed payload
+bytes. This library admission/enforcement contract is a prerequisite for the
+broader signed source and runtime authority integration tracked by
+`bd-reality-20260923-26n9r.28`.
 
 ## Enforcement Rules
 
@@ -38,6 +70,9 @@ Required fields:
 
 - `contract_id`
 - `extension_id`
+- `extension_version`
+- `artifact_id`
+- `payload_hash` (lowercase SHA-256 hexadecimal digest)
 - `capabilities` (array of `CapabilityEntry`)
 - `signer_id`
 - `signature`

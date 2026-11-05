@@ -3,10 +3,12 @@ pub mod artifact_contract;
 #[cfg(test)]
 mod tests {
     use super::artifact_contract::{
-        AdmissionConfig, AdmissionDenialReason, AdmissionGate, AdmissionOutcome, CapabilityEntry,
-        DriftCheckResult, EnforcementEngine, ExtensionArtifact, SCHEMA_VERSION, make_artifact,
-        make_contract,
+        AdmissionConfig, AdmissionDenialReason, AdmissionGate, AdmissionOutcome,
+        CapabilityContract, CapabilityEntry, DriftCheckResult, EnforcementEngine,
+        ExtensionArtifact, SCHEMA_VERSION, make_artifact as make_signed_artifact,
+        make_contract as make_signed_contract,
     };
+    use ed25519_dalek::SigningKey;
     // bd-o776s: prod admission now runs a TRUST-REGISTRY availability + revocation check
     // BEFORE contract/capability validation (artifact_contract::AdmissionGate::evaluate,
     // the `else` arm that denies with TrustRevoked "Trust registry not available for
@@ -20,6 +22,37 @@ mod tests {
         ExtensionIdentity, ProvenanceSummary, PublisherIdentity, ReputationTrend, RevocationStatus,
         RiskAssessment, RiskLevel, TrustCardInput, TrustCardRegistry,
     };
+
+    fn signing_key() -> SigningKey {
+        SigningKey::from_bytes(&[42; 32])
+    }
+
+    fn make_contract(
+        contract_id: &str,
+        extension_id: &str,
+        capabilities: Vec<CapabilityEntry>,
+        signer_id: &str,
+        schema_version: &str,
+        issued_epoch_ms: u64,
+    ) -> CapabilityContract {
+        make_signed_contract(
+            contract_id,
+            extension_id,
+            capabilities,
+            signer_id,
+            schema_version,
+            issued_epoch_ms,
+            &signing_key(),
+        )
+    }
+
+    fn make_artifact(
+        artifact_id: &str,
+        extension_id: &str,
+        contract: CapabilityContract,
+    ) -> ExtensionArtifact {
+        make_signed_artifact(artifact_id, extension_id, contract, &signing_key())
+    }
 
     fn capabilities() -> Vec<CapabilityEntry> {
         vec![
@@ -39,7 +72,7 @@ mod tests {
     fn trusted_gate() -> AdmissionGate {
         let mut config = AdmissionConfig::new(SCHEMA_VERSION);
         config
-            .with_signer("signer-A")
+            .with_signer("signer-A", &signing_key().verifying_key())
             .expect("test signer registration should fit");
         AdmissionGate::new(config)
     }

@@ -5,6 +5,7 @@
 //! invalid contracts cause immediate rejection. At runtime, the enforced capability
 //! envelope must match the admitted contract without drift.
 
+use ed25519_dalek::{SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -13,10 +14,14 @@ use crate::capacity_defaults::aliases::MAX_TRUSTED_SIGNERS;
 use crate::capacity_defaults::bounded_input::{
     self, AUDIT_BOUNDED_INPUT_REJECTED, BoundedInputPolicy,
 };
+use crate::supply_chain::artifact_signing::{sign_bytes, verify_signature};
 use crate::supply_chain::trust_card::{RevocationStatus, TrustCardRegistry};
 
 /// Report schema version for capability artifact vectors.
 pub const SCHEMA_VERSION: &str = "capability-artifact-v1.0";
+
+const CONTRACT_SIGNATURE_PREFIX: &str = "ed25519-v1:";
+const CONTRACT_SIGNATURE_DOMAIN: &[u8] = b"franken-node/capability-contract-signature/v1:";
 
 /// Reserved placeholder for unknown artifact identifiers.
 const RESERVED_ARTIFACT_ID: &str = "<unknown>";
@@ -244,7 +249,9 @@ pub enum AdmissionOutcome {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdmissionConfig {
     pub expected_schema_version: String,
-    pub trusted_signers: Vec<String>,
+    /// Independently configured signer IDs and lowercase-hex Ed25519 public keys.
+    /// Contract contents never supply their own admission trust anchor.
+    pub trusted_signers: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -287,28 +294,50 @@ impl AdmissionConfig {
     pub fn new(expected_schema_version: impl Into<String>) -> Self {
         Self {
             expected_schema_version: expected_schema_version.into(),
-            trusted_signers: Vec::new(),
+            trusted_signers: BTreeMap::new(),
         }
     }
 
     pub fn with_signer(
         &mut self,
         signer_id: impl Into<String>,
+        verifying_key: &VerifyingKey,
     ) -> Result<(), AdmissionConfigError> {
         let signer_id = signer_id.into();
         if let Some(detail) = invalid_token_detail("signer_id", &signer_id) {
             return Err(AdmissionConfigError::InvalidTrustedSigner { detail });
         }
-        if self.trusted_signers.contains(&signer_id) {
-            return Ok(());
+        let public_key_hex = hex::encode(verifying_key.as_bytes());
+        if let Some(existing_key) = self.trusted_signers.get(&signer_id) {
+            return if existing_key == &public_key_hex {
+                Ok(())
+            } else {
+                Err(AdmissionConfigError::InvalidTrustedSigner {
+                    detail: "signer_id is already bound to a different public key".to_string(),
+                })
+            };
         }
         if self.trusted_signers.len() >= MAX_TRUSTED_SIGNERS {
             return Err(AdmissionConfigError::TrustedSignerCapacityExceeded {
                 capacity: MAX_TRUSTED_SIGNERS,
             });
         }
-        self.trusted_signers.push(signer_id);
+        self.trusted_signers.insert(signer_id, public_key_hex);
         Ok(())
+    }
+
+    fn verifying_key(&self, signer_id: &str) -> Option<VerifyingKey> {
+        // Serialized or directly constructed configurations must not bypass
+        // the builder's capacity and canonical key-encoding requirements.
+        if self.trusted_signers.len() > MAX_TRUSTED_SIGNERS {
+            return None;
+        }
+        let encoded = self.trusted_signers.get(signer_id)?;
+        if !is_hex_sha256(encoded) {
+            return None;
+        }
+        let bytes: [u8; 32] = hex::decode(encoded).ok()?.try_into().ok()?;
+        VerifyingKey::from_bytes(&bytes).ok()
     }
 }
 
@@ -603,9 +632,10 @@ impl AdmissionGate {
             };
         }
 
-        if !is_hex_sha256(&contract.signature) {
+        if contract_signature_hex(&contract.signature).is_none() {
             let reason = AdmissionDenialReason::InvalidContract {
-                detail: "signature must be lowercase hex sha256".to_string(),
+                detail: "signature must be ed25519-v1 followed by 128 lowercase hex digits"
+                    .to_string(),
             };
             return AdmissionOutcome::Denied {
                 event_code: reason.code().to_string(),
@@ -689,14 +719,14 @@ impl AdmissionGate {
         }
 
         // INV-ARTIFACT-SIGNED-CONTRACT: verify signer is trusted and signature is valid
-        if !self.config.trusted_signers.contains(&contract.signer_id) {
+        let Some(verifying_key) = self.config.verifying_key(&contract.signer_id) else {
             return AdmissionOutcome::Denied {
                 reason: AdmissionDenialReason::SignatureInvalid,
                 event_code: error_codes::ERR_ARTIFACT_ADMISSION_DENIED.to_string(),
             };
-        }
+        };
 
-        if !verify_contract_signature(contract) {
+        if !verify_contract_signature(contract, &verifying_key) {
             return AdmissionOutcome::Denied {
                 reason: AdmissionDenialReason::SignatureInvalid,
                 event_code: error_codes::ERR_ARTIFACT_ADMISSION_DENIED.to_string(),
@@ -909,13 +939,55 @@ fn is_hex_sha256(value: &str) -> bool {
         .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
-fn verify_contract_signature(contract: &CapabilityContract) -> bool {
-    let expected = compute_contract_signature(contract);
-    crate::security::constant_time::ct_eq(&contract.signature, &expected)
+fn contract_signature_hex(signature: &str) -> Option<&str> {
+    let encoded = signature.strip_prefix(CONTRACT_SIGNATURE_PREFIX)?;
+    (encoded.len() == 128
+        && encoded
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f')))
+    .then_some(encoded)
 }
 
-/// Compute the expected signature for a capability contract.
-pub fn compute_contract_signature(contract: &CapabilityContract) -> String {
+fn contract_signature_message(contract: &CapabilityContract) -> Vec<u8> {
+    let mut message = CONTRACT_SIGNATURE_DOMAIN.to_vec();
+    message.extend_from_slice(compute_contract_digest(contract).as_bytes());
+    message
+}
+
+fn verify_contract_signature(contract: &CapabilityContract, verifying_key: &VerifyingKey) -> bool {
+    let Some(encoded) = contract_signature_hex(&contract.signature) else {
+        return false;
+    };
+    let Ok(signature) = hex::decode(encoded) else {
+        return false;
+    };
+    verify_signature(
+        verifying_key,
+        &contract_signature_message(contract),
+        &signature,
+    )
+    .is_ok()
+}
+
+/// Sign the complete capability contract with an explicitly supplied Ed25519 key.
+/// The signer ID is part of the signed statement; admission independently pins
+/// that ID to its public key. An unkeyed digest is never an admission signature.
+pub fn compute_contract_signature(
+    contract: &CapabilityContract,
+    signing_key: &SigningKey,
+) -> String {
+    format!(
+        "{CONTRACT_SIGNATURE_PREFIX}{}",
+        hex::encode(sign_bytes(
+            signing_key,
+            &contract_signature_message(contract)
+        ))
+    )
+}
+
+/// Compute the canonical content digest, preserving the original v1 byte layout.
+/// This public digest provides integrity only and cannot authenticate a signer.
+pub fn compute_contract_digest(contract: &CapabilityContract) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"artifact_contract_digest_v1:");
 
@@ -952,6 +1024,7 @@ pub fn make_contract(
     signer_id: &str,
     schema_version: &str,
     issued_epoch_ms: u64,
+    signing_key: &SigningKey,
 ) -> CapabilityContract {
     let mut contract = CapabilityContract {
         contract_id: contract_id.to_string(),
@@ -965,7 +1038,7 @@ pub fn make_contract(
         schema_version: schema_version.to_string(),
         issued_epoch_ms,
     };
-    contract.signature = compute_contract_signature(&contract);
+    contract.signature = compute_contract_signature(&contract, signing_key);
     contract
 }
 
@@ -974,6 +1047,7 @@ pub fn make_artifact(
     artifact_id: &str,
     extension_id: &str,
     mut contract: CapabilityContract,
+    signing_key: &SigningKey,
 ) -> ExtensionArtifact {
     // Length-prefixed encoding prevents delimiter-collision ambiguity.
     let mut hasher = Sha256::new();
@@ -983,12 +1057,12 @@ pub fn make_artifact(
         hasher.update(field.as_bytes());
     }
     let payload_hash = hex::encode(hasher.finalize());
-    let should_resign = verify_contract_signature(&contract);
+    let should_resign = verify_contract_signature(&contract, &signing_key.verifying_key());
     contract.artifact_id = artifact_id.to_string();
     contract.extension_version = DEFAULT_EXTENSION_VERSION.to_string();
     contract.payload_hash = payload_hash.clone();
     if should_resign {
-        contract.signature = compute_contract_signature(&contract);
+        contract.signature = compute_contract_signature(&contract, signing_key);
     }
     ExtensionArtifact {
         artifact_id: artifact_id.to_string(),
@@ -1006,6 +1080,70 @@ pub fn make_artifact(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_signing_key() -> SigningKey {
+        SigningKey::from_bytes(&[42; 32])
+    }
+
+    fn make_contract(
+        contract_id: &str,
+        extension_id: &str,
+        capabilities: Vec<CapabilityEntry>,
+        signer_id: &str,
+        schema_version: &str,
+        issued_epoch_ms: u64,
+    ) -> CapabilityContract {
+        super::make_contract(
+            contract_id,
+            extension_id,
+            capabilities,
+            signer_id,
+            schema_version,
+            issued_epoch_ms,
+            &test_signing_key(),
+        )
+    }
+
+    fn make_artifact(
+        artifact_id: &str,
+        extension_id: &str,
+        contract: CapabilityContract,
+    ) -> ExtensionArtifact {
+        super::make_artifact(artifact_id, extension_id, contract, &test_signing_key())
+    }
+
+    fn independently_signed_artifact() -> ExtensionArtifact {
+        // Fixed vector produced independently with Python hashlib/struct and
+        // cryptography's Ed25519 implementation, using the documented encoding.
+        let contract = CapabilityContract {
+            contract_id: "contract-ed25519-vector".to_string(),
+            extension_id: "ext-alpha".to_string(),
+            extension_version: "1.0.0".to_string(),
+            artifact_id: "artifact-ed25519-vector".to_string(),
+            payload_hash: "a".repeat(64),
+            capabilities: vec![CapabilityEntry {
+                capability_id: "fs.read".to_string(),
+                scope: "filesystem:read".to_string(),
+                max_calls_per_epoch: 2,
+            }],
+            signer_id: "signer-A".to_string(),
+            signature: concat!(
+                "ed25519-v1:",
+                "2f12cc9adcc8026b1baa271620c166eb53c2d9fa738e0871952b102f9949fc8666",
+                "2ac06015bd9f9836d1723fe7f1e135dd1ca608020bcf0847472784ca365e01"
+            )
+            .to_string(),
+            schema_version: SCHEMA_VERSION.to_string(),
+            issued_epoch_ms: 10_000,
+        };
+        ExtensionArtifact {
+            artifact_id: contract.artifact_id.clone(),
+            extension_id: contract.extension_id.clone(),
+            extension_version: contract.extension_version.clone(),
+            payload_hash: contract.payload_hash.clone(),
+            capability_contract: Some(contract),
+        }
+    }
 
     fn test_capabilities() -> Vec<CapabilityEntry> {
         vec![
@@ -1035,7 +1173,7 @@ mod tests {
 
     fn test_gate() -> AdmissionGate {
         let mut cfg = AdmissionConfig::new(SCHEMA_VERSION);
-        cfg.with_signer("signer-A")
+        cfg.with_signer("signer-A", &test_signing_key().verifying_key())
             .expect("trusted signer registration should succeed");
         AdmissionGate::new(cfg)
     }
@@ -1137,13 +1275,14 @@ mod tests {
     #[test]
     fn trusted_signer_registration_rejects_capacity_overflow_without_eviction() {
         let mut cfg = AdmissionConfig::new(SCHEMA_VERSION);
+        let verifying_key = test_signing_key().verifying_key();
         for idx in 0..MAX_TRUSTED_SIGNERS {
-            cfg.with_signer(format!("signer-{idx}"))
+            cfg.with_signer(format!("signer-{idx}"), &verifying_key)
                 .expect("signer fill should succeed");
         }
 
         let err = cfg
-            .with_signer("overflow-signer")
+            .with_signer("overflow-signer", &verifying_key)
             .expect_err("overflow signer must be rejected");
         assert_eq!(
             err,
@@ -1156,28 +1295,23 @@ mod tests {
             error_codes::ERR_ARTIFACT_TRUSTED_SIGNER_CAPACITY
         );
         assert_eq!(cfg.trusted_signers.len(), MAX_TRUSTED_SIGNERS);
-        assert_eq!(
-            cfg.trusted_signers.first().map(String::as_str),
-            Some("signer-0")
-        );
+        assert!(cfg.trusted_signers.contains_key("signer-0"));
         let expected_last = format!("signer-{}", MAX_TRUSTED_SIGNERS.saturating_sub(1));
-        assert_eq!(
-            cfg.trusted_signers.last().map(String::as_str),
-            Some(expected_last.as_str())
-        );
-        assert!(!cfg.trusted_signers.iter().any(|s| s == "overflow-signer"));
+        assert!(cfg.trusted_signers.contains_key(&expected_last));
+        assert!(!cfg.trusted_signers.contains_key("overflow-signer"));
     }
 
     #[test]
     fn trusted_signer_overflow_preserves_existing_admission_roots() {
         let mut cfg = AdmissionConfig::new(SCHEMA_VERSION);
-        cfg.with_signer("signer-A")
+        let verifying_key = test_signing_key().verifying_key();
+        cfg.with_signer("signer-A", &verifying_key)
             .expect("initial signer registration should succeed");
         for idx in 1..MAX_TRUSTED_SIGNERS {
-            cfg.with_signer(format!("signer-{idx}"))
+            cfg.with_signer(format!("signer-{idx}"), &verifying_key)
                 .expect("signer fill should succeed");
         }
-        cfg.with_signer("signer-overflow")
+        cfg.with_signer("signer-overflow", &verifying_key)
             .expect_err("overflow signer must be rejected");
 
         let gate = AdmissionGate::new(cfg);
@@ -1207,18 +1341,183 @@ mod tests {
     #[test]
     fn trusted_signer_registration_is_idempotent() {
         let mut cfg = AdmissionConfig::new(SCHEMA_VERSION);
-        cfg.with_signer("signer-A")
+        cfg.with_signer("signer-A", &test_signing_key().verifying_key())
             .expect("initial signer registration should succeed");
-        cfg.with_signer("signer-A")
+        cfg.with_signer("signer-A", &test_signing_key().verifying_key())
             .expect("duplicate signer registration should be ignored");
         assert_eq!(cfg.trusted_signers.len(), 1);
+    }
+
+    #[test]
+    fn trusted_signer_registration_cannot_replace_an_admission_key() {
+        let mut cfg = AdmissionConfig::new(SCHEMA_VERSION);
+        cfg.with_signer("signer-A", &test_signing_key().verifying_key())
+            .expect("register independent publisher key");
+        let original_roots = cfg.trusted_signers.clone();
+        let other_key = SigningKey::from_bytes(&[7; 32]).verifying_key();
+        assert!(matches!(
+            cfg.with_signer("signer-A", &other_key),
+            Err(AdmissionConfigError::InvalidTrustedSigner { .. })
+        ));
+        assert_eq!(cfg.trusted_signers, original_roots);
+        assert!(matches!(
+            evaluate_trusted(
+                &AdmissionGate::new(cfg),
+                &independently_signed_artifact(),
+                0,
+            ),
+            AdmissionOutcome::Accepted { .. }
+        ));
+    }
+
+    #[test]
+    fn admission_accepts_independent_ed25519_vector_and_enforces_signed_budget() {
+        let public_key_bytes: [u8; 32] =
+            hex::decode("197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d61")
+                .expect("independent vector public key")
+                .try_into()
+                .expect("32-byte public key");
+        let public_key = VerifyingKey::from_bytes(&public_key_bytes).expect("Ed25519 public key");
+        let mut cfg = AdmissionConfig::new(SCHEMA_VERSION);
+        cfg.with_signer("signer-A", &public_key)
+            .expect("register separately retained public key");
+        let artifact = independently_signed_artifact();
+        let contract = artifact.capability_contract.as_ref().expect("contract");
+        assert_eq!(
+            compute_contract_digest(contract),
+            "10769f32aee73a0b7072a12587b854f7c702b0023d39265454c7a7b4402f4222"
+        );
+        assert_eq!(
+            compute_contract_signature(contract, &test_signing_key()),
+            contract.signature
+        );
+        assert!(matches!(
+            evaluate_trusted(&AdmissionGate::new(cfg), &artifact, 0),
+            AdmissionOutcome::Accepted { .. }
+        ));
+        let mut enforcement = EnforcementEngine::from_contract(contract);
+        assert!(matches!(
+            enforcement.permit_invocation("fs.read", "filesystem:write"),
+            InvocationDecision::Denied {
+                reason: InvocationDenialReason::ScopeMismatch { .. },
+                ..
+            }
+        ));
+        for remaining in [1, 0] {
+            assert!(matches!(
+                enforcement.permit_invocation("fs.read", "filesystem:read"),
+                InvocationDecision::Permitted { remaining_calls_in_epoch, .. }
+                    if remaining_calls_in_epoch == remaining
+            ));
+        }
+        assert!(matches!(
+            enforcement.permit_invocation("fs.read", "filesystem:read"),
+            InvocationDecision::Denied {
+                reason: InvocationDenialReason::CallBudgetExceeded {
+                    max_calls_per_epoch: 2
+                },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn admission_rejects_public_digest_forgery_even_with_trusted_signer_name() {
+        let gate = test_gate();
+        let mut artifact = independently_signed_artifact();
+        let contract = artifact.capability_contract.as_mut().expect("contract");
+        contract.capabilities[0].max_calls_per_epoch = u64::MAX;
+        let digest = compute_contract_digest(contract);
+        contract.signature = digest.clone();
+        assert!(matches!(
+            evaluate_trusted(&gate, &artifact, 0),
+            AdmissionOutcome::Denied {
+                reason: AdmissionDenialReason::InvalidContract { .. },
+                ..
+            }
+        ));
+
+        // A digest padded to the new signature width still cannot authenticate
+        // a caller-selected capability envelope under the configured root.
+        artifact
+            .capability_contract
+            .as_mut()
+            .expect("contract")
+            .signature = format!("{CONTRACT_SIGNATURE_PREFIX}{digest}{digest}");
+        assert!(matches!(
+            evaluate_trusted(&gate, &artifact, 0),
+            AdmissionOutcome::Denied {
+                reason: AdmissionDenialReason::SignatureInvalid,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn admission_rejects_foreign_key_and_wrong_signature_domain() {
+        let gate = test_gate();
+        let mut artifact = independently_signed_artifact();
+        let contract = artifact.capability_contract.as_mut().expect("contract");
+        contract.signature =
+            compute_contract_signature(contract, &SigningKey::from_bytes(&[7; 32]));
+        assert!(matches!(
+            evaluate_trusted(&gate, &artifact, 0),
+            AdmissionOutcome::Denied {
+                reason: AdmissionDenialReason::SignatureInvalid,
+                ..
+            }
+        ));
+
+        let contract = artifact.capability_contract.as_mut().expect("contract");
+        contract.signature = format!(
+            "{CONTRACT_SIGNATURE_PREFIX}{}",
+            hex::encode(sign_bytes(
+                &test_signing_key(),
+                compute_contract_digest(contract).as_bytes(),
+            ))
+        );
+        assert!(matches!(
+            evaluate_trusted(&gate, &artifact, 0),
+            AdmissionOutcome::Denied {
+                reason: AdmissionDenialReason::SignatureInvalid,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn admission_rejects_malformed_or_foreign_configured_public_keys() {
+        let artifact = independently_signed_artifact();
+        for encoded in [
+            String::new(),
+            "g".repeat(64),
+            "00".repeat(32),
+            hex::encode(SigningKey::from_bytes(&[7; 32]).verifying_key().as_bytes()),
+        ] {
+            let mut cfg = AdmissionConfig::new(SCHEMA_VERSION);
+            cfg.trusted_signers.insert("signer-A".to_string(), encoded);
+            assert!(matches!(
+                evaluate_trusted(&AdmissionGate::new(cfg), &artifact, 0),
+                AdmissionOutcome::Denied {
+                    reason: AdmissionDenialReason::SignatureInvalid,
+                    ..
+                }
+            ));
+        }
+        assert!(
+            serde_json::from_value::<AdmissionConfig>(serde_json::json!({
+                "expected_schema_version": SCHEMA_VERSION,
+                "trusted_signers": ["signer-A"]
+            }))
+            .is_err()
+        );
     }
 
     #[test]
     fn trusted_signer_registration_rejects_blank_signer() {
         let mut cfg = AdmissionConfig::new(SCHEMA_VERSION);
         let err = cfg
-            .with_signer("   ")
+            .with_signer("   ", &test_signing_key().verifying_key())
             .expect_err("blank signer registration must fail closed");
         assert!(matches!(
             &err,
@@ -1233,7 +1532,7 @@ mod tests {
     fn trusted_signer_registration_rejects_whitespace_wrapped_signer() {
         let mut cfg = AdmissionConfig::new(SCHEMA_VERSION);
         let err = cfg
-            .with_signer(" signer-A ")
+            .with_signer(" signer-A ", &test_signing_key().verifying_key())
             .expect_err("whitespace signer registration must fail closed");
         assert!(matches!(
             &err,
@@ -1248,7 +1547,7 @@ mod tests {
         let mut cfg = AdmissionConfig::new(SCHEMA_VERSION);
         for signer in ["../signer-A", "/signer-A", "signer\\A", "signer\0A"] {
             let err = cfg
-                .with_signer(signer)
+                .with_signer(signer, &test_signing_key().verifying_key())
                 .expect_err("path-like signer registration must fail closed");
             assert!(matches!(
                 &err,
@@ -1459,7 +1758,7 @@ mod tests {
         let gate = test_gate();
         let mut contract = test_contract();
         contract.signer_id.clear();
-        contract.signature = compute_contract_signature(&contract);
+        contract.signature = compute_contract_signature(&contract, &test_signing_key());
         let artifact = make_artifact("a1", "ext-alpha", contract);
         let outcome = evaluate_trusted(&gate, &artifact, 0);
         assert!(matches!(
@@ -1531,7 +1830,7 @@ mod tests {
     fn admission_rejects_uppercase_signature() {
         let gate = test_gate();
         let mut contract = test_contract();
-        contract.signature = "A".repeat(64);
+        contract.signature = format!("{CONTRACT_SIGNATURE_PREFIX}{}", "A".repeat(128));
         let artifact = make_artifact("a1", "ext-alpha", contract);
         let outcome = evaluate_trusted(&gate, &artifact, 0);
         let AdmissionOutcome::Denied {
@@ -1542,7 +1841,7 @@ mod tests {
             assert!(false, "expected uppercase signature to be denied");
             return;
         };
-        assert!(detail.contains("signature must be lowercase hex sha256"));
+        assert!(detail.contains("signature must be ed25519-v1"));
     }
 
     #[test]
@@ -1792,7 +2091,7 @@ mod tests {
             .as_mut()
             .expect("fixture should carry a contract");
         contract.artifact_id = "a2".to_string();
-        contract.signature = compute_contract_signature(contract);
+        contract.signature = compute_contract_signature(contract, &test_signing_key());
 
         let outcome = evaluate_trusted(&gate, &artifact, 0);
         let AdmissionOutcome::Denied {
@@ -1816,7 +2115,7 @@ mod tests {
             .as_mut()
             .expect("fixture should carry a contract");
         contract.payload_hash = "b".repeat(64);
-        contract.signature = compute_contract_signature(contract);
+        contract.signature = compute_contract_signature(contract, &test_signing_key());
 
         let outcome = evaluate_trusted(&gate, &artifact, 0);
         let AdmissionOutcome::Denied {
@@ -1840,7 +2139,7 @@ mod tests {
             .as_mut()
             .expect("fixture should carry a contract");
         contract.extension_version = "2.0.0".to_string();
-        contract.signature = compute_contract_signature(contract);
+        contract.signature = compute_contract_signature(contract, &test_signing_key());
 
         let outcome = evaluate_trusted(&gate, &artifact, 0);
         let AdmissionOutcome::Denied {
@@ -2053,12 +2352,9 @@ mod tests {
     fn admission_rejects_tampered_signature() {
         let gate = test_gate();
         let mut contract = test_contract();
-        // bd-o776s: use a well-formed (lowercase-hex, 64-char) but cryptographically
-        // wrong signature so admission reaches the signature-verification gate
-        // (SignatureInvalid). The prior value "tampered-sig" is not hex sha256, so
-        // the *format* gate would instead reject it as InvalidContract — which is
-        // the distinct case already covered by admission_rejects_non_hex_signature.
-        contract.signature = "0".repeat(64);
+        // Use the versioned Ed25519 encoding with invalid signature bytes so
+        // this reaches verification rather than the separate format gate.
+        contract.signature = format!("{CONTRACT_SIGNATURE_PREFIX}{}", "0".repeat(128));
         let artifact = make_artifact("a1", "ext-alpha", contract);
         let outcome = evaluate_trusted(&gate, &artifact, 0);
         assert!(matches!(
@@ -2622,10 +2918,11 @@ mod tests {
         #[test]
         fn trusted_signer_capacity_boundary_testing() {
             let mut cfg = AdmissionConfig::new(SCHEMA_VERSION);
+            let verifying_key = test_signing_key().verifying_key();
 
             // Fill to exact capacity
             for i in 0..MAX_TRUSTED_SIGNERS {
-                cfg.with_signer(format!("signer-{i}"))
+                cfg.with_signer(format!("signer-{i}"), &verifying_key)
                     .expect("should fit within capacity");
             }
 
@@ -2633,7 +2930,7 @@ mod tests {
             assert_eq!(cfg.trusted_signers.len(), MAX_TRUSTED_SIGNERS);
 
             // Test overflow rejection
-            let overflow_result = cfg.with_signer("overflow-signer");
+            let overflow_result = cfg.with_signer("overflow-signer", &verifying_key);
             assert!(overflow_result.is_err());
             assert_eq!(cfg.trusted_signers.len(), MAX_TRUSTED_SIGNERS);
 
@@ -2921,9 +3218,9 @@ mod tests {
         }
     }
 
-    // Frozen SHA-256 hex outputs of compute_contract_signature
-    // (artifact_contract.rs:842). The function derives the canonical
-    // capability-contract signature as:
+    // Frozen SHA-256 hex outputs of compute_contract_digest. These original
+    // integrity vectors remain unchanged; they do not authenticate a signer.
+    // Ed25519 signs the digest under a separate versioned signature domain.
     //
     //   SHA256(
     //     b"artifact_contract_digest_v1:"
@@ -2961,7 +3258,7 @@ mod tests {
     //
     //   4. SIGNATURE-EXCLUSION INVARIANT: changing only the `signature`
     //      field of the input contract MUST NOT change the output
-    //      signature (signature is the OUTPUT, not an input).
+    //      digest (signature is an OUTPUT, not an input).
     //
     //   5. CAPABILITY-ORDER-SENSITIVITY: reordering the capabilities
     //      Vec MUST flip the output. Pins that Vec iteration order is
@@ -2969,22 +3266,21 @@ mod tests {
     //      BTreeMap design).
     //
     //   6. MAX-CALLS-SENSITIVITY: bumping max_calls_per_epoch by 1 MUST
-    //      flip the signature. Pins that the per-cap u64 IS fed into
+    //      flip the digest. Pins that the per-cap u64 IS fed into
     //      the hasher.
     //
     // Goldens were derived offline from the canonical-byte spec via
     // Python — NOT captured from an unreviewed prior run.
     //
-    // Why this matters (the contract): compute_contract_signature is
+    // Why this matters (the contract): compute_contract_digest is
     // the integrity-binding primitive for capability contracts. If
-    // two nodes compute different signatures for the same logical
+    // two nodes compute different digests for the same logical
     // contract — because someone reordered fields, swapped Vec for
     // BTreeMap on capabilities (which would alphabetically sort caps),
     // dropped max_calls_per_epoch from the hasher, or muddled the v1
-    // domain — contract verification (verify_contract_signature at
-    // L836) fails opaquely AND legitimate extensions get rejected.
+    // domain — cryptographic verification rejects legitimate extensions.
     #[test]
-    fn compute_contract_signature_frozen_canonical_byte_layout_golden() {
+    fn compute_contract_digest_frozen_canonical_byte_layout_golden() {
         // 1. Minimal: empty everything.
         let minimal = CapabilityContract {
             contract_id: String::new(),
@@ -2999,9 +3295,9 @@ mod tests {
             issued_epoch_ms: 0,
         };
         assert_eq!(
-            compute_contract_signature(&minimal),
+            compute_contract_digest(&minimal),
             "0b1212fbba689029fdfac4ff0296697cf8df520e72b4858563bbf8cc894ae48f",
-            "minimal compute_contract_signature drifted — check the v1 \
+            "minimal compute_contract_digest drifted — check the v1 \
              domain separator `artifact_contract_digest_v1:`, the 7 \
              LE64(0)-empty-string framings, OR the LE64(0) zero-caps \
              count"
@@ -3026,7 +3322,7 @@ mod tests {
             issued_epoch_ms: 1_700_000_000_000,
         };
         assert_eq!(
-            compute_contract_signature(&typical),
+            compute_contract_digest(&typical),
             "4cb860e222e7625909c3ca1f7d84f069714b14bb89185806f7b24f1874bb5e33"
         );
 
@@ -3056,7 +3352,7 @@ mod tests {
             issued_epoch_ms: 1_700_000_001_000,
         };
         assert_eq!(
-            compute_contract_signature(&multi_cap),
+            compute_contract_digest(&multi_cap),
             "89756cf9190cdf2033104f0ce2307ff707facb712d45df17604b81506070eafc"
         );
 
@@ -3065,10 +3361,10 @@ mod tests {
         let mut with_sig = typical.clone();
         with_sig.signature = "ed25519:placeholder-signature-bytes".to_string();
         assert_eq!(
-            compute_contract_signature(&with_sig),
-            compute_contract_signature(&typical),
+            compute_contract_digest(&with_sig),
+            compute_contract_digest(&typical),
             "the `signature` field MUST be EXCLUDED from \
-             compute_contract_signature (it is the OUTPUT, not an input \
+             compute_contract_digest (it is an OUTPUT, not an input \
              — including it would be circular)"
         );
 
@@ -3076,9 +3372,9 @@ mod tests {
         let mut reordered = multi_cap.clone();
         reordered.capabilities.reverse();
         assert_ne!(
-            compute_contract_signature(&reordered),
-            compute_contract_signature(&multi_cap),
-            "reversing the capabilities Vec MUST flip the signature \
+            compute_contract_digest(&reordered),
+            compute_contract_digest(&multi_cap),
+            "reversing the capabilities Vec MUST flip the digest \
              — Vec<CapabilityEntry> iteration is canonical (NOT \
              sorted; opposite to r53 capability_artifact's BTreeMap)"
         );
@@ -3087,19 +3383,19 @@ mod tests {
         let mut max_calls_bumped = typical.clone();
         max_calls_bumped.capabilities[0].max_calls_per_epoch = 101;
         assert_ne!(
-            compute_contract_signature(&max_calls_bumped),
-            compute_contract_signature(&typical),
+            compute_contract_digest(&max_calls_bumped),
+            compute_contract_digest(&typical),
             "bumping CapabilityEntry::max_calls_per_epoch from 100 to \
-             101 MUST flip the signature; if it does not, the u64 \
+             101 MUST flip the digest; if it does not, the u64 \
              counter is not being fed into the hasher and capability \
              quota tampering goes undetected"
         );
 
         // 64-lowercase-hex length+casing contract.
         for sig in [
-            compute_contract_signature(&minimal),
-            compute_contract_signature(&typical),
-            compute_contract_signature(&multi_cap),
+            compute_contract_digest(&minimal),
+            compute_contract_digest(&typical),
+            compute_contract_digest(&multi_cap),
         ] {
             assert_eq!(sig.len(), 64);
             assert!(
@@ -3144,7 +3440,7 @@ mod tests {
         // Create admission gate
         let mut gate_config = AdmissionConfig::new(SCHEMA_VERSION);
         gate_config
-            .with_signer("signer-A")
+            .with_signer("signer-A", &test_signing_key().verifying_key())
             .expect("add trusted signer");
         let gate = AdmissionGate::new(gate_config);
 
@@ -3255,7 +3551,7 @@ mod tests {
 
         let mut gate_config = AdmissionConfig::new(SCHEMA_VERSION);
         gate_config
-            .with_signer("signer-A")
+            .with_signer("signer-A", &test_signing_key().verifying_key())
             .expect("add trusted signer");
         let gate = AdmissionGate::new(gate_config);
 
@@ -3316,7 +3612,7 @@ mod tests {
 
         let mut gate_config = AdmissionConfig::new(SCHEMA_VERSION);
         gate_config
-            .with_signer("signer-A")
+            .with_signer("signer-A", &test_signing_key().verifying_key())
             .expect("add trusted signer");
         let gate = AdmissionGate::new(gate_config);
 
@@ -3365,7 +3661,7 @@ mod tests {
         // Test fail-closed behavior when no trust registry is provided
         let mut gate_config = AdmissionConfig::new(SCHEMA_VERSION);
         gate_config
-            .with_signer("signer-A")
+            .with_signer("signer-A", &test_signing_key().verifying_key())
             .expect("add trusted signer");
         let gate = AdmissionGate::new(gate_config);
 

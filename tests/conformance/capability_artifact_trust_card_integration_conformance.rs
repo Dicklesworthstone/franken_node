@@ -17,6 +17,7 @@
 
 use std::collections::BTreeMap;
 
+use ed25519_dalek::SigningKey;
 use frankenengine_node::extensions::artifact_contract::{
     AdmissionConfig, AdmissionGate, AdmissionOutcome, CapabilityContract, CapabilityEntry,
     ExtensionArtifact, SCHEMA_VERSION, make_artifact, make_contract,
@@ -69,9 +70,13 @@ struct IntegrationConformanceCase {
 fn create_test_admission_gate() -> Result<AdmissionGate, String> {
     let mut config = AdmissionConfig::new(SCHEMA_VERSION);
     config
-        .with_signer("signer-integration-test")
+        .with_signer("signer-integration-test", &signing_key().verifying_key())
         .map_err(|error| format!("Failed to register trusted signer: {error}"))?;
     Ok(AdmissionGate::new(config))
+}
+
+fn signing_key() -> SigningKey {
+    SigningKey::from_bytes(&[42; 32])
 }
 
 /// Generate capability entries for testing
@@ -104,8 +109,14 @@ fn create_test_artifact(extension_id: &str, capabilities: Vec<CapabilityEntry>) 
         "signer-integration-test",
         SCHEMA_VERSION,
         1,
+        &signing_key(),
     );
-    make_artifact(&format!("artifact-{}", extension_id), extension_id, contract)
+    make_artifact(
+        &format!("artifact-{}", extension_id),
+        extension_id,
+        contract,
+        &signing_key(),
+    )
 }
 
 /// Create trust card input that corresponds to the artifact
@@ -339,8 +350,14 @@ fn test_schema_compatibility(
         "signer-integration-test",
         "capability-artifact-v0.9", // Wrong version
         1,
+        &signing_key(),
     );
-    let artifact = make_artifact(&format!("artifact-{}", extension_id), extension_id, contract);
+    let artifact = make_artifact(
+        &format!("artifact-{}", extension_id),
+        extension_id,
+        contract,
+        &signing_key(),
+    );
 
     // Should fail with schema mismatch
     match admission_gate.evaluate(&artifact) {
