@@ -108,6 +108,14 @@ impl SourcePreparer {
         source: &str,
         report: &SourceGraphReport,
     ) -> Result<ModuleKind> {
+        // Bound the original UTF-8 source before normalization can erase type
+        // declarations or a zero-transform path can return. The normalized
+        // source remains subject to the parser budget below as well.
+        let source_bytes = u64::try_from(source.len())
+            .map_err(|_| parser_failure(ParseErrorCode::SourceTooLarge))?;
+        if source_bytes > self.parser_options.budget.max_source_bytes {
+            return Err(parser_failure(ParseErrorCode::SourceTooLarge));
+        }
         let explicit = captured_kind(module)?;
         let has_hashbang = source
             .strip_prefix('\u{feff}')
@@ -538,6 +546,108 @@ mod tests {
     }
 
     #[test]
+    fn typescript_erasure_cannot_hide_an_oversized_entry_or_dependency() {
+        use super::super::super::{GraphOptions, capture};
+        use super::super::CapturedEngineResolver;
+
+        let root = tempfile::tempdir().unwrap();
+        let source = format!(
+            "type PrivatePadding = \"{}\";\nexport const value = 1;\n",
+            "private_padding".repeat(512)
+        );
+        put_json_fixture(root.path(), "payload.mts", &source);
+        put_json_fixture(root.path(), "app.mjs", "import './payload.mts';");
+        let options = source_budget(256);
+        // Establish that the actual engine erases enough text to fit the
+        // budget: checking only its output would admit the oversized input.
+        let normalized = prepare_source_entry_for_public_entrypoints(
+            &source,
+            "payload.mts",
+            "source-byte-regression",
+            "source-byte-regression",
+            "source-byte-regression",
+        )
+        .unwrap();
+        assert!(source.len() > 256);
+        assert!(normalized.prepared_source.len() < 256);
+        assert!(
+            detect_kind_with_options(
+                &normalized.prepared_source,
+                Some(ModuleKind::EsModule),
+                &options,
+            )
+            .is_ok()
+        );
+
+        for entry in ["payload.mts", "app.mjs"] {
+            let graph = capture(root.path(), entry, GraphOptions::default()).unwrap();
+            assert!(graph.report().fully_resolved);
+            let pin = graph.report().input_hash.clone();
+            let failure =
+                CapturedEngineResolver::new_with_parser_options(graph, &pin, options.clone())
+                    .err()
+                    .unwrap();
+            assert_eq!(failure.code, "ERR_MODULE_ENGINE_PARSE_LIMIT", "{entry}");
+            assert!(!failure.detail.contains("private_padding"));
+        }
+    }
+
+    #[test]
+    fn original_source_byte_budget_is_inclusive_and_counts_utf8_for_every_kind() {
+        use super::super::super::{GraphOptions, capture};
+
+        let root = tempfile::tempdir().unwrap();
+        put_json_fixture(root.path(), "app.cjs", "require('./input.json');");
+        for (path, source, expected) in [
+            (
+                "input.mts",
+                "export const value: string = \"é😀\";\n",
+                ModuleKind::EsModule,
+            ),
+            (
+                "input.mjs",
+                "export const value = \"é😀\";\n",
+                ModuleKind::EsModule,
+            ),
+            ("input.json", "{\"value\":\"é😀\"}", ModuleKind::Json),
+        ] {
+            put_json_fixture(root.path(), path, source);
+            let entry = if expected == ModuleKind::Json {
+                "app.cjs"
+            } else {
+                path
+            };
+            let graph = capture(root.path(), entry, GraphOptions::default()).unwrap();
+            assert!(graph.report().fully_resolved);
+            let module = graph
+                .report()
+                .modules
+                .iter()
+                .find(|module| module.id.path == path)
+                .unwrap();
+            let mut preparer = SourcePreparer::with_parser_options(source_budget(source.len()));
+            assert_eq!(
+                preparer.prepare(module, source, graph.report()).unwrap(),
+                expected
+            );
+            // Repeated preparation must also preserve the inclusive boundary.
+            assert_eq!(
+                preparer.prepare(module, source, graph.report()).unwrap(),
+                expected
+            );
+            for limit in [source.len() - 1, source.chars().count()] {
+                let failure = SourcePreparer::with_parser_options(source_budget(limit))
+                    .prepare(module, source, graph.report())
+                    .unwrap_err();
+                assert_eq!(
+                    failure.code, "ERR_MODULE_ENGINE_PARSE_LIMIT",
+                    "{path}: {limit}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn syntax_fallback_preserves_explicit_commonjs_boundaries() {
         let source = "export const answer=42;";
         assert_eq!(detect_kind(source, None).unwrap(), ModuleKind::EsModule);
@@ -886,7 +996,10 @@ export {answer};
             let graph = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
             let a = graph.report().modules.iter().find(|module| module.id.path == "a.json").unwrap();
             let b = graph.report().modules.iter().find(|module| module.id.path == "b.json").unwrap();
-            let mut preparer = SourcePreparer::with_parser_options(source_budget(0));
+            let mut options = source_budget(2);
+            options.budget.max_token_count = 0;
+            options.budget.max_recursion_depth = 0;
+            let mut preparer = SourcePreparer::with_parser_options(options);
             preparer.retained_bytes = MAX_PREPARED_SOURCE_BYTES;
             assert_eq!(preparer.prepare(a, "{}", graph.report()).unwrap(), ModuleKind::Json);
             assert_eq!(preparer.prepare(a, "{}", graph.report()).unwrap(), ModuleKind::Json);
