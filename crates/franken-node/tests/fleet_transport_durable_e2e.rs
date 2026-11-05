@@ -830,12 +830,15 @@ fn committed_writes_survive_child_process_abort() {
 
 #[cfg(feature = "http-client")]
 mod http_origin_boundary {
-    use super::{sample_action, sample_node};
+    use super::{release_action, sample_action, sample_node};
+    use frankenengine_node::capacity_defaults::aliases::{MAX_ACTION_LOG_ENTRIES, MAX_NODES_CAP};
     use frankenengine_node::control_plane::fleet_transport::{
-        FleetActionRecord, FleetTransport, FleetTransportError,
+        FLEET_SHARED_STATE_SCHEMA, FleetActionRecord, FleetApplicationCheckpoint, FleetTransport,
+        FleetTransportError, NodeHealth,
     };
     use frankenengine_node::control_plane::fleet_transport_http::{
-        FLEET_HTTP_API_SCHEMA, HttpFleetTransport,
+        FLEET_HTTP_ACTIONS_PATH, FLEET_HTTP_API_SCHEMA, FLEET_HTTP_HEALTH_PATH,
+        FLEET_HTTP_NODES_PATH, FLEET_HTTP_STATE_PATH, HttpFleetTransport,
     };
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -844,55 +847,59 @@ mod http_origin_boundary {
 
     const TOKEN: &str = "fleet-origin-test-0123456789abcdef0123456789abcdef";
 
-    /// A real one-request HTTP peer with bounded accept/read/write operations.
-    /// Return the complete request so the positive controls check actual I/O.
-    fn serve_response(response: String) -> (String, JoinHandle<String>) {
+    /// A real HTTP peer with bounded accept/read/write operations for each
+    /// scripted response. Return every complete request to check actual I/O.
+    fn serve_responses<const N: usize>(
+        responses: [String; N],
+    ) -> (String, JoinHandle<[String; N]>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind HTTP peer");
         let origin = format!("http://{}", listener.local_addr().expect("peer address"));
         listener.set_nonblocking(true).expect("nonblocking accept");
         let peer = std::thread::spawn(move || {
-            let deadline = Instant::now() + Duration::from_secs(5);
-            let mut stream = loop {
-                match listener.accept() {
-                    Ok((stream, _)) => break stream,
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        assert!(Instant::now() < deadline, "HTTP peer was never contacted");
-                        std::thread::sleep(Duration::from_millis(5));
+            responses.map(|response| {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(Instant::now() < deadline, "HTTP peer was never contacted");
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(error) => panic!("accept HTTP peer: {error}"),
                     }
-                    Err(error) => panic!("accept HTTP peer: {error}"),
+                };
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .expect("read timeout");
+                stream
+                    .set_write_timeout(Some(Duration::from_secs(5)))
+                    .expect("write timeout");
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    assert!(request.len() < 64 * 1024, "HTTP request headers too large");
+                    let mut byte = [0_u8; 1];
+                    stream.read_exact(&mut byte).expect("request header byte");
+                    request.push(byte[0]);
                 }
-            };
-            stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .expect("read timeout");
-            stream
-                .set_write_timeout(Some(Duration::from_secs(5)))
-                .expect("write timeout");
-            let mut request = Vec::new();
-            while !request.ends_with(b"\r\n\r\n") {
-                assert!(request.len() < 64 * 1024, "HTTP request headers too large");
-                let mut byte = [0_u8; 1];
-                stream.read_exact(&mut byte).expect("request header byte");
-                request.push(byte[0]);
-            }
-            let headers = std::str::from_utf8(&request).expect("ASCII request headers");
-            let content_length = headers
-                .lines()
-                .filter_map(|line| line.split_once(':'))
-                .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
-                .map_or(0, |(_, value)| {
-                    value.trim().parse::<usize>().expect("body length")
-                });
-            assert!(content_length <= 64 * 1024, "HTTP request body too large");
-            let header_bytes = request.len();
-            request.resize(header_bytes + content_length, 0);
-            stream
-                .read_exact(&mut request[header_bytes..])
-                .expect("complete request body");
-            stream
-                .write_all(response.as_bytes())
-                .expect("send response");
-            String::from_utf8(request).expect("UTF-8 request")
+                let headers = std::str::from_utf8(&request).expect("ASCII request headers");
+                let content_length = headers
+                    .lines()
+                    .filter_map(|line| line.split_once(':'))
+                    .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                    .map_or(0, |(_, value)| {
+                        value.trim().parse::<usize>().expect("body length")
+                    });
+                assert!(content_length <= 64 * 1024, "HTTP request body too large");
+                let header_bytes = request.len();
+                request.resize(header_bytes + content_length, 0);
+                stream
+                    .read_exact(&mut request[header_bytes..])
+                    .expect("complete request body");
+                stream
+                    .write_all(response.as_bytes())
+                    .expect("send response");
+                String::from_utf8(request).expect("UTF-8 request")
+            })
         });
         (origin, peer)
     }
@@ -919,9 +926,9 @@ mod http_origin_boundary {
                 );
                 // No response body follows the declared length. Refusal must
                 // happen on the status, before attempting body consumption.
-                let (origin, peer) = serve_response(format!(
+                let (origin, peer) = serve_responses([format!(
                     "HTTP/1.1 {status} Redirect\r\nLocation: {destination}\r\nContent-Length: 1048576\r\nConnection: close\r\n\r\n"
-                ));
+                )]);
                 let mut client = HttpFleetTransport::new(&origin, TOKEN, Duration::from_secs(2))
                     .expect("client");
                 let result = match operation {
@@ -933,7 +940,7 @@ mod http_origin_boundary {
                     "heartbeat" => client.upsert_node_status(&sample_node("origin-node")),
                     _ => unreachable!("fixed operation table"),
                 };
-                let request = peer.join().expect("HTTP peer finished");
+                let [request] = peer.join().expect("HTTP peer finished");
                 let error = result.expect_err("redirect must not succeed");
                 assert!(
                     matches!(&error, FleetTransportError::IoError { .. }),
@@ -967,26 +974,26 @@ mod http_origin_boundary {
     #[test]
     fn fleet_http_direct_reads_and_mutations_keep_their_wire_contract() {
         let action = sample_action("origin-positive", "origin-positive-inc");
-        let (origin, peer) = serve_response(json_response(&serde_json::json!({
+        let (origin, peer) = serve_responses([json_response(&serde_json::json!({
             "schema_version": FLEET_HTTP_API_SCHEMA,
             "actions": [action.clone()]
-        })));
+        }))]);
         let client =
             HttpFleetTransport::new(&origin, TOKEN, Duration::from_secs(2)).expect("read client");
         let result = client.list_actions();
-        let request = peer.join().expect("read peer finished");
+        let [request] = peer.join().expect("read peer finished");
         assert_eq!(result.expect("direct list succeeds"), vec![action.clone()]);
         assert!(request.starts_with("GET /v1/fleet/actions HTTP/1.1\r\n"));
         assert!(request.contains(&format!("Bearer {TOKEN}")));
 
-        let (origin, peer) = serve_response(json_response(&serde_json::json!({
+        let (origin, peer) = serve_responses([json_response(&serde_json::json!({
             "schema_version": FLEET_HTTP_API_SCHEMA,
             "accepted": action.action_id
-        })));
+        }))]);
         let mut client = HttpFleetTransport::new(&origin, TOKEN, Duration::from_secs(2))
             .expect("publish client");
         let result = client.publish_action(&action);
-        let request = peer.join().expect("publish peer finished");
+        let [request] = peer.join().expect("publish peer finished");
         result.expect("direct publication succeeds");
         assert!(request.starts_with("POST /v1/fleet/actions HTTP/1.1\r\n"));
         assert!(request.contains(&format!("Bearer {TOKEN}")));
@@ -994,6 +1001,344 @@ mod http_origin_boundary {
         assert_eq!(
             serde_json::from_str::<FleetActionRecord>(body).expect("actual transmitted action"),
             action
+        );
+    }
+
+    fn assert_snapshot_refused(path: &str, body: &serde_json::Value, expected: &str) {
+        let (origin, peer) = serve_responses([json_response(body)]);
+        let client = HttpFleetTransport::new(&origin, TOKEN, Duration::from_secs(5))
+            .expect("snapshot client");
+        let result = match path {
+            FLEET_HTTP_ACTIONS_PATH => client.list_actions().map(|_| ()),
+            FLEET_HTTP_NODES_PATH => client.list_node_statuses().map(|_| ()),
+            FLEET_HTTP_STATE_PATH => client.read_shared_state().map(|_| ()),
+            _ => unreachable!("fixed snapshot route table"),
+        };
+        let [request] = peer.join().expect("snapshot peer finished");
+        let error = result.expect_err("malformed snapshot must fail closed");
+        assert!(
+            matches!(&error, FleetTransportError::SerializationError { .. }),
+            "{path}: {error}"
+        );
+        assert!(error.to_string().contains(expected), "{path}: {error}");
+        assert!(request.starts_with(&format!("GET {path} HTTP/1.1\r\n")));
+        assert!(request.contains(&format!("Bearer {TOKEN}")));
+    }
+
+    fn initialization_result(nodes: &serde_json::Value) -> Result<(), FleetTransportError> {
+        let (origin, peer) = serve_responses([
+            json_response(&serde_json::json!({
+                "schema_version": FLEET_HTTP_API_SCHEMA,
+                "status": "ok",
+                "service": "franken-node",
+                "store": "durable"
+            })),
+            json_response(nodes),
+        ]);
+        let mut client = HttpFleetTransport::new(&origin, TOKEN, Duration::from_secs(5))
+            .expect("initialization client");
+        let result = client.initialize();
+        let [health_request, nodes_request] = peer.join().expect("initialization peer finished");
+        assert!(health_request.starts_with(&format!("GET {FLEET_HTTP_HEALTH_PATH} HTTP/1.1\r\n")));
+        assert!(!health_request.contains(TOKEN));
+        assert!(nodes_request.starts_with(&format!("GET {FLEET_HTTP_NODES_PATH} HTTP/1.1\r\n")));
+        assert!(nodes_request.contains(&format!("Bearer {TOKEN}")));
+        result
+    }
+
+    #[test]
+    fn fleet_http_initialization_validates_the_authenticated_node_snapshot() {
+        let node = sample_node("initialization-node");
+        let mut invalid_id = node.clone();
+        invalid_id.node_id = "../escape".to_string();
+        let mut invalid_checkpoint = node.clone();
+        invalid_checkpoint.applied_actions = Some(FleetApplicationCheckpoint {
+            action_count: 0,
+            actions_sha256: "not-a-sha256-digest".to_string(),
+        });
+        for (nodes, expected) in [
+            (vec![invalid_id], "node_id"),
+            (vec![invalid_checkpoint], "checkpoint"),
+            (vec![node.clone(), node.clone()], "repeats node"),
+        ] {
+            let error = initialization_result(&serde_json::json!({
+                "schema_version": FLEET_HTTP_API_SCHEMA,
+                "nodes": nodes
+            }))
+            .expect_err("authenticated invalid nodes must not initialize");
+            assert!(
+                matches!(&error, FleetTransportError::SerializationError { .. }),
+                "{error}"
+            );
+            assert!(error.to_string().contains(expected), "{error}");
+        }
+        for nodes in [vec![], vec![node]] {
+            initialization_result(&serde_json::json!({
+                "schema_version": FLEET_HTTP_API_SCHEMA,
+                "nodes": nodes
+            }))
+            .expect("valid empty and populated coordinators initialize");
+        }
+    }
+
+    #[test]
+    fn fleet_http_action_snapshots_reject_repeated_ids_and_invalid_records() {
+        let action = sample_action("snapshot-action", "snapshot-incident");
+        let conflict = release_action("snapshot-action", "snapshot-incident");
+        let mut invalid_id = action.clone();
+        invalid_id.action_id = "../escape".to_string();
+        for (actions, expected) in [
+            (vec![action.clone(), action], "repeats action_id"),
+            (
+                vec![
+                    sample_action("snapshot-action", "snapshot-incident"),
+                    conflict,
+                ],
+                "repeats action_id",
+            ),
+            (vec![invalid_id], "action_id"),
+        ] {
+            assert_snapshot_refused(
+                FLEET_HTTP_ACTIONS_PATH,
+                &serde_json::json!({
+                    "schema_version": FLEET_HTTP_API_SCHEMA,
+                    "actions": actions
+                }),
+                expected,
+            );
+            assert_snapshot_refused(
+                FLEET_HTTP_STATE_PATH,
+                &serde_json::json!({
+                    "schema_version": FLEET_HTTP_API_SCHEMA,
+                    "state": {
+                        "schema_version": FLEET_SHARED_STATE_SCHEMA,
+                        "actions": actions,
+                        "nodes": []
+                    }
+                }),
+                expected,
+            );
+        }
+    }
+
+    #[test]
+    fn fleet_http_node_snapshots_reject_repeated_scoped_ids_and_invalid_records() {
+        let node = sample_node("snapshot-node");
+        let mut conflict = node.clone();
+        conflict.health = NodeHealth::Quarantined;
+        conflict.quarantine_version = 99;
+        let mut invalid_id = node.clone();
+        invalid_id.node_id = "../escape".to_string();
+        let mut invalid_checkpoint = node.clone();
+        invalid_checkpoint.applied_actions = Some(FleetApplicationCheckpoint {
+            action_count: 0,
+            actions_sha256: "A".repeat(64),
+        });
+        for (nodes, expected) in [
+            (vec![node.clone(), node.clone()], "repeats node"),
+            (vec![node, conflict], "repeats node"),
+            (vec![invalid_id], "node_id"),
+            (vec![invalid_checkpoint], "checkpoint"),
+        ] {
+            assert_snapshot_refused(
+                FLEET_HTTP_NODES_PATH,
+                &serde_json::json!({
+                    "schema_version": FLEET_HTTP_API_SCHEMA,
+                    "nodes": nodes
+                }),
+                expected,
+            );
+            assert_snapshot_refused(
+                FLEET_HTTP_STATE_PATH,
+                &serde_json::json!({
+                    "schema_version": FLEET_HTTP_API_SCHEMA,
+                    "state": {
+                        "schema_version": FLEET_SHARED_STATE_SCHEMA,
+                        "actions": [],
+                        "nodes": nodes
+                    }
+                }),
+                expected,
+            );
+        }
+    }
+
+    #[test]
+    fn fleet_http_snapshots_require_both_http_and_shared_state_schemas() {
+        let mut actions = serde_json::json!({
+            "schema_version": FLEET_HTTP_API_SCHEMA,
+            "actions": []
+        });
+        let mut nodes = serde_json::json!({
+            "schema_version": FLEET_HTTP_API_SCHEMA,
+            "nodes": []
+        });
+        let mut state = serde_json::json!({
+            "schema_version": FLEET_HTTP_API_SCHEMA,
+            "state": {
+                "schema_version": FLEET_SHARED_STATE_SCHEMA,
+                "actions": [],
+                "nodes": []
+            }
+        });
+        for (path, body) in [
+            (FLEET_HTTP_ACTIONS_PATH, &mut actions),
+            (FLEET_HTTP_NODES_PATH, &mut nodes),
+            (FLEET_HTTP_STATE_PATH, &mut state),
+        ] {
+            body["schema_version"] = "future-http-schema".into();
+            assert_snapshot_refused(path, body, FLEET_HTTP_API_SCHEMA);
+        }
+        let error = initialization_result(&nodes).expect_err("unknown initialization schema");
+        assert!(matches!(
+            error,
+            FleetTransportError::SerializationError { .. }
+        ));
+        state["schema_version"] = FLEET_HTTP_API_SCHEMA.into();
+        state["state"]["schema_version"] = "future-shared-state-schema".into();
+        assert_snapshot_refused(FLEET_HTTP_STATE_PATH, &state, FLEET_SHARED_STATE_SCHEMA);
+    }
+
+    #[test]
+    fn fleet_http_snapshots_preserve_records_and_sort_by_transport_identity() {
+        let timestamp =
+            chrono::DateTime::from_timestamp(1_700_000_000, 0).expect("fixed timestamp");
+        let mut early = sample_action("action-z", "early-incident");
+        early.emitted_at = timestamp - chrono::TimeDelta::seconds(1);
+        let mut first = sample_action("action-a", "first-incident");
+        first.emitted_at = timestamp;
+        let mut second = sample_action("action-b", "second-incident");
+        second.emitted_at = timestamp;
+        let expected_actions = vec![early.clone(), first.clone(), second.clone()];
+        let actions = vec![second, early, first];
+        let first_node = sample_node("node-a");
+        let second_node = sample_node("node-b");
+        let mut other_zone = first_node.clone();
+        other_zone.zone_id = "zone-b".to_string();
+        let expected_nodes = vec![first_node.clone(), second_node.clone(), other_zone.clone()];
+        let nodes = vec![other_zone, second_node, first_node];
+        let (origin, peer) = serve_responses([
+            json_response(&serde_json::json!({
+                "schema_version": FLEET_HTTP_API_SCHEMA,
+                "actions": actions
+            })),
+            json_response(&serde_json::json!({
+                "schema_version": FLEET_HTTP_API_SCHEMA,
+                "nodes": nodes
+            })),
+            json_response(&serde_json::json!({
+                "schema_version": FLEET_HTTP_API_SCHEMA,
+                "state": {
+                    "schema_version": FLEET_SHARED_STATE_SCHEMA,
+                    "actions": actions,
+                    "nodes": nodes
+                }
+            })),
+        ]);
+        let client = HttpFleetTransport::new(&origin, TOKEN, Duration::from_secs(5))
+            .expect("ordered snapshot client");
+        let listed_actions = client.list_actions();
+        let listed_nodes = client.list_node_statuses();
+        let shared = client.read_shared_state();
+        let requests = peer.join().expect("ordered snapshot peer finished");
+        assert_eq!(listed_actions.expect("unique actions"), expected_actions);
+        assert_eq!(listed_nodes.expect("zone-scoped nodes"), expected_nodes);
+        let shared = shared.expect("valid shared state");
+        assert_eq!(shared.schema_version, FLEET_SHARED_STATE_SCHEMA);
+        assert_eq!(shared.actions, expected_actions);
+        assert_eq!(shared.nodes, expected_nodes);
+        for (request, path) in requests.iter().zip([
+            FLEET_HTTP_ACTIONS_PATH,
+            FLEET_HTTP_NODES_PATH,
+            FLEET_HTTP_STATE_PATH,
+        ]) {
+            assert!(request.starts_with(&format!("GET {path} HTTP/1.1\r\n")));
+            assert!(request.contains(&format!("Bearer {TOKEN}")));
+        }
+    }
+
+    #[test]
+    fn fleet_http_snapshot_count_limits_refuse_overflow_without_truncation() {
+        // Use distinct valid identities: duplicate or record validation must
+        // not accidentally stand in for the count boundary being tested.
+        let timestamp =
+            chrono::DateTime::from_timestamp(1_700_000_000, 0).expect("fixed timestamp");
+        let mut actions: Vec<_> = (0..MAX_ACTION_LOG_ENTRIES)
+            .map(|index| {
+                let mut action =
+                    sample_action(&format!("bounded-action-{index:05}"), "bounded-inc");
+                action.emitted_at = timestamp;
+                action
+            })
+            .collect();
+        let mut nodes: Vec<_> = (0..MAX_NODES_CAP)
+            .map(|index| sample_node(&format!("bounded-node-{index:05}")))
+            .collect();
+        let (origin, peer) = serve_responses([json_response(&serde_json::json!({
+            "schema_version": FLEET_HTTP_API_SCHEMA,
+            "state": {
+                "schema_version": FLEET_SHARED_STATE_SCHEMA,
+                "actions": actions,
+                "nodes": nodes
+            }
+        }))]);
+        let client = HttpFleetTransport::new(&origin, TOKEN, Duration::from_secs(5))
+            .expect("bounded snapshot client");
+        let result = client.read_shared_state();
+        peer.join().expect("bounded snapshot peer finished");
+        let shared = result.expect("inclusive limits preserve the complete snapshot");
+        assert_eq!(shared.actions, actions);
+        assert_eq!(shared.nodes, nodes);
+
+        actions.push(sample_action("bounded-action-extra", "bounded-inc-extra"));
+        assert_snapshot_refused(
+            FLEET_HTTP_ACTIONS_PATH,
+            &serde_json::json!({
+                "schema_version": FLEET_HTTP_API_SCHEMA,
+                "actions": actions
+            }),
+            "action snapshot exceeds",
+        );
+        assert_snapshot_refused(
+            FLEET_HTTP_STATE_PATH,
+            &serde_json::json!({
+                "schema_version": FLEET_HTTP_API_SCHEMA,
+                "state": {
+                    "schema_version": FLEET_SHARED_STATE_SCHEMA,
+                    "actions": actions,
+                    "nodes": []
+                }
+            }),
+            "action snapshot exceeds",
+        );
+
+        nodes.push(sample_node("bounded-node-extra"));
+        let node_body = serde_json::json!({
+            "schema_version": FLEET_HTTP_API_SCHEMA,
+            "nodes": nodes
+        });
+        assert_snapshot_refused(FLEET_HTTP_NODES_PATH, &node_body, "node snapshot exceeds");
+        assert_snapshot_refused(
+            FLEET_HTTP_STATE_PATH,
+            &serde_json::json!({
+                "schema_version": FLEET_HTTP_API_SCHEMA,
+                "state": {
+                    "schema_version": FLEET_SHARED_STATE_SCHEMA,
+                    "actions": [],
+                    "nodes": nodes
+                }
+            }),
+            "node snapshot exceeds",
+        );
+        let error =
+            initialization_result(&node_body).expect_err("oversized initialization snapshot");
+        assert!(
+            matches!(&error, FleetTransportError::SerializationError { .. }),
+            "{error}"
+        );
+        assert!(
+            error.to_string().contains("node snapshot exceeds"),
+            "{error}"
         );
     }
 }

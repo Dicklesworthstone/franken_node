@@ -22,13 +22,15 @@
 //!   record the coordinator returns is re-validated by the client with the
 //!   same rules the coordinator applies on ingest.
 
-use std::time::Duration;
+use std::{collections::BTreeSet, time::Duration};
 
 use serde::{Deserialize, Serialize};
 
+use crate::capacity_defaults::aliases::{MAX_ACTION_LOG_ENTRIES, MAX_NODES_CAP};
+
 use super::fleet_transport::{
-    FleetActionRecord, FleetSharedState, FleetTransport, FleetTransportError, NodeStatus,
-    validate_action_record, validate_node_status,
+    FLEET_SHARED_STATE_SCHEMA, FleetActionRecord, FleetSharedState, FleetTransport,
+    FleetTransportError, NodeStatus, validate_action_record, validate_node_status,
 };
 
 /// Schema tag carried by every fleet HTTP API response body.
@@ -458,13 +460,69 @@ impl HttpFleetTransport {
     }
 }
 
+/// Preserve the bounded history required by checkpoint application. Never
+/// truncate a remote history or select one record for a repeated immutable ID.
+fn validate_action_snapshot(actions: &mut [FleetActionRecord]) -> Result<(), FleetTransportError> {
+    if actions.len() > MAX_ACTION_LOG_ENTRIES {
+        return Err(FleetTransportError::serialization(format!(
+            "fleet action snapshot exceeds {MAX_ACTION_LOG_ENTRIES} entries"
+        )));
+    }
+    {
+        let mut ids = BTreeSet::new();
+        for action in actions.iter() {
+            validate_action_record(action)?;
+            if !ids.insert(action.action_id.as_str()) {
+                return Err(FleetTransportError::serialization(format!(
+                    "fleet action snapshot repeats action_id `{}`",
+                    action.action_id
+                )));
+            }
+        }
+    }
+    actions.sort_by(|left, right| {
+        left.emitted_at
+            .cmp(&right.emitted_at)
+            .then_with(|| left.action_id.cmp(&right.action_id))
+    });
+    Ok(())
+}
+
+/// Node identity is scoped by zone. An ambiguous or oversized remote snapshot
+/// is refused in full; dropping a duplicate could hide an unhealthy heartbeat.
+fn validate_node_snapshot(nodes: &mut [NodeStatus]) -> Result<(), FleetTransportError> {
+    if nodes.len() > MAX_NODES_CAP {
+        return Err(FleetTransportError::serialization(format!(
+            "fleet node snapshot exceeds {MAX_NODES_CAP} entries"
+        )));
+    }
+    {
+        let mut ids = BTreeSet::new();
+        for status in nodes.iter() {
+            validate_node_status(status)?;
+            if !ids.insert((status.zone_id.as_str(), status.node_id.as_str())) {
+                return Err(FleetTransportError::serialization(format!(
+                    "fleet node snapshot repeats node `{}/{}`",
+                    status.zone_id, status.node_id
+                )));
+            }
+        }
+    }
+    nodes.sort_by(|left, right| {
+        left.zone_id
+            .cmp(&right.zone_id)
+            .then_with(|| left.node_id.cmp(&right.node_id))
+    });
+    Ok(())
+}
+
 impl FleetTransport for HttpFleetTransport {
     /// Initialization for a remote store is a health probe plus one
-    /// authenticated read, so a wrong token fails here rather than mid-command.
+    /// fully validated authenticated node snapshot, so a wrong token or
+    /// malformed coordinator state fails here rather than mid-command.
     fn initialize(&mut self) -> Result<(), FleetTransportError> {
         self.health()?;
-        let listed: FleetHttpNodeList = self.get_json(FLEET_HTTP_NODES_PATH, true)?;
-        self.check_schema(&listed.schema_version)
+        self.list_node_statuses().map(|_| ())
     }
 
     fn publish_action(&mut self, action: &FleetActionRecord) -> Result<(), FleetTransportError> {
@@ -480,12 +538,13 @@ impl FleetTransport for HttpFleetTransport {
         Ok(())
     }
 
+    /// Refuse histories exceeding the checkpoint/file transport bound, even if
+    /// a coordinator's durable store has admitted more records. Retain every
+    /// accepted action and return the transport's chronological ordering.
     fn list_actions(&self) -> Result<Vec<FleetActionRecord>, FleetTransportError> {
-        let listed: FleetHttpActionList = self.get_json(FLEET_HTTP_ACTIONS_PATH, true)?;
+        let mut listed: FleetHttpActionList = self.get_json(FLEET_HTTP_ACTIONS_PATH, true)?;
         self.check_schema(&listed.schema_version)?;
-        for action in &listed.actions {
-            validate_action_record(action)?;
-        }
+        validate_action_snapshot(&mut listed.actions)?;
         Ok(listed.actions)
     }
 
@@ -503,24 +562,26 @@ impl FleetTransport for HttpFleetTransport {
         Ok(())
     }
 
+    /// Apply the file transport's node-count bound without truncation and
+    /// return one validated status per scoped identity, sorted by zone and ID.
     fn list_node_statuses(&self) -> Result<Vec<NodeStatus>, FleetTransportError> {
-        let listed: FleetHttpNodeList = self.get_json(FLEET_HTTP_NODES_PATH, true)?;
+        let mut listed: FleetHttpNodeList = self.get_json(FLEET_HTTP_NODES_PATH, true)?;
         self.check_schema(&listed.schema_version)?;
-        for status in &listed.nodes {
-            validate_node_status(status)?;
-        }
+        validate_node_snapshot(&mut listed.nodes)?;
         Ok(listed.nodes)
     }
 
     fn read_shared_state(&self) -> Result<FleetSharedState, FleetTransportError> {
-        let state: FleetHttpState = self.get_json(FLEET_HTTP_STATE_PATH, true)?;
+        let mut state: FleetHttpState = self.get_json(FLEET_HTTP_STATE_PATH, true)?;
         self.check_schema(&state.schema_version)?;
-        for action in &state.state.actions {
-            validate_action_record(action)?;
+        if state.state.schema_version != FLEET_SHARED_STATE_SCHEMA {
+            return Err(FleetTransportError::serialization(format!(
+                "fleet shared state uses `{}`, expected `{FLEET_SHARED_STATE_SCHEMA}`",
+                state.state.schema_version
+            )));
         }
-        for status in &state.state.nodes {
-            validate_node_status(status)?;
-        }
+        validate_action_snapshot(&mut state.state.actions)?;
+        validate_node_snapshot(&mut state.state.nodes)?;
         Ok(state.state)
     }
 }
