@@ -187,6 +187,7 @@ use frankenengine_node::{
         },
         registry_artifact::{
             ArtifactRuntimeAuthority, LocalRegistryArtifactManifest, PublisherSourceGraphApproval,
+            registry_publish_provenance_signature_payload,
         },
         trust_card::{
             BehavioralProfile, CapabilityDeclaration, CapabilityRisk, CertificationLevel,
@@ -24974,23 +24975,6 @@ fn build_registry_publish_links(
     links
 }
 
-fn registry_publish_provenance_signature_payload(
-    manifest_bytes: &[u8],
-    provenance: &supply_chain::provenance::ProvenanceAttestation,
-) -> Result<Vec<u8>> {
-    let canonical =
-        supply_chain::provenance::canonical_attestation_json(provenance).map_err(|error| {
-            anyhow::anyhow!("failed canonicalizing registry publish provenance: {error}")
-        })?;
-    let mut payload = Vec::new();
-    payload.extend(b"registry_publish_provenance_v1:");
-    payload.extend((u64::try_from(manifest_bytes.len()).unwrap_or(u64::MAX)).to_le_bytes());
-    payload.extend(manifest_bytes);
-    payload.extend((u64::try_from(canonical.len()).unwrap_or(u64::MAX)).to_le_bytes());
-    payload.extend(canonical.as_bytes());
-    Ok(payload)
-}
-
 fn build_registry_publish_request(
     package_path: &Path,
     content_hash: &str,
@@ -37966,6 +37950,7 @@ mod run_trust_gate_tests {
                 version: "1.2.3".to_string(),
                 artifact_sha256: format!("sha256:{}", "cd".repeat(32)),
                 runtime_authority: None,
+                publisher_provenance_sha256: Some(format!("sha256:{}", "12".repeat(32))),
             }),
         };
         core.native_module_graph = Some(graph.clone());
@@ -37992,6 +37977,20 @@ mod run_trust_gate_tests {
             |graph| {
                 graph.publisher_artifact.as_mut().unwrap().artifact_sha256 =
                     format!("sha256:{}", "01".repeat(32))
+            },
+            |graph| {
+                graph
+                    .publisher_artifact
+                    .as_mut()
+                    .unwrap()
+                    .publisher_provenance_sha256 = None
+            },
+            |graph| {
+                graph
+                    .publisher_artifact
+                    .as_mut()
+                    .unwrap()
+                    .publisher_provenance_sha256 = Some(format!("sha256:{}", "34".repeat(32)))
             },
         ] {
             let mut replacement = graph.clone();

@@ -75,6 +75,35 @@ fn write_signing_key(path: &Path) {
     fs::write(path, hex::encode([42_u8; 32])).expect("write signing key");
 }
 
+/// Mutations that intentionally represent another legitimate publication must
+/// sign both the exact registration bytes and their provenance binding. Merely
+/// re-signing the source manifest is no longer a valid positive control.
+fn resign_published_provenance(manifest: &mut serde_json::Value, key: &ed25519_dalek::SigningKey) {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use frankenengine_node::supply_chain::{artifact_signing, provenance, registry_artifact};
+    let manifest_bytes = STANDARD
+        .decode(manifest["manifest_bytes_b64"].as_str().unwrap())
+        .unwrap();
+    let mut attestation: provenance::ProvenanceAttestation =
+        serde_json::from_value(manifest["extension"]["provenance"].clone()).unwrap();
+    let payload = registry_artifact::registry_publish_provenance_signature_payload(
+        &manifest_bytes,
+        &attestation,
+    )
+    .unwrap();
+    attestation.custom_claims.insert(
+        "operator_provenance_signature".into(),
+        hex::encode(artifact_signing::sign_bytes(key, &payload)),
+    );
+    let keys = attestation
+        .links
+        .iter()
+        .map(|link| (link.signer_id.clone(), key.clone()))
+        .collect();
+    provenance::sign_links_in_place(&mut attestation, &keys).unwrap();
+    manifest["extension"]["provenance"] = serde_json::to_value(attestation).unwrap();
+}
+
 fn publisher_runtime_authority() -> serde_json::Value {
     serde_json::json!({
         "schema_version": "franken-node/artifact-runtime-authority/v1",
@@ -498,6 +527,20 @@ fn registry_source_capsule_admits_native_cjs_and_esm() {
                 &fs::read(&fixture.artifact).unwrap()
             )
         );
+        let manifest: frankenengine_node::supply_chain::registry_artifact::LocalRegistryArtifactManifest =
+            serde_json::from_slice(&fs::read(&fixture.manifest).unwrap()).unwrap();
+        let provenance = frankenengine_node::supply_chain::provenance::canonical_attestation_json(
+            &manifest.extension.provenance,
+        )
+        .unwrap();
+        let provenance_hash =
+            frankenengine_node::supply_chain::registry_artifact::artifact_sha256(
+                provenance.as_bytes(),
+            );
+        assert_eq!(
+            publisher.publisher_provenance_sha256.as_deref(),
+            Some(provenance_hash.as_str())
+        );
 
         // Authenticate the persisted product record with the independent run
         // public key created by init. A live dispatch JSON field alone cannot
@@ -543,6 +586,10 @@ fn registry_source_capsule_admits_native_cjs_and_esm() {
             (
                 "/receipt_snapshot/native_module_graph/publisher_artifact/publisher_key_id",
                 "substituted-publisher-key".into(),
+            ),
+            (
+                "/receipt_snapshot/native_module_graph/publisher_artifact/publisher_provenance_sha256",
+                format!("sha256:{}", "ab".repeat(32)),
             ),
         ] {
             let mut substituted = record.clone();
@@ -920,6 +967,126 @@ fn registry_runtime_authority_cannot_be_expanded_or_stripped_without_resigning()
 
 #[test]
 #[cfg(all(feature = "engine", unix))]
+fn registry_source_capsule_authenticates_provenance_before_guest_execution() {
+    let authority = publisher_runtime_authority();
+    let fixture = PublishedSourceFixture::with_modules_and_authority(
+        "app.cjs",
+        &[
+            (
+                "app.cjs",
+                "const value = require('./side.cjs'); console.log('PUBLISHER_APPROVED_WORKLOAD', value);\n",
+            ),
+            ("side.cjs", "module.exports = 42;\n"),
+        ],
+        Some(&authority),
+    );
+    let valid = fixture.run(&[]);
+    assert!(
+        valid.status.success(),
+        "positive signed publication: {}\n{}",
+        String::from_utf8_lossy(&valid.stdout),
+        String::from_utf8_lossy(&valid.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&valid.stdout).unwrap();
+    assert_eq!(
+        report["dispatch"]["captured_output"]["stdout"],
+        "PUBLISHER_APPROVED_WORKLOAD 42\n"
+    );
+    assert!(
+        report["receipt"]["native_module_graph"]["publisher_artifact"]
+            ["publisher_provenance_sha256"]
+            .as_str()
+            .is_some_and(|hash| hash.starts_with("sha256:") && hash.len() == 71)
+    );
+    let original: serde_json::Value =
+        serde_json::from_slice(&fs::read(&fixture.manifest).unwrap()).unwrap();
+    for (pointer, replacement) in [
+        (
+            "/extension/provenance/source_repository_url",
+            serde_json::json!("https://example.com/substituted/repository"),
+        ),
+        (
+            "/extension/provenance/builder_identity",
+            serde_json::json!("a-different-publisher"),
+        ),
+        (
+            "/extension/provenance/output_hash",
+            serde_json::json!(format!("sha256:{}", "00".repeat(32))),
+        ),
+        (
+            "/extension/provenance/reproducibility_hash",
+            serde_json::json!(format!("sha256:{}", "00".repeat(32))),
+        ),
+        (
+            "/extension/provenance/custom_claims/operator_key_id",
+            serde_json::json!("another-publisher-key"),
+        ),
+        (
+            "/extension/provenance/custom_claims/operator_signature_scope",
+            serde_json::json!("another-signature-purpose"),
+        ),
+        (
+            "/extension/provenance/custom_claims/operator_provenance_signature",
+            serde_json::json!("00".repeat(64)),
+        ),
+        (
+            "/extension/provenance/links/0/signature",
+            serde_json::json!("00".repeat(64)),
+        ),
+    ] {
+        let mut tampered = original.clone();
+        *tampered.pointer_mut(pointer).unwrap() = replacement;
+        fs::write(&fixture.manifest, serde_json::to_vec(&tampered).unwrap()).unwrap();
+        fixture.assert_denied(&[], "provenance");
+    }
+
+    let mut stripped = original.clone();
+    let claims = stripped["extension"]["provenance"]["custom_claims"]
+        .as_object_mut()
+        .unwrap();
+    for name in [
+        "operator_key_id",
+        "operator_signature_scope",
+        "operator_provenance_signature",
+    ] {
+        claims.remove(name);
+    }
+    fs::write(&fixture.manifest, serde_json::to_vec(&stripped).unwrap()).unwrap();
+    fixture.assert_denied(&[], "provenance");
+
+    // Authentic signatures cannot waive an expired or explicitly revoked
+    // attestation link. These failures must reach the existing chain policy.
+    let key = ed25519_dalek::SigningKey::from_bytes(&[42; 32]);
+    for expired in [false, true] {
+        let mut refused = original.clone();
+        if expired {
+            refused["extension"]["provenance"]["build_timestamp_epoch"] = serde_json::json!(1);
+            for link in refused["extension"]["provenance"]["links"]
+                .as_array_mut()
+                .unwrap()
+            {
+                link["issued_at_epoch"] = serde_json::json!(1);
+                link["expires_at_epoch"] = serde_json::json!(2);
+            }
+        } else {
+            refused["extension"]["provenance"]["links"][0]["revoked"] = serde_json::json!(true);
+        }
+        resign_published_provenance(&mut refused, &key);
+        fs::write(&fixture.manifest, serde_json::to_vec(&refused).unwrap()).unwrap();
+        fixture.assert_denied(&[], "provenance");
+    }
+    fs::write(&fixture.manifest, serde_json::to_vec(&original).unwrap()).unwrap();
+    let restored = fixture.run(&[]);
+    assert!(
+        restored.status.success(),
+        "restored authentic publication: {}\n{}",
+        String::from_utf8_lossy(&restored.stdout),
+        String::from_utf8_lossy(&restored.stderr)
+    );
+}
+
+#[test]
+#[cfg(all(feature = "engine", unix))]
 fn registry_source_capsule_requires_signed_run_record_persistence() {
     let fixture = PublishedSourceFixture::new(false);
     let signing_key = fixture
@@ -1072,6 +1239,16 @@ fn registry_source_capsule_binds_signed_bytes_and_parent_admission() {
         serde_json::json!(KeyId::from_verifying_key(&publisher.verifying_key()).to_string());
     envelope["extension"]["signature"]["signature_bytes"] =
         serde_json::json!(artifact_signing::sign_bytes(&publisher, &signed_bytes));
+    for field in ["input_hash", "output_hash", "reproducibility_hash"] {
+        envelope["extension"]["provenance"][field] = serde_json::json!(replacement_hash);
+    }
+    for link in envelope["extension"]["provenance"]["links"]
+        .as_array_mut()
+        .unwrap()
+    {
+        link["signed_payload_hash"] = serde_json::json!(replacement_hash);
+    }
+    resign_published_provenance(&mut envelope, &publisher);
     fs::write(&fixture.manifest, serde_json::to_vec(&envelope).unwrap()).unwrap();
     PublisherSourceGraphApproval::load(&fixture.manifest, &publisher.verifying_key()).unwrap();
     assert!(
@@ -1758,6 +1935,32 @@ fn registry_verify_rejects_replacement_artifact_with_recomputed_storage_hashes()
 }
 
 #[test]
+fn registry_verify_rejects_substituted_publisher_provenance() {
+    let workspace = registry_workspace();
+    let (extension_id, _, manifest_path) = publish_signed_artifact(workspace.path());
+    let original: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+    let mut substituted = original.clone();
+    substituted["extension"]["provenance"]["source_repository_url"] =
+        serde_json::json!("https://example.com/unapproved/source");
+    fs::write(&manifest_path, serde_json::to_vec(&substituted).unwrap()).unwrap();
+    let report = assert_registry_verify_integrity(
+        workspace.path(),
+        &extension_id,
+        "invalid-signature",
+        "provenance substitution",
+    );
+    assert!(report.to_string().contains("provenance"), "{report}");
+    fs::write(&manifest_path, serde_json::to_vec(&original).unwrap()).unwrap();
+    assert_registry_verify_integrity(
+        workspace.path(),
+        &extension_id,
+        "verified",
+        "authentic provenance restored",
+    );
+}
+
+#[test]
 fn registry_verify_binds_signed_identity_version_and_size() {
     let workspace = registry_workspace();
     let (extension_id, _, manifest_path) = publish_signed_artifact(workspace.path());
@@ -1912,6 +2115,7 @@ fn registry_verify_checks_signed_statement_schema_without_requiring_json_layout(
             serde_json::json!(base64::engine::general_purpose::STANDARD.encode(&bytes));
         manifest["extension"]["signature"]["signature_bytes"] =
             serde_json::json!(signature.to_bytes().to_vec());
+        resign_published_provenance(&mut manifest, &signing_key);
         fs::write(
             &manifest_path,
             serde_json::to_vec(&manifest).expect("encode wrapper"),

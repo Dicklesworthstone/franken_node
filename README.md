@@ -4107,11 +4107,27 @@ one pass.
   or failed record persistence, fails the command. This check occurs after
   execution and does not undo guest effects.
 
-  This establishes publisher approval of source identity and a durable statement
-  from the run receipt authority. It does not authenticate unsigned registry
-  lifecycle/provenance fields, attest registry-service approval, grant capabilities
-  or increase resource limits. Existing dependency trust-card revocation and
-  quarantine, fleet policy and runtime controls still govern execution.
+  Publications also authenticate their provenance statement against that same
+  pinned publisher key. Admission verifies the existing provenance signature,
+  its exact registration-byte binding, the publisher and artifact identities,
+  and the attestation links using the existing fail-closed chain verifier. The
+  run receipt retains `publisher_provenance_sha256`, a commitment to the complete
+  authenticated statement, including its signatures. Changing the source
+  repository, builder, output hash, claims or links invalidates the publication.
+  Link expiry and revocation flags are checked at admission; the CLI currently
+  issues links with a 24-hour validity window. Authority-bearing v2 publications
+  with expired provenance require fresh valid signatures before another run.
+
+  This is the publisher's authenticated provenance statement. It does not prove
+  independent build reproduction or registry-service approval. Unsigned registry
+  lifecycle fields confer no authority. A v1 source-only artifact with no
+  provenance proof remains explicitly unbound to provenance; partial proofs are
+  refused. The v1 source-only contract permits removal of the complete proof;
+  use v2 when authenticated provenance is required. A v2 authority-bearing
+  artifact requires complete valid provenance,
+  including when an attacker removes every proof marker. Existing dependency
+  trust-card revocation and quarantine, fleet policy and runtime controls still
+  govern execution; this does not add a live publisher-key revocation service.
 
   **Publisher-bounded native authority.** To bind execution ceilings to those
   same signed package bytes, supply `--runtime-authority /operator/runtime-authority.json`

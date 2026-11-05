@@ -4,8 +4,9 @@
 //! admission requires a separately supplied publisher key, the signed package
 //! identity, and the exact capsule bytes. A signed runtime authority can only
 //! narrow the operator's capabilities and resource limits; it cannot grant new
-//! rights. The envelope's unsigned lifecycle and provenance claims confer no
-//! execution authority.
+//! rights. The envelope's unsigned lifecycle confers no execution authority.
+//! Publisher provenance is authenticated against the same publisher and exact
+//! signed manifest, with only its canonical digest retained in execution identity.
 
 use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -16,6 +17,10 @@ use std::path::{Component, Path, PathBuf};
 
 use super::artifact_signing::{KeyId, verify_signature};
 use super::extension_registry::{ExtensionRegistrationManifest, SignedExtension};
+
+#[path = "registry_artifact_provenance.rs"]
+mod publisher_provenance;
+pub use publisher_provenance::registry_publish_provenance_signature_payload;
 
 pub const LOCAL_ARTIFACT_SCHEMA: &str = "franken-node/local-registry-artifact-manifest/v1";
 /// Match the installed registry's artifact and manifest input bound.
@@ -194,9 +199,9 @@ pub fn artifact_file_name_is_safe(value: &str) -> bool {
     matches!(parts.next(), Some(Component::Normal(_))) && parts.next().is_none()
 }
 
-/// Source-free claims authenticated by the publisher's registration signature.
-/// The registry-generated extension ID, lifecycle and provenance are deliberately
-/// absent: they are not fields of that signed registration.
+/// Source-free claims authenticated by the publisher's registration signature
+/// and, when present, separately verified publisher provenance bound to it.
+/// Registry-generated extension IDs, lifecycle and raw provenance are absent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PublisherArtifactIdentity {
@@ -209,6 +214,11 @@ pub struct PublisherArtifactIdentity {
     /// source-only artifact makes no publisher claim about runtime authority.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_authority: Option<ArtifactRuntimeAuthority>,
+    /// Commitment to publisher-authenticated provenance valid at admission.
+    /// Legacy v1 source-only imports without proof retain None. This does not
+    /// certify an independent build or ongoing signer-revocation monitoring.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publisher_provenance_sha256: Option<String>,
 }
 
 /// The registry inspector may check self-consistency without a trust anchor.
@@ -342,6 +352,13 @@ pub fn verify_artifact_bytes(
     if let Some(detail) = binding_error {
         return Err(failure(InvalidMetadata, detail));
     }
+    let publisher_provenance_sha256 = publisher_provenance::verify_publisher_provenance(
+        envelope,
+        &signed,
+        &manifest_bytes,
+        &verifying_key,
+        &actual_hash,
+    )?;
     Ok(PublisherArtifactIdentity {
         publisher_key_id: key_id,
         publisher_id: signed.publisher_id,
@@ -349,6 +366,7 @@ pub fn verify_artifact_bytes(
         version: signed.initial_version.version,
         artifact_sha256: actual_hash,
         runtime_authority: signed.runtime_authority,
+        publisher_provenance_sha256,
     })
 }
 
@@ -581,7 +599,12 @@ impl PublisherSourceGraphApproval {
                 &self.graph_input_hash,
             ]
             .into_iter()
-            .all(|hash| valid_hash(hash)),
+            .all(|hash| valid_hash(hash))
+                && self
+                    .identity
+                    .publisher_provenance_sha256
+                    .as_deref()
+                    .is_none_or(valid_hash),
             "registry approval contains an invalid commitment"
         );
         anyhow::ensure!(
@@ -665,7 +688,10 @@ mod tests {
             canonical_registration_manifest_bytes_with_authority,
         },
         module_resolution_graph::file_resolution::source_graph::{GraphOptions, capsule, capture},
-        provenance::{AttestationEnvelopeFormat, ProvenanceAttestation},
+        provenance::{
+            AttestationEnvelopeFormat, AttestationLink, ChainLinkRole, ProvenanceAttestation,
+            canonical_attestation_json, sign_links_in_place,
+        },
     };
 
     struct Fixture {
@@ -802,6 +828,7 @@ mod tests {
             .unwrap();
             self.manifest.manifest_bytes_b64 = STANDARD.encode(&signed);
             self.manifest.extension.signature.signature_bytes = sign_bytes(&self.key, &signed);
+            self.authenticate_provenance_at(current_epoch());
             std::fs::write(
                 &self.manifest_path,
                 serde_json::to_vec(&self.manifest).unwrap(),
@@ -809,6 +836,512 @@ mod tests {
             .unwrap();
             self
         }
+
+        fn authenticate_provenance_at(&mut self, now: u64) {
+            let key_id = KeyId::from_verifying_key(&self.key.verifying_key()).to_string();
+            let hash = self.manifest.artifact_sha256.clone();
+            self.manifest.extension.provenance = ProvenanceAttestation {
+                schema_version: "1.0".into(),
+                source_repository_url: "https://example.com/publisher/source".into(),
+                build_system_identifier: "registry-publish-test".into(),
+                builder_identity: self.manifest.extension.publisher_id.clone(),
+                builder_version: "1".into(),
+                vcs_commit_sha: "a".repeat(40),
+                build_timestamp_epoch: now,
+                reproducibility_hash: hash.clone(),
+                input_hash: hash.clone(),
+                output_hash: hash.clone(),
+                slsa_level_claim: 1,
+                envelope_format: AttestationEnvelopeFormat::FrankenNodeEnvelopeV1,
+                links: vec![AttestationLink {
+                    role: ChainLinkRole::Publisher,
+                    signer_id: key_id.clone(),
+                    signer_version: "1".into(),
+                    signature: String::new(),
+                    signed_payload_hash: hash,
+                    issued_at_epoch: now,
+                    expires_at_epoch: now + 24 * 60 * 60,
+                    revoked: false,
+                }],
+                custom_claims: std::collections::BTreeMap::from([
+                    ("operator_key_id".into(), key_id),
+                    (
+                        "operator_signature_scope".into(),
+                        "registry_publish_provenance_v1".into(),
+                    ),
+                ]),
+            };
+            self.resign_provenance();
+        }
+
+        fn resign_provenance(&mut self) {
+            let manifest_bytes = STANDARD.decode(&self.manifest.manifest_bytes_b64).unwrap();
+            let provenance = &mut self.manifest.extension.provenance;
+            let payload =
+                registry_publish_provenance_signature_payload(&manifest_bytes, provenance).unwrap();
+            provenance.custom_claims.insert(
+                "operator_provenance_signature".into(),
+                hex::encode(sign_bytes(&self.key, &payload)),
+            );
+            let keys = std::collections::BTreeMap::from([(
+                KeyId::from_verifying_key(&self.key.verifying_key()).to_string(),
+                self.key.clone(),
+            )]);
+            sign_links_in_place(provenance, &keys).unwrap();
+        }
+
+        fn verify_provenance_at(
+            &self,
+            now: u64,
+        ) -> std::result::Result<Option<String>, ArtifactVerificationError> {
+            let manifest_bytes = STANDARD.decode(&self.manifest.manifest_bytes_b64).unwrap();
+            let signed = serde_json::from_slice(&manifest_bytes).unwrap();
+            publisher_provenance::verify_publisher_provenance_at(
+                &self.manifest,
+                &signed,
+                &manifest_bytes,
+                &self.key.verifying_key(),
+                &self.manifest.artifact_sha256,
+                now,
+            )
+        }
+    }
+
+    fn current_epoch() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+
+    #[test]
+    fn publisher_provenance_preimage_preserves_the_existing_publication_format() {
+        let mut fixture = Fixture::new("console.log(42);\n");
+        fixture.authenticate_provenance_at(current_epoch());
+        let manifest_bytes = STANDARD
+            .decode(&fixture.manifest.manifest_bytes_b64)
+            .unwrap();
+        let provenance = &fixture.manifest.extension.provenance;
+        let mut before_signing = provenance.clone();
+        before_signing
+            .custom_claims
+            .remove("operator_provenance_signature");
+        for link in &mut before_signing.links {
+            link.signature.clear();
+        }
+        // Independently assemble the original producer framing, rather than
+        // using the verification helper to construct its own expected bytes.
+        let canonical = canonical_attestation_json(&before_signing).unwrap();
+        let mut expected = b"registry_publish_provenance_v1:".to_vec();
+        expected.extend_from_slice(&(manifest_bytes.len() as u64).to_le_bytes());
+        expected.extend_from_slice(&manifest_bytes);
+        expected.extend_from_slice(&(canonical.len() as u64).to_le_bytes());
+        expected.extend_from_slice(canonical.as_bytes());
+        assert_eq!(
+            registry_publish_provenance_signature_payload(&manifest_bytes, &before_signing)
+                .unwrap(),
+            expected
+        );
+        assert_eq!(
+            registry_publish_provenance_signature_payload(&manifest_bytes, provenance).unwrap(),
+            expected
+        );
+
+        // Even semantically equivalent registration JSON is a different
+        // signed statement: its exact bytes are part of this second proof.
+        let mut other_manifest = manifest_bytes.clone();
+        other_manifest.push(b'\n');
+        fixture.manifest.manifest_bytes_b64 = STANDARD.encode(&other_manifest);
+        fixture.manifest.extension.signature.signature_bytes =
+            sign_bytes(&fixture.key, &other_manifest);
+        assert_eq!(
+            verify_artifact_bytes(
+                &fixture.manifest,
+                &fixture.bytes,
+                Some(&fixture.key.verifying_key())
+            )
+            .unwrap_err()
+            .kind,
+            ArtifactVerificationFailure::InvalidSignature
+        );
+    }
+
+    #[test]
+    fn publisher_provenance_is_verified_and_committed_for_v1_and_v2() {
+        for with_authority in [false, true] {
+            let mut fixture = Fixture::new("console.log(42);\n");
+            if with_authority {
+                fixture = fixture.with_runtime_authority(&runtime_authority());
+            } else {
+                fixture.authenticate_provenance_at(current_epoch());
+                std::fs::write(
+                    &fixture.manifest_path,
+                    serde_json::to_vec(&fixture.manifest).unwrap(),
+                )
+                .unwrap();
+            }
+            let expected = artifact_sha256(
+                canonical_attestation_json(&fixture.manifest.extension.provenance)
+                    .unwrap()
+                    .as_bytes(),
+            );
+            let identity = verify_artifact_bytes(
+                &fixture.manifest,
+                &fixture.bytes,
+                Some(&fixture.key.verifying_key()),
+            )
+            .unwrap();
+            assert_eq!(
+                identity.publisher_provenance_sha256.as_deref(),
+                Some(expected.as_str())
+            );
+            let approval = fixture.approval();
+            assert_eq!(approval.identity(), &identity);
+            let handoff: PublisherSourceGraphApproval =
+                serde_json::from_slice(&serde_json::to_vec(&approval).unwrap()).unwrap();
+            handoff.revalidate().unwrap();
+            assert_eq!(handoff, approval);
+            let receipt = serde_json::to_string(&identity).unwrap();
+            assert!(!receipt.contains("https://example.com/publisher/source"));
+            assert!(!receipt.contains("operator_provenance_signature"));
+        }
+    }
+
+    #[test]
+    fn publisher_provenance_cannot_be_stripped_from_authority_or_partially_declared() {
+        let mut legacy = Fixture::new("console.log(42);\n");
+        let identity = verify_artifact_bytes(
+            &legacy.manifest,
+            &legacy.bytes,
+            Some(&legacy.key.verifying_key()),
+        )
+        .unwrap();
+        assert!(identity.publisher_provenance_sha256.is_none());
+        assert!(
+            !serde_json::to_value(identity)
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .contains_key("publisher_provenance_sha256")
+        );
+        for marker in [
+            "operator_key_id",
+            "operator_signature_scope",
+            "operator_provenance_signature",
+        ] {
+            legacy.manifest.extension.provenance.custom_claims.clear();
+            legacy
+                .manifest
+                .extension
+                .provenance
+                .custom_claims
+                .insert(marker.into(), "partial".into());
+            assert!(
+                verify_artifact_bytes(
+                    &legacy.manifest,
+                    &legacy.bytes,
+                    Some(&legacy.key.verifying_key()),
+                )
+                .is_err(),
+                "{marker}"
+            );
+        }
+
+        let mut authority =
+            Fixture::new("console.log(42);\n").with_runtime_authority(&runtime_authority());
+        authority
+            .manifest
+            .extension
+            .provenance
+            .custom_claims
+            .clear();
+        assert_eq!(
+            verify_artifact_bytes(
+                &authority.manifest,
+                &authority.bytes,
+                Some(&authority.key.verifying_key()),
+            )
+            .unwrap_err()
+            .kind,
+            ArtifactVerificationFailure::InvalidMetadata
+        );
+    }
+
+    #[test]
+    fn publisher_provenance_rejects_statement_mutations_and_foreign_signatures() {
+        let mut fixture = Fixture::new("console.log(42);\n");
+        fixture.authenticate_provenance_at(current_epoch());
+        for (label, mutate) in [
+            (
+                "repository",
+                (|p: &mut ProvenanceAttestation| {
+                    p.source_repository_url.push_str("/private-substitute")
+                }) as fn(&mut ProvenanceAttestation),
+            ),
+            ("builder", |p| p.builder_identity.push_str("-substitute")),
+            ("build_system", |p| {
+                p.build_system_identifier.push_str("-substitute")
+            }),
+            ("revision", |p| p.vcs_commit_sha = "b".repeat(40)),
+            ("input_hash", |p| {
+                p.input_hash = artifact_sha256(b"different input")
+            }),
+            ("output_hash", |p| {
+                p.output_hash = artifact_sha256(b"different output")
+            }),
+            ("reproducibility_hash", |p| {
+                p.reproducibility_hash = artifact_sha256(b"different build")
+            }),
+            ("slsa_claim", |p| p.slsa_level_claim = 3),
+            ("claim", |p| {
+                p.custom_claims.insert("source_dirty".into(), "true".into());
+            }),
+            ("scope", |p| {
+                p.custom_claims
+                    .insert("operator_signature_scope".into(), "other".into());
+            }),
+            ("key_id", |p| {
+                p.custom_claims
+                    .insert("operator_key_id".into(), "other".into());
+            }),
+            ("proof_missing", |p| {
+                p.custom_claims.remove("operator_provenance_signature");
+            }),
+            ("proof_noncanonical", |p| {
+                p.custom_claims
+                    .insert("operator_provenance_signature".into(), "A".repeat(128));
+            }),
+            ("link_identity", |p| {
+                p.links[0].signer_id.push_str("-substitute")
+            }),
+            ("link_expiry", |p| p.links[0].expires_at_epoch += 1),
+            ("link_revoked", |p| p.links[0].revoked = true),
+        ] {
+            let mut changed = fixture.manifest.clone();
+            mutate(&mut changed.extension.provenance);
+            let error =
+                verify_artifact_bytes(&changed, &fixture.bytes, Some(&fixture.key.verifying_key()))
+                    .unwrap_err();
+            assert!(!error.detail.contains("private-substitute"), "{label}");
+        }
+
+        let foreign = ed25519_dalek::SigningKey::from_bytes(&[99; 32]);
+        let manifest_bytes = STANDARD
+            .decode(&fixture.manifest.manifest_bytes_b64)
+            .unwrap();
+        let payload = registry_publish_provenance_signature_payload(
+            &manifest_bytes,
+            &fixture.manifest.extension.provenance,
+        )
+        .unwrap();
+        fixture.manifest.extension.provenance.custom_claims.insert(
+            "operator_provenance_signature".into(),
+            hex::encode(sign_bytes(&foreign, &payload)),
+        );
+        assert_eq!(
+            verify_artifact_bytes(
+                &fixture.manifest,
+                &fixture.bytes,
+                Some(&fixture.key.verifying_key()),
+            )
+            .unwrap_err()
+            .kind,
+            ArtifactVerificationFailure::InvalidSignature
+        );
+    }
+
+    #[test]
+    fn publisher_provenance_requires_real_ordered_links_under_the_pinned_key() {
+        const NOW: u64 = 1_800_000_000;
+        let mut fixture = Fixture::new("console.log(42);\n");
+        fixture.authenticate_provenance_at(NOW);
+        let original = fixture.manifest.extension.provenance.clone();
+        let manifest_bytes = STANDARD
+            .decode(&fixture.manifest.manifest_bytes_b64)
+            .unwrap();
+        let outer_payload =
+            registry_publish_provenance_signature_payload(&manifest_bytes, &original).unwrap();
+        fixture.manifest.extension.provenance.links[0].signature = "0".repeat(128);
+        assert_eq!(
+            registry_publish_provenance_signature_payload(
+                &manifest_bytes,
+                &fixture.manifest.extension.provenance,
+            )
+            .unwrap(),
+            outer_payload,
+            "the independent link signature is not part of the outer preimage"
+        );
+        assert_eq!(
+            fixture.verify_provenance_at(NOW).unwrap_err().kind,
+            ArtifactVerificationFailure::InvalidSignature
+        );
+
+        fixture.manifest.extension.provenance = original.clone();
+        for role in [ChainLinkRole::BuildSystem, ChainLinkRole::SourceVcs] {
+            let mut link = original.links[0].clone();
+            link.role = role;
+            fixture.manifest.extension.provenance.links.push(link);
+            fixture.resign_provenance();
+            assert!(fixture.verify_provenance_at(NOW).unwrap().is_some());
+        }
+        fixture.manifest.extension.provenance.links[1].role = ChainLinkRole::Publisher;
+        fixture.resign_provenance();
+        assert_eq!(
+            fixture.verify_provenance_at(NOW).unwrap_err().kind,
+            ArtifactVerificationFailure::InvalidMetadata
+        );
+
+        // The publisher may attest that another signer exists, but that does
+        // not install the foreign key as an admission trust anchor.
+        fixture.manifest.extension.provenance = original;
+        let foreign = ed25519_dalek::SigningKey::from_bytes(&[98; 32]);
+        let foreign_id = KeyId::from_verifying_key(&foreign.verifying_key()).to_string();
+        fixture.manifest.extension.provenance.links[0].signer_id = foreign_id.clone();
+        let payload = registry_publish_provenance_signature_payload(
+            &manifest_bytes,
+            &fixture.manifest.extension.provenance,
+        )
+        .unwrap();
+        fixture.manifest.extension.provenance.custom_claims.insert(
+            "operator_provenance_signature".into(),
+            hex::encode(sign_bytes(&fixture.key, &payload)),
+        );
+        sign_links_in_place(
+            &mut fixture.manifest.extension.provenance,
+            &std::collections::BTreeMap::from([(foreign_id.clone(), foreign)]),
+        )
+        .unwrap();
+        let error = fixture.verify_provenance_at(NOW).unwrap_err();
+        assert_eq!(error.kind, ArtifactVerificationFailure::InvalidSignature);
+        assert!(!error.detail.contains(&foreign_id));
+    }
+
+    #[test]
+    fn publisher_provenance_expiry_future_time_and_revocation_fail_closed() {
+        const NOW: u64 = 1_800_000_000;
+        let mut fixture = Fixture::new("console.log(42);\n");
+        fixture.authenticate_provenance_at(NOW);
+        let original = fixture.manifest.extension.provenance.clone();
+        assert!(
+            fixture
+                .verify_provenance_at(NOW + 24 * 60 * 60 - 1)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            fixture
+                .verify_provenance_at(NOW + 24 * 60 * 60)
+                .unwrap_err()
+                .kind,
+            ArtifactVerificationFailure::InvalidMetadata
+        );
+        for (label, mutate) in [
+            (
+                "future_build",
+                (|p: &mut ProvenanceAttestation| p.build_timestamp_epoch = NOW + 1)
+                    as fn(&mut ProvenanceAttestation),
+            ),
+            ("future_link", |p| p.links[0].issued_at_epoch = NOW + 1),
+            ("expired_link", |p| p.links[0].expires_at_epoch = NOW),
+            ("old_build", |p| {
+                p.build_timestamp_epoch = NOW - 7 * 24 * 60 * 60
+            }),
+            ("old_link", |p| {
+                p.links[0].issued_at_epoch = NOW - 7 * 24 * 60 * 60
+            }),
+            ("revoked_link", |p| p.links[0].revoked = true),
+            ("missing_link", |p| p.links.clear()),
+            ("unsupported_schema", |p| {
+                p.schema_version = "future-unknown".into()
+            }),
+            ("unsupported_envelope", |p| {
+                p.envelope_format = AttestationEnvelopeFormat::InToto
+            }),
+        ] {
+            fixture.manifest.extension.provenance = original.clone();
+            mutate(&mut fixture.manifest.extension.provenance);
+            // These are valid publisher and link signatures: failures must
+            // come from actual admission policy, not stale cryptographic bytes.
+            fixture.resign_provenance();
+            assert_eq!(
+                fixture.verify_provenance_at(NOW).unwrap_err().kind,
+                ArtifactVerificationFailure::InvalidMetadata,
+                "{label}"
+            );
+        }
+        fixture.manifest.extension.provenance = original;
+        fixture.manifest.extension.provenance.links[0].expires_at_epoch = NOW + 8 * 24 * 60 * 60;
+        fixture.resign_provenance();
+        assert!(
+            fixture
+                .verify_provenance_at(NOW + 7 * 24 * 60 * 60 - 1)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            fixture
+                .verify_provenance_at(NOW + 7 * 24 * 60 * 60)
+                .unwrap_err()
+                .kind,
+            ArtifactVerificationFailure::InvalidMetadata
+        );
+    }
+
+    #[test]
+    fn publisher_provenance_bounds_ordinary_metadata_before_canonical_copy() {
+        let mut fixture = Fixture::new("console.log(42);\n");
+        fixture.authenticate_provenance_at(current_epoch());
+        fixture.manifest.extension.provenance.source_repository_url =
+            "private-metadata".repeat(MAX_ARTIFACT_BYTES as usize / 16 + 1);
+        let manifest_bytes = STANDARD
+            .decode(&fixture.manifest.manifest_bytes_b64)
+            .unwrap();
+        assert!(
+            registry_publish_provenance_signature_payload(
+                &manifest_bytes,
+                &fixture.manifest.extension.provenance,
+            )
+            .is_err()
+        );
+        let error = verify_artifact_bytes(
+            &fixture.manifest,
+            &fixture.bytes,
+            Some(&fixture.key.verifying_key()),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind, ArtifactVerificationFailure::InvalidMetadata);
+        assert!(!error.detail.contains("private-metadata"));
+    }
+
+    #[test]
+    fn publisher_provenance_commitment_binds_the_retained_execution_approval() {
+        let mut fixture =
+            Fixture::new("console.log(42);\n").with_runtime_authority(&runtime_authority());
+        let retained = fixture.approval();
+        let mut invalid_handoff = retained.clone();
+        invalid_handoff.identity.publisher_provenance_sha256 = Some("sha256:invalid".into());
+        assert!(invalid_handoff.validate().is_err());
+
+        fixture.manifest.extension.provenance.vcs_commit_sha = "c".repeat(40);
+        fixture.resign_provenance();
+        std::fs::write(
+            &fixture.manifest_path,
+            serde_json::to_vec(&fixture.manifest).unwrap(),
+        )
+        .unwrap();
+        let replacement = fixture.approval();
+        assert_ne!(
+            retained.identity().publisher_provenance_sha256,
+            replacement.identity().publisher_provenance_sha256,
+        );
+        replacement.revalidate().unwrap();
+        assert!(
+            retained
+                .revalidate()
+                .unwrap_err()
+                .to_string()
+                .contains("changed after publisher admission")
+        );
     }
 
     #[test]
