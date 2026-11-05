@@ -15,6 +15,9 @@
 //!   coordinator must be reached over `https://` (for example behind a
 //!   TLS-terminating proxy) so the bearer token never crosses a network in
 //!   clear text;
+//! * redirects are refused before reading their bodies: neither authenticated
+//!   fleet requests nor unauthenticated health probes may leave the configured
+//!   coordinator origin or silently change their fixed API route;
 //! * response bodies are size-bounded before they are parsed, and every
 //!   record the coordinator returns is re-validated by the client with the
 //!   same rules the coordinator applies on ingest.
@@ -281,6 +284,10 @@ impl HttpFleetTransport {
         validate_bearer_token(&token).map_err(FleetTransportError::not_initialized)?;
         let config = ureq::Agent::config_builder()
             .timeout_global(Some(timeout))
+            // Origin admission applies to the configured coordinator only. A
+            // redirect must not forward an action body or substitute another
+            // server's state, even when the HTTP client strips Authorization.
+            .max_redirects(0)
             .http_status_as_error(false)
             .build();
         Ok(Self {
@@ -374,6 +381,13 @@ impl HttpFleetTransport {
         mut response: ureq::http::Response<ureq::Body>,
     ) -> Result<T, FleetTransportError> {
         let status = response.status().as_u16();
+        if (300..400).contains(&status) {
+            // Do not consume an untrusted or stalled redirect body and do not
+            // expose its Location value as an operator-approved destination.
+            return Err(FleetTransportError::io(format!(
+                "fleet control plane at {endpoint} returned HTTP {status}; redirects are refused to preserve the configured coordinator origin"
+            )));
+        }
         let body = response
             .body_mut()
             .with_config()

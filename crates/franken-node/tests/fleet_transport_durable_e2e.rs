@@ -827,3 +827,173 @@ fn committed_writes_survive_child_process_abort() {
     assert_eq!(actions.len(), 1, "committed action must survive the abort");
     assert_eq!(actions[0].action_id, "committed-before-abort");
 }
+
+#[cfg(feature = "http-client")]
+mod http_origin_boundary {
+    use super::{sample_action, sample_node};
+    use frankenengine_node::control_plane::fleet_transport::{
+        FleetActionRecord, FleetTransport, FleetTransportError,
+    };
+    use frankenengine_node::control_plane::fleet_transport_http::{
+        FLEET_HTTP_API_SCHEMA, HttpFleetTransport,
+    };
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread::JoinHandle;
+    use std::time::{Duration, Instant};
+
+    const TOKEN: &str = "fleet-origin-test-0123456789abcdef0123456789abcdef";
+
+    /// A real one-request HTTP peer with bounded accept/read/write operations.
+    /// Return the complete request so the positive controls check actual I/O.
+    fn serve_response(response: String) -> (String, JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind HTTP peer");
+        let origin = format!("http://{}", listener.local_addr().expect("peer address"));
+        listener.set_nonblocking(true).expect("nonblocking accept");
+        let peer = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(Instant::now() < deadline, "HTTP peer was never contacted");
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("accept HTTP peer: {error}"),
+                }
+            };
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("read timeout");
+            stream
+                .set_write_timeout(Some(Duration::from_secs(5)))
+                .expect("write timeout");
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                assert!(request.len() < 64 * 1024, "HTTP request headers too large");
+                let mut byte = [0_u8; 1];
+                stream.read_exact(&mut byte).expect("request header byte");
+                request.push(byte[0]);
+            }
+            let headers = std::str::from_utf8(&request).expect("ASCII request headers");
+            let content_length = headers
+                .lines()
+                .filter_map(|line| line.split_once(':'))
+                .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                .map_or(0, |(_, value)| {
+                    value.trim().parse::<usize>().expect("body length")
+                });
+            assert!(content_length <= 64 * 1024, "HTTP request body too large");
+            let header_bytes = request.len();
+            request.resize(header_bytes + content_length, 0);
+            stream
+                .read_exact(&mut request[header_bytes..])
+                .expect("complete request body");
+            stream
+                .write_all(response.as_bytes())
+                .expect("send response");
+            String::from_utf8(request).expect("UTF-8 request")
+        });
+        (origin, peer)
+    }
+
+    fn json_response(body: &serde_json::Value) -> String {
+        let body = serde_json::to_string(body).expect("encode response");
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    #[test]
+    fn fleet_http_redirects_never_contact_another_origin() {
+        for status in [301, 302, 303, 307, 308] {
+            for operation in ["health", "actions", "publish", "heartbeat"] {
+                let target = TcpListener::bind("127.0.0.1:0").expect("bind redirect target");
+                target
+                    .set_nonblocking(true)
+                    .expect("inspect pending contacts");
+                let destination = format!(
+                    "http://{}/untrusted-fleet",
+                    target.local_addr().expect("redirect address")
+                );
+                // No response body follows the declared length. Refusal must
+                // happen on the status, before attempting body consumption.
+                let (origin, peer) = serve_response(format!(
+                    "HTTP/1.1 {status} Redirect\r\nLocation: {destination}\r\nContent-Length: 1048576\r\nConnection: close\r\n\r\n"
+                ));
+                let mut client = HttpFleetTransport::new(&origin, TOKEN, Duration::from_secs(2))
+                    .expect("client");
+                let result = match operation {
+                    "health" => client.health().map(|_| ()),
+                    "actions" => client.list_actions().map(|_| ()),
+                    "publish" => {
+                        client.publish_action(&sample_action("origin-action", "origin-inc"))
+                    }
+                    "heartbeat" => client.upsert_node_status(&sample_node("origin-node")),
+                    _ => unreachable!("fixed operation table"),
+                };
+                let request = peer.join().expect("HTTP peer finished");
+                let error = result.expect_err("redirect must not succeed");
+                assert!(
+                    matches!(&error, FleetTransportError::IoError { .. }),
+                    "{error}"
+                );
+                assert!(
+                    error
+                        .to_string()
+                        .contains(&format!("HTTP {status}; redirects are refused")),
+                    "{operation}: {error}"
+                );
+                assert!(
+                    !error.to_string().contains(&destination),
+                    "untrusted redirect target must not be promoted into diagnostics"
+                );
+                let contact = target
+                    .accept()
+                    .expect_err("redirect target must never be contacted");
+                assert_eq!(contact.kind(), std::io::ErrorKind::WouldBlock);
+                let has_token = request.contains(TOKEN);
+                assert_eq!(has_token, operation != "health", "{operation}");
+                if operation == "publish" || operation == "heartbeat" {
+                    assert!(request.starts_with("POST "), "{operation}");
+                } else {
+                    assert!(request.starts_with("GET "), "{operation}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fleet_http_direct_reads_and_mutations_keep_their_wire_contract() {
+        let action = sample_action("origin-positive", "origin-positive-inc");
+        let (origin, peer) = serve_response(json_response(&serde_json::json!({
+            "schema_version": FLEET_HTTP_API_SCHEMA,
+            "actions": [action.clone()]
+        })));
+        let client =
+            HttpFleetTransport::new(&origin, TOKEN, Duration::from_secs(2)).expect("read client");
+        let result = client.list_actions();
+        let request = peer.join().expect("read peer finished");
+        assert_eq!(result.expect("direct list succeeds"), vec![action.clone()]);
+        assert!(request.starts_with("GET /v1/fleet/actions HTTP/1.1\r\n"));
+        assert!(request.contains(&format!("Bearer {TOKEN}")));
+
+        let (origin, peer) = serve_response(json_response(&serde_json::json!({
+            "schema_version": FLEET_HTTP_API_SCHEMA,
+            "accepted": action.action_id
+        })));
+        let mut client = HttpFleetTransport::new(&origin, TOKEN, Duration::from_secs(2))
+            .expect("publish client");
+        let result = client.publish_action(&action);
+        let request = peer.join().expect("publish peer finished");
+        result.expect("direct publication succeeds");
+        assert!(request.starts_with("POST /v1/fleet/actions HTTP/1.1\r\n"));
+        assert!(request.contains(&format!("Bearer {TOKEN}")));
+        let (_, body) = request.split_once("\r\n\r\n").expect("request body");
+        assert_eq!(
+            serde_json::from_str::<FleetActionRecord>(body).expect("actual transmitted action"),
+            action
+        );
+    }
+}
