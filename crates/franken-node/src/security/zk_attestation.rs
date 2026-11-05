@@ -1,9 +1,10 @@
 //! bd-kcg9: Zero-knowledge attestation support for selective compliance verification.
 //!
-//! Provides types and operations for generating, verifying, and auditing
-//! zero-knowledge attestations.  Verifiers can validate compliance predicates
-//! without requiring privileged disclosure of full private metadata.  Invalid
-//! or forged proofs fail admission deterministically.
+//! Legacy attestation records and lifecycle auditing. The v1 format contains
+//! caller-supplied bytes and outcomes, with no cryptographic witness relation,
+//! verifier key or public statement. Registration is not proof generation.
+//! Verification therefore fails closed until a supported cryptographic backend
+//! and independently authenticated public parameters are implemented.
 //!
 //! # Invariants
 //!
@@ -157,6 +158,8 @@ pub mod event_codes {
 // ── Error codes ─────────────────────────────────────────────────────────────
 
 pub mod error_codes {
+    /// No supported cryptographic relation and verifier parameters are available.
+    pub const ERR_ZKA_VERIFIER_UNAVAILABLE: &str = "ERR_ZKA_VERIFIER_UNAVAILABLE";
     /// Proof bytes do not parse or signature invalid.
     pub const ERR_ZKA_INVALID_PROOF: &str = "ERR_ZKA_INVALID_PROOF";
     /// Proof was generated under a different policy.
@@ -515,9 +518,9 @@ impl AttestationLedger {
         }
     }
 
-    /// Generate a ZK attestation proof from private data commitment and a policy.
-    /// INV-ZKA-SELECTIVE: we never store or transmit the raw private data.
-    /// Returns the attestation. Emits FN-ZK-001.
+    /// Register a legacy attestation record supplied by the caller.
+    /// This does not generate a proof or establish predicate satisfaction.
+    /// Retains the v1 wire format and historical FN-ZK-001 registration event.
     #[allow(clippy::too_many_arguments)]
     pub fn generate_proof(
         &mut self,
@@ -573,7 +576,7 @@ impl AttestationLedger {
             Some(policy.policy_id.clone()),
             trace_id,
             now_ms,
-            "Attestation proof generated".to_string(),
+            "Legacy attestation registered; cryptographic proof not established".to_string(),
         );
 
         Ok(attestation)
@@ -772,22 +775,26 @@ impl AttestationLedger {
             };
         }
 
-        // All checks passed -- emit FN-ZK-003
+        // Structural checks, ledger membership and a caller's Pass are not a
+        // cryptographic proof. v1 has no authenticated relation/key/statement.
+        // Never upgrade historical registrations to verification authority.
         self.record_audit(
-            format!("audit-{}-pass", aid),
-            event_codes::FN_ZK_003.to_string(),
+            format!("audit-{}-unavailable", aid),
+            event_codes::FN_ZK_004.to_string(),
             Some(aid.clone()),
             Some(pid.clone()),
             trace_id.clone(),
             now_ms,
-            "Verification passed".to_string(),
+            "Cryptographic verifier unavailable for legacy attestation".to_string(),
         );
 
-        ZkVerificationResult::Verified {
+        ZkVerificationResult::Rejected {
             attestation_id: aid,
             policy_id: pid,
             trace_id,
-            verified_at_ms: now_ms,
+            reason: "No supported cryptographic verifier or authenticated public parameters"
+                .to_string(),
+            error_code: error_codes::ERR_ZKA_VERIFIER_UNAVAILABLE.to_string(),
         }
     }
 
@@ -1307,7 +1314,7 @@ mod tests {
     // ── Verify proof tests ──────────────────────────────────────────────
 
     #[test]
-    fn test_verify_valid_proof_passes() {
+    fn test_registered_pass_requires_cryptographic_verifier() {
         let mut ledger = AttestationLedger::new();
         let policy = test_policy();
         let att = generate_test_attestation(
@@ -1318,7 +1325,10 @@ mod tests {
             1_000_000,
         );
         let result = ledger.verify_proof(&att, &policy, 1_000_001, "trace-v1".to_string());
-        assert!(result.is_verified());
+        assert!(
+            matches!(result, ZkVerificationResult::Rejected { error_code, .. }
+            if error_code == error_codes::ERR_ZKA_VERIFIER_UNAVAILABLE)
+        );
     }
 
     #[test]
@@ -1475,7 +1485,7 @@ mod tests {
     // ── Batch verification tests ────────────────────────────────────────
 
     #[test]
-    fn test_batch_all_pass() {
+    fn test_batch_claimed_passes_are_not_verified() {
         let mut ledger = AttestationLedger::new();
         let policy = test_policy();
         let att1 = generate_test_attestation(
@@ -1495,8 +1505,8 @@ mod tests {
         let batch =
             ledger.verify_batch(&[att1, att2], &policy, 1_000_001, "trace-batch".to_string());
         assert_eq!(batch.total, 2);
-        assert_eq!(batch.passed, 2);
-        assert_eq!(batch.failed, 0);
+        assert_eq!(batch.passed, 0);
+        assert_eq!(batch.failed, 2);
     }
 
     #[test]
@@ -1524,8 +1534,8 @@ mod tests {
             "trace-batch2".to_string(),
         );
         assert_eq!(batch.total, 2);
-        assert_eq!(batch.passed, 1);
-        assert_eq!(batch.failed, 1);
+        assert_eq!(batch.passed, 0);
+        assert_eq!(batch.failed, 2);
     }
 
     // ── Revocation tests ────────────────────────────────────────────────
@@ -1732,13 +1742,19 @@ mod tests {
             1_000_000,
         );
         ledger.verify_proof(&att, &policy, 1_000_001, "trace-audit".to_string());
-        // Should have: FN-ZK-001 (gen), FN-ZK-002 (submit), FN-ZK-003 (pass)
+        // Registration and submission must end in refusal, never a pass event.
         let gen_records = ledger.query_audit(|r| r.event_code == event_codes::FN_ZK_001);
         let submit_records = ledger.query_audit(|r| r.event_code == event_codes::FN_ZK_002);
         let pass_records = ledger.query_audit(|r| r.event_code == event_codes::FN_ZK_003);
         assert_eq!(gen_records.len(), 1);
         assert_eq!(submit_records.len(), 1);
-        assert_eq!(pass_records.len(), 1);
+        assert!(pass_records.is_empty());
+        assert_eq!(
+            ledger
+                .query_audit(|r| r.event_code == event_codes::FN_ZK_004)
+                .len(),
+            1
+        );
     }
 
     // ── Compliance report tests ─────────────────────────────────────────
@@ -2007,7 +2023,7 @@ mod tests {
     }
 
     #[test]
-    fn verify_proof_accepts_legitimate_attestation() {
+    fn verify_proof_registration_is_not_cryptographic_authority() {
         let mut ledger = AttestationLedger::new();
         let policy = test_policy();
         let att = generate_test_attestation(
@@ -2019,8 +2035,9 @@ mod tests {
         );
         let result = ledger.verify_proof(&att, &policy, 1_000_000, "trace-legit".to_string());
         assert!(
-            matches!(result, ZkVerificationResult::Verified { .. }),
-            "legitimate attestation should verify: {result:?}"
+            matches!(result, ZkVerificationResult::Rejected { error_code, .. }
+                if error_code == error_codes::ERR_ZKA_VERIFIER_UNAVAILABLE),
+            "registration must not establish predicate satisfaction"
         );
     }
 

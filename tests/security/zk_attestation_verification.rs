@@ -60,11 +60,20 @@ fn valid_proof_does_not_disclose_private_metadata() {
     // ZK_ATTESTATION_REQUEST / ZK_PROOF_GENERATED
     let mut ledger = AttestationLedger::new();
     let policy = test_policy();
-    let att = make_attestation(&mut ledger, "att-sel-1", &policy, PredicateOutcome::Pass, 1_000_000);
+    let att = make_attestation(
+        &mut ledger,
+        "att-sel-1",
+        &policy,
+        PredicateOutcome::Pass,
+        1_000_000,
+    );
     // Proof payload must contain only hex commitment, not plaintext.
     assert!(invariants::check_selective(&att), "INV-ZKA-SELECTIVE");
     assert!(
-        att.payload.proof_bytes_hex.chars().all(|c| c.is_ascii_hexdigit()),
+        att.payload
+            .proof_bytes_hex
+            .chars()
+            .all(|c| c.is_ascii_hexdigit()),
         "proof bytes must be pure hex"
     );
     assert!(
@@ -111,7 +120,9 @@ fn non_hex_proof_bytes_rejected_at_generation() {
     );
     assert!(result.is_err());
     assert!(
-        result.unwrap_err().contains(error_codes::ERR_ZKA_METADATA_LEAK),
+        result
+            .unwrap_err()
+            .contains(error_codes::ERR_ZKA_METADATA_LEAK),
         "Non-hex proof bytes must fail with ERR_ZKA_METADATA_LEAK"
     );
 }
@@ -124,7 +135,13 @@ fn forged_proof_policy_mismatch_rejected() {
     let mut ledger = AttestationLedger::new();
     let policy = test_policy();
     let wrong_policy = alt_policy();
-    let att = make_attestation(&mut ledger, "att-forge-1", &policy, PredicateOutcome::Pass, 1_000_000);
+    let att = make_attestation(
+        &mut ledger,
+        "att-forge-1",
+        &policy,
+        PredicateOutcome::Pass,
+        1_000_000,
+    );
     let result = ledger.verify_proof(&att, &wrong_policy, 1_000_001, "trace-forge".to_string());
     assert!(!result.is_verified());
     match &result {
@@ -140,8 +157,16 @@ fn revoked_proof_rejected_deterministically() {
     // ERR_ZK_PROOF_FORGED analogue: revoked proofs are rejected
     let mut ledger = AttestationLedger::new();
     let policy = test_policy();
-    let mut att = make_attestation(&mut ledger, "att-rev-1", &policy, PredicateOutcome::Pass, 1_000_000);
-    att.status = AttestationStatus::Revoked;
+    let att = make_attestation(
+        &mut ledger,
+        "att-rev-1",
+        &policy,
+        PredicateOutcome::Pass,
+        1_000_000,
+    );
+    ledger
+        .revoke_attestation(&att.attestation_id, 1_000_000, "trace-revoke".to_string())
+        .unwrap();
     let result = ledger.verify_proof(&att, &policy, 1_000_001, "trace-rev".to_string());
     assert!(!result.is_verified());
     match &result {
@@ -160,7 +185,10 @@ fn soundness_invariant_holds_for_verified_result() {
         trace_id: "t1".to_string(),
         verified_at_ms: 1_000_000,
     };
-    assert!(invariants::check_soundness(&result), "INV-ZKA-SOUNDNESS for Verified");
+    assert!(
+        invariants::check_soundness(&result),
+        "INV-ZKA-SOUNDNESS for Verified"
+    );
 }
 
 #[test]
@@ -172,7 +200,10 @@ fn soundness_invariant_holds_for_rejected_result() {
         reason: "bad proof".to_string(),
         error_code: error_codes::ERR_ZKA_INVALID_PROOF.to_string(),
     };
-    assert!(invariants::check_soundness(&result), "INV-ZKA-SOUNDNESS for Rejected");
+    assert!(
+        invariants::check_soundness(&result),
+        "INV-ZKA-SOUNDNESS for Rejected"
+    );
 }
 
 // ── INV-ZK-FAIL-CLOSED ──────────────────────────────────────────────────────
@@ -182,8 +213,19 @@ fn expired_proof_is_fail_closed() {
     // ERR_ZK_ATTESTATION_EXPIRED / ERR_ZKA_EXPIRED
     let mut ledger = AttestationLedger::new();
     let policy = test_policy();
-    let att = make_attestation(&mut ledger, "att-exp-1", &policy, PredicateOutcome::Pass, 1_000_000);
-    let result = ledger.verify_proof(&att, &policy, att.expires_at_ms + 1, "trace-exp".to_string());
+    let att = make_attestation(
+        &mut ledger,
+        "att-exp-1",
+        &policy,
+        PredicateOutcome::Pass,
+        1_000_000,
+    );
+    let result = ledger.verify_proof(
+        &att,
+        &policy,
+        att.expires_at_ms + 1,
+        "trace-exp".to_string(),
+    );
     assert!(
         !result.is_verified(),
         "Expired proof must be rejected (fail-closed)"
@@ -201,7 +243,13 @@ fn failing_predicate_is_fail_closed() {
     // ERR_ZK_PREDICATE_UNSATISFIED / ERR_ZKA_PREDICATE_UNSATISFIED
     let mut ledger = AttestationLedger::new();
     let policy = test_policy();
-    let att = make_attestation(&mut ledger, "att-pred-1", &policy, PredicateOutcome::Fail, 1_000_000);
+    let att = make_attestation(
+        &mut ledger,
+        "att-pred-1",
+        &policy,
+        PredicateOutcome::Fail,
+        1_000_000,
+    );
     let result = ledger.verify_proof(&att, &policy, 1_000_001, "trace-pred".to_string());
     assert!(
         !result.is_verified(),
@@ -219,7 +267,13 @@ fn failing_predicate_is_fail_closed() {
 fn error_predicate_is_fail_closed() {
     let mut ledger = AttestationLedger::new();
     let policy = test_policy();
-    let att = make_attestation(&mut ledger, "att-err-1", &policy, PredicateOutcome::Error, 1_000_000);
+    let att = make_attestation(
+        &mut ledger,
+        "att-err-1",
+        &policy,
+        PredicateOutcome::Error,
+        1_000_000,
+    );
     let result = ledger.verify_proof(&att, &policy, 1_000_001, "trace-err".to_string());
     assert!(
         !result.is_verified(),
@@ -230,15 +284,21 @@ fn error_predicate_is_fail_closed() {
 // ── INV-ZK-PREDICATE-COMPLETENESS / INV-ZKA-COMPLETENESS ────────────────────
 
 #[test]
-fn valid_proof_within_window_passes_verification() {
-    // ZK_PROOF_VERIFIED / ZK_PREDICATE_SATISFIED
+fn active_registration_within_window_still_requires_a_verifier() {
     let mut ledger = AttestationLedger::new();
     let policy = test_policy();
-    let att = make_attestation(&mut ledger, "att-comp-1", &policy, PredicateOutcome::Pass, 1_000_000);
+    let att = make_attestation(
+        &mut ledger,
+        "att-comp-1",
+        &policy,
+        PredicateOutcome::Pass,
+        1_000_000,
+    );
     let result = ledger.verify_proof(&att, &policy, 1_000_001, "trace-comp".to_string());
     assert!(
-        result.is_verified(),
-        "Valid proof within window must pass (INV-ZKA-COMPLETENESS)"
+        matches!(result, ZkVerificationResult::Rejected { error_code, .. }
+            if error_code == error_codes::ERR_ZKA_VERIFIER_UNAVAILABLE),
+        "A validity window cannot establish cryptographic completeness"
     );
 }
 
@@ -246,7 +306,13 @@ fn valid_proof_within_window_passes_verification() {
 fn completeness_invariant_holds_for_active_pass() {
     let mut ledger = AttestationLedger::new();
     let policy = test_policy();
-    let att = make_attestation(&mut ledger, "att-cinv-1", &policy, PredicateOutcome::Pass, 1_000_000);
+    let att = make_attestation(
+        &mut ledger,
+        "att-cinv-1",
+        &policy,
+        PredicateOutcome::Pass,
+        1_000_000,
+    );
     assert!(
         invariants::check_completeness(&att, 1_000_001),
         "INV-ZKA-COMPLETENESS: active pass within window"
@@ -259,7 +325,13 @@ fn completeness_invariant_holds_for_active_pass() {
 fn policy_bound_invariant() {
     let mut ledger = AttestationLedger::new();
     let policy = test_policy();
-    let att = make_attestation(&mut ledger, "att-pb-1", &policy, PredicateOutcome::Pass, 1_000_000);
+    let att = make_attestation(
+        &mut ledger,
+        "att-pb-1",
+        &policy,
+        PredicateOutcome::Pass,
+        1_000_000,
+    );
     assert!(invariants::check_policy_bound(&att, &policy));
     assert!(!invariants::check_policy_bound(&att, &alt_policy()));
 }
@@ -267,27 +339,51 @@ fn policy_bound_invariant() {
 // ── Batch verification ──────────────────────────────────────────────────────
 
 #[test]
-fn batch_all_pass() {
+fn batch_claimed_passes_require_cryptographic_verification() {
     let mut ledger = AttestationLedger::new();
     let policy = test_policy();
-    let a1 = make_attestation(&mut ledger, "att-ba-1", &policy, PredicateOutcome::Pass, 1_000_000);
-    let a2 = make_attestation(&mut ledger, "att-ba-2", &policy, PredicateOutcome::Pass, 1_000_000);
+    let a1 = make_attestation(
+        &mut ledger,
+        "att-ba-1",
+        &policy,
+        PredicateOutcome::Pass,
+        1_000_000,
+    );
+    let a2 = make_attestation(
+        &mut ledger,
+        "att-ba-2",
+        &policy,
+        PredicateOutcome::Pass,
+        1_000_000,
+    );
     let batch = ledger.verify_batch(&[a1, a2], &policy, 1_000_001, "trace-ba".to_string());
     assert_eq!(batch.total, 2);
-    assert_eq!(batch.passed, 2);
-    assert_eq!(batch.failed, 0);
+    assert_eq!(batch.passed, 0);
+    assert_eq!(batch.failed, 2);
 }
 
 #[test]
 fn batch_partial_failure() {
     let mut ledger = AttestationLedger::new();
     let policy = test_policy();
-    let a1 = make_attestation(&mut ledger, "att-bp-1", &policy, PredicateOutcome::Pass, 1_000_000);
-    let a2 = make_attestation(&mut ledger, "att-bp-2", &policy, PredicateOutcome::Fail, 1_000_000);
+    let a1 = make_attestation(
+        &mut ledger,
+        "att-bp-1",
+        &policy,
+        PredicateOutcome::Pass,
+        1_000_000,
+    );
+    let a2 = make_attestation(
+        &mut ledger,
+        "att-bp-2",
+        &policy,
+        PredicateOutcome::Fail,
+        1_000_000,
+    );
     let batch = ledger.verify_batch(&[a1, a2], &policy, 1_000_001, "trace-bp".to_string());
     assert_eq!(batch.total, 2);
-    assert_eq!(batch.passed, 1);
-    assert_eq!(batch.failed, 1);
+    assert_eq!(batch.passed, 0);
+    assert_eq!(batch.failed, 2);
 }
 
 // ── Revocation lifecycle ─────────────────────────────────────────────────────
@@ -296,7 +392,13 @@ fn batch_partial_failure() {
 fn revoke_attestation_success() {
     let mut ledger = AttestationLedger::new();
     let policy = test_policy();
-    make_attestation(&mut ledger, "att-rk-1", &policy, PredicateOutcome::Pass, 1_000_000);
+    make_attestation(
+        &mut ledger,
+        "att-rk-1",
+        &policy,
+        PredicateOutcome::Pass,
+        1_000_000,
+    );
     let result = ledger.revoke_attestation("att-rk-1", 1_000_100, "trace-rk".to_string());
     assert!(result.is_ok());
     assert!(result.unwrap().contains(event_codes::FN_ZK_007));
@@ -310,8 +412,16 @@ fn revoke_attestation_success() {
 fn double_revoke_fails() {
     let mut ledger = AttestationLedger::new();
     let policy = test_policy();
-    make_attestation(&mut ledger, "att-rk-2", &policy, PredicateOutcome::Pass, 1_000_000);
-    ledger.revoke_attestation("att-rk-2", 1_000_100, "trace-rk2a".to_string()).unwrap();
+    make_attestation(
+        &mut ledger,
+        "att-rk-2",
+        &policy,
+        PredicateOutcome::Pass,
+        1_000_000,
+    );
+    ledger
+        .revoke_attestation("att-rk-2", 1_000_100, "trace-rk2a".to_string())
+        .unwrap();
     let result = ledger.revoke_attestation("att-rk-2", 1_000_200, "trace-rk2b".to_string());
     assert!(result.is_err());
 }
@@ -322,7 +432,13 @@ fn double_revoke_fails() {
 fn audit_trail_populated_after_generation() {
     let mut ledger = AttestationLedger::new();
     let policy = test_policy();
-    make_attestation(&mut ledger, "att-aud-1", &policy, PredicateOutcome::Pass, 1_000_000);
+    make_attestation(
+        &mut ledger,
+        "att-aud-1",
+        &policy,
+        PredicateOutcome::Pass,
+        1_000_000,
+    );
     let records = ledger.query_audit(|r| r.event_code == event_codes::FN_ZK_001);
     assert_eq!(records.len(), 1);
 }
@@ -331,12 +447,53 @@ fn audit_trail_populated_after_generation() {
 fn audit_trail_records_verification_events() {
     let mut ledger = AttestationLedger::new();
     let policy = test_policy();
-    let att = make_attestation(&mut ledger, "att-aud-2", &policy, PredicateOutcome::Pass, 1_000_000);
+    let att = make_attestation(
+        &mut ledger,
+        "att-aud-2",
+        &policy,
+        PredicateOutcome::Pass,
+        1_000_000,
+    );
     ledger.verify_proof(&att, &policy, 1_000_001, "trace-aud".to_string());
     let submit = ledger.query_audit(|r| r.event_code == event_codes::FN_ZK_002);
     let pass = ledger.query_audit(|r| r.event_code == event_codes::FN_ZK_003);
     assert_eq!(submit.len(), 1);
-    assert_eq!(pass.len(), 1);
+    assert!(pass.is_empty());
+    let rejected = ledger.query_audit(|r| r.event_code == event_codes::FN_ZK_004);
+    assert_eq!(rejected.len(), 1);
+}
+
+#[test]
+fn registered_arbitrary_bytes_and_pass_never_establish_compliance() {
+    for bytes in ["", "0", "00", "deadbeef"] {
+        let mut ledger = AttestationLedger::new();
+        let policy = test_policy();
+        let att = ledger
+            .generate_proof(
+                "arbitrary".to_string(),
+                &policy,
+                "commitment".to_string(),
+                bytes.to_string(),
+                PredicateOutcome::Pass,
+                1_000_000,
+                "register".to_string(),
+            )
+            .unwrap();
+        let restored = serde_json::to_string(&ledger).unwrap();
+        let mut restored: AttestationLedger = serde_json::from_str(&restored).unwrap();
+        for ledger in [&mut ledger, &mut restored] {
+            let result = ledger.verify_proof(&att, &policy, 1_000_001, "verify".to_string());
+            assert!(
+                matches!(result, ZkVerificationResult::Rejected { error_code, .. }
+                if error_code == error_codes::ERR_ZKA_VERIFIER_UNAVAILABLE)
+            );
+            assert!(
+                ledger
+                    .query_audit(|r| r.event_code == event_codes::FN_ZK_003)
+                    .is_empty()
+            );
+        }
+    }
 }
 
 #[test]
@@ -351,7 +508,10 @@ fn audit_record_has_required_fields() {
         detail: "test".to_string(),
         schema_version: SCHEMA_VERSION.to_string(),
     };
-    assert!(invariants::check_audit_trail(&record), "INV-ZKA-AUDIT-TRAIL");
+    assert!(
+        invariants::check_audit_trail(&record),
+        "INV-ZKA-AUDIT-TRAIL"
+    );
 }
 
 // ── Sweep / validity ─────────────────────────────────────────────────────────
@@ -360,7 +520,13 @@ fn audit_record_has_required_fields() {
 fn sweep_expired_marks_correctly() {
     let mut ledger = AttestationLedger::new();
     let policy = test_policy();
-    let att = make_attestation(&mut ledger, "att-sw-1", &policy, PredicateOutcome::Pass, 1_000_000);
+    let att = make_attestation(
+        &mut ledger,
+        "att-sw-1",
+        &policy,
+        PredicateOutcome::Pass,
+        1_000_000,
+    );
     let expired = ledger.sweep_expired(att.expires_at_ms + 1);
     assert!(expired.contains(&"att-sw-1".to_string()));
     assert_eq!(
@@ -373,7 +539,13 @@ fn sweep_expired_marks_correctly() {
 fn is_valid_within_window() {
     let mut ledger = AttestationLedger::new();
     let policy = test_policy();
-    make_attestation(&mut ledger, "att-val-1", &policy, PredicateOutcome::Pass, 1_000_000);
+    make_attestation(
+        &mut ledger,
+        "att-val-1",
+        &policy,
+        PredicateOutcome::Pass,
+        1_000_000,
+    );
     assert!(ledger.is_valid("att-val-1", 1_000_001));
 }
 
@@ -381,7 +553,13 @@ fn is_valid_within_window() {
 fn is_valid_after_expiry() {
     let mut ledger = AttestationLedger::new();
     let policy = test_policy();
-    let att = make_attestation(&mut ledger, "att-val-2", &policy, PredicateOutcome::Pass, 1_000_000);
+    let att = make_attestation(
+        &mut ledger,
+        "att-val-2",
+        &policy,
+        PredicateOutcome::Pass,
+        1_000_000,
+    );
     assert!(!ledger.is_valid("att-val-2", att.expires_at_ms + 1));
 }
 
@@ -396,8 +574,17 @@ fn schema_version_constant() {
 fn attestation_carries_schema_version() {
     let mut ledger = AttestationLedger::new();
     let policy = test_policy();
-    let att = make_attestation(&mut ledger, "att-sv-1", &policy, PredicateOutcome::Pass, 1_000_000);
-    assert!(invariants::check_schema_versioned(&att), "INV-ZKA-SCHEMA-VERSIONED");
+    let att = make_attestation(
+        &mut ledger,
+        "att-sv-1",
+        &policy,
+        PredicateOutcome::Pass,
+        1_000_000,
+    );
+    assert!(
+        invariants::check_schema_versioned(&att),
+        "INV-ZKA-SCHEMA-VERSIONED"
+    );
 }
 
 // ── Duplicate detection ─────────────────────────────────────────────────────
@@ -406,7 +593,13 @@ fn attestation_carries_schema_version() {
 fn duplicate_commitment_rejected() {
     let mut ledger = AttestationLedger::new();
     let policy = test_policy();
-    make_attestation(&mut ledger, "att-dup-1", &policy, PredicateOutcome::Pass, 1_000_000);
+    make_attestation(
+        &mut ledger,
+        "att-dup-1",
+        &policy,
+        PredicateOutcome::Pass,
+        1_000_000,
+    );
     let result = ledger.generate_proof(
         "att-dup-2".to_string(),
         &policy,
@@ -447,8 +640,20 @@ fn deregister_policy() {
 fn compliance_report_counts() {
     let mut ledger = AttestationLedger::new();
     let policy = test_policy();
-    make_attestation(&mut ledger, "att-cr-1", &policy, PredicateOutcome::Pass, 1_000_000);
-    make_attestation(&mut ledger, "att-cr-2", &policy, PredicateOutcome::Fail, 1_000_000);
+    make_attestation(
+        &mut ledger,
+        "att-cr-1",
+        &policy,
+        PredicateOutcome::Pass,
+        1_000_000,
+    );
+    make_attestation(
+        &mut ledger,
+        "att-cr-2",
+        &policy,
+        PredicateOutcome::Fail,
+        1_000_000,
+    );
     let report = ledger.generate_compliance_report(&policy.policy_id);
     assert_eq!(report["total"], 2);
     assert_eq!(report["outcome_pass"], 1);

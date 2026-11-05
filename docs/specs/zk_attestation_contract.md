@@ -1,5 +1,17 @@
 # ZK Attestation Contract -- bd-kcg9
 
+## Current implementation boundary
+
+The `zka-v1.0` wire format is retained for historical lifecycle records. It has
+no cryptographic witness relation, verifier key or authenticated public statement.
+`generate_proof` registers caller-supplied bytes and an outcome; it does not prove
+that outcome. After lifecycle and structural checks, `verify_proof` returns
+`Rejected` with `ERR_ZKA_VERIFIER_UNAVAILABLE`, logs FN-ZK-004, and never emits
+FN-ZK-003. Batch verification likewise counts no registration as a verified proof.
+Reloading a historical ledger cannot confer proof authority. The acceptance goals
+below remain unfulfilled until a reviewed cryptographic backend and independently
+authenticated parameters are implemented (bd-reality-20260923-26n9r.18/.19).
+
 ## Section
 
 10.17 -- Radical Expansion Execution Track
