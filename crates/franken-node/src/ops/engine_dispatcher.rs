@@ -1,6 +1,11 @@
 use crate::control_plane::fleet_transport::{
     ActiveFleetPolicy, enforce_active_fleet_policy, validate_fleet_policy_project_root,
 };
+#[cfg(feature = "engine")]
+use crate::ops::native_session_inventory::{
+    NativeSessionAdmission, NativeSessionEffectObservation, NativeSessionInventoryGuard,
+    NativeSessionOutcomeKind,
+};
 use crate::ops::telemetry_bridge::{
     ShutdownReason, TelemetryBridge, TelemetryRuntimeHandle, TelemetryRuntimeReport,
 };
@@ -119,21 +124,21 @@ const NATIVE_SESSION_PROTOCOL_VERSION: u32 = 7;
 #[cfg(feature = "engine")]
 const NATIVE_SESSION_FRAME_HEADER_BYTES: usize = 12 + 4 + 8 + 32;
 #[cfg(feature = "engine")]
-const NATIVE_SESSION_MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
+pub(super) const NATIVE_SESSION_MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
 #[cfg(feature = "engine")]
 const NATIVE_SESSION_MAX_RESPONSE_BYTES: usize = 24 * 1024 * 1024;
 #[cfg(feature = "engine")]
 const NATIVE_SESSION_MAX_EFFECT_WAL_EVENT_BYTES: usize = 1024;
 #[cfg(feature = "engine")]
-const NATIVE_SESSION_MAX_EFFECT_WAL_EVENTS: usize = 2048;
+pub(super) const NATIVE_SESSION_MAX_EFFECT_WAL_EVENTS: usize = 2048;
 #[cfg(feature = "engine")]
-const NATIVE_SESSION_MAX_EFFECT_WAL_STREAM_BYTES: usize = 4 * 1024 * 1024;
+pub(super) const NATIVE_SESSION_MAX_EFFECT_WAL_STREAM_BYTES: usize = 4 * 1024 * 1024;
 #[cfg(feature = "engine")]
 const NATIVE_SESSION_MAX_OUTPUT_STREAM_BYTES: usize = NATIVE_SESSION_MAX_EFFECT_WAL_STREAM_BYTES
     + NATIVE_SESSION_FRAME_HEADER_BYTES
     + NATIVE_SESSION_MAX_RESPONSE_BYTES;
 #[cfg(feature = "engine")]
-const NATIVE_SESSION_MAX_DIAGNOSTIC_BYTES: usize = 1024 * 1024;
+pub(super) const NATIVE_SESSION_MAX_DIAGNOSTIC_BYTES: usize = 1024 * 1024;
 #[cfg(feature = "engine")]
 const NATIVE_SESSION_MAX_GUEST_OUTPUT_BYTES: usize = 10 * 1024 * 1024;
 #[cfg(feature = "engine")]
@@ -149,7 +154,7 @@ const NATIVE_RUN_CONTROL_OBSERVATION_DEADLINE: std::time::Duration =
 #[cfg(feature = "engine")]
 const NATIVE_EFFECT_WAL_SCHEMA: &str = "franken-node/native-effect-wal/v1";
 #[cfg(feature = "engine")]
-const NATIVE_EFFECT_INTERRUPTION_EVIDENCE_SCHEMA: &str =
+pub(super) const NATIVE_EFFECT_INTERRUPTION_EVIDENCE_SCHEMA: &str =
     "franken-node/native-effect-interruption-evidence/v1";
 #[cfg(feature = "engine")]
 const NATIVE_EFFECT_WAL_REQUEST_HASH_DOMAIN: &[u8] = b"franken-node.native-effect-wal.request.v1";
@@ -166,13 +171,13 @@ const RUNTIME_EVIDENCE_CAPTURE_SCHEMA: &str = "franken-node/runtime-evidence-ide
 const RUNTIME_EVIDENCE_CAPTURE_SIGNATURE_DOMAIN: &[u8] =
     b"franken-node.runtime-evidence-identity-capture.v1";
 #[cfg(feature = "engine")]
-const RUNTIME_EVIDENCE_PRODUCT_STATE_DIRECTORY: &str = "franken-node";
+pub(super) const RUNTIME_EVIDENCE_PRODUCT_STATE_DIRECTORY: &str = "franken-node";
 #[cfg(feature = "engine")]
-const RUNTIME_EVIDENCE_STATE_DIRECTORY: &str = "runtime-evidence";
+pub(super) const RUNTIME_EVIDENCE_STATE_DIRECTORY: &str = "runtime-evidence";
 #[cfg(feature = "engine")]
-const RUNTIME_EVIDENCE_ROOT_KEY_RELATIVE_PATH: &str = "keys/product-root.key";
+pub(super) const RUNTIME_EVIDENCE_ROOT_KEY_RELATIVE_PATH: &str = "keys/product-root.key";
 #[cfg(feature = "engine")]
-const RUNTIME_EVIDENCE_CAPTURE_DIR_RELATIVE_PATH: &str = "identity-captures";
+pub(super) const RUNTIME_EVIDENCE_CAPTURE_DIR_RELATIVE_PATH: &str = "identity-captures";
 
 #[cfg(all(feature = "engine", target_os = "linux"))]
 const CORPUS_PROCESS_AUTHORITY_SCHEMA: &str = "franken-node/corpus-process-authority/v1";
@@ -565,7 +570,7 @@ fn runtime_evidence_capture_preimage(capture: &RuntimeEvidenceIdentityCapture) -
 
 #[cfg(feature = "engine")]
 impl RuntimeEvidenceIdentityCapture {
-    fn issue(
+    pub(super) fn issue(
         session_nonce: &str,
         identity: EvidenceVerificationIdentity,
         product_root: &ed25519_dalek::SigningKey,
@@ -687,7 +692,10 @@ impl RuntimeEvidenceSessionGrant {
 }
 
 #[cfg(feature = "engine")]
-fn ensure_runtime_evidence_directory(path: &Path, require_private_mode: bool) -> Result<()> {
+pub(super) fn ensure_runtime_evidence_directory(
+    path: &Path,
+    require_private_mode: bool,
+) -> Result<()> {
     let created = match std::fs::create_dir(path) {
         Ok(()) => true,
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => false,
@@ -820,7 +828,7 @@ fn validate_runtime_evidence_protected_root(
 }
 
 #[cfg(feature = "engine")]
-fn runtime_evidence_user_state_home() -> Result<PathBuf> {
+pub(super) fn runtime_evidence_user_state_home() -> Result<PathBuf> {
     let state_home = std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
         .or({
@@ -908,7 +916,7 @@ fn append_runtime_evidence_containment_mask(
 }
 
 #[cfg(feature = "engine")]
-fn validate_runtime_evidence_private_file_metadata(
+pub(super) fn validate_runtime_evidence_private_file_metadata(
     path: &Path,
     metadata: &std::fs::Metadata,
 ) -> Result<()> {
@@ -942,7 +950,10 @@ fn validate_runtime_evidence_private_file_metadata(
 }
 
 #[cfg(feature = "engine")]
-fn read_runtime_evidence_private_file(path: &Path, max_bytes: usize) -> Result<Zeroizing<Vec<u8>>> {
+pub(super) fn read_runtime_evidence_private_file(
+    path: &Path,
+    max_bytes: usize,
+) -> Result<Zeroizing<Vec<u8>>> {
     let observed = std::fs::symlink_metadata(path)
         .with_context(|| format!("inspect runtime evidence file {}", path.display()))?;
     if observed.file_type().is_symlink() {
@@ -998,7 +1009,7 @@ fn read_runtime_evidence_private_file(path: &Path, max_bytes: usize) -> Result<Z
 }
 
 #[cfg(feature = "engine")]
-fn create_new_runtime_evidence_private_file(path: &Path, bytes: &[u8]) -> Result<bool> {
+pub(super) fn create_new_runtime_evidence_private_file(path: &Path, bytes: &[u8]) -> Result<bool> {
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -1039,7 +1050,7 @@ fn create_new_runtime_evidence_private_file(path: &Path, bytes: &[u8]) -> Result
 }
 
 #[cfg(feature = "engine")]
-fn load_runtime_evidence_product_root(path: &Path) -> Result<ed25519_dalek::SigningKey> {
+pub(super) fn load_runtime_evidence_product_root(path: &Path) -> Result<ed25519_dalek::SigningKey> {
     let bytes = read_runtime_evidence_private_file(path, 32)?;
     if bytes.len() != 32 {
         anyhow::bail!(
@@ -7996,6 +8007,7 @@ impl EngineDispatcher {
         fn kill_and_reap_native_session(
             child: &mut std::process::Child,
             containment: &NativeSessionContainment,
+            inventory: &mut NativeSessionInventoryGuard,
         ) -> io::Result<()> {
             #[cfg(target_os = "linux")]
             if let NativeSessionContainment::Bubblewrap(unit) = containment {
@@ -8005,6 +8017,12 @@ impl EngineDispatcher {
                     pidfd_send_signal(&unit.init_pidfd, Signal::KILL).map_err(io::Error::from);
                 let empty_result = wait_for_containment_unit_empty(unit);
                 let supervisor_result = wait_for_outer_supervisor(child);
+                if empty_result.is_ok() {
+                    inventory.containment_empty();
+                }
+                if supervisor_result.is_ok() {
+                    inventory.worker_reaped();
+                }
                 let mut failures = Vec::new();
                 if let Err(error) = signal_result {
                     failures.push(format!("namespace-init kill failed: {error}"));
@@ -8025,6 +8043,9 @@ impl EngineDispatcher {
             let group_result = kill_process_group(child.id());
             let direct_result = child.kill();
             let wait_result = child.wait();
+            if wait_result.is_ok() {
+                inventory.worker_reaped();
+            }
             let mut failures = Vec::new();
             if let Err(error) = group_result {
                 failures.push(format!("process-group kill failed: {error}"));
@@ -8306,6 +8327,33 @@ impl EngineDispatcher {
             .to_actionable()
         })?;
 
+        // Commit the actual nonce-bound population before a child can run.
+        // Failure here is an admission refusal; later persistence failures
+        // retain this unresolved admission without replacing execution errors.
+        let mut session_inventory = NativeSessionInventoryGuard::admit(
+            &runtime_evidence_state_root,
+            NativeSessionAdmission {
+                session_nonce: nonce.clone(),
+                product_root_key_id: expected_evidence_capture.product_root_key_id.clone(),
+                identity_capture_path: evidence_capture_path.clone(),
+                security_epoch: expected_evidence_capture
+                    .evidence_verification_identity
+                    .key_provenance
+                    .activation_epoch
+                    .as_u64(),
+                admitted_at: Utc::now(),
+                project_root: project_paths.project_root().to_path_buf(),
+                entrypoint: project_paths.entrypoint().to_path_buf(),
+                dependency_ids: trust_requirements.dependency_ids.clone(),
+                configured_node_id: config.fleet.node_id.clone(),
+                fleet_zone_id: fleet_policy.map(|policy| policy.zone_id.clone()),
+                fleet_policy_sha256: fleet_policy
+                    .map(crate::ops::native_session_inventory::fleet_policy_observation_digest)
+                    .transpose()?,
+            },
+        )
+        .context("native-session inventory admission failed; worker was not started")?;
+
         let mut child = command.spawn().map_err(|error| {
             EngineDispatchError::EngineExecutionError {
                 app_path: app_path_buf.clone(),
@@ -8317,12 +8365,13 @@ impl EngineDispatcher {
             }
             .to_actionable()
         })?;
+        session_inventory.worker_started();
         let mut containment = NativeSessionContainment::ProcessGroup;
         let stdout = match child.stdout.take() {
             Some(stdout) => stdout,
             None => {
                 let cleanup_failure = native_session_cleanup_failure(
-                    kill_and_reap_native_session(&mut child, &containment),
+                    kill_and_reap_native_session(&mut child, &containment, &mut session_inventory),
                     None,
                     None,
                     None,
@@ -8347,7 +8396,7 @@ impl EngineDispatcher {
             None => {
                 drop(stdout);
                 let cleanup_failure = native_session_cleanup_failure(
-                    kill_and_reap_native_session(&mut child, &containment),
+                    kill_and_reap_native_session(&mut child, &containment, &mut session_inventory),
                     None,
                     None,
                     None,
@@ -8378,7 +8427,11 @@ impl EngineDispatcher {
                 Err(error) => {
                     drop(stdout);
                     drop(stderr);
-                    let cleanup = kill_and_reap_native_session(&mut child, &containment);
+                    let cleanup = kill_and_reap_native_session(
+                        &mut child,
+                        &containment,
+                        &mut session_inventory,
+                    );
                     let cleanup_detail = cleanup.err().map_or_else(String::new, |failure| {
                         format!("; cleanup could not prove quiescence: {failure}")
                     });
@@ -8403,7 +8456,7 @@ impl EngineDispatcher {
             Err(error) => {
                 drop(stderr);
                 let cleanup_failure = native_session_cleanup_failure(
-                    kill_and_reap_native_session(&mut child, &containment),
+                    kill_and_reap_native_session(&mut child, &containment, &mut session_inventory),
                     None,
                     None,
                     None,
@@ -8432,7 +8485,7 @@ impl EngineDispatcher {
             Ok(reader) => reader,
             Err(error) => {
                 let cleanup_failure = native_session_cleanup_failure(
-                    kill_and_reap_native_session(&mut child, &containment),
+                    kill_and_reap_native_session(&mut child, &containment, &mut session_inventory),
                     None,
                     Some(receive_reader(stdout_reader, "response")),
                     None,
@@ -8460,7 +8513,7 @@ impl EngineDispatcher {
             Some(stdin) => stdin,
             None => {
                 let cleanup_failure = native_session_cleanup_failure(
-                    kill_and_reap_native_session(&mut child, &containment),
+                    kill_and_reap_native_session(&mut child, &containment, &mut session_inventory),
                     None,
                     Some(receive_reader(stdout_reader, "response")),
                     Some(receive_reader(stderr_reader, "diagnostics")),
@@ -8484,7 +8537,7 @@ impl EngineDispatcher {
             Ok(writer) => writer,
             Err(error) => {
                 let cleanup_failure = native_session_cleanup_failure(
-                    kill_and_reap_native_session(&mut child, &containment),
+                    kill_and_reap_native_session(&mut child, &containment, &mut session_inventory),
                     None,
                     Some(receive_reader(stdout_reader, "response")),
                     Some(receive_reader(stderr_reader, "diagnostics")),
@@ -8510,7 +8563,10 @@ impl EngineDispatcher {
             // This only polls the child and bounded observer channel. Policy
             // store reads cannot block either the deadline or completion.
             match control_monitor.poll_session(&mut child, started, timeout) {
-                Ok(NativeSessionPoll::Completed(status)) => break status,
+                Ok(NativeSessionPoll::Completed(status)) => {
+                    session_inventory.worker_reaped();
+                    break status;
+                }
                 Ok(NativeSessionPoll::Running) => {
                     thread::sleep(NATIVE_SESSION_POLL_INTERVAL);
                 }
@@ -8519,6 +8575,7 @@ impl EngineDispatcher {
                     worker_already_exited,
                 }) => {
                     let process_cleanup = if worker_already_exited {
+                        session_inventory.worker_reaped();
                         // try_wait already reaped this PID. Never send a
                         // numeric PID/group signal that could hit a reused
                         // identity. Process authority uses a pinned namespace
@@ -8526,12 +8583,20 @@ impl EngineDispatcher {
                         match &containment {
                             #[cfg(target_os = "linux")]
                             NativeSessionContainment::Bubblewrap(unit) => {
-                                wait_for_containment_unit_empty(unit)
+                                let result = wait_for_containment_unit_empty(unit);
+                                if result.is_ok() {
+                                    session_inventory.containment_empty();
+                                }
+                                result
                             }
                             NativeSessionContainment::ProcessGroup => Ok(()),
                         }
                     } else {
-                        kill_and_reap_native_session(&mut child, &containment)
+                        kill_and_reap_native_session(
+                            &mut child,
+                            &containment,
+                            &mut session_inventory,
+                        )
                     };
                     let request_writer_cleanup = receive_request_writer(request_writer, true);
                     let response_drain = receive_reader(stdout_reader, "response");
@@ -8551,6 +8616,12 @@ impl EngineDispatcher {
                         &nonce,
                         cfg!(test),
                         control_trigger.clone(),
+                    );
+                    session_inventory.finish(
+                        NativeSessionOutcomeKind::Interrupted,
+                        NativeSessionEffectObservation::Interrupted {
+                            evidence: Box::new(effect_evidence.clone()),
+                        },
                     );
                     let actionable = if let Some(trigger) = control_trigger {
                         let cleanup_detail = cleanup_failure.map_or_else(String::new, |error| {
@@ -8590,7 +8661,11 @@ impl EngineDispatcher {
                 }
                 Err(error) => {
                     let cleanup_failure = native_session_cleanup_failure(
-                        kill_and_reap_native_session(&mut child, &containment),
+                        kill_and_reap_native_session(
+                            &mut child,
+                            &containment,
+                            &mut session_inventory,
+                        ),
                         Some(receive_request_writer(request_writer, true)),
                         Some(receive_reader(stdout_reader, "response")),
                         Some(receive_reader(stderr_reader, "diagnostics")),
@@ -8673,6 +8748,7 @@ impl EngineDispatcher {
                 }
                 .to_actionable()
             })?;
+            session_inventory.containment_empty();
         }
         let diagnostics = String::from_utf8_lossy(&diagnostic_bytes)
             .trim()
@@ -8850,6 +8926,12 @@ impl EngineDispatcher {
                     };
                     return Err(dispatch_error.to_actionable().into());
                 }
+                session_inventory.finish(
+                    NativeSessionOutcomeKind::Completed,
+                    NativeSessionEffectObservation::from_verified_ledger(
+                        host_effect_ledger.as_ref(),
+                    ),
+                );
                 Ok((
                     Output {
                         status: exit_status_from_code(exit_code),
@@ -8947,6 +9029,12 @@ impl EngineDispatcher {
                     phase: "execution".to_string(),
                 };
                 let actionable = dispatch_error.to_actionable();
+                session_inventory.finish(
+                    NativeSessionOutcomeKind::ExecutionFailed,
+                    NativeSessionEffectObservation::from_verified_ledger(
+                        host_effect_ledger.as_ref(),
+                    ),
+                );
                 Err(anyhow::Error::new(NativeRunFailure {
                     actionable,
                     invocation_settings,
@@ -8976,6 +9064,10 @@ impl EngineDispatcher {
                     app_path: app_path_buf,
                     telemetry_error: message,
                 };
+                session_inventory.finish(
+                    NativeSessionOutcomeKind::TelemetryFailed,
+                    NativeSessionEffectObservation::Unknown,
+                );
                 Err(dispatch_error.to_actionable().into())
             }
             NativeSessionResponse::Panicked {
@@ -9000,6 +9092,10 @@ impl EngineDispatcher {
                 // Retain only a panic reported through this authenticated
                 // response. A generic worker exit above is not sufficient.
                 let observed_at_epoch_secs = u64::try_from(Utc::now().timestamp()).unwrap_or(0);
+                session_inventory.finish(
+                    NativeSessionOutcomeKind::Panicked,
+                    NativeSessionEffectObservation::Unknown,
+                );
                 Err(NativeRunPanic::from_validated_response(
                     dispatch_error.to_actionable(),
                     expected_evidence_capture,
@@ -20492,9 +20588,37 @@ mod tests {
         );
         let elapsed = start.elapsed();
 
-        let error = result
-            .expect_err("the infinite loop must time out")
-            .to_string();
+        let error = result.expect_err("the infinite loop must time out");
+        let interruption = error
+            .downcast_ref::<NativeRunInterruption>()
+            .expect("timeout must retain typed parent interruption evidence");
+        let inventory = crate::ops::native_session_inventory::read_local_native_session_inventory(
+            Some(project_paths.project_root()),
+        )
+        .expect("read the durable timeout observation");
+        let retained = inventory
+            .records
+            .iter()
+            .find(|record| {
+                record.admission.session_nonce == interruption.effect_evidence().session_nonce
+            })
+            .expect("the actual timed-out session must remain in the inventory");
+        let outcome = retained
+            .outcome
+            .as_ref()
+            .expect("timeout outcome persisted");
+        assert_eq!(outcome.kind, NativeSessionOutcomeKind::Interrupted);
+        assert_eq!(
+            outcome.process,
+            crate::ops::native_session_inventory::NativeSessionProcessObservation::WorkerReaped,
+        );
+        assert!(!outcome.containment_empty_observed);
+        let NativeSessionEffectObservation::Interrupted { evidence } = &outcome.effects else {
+            panic!("timeout must retain its complete indeterminate effect evidence");
+        };
+        assert_eq!(evidence.as_ref(), interruption.effect_evidence());
+        assert!(!inventory.quiescence_certified);
+        let error = error.to_string();
         assert!(
             error.contains("timeout") || error.contains("Timeout"),
             "error should identify the timeout: {error}"

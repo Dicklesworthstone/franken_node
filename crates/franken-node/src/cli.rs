@@ -1944,6 +1944,9 @@ pub enum FleetCommand {
     /// Show fleet and quarantine state from the configured store.
     Status(FleetStatusArgs),
 
+    /// Inspect locally recorded native sessions and unresolved supervision.
+    Sessions(FleetSessionsArgs),
+
     /// Describe one node from the configured fleet store.
     Describe(FleetDescribeArgs),
 
@@ -2043,6 +2046,18 @@ pub struct FleetStatusArgs {
     /// Emit JSON instead of human-readable output.
     /// JSON includes `transport` (`file` or `http`) and `live_control_plane`;
     /// `status.activated` is true only when a live coordinator answered.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Parser)]
+pub struct FleetSessionsArgs {
+    /// Restrict recorded sessions to this project directory.
+    /// Omit to inspect all projects in this operator's local runtime state.
+    #[arg(long)]
+    pub project: Option<PathBuf>,
+
+    /// Emit records and counts as JSON, including unresolved observations.
     #[arg(long)]
     pub json: bool,
 }
@@ -3684,6 +3699,32 @@ mod parser_contract_extra_tests {
             }
             other => return Err(format!("expected fleet agent, got {other:?}")),
         }
+        Ok(())
+    }
+
+    #[test]
+    fn fleet_sessions_parses_local_project_filter_and_json() -> Result<(), String> {
+        let cli = parse(&[
+            "franken-node",
+            "fleet",
+            "sessions",
+            "--project",
+            "/srv/application",
+            "--json",
+        ])
+        .map_err(|error| error.to_string())?;
+        let Command::Fleet(FleetCommand::Sessions(args)) = cli.command else {
+            return Err("expected local native-session inventory command".into());
+        };
+        assert!(args.json);
+        assert_eq!(args.project, Some(PathBuf::from("/srv/application")));
+        let cli =
+            parse(&["franken-node", "fleet", "sessions"]).map_err(|error| error.to_string())?;
+        let Command::Fleet(FleetCommand::Sessions(args)) = cli.command else {
+            return Err("expected unfiltered native-session inventory command".into());
+        };
+        assert!(args.project.is_none());
+        assert!(!args.json);
         Ok(())
     }
 

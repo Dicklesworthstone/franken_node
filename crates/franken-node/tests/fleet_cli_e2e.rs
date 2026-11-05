@@ -91,6 +91,7 @@ fn run_cli_in_dir_with_env(
         .current_dir(current_dir)
         .args(args)
         .env_remove("FRANKEN_NODE_PROFILE")
+        .env_remove("FRANKEN_NODE_SECURITY_DECISION_RECEIPT_SIGNING_KEY_PATH")
         .envs(extra_env.iter().copied())
         .output()
         .unwrap_or_else(|err| fail_command("failed running", args, err))
@@ -1568,6 +1569,151 @@ fn jsonl_stdout(output: &Output, label: &str) -> serde_json::Value {
         })
         .collect::<Vec<serde_json::Value>>();
     serde_json::Value::Array(lines)
+}
+
+#[test]
+#[cfg(all(feature = "engine", unix))]
+fn fleet_sessions_retains_native_completion_across_cli_restarts_and_project_filters() {
+    let workspace = tempdir().expect("native project");
+    let other_project = tempdir().expect("different project");
+    let state_home = tempdir().expect("operator state outside guest source");
+    let config_home = state_home.path().join("config");
+    let state_home_arg = state_home.path().to_str().unwrap();
+    let env = [
+        ("XDG_STATE_HOME", state_home_arg),
+        ("XDG_CONFIG_HOME", config_home.to_str().unwrap()),
+    ];
+    let inspect = |project: Option<&std::path::Path>| {
+        let mut args = vec!["fleet", "sessions", "--json"];
+        if let Some(project) = project {
+            args.extend(["--project", project.to_str().unwrap()]);
+        }
+        let output = run_cli_in_dir_with_env(workspace.path(), &args, &env);
+        assert!(
+            output.status.success(),
+            "inventory: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+    };
+    let before = inspect(None);
+    assert_eq!(before["scope"], "local_supervisor_observation");
+    assert_eq!(before["quiescence_certified"], false);
+    assert_eq!(before["store_present"], false);
+    assert_eq!(before["total_stored_sessions"], 0);
+    assert_eq!(before["records"], serde_json::json!([]));
+    assert!(!state_home.path().join("franken-node").exists());
+
+    let initialized = run_cli_in_dir_with_env(
+        workspace.path(),
+        &["init", "--profile", "balanced", "--out-dir", ".", "--json"],
+        &env,
+    );
+    assert!(
+        initialized.status.success(),
+        "init: {}\n{}",
+        String::from_utf8_lossy(&initialized.stdout),
+        String::from_utf8_lossy(&initialized.stderr)
+    );
+    std::fs::write(
+        workspace.path().join("app.cjs"),
+        "console.log('DURABLE_NATIVE_SESSION_COMPLETED');\n",
+    )
+    .unwrap();
+    let executed = run_cli_in_dir_with_env(
+        workspace.path(),
+        &[
+            "run",
+            "app.cjs",
+            "--config",
+            "franken_node.toml",
+            "--runtime",
+            "franken-engine",
+            "--json",
+        ],
+        &env,
+    );
+    assert!(
+        executed.status.success(),
+        "native run: {}\n{}",
+        String::from_utf8_lossy(&executed.stdout),
+        String::from_utf8_lossy(&executed.stderr)
+    );
+    let execution: serde_json::Value = serde_json::from_slice(&executed.stdout).unwrap();
+    assert_eq!(
+        execution["dispatch"]["captured_output"]["stdout"],
+        "DURABLE_NATIVE_SESSION_COMPLETED\n"
+    );
+    let observed = inspect(Some(workspace.path()));
+    assert_eq!(observed["total_stored_sessions"], 1);
+    assert_eq!(observed["pending_sessions"], 0);
+    assert_eq!(observed["terminal_sessions"], 1);
+    assert_eq!(observed["quiescence_certified"], false);
+    assert_eq!(
+        observed["untracked_identity_captures"],
+        serde_json::json!([])
+    );
+    let record = &observed["records"][0];
+    assert_eq!(record["outcome"]["kind"], "completed");
+    assert_eq!(record["outcome"]["process"], "worker_reaped");
+    assert_eq!(
+        record["admission"]["project_root"],
+        serde_json::json!(workspace.path().canonicalize().unwrap())
+    );
+    assert_eq!(
+        record["admission"]["session_nonce"],
+        execution["dispatch"]["runtime_evidence_identity_capture"]["session_nonce"]
+    );
+    let reopened = inspect(None);
+    assert_eq!(reopened["records"][0], *record);
+    let unrelated = inspect(Some(other_project.path()));
+    assert_eq!(unrelated["total_stored_sessions"], 1);
+    assert_eq!(unrelated["records"], serde_json::json!([]));
+    assert_eq!(unrelated["terminal_sessions"], 0);
+    assert_eq!(unrelated["quiescence_certified"], false);
+}
+
+#[test]
+#[cfg(all(feature = "engine", unix))]
+fn fleet_sessions_refuses_corrupt_storage_without_reporting_an_empty_population() {
+    use std::os::unix::fs::PermissionsExt;
+    let workspace = tempdir().unwrap();
+    let state_home = tempdir().unwrap();
+    let config_home = state_home.path().join("config");
+    let env = [
+        ("XDG_STATE_HOME", state_home.path().to_str().unwrap()),
+        ("XDG_CONFIG_HOME", config_home.to_str().unwrap()),
+    ];
+    let initialized = run_cli_in_dir_with_env(
+        workspace.path(),
+        &["init", "--profile", "balanced", "--out-dir", ".", "--json"],
+        &env,
+    );
+    assert!(initialized.status.success());
+    // Resolve the exact supported location from the public read-only report,
+    // rather than hard-code a second copy of the evidence directory layout.
+    let fresh = run_cli_in_dir_with_env(workspace.path(), &["fleet", "sessions", "--json"], &env);
+    assert!(fresh.status.success());
+    let fresh: serde_json::Value = serde_json::from_slice(&fresh.stdout).unwrap();
+    let database = PathBuf::from(fresh["database_path"].as_str().unwrap());
+    let protected = database.parent().unwrap();
+    std::fs::create_dir_all(protected).unwrap();
+    std::fs::set_permissions(protected, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::set_permissions(
+        protected.parent().unwrap(),
+        std::fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    std::fs::write(&database, b"not a valid durable session database").unwrap();
+    std::fs::set_permissions(&database, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let refused = run_cli_in_dir_with_env(workspace.path(), &["fleet", "sessions", "--json"], &env);
+    assert!(!refused.status.success());
+    let error: serde_json::Value = serde_json::from_slice(&refused.stdout).unwrap();
+    assert_eq!(error["schema_version"], "franken-node/fleet-error-cli/v1");
+    assert_eq!(error["command"], "fleet.sessions");
+    assert_eq!(error["ok"], false);
+    assert!(error.get("records").is_none());
 }
 
 #[test]

@@ -1036,10 +1036,40 @@ Every fleet command, and `trust quarantine`, talks to one of two stores:
 |---|---|
 | `franken-node fleet serve` | Run the live coordinator: serves this node's durable fleet store over HTTP (fastapi_rust listener on the asupersync runtime). Routes: `GET /v1/fleet/health` (open), `GET/POST /v1/fleet/actions`, `GET/POST /v1/fleet/nodes`, `GET /v1/fleet/state` (bearer token, constant-time compare). Validates every record, caps bodies at 64 KiB, stamps heartbeats with its own clock. Flags: `--bind` (default `127.0.0.1:9440`; port 0 picks a free port, printed first on stdout), `--token-file` (default `.franken-node/keys/fleet-control-plane.token`), `--generate-token` (create a 0600 256-bit token), `--allow-non-loopback` (plaintext listener; only behind TLS termination or an encrypted overlay), `--max-requests`, `--json` (JSONL `FLEET_HTTP_LISTENING` / `FLEET_HTTP_REQUEST` / `FLEET_HTTP_SHUTDOWN` events). |
 | `franken-node fleet status` | Show fleet/quarantine state from the configured store. `activated` is true only when a live coordinator answered. Flags: `--zone`, `--verbose`, `--json`. |
+| `franken-node fleet sessions` | Inspect this operator's durable local native-session inventory, pending admissions, observed worker termination and unknown effects. Flags: `--project <directory>`, `--json`. Requires the native engine. |
 | `franken-node fleet describe <node>` | Describe one fleet node with zone context and incident state. Flags: `--zone`, `--json`. |
 | `franken-node fleet release` | Retire one fleet quarantine incident with signed receipts and application convergence. Preserves local quarantine, other scoped incidents, and permanent revocation. `--zone` disambiguates a shared incident ID; `--zone all` selects its global scope. `--incident` is handler-required so `--json` failures emit `franken-node/fleet-error-cli/v1`. |
 | `franken-node fleet reconcile` | Reconcile the fleet-action log and wait for convergence. Times out fail-closed (same as `fleet release`). Flags: `--json`. |
 | `franken-node fleet agent` | Pull fleet actions, apply them to this node's trust-card registry, and push a heartbeat each cycle. `--zone` is handler-required so `--json` failures emit `franken-node/fleet-error-cli/v1` instead of a human clap error. Flags: `--node-id`, `--poll-interval-secs`, `--max-cycles`, `--once`, `--json`. |
+
+Native supervisors durably record admission before starting a worker. The local
+inventory retains the product-signed session nonce and root identity, engine
+security epoch, project and entrypoint, dependency identities, and the digest of
+any active fleet policy. Worker completion and interruption add an immutable
+outcome; failure to persist that outcome leaves the admission unresolved. A
+supervisor crash never becomes an inferred success because a PID disappeared.
+
+```bash
+franken-node fleet sessions --json
+franken-node fleet sessions --project /srv/application --json
+```
+
+The records live in the existing protected runtime-evidence directory outside
+guest source, using durable SQLite transactions. Admissions are bounded to
+16,384 retained records and 256 MiB of reserved record bytes; each pending
+admission reserves 5 MiB for its maximum outcome, covering the existing effect
+journal and diagnostic bounds. The byte limit can therefore be reached before
+the record limit. Capacity exhaustion refuses new workers while retaining
+earlier obligations. The inventory never evicts a session to make room for another.
+
+This command reports local supervisor observations, with
+`quiescence_certified: false`. A reaped worker and an unknown external effect can
+appear in the same record. Interrupted effect entries retain request commitments
+and the existing incomplete-journal evidence; they do not claim rollback or a
+final host-effect receipt. Earlier identity captures without lifecycle records
+are listed separately, including when a project filter cannot attribute them.
+These records are the retained local population needed for later fleet drain
+reconciliation; they do not replace node enrollment or certify a fleet epoch.
 
 ```bash
 # coordinator

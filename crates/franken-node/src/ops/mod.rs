@@ -65,11 +65,13 @@ pub mod closed_bead_compliance;
 pub mod compat_corpus_run;
 pub mod doctor;
 pub mod engine_dispatcher;
-pub mod native_replay;
 pub mod evidence_index;
 pub mod flow_gated_host_io;
 #[cfg(feature = "admin-tools")]
 pub mod mitigation_synthesis;
+pub mod native_replay;
+#[cfg(feature = "engine")]
+pub mod native_session_inventory;
 pub mod operator_transcripts;
 pub mod proof_carrying_evidence;
 pub mod proof_pipeline;

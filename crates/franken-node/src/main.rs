@@ -26805,6 +26805,55 @@ fn fleet_status_from_loaded_state(loaded: &LoadedFleetState, requested_zone: &st
     }
 }
 
+fn handle_fleet_sessions(args: &cli::FleetSessionsArgs) -> Result<()> {
+    #[cfg(not(feature = "engine"))]
+    {
+        let _ = args;
+        anyhow::bail!("`fleet sessions` requires a native-engine build");
+    }
+    #[cfg(feature = "engine")]
+    {
+        let report = ops::native_session_inventory::read_local_native_session_inventory(
+            args.project.as_deref(),
+        )?;
+        if args.json {
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        } else {
+            println!("Local native-session observations");
+            println!(
+                "  recorded={} retained_total={} pending={} worker_reaped={} process_unproven={} effects_unknown={}",
+                report.records.len(),
+                report.total_stored_sessions,
+                report.pending_sessions,
+                report.terminal_sessions,
+                report.unproven_process_sessions,
+                report.unknown_effect_sessions,
+            );
+            println!(
+                "  identity_captures_without_lifecycle={}",
+                report.untracked_identity_captures.len(),
+            );
+            println!("  coverage={}", report.coverage);
+            println!("  quiescence_certified={}", report.quiescence_certified);
+            for record in &report.records {
+                let outcome = record.outcome.as_ref().map_or_else(
+                    || "pending; process and effects unknown".to_string(),
+                    |outcome| format!("{:?}; process={:?}", outcome.kind, outcome.process),
+                );
+                println!(
+                    "  {} project={} entrypoint={} security_epoch={} outcome={}",
+                    record.admission.session_nonce,
+                    record.admission.project_root.display(),
+                    record.admission.entrypoint.display(),
+                    record.admission.security_epoch,
+                    outcome,
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
 fn fleet_status_report(project_root: &Path, requested_zone: &str) -> Result<FleetCliStatusReport> {
     let loaded = load_fleet_state(project_root)?;
     let status = fleet_status_from_loaded_state(&loaded, requested_zone);
@@ -36263,6 +36312,11 @@ fn main() -> Result<()> {
                 };
                 if let Err(err) = emit_fleet_status_report(&report, args.json, args.verbose) {
                     return fleet_fail("fleet.status", args.json, err);
+                }
+            }
+            FleetCommand::Sessions(args) => {
+                if let Err(err) = handle_fleet_sessions(&args) {
+                    return fleet_fail("fleet.sessions", args.json, err);
                 }
             }
             FleetCommand::Describe(args) => {
