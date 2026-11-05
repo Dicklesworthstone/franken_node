@@ -16,6 +16,11 @@
 //! Storage behavior under the shared [`FleetTransport`] contract:
 //! * actions are keyed by `action_id`; exact retries are deduplicated and
 //!   different records with the same ID are rejected without changing history;
+//! * action and node capacity is checked in the admitting transaction, without
+//!   evicting retained containment or recorded nodes; retries and heartbeats for
+//!   existing records remain usable at capacity;
+//! * shared-state readers use one database snapshot for actions and node
+//!   checkpoints, including when another process is publishing concurrently;
 //! * torn trailing lines cannot happen (transactions are atomic);
 //! * cross-process contention is handled by SQLite busy-timeout instead of
 //!   ad-hoc flock files.
@@ -24,8 +29,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
 
-use fsqlite::compat::TransactionExt;
+use fsqlite::compat::{Transaction, TransactionExt};
 use fsqlite::{Connection, SqliteValue};
+
+use crate::capacity_defaults::aliases::{MAX_ACTION_LOG_ENTRIES, MAX_NODES_CAP};
 
 use super::fleet_transport::{
     FLEET_ACTION_LOG_FILE, FleetAction, FleetActionRecord, FleetSharedState, FleetTransport,
@@ -97,6 +104,43 @@ fn parse_action_row(value: &SqliteValue) -> Result<FleetActionRecord, FleetTrans
         .map_err(|err| FleetTransportError::serialization(format!("column action_json: {err}")))?;
     validate_action_record(&record)?;
     Ok(record)
+}
+
+/// The caller holds the write transaction that inserted or updated a record.
+/// Checking after the upsert permits exact action retries and existing-node
+/// heartbeats at capacity, while a new over-capacity row is rolled back with
+/// the rest of its transaction. Never drop an older obligation to make room.
+fn enforce_table_capacity(
+    tx: &Transaction<'_>,
+    table: &str,
+    capacity: usize,
+) -> Result<(), FleetTransportError> {
+    let rows = tx
+        .query(&format!("SELECT COUNT(*) FROM {table};"))
+        .map_err(|err| FleetTransportError::io(err.to_string()))?;
+    let count = match rows.as_slice() {
+        [row] => match row.values() {
+            [SqliteValue::Integer(count)] => usize::try_from(*count).map_err(|_| {
+                FleetTransportError::serialization(format!("{table}: invalid stored record count"))
+            })?,
+            _ => {
+                return Err(FleetTransportError::serialization(format!(
+                    "{table}: invalid stored record count"
+                )));
+            }
+        },
+        _ => {
+            return Err(FleetTransportError::serialization(format!(
+                "{table}: missing stored record count"
+            )));
+        }
+    };
+    if count > capacity {
+        return Err(FleetTransportError::serialization(format!(
+            "{table} exceeds the maximum {capacity} records; refusing to discard retained fleet state"
+        )));
+    }
+    Ok(())
 }
 
 /// Durable WAL-backed implementation of [`FleetTransport`].
@@ -327,10 +371,10 @@ impl DurableFleetTransport {
             let rows = tx
                 .query(&format!(
                     "SELECT action_json FROM fleet_actions ORDER BY seq ASC LIMIT {};",
-                    crate::capacity_defaults::aliases::MAX_ACTION_LOG_ENTRIES.saturating_add(1)
+                    MAX_ACTION_LOG_ENTRIES.saturating_add(1)
                 ))
                 .map_err(|err| FleetTransportError::io(err.to_string()))?;
-            if rows.len() > crate::capacity_defaults::aliases::MAX_ACTION_LOG_ENTRIES {
+            if rows.len() > MAX_ACTION_LOG_ENTRIES {
                 return Err(FleetTransportError::serialization(
                     "fleet policy history exceeds the action bound",
                 ));
@@ -374,6 +418,7 @@ impl DurableFleetTransport {
                 record.action_id
             )));
         }
+        enforce_table_capacity(&tx, "fleet_actions", MAX_ACTION_LOG_ENTRIES)?;
         tx.commit()
             .map_err(|err| FleetTransportError::io(err.to_string()))?;
         Ok(())
@@ -401,6 +446,7 @@ impl DurableFleetTransport {
             ],
         )
         .map_err(|err| FleetTransportError::io(err.to_string()))?;
+        enforce_table_capacity(&tx, "fleet_nodes", MAX_NODES_CAP)?;
         tx.commit()
             .map_err(|err| FleetTransportError::io(err.to_string()))?;
         Ok(())
@@ -412,11 +458,17 @@ impl DurableFleetTransport {
         // Ordering contract mirrors FileFleetTransport::read_shared_state:
         // emitted_at, then action_id.
         let rows = connection
-            .query(
+            .query(&format!(
                 "SELECT action_json FROM fleet_actions
-                 ORDER BY emitted_at ASC, action_id ASC;",
-            )
+                 ORDER BY emitted_at ASC, action_id ASC LIMIT {};",
+                MAX_ACTION_LOG_ENTRIES.saturating_add(1)
+            ))
             .map_err(|err| FleetTransportError::io(err.to_string()))?;
+        if rows.len() > MAX_ACTION_LOG_ENTRIES {
+            return Err(FleetTransportError::serialization(format!(
+                "stored fleet action snapshot exceeds {MAX_ACTION_LOG_ENTRIES} entries"
+            )));
+        }
         rows.iter()
             .map(|row| parse_action_row(&row.values()[0]))
             .collect()
@@ -424,8 +476,16 @@ impl DurableFleetTransport {
 
     fn query_nodes(connection: &Connection) -> Result<Vec<NodeStatus>, FleetTransportError> {
         let rows = connection
-            .query("SELECT status_json FROM fleet_nodes ORDER BY zone_id ASC, node_id ASC;")
+            .query(&format!(
+                "SELECT status_json FROM fleet_nodes ORDER BY zone_id ASC, node_id ASC LIMIT {};",
+                MAX_NODES_CAP.saturating_add(1)
+            ))
             .map_err(|err| FleetTransportError::io(err.to_string()))?;
+        if rows.len() > MAX_NODES_CAP {
+            return Err(FleetTransportError::serialization(format!(
+                "stored fleet node snapshot exceeds {MAX_NODES_CAP} entries"
+            )));
+        }
         rows.iter()
             .map(|row| {
                 let status = parse_row_json(&row.values()[0], "status_json")?;
@@ -566,10 +626,20 @@ impl FleetTransport for DurableFleetTransport {
     fn read_shared_state(&self) -> Result<FleetSharedState, FleetTransportError> {
         self.ensure_initialized()?;
         let (actions, nodes) = self.with_connection(|connection| {
-            Ok((
+            // The connection mutex only protects this process. Keep both
+            // reads in one SQL transaction so a concurrently committed action
+            // and application checkpoint cannot produce a mixed-generation
+            // status/reconcile response.
+            let mut tx = connection
+                .transaction()
+                .map_err(|err| FleetTransportError::io(err.to_string()))?;
+            let snapshot = (
                 Self::query_actions(connection)?,
                 Self::query_nodes(connection)?,
-            ))
+            );
+            tx.commit()
+                .map_err(|err| FleetTransportError::io(err.to_string()))?;
+            Ok(snapshot)
         })?;
         // Keep the shared-state sort contract even though SQL pre-sorts.
         let mut actions = actions;

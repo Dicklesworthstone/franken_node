@@ -14,6 +14,7 @@
 use std::time::Duration;
 
 use chrono::Utc;
+use frankenengine_node::capacity_defaults::aliases::{MAX_ACTION_LOG_ENTRIES, MAX_NODES_CAP};
 use frankenengine_node::control_plane::fleet_transport::{
     FileFleetTransport, FleetAction, FleetActionRecord, FleetTargetKind, FleetTransport,
     FleetTransportError, NodeHealth, NodeStatus, fleet_application_checkpoint,
@@ -21,6 +22,8 @@ use frankenengine_node::control_plane::fleet_transport::{
 use frankenengine_node::control_plane::fleet_transport_durable::{
     DurableFleetTransport, count_active_quarantine_actions,
 };
+use fsqlite::compat::TransactionExt;
+use fsqlite::{Connection, SqliteValue};
 
 const FLEET_DB_FILE: &str = "fleet-state.db";
 const FLEET_ACTION_LOG_FILE: &str = "actions.jsonl";
@@ -61,6 +64,361 @@ fn sample_node(node_id: &str) -> NodeStatus {
         health: NodeHealth::Healthy,
         applied_actions: None,
     }
+}
+
+/// Populate the actual canonical capacity efficiently. Raw SQL is fixture
+/// setup only: the final admissions, retries, reads and reopen all use the
+/// product transport. Batching avoids tens of thousands of individual fsyncs.
+fn seed_durable_inventory(
+    transport: &DurableFleetTransport,
+    action_count: usize,
+    node_count: usize,
+) {
+    let connection = Connection::open(transport.db_path().to_string_lossy().as_ref())
+        .expect("open fixture connection");
+    connection.query("PRAGMA journal_mode=WAL;").expect("WAL");
+    connection.query("PRAGMA synchronous=FULL;").expect("FULL");
+    let mut tx = connection.transaction().expect("fixture transaction");
+    const BATCH_SIZE: usize = 128;
+    for first in (0..action_count).step_by(BATCH_SIZE) {
+        let batch_len = (action_count - first).min(BATCH_SIZE);
+        let placeholders = (0..batch_len)
+            .map(|index| {
+                format!(
+                    "(?{}, ?{}, ?{})",
+                    index * 3 + 1,
+                    index * 3 + 2,
+                    index * 3 + 3
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut parameters = Vec::with_capacity(batch_len * 3);
+        for index in first..first + batch_len {
+            let record = sample_action(&format!("seed-action-{index:05}"), "seed-incident");
+            parameters.extend([
+                SqliteValue::Text(record.action_id.clone().into()),
+                SqliteValue::Text(record.emitted_at.to_rfc3339().into()),
+                SqliteValue::Text(
+                    serde_json::to_string(&record)
+                        .expect("encode action")
+                        .into(),
+                ),
+            ]);
+        }
+        tx.execute_with_params(
+            &format!(
+                "INSERT INTO fleet_actions(action_id, emitted_at, action_json) VALUES {placeholders};"
+            ),
+            &parameters,
+        )
+        .expect("seed action batch");
+    }
+    for first in (0..node_count).step_by(BATCH_SIZE) {
+        let batch_len = (node_count - first).min(BATCH_SIZE);
+        let placeholders = (0..batch_len)
+            .map(|index| {
+                format!(
+                    "(?{}, ?{}, ?{})",
+                    index * 3 + 1,
+                    index * 3 + 2,
+                    index * 3 + 3
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut parameters = Vec::with_capacity(batch_len * 3);
+        for index in first..first + batch_len {
+            let node = sample_node(&format!("seed-node-{index:05}"));
+            parameters.extend([
+                SqliteValue::Text(node.zone_id.clone().into()),
+                SqliteValue::Text(node.node_id.clone().into()),
+                SqliteValue::Text(serde_json::to_string(&node).expect("encode node").into()),
+            ]);
+        }
+        tx.execute_with_params(
+            &format!(
+                "INSERT INTO fleet_nodes(zone_id, node_id, status_json) VALUES {placeholders};"
+            ),
+            &parameters,
+        )
+        .expect("seed node batch");
+    }
+    tx.commit().expect("commit fixture inventory");
+}
+
+#[test]
+fn durable_capacity_keeps_retries_and_existing_heartbeats_operational() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut transport = DurableFleetTransport::new(dir.path()).expect("open");
+    transport.initialize().expect("initialize");
+    seed_durable_inventory(&transport, MAX_ACTION_LOG_ENTRIES - 1, MAX_NODES_CAP - 1);
+
+    let action = sample_action("last-action-slot", "retained-incident");
+    transport.publish_action(&action).expect("last action slot");
+    let mut node = sample_node("last-node-slot");
+    transport.upsert_node_status(&node).expect("last node slot");
+    transport
+        .publish_action(&action)
+        .expect("exact retry at capacity");
+
+    let mut conflict = action.clone();
+    conflict.action = release_action("unused-id", "retained-incident").action;
+    assert!(matches!(
+        transport.publish_action(&conflict),
+        Err(FleetTransportError::ActionConflict { .. })
+    ));
+    assert!(matches!(
+        transport.publish_action(&release_action(
+            "over-capacity-release",
+            "retained-incident"
+        )),
+        Err(FleetTransportError::SerializationError { .. })
+    ));
+    assert!(matches!(
+        transport.upsert_node_status(&sample_node("over-capacity-node")),
+        Err(FleetTransportError::SerializationError { .. })
+    ));
+    let mut another_zone = node.clone();
+    another_zone.zone_id = "zone-b".to_string();
+    assert!(matches!(
+        transport.upsert_node_status(&another_zone),
+        Err(FleetTransportError::SerializationError { .. })
+    ));
+
+    let actions = transport.list_actions().expect("retained actions readable");
+    assert_eq!(actions.len(), MAX_ACTION_LOG_ENTRIES);
+    assert!(actions.contains(&action), "containment is never evicted");
+    assert!(
+        !actions
+            .iter()
+            .any(|row| row.action_id == "over-capacity-release")
+    );
+    node.applied_actions = Some(
+        fleet_application_checkpoint(&actions, "zone-a").expect("full snapshot remains applicable"),
+    );
+    transport
+        .upsert_node_status(&node)
+        .expect("existing node can still acknowledge application");
+    drop(transport);
+
+    let mut reopened = DurableFleetTransport::new(dir.path()).expect("reopen");
+    reopened.initialize().expect("reinitialize");
+    reopened
+        .publish_action(&action)
+        .expect("retry after reopen");
+    let state = reopened
+        .read_shared_state()
+        .expect("coherent retained snapshot");
+    assert_eq!(state.actions, actions);
+    assert_eq!(state.nodes.len(), MAX_NODES_CAP);
+    assert!(state.nodes.contains(&node));
+    assert_eq!(
+        node.applied_actions,
+        Some(fleet_application_checkpoint(&state.actions, "zone-a").expect("checkpoint"))
+    );
+    node.health = NodeHealth::Degraded;
+    node.applied_actions = None;
+    reopened
+        .upsert_node_status(&node)
+        .expect("failure can still clear the previous checkpoint at capacity");
+    assert!(
+        reopened
+            .list_node_statuses()
+            .expect("latest heartbeats")
+            .contains(&node)
+    );
+}
+
+#[test]
+fn durable_readers_refuse_oversized_existing_inventory_without_truncating() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut transport = DurableFleetTransport::new(dir.path()).expect("open");
+    transport.initialize().expect("initialize");
+    // A store written by an older version must not silently hide its last
+    // action or node to manufacture an in-bounds convergence snapshot.
+    seed_durable_inventory(&transport, MAX_ACTION_LOG_ENTRIES + 1, MAX_NODES_CAP + 1);
+    for result in [
+        transport.list_actions().map(|_| ()),
+        transport.list_node_statuses().map(|_| ()),
+        transport.read_shared_state().map(|_| ()),
+    ] {
+        assert!(matches!(
+            result,
+            Err(FleetTransportError::SerializationError { .. })
+        ));
+    }
+    let connection = Connection::open(transport.db_path().to_string_lossy().as_ref())
+        .expect("inspect retained inventory");
+    for (table, expected) in [
+        ("fleet_actions", MAX_ACTION_LOG_ENTRIES + 1),
+        ("fleet_nodes", MAX_NODES_CAP + 1),
+    ] {
+        let rows = connection
+            .query(&format!("SELECT COUNT(*) FROM {table};"))
+            .expect("count");
+        assert_eq!(
+            rows[0].values()[0],
+            SqliteValue::Integer(i64::try_from(expected).expect("capacity fits i64"))
+        );
+    }
+}
+
+#[test]
+fn concurrent_durable_publishers_cannot_overbook_the_last_inventory_slots() {
+    use std::sync::{Arc, Barrier};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut transport = DurableFleetTransport::new(dir.path()).expect("open");
+    transport.initialize().expect("initialize");
+    seed_durable_inventory(&transport, MAX_ACTION_LOG_ENTRIES - 1, MAX_NODES_CAP - 1);
+    let barrier = Arc::new(Barrier::new(3));
+    let publishers = (0..2)
+        .map(|index| {
+            let root = dir.path().to_path_buf();
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                let mut writer = DurableFleetTransport::new(root).expect("independent writer");
+                writer.initialize().expect("writer initialize");
+                barrier.wait();
+                let action = writer.publish_action(&sample_action(
+                    &format!("racing-action-{index}"),
+                    &format!("racing-incident-{index}"),
+                ));
+                barrier.wait();
+                let node = writer.upsert_node_status(&sample_node(&format!("racing-node-{index}")));
+                (action, node)
+            })
+        })
+        .collect::<Vec<_>>();
+    barrier.wait();
+    barrier.wait();
+    let results = publishers
+        .into_iter()
+        .map(|writer| writer.join().expect("writer completed"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        results.iter().filter(|(action, _)| action.is_ok()).count(),
+        1
+    );
+    assert_eq!(results.iter().filter(|(_, node)| node.is_ok()).count(), 1);
+    for result in results
+        .into_iter()
+        .flat_map(|(action, node)| [action, node])
+    {
+        if let Err(error) = result {
+            assert!(
+                matches!(error, FleetTransportError::SerializationError { .. }),
+                "{error}"
+            );
+        }
+    }
+    let state = transport
+        .read_shared_state()
+        .expect("bounded snapshot after races");
+    assert_eq!(state.actions.len(), MAX_ACTION_LOG_ENTRIES);
+    assert_eq!(state.nodes.len(), MAX_NODES_CAP);
+    assert_eq!(
+        state
+            .actions
+            .iter()
+            .filter(|row| row.action_id.starts_with("seed-action-"))
+            .count(),
+        MAX_ACTION_LOG_ENTRIES - 1
+    );
+    assert_eq!(
+        state
+            .nodes
+            .iter()
+            .filter(|row| row.node_id.starts_with("seed-node-"))
+            .count(),
+        MAX_NODES_CAP - 1
+    );
+}
+
+#[test]
+fn durable_shared_state_does_not_mix_action_and_checkpoint_generations() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Barrier};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut transport = DurableFleetTransport::new(dir.path()).expect("open");
+    transport.initialize().expect("initialize");
+    seed_durable_inventory(&transport, 256, 0);
+    let mut actions = transport.list_actions().expect("initial actions");
+    let mut node = sample_node("generation-node");
+    node.applied_actions =
+        Some(fleet_application_checkpoint(&actions, "zone-a").expect("checkpoint"));
+    transport.upsert_node_status(&node).expect("initial node");
+
+    let barrier = Arc::new(Barrier::new(2));
+    let finished = Arc::new(AtomicBool::new(false));
+    let writer_barrier = Arc::clone(&barrier);
+    let writer_finished = Arc::clone(&finished);
+    let db_path = transport.db_path().to_path_buf();
+    let writer = std::thread::spawn(move || {
+        let connection =
+            Connection::open(db_path.to_string_lossy().as_ref()).expect("writer connection");
+        connection
+            .query("PRAGMA journal_mode=WAL;")
+            .expect("writer WAL");
+        connection
+            .query("PRAGMA synchronous=FULL;")
+            .expect("writer FULL");
+        connection
+            .query("PRAGMA busy_timeout=5000;")
+            .expect("writer timeout");
+        writer_barrier.wait();
+        for generation in 0..64 {
+            let action = sample_action(
+                &format!("generation-{generation:03}"),
+                "generation-incident",
+            );
+            actions.push(action.clone());
+            node.applied_actions =
+                Some(fleet_application_checkpoint(&actions, "zone-a").expect("next checkpoint"));
+            let mut tx = connection.transaction().expect("generation transaction");
+            tx.execute_with_params(
+                "INSERT INTO fleet_actions(action_id, emitted_at, action_json) VALUES (?1, ?2, ?3);",
+                &[
+                    SqliteValue::Text(action.action_id.into()),
+                    SqliteValue::Text(action.emitted_at.to_rfc3339().into()),
+                    SqliteValue::Text(serde_json::to_string(actions.last().expect("appended action")).expect("encode action").into()),
+                ],
+            ).expect("generation action");
+            tx.execute_with_params(
+                "UPDATE fleet_nodes SET status_json = ?1 WHERE zone_id = ?2 AND node_id = ?3;",
+                &[
+                    SqliteValue::Text(serde_json::to_string(&node).expect("encode node").into()),
+                    SqliteValue::Text(node.zone_id.clone().into()),
+                    SqliteValue::Text(node.node_id.clone().into()),
+                ],
+            )
+            .expect("generation node");
+            // Both records become visible together. Every valid snapshot must
+            // therefore pair the action set with exactly its own checkpoint.
+            tx.commit().expect("commit generation");
+        }
+        writer_finished.store(true, Ordering::Release);
+    });
+    barrier.wait();
+    for sample in 0..128 {
+        let state = transport.read_shared_state().expect("shared snapshot");
+        assert_eq!(state.nodes.len(), 1);
+        assert_eq!(
+            state.nodes[0].applied_actions,
+            Some(
+                fleet_application_checkpoint(&state.actions, "zone-a")
+                    .expect("snapshot checkpoint")
+            ),
+            "reader combined actions and heartbeat from different committed snapshots"
+        );
+        if sample >= 31 && finished.load(Ordering::Acquire) {
+            break;
+        }
+    }
+    writer.join().expect("generation writer completed");
+    assert_eq!(transport.list_actions().expect("final actions").len(), 320);
 }
 
 #[test]
