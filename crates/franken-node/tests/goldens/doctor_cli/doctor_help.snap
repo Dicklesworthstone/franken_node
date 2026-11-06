@@ -10,6 +10,7 @@ Commands:
   evidence-readiness       Report evidence readiness from an `--input` snapshot (not a live broker)
   workspace-pressure       Probe local disk, memory, RCH slots, and build counts; apply pressure policy
   process-spawn-readiness  Validate the Linux Bubblewrap backend required for process spawning
+  expected-loss-actions    Rank workspace-pressure findings by expected loss (IBD-8) using the copilot value-of-information engine
   help                     Print this message or the help of the given subcommand(s)
 
 Options:
@@ -27,6 +28,8 @@ Options:
           Stable trace ID for correlating diagnostics [default: doctor-bootstrap]
       --verbose
           Show verbose diagnostic output
+      --screen
+          Draw the operator screen (frankentui panels: summary and every check) instead of text. Width follows `COLUMNS` (default 100)
   -h, --help
           Print help
   -V, --version

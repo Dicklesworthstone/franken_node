@@ -39,7 +39,8 @@ fn json_ok(workspace: &Path, args: &[&str]) -> Value {
 }
 
 /// `app` depends on `web-kit` and `lib-core`; `web-kit` itself depends on
-/// `lib-core`, which depends on `tiny-helper` (in the lockfile only).
+/// `lib-core`, which depends on `tiny-helper`. `trust scan` seeds a card for
+/// every package the lockfile resolves at scan time.
 fn project() -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("tempdir");
     std::fs::write(
@@ -102,23 +103,38 @@ fn quarantine_propagates_through_lockfile_edges_with_explanations_and_blast_radi
     assert_eq!(before["schema_version"], "franken-node/trust-graph-cli/v1");
     assert_eq!(before["lockfile"], "package-lock.json");
     let graph = &before["graph"];
-    assert_eq!(node(graph, "npm:web-kit")["kind"], "extension");
-    assert_eq!(node(graph, "npm:lib-core")["kind"], "extension");
+    for scanned in ["npm:web-kit", "npm:lib-core", "npm:tiny-helper"] {
+        assert_eq!(node(graph, scanned)["kind"], "extension", "{scanned}");
+    }
     assert!(
         has_edge(graph, "npm:web-kit", "npm:lib-core", "depends_on"),
         "{graph}"
     );
-    // A lockfile package nobody scanned is a coverage gap, never trusted.
-    let helper = node(graph, "npm:tiny-helper");
-    assert_eq!(helper["kind"], "untracked_dependency", "{helper}");
-    assert!(helper["effective_score"].is_null(), "{helper}");
     assert!(has_edge(
         graph,
         "npm:lib-core",
         "npm:tiny-helper",
         "depends_on"
     ));
-    assert!(graph["summary"]["untracked_dependencies"].as_u64() >= Some(1));
+    assert_eq!(graph["summary"]["untracked_dependencies"], 0, "{graph}");
+
+    // The lockfile gains a package after the last scan: a coverage gap,
+    // never a trusted node.
+    let lock_path = workspace.path().join("package-lock.json");
+    let mut lock: Value =
+        serde_json::from_slice(&std::fs::read(&lock_path).expect("lockfile")).expect("lock json");
+    lock["packages"]["node_modules/lib-core"]["dependencies"]["late-helper"] =
+        serde_json::json!("^0.1.0");
+    lock["packages"]["node_modules/late-helper"] = serde_json::json!({"version": "0.1.3"});
+    std::fs::write(&lock_path, serde_json::to_vec_pretty(&lock).expect("encode")).expect("write");
+    let drifted = json_ok(workspace.path(), &["trust", "graph", "--json"]);
+    let graph = &drifted["graph"];
+    let late = node(graph, "npm:late-helper");
+    assert_eq!(late["kind"], "untracked_dependency", "{late}");
+    assert!(late["effective_score"].is_null(), "{late}");
+    assert!(has_edge(graph, "npm:lib-core", "npm:late-helper", "depends_on"));
+    assert_eq!(graph["summary"]["untracked_dependencies"], 1, "{graph}");
+
     let web_kit_before = node(graph, "npm:web-kit")["effective_score"]
         .as_u64()
         .expect("score");

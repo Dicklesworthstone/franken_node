@@ -13,6 +13,7 @@ use frankentui::render::frame::Frame;
 use frankentui::render::grapheme_pool::GraphemePool;
 use frankentui::widgets::Widget;
 use frankentui::widgets::block::Block;
+use frankentui::widgets::borders::Borders;
 use frankentui::widgets::paragraph::Paragraph;
 use frankentui::widgets::table::{Row, Table};
 
@@ -127,6 +128,12 @@ fn bounded_rows<T>(items: &[T], row: impl Fn(&T) -> Row) -> (Vec<Row>, Option<St
     (rows, omitted)
 }
 
+/// A titled panel: borders only. `Block::bordered()` also pads one cell on
+/// every side, which the fixed panel heights below do not budget for.
+fn panel(title: &str) -> Block<'_> {
+    Block::new().borders(Borders::ALL).title(title)
+}
+
 /// Rows a bordered table needs: border, header, body (at least one line).
 fn table_height(rows: usize) -> u16 {
     u16::try_from(rows.max(1))
@@ -158,7 +165,7 @@ pub fn render_fleet_screen(model: &FleetScreenModel, width: u16) -> String {
         model.active_revocations,
         model.convergences.len(),
     ))
-    .block(Block::bordered().title(&summary_title));
+    .block(panel(&summary_title));
 
     let (node_rows, nodes_omitted) = bounded_rows(&model.nodes, |node| {
         Row::new([
@@ -195,7 +202,7 @@ pub fn render_fleet_screen(model: &FleetScreenModel, width: u16) -> String {
         "quarantine v",
         "last seen",
     ]))
-    .block(Block::bordered().title(&nodes_title));
+    .block(panel(&nodes_title));
 
     let (convergence_rows, convergences_omitted) =
         bounded_rows(&model.convergences, |convergence| {
@@ -225,7 +232,7 @@ pub fn render_fleet_screen(model: &FleetScreenModel, width: u16) -> String {
         ],
     )
     .header(Row::new(["incident", "kind", "target", "progress"]))
-    .block(Block::bordered().title(&convergence_title));
+    .block(panel(&convergence_title));
 
     render_panels(
         width,
@@ -248,7 +255,7 @@ pub fn render_doctor_screen(model: &DoctorScreenModel, width: u16) -> String {
         model.count("warn"),
         model.count("fail"),
     ))
-    .block(Block::bordered().title(" franken-node doctor "));
+    .block(panel(" franken-node doctor "));
     let (rows, omitted) = bounded_rows(&model.checks, |check| {
         Row::new([
             check.status.clone(),
@@ -276,7 +283,7 @@ pub fn render_doctor_screen(model: &DoctorScreenModel, width: u16) -> String {
         ],
     )
     .header(Row::new(["status", "code", "scope", "message"]))
-    .block(Block::bordered().title(&title));
+    .block(panel(&title));
     render_panels(width, &[(3, &summary), (table_height(count), &checks)])
 }
 
