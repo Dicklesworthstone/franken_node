@@ -275,15 +275,22 @@ fn publish_signed_artifact(workspace: &Path) -> (String, PathBuf, PathBuf) {
 }
 
 #[cfg(all(feature = "engine", unix))]
-fn run_source_fixture_cli(workspace: &Path, state_home: &Path, args: &[&str]) -> Output {
-    Command::new(resolve_binary_path())
+fn source_fixture_command(workspace: &Path, state_home: &Path, args: &[&str]) -> Command {
+    let mut command = Command::new(resolve_binary_path());
+    command
         .current_dir(workspace)
         .env("XDG_STATE_HOME", state_home)
         .env("XDG_CONFIG_HOME", state_home.join("config"))
         .env("PUBLISHER_TEST_VALUE", "VISIBLE_FROM_OPERATOR")
         .env_remove("FRANKEN_NODE_PROFILE")
         .env_remove("FRANKEN_NODE_SECURITY_DECISION_RECEIPT_SIGNING_KEY_PATH")
-        .args(args)
+        .args(args);
+    command
+}
+
+#[cfg(all(feature = "engine", unix))]
+fn run_source_fixture_cli(workspace: &Path, state_home: &Path, args: &[&str]) -> Output {
+    source_fixture_command(workspace, state_home, args)
         .output()
         .expect("launch native publisher-approved source fixture")
 }
@@ -435,13 +442,17 @@ impl PublishedSourceFixture {
     }
 
     fn run(&self, extra: &[&str]) -> Output {
+        self.run_with_policy("balanced", extra)
+    }
+
+    fn run_with_policy(&self, policy: &str, extra: &[&str]) -> Output {
         let mut args = vec![
             "run",
             &self.entrypoint,
             "--config",
             "franken_node.toml",
             "--policy",
-            "balanced",
+            policy,
             "--runtime",
             "franken-engine",
             "--frozen-modules",
@@ -473,6 +484,338 @@ impl PublishedSourceFixture {
         assert!(
             !diagnostics.contains("PUBLISHER_APPROVED_WORKLOAD"),
             "guest executed before refusal: {diagnostics}"
+        );
+    }
+}
+
+#[test]
+fn trust_execution_revocation_rejects_ambiguous_and_partial_targets_before_mutation() {
+    let workspace = tempfile::tempdir().unwrap();
+    for args in [
+        vec![
+            "trust",
+            "revoke",
+            "--artifact-sha256",
+            "sha256:deadbeef",
+            "--json",
+        ],
+        vec![
+            "trust",
+            "revoke",
+            "npm:plugin",
+            "--artifact-sha256",
+            "bad",
+            "--json",
+        ],
+        vec![
+            "trust",
+            "revoke",
+            "--publisher-public-key",
+            "publisher.pub",
+            "--artifact-sha256",
+            "bad",
+            "--json",
+        ],
+    ] {
+        let output = run_cli_in_workspace(workspace.path(), &args);
+        assert!(!output.status.success());
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout)
+            .expect("invalid revocation target must preserve structured CLI errors");
+        assert_eq!(report["schema_version"], "franken-node/trust-error-cli/v1");
+        assert_eq!(report["command"], "trust.revoke");
+        assert!(
+            !workspace.path().join(".franken-node").exists(),
+            "invalid target must be rejected before creating or mutating trust state"
+        );
+    }
+}
+
+#[test]
+#[cfg(all(feature = "engine", unix))]
+fn registry_source_capsule_obeys_exact_publisher_and_artifact_revocations_without_dependencies() {
+    use frankenengine_node::supply_chain::registry_artifact::artifact_sha256;
+
+    for publisher_target in [true, false] {
+        for signed_authority in [false, true] {
+            let authority = publisher_runtime_authority();
+            let fixture = PublishedSourceFixture::with_modules_and_authority(
+                "app.cjs",
+                &[("app.cjs", "console.log('PUBLISHER_APPROVED_WORKLOAD');\n")],
+                signed_authority.then_some(&authority),
+            );
+            let digest = artifact_sha256(&fs::read(&fixture.artifact).unwrap());
+            let unrelated_key = fixture.registry.path().join("unrelated.pub");
+            let key = ed25519_dalek::SigningKey::from_bytes(&[43; 32]);
+            fs::write(&unrelated_key, hex::encode(key.verifying_key().as_bytes())).unwrap();
+            let unrelated_digest = format!("sha256:{}", "fe".repeat(32));
+            let (flag, unrelated, matching) = if publisher_target {
+                (
+                    "--publisher-public-key",
+                    unrelated_key.to_str().unwrap(),
+                    fixture.public_key.to_str().unwrap(),
+                )
+            } else {
+                (
+                    "--artifact-sha256",
+                    unrelated_digest.as_str(),
+                    digest.as_str(),
+                )
+            };
+            let unrelated = run_source_fixture_cli(
+                fixture.project.path(),
+                fixture.state_home.path(),
+                &["trust", "revoke", flag, unrelated, "--json"],
+            );
+            assert!(
+                unrelated.status.success(),
+                "{}",
+                String::from_utf8_lossy(&unrelated.stderr)
+            );
+            let admitted = fixture.run(&[]);
+            assert!(
+                admitted.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&admitted.stdout),
+                String::from_utf8_lossy(&admitted.stderr)
+            );
+            let report: serde_json::Value = serde_json::from_slice(&admitted.stdout).unwrap();
+            assert_eq!(
+                report["dispatch"]["captured_output"]["stdout"],
+                "PUBLISHER_APPROVED_WORKLOAD\n"
+            );
+
+            let revoke_args = ["trust", "revoke", flag, matching, "--json"];
+            let revoked = run_source_fixture_cli(
+                fixture.project.path(),
+                fixture.state_home.path(),
+                &revoke_args,
+            );
+            assert!(
+                revoked.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&revoked.stdout),
+                String::from_utf8_lossy(&revoked.stderr)
+            );
+            let record: serde_json::Value = serde_json::from_slice(&revoked.stdout).unwrap();
+            assert_eq!(
+                record["schema_version"],
+                "franken-node/trust-execution-revocation-cli/v1"
+            );
+            assert_eq!(record["scope"], "project_registry");
+            assert_eq!(record["revoked"], true);
+            let repeated = run_source_fixture_cli(
+                fixture.project.path(),
+                fixture.state_home.path(),
+                &revoke_args,
+            );
+            assert!(repeated.status.success());
+            let repeated: serde_json::Value = serde_json::from_slice(&repeated.stdout).unwrap();
+            assert_eq!(
+                repeated["revocation"], record["revocation"],
+                "repeat revocation retains the original record"
+            );
+
+            for policy in ["strict", "balanced", "legacy-risky"] {
+                let denied = fixture.run_with_policy(policy, &[]);
+                let diagnostic = format!(
+                    "{}\n{}",
+                    String::from_utf8_lossy(&denied.stdout),
+                    String::from_utf8_lossy(&denied.stderr)
+                );
+                assert!(
+                    !denied.status.success(),
+                    "revocation bypassed in {policy}: {diagnostic}"
+                );
+                assert!(
+                    diagnostic.contains("revoked"),
+                    "must deny the exact authority in {policy}: {diagnostic}"
+                );
+                assert!(
+                    !diagnostic.contains("PUBLISHER_APPROVED_WORKLOAD"),
+                    "revoked guest executed: {diagnostic}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+#[cfg(all(feature = "engine", unix))]
+fn registry_revocation_stops_a_running_native_guest_and_retains_its_effect_observation() {
+    use frankenengine_node::supply_chain::registry_artifact::artifact_sha256;
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    struct ReapChild(std::process::Child);
+    impl Drop for ReapChild {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    for publisher_target in [true, false] {
+        let mut authority = publisher_runtime_authority();
+        authority["allowed_capabilities"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!("fs_write"));
+        authority["max_instructions"] = serde_json::json!(1_000_000_000_000_u64);
+        let fixture = PublishedSourceFixture::with_modules_and_authority(
+            "app.cjs",
+            &[(
+                "app.cjs",
+                "require('fs').writeFileSync('guest.started', 'actual-native-effect'); while (true) {}\n",
+            )],
+            // Exercise both source-only and authority-bearing approvals. The
+            // local legacy profile grants the test's single filesystem write;
+            // it must never waive a publisher or artifact revocation.
+            (!publisher_target).then_some(&authority),
+        );
+        let config_path = fixture.project.path().join("franken_node.toml");
+        let mut config: frankenengine_node::config::Config =
+            toml::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        config.runtime.max_instructions = Some(1_000_000_000_000);
+        fs::write(config_path, config.to_toml().unwrap()).unwrap();
+        let stdout_path = fixture.registry.path().join("running-guest.stdout");
+        let stderr_path = fixture.registry.path().join("running-guest.stderr");
+        let mut command = source_fixture_command(
+            fixture.project.path(),
+            fixture.state_home.path(),
+            &[
+                "run",
+                "app.cjs",
+                "--config",
+                "franken_node.toml",
+                "--policy",
+                "legacy-risky",
+                "--runtime",
+                "franken-engine",
+                "--frozen-modules",
+                "--registry-artifact",
+                fixture.manifest.to_str().unwrap(),
+                "--publisher-public-key",
+                fixture.public_key.to_str().unwrap(),
+                "--json",
+            ],
+        );
+        command
+            .env("FRANKEN_ENGINE_TIMEOUT_SECS", "25")
+            .stdout(Stdio::from(fs::File::create(&stdout_path).unwrap()))
+            .stderr(Stdio::from(fs::File::create(&stderr_path).unwrap()));
+        let mut child = ReapChild(command.spawn().expect("start actual native guest"));
+        let startup_deadline = Instant::now() + Duration::from_secs(10);
+        let marker = fixture.project.path().join("guest.started");
+        let started = loop {
+            if fs::read(&marker).is_ok_and(|bytes| bytes == b"actual-native-effect") {
+                break true;
+            }
+            if child.0.try_wait().unwrap().is_some() || Instant::now() >= startup_deadline {
+                break false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let digest = artifact_sha256(&fs::read(&fixture.artifact).unwrap());
+        let (flag, target) = if publisher_target {
+            (
+                "--publisher-public-key",
+                fixture.public_key.to_str().unwrap(),
+            )
+        } else {
+            ("--artifact-sha256", digest.as_str())
+        };
+        let revocation = started.then(|| {
+            run_source_fixture_cli(
+                fixture.project.path(),
+                fixture.state_home.path(),
+                &["trust", "revoke", flag, target, "--json"],
+            )
+        });
+        // This is a hang guard, not a measured propagation SLO. The actual
+        // assertion below requires an execution-trust trigger, never timeout.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let status = loop {
+            if let Some(status) = child.0.try_wait().unwrap() {
+                break status;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "native supervisor failed to terminate"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let stdout = fs::read(&stdout_path).unwrap();
+        let stderr = fs::read(&stderr_path).unwrap();
+        let diagnostic = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&stdout),
+            String::from_utf8_lossy(&stderr)
+        );
+        assert!(
+            started,
+            "a real guest effect must precede revocation: {diagnostic}"
+        );
+        let revocation = revocation.unwrap();
+        assert!(
+            revocation.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&revocation.stdout),
+            String::from_utf8_lossy(&revocation.stderr)
+        );
+        assert!(
+            !status.success(),
+            "revoked native guest returned success: {diagnostic}"
+        );
+        let report: serde_json::Value =
+            serde_json::from_slice(&stdout).expect("interruption report");
+        assert_eq!(
+            report["schema_version"],
+            "franken-node/native-effect-interruption-evidence/v1"
+        );
+        assert_eq!(
+            report["control_trigger"]["kind"], "execution_trust",
+            "{diagnostic}"
+        );
+        assert!(
+            report["control_trigger"]["detail"]
+                .as_str()
+                .unwrap()
+                .contains("revoked")
+        );
+        assert_eq!(report["replay_certified"], false);
+        assert!(
+            report["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["effect_kind"] == "fs_write")
+        );
+        assert_eq!(
+            fs::read(&marker).unwrap(),
+            b"actual-native-effect",
+            "revocation does not undo a completed write"
+        );
+
+        let inventory = run_source_fixture_cli(
+            fixture.project.path(),
+            fixture.state_home.path(),
+            &["fleet", "sessions", "--json"],
+        );
+        assert!(inventory.status.success());
+        let inventory: serde_json::Value = serde_json::from_slice(&inventory.stdout).unwrap();
+        assert_eq!(inventory["quiescence_certified"], false);
+        let retained = inventory["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|record| record["admission"]["session_nonce"] == report["session_nonce"])
+            .expect("revoked session remains in the durable inventory");
+        assert_eq!(retained["outcome"]["kind"], "interrupted");
+        assert_eq!(retained["outcome"]["process"], "worker_reaped");
+        assert_eq!(retained["outcome"]["effects"]["kind"], "interrupted");
+        assert_eq!(
+            retained["outcome"]["effects"]["evidence"]["control_trigger"],
+            report["control_trigger"]
         );
     }
 }

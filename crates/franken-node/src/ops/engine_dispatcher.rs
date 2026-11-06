@@ -3322,6 +3322,8 @@ impl RunTrustRequirements {
 /// Both the dispatcher and authenticated native worker use this same policy.
 /// Previously trusted cards must remain present; newly tracked dependencies
 /// must obey their current revocation, quarantine, and risk state as well.
+/// A retained publisher approval always requires authenticated current registry
+/// state for its exact signing key and artifact, even without dependencies.
 /// Warnings retain the existing balanced/legacy profile behavior.
 pub fn validate_execution_trust(
     project_root: &Path,
@@ -3335,13 +3337,21 @@ pub fn validate_execution_trust(
     };
 
     requirements.validate()?;
-    if requirements.dependency_ids.is_empty() {
+    let publisher_identity = requirements
+        .registry_artifact_approval
+        .as_ref()
+        .map(PublisherSourceGraphApproval::identity);
+    if requirements.dependency_ids.is_empty() && publisher_identity.is_none() {
         return Ok(Vec::new());
     }
+    // Derive this from the retained approval as well as the preflight flag.
+    // Source-only and dependency-free artifacts must not bypass revocations,
+    // including under the legacy profile or a deserialized false flag.
+    let registry_required = requirements.registry_required || publisher_identity.is_some();
     let authoritative_registry = registry_snapshot_path(project_root);
     let durable_authoritative = durable_store_path(&authoritative_registry);
     if !durable_authoritative.is_file() && !authoritative_registry.is_file() {
-        if !requirements.registry_required && config.profile == Profile::LegacyRisky {
+        if !registry_required && config.profile == Profile::LegacyRisky {
             return Ok(vec![
                 "authoritative trust registry remains unavailable at execution admission; legacy-risky policy retains the skipped preflight".to_string(),
             ]);
@@ -3349,7 +3359,7 @@ pub fn validate_execution_trust(
         return Err(ActionableError::new(
             format!(
                 "Execution blocked: authoritative trust registry is missing after preflight; \
-                 neither {} nor {} exists. Dependency execution requires current trust state.",
+                 neither {} nor {} exists. Governed execution requires current trust state.",
                 durable_authoritative.display(),
                 authoritative_registry.display(),
             ),
@@ -3364,7 +3374,7 @@ pub fn validate_execution_trust(
         SnapshotSourceContext::TrustedFile,
     ) {
         Ok(registry) => registry,
-        Err(error) if !requirements.registry_required && config.profile == Profile::LegacyRisky => {
+        Err(error) if !registry_required && config.profile == Profile::LegacyRisky => {
             return Ok(vec![format!(
                 "authoritative trust registry remains unreadable at execution admission; legacy-risky policy retains the skipped preflight: {error}"
             )]);
@@ -3373,6 +3383,20 @@ pub fn validate_execution_trust(
             return Err(error).context("Trust registry validation failed at execution time");
         }
     };
+    if let Some(identity) = publisher_identity
+        && let Some(revocation) = registry
+            .execution_authority_revocation(&identity.publisher_key_id, &identity.artifact_sha256)
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?
+    {
+        anyhow::bail!(
+            "Execution blocked: publisher-approved artifact authority is revoked \
+             (publisher_key_id={}, artifact_sha256={}, revoked_at_secs={}): {}",
+            identity.publisher_key_id,
+            identity.artifact_sha256,
+            revocation.revoked_at_secs,
+            revocation.reason,
+        );
+    }
     let mut warnings = Vec::new();
     let mut admitted_tracked_card = false;
     for extension_id in &requirements.dependency_ids {
@@ -3448,7 +3472,7 @@ pub fn validate_execution_trust(
         }
         admitted_tracked_card = true;
     }
-    if admitted_tracked_card
+    if (admitted_tracked_card || publisher_identity.is_some())
         && let Some(detail) = registry_revocation_freshness_denial(
             &authoritative_registry,
             &config.trust,
@@ -3576,8 +3600,10 @@ fn recheck_native_run_controls(
         })?
         .as_secs();
     // Preserve the admission profile's warning/deny distinctions, including
-    // legacy quarantine behavior. These identities are the preflight set, not
-    // a claim of per-package attribution for all dynamically loaded code.
+    // legacy quarantine behavior. Dependency identities are the preflight set,
+    // not a claim of per-package attribution for all dynamically loaded code.
+    // Publisher revocations use the already authenticated approval identity;
+    // this observer does not reopen or rehash the source archive each poll.
     validate_execution_trust(project_paths.project_root(), config, requirements, now_secs)
         .map_err(|error| {
             NativeRunControlTrigger::new(NativeRunControlKind::ExecutionTrust, error)
@@ -12748,6 +12774,458 @@ mod tests {
         )
         .expect("record independent fresh frontier");
         config
+    }
+
+    #[cfg(all(feature = "engine", unix))]
+    mod publisher_execution_revocation {
+        use super::*;
+        use crate::supply_chain::{
+            artifact_signing::{KeyId, sign_bytes},
+            extension_registry::{
+                ExtensionSignature, ExtensionStatus, SignedExtension, VersionEntry,
+                canonical_registration_manifest_bytes,
+                canonical_registration_manifest_bytes_with_authority,
+            },
+            module_resolution_graph::file_resolution::source_graph::{
+                GraphOptions, capsule, capture,
+            },
+            provenance::{
+                AttestationEnvelopeFormat, AttestationLink, ChainLinkRole, ProvenanceAttestation,
+                sign_links_in_place,
+            },
+            registry_artifact::{
+                LOCAL_ARTIFACT_SCHEMA, LocalRegistryArtifactManifest, artifact_sha256,
+                registry_publish_provenance_signature_payload,
+            },
+            trust_card::ExecutionRevocationTarget,
+            trust_card_registry_store::{record_revocation_frontier, registry_snapshot_path},
+        };
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+        struct PublisherFixture {
+            directory: TempDir,
+            approval: PublisherSourceGraphApproval,
+        }
+
+        impl PublisherFixture {
+            fn new(key_byte: u8, source: &str, with_authority: bool) -> Self {
+                let directory = TempDir::new().expect("publisher source workspace");
+                fs::write(directory.path().join("app.cjs"), source).expect("source");
+                let graph = capture(directory.path(), "app.cjs", GraphOptions::default())
+                    .expect("capture complete source graph");
+                let bytes = capsule::encode(&graph).expect("capsule").bytes().to_vec();
+                let key = ed25519_dalek::SigningKey::from_bytes(&[key_byte; 32]);
+                let hash = artifact_sha256(&bytes);
+                let timestamp = "2026-11-03T00:00:00Z".to_string();
+                let version = VersionEntry {
+                    version: "1.2.3".into(),
+                    parent_version: None,
+                    content_hash: hash.strip_prefix("sha256:").unwrap().to_owned(),
+                    registered_at: timestamp.clone(),
+                    compatible_with: vec!["franken-node".into()],
+                };
+                let signed = if with_authority {
+                    canonical_registration_manifest_bytes_with_authority(
+                        "source",
+                        "publisher",
+                        &version,
+                        &[],
+                        &publisher_authority_for_test(),
+                    )
+                    .expect("v2 publisher authority")
+                } else {
+                    canonical_registration_manifest_bytes("source", "publisher", &version, &[])
+                        .expect("source-only v1 publisher statement")
+                };
+                let mut manifest = LocalRegistryArtifactManifest {
+                    schema_version: LOCAL_ARTIFACT_SCHEMA.into(),
+                    stored_at_utc: timestamp.clone(),
+                    artifact_file_name: "source.capsule".into(),
+                    artifact_sha256: hash,
+                    artifact_size_bytes: bytes.len() as u64,
+                    manifest_bytes_b64: STANDARD.encode(&signed),
+                    publisher_public_key_hex: hex::encode(key.verifying_key().as_bytes()),
+                    extension: SignedExtension {
+                        extension_id: "unsigned-registry-id".into(),
+                        name: "source".into(),
+                        description: String::new(),
+                        publisher_id: "publisher".into(),
+                        status: ExtensionStatus::Active,
+                        signature: ExtensionSignature {
+                            key_id: KeyId::from_verifying_key(&key.verifying_key()).to_string(),
+                            algorithm: "ed25519".into(),
+                            signature_bytes: sign_bytes(&key, &signed),
+                            signed_at: timestamp.clone(),
+                        },
+                        provenance: ProvenanceAttestation {
+                            schema_version: "1.0".into(),
+                            source_repository_url: String::new(),
+                            build_system_identifier: String::new(),
+                            builder_identity: String::new(),
+                            builder_version: String::new(),
+                            vcs_commit_sha: String::new(),
+                            build_timestamp_epoch: 0,
+                            reproducibility_hash: String::new(),
+                            input_hash: String::new(),
+                            output_hash: String::new(),
+                            slsa_level_claim: 0,
+                            envelope_format: AttestationEnvelopeFormat::FrankenNodeEnvelopeV1,
+                            links: Vec::new(),
+                            custom_claims: Default::default(),
+                        },
+                        versions: vec![version],
+                        tags: Vec::new(),
+                        registered_at: timestamp.clone(),
+                        updated_at: timestamp,
+                    },
+                };
+                if with_authority {
+                    let now = Utc::now().timestamp().max(0) as u64;
+                    let key_id = KeyId::from_verifying_key(&key.verifying_key()).to_string();
+                    let hash = manifest.artifact_sha256.clone();
+                    manifest.extension.provenance = ProvenanceAttestation {
+                        schema_version: "1.0".into(),
+                        source_repository_url: "https://example.com/publisher/source".into(),
+                        build_system_identifier: "execution-revocation-test".into(),
+                        builder_identity: manifest.extension.publisher_id.clone(),
+                        builder_version: "1".into(),
+                        vcs_commit_sha: "a".repeat(40),
+                        build_timestamp_epoch: now,
+                        reproducibility_hash: hash.clone(),
+                        input_hash: hash.clone(),
+                        output_hash: hash.clone(),
+                        slsa_level_claim: 1,
+                        envelope_format: AttestationEnvelopeFormat::FrankenNodeEnvelopeV1,
+                        links: vec![AttestationLink {
+                            role: ChainLinkRole::Publisher,
+                            signer_id: key_id.clone(),
+                            signer_version: "1".into(),
+                            signature: String::new(),
+                            signed_payload_hash: hash,
+                            issued_at_epoch: now,
+                            expires_at_epoch: now + 24 * 60 * 60,
+                            revoked: false,
+                        }],
+                        custom_claims: std::collections::BTreeMap::from([
+                            ("operator_key_id".into(), key_id.clone()),
+                            (
+                                "operator_signature_scope".into(),
+                                "registry_publish_provenance_v1".into(),
+                            ),
+                        ]),
+                    };
+                    let provenance = &mut manifest.extension.provenance;
+                    let payload =
+                        registry_publish_provenance_signature_payload(&signed, provenance)
+                            .expect("exact publisher provenance preimage");
+                    provenance.custom_claims.insert(
+                        "operator_provenance_signature".into(),
+                        hex::encode(sign_bytes(&key, &payload)),
+                    );
+                    sign_links_in_place(
+                        provenance,
+                        &std::collections::BTreeMap::from([(key_id, key.clone())]),
+                    )
+                    .expect("signed publisher link");
+                }
+                let path = directory.path().join("artifact.manifest.json");
+                fs::write(&path, serde_json::to_vec(&manifest).unwrap()).expect("manifest");
+                fs::write(directory.path().join("source.capsule"), bytes).expect("capsule bytes");
+                let approval = PublisherSourceGraphApproval::load(&path, &key.verifying_key())
+                    .expect("independently anchored publisher approval");
+                Self {
+                    directory,
+                    approval,
+                }
+            }
+
+            fn requirements(&self) -> RunTrustRequirements {
+                let requirements = RunTrustRequirements::new(&[], &[], false)
+                    .expect("no dependency cards")
+                    .with_registry_artifact_approval(self.approval.clone())
+                    .expect("retain authenticated source identity");
+                assert!(requirements.dependency_ids.is_empty());
+                assert!(!requirements.registry_required);
+                requirements
+            }
+        }
+
+        fn seed_empty_registry(root: &Path, now_secs: u64, fresh: bool) -> Config {
+            let mut config = Config::for_profile(Profile::Balanced);
+            config.synthesize_init_security_defaults();
+            let registry_path = registry_snapshot_path(root);
+            TrustCardRegistry::from_config(&config.trust)
+                .expect("operator signing key")
+                .persist_authoritative_state(&registry_path)
+                .expect("signed empty registry");
+            if fresh {
+                record_revocation_frontier(
+                    &registry_path,
+                    &config.trust,
+                    now_secs,
+                    "test-publisher-execution",
+                )
+                .expect("independent authenticated revocation frontier");
+            }
+            config
+        }
+
+        fn revoke(root: &Path, config: &Config, target: ExecutionRevocationTarget, now: u64) {
+            let path = registry_snapshot_path(root);
+            let mut registry = TrustCardRegistry::load_authoritative_state_from_config(
+                &path,
+                &config.trust,
+                now,
+                SnapshotSourceContext::TrustedFile,
+            )
+            .expect("current signed state");
+            registry
+                .revoke_execution_authority(target, "independent operator denial", now)
+                .expect("revoke exact authority");
+            registry
+                .persist_authoritative_state(&path)
+                .expect("durable denial");
+        }
+
+        #[test]
+        fn signed_empty_registry_admits_v1_and_v2_without_dependency_aliases() {
+            let now = Utc::now().timestamp().max(0) as u64;
+            for with_authority in [false, true] {
+                let fixture = PublisherFixture::new(42, "console.log(42);\n", with_authority);
+                let requirements = fixture.requirements();
+                let mut config = seed_empty_registry(fixture.directory.path(), now, true);
+                for profile in [Profile::Strict, Profile::Balanced, Profile::LegacyRisky] {
+                    config.profile = profile;
+                    assert!(
+                        validate_execution_trust(
+                            fixture.directory.path(),
+                            &config,
+                            &requirements,
+                            now,
+                        )
+                        .expect("fresh signed authority without package trust cards")
+                        .is_empty()
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn exact_artifact_and_publisher_revocations_apply_in_every_profile() {
+            let first = PublisherFixture::new(42, "console.log(1);\n", false);
+            let second = PublisherFixture::new(42, "console.log(2);\n", true);
+            let other_publisher = PublisherFixture::new(43, "console.log(2);\n", true);
+            let fixtures = [&first, &second, &other_publisher];
+            let requirements = fixtures.map(PublisherFixture::requirements);
+            assert_ne!(
+                first.approval.identity().artifact_sha256,
+                second.approval.identity().artifact_sha256
+            );
+            assert_eq!(
+                first.approval.identity().publisher_key_id,
+                second.approval.identity().publisher_key_id
+            );
+            assert_ne!(
+                second.approval.identity().publisher_key_id,
+                other_publisher.approval.identity().publisher_key_id
+            );
+            // Display names and publisher labels intentionally match. They
+            // cannot widen an exact signing-key revocation to another signer.
+            assert_eq!(
+                second.approval.identity().name,
+                other_publisher.approval.identity().name
+            );
+            assert_eq!(
+                second.approval.identity().publisher_id,
+                other_publisher.approval.identity().publisher_id
+            );
+            let root = TempDir::new().expect("operator registry");
+            let now = Utc::now().timestamp().max(0) as u64;
+            let mut config = seed_empty_registry(root.path(), now, true);
+            revoke(
+                root.path(),
+                &config,
+                ExecutionRevocationTarget::artifact_sha256(
+                    &first.approval.identity().artifact_sha256,
+                )
+                .unwrap(),
+                now,
+            );
+            for profile in [Profile::Strict, Profile::Balanced, Profile::LegacyRisky] {
+                config.profile = profile;
+                let error = validate_execution_trust(root.path(), &config, &requirements[0], now)
+                    .expect_err("exact artifact denial")
+                    .to_string();
+                assert!(
+                    error.contains("publisher-approved artifact authority is revoked"),
+                    "{error}"
+                );
+                for admitted in &requirements[1..] {
+                    validate_execution_trust(root.path(), &config, admitted, now)
+                        .expect("different artifact remains admitted");
+                }
+            }
+            revoke(
+                root.path(),
+                &config,
+                ExecutionRevocationTarget::publisher_key(
+                    &first.approval.identity().publisher_key_id,
+                )
+                .unwrap(),
+                now + 1,
+            );
+            for profile in [Profile::Strict, Profile::Balanced, Profile::LegacyRisky] {
+                config.profile = profile;
+                for denied in &requirements[..2] {
+                    let error = validate_execution_trust(root.path(), &config, denied, now + 1)
+                        .expect_err("every artifact of the revoked signer is denied")
+                        .to_string();
+                    assert!(
+                        error.contains("publisher-approved artifact authority is revoked"),
+                        "{error}"
+                    );
+                }
+                validate_execution_trust(root.path(), &config, &requirements[2], now + 1)
+                    .expect("identical display identity with another signing key stays admitted");
+            }
+        }
+
+        #[test]
+        fn approval_never_accepts_missing_malformed_or_unsigned_registry_in_legacy_mode() {
+            let fixture = PublisherFixture::new(42, "console.log(42);\n", false);
+            let requirements = fixture.requirements();
+            let now = Utc::now().timestamp().max(0) as u64;
+            for state in ["missing", "malformed", "unsigned"] {
+                let root = TempDir::new().expect("separate untrusted registry state");
+                let mut config = Config::for_profile(Profile::Balanced);
+                config.synthesize_init_security_defaults();
+                let path = registry_snapshot_path(root.path());
+                if state != "missing" {
+                    fs::create_dir_all(path.parent().unwrap()).expect("registry directory");
+                    let bytes = if state == "unsigned" {
+                        let mut snapshot = TrustCardRegistry::from_config(&config.trust)
+                            .unwrap()
+                            .snapshot()
+                            .unwrap();
+                        snapshot.registry_signature.clear();
+                        serde_json::to_vec(&snapshot).unwrap()
+                    } else {
+                        b"not an authenticated registry".to_vec()
+                    };
+                    fs::write(path, bytes).expect("untrusted registry fixture");
+                }
+                for profile in [Profile::Strict, Profile::Balanced, Profile::LegacyRisky] {
+                    config.profile = profile;
+                    let error = validate_execution_trust(root.path(), &config, &requirements, now)
+                        .expect_err("publisher execution requires authenticated current state");
+                    assert!(
+                        error.to_string().contains(if state == "missing" {
+                            "authoritative trust registry is missing"
+                        } else {
+                            "Trust registry validation failed"
+                        }),
+                        "{state}/{profile}: {error:#}",
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn artifact_without_cards_obeys_existing_freshness_profile_policy() {
+            let fixture = PublisherFixture::new(42, "console.log(42);\n", false);
+            let requirements = fixture.requirements();
+            let now = Utc::now().timestamp().max(0) as u64;
+            let mut config = seed_empty_registry(fixture.directory.path(), now, false);
+            for profile in [Profile::Strict, Profile::Balanced, Profile::LegacyRisky] {
+                config.profile = profile;
+                let result =
+                    validate_execution_trust(fixture.directory.path(), &config, &requirements, now);
+                match profile {
+                    Profile::Strict => assert!(
+                        result
+                            .expect_err("strict freshness denial")
+                            .to_string()
+                            .contains("revocation freshness")
+                    ),
+                    Profile::Balanced => assert!(
+                        result
+                            .expect("balanced warning")
+                            .iter()
+                            .any(|warning| warning.contains("revocation freshness"))
+                    ),
+                    Profile::LegacyRisky => {
+                        assert!(result.expect("no legacy age floor").is_empty())
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn live_controls_observe_exact_revocation_without_reopening_source_archive() {
+            let fixture = PublisherFixture::new(42, "console.log(42);\n", true);
+            let requirements = fixture.requirements();
+            let now = Utc::now().timestamp().max(0) as u64;
+            let config = seed_empty_registry(fixture.directory.path(), now, true);
+            let paths = RunProjectPaths::resolve(Path::new("app.cjs"), fixture.directory.path())
+                .expect("admitted project paths");
+            let mut fleet_high_water = None;
+            let cancelled = AtomicBool::new(false);
+            recheck_native_run_controls(
+                &paths,
+                &config,
+                &requirements,
+                &mut fleet_high_water,
+                &cancelled,
+            )
+            .expect("current signed authority before revocation");
+            fs::write(
+                fixture.directory.path().join("source.capsule"),
+                b"changed after admission",
+            )
+            .expect("replace only the source archive fixture");
+            assert!(
+                fixture.approval.revalidate().is_err(),
+                "a new dispatch still verifies source bytes"
+            );
+            recheck_native_run_controls(
+                &paths,
+                &config,
+                &requirements,
+                &mut fleet_high_water,
+                &cancelled,
+            )
+            .expect("live check consults retained identity without reopening source");
+            revoke(
+                fixture.directory.path(),
+                &config,
+                ExecutionRevocationTarget::artifact_sha256(
+                    &fixture.approval.identity().artifact_sha256,
+                )
+                .unwrap(),
+                now,
+            );
+            let trigger = recheck_native_run_controls(
+                &paths,
+                &config,
+                &requirements,
+                &mut fleet_high_water,
+                &cancelled,
+            )
+            .expect_err("revocation reaches the existing interruption path");
+            assert_eq!(trigger.kind, NativeRunControlKind::ExecutionTrust);
+            assert!(
+                trigger
+                    .detail
+                    .contains("publisher-approved artifact authority is revoked"),
+                "{trigger:?}"
+            );
+            assert!(
+                trigger
+                    .detail
+                    .contains(&fixture.approval.identity().artifact_sha256),
+                "{trigger:?}"
+            );
+        }
     }
 
     #[test]

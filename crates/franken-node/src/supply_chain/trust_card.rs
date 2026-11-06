@@ -8,6 +8,10 @@
 #[path = "trust_card_fuzz_test.rs"]
 mod fuzz_smoke_tests;
 
+#[path = "trust_card_execution_revocation.rs"]
+mod execution_revocation;
+pub use execution_revocation::{ExecutionRevocation, ExecutionRevocationTarget};
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
@@ -819,6 +823,7 @@ pub(crate) fn get_registry_key(
 /// Validate basic bounds for a parsed snapshot (lazy validation).
 /// Used for trusted file sources where comprehensive validation is less critical.
 fn validate_basic_bounds(snapshot: &TrustCardRegistrySnapshot) -> Result<(), TrustCardError> {
+    execution_revocation::validate_records(&snapshot.execution_revocations)?;
     // Basic schema version check
     if !snapshot
         .schema_version
@@ -1560,6 +1565,10 @@ pub struct TrustCardRegistrySnapshot {
     /// card/audit history. Omission when empty preserves pre-observation hashes.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub behavioral_observation_heads: BTreeMap<String, String>,
+    /// Permanent operator denials for exact authenticated publisher keys or
+    /// artifact bytes. These are signed independently of bounded card history.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub execution_revocations: BTreeMap<String, ExecutionRevocation>,
     pub snapshot_hash: String,
     pub registry_signature: String,
 }
@@ -1588,6 +1597,7 @@ impl std::fmt::Debug for TrustCardRegistrySnapshot {
                 "behavioral_observation_streams",
                 &self.behavioral_observation_heads.len(),
             )
+            .field("execution_revocations", &self.execution_revocations.len())
             .field("snapshot_hash", &"[REDACTED]")
             .field("registry_signature", &"[REDACTED]")
             .finish()
@@ -1620,6 +1630,7 @@ impl TrustCardRegistrySnapshot {
             cache_ttl_secs: cache_ttl_secs.max(1),
             cards_by_extension,
             behavioral_observation_heads: BTreeMap::new(),
+            execution_revocations: BTreeMap::new(),
             snapshot_hash: String::new(),
             registry_signature: String::new(),
         };
@@ -1664,6 +1675,7 @@ impl Clone for DurableBase {
 pub struct TrustCardRegistry {
     cards_by_extension: BTreeMap<String, Vec<TrustCard>>,
     behavioral_observation_heads: BTreeMap<String, String>,
+    execution_revocations: BTreeMap<String, ExecutionRevocation>,
     cache_by_extension: BTreeMap<String, CachedCard>,
     cache_ttl_secs: u64,
     registry_key: Vec<u8>,
@@ -1699,6 +1711,7 @@ impl TrustCardRegistry {
         Self {
             cards_by_extension: BTreeMap::new(),
             behavioral_observation_heads: BTreeMap::new(),
+            execution_revocations: BTreeMap::new(),
             cache_by_extension: BTreeMap::new(),
             cache_ttl_secs: cache_ttl_secs.max(1),
             registry_key: registry_key.to_vec(),
@@ -1735,6 +1748,7 @@ impl TrustCardRegistry {
     /// # Errors
     /// Returns `TrustCardError` if canonical snapshot signing fails.
     pub fn snapshot(&self) -> Result<TrustCardRegistrySnapshot, TrustCardError> {
+        execution_revocation::validate_records(&self.execution_revocations)?;
         let mut snapshot = TrustCardRegistrySnapshot {
             schema_version: TRUST_CARD_REGISTRY_SNAPSHOT_SCHEMA.to_string(),
             snapshot_epoch: self.snapshot_epoch,
@@ -1742,6 +1756,7 @@ impl TrustCardRegistry {
             cache_ttl_secs: self.cache_ttl_secs,
             cards_by_extension: self.cards_by_extension.clone(),
             behavioral_observation_heads: self.behavioral_observation_heads.clone(),
+            execution_revocations: self.execution_revocations.clone(),
             snapshot_hash: String::new(),
             registry_signature: String::new(),
         };
@@ -1842,10 +1857,12 @@ impl TrustCardRegistry {
             ));
         }
 
+        execution_revocation::validate_records(&snapshot.execution_revocations)?;
         let mut registry = Self::new(snapshot.cache_ttl_secs, registry_key);
         validate_behavioral_observation_heads(&snapshot.behavioral_observation_heads)?;
         registry.cards_by_extension = snapshot.cards_by_extension.clone();
         registry.behavioral_observation_heads = snapshot.behavioral_observation_heads.clone();
+        registry.execution_revocations = snapshot.execution_revocations.clone();
 
         for (extension_id, history) in &registry.cards_by_extension {
             validate_snapshot_history(extension_id, history, &registry.registry_key)?;
@@ -2114,6 +2131,32 @@ impl TrustCardRegistry {
                 }
                 None => None,
             };
+            // A valid successor signature does not authorize dropping a
+            // permanent execution denial. Check the current authenticated
+            // records inside the same transaction that publishes the new
+            // snapshot, including callers rebuilding from a signed snapshot.
+            match read_slot(connection, SLOT_SNAPSHOT)? {
+                Some(raw) => {
+                    let current = validated_snapshot_from_raw(
+                        &raw,
+                        path,
+                        &self.registry_key,
+                        SnapshotSourceContext::TrustedFile,
+                    )?;
+                    verify_snapshot_signature(&current, &self.registry_key)?;
+                    validate_snapshot_high_water(path, &current, current_high_water.as_ref())?;
+                    execution_revocation::ensure_retained(
+                        &current.execution_revocations,
+                        &snapshot.execution_revocations,
+                    )?;
+                }
+                None if current_high_water.is_some() => {
+                    return Err(TrustCardError::InvalidSnapshot(
+                        "durable snapshot is missing while its high-water marker remains; execution revocation retention cannot be established".to_string(),
+                    ));
+                }
+                None => {}
+            }
             if let Some(current) = current_high_water.as_ref()
                 && snapshot.snapshot_epoch > current.snapshot_epoch
                 && !snapshot
@@ -4133,6 +4176,7 @@ fn sign_snapshot_in_place(
     snapshot: &mut TrustCardRegistrySnapshot,
     registry_key: &[u8],
 ) -> Result<(), TrustCardError> {
+    execution_revocation::validate_records(&snapshot.execution_revocations)?;
     validate_behavioral_observation_heads(&snapshot.behavioral_observation_heads)?;
     snapshot.snapshot_hash = compute_snapshot_hash(snapshot)?;
     let mut mac =
@@ -4171,6 +4215,7 @@ fn verify_snapshot_signature(
     snapshot: &TrustCardRegistrySnapshot,
     registry_key: &[u8],
 ) -> Result<(), TrustCardError> {
+    execution_revocation::validate_records(&snapshot.execution_revocations)?;
     let expected_hash = compute_snapshot_hash(snapshot)?;
     if !constant_time::ct_eq(&snapshot.snapshot_hash, &expected_hash) {
         return Err(TrustCardError::InvalidSnapshot(
@@ -8941,6 +8986,7 @@ mod tests {
             cards_by_extension: BTreeMap::new(),
             behavioral_observation_heads: BTreeMap::new(),
             snapshot_hash: "valid_hash".to_string(),
+            execution_revocations: BTreeMap::new(),
             registry_signature: "invalid_signature".to_string(),
         };
         let json = serde_json::to_string_pretty(&invalid_snapshot).expect("serialize");
@@ -9104,6 +9150,7 @@ mod tests {
             cards_by_extension: cards_map,
             behavioral_observation_heads: BTreeMap::new(),
             snapshot_hash: "test_hash".to_string(),
+            execution_revocations: BTreeMap::new(),
             registry_signature: "test_signature".to_string(),
         };
 
@@ -9138,6 +9185,7 @@ mod tests {
             cards_by_extension: BTreeMap::new(),
             behavioral_observation_heads: BTreeMap::new(),
             snapshot_hash: "test_hash".to_string(),
+            execution_revocations: BTreeMap::new(),
             registry_signature: "test_signature".to_string(),
         };
 
@@ -9159,6 +9207,7 @@ mod tests {
             cards_by_extension: cards_map,
             behavioral_observation_heads: BTreeMap::new(),
             snapshot_hash: "test_hash".to_string(),
+            execution_revocations: BTreeMap::new(),
             registry_signature: "test_signature".to_string(),
         };
 

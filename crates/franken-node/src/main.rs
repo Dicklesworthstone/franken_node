@@ -25777,6 +25777,89 @@ fn render_trust_card_list_for_trust_command(cards: &[TrustCard], json: bool) -> 
     }
 }
 
+fn resolve_trust_execution_revocation_target(
+    args: &cli::TrustRevokeArgs,
+) -> Result<Option<supply_chain::trust_card::ExecutionRevocationTarget>> {
+    use supply_chain::trust_card::ExecutionRevocationTarget;
+
+    let targets = usize::from(!args.extension_id.trim().is_empty())
+        + usize::from(args.publisher_public_key.is_some())
+        + usize::from(args.artifact_sha256.is_some());
+    anyhow::ensure!(
+        targets != 0,
+        "`trust revoke` requires an extension id, --publisher-public-key, or --artifact-sha256"
+    );
+    anyhow::ensure!(
+        targets == 1,
+        "`trust revoke` accepts exactly one of an extension id, --publisher-public-key, or --artifact-sha256"
+    );
+    if let Some(path) = &args.publisher_public_key {
+        let bytes = supply_chain::registry_artifact::read_artifact_file(path, 64 * 1024)
+            .context("failed reading publisher public key for revocation")?;
+        let key = parse_verifying_key_from_blob(&bytes)
+            .context("revocation target is not a supported Ed25519 public key")?;
+        let key_id = supply_chain::artifact_signing::KeyId::from_verifying_key(&key);
+        return Ok(Some(ExecutionRevocationTarget::publisher_key(
+            &key_id.to_string(),
+        )?));
+    }
+    if let Some(raw) = &args.artifact_sha256 {
+        let digest = raw.strip_prefix("sha256:").unwrap_or(raw);
+        anyhow::ensure!(
+            digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()),
+            "--artifact-sha256 requires the complete 64-character SHA-256 digest; prefixes are not accepted"
+        );
+        return Ok(Some(ExecutionRevocationTarget::artifact_sha256(&format!(
+            "sha256:{}",
+            digest.to_ascii_lowercase()
+        ))?));
+    }
+    Ok(None)
+}
+
+fn revoke_execution_authority_for_trust_command(
+    state: &mut TrustCardCliRegistryState,
+    target: supply_chain::trust_card::ExecutionRevocationTarget,
+    now_secs: u64,
+    json: bool,
+) -> Result<()> {
+    let revocation = state.registry.revoke_execution_authority(
+        target,
+        "manual revoke via franken-node trust revoke",
+        now_secs,
+    )?;
+    persist_trust_card_cli_registry(state)?;
+    let target_hash =
+        supply_chain::registry_artifact::artifact_sha256(&serde_json::to_vec(&revocation.target)?);
+    record_trust_decision_evidence(
+        &project_ledger_dir(Path::new(".")),
+        &format!(
+            "trust-revoke-authority:{target_hash}:{}",
+            revocation.revoked_at_secs
+        ),
+        observability::evidence_ledger::DecisionKind::Deny,
+        serde_json::json!({
+            "action": "revoke_execution_authority",
+            "scope": "project_registry",
+            "revocation": &revocation,
+        }),
+    );
+    let report = serde_json::json!({
+        "schema_version": "franken-node/trust-execution-revocation-cli/v1",
+        "command": "trust.revoke",
+        "scope": "project_registry",
+        "revoked": true,
+        "revocation": &revocation,
+    });
+    emit_json_or_human(&report, json, || {
+        format!(
+            "execution authority revoked in this project's trust registry: {:?}\n{}",
+            revocation.target, revocation.reason,
+        )
+    })?;
+    Ok(())
+}
+
 fn revoke_trust_card(
     registry: &mut TrustCardRegistry,
     extension_id: &str,
@@ -36020,13 +36103,10 @@ fn main() -> Result<()> {
                 }
             }
             TrustCommand::Revoke(args) => {
-                if args.extension_id.trim().is_empty() {
-                    return trust_fail(
-                        "trust.revoke",
-                        args.json,
-                        "`trust revoke` requires an extension id",
-                    );
-                }
+                let execution_target = match resolve_trust_execution_revocation_target(&args) {
+                    Ok(target) => target,
+                    Err(err) => return trust_fail("trust.revoke", args.json, err),
+                };
                 // Prepare receipt export context upfront - fails immediately if receipt export
                 // is requested but signing material is unavailable (sign-or-fail).
                 let receipt_export_ctx = match prepare_receipt_export_context(
@@ -36042,30 +36122,38 @@ fn main() -> Result<()> {
                     Ok(state) => state,
                     Err(err) => return trust_fail("trust.revoke", args.json, err),
                 };
-                let card =
-                    match revoke_trust_card(&mut state.registry, &args.extension_id, now_secs) {
-                        Ok(card) => card,
-                        Err(err) => return trust_fail("trust.revoke", args.json, err),
-                    };
-                if let Err(err) = persist_trust_card_cli_registry(&state) {
-                    return trust_fail("trust.revoke", args.json, err);
+                if let Some(target) = execution_target {
+                    if let Err(err) = revoke_execution_authority_for_trust_command(
+                        &mut state, target, now_secs, args.json,
+                    ) {
+                        return trust_fail("trust.revoke", args.json, err);
+                    }
+                } else {
+                    let card =
+                        match revoke_trust_card(&mut state.registry, &args.extension_id, now_secs) {
+                            Ok(card) => card,
+                            Err(err) => return trust_fail("trust.revoke", args.json, err),
+                        };
+                    if let Err(err) = persist_trust_card_cli_registry(&state) {
+                        return trust_fail("trust.revoke", args.json, err);
+                    }
+                    record_trust_decision_evidence(
+                        &project_ledger_dir(Path::new(".")),
+                        &format!(
+                            "trust-revoke:{}:v{}",
+                            card.extension.extension_id, card.trust_card_version
+                        ),
+                        observability::evidence_ledger::DecisionKind::Deny,
+                        serde_json::json!({
+                            "action": "revoke",
+                            "extension_id": card.extension.extension_id,
+                            "version": card.extension.version,
+                            "trust_card_version": card.trust_card_version,
+                            "card_hash": card.card_hash,
+                        }),
+                    );
+                    println!("{}", render_trust_card_for_trust_command(&card, args.json)?);
                 }
-                record_trust_decision_evidence(
-                    &project_ledger_dir(Path::new(".")),
-                    &format!(
-                        "trust-revoke:{}:v{}",
-                        card.extension.extension_id, card.trust_card_version
-                    ),
-                    observability::evidence_ledger::DecisionKind::Deny,
-                    serde_json::json!({
-                        "action": "revoke",
-                        "extension_id": card.extension.extension_id,
-                        "version": card.extension.version,
-                        "trust_card_version": card.trust_card_version,
-                        "card_hash": card.card_hash,
-                    }),
-                );
-                println!("{}", render_trust_card_for_trust_command(&card, args.json)?);
                 if let Some(ref ctx) = receipt_export_ctx
                     && let Err(err) = export_signed_receipts(
                         "revocation",

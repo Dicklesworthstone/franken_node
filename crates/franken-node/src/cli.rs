@@ -1498,7 +1498,7 @@ pub enum TrustCommand {
     /// Verify collector-attested package behavior and update its durable trust card.
     Observe(TrustObserveArgs),
 
-    /// Revoke an artifact or publisher in the local trust-card registry (not a live fleet).
+    /// Revoke an extension, publisher key, or exact artifact in the local trust registry.
     Revoke(TrustRevokeArgs),
 
     /// Quarantine an artifact in the local trust-card registry and publish it to the fleet store.
@@ -1631,13 +1631,25 @@ pub struct TrustObserveArgs {
 
 #[derive(Debug, Parser)]
 pub struct TrustRevokeArgs {
-    /// Extension identifier with optional version.
-    /// Required by the handler (not clap) so `--json` failures emit
-    /// `franken-node/trust-error-cli/v1` instead of a human clap error.
+    /// Extension identifier with optional version. Choose exactly one target:
+    /// this identifier, --publisher-public-key, or --artifact-sha256. The
+    /// handler validates the choice so --json failures remain structured.
     #[arg(default_value = "")]
     pub extension_id: String,
 
-    /// Emit the revoked trust card as JSON instead of the human card dump.
+    /// Revoke every admitted artifact signed by this Ed25519 public key.
+    /// The file may contain a raw, hex, or SSH public key; publisher labels
+    /// and keys embedded in an artifact do not select the target.
+    #[arg(long)]
+    pub publisher_public_key: Option<PathBuf>,
+
+    /// Revoke one exact artifact digest (64 hex characters, optionally sha256:-prefixed).
+    /// Digest prefixes are rejected. Applies to authenticated registry runs
+    /// in this project's trust registry, including already-running sessions.
+    #[arg(long)]
+    pub artifact_sha256: Option<String>,
+
+    /// Emit the revoked trust card or execution-authority record as JSON.
     #[arg(long)]
     pub json: bool,
 
@@ -3871,6 +3883,46 @@ mod parser_contract_extra_tests {
         assert_eq!(args.extension_id, "npm:@acme/plugin");
         assert!(args.json);
         Ok(())
+    }
+
+    #[test]
+    fn trust_revoke_parses_exact_publisher_and_artifact_targets() {
+        for (flag, value) in [
+            ("--publisher-public-key", "operator/publisher.pub"),
+            (
+                "--artifact-sha256",
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            ),
+        ] {
+            let cli = parse(&["franken-node", "trust", "revoke", flag, value, "--json"])
+                .expect("exact execution revocation target parses");
+            let Command::Trust(TrustCommand::Revoke(args)) = cli.command else {
+                panic!("expected trust revoke");
+            };
+            assert!(args.extension_id.is_empty());
+            assert!(args.json);
+            if flag == "--publisher-public-key" {
+                assert_eq!(args.publisher_public_key, Some(PathBuf::from(value)));
+                assert!(args.artifact_sha256.is_none());
+            } else {
+                assert_eq!(args.artifact_sha256.as_deref(), Some(value));
+                assert!(args.publisher_public_key.is_none());
+            }
+        }
+        // Conflict validation stays in the handler so JSON callers receive a
+        // structured error before any durable trust mutation occurs.
+        assert!(
+            parse(&[
+                "franken-node",
+                "trust",
+                "revoke",
+                "npm:plugin",
+                "--artifact-sha256",
+                "bad",
+                "--json",
+            ])
+            .is_ok()
+        );
     }
 
     #[test]

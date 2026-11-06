@@ -995,7 +995,7 @@ remain in force.
 | `franken-node trust scan [path]` | Populate baseline trust cards from package.json. A plain rescan skips existing cards; with `--deep`/`--audit` it refreshes them from the fetched evidence (same version only; lowering risk needs an OSV answer from the default endpoint) and keeps certification, revocation, quarantine and camouflage marks. Flags: `--deep`, `--audit`, `--json`. |
 | `franken-node trust observe <observation.json> --collector-key <public-key-file>` | Verify collector-attested measurements for an exact package artifact, append a durable observation stream, and apply BPET camouflage findings to its signed trust card. Repeated observations are idempotent. `--json` emits `franken-node/behavioral-ingestion/v1`. See [the measurement and signing contract](docs/TRUST_BEHAVIORAL_OBSERVATIONS.md). |
 | `franken-node trust sync` | Refresh trust-card cache and npm vulnerability state from OSV; `--force` to ignore caches. `--json` emits `franken-node/trust-sync-cli/v1`. |
-| `franken-node trust revoke <id>` | Revoke an artifact or publisher in the **local** trust-card registry (not a live fleet). The extension id is handler-required so `--json` failures emit `franken-node/trust-error-cli/v1` instead of a human clap error. Optional `--receipt-signing-key`, `--receipt-out`. `--json` emits the revoked trust card; failures `franken-node/trust-error-cli/v1`. |
+| `franken-node trust revoke [<id>]` | Revoke one extension card, or choose `--publisher-public-key <file>` / `--artifact-sha256 <full-digest>` to deny authenticated native artifacts in this project's signed registry, including running sessions. Exactly one target is required. Optional `--receipt-signing-key`, `--receipt-out`. `--json` emits the revoked card or `franken-node/trust-execution-revocation-cli/v1`; failures use `franken-node/trust-error-cli/v1`. |
 | `franken-node trust quarantine` | Quarantine a suspicious artifact in the local trust-card registry and publish the quarantine to the fleet store: the local file transport, or the live coordinator when `[fleet] control_plane_url` is set (every agent polling it applies the quarantine). `--artifact` is handler-required so `--json` failures emit `franken-node/trust-error-cli/v1` instead of a human clap error. `--json` emits `franken-node/trust-quarantine-cli/v1`. |
 | `franken-node trust graph` | Ecosystem reputation graph from the verified trust-card registry and the project's `package-lock.json`: publisher→extension and lockfile `depends_on` edges, effective trust after named propagation rules (R1 revoked → 0; R2 quarantined ≤ 100; R3 at most 200 above the weakest dependency; R4 publishers with a revoked/quarantined extension capped at 400 and their extensions at publisher + 300), an explanation per lowered score, untracked dependencies reported as coverage gaps, and card-version transitions with the audit records that caused them. `--extension <id>` adds that extension's blast radius (every extension whose trust rests on it). `--json` emits `franken-node/trust-graph-cli/v1`. |
 | `franken-node trust release` | Release a local trust-card hold with `--artifact <extension-id or sha256:prefix>`, preserving fleet quarantine owners and permanent revocation, or release a sentinel run-target record with `--app`. Exactly one target, `--operator-id`, and `--reason` are required. Artifact releases bind operator/rationale into signed card history and report remaining containment. `--json` emits `franken-node/trust-artifact-release-cli/v1` for artifacts or `franken-node/trust-release-cli/v1` for apps; failures emit `franken-node/trust-release-error/v1`. |
@@ -4157,7 +4157,44 @@ one pass.
   artifact requires complete valid provenance,
   including when an attacker removes every proof marker. Existing dependency
   trust-card revocation and quarantine, fleet policy and runtime controls still
-  govern execution; this does not add a live publisher-key revocation service.
+  govern execution.
+
+  **Local publisher and artifact revocation.** From the project root, revoke
+  the actual publisher key or the complete artifact digest:
+
+  ```sh
+  franken-node trust revoke --publisher-public-key /operator/publisher.pub --json
+  franken-node trust revoke --artifact-sha256 sha256:<64-hex-artifact-digest> --json
+  ```
+
+  These commands persist immutable denials in the existing authenticated trust
+  registry, without requiring a dependency trust card. Publisher targets come
+  from the supplied Ed25519 key, not a publisher display name. Artifact targets
+  match the complete signed capsule digest; short hash prefixes are rejected.
+  Revoking a publisher affects all of its approved artifacts in this project;
+  revoking one artifact does not revoke a different artifact from that publisher.
+  An unrelated key or digest does not block the approved workload.
+
+  Both v1 and v2 publisher-approved runs require an authenticated local trust
+  registry, including dependency-free programs and the `legacy-risky` profile.
+  `init` creates the empty signed registry. Strict execution also requires a
+  fresh signed revocation frontier established by `trust sync --force`; other
+  profiles retain their existing freshness warning/denial policy. Missing,
+  unreadable, or unauthenticated registry state cannot authorize an approved run.
+
+  The parent and native worker check the exact identities before execution.
+  The existing live control observer checks them again on its 250 ms polling
+  cycle, using the retained authenticated identity rather than rereading the
+  source archive. A matching denial invokes the existing worker stop/reap and
+  interrupted-effect recording path. A stalled observer remains subject to its
+  existing 10-second observation deadline. These intervals are control policy,
+  not measured propagation guarantees. Completed effects are not undone, and
+  unknown effects remain indeterminate in the durable session inventory.
+  Local release, card refresh, and later registry writes cannot remove these
+  retained denials. The commands apply to this project's registry; they do not
+  distribute revocations to other projects or provide an external publisher
+  revocation feed. Protection against wholesale replacement of operator state
+  and independently qualified fleet-wide convergence remain separate work.
 
   **Publisher-bounded native authority.** To bind execution ceilings to those
   same signed package bytes, supply `--runtime-authority /operator/runtime-authority.json`
