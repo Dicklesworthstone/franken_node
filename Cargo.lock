@@ -509,7 +509,7 @@ dependencies = [
  "memchr",
  "nix",
  "nkeys",
- "parking_lot",
+ "parking_lot 0.12.5",
  "pin-project",
  "polling",
  "prost",
@@ -561,7 +561,7 @@ dependencies = [
  "memchr",
  "nix",
  "nkeys",
- "parking_lot",
+ "parking_lot 0.12.5",
  "pin-project",
  "polling",
  "prost",
@@ -1388,9 +1388,9 @@ dependencies = [
  "cfg-if",
  "crossbeam-utils",
  "hashbrown 0.14.5",
- "lock_api",
+ "lock_api 0.4.14",
  "once_cell",
- "parking_lot_core",
+ "parking_lot_core 0.9.12",
 ]
 
 [[package]]
@@ -1665,7 +1665,7 @@ dependencies = [
  "fastapi-router 0.4.4",
  "fastapi-types 0.4.4",
  "getrandom 0.4.3",
- "parking_lot",
+ "parking_lot 0.12.5",
  "serde",
  "serde_json",
 ]
@@ -1679,7 +1679,7 @@ dependencies = [
  "fastapi-router 0.5.0",
  "fastapi-types 0.5.0",
  "getrandom 0.4.3",
- "parking_lot",
+ "parking_lot 0.13.0",
  "serde",
  "serde_json",
 ]
@@ -2098,8 +2098,8 @@ dependencies = [
  "serde_json",
  "sha1 0.10.7",
  "sha2 0.10.9",
- "sqlmodel 0.5.0 (git+https://github.com/Dicklesworthstone/sqlmodel_rust.git?rev=7f432ff690260ef85aca5227e2372b2eb63230c9)",
- "sqlmodel-core 0.5.0 (git+https://github.com/Dicklesworthstone/sqlmodel_rust.git?rev=7f432ff690260ef85aca5227e2372b2eb63230c9)",
+ "sqlmodel 0.5.0",
+ "sqlmodel-core 0.5.0",
  "sqlmodel-frankensqlite",
  "subtle",
  "syn 2.0.117",
@@ -2176,9 +2176,9 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
- "sqlmodel 0.5.0",
- "sqlmodel-core 0.5.0",
- "sqlmodel-schema 0.5.0",
+ "sqlmodel 0.5.1",
+ "sqlmodel-core 0.5.1",
+ "sqlmodel-schema 0.5.1",
  "subtle",
  "syn 2.0.117",
  "tempfile",
@@ -2340,7 +2340,7 @@ dependencies = [
  "hashbrown 0.17.0",
  "itoa",
  "lazy_static",
- "lru",
+ "lru 0.18.4",
  "serde",
  "serde_json",
  "smallvec",
@@ -2373,7 +2373,7 @@ dependencies = [
  "hashbrown 0.17.0",
  "itoa",
  "lazy_static",
- "lru",
+ "lru 0.18.4",
  "serde",
  "serde_json",
  "smallvec",
@@ -2506,7 +2506,7 @@ dependencies = [
  "fsqlite-vfs 0.1.19",
  "fsqlite-wal 0.1.19",
  "nix",
- "parking_lot",
+ "parking_lot 0.12.5",
  "serde",
  "smallvec",
  "tracing",
@@ -2531,7 +2531,7 @@ dependencies = [
  "fsqlite-vfs 0.4.0",
  "fsqlite-wal 0.4.0",
  "nix",
- "parking_lot",
+ "parking_lot 0.12.5",
  "serde",
  "smallvec",
  "thiserror",
@@ -2546,7 +2546,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c10003d6b84ff417bfa216806fa36277b4f7007d239a57d7087584d4ebb50fb"
 dependencies = [
  "fsqlite-types 0.1.19",
- "parking_lot",
+ "parking_lot 0.12.5",
  "serde",
  "tracing",
 ]
@@ -2558,7 +2558,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4f89fd980ceec37ce02aa5742844af12fc7f07edc7273f6e2509714c1a9ebea3"
 dependencies = [
  "fsqlite-types 0.4.0",
- "parking_lot",
+ "parking_lot 0.12.5",
  "serde",
  "tracing",
 ]
@@ -2581,7 +2581,7 @@ dependencies = [
  "fsqlite-vfs 0.1.19",
  "fsqlite-wal 0.1.19",
  "hashbrown 0.17.0",
- "parking_lot",
+ "parking_lot 0.12.5",
  "smallvec",
  "tracing",
  "xxhash-rust",
@@ -2606,7 +2606,7 @@ dependencies = [
  "fsqlite-vfs 0.4.0",
  "fsqlite-wal 0.4.0",
  "hashbrown 0.17.0",
- "parking_lot",
+ "parking_lot 0.12.5",
  "rand 0.10.1",
  "smallvec",
  "tracing",
@@ -2652,7 +2652,7 @@ dependencies = [
  "fsqlite-error 0.1.19",
  "fsqlite-parser 0.1.19",
  "fsqlite-types 0.1.19",
- "lru",
+ "lru 0.18.4",
  "serde",
  "serde_json",
  "tracing",
@@ -2670,7 +2670,7 @@ dependencies = [
  "fsqlite-error 0.4.0",
  "fsqlite-parser 0.4.0",
  "fsqlite-types 0.4.0",
- "lru",
+ "lru 0.18.4",
  "serde",
  "serde_json",
  "tracing",
@@ -2688,7 +2688,7 @@ dependencies = [
  "blake3",
  "fsqlite-error 0.1.19",
  "memchr",
- "parking_lot",
+ "parking_lot 0.12.5",
  "serde",
  "simdutf8",
  "smallvec",
@@ -2708,7 +2708,7 @@ dependencies = [
  "blake3",
  "fsqlite-error 0.4.0",
  "memchr",
- "parking_lot",
+ "parking_lot 0.12.5",
  "serde",
  "simdutf8",
  "smallvec",
@@ -2814,7 +2814,7 @@ dependencies = [
  "fsqlite-error 0.1.19",
  "fsqlite-types 0.1.19",
  "fsqlite-vfs 0.1.19",
- "parking_lot",
+ "parking_lot 0.12.5",
  "rand 0.10.1",
  "serde",
  "tracing",
@@ -2834,7 +2834,7 @@ dependencies = [
  "fsqlite-observability 0.4.0",
  "fsqlite-types 0.4.0",
  "fsqlite-vfs 0.4.0",
- "parking_lot",
+ "parking_lot 0.12.5",
  "rand 0.10.1",
  "serde",
  "tracing",
@@ -2843,7 +2843,7 @@ dependencies = [
 
 [[package]]
 name = "ftui"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "ftui-a11y",
  "ftui-core",
@@ -2856,7 +2856,7 @@ dependencies = [
 
 [[package]]
 name = "ftui-a11y"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "ahash",
  "ftui-core",
@@ -2864,7 +2864,7 @@ dependencies = [
 
 [[package]]
 name = "ftui-backend"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "ftui-core",
  "ftui-render",
@@ -2872,7 +2872,7 @@ dependencies = [
 
 [[package]]
 name = "ftui-core"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "ahash",
  "arc-swap",
@@ -2891,11 +2891,11 @@ dependencies = [
 
 [[package]]
 name = "ftui-i18n"
-version = "0.9.0"
+version = "0.10.0"
 
 [[package]]
 name = "ftui-layout"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "ftui-core",
  "rustc-hash",
@@ -2906,7 +2906,7 @@ dependencies = [
 
 [[package]]
 name = "ftui-render"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "ahash",
  "bitflags",
@@ -2921,7 +2921,7 @@ dependencies = [
 
 [[package]]
 name = "ftui-runtime"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "arc-swap",
  "ftui-a11y",
@@ -2941,7 +2941,7 @@ dependencies = [
 
 [[package]]
 name = "ftui-style"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "ahash",
  "arc-swap",
@@ -2951,13 +2951,13 @@ dependencies = [
 
 [[package]]
 name = "ftui-text"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "ftui-core",
  "ftui-layout",
  "ftui-render",
  "ftui-style",
- "lru",
+ "lru 0.19.0",
  "ropey",
  "rustc-hash",
  "smallvec",
@@ -2968,7 +2968,7 @@ dependencies = [
 
 [[package]]
 name = "ftui-widgets"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "ahash",
  "bitflags",
@@ -3571,9 +3571,9 @@ dependencies = [
 
 [[package]]
 name = "libc"
-version = "0.2.189"
+version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
+checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
 
 [[package]]
 name = "libm"
@@ -3612,6 +3612,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lock_api"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "65d91b22da179613dcf4d6ec8349563f52a363f6849e03b00dd0a185ec4a59af"
+dependencies = [
+ "scopeguard",
+]
+
+[[package]]
 name = "log"
 version = "0.4.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3635,6 +3644,15 @@ name = "lru"
 version = "0.18.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ff9840bcc50b71349309900da0ce7279aa336ae71d73250b07998932c7d97c25"
+dependencies = [
+ "hashbrown 0.17.0",
+]
+
+[[package]]
+name = "lru"
+version = "0.19.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4a9f71e3591c7ec44d3e563e87bf14ddc2bada8519dca046e5b0e560cd004e2d"
 dependencies = [
  "hashbrown 0.17.0",
 ]
@@ -3932,8 +3950,18 @@ version = "0.12.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "93857453250e3077bd71ff98b6a65ea6621a19bb0f559a85248955ac12c45a1a"
 dependencies = [
- "lock_api",
- "parking_lot_core",
+ "lock_api 0.4.14",
+ "parking_lot_core 0.9.12",
+]
+
+[[package]]
+name = "parking_lot"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a9cf937ca4e1d0b7578784559063422fc39ae7c5a00f02471f2614d5486fd226"
+dependencies = [
+ "lock_api 0.5.0",
+ "parking_lot_core 0.10.0",
 ]
 
 [[package]]
@@ -3944,7 +3972,19 @@ checksum = "2621685985a2ebf1c516881c026032ac7deafcda1a2c9b7850dc81e3dfcb64c1"
 dependencies = [
  "cfg-if",
  "libc",
- "redox_syscall",
+ "redox_syscall 0.5.18",
+ "smallvec",
+ "windows-link",
+]
+
+[[package]]
+name = "parking_lot_core"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9cfff060068cc18aa7815010fcaf80c68c7fb9e85fc7f5c0f9bf142c21d19826"
+dependencies = [
+ "libc",
+ "redox_syscall 0.9.5",
  "smallvec",
  "windows-link",
 ]
@@ -4598,6 +4638,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "redox_syscall"
+version = "0.9.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "580c875845b41ecb1564ad1ae4703044cef774145e3d7a94dc2b3fa7c97868fd"
+dependencies = [
+ "bitflags",
+]
+
+[[package]]
 name = "regex"
 version = "1.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5137,6 +5186,7 @@ dependencies = [
 [[package]]
 name = "sqlmodel"
 version = "0.5.0"
+source = "git+https://github.com/Dicklesworthstone/sqlmodel_rust.git?rev=7f432ff690260ef85aca5227e2372b2eb63230c9#7f432ff690260ef85aca5227e2372b2eb63230c9"
 dependencies = [
  "asupersync 0.5.0",
  "serde",
@@ -5151,23 +5201,23 @@ dependencies = [
 
 [[package]]
 name = "sqlmodel"
-version = "0.5.0"
-source = "git+https://github.com/Dicklesworthstone/sqlmodel_rust.git?rev=7f432ff690260ef85aca5227e2372b2eb63230c9#7f432ff690260ef85aca5227e2372b2eb63230c9"
+version = "0.5.1"
 dependencies = [
  "asupersync 0.5.0",
  "serde",
  "serde_json",
- "sqlmodel-core 0.5.0 (git+https://github.com/Dicklesworthstone/sqlmodel_rust.git?rev=7f432ff690260ef85aca5227e2372b2eb63230c9)",
- "sqlmodel-macros 0.5.0 (git+https://github.com/Dicklesworthstone/sqlmodel_rust.git?rev=7f432ff690260ef85aca5227e2372b2eb63230c9)",
- "sqlmodel-pool 0.5.0 (git+https://github.com/Dicklesworthstone/sqlmodel_rust.git?rev=7f432ff690260ef85aca5227e2372b2eb63230c9)",
- "sqlmodel-query 0.5.0 (git+https://github.com/Dicklesworthstone/sqlmodel_rust.git?rev=7f432ff690260ef85aca5227e2372b2eb63230c9)",
- "sqlmodel-schema 0.5.0 (git+https://github.com/Dicklesworthstone/sqlmodel_rust.git?rev=7f432ff690260ef85aca5227e2372b2eb63230c9)",
- "sqlmodel-session 0.5.0 (git+https://github.com/Dicklesworthstone/sqlmodel_rust.git?rev=7f432ff690260ef85aca5227e2372b2eb63230c9)",
+ "sqlmodel-core 0.5.1",
+ "sqlmodel-macros 0.5.1",
+ "sqlmodel-pool 0.5.1",
+ "sqlmodel-query 0.5.1",
+ "sqlmodel-schema 0.5.1",
+ "sqlmodel-session 0.5.1",
 ]
 
 [[package]]
 name = "sqlmodel-core"
 version = "0.5.0"
+source = "git+https://github.com/Dicklesworthstone/sqlmodel_rust.git?rev=7f432ff690260ef85aca5227e2372b2eb63230c9#7f432ff690260ef85aca5227e2372b2eb63230c9"
 dependencies = [
  "asupersync 0.5.0",
  "regex",
@@ -5178,8 +5228,7 @@ dependencies = [
 
 [[package]]
 name = "sqlmodel-core"
-version = "0.5.0"
-source = "git+https://github.com/Dicklesworthstone/sqlmodel_rust.git?rev=7f432ff690260ef85aca5227e2372b2eb63230c9#7f432ff690260ef85aca5227e2372b2eb63230c9"
+version = "0.5.1"
 dependencies = [
  "asupersync 0.5.0",
  "regex",
@@ -5200,17 +5249,7 @@ dependencies = [
  "fsqlite-types 0.4.0",
  "serde",
  "serde_json",
- "sqlmodel-core 0.5.0 (git+https://github.com/Dicklesworthstone/sqlmodel_rust.git?rev=7f432ff690260ef85aca5227e2372b2eb63230c9)",
-]
-
-[[package]]
-name = "sqlmodel-macros"
-version = "0.5.0"
-dependencies = [
- "proc-macro2",
- "quote",
- "regex",
- "syn 3.0.3",
+ "sqlmodel-core 0.5.0",
 ]
 
 [[package]]
@@ -5225,12 +5264,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "sqlmodel-pool"
-version = "0.5.0"
+name = "sqlmodel-macros"
+version = "0.5.1"
 dependencies = [
- "asupersync 0.5.0",
- "sqlmodel-core 0.5.0",
- "tracing",
+ "proc-macro2",
+ "quote",
+ "regex",
+ "syn 3.0.3",
 ]
 
 [[package]]
@@ -5239,13 +5279,23 @@ version = "0.5.0"
 source = "git+https://github.com/Dicklesworthstone/sqlmodel_rust.git?rev=7f432ff690260ef85aca5227e2372b2eb63230c9#7f432ff690260ef85aca5227e2372b2eb63230c9"
 dependencies = [
  "asupersync 0.5.0",
- "sqlmodel-core 0.5.0 (git+https://github.com/Dicklesworthstone/sqlmodel_rust.git?rev=7f432ff690260ef85aca5227e2372b2eb63230c9)",
+ "sqlmodel-core 0.5.0",
+ "tracing",
+]
+
+[[package]]
+name = "sqlmodel-pool"
+version = "0.5.1"
+dependencies = [
+ "asupersync 0.5.0",
+ "sqlmodel-core 0.5.1",
  "tracing",
 ]
 
 [[package]]
 name = "sqlmodel-query"
 version = "0.5.0"
+source = "git+https://github.com/Dicklesworthstone/sqlmodel_rust.git?rev=7f432ff690260ef85aca5227e2372b2eb63230c9#7f432ff690260ef85aca5227e2372b2eb63230c9"
 dependencies = [
  "asupersync 0.5.0",
  "serde",
@@ -5255,18 +5305,18 @@ dependencies = [
 
 [[package]]
 name = "sqlmodel-query"
-version = "0.5.0"
-source = "git+https://github.com/Dicklesworthstone/sqlmodel_rust.git?rev=7f432ff690260ef85aca5227e2372b2eb63230c9#7f432ff690260ef85aca5227e2372b2eb63230c9"
+version = "0.5.1"
 dependencies = [
  "asupersync 0.5.0",
  "serde",
- "sqlmodel-core 0.5.0 (git+https://github.com/Dicklesworthstone/sqlmodel_rust.git?rev=7f432ff690260ef85aca5227e2372b2eb63230c9)",
+ "sqlmodel-core 0.5.1",
  "tracing",
 ]
 
 [[package]]
 name = "sqlmodel-schema"
 version = "0.5.0"
+source = "git+https://github.com/Dicklesworthstone/sqlmodel_rust.git?rev=7f432ff690260ef85aca5227e2372b2eb63230c9#7f432ff690260ef85aca5227e2372b2eb63230c9"
 dependencies = [
  "asupersync 0.5.0",
  "serde",
@@ -5277,19 +5327,19 @@ dependencies = [
 
 [[package]]
 name = "sqlmodel-schema"
-version = "0.5.0"
-source = "git+https://github.com/Dicklesworthstone/sqlmodel_rust.git?rev=7f432ff690260ef85aca5227e2372b2eb63230c9#7f432ff690260ef85aca5227e2372b2eb63230c9"
+version = "0.5.1"
 dependencies = [
  "asupersync 0.5.0",
  "serde",
- "sqlmodel-core 0.5.0 (git+https://github.com/Dicklesworthstone/sqlmodel_rust.git?rev=7f432ff690260ef85aca5227e2372b2eb63230c9)",
- "sqlmodel-macros 0.5.0 (git+https://github.com/Dicklesworthstone/sqlmodel_rust.git?rev=7f432ff690260ef85aca5227e2372b2eb63230c9)",
+ "sqlmodel-core 0.5.1",
+ "sqlmodel-macros 0.5.1",
  "tracing",
 ]
 
 [[package]]
 name = "sqlmodel-session"
 version = "0.5.0"
+source = "git+https://github.com/Dicklesworthstone/sqlmodel_rust.git?rev=7f432ff690260ef85aca5227e2372b2eb63230c9#7f432ff690260ef85aca5227e2372b2eb63230c9"
 dependencies = [
  "asupersync 0.5.0",
  "serde",
@@ -5301,14 +5351,13 @@ dependencies = [
 
 [[package]]
 name = "sqlmodel-session"
-version = "0.5.0"
-source = "git+https://github.com/Dicklesworthstone/sqlmodel_rust.git?rev=7f432ff690260ef85aca5227e2372b2eb63230c9#7f432ff690260ef85aca5227e2372b2eb63230c9"
+version = "0.5.1"
 dependencies = [
  "asupersync 0.5.0",
  "serde",
  "serde_json",
- "sqlmodel-core 0.5.0 (git+https://github.com/Dicklesworthstone/sqlmodel_rust.git?rev=7f432ff690260ef85aca5227e2372b2eb63230c9)",
- "sqlmodel-query 0.5.0 (git+https://github.com/Dicklesworthstone/sqlmodel_rust.git?rev=7f432ff690260ef85aca5227e2372b2eb63230c9)",
+ "sqlmodel-core 0.5.1",
+ "sqlmodel-query 0.5.1",
  "tracing",
 ]
 
@@ -5350,7 +5399,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a18596f8c785a729f2819c0f6a7eae6ebeebdfffbfe4214ae6b087f690e31901"
 dependencies = [
  "new_debug_unreachable",
- "parking_lot",
+ "parking_lot 0.12.5",
  "phf_shared 0.13.1",
  "precomputed-hash",
 ]
