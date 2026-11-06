@@ -435,13 +435,21 @@ fn application_checkpoints_bind_zone_wildcards_and_complete_immutable_records() 
     let actions = vec![first.clone(), wildcard.clone(), other_zone.clone()];
     let expected = fleet_application_checkpoint(&actions, "zone-a").expect("checkpoint");
     assert_eq!(expected.action_count, 2);
-    assert_eq!(
+    assert_ne!(
         expected,
         fleet_application_checkpoint(
             &[other_zone.clone(), wildcard.clone(), first.clone()],
             "zone-a"
         )
-        .expect("delivery-order invariant")
+        .expect("reordered relevant history has a different checkpoint")
+    );
+    assert_eq!(
+        expected,
+        fleet_application_checkpoint(
+            &[other_zone.clone(), first.clone(), wildcard.clone()],
+            "zone-a"
+        )
+        .expect("unrelated zone order does not change the relevant sequence")
     );
     assert_eq!(
         expected,
@@ -562,8 +570,8 @@ fn writes_survive_reopen_and_read_back_in_contract_order() {
     {
         let mut transport = DurableFleetTransport::new(&state_dir).expect("open");
         transport.initialize().expect("initialize");
-        // Explicit distinct timestamps: the sort contract is chronological
-        // (emitted_at, then action_id), so a-1 precedes a-2 by construction.
+        // The second issuer has a slower clock and a lower action ID. Neither
+        // can move its committed action ahead of the first accepted action.
         let base = Utc::now();
         let mut first = sample_action("a-1", "inc-1");
         first.emitted_at = base;
@@ -581,15 +589,143 @@ fn writes_survive_reopen_and_read_back_in_contract_order() {
     let actions = reopened.list_actions().expect("list actions");
     assert_eq!(actions.len(), 2, "both actions survive reopen");
     assert_eq!(
-        actions[0].action_id, "a-1",
-        "chronological order: a-1 precedes a-2"
+        actions[0].action_id, "a-2",
+        "the first committed action remains first despite issuer clock skew"
     );
+    assert_eq!(actions[1].action_id, "a-1");
     let nodes = reopened.list_node_statuses().expect("list nodes");
     assert_eq!(nodes.len(), 1);
     assert_eq!(nodes[0].node_id, "node-1");
     let state = reopened.read_shared_state().expect("shared state");
-    assert_eq!(state.actions.len(), 2);
+    assert_eq!(state.actions, actions);
     assert_eq!(state.nodes.len(), 1);
+}
+
+#[test]
+fn file_and_durable_transports_preserve_requarantine_order_through_retry_and_reopen() {
+    use std::io::Write as _;
+
+    let compact_on_reopen = |transport: &mut FileFleetTransport| {
+        // Exercise initialize()'s real 10 MiB compaction threshold. Empty
+        // JSONL lines are valid fixture padding and add no action records.
+        let file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(transport.layout().actions_path())
+            .expect("open action log for compaction fixture");
+        let mut writer = std::io::BufWriter::new(file);
+        let mut padding = [b' '; 4_096];
+        padding[4_095] = b'\n';
+        for _ in 0..2_560 {
+            writer.write_all(&padding).expect("write padding");
+        }
+        writer.flush().expect("flush padding");
+        drop(writer);
+        transport.initialize().expect("compact on reopen");
+        assert!(
+            std::fs::metadata(transport.layout().actions_path())
+                .expect("compacted log metadata")
+                .len()
+                < 10 * 1_024 * 1_024,
+            "normal initialization must actually compact the oversized log"
+        );
+    };
+    let directory = tempfile::tempdir().expect("tempdir");
+    let now = Utc::now() - chrono::TimeDelta::days(60);
+    let mut original = sample_action("z-original", "same-incident");
+    original.emitted_at = now;
+    let mut release = release_action("m-release", "same-incident");
+    release.emitted_at = now + chrono::TimeDelta::seconds(1);
+    let mut repeat = sample_action("a-repeat", "same-incident");
+    repeat.emitted_at = now - chrono::TimeDelta::hours(1);
+    let expected = vec![original, release.clone(), repeat];
+
+    for durable in [false, true] {
+        let root = directory.path().join(if durable { "sql" } else { "file" });
+        let open = || -> Box<dyn FleetTransport> {
+            if durable {
+                Box::new(DurableFleetTransport::new(&root).expect("durable transport"))
+            } else {
+                Box::new(FileFleetTransport::new(&root))
+            }
+        };
+        {
+            let mut transport = open();
+            transport.initialize().expect("initialize");
+            for action in &expected {
+                transport.publish_action(action).expect("publish");
+            }
+            transport
+                .publish_action(&release)
+                .expect("retry must not move the release after the new quarantine");
+            assert_eq!(transport.list_actions().expect("listed actions"), expected);
+            assert_eq!(
+                transport.read_shared_state().expect("shared state").actions,
+                expected
+            );
+        }
+        let mut reopened = open();
+        reopened.initialize().expect("reinitialize");
+        assert_eq!(reopened.list_actions().expect("reopened history"), expected);
+        assert_eq!(
+            reopened
+                .read_shared_state()
+                .expect("reopened shared state")
+                .actions,
+            expected
+        );
+        if durable {
+            assert_eq!(
+                count_active_quarantine_actions(&root).expect("active metric"),
+                1
+            );
+        }
+    }
+    let file_root = directory.path().join("file");
+    let mut file = FileFleetTransport::new(&file_root);
+    compact_on_reopen(&mut file);
+    assert_eq!(
+        file.list_actions().expect("compacted file history"),
+        expected
+    );
+    let mut imported = DurableFleetTransport::new(&file_root).expect("import file store");
+    imported.initialize().expect("initialize imported store");
+    assert_eq!(
+        imported
+            .read_shared_state()
+            .expect("imported snapshot")
+            .actions,
+        expected,
+        "migration to the durable store must preserve active containment order"
+    );
+    let mut released = FileFleetTransport::new(directory.path().join("released-file"));
+    released.initialize().expect("initialize released fixture");
+    for action in &expected {
+        released.publish_action(action).expect("publish fixture");
+    }
+    let mut final_release = release;
+    final_release.action_id = "0-final-release".to_string();
+    final_release.emitted_at = now - chrono::TimeDelta::hours(2);
+    released
+        .publish_action(&final_release)
+        .expect("publish backdated final release");
+    compact_on_reopen(&mut released);
+    assert!(
+        released
+            .list_actions()
+            .expect("released history")
+            .is_empty(),
+        "a subsequently committed release permits expired incident history to retire"
+    );
+    let reordered = vec![
+        expected[0].clone(),
+        expected[2].clone(),
+        expected[1].clone(),
+    ];
+    assert_ne!(
+        fleet_application_checkpoint(&expected, "zone-a").expect("quarantined checkpoint"),
+        fleet_application_checkpoint(&reordered, "zone-a").expect("released checkpoint"),
+        "opposite containment outcomes must never share an application checkpoint"
+    );
 }
 
 #[test]
@@ -869,7 +1005,7 @@ fn file_transport_rejects_a_torn_record_without_appending_or_rewriting_history()
 
 #[cfg(feature = "fleet-control-plane-server")]
 #[test]
-fn live_http_conflict_is_nonretryable_and_preserves_the_durable_action() {
+fn live_http_conflicts_and_legacy_routes_preserve_durable_actions_and_checkpoints() {
     use frankenengine_node::control_plane::fleet_http_server::{
         FleetControlPlaneService, FleetHttpEventSink, FleetHttpServerConfig,
         FleetHttpServerControl, serve_fleet_control_plane,
@@ -958,6 +1094,49 @@ fn live_http_conflict_is_nonretryable_and_preserves_the_durable_action() {
         .expect("checkpoint state over socket");
     assert_eq!(received.nodes.len(), 1);
     assert_eq!(received.nodes[0].applied_actions, node.applied_actions);
+
+    // Version negotiation must happen before mutation. A v1 client checks
+    // response schemas only after POST, so v2 must not expose writable v1
+    // routes even when a legacy client presents the correct bearer token.
+    let legacy_client = ureq::Agent::new_with_config(
+        ureq::Agent::config_builder()
+            .timeout_global(Some(Duration::from_secs(5)))
+            .max_redirects(0)
+            .http_status_as_error(false)
+            .build(),
+    );
+    let mut legacy_node = node.clone();
+    legacy_node
+        .applied_actions
+        .as_mut()
+        .expect("checkpoint")
+        .actions_sha256 = "0".repeat(64);
+    for (path, payload) in [
+        (
+            "/v1/fleet/actions",
+            serde_json::to_vec(&release_action("legacy-release", "inc-http"))
+                .expect("legacy action"),
+        ),
+        (
+            "/v1/fleet/nodes",
+            serde_json::to_vec(&legacy_node).expect("legacy heartbeat"),
+        ),
+    ] {
+        let response = legacy_client
+            .post(format!("http://{address}{path}"))
+            .header("Content-Type", "application/json")
+            .header("Authorization", format!("Bearer {token}"))
+            .send(&payload[..])
+            .expect("legacy request reaches coordinator");
+        assert_eq!(response.status().as_u16(), 404, "legacy route {path}");
+    }
+    assert_eq!(
+        client
+            .read_shared_state()
+            .expect("state after legacy writes"),
+        received,
+        "old action and checkpoint submissions must not mutate the coordinator"
+    );
 
     stop.0.request_shutdown();
     server
@@ -1344,7 +1523,7 @@ mod http_origin_boundary {
         let result = client.list_actions();
         let [request] = peer.join().expect("read peer finished");
         assert_eq!(result.expect("direct list succeeds"), vec![action.clone()]);
-        assert!(request.starts_with("GET /v1/fleet/actions HTTP/1.1\r\n"));
+        assert!(request.starts_with("GET /v2/fleet/actions HTTP/1.1\r\n"));
         assert!(request.contains(&format!("Bearer {TOKEN}")));
 
         let (origin, peer) = serve_responses([json_response(&serde_json::json!({
@@ -1356,7 +1535,7 @@ mod http_origin_boundary {
         let result = client.publish_action(&action);
         let [request] = peer.join().expect("publish peer finished");
         result.expect("direct publication succeeds");
-        assert!(request.starts_with("POST /v1/fleet/actions HTTP/1.1\r\n"));
+        assert!(request.starts_with("POST /v2/fleet/actions HTTP/1.1\r\n"));
         assert!(request.contains(&format!("Bearer {TOKEN}")));
         let (_, body) = request.split_once("\r\n\r\n").expect("request body");
         assert_eq!(
@@ -1547,8 +1726,10 @@ mod http_origin_boundary {
             (FLEET_HTTP_NODES_PATH, &mut nodes),
             (FLEET_HTTP_STATE_PATH, &mut state),
         ] {
-            body["schema_version"] = "future-http-schema".into();
-            assert_snapshot_refused(path, body, FLEET_HTTP_API_SCHEMA);
+            for schema in ["franken-node/fleet-http-api/v1", "future-http-schema"] {
+                body["schema_version"] = schema.into();
+                assert_snapshot_refused(path, body, FLEET_HTTP_API_SCHEMA);
+            }
         }
         let error = initialization_result(&nodes).expect_err("unknown initialization schema");
         assert!(matches!(
@@ -1556,12 +1737,17 @@ mod http_origin_boundary {
             FleetTransportError::SerializationError { .. }
         ));
         state["schema_version"] = FLEET_HTTP_API_SCHEMA.into();
-        state["state"]["schema_version"] = "future-shared-state-schema".into();
-        assert_snapshot_refused(FLEET_HTTP_STATE_PATH, &state, FLEET_SHARED_STATE_SCHEMA);
+        for schema in [
+            "franken-node/fleet-transport-state/v1",
+            "future-shared-state-schema",
+        ] {
+            state["state"]["schema_version"] = schema.into();
+            assert_snapshot_refused(FLEET_HTTP_STATE_PATH, &state, FLEET_SHARED_STATE_SCHEMA);
+        }
     }
 
     #[test]
-    fn fleet_http_snapshots_preserve_records_and_sort_by_transport_identity() {
+    fn fleet_http_snapshots_preserve_action_order_and_sort_node_identity() {
         let timestamp =
             chrono::DateTime::from_timestamp(1_700_000_000, 0).expect("fixed timestamp");
         let mut early = sample_action("action-z", "early-incident");
@@ -1570,8 +1756,8 @@ mod http_origin_boundary {
         first.emitted_at = timestamp;
         let mut second = sample_action("action-b", "second-incident");
         second.emitted_at = timestamp;
-        let expected_actions = vec![early.clone(), first.clone(), second.clone()];
         let actions = vec![second, early, first];
+        let expected_actions = actions.clone();
         let first_node = sample_node("node-a");
         let second_node = sample_node("node-b");
         let mut other_zone = first_node.clone();

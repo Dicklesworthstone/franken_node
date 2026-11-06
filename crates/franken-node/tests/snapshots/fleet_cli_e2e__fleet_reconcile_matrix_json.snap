@@ -77,7 +77,7 @@ expression: "&matrix[\"reconcile\"]"
   "stale_nodes": [],
   "active_incidents": [],
   "state": {
-    "schema_version": "franken-node/fleet-transport-state/v1",
+    "schema_version": "franken-node/fleet-transport-state/v2",
     "actions": [],
     "nodes": []
   }

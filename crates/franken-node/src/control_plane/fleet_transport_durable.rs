@@ -455,12 +455,12 @@ impl DurableFleetTransport {
     fn query_actions(
         connection: &Connection,
     ) -> Result<Vec<FleetActionRecord>, FleetTransportError> {
-        // Ordering contract mirrors FileFleetTransport::read_shared_state:
-        // emitted_at, then action_id.
+        // The committed sequence matches the file log's append order. Issuer
+        // clocks cannot reorder a quarantine relative to its release.
         let rows = connection
             .query(&format!(
                 "SELECT action_json FROM fleet_actions
-                 ORDER BY emitted_at ASC, action_id ASC LIMIT {};",
+                 ORDER BY seq ASC LIMIT {};",
                 MAX_ACTION_LOG_ENTRIES.saturating_add(1)
             ))
             .map_err(|err| FleetTransportError::io(err.to_string()))?;
@@ -641,13 +641,7 @@ impl FleetTransport for DurableFleetTransport {
                 .map_err(|err| FleetTransportError::io(err.to_string()))?;
             Ok(snapshot)
         })?;
-        // Keep the shared-state sort contract even though SQL pre-sorts.
-        let mut actions = actions;
-        actions.sort_by(|left, right| {
-            left.emitted_at
-                .cmp(&right.emitted_at)
-                .then_with(|| left.action_id.cmp(&right.action_id))
-        });
+        // Preserve the committed action sequence; only node presentation sorts.
         let mut nodes = nodes;
         nodes.sort_by(|left, right| {
             left.zone_id

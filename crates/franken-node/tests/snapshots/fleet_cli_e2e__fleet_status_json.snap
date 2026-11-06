@@ -54,7 +54,7 @@ expression: "&matrix[\"status_all\"]"
     }
   ],
   "state": {
-    "schema_version": "franken-node/fleet-transport-state/v1",
+    "schema_version": "franken-node/fleet-transport-state/v2",
     "actions": [
       {
         "action_id": "fleet-op-quarantine-golden-status",

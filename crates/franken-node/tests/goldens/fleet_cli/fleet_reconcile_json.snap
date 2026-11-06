@@ -76,7 +76,7 @@ source: crates/franken-node/tests/cli_subcommand_goldens.rs
   "stale_nodes": [],
   "active_incidents": [],
   "state": {
-    "schema_version": "franken-node/fleet-transport-state/v1",
+    "schema_version": "franken-node/fleet-transport-state/v2",
     "actions": [],
     "nodes": []
   }

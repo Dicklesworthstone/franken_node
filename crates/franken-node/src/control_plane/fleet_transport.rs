@@ -41,7 +41,8 @@ use uuid::Uuid;
 
 use crate::runtime::clock;
 
-pub const FLEET_SHARED_STATE_SCHEMA: &str = "franken-node/fleet-transport-state/v1";
+/// Computed snapshot contract; persisted action and node record formats are unchanged.
+pub const FLEET_SHARED_STATE_SCHEMA: &str = "franken-node/fleet-transport-state/v2";
 pub const FLEET_ACTION_LOG_FILE: &str = "actions.jsonl";
 pub const FLEET_NODE_DIR: &str = "nodes";
 pub const FLEET_LOCK_DIR: &str = "locks";
@@ -997,10 +998,12 @@ pub struct FleetApplicationCheckpoint {
     pub actions_sha256: String,
 }
 
-/// Bind the full immutable records affecting `zone_id`, independent of their
-/// delivery order or the issuing machines' clocks. Wildcard actions apply to
-/// every zone. A change to any action (including its timestamp) invalidates the
-/// checkpoint. The fixed-size result keeps heartbeats bounded as history grows.
+/// Bind the full immutable records affecting `zone_id` in the coordinator's
+/// append order. Wildcard actions apply to every zone. Both record contents
+/// and order matter: quarantine followed by release is different from release
+/// followed by quarantine, regardless of the issuing machines' clocks.
+/// The v2 domain refuses historical unordered checkpoints until the agent
+/// reapplies the ordered snapshot. Heartbeats remain bounded as history grows.
 pub fn fleet_application_checkpoint(
     actions: &[FleetActionRecord],
     zone_id: &str,
@@ -1032,9 +1035,8 @@ pub fn fleet_application_checkpoint(
             relevant.push(record);
         }
     }
-    relevant.sort_unstable_by(|left, right| left.action_id.cmp(&right.action_id));
     let mut hasher = Sha256::new();
-    hasher.update(b"franken-node/fleet-applied-actions/v1\0");
+    hasher.update(b"franken-node/fleet-applied-actions/v2\0");
     hasher.update((zone_id.len() as u64).to_le_bytes());
     hasher.update(zone_id.as_bytes());
     hasher.update((relevant.len() as u64).to_le_bytes());
@@ -1367,7 +1369,8 @@ pub trait FleetTransport {
     ///
     /// Fleet actions represent operations performed across the distributed fleet,
     /// such as quarantine requests, rollback commands, or configuration changes.
-    /// Actions are timestamped and stored in chronological order.
+    /// Actions are timestamped and stored in the coordinator's serialized
+    /// append order. Issuer timestamps are metadata, not causal ordering.
     /// A retained `action_id` identifies one immutable record, including its
     /// original timestamp. Retrying that exact record succeeds without adding
     /// another action. Reusing its ID with different contents fails with
@@ -1403,14 +1406,15 @@ pub trait FleetTransport {
     /// ```
     fn publish_action(&mut self, action: &FleetActionRecord) -> Result<(), FleetTransportError>;
 
-    /// Retrieve all fleet actions in chronological order.
+    /// Retrieve all fleet actions in their durable append order.
     ///
-    /// Returns the complete action history for the fleet, sorted by emission timestamp
-    /// and action ID for consistent ordering across multiple reads.
+    /// Returns the complete retained action history in the order accepted by
+    /// the coordinator. Neither issuer clock skew nor action IDs may reorder
+    /// quarantine and release. Exact retries retain their original position.
     ///
     /// # Returns
     ///
-    /// Vector of [`FleetActionRecord`]s sorted chronologically.
+    /// Vector of [`FleetActionRecord`]s in append order.
     ///
     /// # Errors
     ///
@@ -1503,7 +1507,7 @@ pub trait FleetTransport {
     ///
     /// This method provides a unified view of the fleet by combining the complete
     /// action history with current node status. The returned state includes:
-    /// - All fleet actions sorted chronologically
+    /// - All fleet actions in append order
     /// - All node statuses sorted by zone and node ID
     /// - Schema version for compatibility checking
     ///
@@ -1512,7 +1516,7 @@ pub trait FleetTransport {
     ///
     /// # Returns
     ///
-    /// [`FleetSharedState`] containing sorted actions and node statuses.
+    /// [`FleetSharedState`] containing ordered actions and sorted node statuses.
     ///
     /// # Errors
     ///
@@ -1522,7 +1526,7 @@ pub trait FleetTransport {
     /// # Default Implementation
     ///
     /// The default implementation calls [`list_actions`] and [`list_node_statuses`],
-    /// sorts the results, and packages them into [`FleetSharedState`]. Most
+    /// preserves action order, sorts nodes, and packages them into [`FleetSharedState`]. Most
     /// implementations can rely on this default behavior.
     ///
     /// # Example
@@ -1548,12 +1552,7 @@ pub trait FleetTransport {
     /// [`list_actions`]: FleetTransport::list_actions
     /// [`list_node_statuses`]: FleetTransport::list_node_statuses
     fn read_shared_state(&self) -> Result<FleetSharedState, FleetTransportError> {
-        let mut actions = self.list_actions()?;
-        actions.sort_by(|left, right| {
-            left.emitted_at
-                .cmp(&right.emitted_at)
-                .then_with(|| left.action_id.cmp(&right.action_id))
-        });
+        let actions = self.list_actions()?;
 
         let mut nodes = self.list_node_statuses()?;
         nodes.sort_by(|left, right| {
@@ -1829,12 +1828,7 @@ impl FleetTransport for AsupersyncFleetTransport {
         };
         self.record_event("read_shared_state")?;
 
-        let mut actions = actions.as_ref().clone();
-        actions.sort_by(|left, right| {
-            left.emitted_at
-                .cmp(&right.emitted_at)
-                .then_with(|| left.action_id.cmp(&right.action_id))
-        });
+        let actions = actions.as_ref().clone();
 
         let mut nodes = nodes.as_ref().clone();
         nodes.sort_by(|left, right| {
@@ -2041,18 +2035,16 @@ impl FileFleetTransport {
                 lock_file_with_backoff(&file, self.layout.actions_path(), false)?;
                 let rewrite_result = (|| {
                     let retention_window = chrono::TimeDelta::days(retention_days);
-                    let mut actions = parse_jsonl_records::<FleetActionRecord>(
+                    let actions = parse_jsonl_records::<FleetActionRecord>(
                         &file,
                         self.layout.actions_path(),
                     )?;
                     for action in &actions {
                         validate_action_record(action)?;
                     }
-                    actions.sort_by(|left, right| {
-                        left.emitted_at
-                            .cmp(&right.emitted_at)
-                            .then_with(|| left.action_id.cmp(&right.action_id))
-                    });
+                    // The log's serialized append order is authoritative.
+                    // Sorting by issuer time could retire a newer quarantine
+                    // under an older release, including during compaction.
                     // Quarantines do not expire merely because their incident
                     // is old. Retain its whole history until it is released and
                     // every incident record has aged past retention, so pruning
@@ -2522,12 +2514,7 @@ impl FleetTransport for FileFleetTransport {
         self.ensure_initialized()?;
 
         self.with_shared_state_lock(true, || {
-            let mut actions = self.read_action_log()?;
-            actions.sort_by(|left, right| {
-                left.emitted_at
-                    .cmp(&right.emitted_at)
-                    .then_with(|| left.action_id.cmp(&right.action_id))
-            });
+            let actions = self.read_action_log()?;
 
             let mut nodes = self.list_node_statuses_unlocked()?;
             nodes.sort_by(|left, right| {
@@ -2940,7 +2927,7 @@ mod tests {
         MAX_ACTION_LOG_ENTRIES, MAX_ACTION_RECORD_BYTES, MAX_ACTION_RECORD_LINE_BYTES,
         MAX_NODE_ID_LEN, MAX_NODES_CAP, NodeHealth, NodeStatus, TempFileGuard,
         canonical_fleet_convergence_receipt_payload, clock, fleet_action_compaction_root_key,
-        fleet_convergence_receipt_verdict, lock_file_with_backoff,
+        fleet_application_checkpoint, fleet_convergence_receipt_verdict, lock_file_with_backoff,
         lock_fleet_action_compaction_process, lock_retry_backoffs, lock_retry_base_backoffs,
         parse_jsonl_records, push_bounded, sign_fleet_convergence_receipt_payload,
         validate_node_id, validate_zone_id, wait_until_fleet_converged_or_timeout,
@@ -3711,7 +3698,7 @@ mod tests {
     }
 
     #[test]
-    fn read_shared_state_sorts_nodes_and_actions() {
+    fn read_shared_state_preserves_actions_and_sorts_nodes() {
         let tempdir = tempdir().expect("tempdir");
         let mut transport = TestTransport::new(tempdir.path());
         transport.initialize().expect("initialize");
@@ -3769,8 +3756,8 @@ mod tests {
             .expect("upsert node");
 
         let state = transport.read_shared_state().expect("shared state");
-        assert_eq!(state.actions[0].action_id, "a");
-        assert_eq!(state.actions[1].action_id, "b");
+        assert_eq!(state.actions[0].action_id, "b");
+        assert_eq!(state.actions[1].action_id, "a");
         assert_eq!(state.nodes[0].node_id, "node-a");
         assert_eq!(state.nodes[1].node_id, "node-z");
     }
@@ -4417,6 +4404,77 @@ mod tests {
             .into_iter()
             .map(String::from)
             .collect()
+        );
+    }
+
+    #[test]
+    fn file_transport_compaction_preserves_backdated_requarantine_and_release_order() {
+        let directory = tempdir().expect("tempdir");
+        let mut transport = FileFleetTransport::new(directory.path());
+        transport.initialize().expect("initialize");
+        let now = Utc::now();
+        let old = now - chrono::TimeDelta::days(60);
+        let original = FleetActionRecord {
+            action_id: "z-original".to_string(),
+            emitted_at: old,
+            action: FleetAction::Quarantine {
+                zone_id: "prod".to_string(),
+                incident_id: "reopened-incident".to_string(),
+                target_id: "extension".to_string(),
+                target_kind: FleetTargetKind::Extension,
+                reason: "retain active containment despite issuer clock skew".to_string(),
+                quarantine_version: 1,
+            },
+        };
+        let release = FleetActionRecord {
+            action_id: "m-release".to_string(),
+            emitted_at: old + chrono::TimeDelta::seconds(1),
+            action: FleetAction::Release {
+                zone_id: "prod".to_string(),
+                incident_id: "reopened-incident".to_string(),
+                reason: None,
+            },
+        };
+        let mut repeat = original.clone();
+        repeat.action_id = "a-requarantine".to_string();
+        repeat.emitted_at = old - chrono::TimeDelta::hours(1);
+        let expected = vec![original, release.clone(), repeat];
+        for action in &expected {
+            transport.publish_action(action).expect("publish");
+        }
+        let checkpoint = fleet_application_checkpoint(&expected, "prod").expect("checkpoint");
+        transport
+            .compact_action_log_if_needed(1, ACTION_LOG_RETENTION_DAYS, now)
+            .expect("compact active incident");
+        assert_eq!(
+            transport.list_actions().expect("retained history"),
+            expected
+        );
+        assert_eq!(
+            fleet_application_checkpoint(
+                &transport.read_shared_state().expect("shared state").actions,
+                "prod"
+            )
+            .expect("compacted checkpoint"),
+            checkpoint
+        );
+        transport
+            .publish_action(&release)
+            .expect("retry does not release the new quarantine");
+        assert_eq!(transport.list_actions().expect("retry history"), expected);
+
+        let mut final_release = release;
+        final_release.action_id = "0-final-release".to_string();
+        final_release.emitted_at = old - chrono::TimeDelta::hours(2);
+        transport.publish_action(&final_release).expect("release");
+        transport
+            .compact_action_log_if_needed(1, ACTION_LOG_RETENTION_DAYS, now)
+            .expect("compact actually released old incident");
+        assert!(
+            transport
+                .list_actions()
+                .expect("compacted history")
+                .is_empty()
         );
     }
 

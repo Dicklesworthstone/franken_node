@@ -101,11 +101,22 @@ All fleet operations track propagation convergence:
 
 CLI convergence requires a fresh, healthy node heartbeat carrying an
 `applied_actions` checkpoint. Its domain-separated SHA-256 digest and record count
-bind the complete immutable action snapshot relevant to that node's zone,
-including `all` actions. High quarantine counters, later timestamps, and older
+bind the complete immutable action sequence relevant to that node's zone,
+including `all` actions. The `fleet-applied-actions/v2` domain also binds append
+order: quarantine followed by release cannot share a checkpoint with the reverse
+sequence. Historical unordered checkpoints require the agent to reapply the
+ordered snapshot before convergence. High quarantine counters, later timestamps, and older
 checkpoints cannot prove application of a new action. Historical heartbeats
 without a checkpoint remain readable and do not count as converged. A zone with
 no registered nodes remains pending.
+
+The live protocol uses `/v2/fleet/*`, `fleet-http-api/v2`, and
+`fleet-transport-state/v2`. Upgrade the coordinator and its agents together;
+mixed v1/v2 deployments fail closed. A v2 coordinator has no writable v1 routes,
+so an old client cannot publish an action or heartbeat before discovering an
+incompatible response schema. Existing SQLite and file action/node records
+remain readable without conversion; the shared-state version describes the
+computed snapshot. Agents must refresh historical application checkpoints.
 
 Reconcile and status roll up the whole relevant snapshot, including policy-only,
 revocation-only, and release-only histories. Each applicable node is counted
@@ -115,10 +126,17 @@ block a scoped history. Only an empty relevant action history is a no-op.
 
 The agent reconciles active quarantines and mandatory revocations on every poll.
 Targets absent from the local trust registry remain pending and are retried when
-they appear. Action delivery does not use issuer timestamps as a cursor, so a
-slow issuer clock cannot hide a newly delivered independent incident. Conflicting
-records for the same scoped incident retain the protocol's deterministic
-`(emitted_at, action_id)` ordering. Executable `PolicyUpdate` records carry
+they appear. Actions retain the coordinator's serialized append order through
+file and SQLite storage, HTTP delivery, restart, and compaction. Issuer timestamps
+and action IDs are not causal ordering: a backdated re-quarantine remains active
+after an earlier release, and a subsequently committed release retires only its
+own scoped incident. Exact retries of retained action IDs keep their original
+position and cannot reapply an old release after a new quarantine. The default
+SQLite coordinator retains the complete history. File fallback compaction keeps
+every record of an active incident, but removes fully released incidents after
+retention; it does not retain tombstones for those expired action IDs. Reusing
+an expired incident ID and replaying its removed release is not protected by
+file fallback deduplication. Executable `PolicyUpdate` records carry
 validated policy contents and a monotonic revision; policy selection is
 independent of producer clocks. Historical records containing only field names
 remain unsupported: the agent reports degraded health and publishes no

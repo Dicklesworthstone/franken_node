@@ -28303,15 +28303,12 @@ fn run_fleet_agent(args: &FleetAgentArgs) -> Result<()> {
         let now_secs = u64::try_from(poll_timestamp.timestamp()).unwrap_or_default();
         let mut node_health = NodeHealth::Healthy;
 
-        // Read current actions from transport
-        let mut actions = transport
+        // Apply the coordinator's committed sequence. Issuer timestamps and
+        // action IDs cannot retire a newly delivered quarantine under an older
+        // release or prevent a backdated release from clearing its own incident.
+        let actions = transport
             .list_actions()
             .map_err(|err| anyhow::anyhow!("failed listing fleet actions: {err}"))?;
-        actions.sort_by(|left, right| {
-            left.emitted_at
-                .cmp(&right.emitted_at)
-                .then_with(|| left.action_id.cmp(&right.action_id))
-        });
 
         let expected_checkpoint = fleet_application_checkpoint(&actions, &resolved.zone_id)
             .map_err(|err| anyhow::anyhow!("invalid fleet action snapshot: {err}"))?;

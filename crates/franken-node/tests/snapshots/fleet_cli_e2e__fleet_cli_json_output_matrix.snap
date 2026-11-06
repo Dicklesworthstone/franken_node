@@ -55,7 +55,7 @@ expression: matrix
       }
     ],
     "state": {
-      "schema_version": "franken-node/fleet-transport-state/v1",
+      "schema_version": "franken-node/fleet-transport-state/v2",
       "actions": [
         {
           "action_id": "fleet-op-quarantine-golden-status",
@@ -145,7 +145,7 @@ expression: matrix
       }
     ],
     "state": {
-      "schema_version": "franken-node/fleet-transport-state/v1",
+      "schema_version": "franken-node/fleet-transport-state/v2",
       "actions": [
         {
           "action_id": "fleet-op-quarantine-golden-status",
@@ -258,7 +258,7 @@ expression: matrix
     "stale_nodes": [],
     "active_incidents": [],
     "state": {
-      "schema_version": "franken-node/fleet-transport-state/v1",
+      "schema_version": "franken-node/fleet-transport-state/v2",
       "actions": [],
       "nodes": []
     }
@@ -359,7 +359,7 @@ expression: matrix
     "stale_nodes": [],
     "active_incidents": [],
     "state": {
-      "schema_version": "franken-node/fleet-transport-state/v1",
+      "schema_version": "franken-node/fleet-transport-state/v2",
       "actions": [
         {
           "action_id": "fleet-op-inc-golden-release",

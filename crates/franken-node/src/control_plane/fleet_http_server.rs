@@ -916,7 +916,7 @@ mod tests {
         let auth = bearer();
         assert_eq!(
             service
-                .handle(request("GET", "/v1/fleet/admin", Some(&auth), b""))
+                .handle(request("GET", "/v2/fleet/admin", Some(&auth), b""))
                 .status,
             404
         );
@@ -935,7 +935,7 @@ mod tests {
         // Query strings and trailing slashes do not change routing.
         assert_eq!(
             service
-                .handle(request("GET", "/v1/fleet/nodes/?zone=a", Some(&auth), b""))
+                .handle(request("GET", "/v2/fleet/nodes/?zone=a", Some(&auth), b""))
                 .status,
             200
         );

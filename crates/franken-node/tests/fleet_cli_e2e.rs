@@ -2498,7 +2498,7 @@ fn fleet_status_json_includes_full_shared_state() {
     assert_eq!(payload["status"]["activated"], false);
     assert_eq!(
         payload["state"]["schema_version"],
-        "franken-node/fleet-transport-state/v1"
+        "franken-node/fleet-transport-state/v2"
     );
     assert!(payload["state"]["actions"].is_array());
     assert!(payload["state"]["nodes"].is_array());
@@ -3248,6 +3248,159 @@ fn fleet_agent_applies_later_deliveries_despite_lower_ids_and_issuer_clock_skew(
             .expect("checkpoint")
         )
     );
+}
+
+#[test]
+fn fleet_agent_clock_skew_cannot_retire_requarantine_or_preserve_a_released_owner() {
+    let project = tempdir().expect("project");
+    write_fail_closed_cli_config_for_fixture_trust_cards(project.path());
+    write_fixture_registry_to(project.path());
+    let fleet_state_dir = project.path().join("fleet-state");
+    let registry_path = project
+        .path()
+        .join(".franken-node/state/trust-card-registry.v1.json");
+    let emitted_at = Utc::now();
+    let mut expected_history = Vec::new();
+    // Every poll uses a new real agent process. Lower action IDs and older
+    // issuer timestamps must not override the coordinator's commit sequence.
+    let steps: [(&str, &str, bool, i64, &[&str]); 6] = [
+        ("z-original", "reopened", true, 0, &["reopened"]),
+        (
+            "y-independent",
+            "independent",
+            true,
+            1,
+            &["independent", "reopened"],
+        ),
+        ("x-release", "reopened", false, 2, &["independent"]),
+        (
+            "b-requarantine",
+            "reopened",
+            true,
+            -3_600,
+            &["independent", "reopened"],
+        ),
+        ("a-release", "reopened", false, -7_200, &["independent"]),
+        ("0-final-release", "independent", false, -10_800, &[]),
+    ];
+    for (index, (id, incident, quarantine, offset, expected_incidents)) in
+        steps.into_iter().enumerate()
+    {
+        let record = FleetActionRecord {
+            action_id: id.to_string(),
+            emitted_at: emitted_at + TimeDelta::seconds(offset),
+            action: if quarantine {
+                FleetAction::Quarantine {
+                    zone_id: "zone-ordering".to_string(),
+                    incident_id: incident.to_string(),
+                    target_id: "npm:@acme/auth-guard".to_string(),
+                    target_kind: FleetTargetKind::Extension,
+                    reason: "clock-skew containment regression".to_string(),
+                    quarantine_version: u64::try_from(index + 1).expect("bounded step"),
+                }
+            } else {
+                FleetAction::Release {
+                    zone_id: "zone-ordering".to_string(),
+                    incident_id: incident.to_string(),
+                    reason: Some("release only this incident owner".to_string()),
+                }
+            },
+        };
+        {
+            let mut publisher = seed_durable_transport(&fleet_state_dir);
+            publisher.publish_action(&record).expect("publish step");
+            if index == 3 {
+                // Retrying the earlier release after re-quarantine must not
+                // move that immutable record to the end of the history.
+                publisher
+                    .publish_action(&expected_history[2])
+                    .expect("retry historical release");
+            }
+        }
+        expected_history.push(record);
+        let output = run_cli_in_dir_with_fleet_state(
+            project.path(),
+            &[
+                "fleet",
+                "agent",
+                "--node-id",
+                "agent-ordering",
+                "--zone",
+                "zone-ordering",
+                "--once",
+                "--json",
+            ],
+            &fleet_state_dir,
+        );
+        assert!(
+            output.status.success(),
+            "agent step {id} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let poll = json_stdout(&output, "clock-skew agent");
+        assert_eq!(poll["node_health"], "healthy", "step {id}");
+        assert_eq!(poll["last_action_id"], id, "step {id}");
+
+        let mut registry = TrustCardRegistry::load_authoritative_state(
+            &registry_path,
+            60,
+            2_100,
+            SnapshotSourceContext::TrustedFile,
+        )
+        .expect("reload authoritative trust registry");
+        let card = registry
+            .read("npm:@acme/auth-guard", 2_100, "clock-skew-ownership")
+            .expect("read card")
+            .expect("tracked extension");
+        let expected_sources = expected_incidents
+            .iter()
+            .map(|incident| QuarantineSource::Fleet {
+                zone_id: "zone-ordering".to_string(),
+                incident_id: (*incident).to_string(),
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            card.effective_quarantine_sources(),
+            expected_sources,
+            "step {id}"
+        );
+        assert_eq!(
+            card.active_quarantine,
+            !expected_incidents.is_empty(),
+            "step {id}"
+        );
+
+        let observer = seed_durable_transport(&fleet_state_dir);
+        let state = observer
+            .read_shared_state()
+            .expect("authoritative snapshot");
+        assert_eq!(state.actions, expected_history, "step {id}");
+        let node = state
+            .nodes
+            .iter()
+            .find(|node| node.node_id == "agent-ordering")
+            .expect("agent heartbeat");
+        assert_eq!(
+            node.applied_actions,
+            Some(
+                fleet_application_checkpoint(&expected_history, "zone-ordering")
+                    .expect("ordered application checkpoint")
+            ),
+            "step {id}"
+        );
+        let status_output = run_cli_in_dir_with_fleet_state(
+            project.path(),
+            &["fleet", "status", "--zone", "zone-ordering", "--json"],
+            &fleet_state_dir,
+        );
+        assert!(status_output.status.success(), "status step {id}");
+        let status = json_stdout(&status_output, "clock-skew status");
+        assert_eq!(
+            status["status"]["active_quarantines"],
+            expected_incidents.len(),
+            "status and local containment must agree at step {id}"
+        );
+    }
 }
 
 #[test]

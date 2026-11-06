@@ -8,7 +8,7 @@
 //! drive a real multi-node fleet without a shared filesystem.
 //!
 //! Security contract (fail closed):
-//! * every request except `GET /v1/fleet/health` carries
+//! * every request except `GET /v2/fleet/health` carries
 //!   `Authorization: Bearer <token>`; the coordinator compares it in constant
 //!   time and answers `401` otherwise;
 //! * plaintext `http://` is accepted only for loopback hosts; a remote
@@ -21,6 +21,9 @@
 //! * response bodies are size-bounded before they are parsed, and every
 //!   record the coordinator returns is re-validated by the client with the
 //!   same rules the coordinator applies on ingest.
+//! * v2 routes and schemas require coordinator append order. Legacy v1
+//!   requests cannot publish actions or acknowledgements before discovering
+//!   the incompatible ordering contract in a response.
 
 use std::{collections::BTreeSet, time::Duration};
 
@@ -33,16 +36,16 @@ use super::fleet_transport::{
     FleetTransportError, NodeStatus, validate_action_record, validate_node_status,
 };
 
-/// Schema tag carried by every fleet HTTP API response body.
-pub const FLEET_HTTP_API_SCHEMA: &str = "franken-node/fleet-http-api/v1";
+/// Schema tag carried by every response; v2 binds coordinator append order.
+pub const FLEET_HTTP_API_SCHEMA: &str = "franken-node/fleet-http-api/v2";
 /// Liveness probe; the only unauthenticated route.
-pub const FLEET_HTTP_HEALTH_PATH: &str = "/v1/fleet/health";
+pub const FLEET_HTTP_HEALTH_PATH: &str = "/v2/fleet/health";
 /// `GET` lists actions, `POST` publishes one.
-pub const FLEET_HTTP_ACTIONS_PATH: &str = "/v1/fleet/actions";
+pub const FLEET_HTTP_ACTIONS_PATH: &str = "/v2/fleet/actions";
 /// `GET` lists node statuses, `POST` upserts one (heartbeat).
-pub const FLEET_HTTP_NODES_PATH: &str = "/v1/fleet/nodes";
+pub const FLEET_HTTP_NODES_PATH: &str = "/v2/fleet/nodes";
 /// `GET` returns the consolidated shared state (actions + nodes).
-pub const FLEET_HTTP_STATE_PATH: &str = "/v1/fleet/state";
+pub const FLEET_HTTP_STATE_PATH: &str = "/v2/fleet/state";
 /// Upper bound on any request body the coordinator accepts.
 pub const FLEET_HTTP_MAX_REQUEST_BYTES: usize = 64 * 1024;
 /// Upper bound on any response body the client reads.
@@ -54,7 +57,7 @@ pub const FLEET_HTTP_MAX_TOKEN_LEN: usize = 512;
 /// Default per-request client timeout.
 pub const FLEET_HTTP_DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// `GET /v1/fleet/health` response body.
+/// `GET /v2/fleet/health` response body.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FleetHttpHealth {
     pub schema_version: String,
@@ -63,21 +66,21 @@ pub struct FleetHttpHealth {
     pub store: String,
 }
 
-/// `GET /v1/fleet/actions` response body.
+/// `GET /v2/fleet/actions` response body.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FleetHttpActionList {
     pub schema_version: String,
     pub actions: Vec<FleetActionRecord>,
 }
 
-/// `GET /v1/fleet/nodes` response body.
+/// `GET /v2/fleet/nodes` response body.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FleetHttpNodeList {
     pub schema_version: String,
     pub nodes: Vec<NodeStatus>,
 }
 
-/// `GET /v1/fleet/state` response body.
+/// `GET /v2/fleet/state` response body.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FleetHttpState {
     pub schema_version: String,
@@ -206,7 +209,7 @@ impl FleetControlPlaneUrl {
         let path = rest[authority.len()..].trim_end_matches('/');
         if !path.is_empty() {
             return Err(format!(
-                "fleet control-plane URL must be a bare origin (got path `{path}`); routes are fixed under /v1/fleet"
+                "fleet control-plane URL must be a bare origin (got path `{path}`); routes are fixed under /v2/fleet"
             ));
         }
         Ok(Self {
@@ -461,8 +464,9 @@ impl HttpFleetTransport {
 }
 
 /// Preserve the bounded history required by checkpoint application. Never
-/// truncate a remote history or select one record for a repeated immutable ID.
-fn validate_action_snapshot(actions: &mut [FleetActionRecord]) -> Result<(), FleetTransportError> {
+/// truncate a remote history, reorder the coordinator's committed sequence, or
+/// select one record for a repeated immutable ID.
+fn validate_action_snapshot(actions: &[FleetActionRecord]) -> Result<(), FleetTransportError> {
     if actions.len() > MAX_ACTION_LOG_ENTRIES {
         return Err(FleetTransportError::serialization(format!(
             "fleet action snapshot exceeds {MAX_ACTION_LOG_ENTRIES} entries"
@@ -480,11 +484,6 @@ fn validate_action_snapshot(actions: &mut [FleetActionRecord]) -> Result<(), Fle
             }
         }
     }
-    actions.sort_by(|left, right| {
-        left.emitted_at
-            .cmp(&right.emitted_at)
-            .then_with(|| left.action_id.cmp(&right.action_id))
-    });
     Ok(())
 }
 
@@ -540,11 +539,11 @@ impl FleetTransport for HttpFleetTransport {
 
     /// Refuse histories exceeding the checkpoint/file transport bound, even if
     /// a coordinator's durable store has admitted more records. Retain every
-    /// accepted action and return the transport's chronological ordering.
+    /// accepted action in the coordinator's append order.
     fn list_actions(&self) -> Result<Vec<FleetActionRecord>, FleetTransportError> {
-        let mut listed: FleetHttpActionList = self.get_json(FLEET_HTTP_ACTIONS_PATH, true)?;
+        let listed: FleetHttpActionList = self.get_json(FLEET_HTTP_ACTIONS_PATH, true)?;
         self.check_schema(&listed.schema_version)?;
-        validate_action_snapshot(&mut listed.actions)?;
+        validate_action_snapshot(&listed.actions)?;
         Ok(listed.actions)
     }
 
@@ -580,7 +579,7 @@ impl FleetTransport for HttpFleetTransport {
                 state.state.schema_version
             )));
         }
-        validate_action_snapshot(&mut state.state.actions)?;
+        validate_action_snapshot(&state.state.actions)?;
         validate_node_snapshot(&mut state.state.nodes)?;
         Ok(state.state)
     }
@@ -605,7 +604,7 @@ mod tests {
         let url = FleetControlPlaneUrl::parse("http://127.0.0.1:9440").expect("parse");
         assert_eq!(
             url.endpoint(FLEET_HTTP_ACTIONS_PATH),
-            "http://127.0.0.1:9440/v1/fleet/actions"
+            "http://127.0.0.1:9440/v2/fleet/actions"
         );
     }
 
@@ -632,7 +631,7 @@ mod tests {
             "ftp://127.0.0.1",
             "http://",
             "http://user:pw@127.0.0.1:9440",
-            "http://127.0.0.1:9440/v1/fleet",
+            "http://127.0.0.1:9440/v2/fleet",
             "http://127.0.0.1:9440/?x=1",
             "https://fleet.example.com#frag",
         ] {
