@@ -2058,6 +2058,25 @@ fn native_engine_panic_message(payload: &(dyn std::any::Any + Send)) -> String {
 }
 
 #[cfg(feature = "engine")]
+/// Entry-source marker that makes a `test-support` build's native engine
+/// worker panic inside its caught boundary, so crash-loop drills exercise
+/// the real validated panic path (envelope, nonce, durable crash record,
+/// threshold, safe mode) end to end. Default and release builds do not
+/// compile the check, so no guest source can trigger it there.
+#[cfg(feature = "test-support")]
+pub const TEST_SUPPORT_NATIVE_ENGINE_PANIC_MARKER: &str =
+    "__FRANKEN_NODE_TEST_SUPPORT_NATIVE_ENGINE_PANIC__";
+
+#[cfg(feature = "test-support")]
+fn inject_test_support_native_engine_panic(entrypoint: &Path) {
+    let marker = TEST_SUPPORT_NATIVE_ENGINE_PANIC_MARKER.as_bytes();
+    let requested = std::fs::read(entrypoint)
+        .is_ok_and(|source| source.windows(marker.len()).any(|window| window == marker));
+    if requested {
+        panic!("test-support fault injection: native engine panic requested by the entry source");
+    }
+}
+
 fn spawn_caught_native_engine_worker<T: Send + 'static>(
     cleanup_successful: Arc<AtomicBool>,
     worker: impl FnOnce() -> T + Send + 'static,
@@ -7443,6 +7462,8 @@ impl EngineDispatcher {
         let cancellation = NativeEngineCancellation::new();
         let effect_wal = NativeEffectWalEmitter::new(nonce.clone(), Box::new(io::stdout()));
         let spawned = spawn_caught_native_engine_worker(cleanup_for_worker, move || {
+            #[cfg(feature = "test-support")]
+            inject_test_support_native_engine_panic(project_paths.entrypoint());
             Self::run_engine_native_guarded(
                 &app_path,
                 &config,

@@ -795,6 +795,19 @@ name = "safe_mode_execution"
 path = "tests/safe_mode_execution.rs"
 
 [[test]]
+name = "trust_graph_cli_e2e"
+path = "tests/trust_graph_cli_e2e.rs"
+
+[[test]]
+name = "operator_screens_cli_e2e"
+path = "tests/operator_screens_cli_e2e.rs"
+
+[[test]]
+name = "deployment_crash_loop_recovery_e2e"
+path = "tests/deployment_crash_loop_recovery_e2e.rs"
+required-features = ["engine", "test-support"]
+
+[[test]]
 name = "workspace_pressure_governance_e2e"
 path = "tests/workspace_pressure_governance_e2e.rs"
 

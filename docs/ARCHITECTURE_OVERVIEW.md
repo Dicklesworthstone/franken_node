@@ -176,6 +176,7 @@ franken-node <SUBCOMMAND> [OPTIONS]
 
 Core Commands:
   run              Execute JavaScript with franken_engine
+  deploy           Signed releases, activation pointer, crash-loop rollback to a verified known-good release
   migrate          Migration analysis and tooling (`--emit-rollback` is unsigned JSON)
   trust            Trust and supply chain operations
   fleet            Fleet quarantine control plane (local store, or a live `fleet serve` coordinator)

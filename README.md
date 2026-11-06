@@ -917,7 +917,7 @@ every leaf command available in the current build.
 |---|---|
 | `franken-node init` | Bootstrap config, policy profile, and `.franken-node/state/` workspace metadata. Flags: `--profile`, `--config`, `--out-dir`, `--overwrite`, `--backup-existing`, `--scan`, `--state-dir`, `--no-state`, `--json` (`franken-node/init-cli/v1`; failures `franken-node/init-error-cli/v1`). |
 | `franken-node run <app_path>` | Run app under policy-governed runtime controls. A directory runs its entry file as `node <dir>` does: package.json `main` (as given, with `.js`, or its `index.js`), else `index.js`; a `main` outside the directory is refused. The app path is handler-required so `--json` failures emit `franken-node/run-error-cli/v1` instead of a human clap error. Flags: `--policy`, `--config`, `--runtime` (auto\|node\|bun\|franken-engine), `--engine-bin`, `--compat-preflight`, `--json` (early failures `franken-node/run-error-cli/v1`; blocked preflight prints JSON then exits 1). External Node/Bun selections fail closed; use `verify lockstep` for comparison. |
-| `franken-node doctor` | Local diagnostics: config/profile, close-condition, evidence snapshot, workspace pressure, bwrap. Exits 1 when the overall verdict is `fail` (after printing the full report) and 0 for `pass`/`warn`. Workspace pressure (host load, builds, disk) is advisory in this command and never fails it; `doctor workspace-pressure` gives the full signal. `--policy-activation-input` is a snapshot JSON file (not a live guardrail probe). Flags: `--config`, `--profile`, `--policy-activation-input`, `--verbose`, `--json` (early failures `franken-node/doctor-error-cli/v1`), `--structured-logs-jsonl`. |
+| `franken-node doctor` | Local diagnostics: config/profile, close-condition, evidence snapshot, workspace pressure, bwrap. Exits 1 when the overall verdict is `fail` (after printing the full report) and 0 for `pass`/`warn`. Workspace pressure (host load, builds, disk) is advisory in this command and never fails it; `doctor workspace-pressure` gives the full signal. `--policy-activation-input` is a snapshot JSON file (not a live guardrail probe). Flags: `--config`, `--profile`, `--policy-activation-input`, `--verbose`, `--json` (early failures `franken-node/doctor-error-cli/v1`), `--structured-logs-jsonl`, `--screen` (the operator screen: frankentui summary and checks panels, width from `COLUMNS`; excludes `--json`). |
 
 ### Migration
 
@@ -1035,7 +1035,7 @@ Every fleet command, and `trust quarantine`, talks to one of two stores:
 | Command | Purpose |
 |---|---|
 | `franken-node fleet serve` | Run the live coordinator: serves this node's durable fleet store over HTTP (fastapi_rust listener on the asupersync runtime). Routes: `GET /v2/fleet/health` (open), `GET/POST /v2/fleet/actions`, `GET/POST /v2/fleet/nodes`, `GET /v2/fleet/state` (bearer token, constant-time compare). V2 preserves coordinator append order; upgrade coordinator and agents together because legacy routes are refused before mutation. Validates every record, caps bodies at 64 KiB, stamps heartbeats with its own clock. Flags: `--bind` (default `127.0.0.1:9440`; port 0 picks a free port, printed first on stdout), `--token-file` (default `.franken-node/keys/fleet-control-plane.token`), `--generate-token` (create a 0600 256-bit token), `--allow-non-loopback` (plaintext listener; only behind TLS termination or an encrypted overlay), `--max-requests`, `--json` (JSONL `FLEET_HTTP_LISTENING` / `FLEET_HTTP_REQUEST` / `FLEET_HTTP_SHUTDOWN` events). |
-| `franken-node fleet status` | Show fleet/quarantine state from the configured store. `activated` is true only when a live coordinator answered. Flags: `--zone`, `--verbose`, `--json`. |
+| `franken-node fleet status` | Show fleet/quarantine state from the configured store. `activated` is true only when a live coordinator answered. Flags: `--zone`, `--verbose`, `--json`, `--screen` (the operator screen: frankentui summary, node-heartbeat and pending-convergence panels drawn from the same report, width from `COLUMNS`; excludes `--json`). |
 | `franken-node fleet sessions` | Inspect this operator's durable local native-session inventory, pending admissions, observed worker termination and unknown effects. Flags: `--project <directory>`, `--json`. Requires the native engine. |
 | `franken-node fleet describe <node>` | Describe one fleet node with zone context and incident state. Flags: `--zone`, `--json`. |
 | `franken-node fleet release` | Retire one fleet quarantine incident with signed receipts and application convergence. Preserves local quarantine, other scoped incidents, and permanent revocation. `--zone` disambiguates a shared incident ID; `--zone all` selects its global scope. `--incident` is handler-required so `--json` failures emit `franken-node/fleet-error-cli/v1`. |
@@ -1111,6 +1111,21 @@ franken-node fleet status --json   # transport=http, live_control_plane=true
 | `franken-node safe-mode exit` | Exit safe mode after explicit operator confirmation. `--operator-id` is handler-required so `--json` failures emit `franken-node/safe-mode-cli/v1` instead of a human clap error. Required: `--confirm`. `--trust-state-consistent`, `--no-unresolved-incidents`, and `--evidence-ledger-intact` are **operator attestations**, not independently verified checks. Flags: `--json`. |
 | `franken-node proofs queue status` | Inspect proof queue, proof status, and worker readiness from `--input`/`--receipt` snapshots (`live_queue=false`, `queue_source=validation_readiness_snapshot`). Not a live broker. Flags: `--json`. |
 | `franken-node proofs workers restart` | Validate and emit a restart-*request* artifact. Does **not** restart a process unless `--execute` is set and `FRANKEN_NODE_PROOF_WORKER_RESTART_EXECUTOR` is bound. `--operator-id`, `--operator-role`, and `--reason` are handler-required so `--json` failures emit `franken-node/proofs-error-cli/v1` instead of a human clap error. Required: `--confirm`. Flags: `--json`. |
+
+### Deployments and crash-loop recovery
+
+All `deploy` commands run in the deployment root, sign their records with its
+receipt signing key, and emit `franken-node/deploy-cli/v1` with `--json`
+(`deploy run`: `franken-node/deploy-run-cli/v1`). See
+[Deployments and crash-loop recovery to a known-good release](#deployments-and-crash-loop-recovery-to-a-known-good-release).
+
+| Command | Purpose |
+|---|---|
+| `franken-node deploy install <name>` | Admit an immutable release project through its publisher-signed source-graph approval. Required: `--release-dir`, `--entrypoint`, `--registry-artifact`, `--publisher-public-key` (outside the release). Optional `--release-id` (default: artifact version). |
+| `franken-node deploy activate <name>` | Re-verify an admitted release and append a signed, hash-chained activation (the pointer). Required: `--release`, `--operator-id`. |
+| `franken-node deploy policy <name>` | Set the signed crash-loop policy: `--on-crash-loop contain\|rollback`, `--restart operator\|automatic` (default `operator`), `--operator-id`. |
+| `franken-node deploy run <name>` | Verify and run the active release natively; record readiness on a healthy run; on a validated crash loop apply the policy (signed recovery record, pointer switch to the newest verified known-good release, optional single restart). Program args after `--`. |
+| `franken-node deploy status <name>` | Show the policy, activation chain, per-release readiness and crash-loop marks, and every recovery. |
 
 ### Ops and diagnostics
 
@@ -3512,7 +3527,7 @@ Profile selection changes concrete behavior. The salient differences:
 | Pure builtins (JSON, Error, Number, `path` string operations) | allowed | allowed | allowed |
 | Compatibility corpus pass rate (560 cases, 2026-09-26, same binary, back to back) | 70.71%: the same as balanced except `http` 3/50, since strict grants no network egress | 78.93% (fs 2/50) | 86.61% |
 | SSRF default | block | block | block |
-| Safe-mode auto-entry on crash-loop | not implemented (the crash-loop detector has no caller) | same | same |
+| Safe-mode auto-entry on crash-loop | after 3 validated native engine panics for one entrypoint in 60 s; a `deploy` policy can then roll back to a verified known-good release | same | same |
 | Camouflage severity threshold for risk bump | constant 0.50, not yet per profile | same | same |
 
 The profile string is canonicalized at load time and recorded in every
@@ -4410,8 +4425,64 @@ resolved project root's controller; the controller's `crash_loop_threshold`
 and `crash_loop_window_secs` configure those defaults. Guest exceptions,
 timeouts, and generic worker exits do not contribute to this panic count.
 These are parent-observed panic records; the separately signed session-key
-capture does not sign the panic outcome itself. This performs containment,
-not automatic rollback to an earlier application artifact.
+capture does not sign the panic outcome itself. A plain `run` performs
+containment only. Under `franken-node deploy`, the same validated crash-loop
+observation drives a signed recovery to an earlier release (below).
+
+#### Deployments and crash-loop recovery to a known-good release
+
+`franken-node deploy` manages a named application slot in the current
+directory (the *deployment root*, whose receipt signing key signs every
+deployment record under `.franken-node/state/deployments/<name>/`).
+
+- `deploy install <name> --release-dir <dir> --entrypoint <file>
+  --registry-artifact <manifest> --publisher-public-key <key>` admits one
+  immutable release. A release is its own project directory (its own
+  `franken_node.toml`) holding the source a publisher signed with `registry
+  publish` (a `verify source-graph --write-source-capsule` capsule). Admission
+  verifies the publisher approval and re-captures the on-disk source graph,
+  which must equal the approved pin. `--release-id` defaults to the artifact
+  version.
+- `deploy activate <name> --release <id> --operator-id <op>` re-verifies the
+  release and appends a signed, hash-chained activation; the newest link is
+  the activation pointer.
+- `deploy policy <name> --on-crash-loop contain|rollback --restart
+  operator|automatic --operator-id <op>` sets the signed policy. Without one
+  the deployment is `contain` / `operator`.
+- `deploy run <name> [--json] [-- args]` verifies the active release (its
+  directory, config bytes, the identical publisher approval, the exact
+  approved source graph, and this build) and runs it through the complete
+  native `run` path with `--frozen-modules` and the publisher approval. A
+  healthy run (exit 0 with a signed receipt) records readiness for the
+  release. When the run ends in a validated native engine panic that completes
+  a crash loop, the supervisor marks the release `crash_looped` and applies the
+  policy. `rollback` selects the newest previously activated release that ran
+  healthy, never crash-looped, and still verifies. It then appends a
+  `crash_loop_rollback` activation; with `--restart automatic` it starts that
+  release once immediately. `--json` emits `franken-node/deploy-run-cli/v1`
+  with `phase` = `healthy`, `failed`, `crashed`, `contained`,
+  `contained_no_known_good`, `rolled_back`, `resumed_healthy` or
+  `resume_failed`, plus the signed `recovery` record (including every refused
+  candidate and why).
+- `deploy status <name> [--json]` shows the policy, the activation chain,
+  each release's readiness and crash-loop marks, and every recovery.
+
+Recovery switches only the activation pointer. Release directories, the
+failed release, its crash records and the activation/recovery history are
+kept. Each release is its own run scope, so the crash-loop safe mode stays on
+the failed release, which can still be inspected and is still refused by a
+plain `run`. An operator safe mode on the deployment root still blocks every
+release. A missing, moved, edited, re-signed or foreign-build candidate is
+refused, and with no acceptable candidate the deployment stays contained
+(`contained_no_known_good`). An edited pointer, policy or release record fails
+its signature, so nothing runs. Limits:
+- Execution revocations are enforced when the selected release is admitted, not
+  during selection: a revoked known-good release is switched to but refuses to
+  run, and the deployment stays contained.
+- Releases admitted by another build are never selected; re-admit them after an
+  upgrade.
+- `--restart automatic` starts the selected release once; it is not a process
+  manager that keeps restarting a workload.
 
 Concurrent crash and operator updates share a stable sibling lock and replace
 the controller atomically after syncing a temporary file. Explicit recovery

@@ -135,6 +135,10 @@ pub enum Command {
     #[command(subcommand, name = "safe-mode")]
     SafeMode(SafeModeCommand),
 
+    /// Signed application deployments: admit releases, activate one, roll a crash-looping release back to a verified known-good release.
+    #[command(subcommand)]
+    Deploy(DeployCommand),
+
     /// Proof-pipeline snapshot/receipt inspection and restart-request artifacts (not a live broker).
     #[command(subcommand)]
     Proofs(ProofsCommand),
@@ -489,6 +493,125 @@ pub struct RuntimeEpochArgs {
     pub peer_epoch: Option<u64>,
 
     /// Emit structured JSON output.
+    #[arg(long)]
+    pub json: bool,
+}
+
+// -- deploy --
+
+#[derive(Debug, Subcommand)]
+pub enum DeployCommand {
+    /// Admit an immutable release project through its publisher-signed source-graph approval.
+    Install(DeployInstallArgs),
+
+    /// Point the deployment at an admitted release after re-verifying it.
+    Activate(DeployActivateArgs),
+
+    /// Set what the supervisor does when the active release crash-loops.
+    Policy(DeployPolicyArgs),
+
+    /// Run the active release natively; on a validated crash loop, recover per policy.
+    Run(DeployRunArgs),
+
+    /// Show releases, the activation chain, release health and recoveries.
+    Status(DeployStatusArgs),
+}
+
+#[derive(Debug, Parser)]
+pub struct DeployInstallArgs {
+    /// Deployment name (1-64 of `[A-Za-z0-9._-]`).
+    #[arg(default_value = "")]
+    pub name: String,
+
+    /// Release project directory: its own `franken_node.toml` and the approved source.
+    #[arg(long)]
+    pub release_dir: Option<PathBuf>,
+
+    /// Release-relative entrypoint the publisher approved.
+    #[arg(long)]
+    pub entrypoint: Option<String>,
+
+    /// Publisher-signed source-capsule manifest (`registry publish` output).
+    #[arg(long)]
+    pub registry_artifact: Option<PathBuf>,
+
+    /// Publisher Ed25519 public key, retained outside the release directory.
+    #[arg(long)]
+    pub publisher_public_key: Option<PathBuf>,
+
+    /// Release identifier (default: the approved artifact version).
+    #[arg(long)]
+    pub release_id: Option<String>,
+
+    /// Emit `franken-node/deploy-cli/v1` JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Parser)]
+pub struct DeployActivateArgs {
+    /// Deployment name.
+    #[arg(default_value = "")]
+    pub name: String,
+
+    /// Release identifier to activate.
+    #[arg(long)]
+    pub release: Option<String>,
+
+    /// Operator identity recorded on the signed activation.
+    #[arg(long)]
+    pub operator_id: Option<String>,
+
+    /// Emit `franken-node/deploy-cli/v1` JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Parser)]
+pub struct DeployPolicyArgs {
+    /// Deployment name.
+    #[arg(default_value = "")]
+    pub name: String,
+
+    /// `contain` (stay in the failed release's safe mode) or `rollback` (switch to the newest verified known-good release).
+    #[arg(long)]
+    pub on_crash_loop: Option<String>,
+
+    /// `operator` (the operator starts the next run) or `automatic` (the supervisor starts the selected release once).
+    #[arg(long, default_value = "operator")]
+    pub restart: String,
+
+    /// Operator identity recorded on the signed policy.
+    #[arg(long)]
+    pub operator_id: Option<String>,
+
+    /// Emit `franken-node/deploy-cli/v1` JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Parser)]
+pub struct DeployRunArgs {
+    /// Deployment name.
+    #[arg(default_value = "")]
+    pub name: String,
+
+    /// Emit `franken-node/deploy-run-cli/v1` JSON.
+    #[arg(long)]
+    pub json: bool,
+
+    /// Arguments for the program itself, after `--`.
+    #[arg(last = true)]
+    pub app_args: Vec<String>,
+}
+
+#[derive(Debug, Parser)]
+pub struct DeployStatusArgs {
+    /// Deployment name.
+    #[arg(default_value = "")]
+    pub name: String,
+
+    /// Emit `franken-node/deploy-cli/v1` JSON.
     #[arg(long)]
     pub json: bool,
 }
@@ -2060,6 +2183,11 @@ pub struct FleetStatusArgs {
     /// `status.activated` is true only when a live coordinator answered.
     #[arg(long)]
     pub json: bool,
+
+    /// Draw the operator screen (frankentui panels: summary, nodes, pending
+    /// convergence) instead of text. Width follows `COLUMNS` (default 100).
+    #[arg(long, conflicts_with = "json")]
+    pub screen: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -3122,6 +3250,11 @@ pub struct DoctorArgs {
     /// Show verbose diagnostic output.
     #[arg(long)]
     pub verbose: bool,
+
+    /// Draw the operator screen (frankentui panels: summary and every check)
+    /// instead of text. Width follows `COLUMNS` (default 100).
+    #[arg(long, conflicts_with = "json")]
+    pub screen: bool,
 
     /// Optional doctor leaf (`close-condition`, `evidence-readiness`, …).
     /// Keep last so parent `--json` / `--profile` bind on `doctor` itself.
