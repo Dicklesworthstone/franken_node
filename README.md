@@ -4454,7 +4454,8 @@ deployment record under `.franken-node/state/deployments/<name>/`).
   the deployment is `contain` / `operator`.
 - `deploy run <name> [--json] [-- args]` verifies the active release (its
   directory, config bytes, the identical publisher approval, the exact
-  approved source graph, and this build) and runs it through the complete
+  approved source graph, its current trust admission, and this build) and
+  runs it through the complete
   native `run` path with `--frozen-modules` and the publisher approval. A
   healthy run (exit 0 with a signed receipt) records readiness for the
   release. When the run ends in a validated native engine panic that completes
@@ -4476,12 +4477,12 @@ kept. Each release is its own run scope, so the crash-loop safe mode stays on
 the failed release, which can still be inspected and is still refused by a
 plain `run`. An operator safe mode on the deployment root still blocks every
 release. A missing, moved, edited, re-signed or foreign-build candidate is
-refused, and with no acceptable candidate the deployment stays contained
-(`contained_no_known_good`). An edited pointer, policy or release record fails
-its signature, so nothing runs. Limits:
-- Execution revocations are enforced when the selected release is admitted, not
-  during selection: a revoked known-good release is switched to but refuses to
-  run, and the deployment stays contained.
+refused. So is one that fails its current trust admission: the release's
+own authenticated trust registry must be current and must not revoke the
+approval's publisher key or exact artifact (`trust revoke --artifact-sha256`
+in the release project). With no acceptable candidate the deployment stays
+contained (`contained_no_known_good`). An edited pointer, policy or release
+record fails its signature, so nothing runs. Limits:
 - Releases admitted by another build are never selected; re-admit them after an
   upgrade.
 - `--restart automatic` starts the selected release once; it is not a process

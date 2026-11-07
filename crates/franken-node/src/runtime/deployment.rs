@@ -22,8 +22,9 @@
 //! an operator safe mode on the deployment root still blocks every release.
 //! A known-good release is one that previously ran healthy under this
 //! deployment, never crash-looped, and still verifies: its record signature,
-//! directory, config bytes, publisher approval, on-disk source graph and
-//! engine compatibility (checked by the caller-supplied verifier).
+//! directory, config bytes, publisher approval, on-disk source graph, current
+//! trust admission (no publisher or artifact revocation) and engine
+//! compatibility (checked by the caller-supplied verifier).
 
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};

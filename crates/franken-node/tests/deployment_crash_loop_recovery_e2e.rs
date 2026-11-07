@@ -466,3 +466,44 @@ fn tampered_pointer_and_drifted_release_refuse_to_run() {
         "{report}"
     );
 }
+
+#[test]
+fn a_revoked_known_good_release_is_refused_before_any_switch() {
+    let drill = Drill::new();
+    let v1_dir = drill.install("1.0.0", HEALTHY_V1);
+    drill.install("2.0.0", &crashing_v2());
+    drill.policy("rollback", "automatic");
+    drill.activate("1.0.0");
+    assert_eq!(drill.run().1["phase"], "healthy");
+    // After proving healthy, 1.0.0's exact artifact is revoked in its own
+    // authenticated trust registry.
+    let status = drill.status();
+    let artifact = status["releases"]
+        .as_array()
+        .expect("releases")
+        .iter()
+        .find(|release| release["release_id"] == "1.0.0")
+        .and_then(|release| release["artifact"]["artifact_sha256"].as_str())
+        .expect("artifact digest")
+        .to_string();
+    drill.ok(
+        &v1_dir,
+        &["trust", "revoke", "--artifact-sha256", &artifact, "--json"],
+    );
+    drill.activate("2.0.0");
+    let (code, report) = drill.crash_until_loop();
+    assert_ne!(code, Some(0));
+    assert_eq!(report["phase"], "contained_no_known_good", "{report}");
+    let refusals = report["recovery"]["candidate_refusals"]
+        .as_array()
+        .expect("refusals");
+    assert_eq!(refusals.len(), 1, "{report}");
+    assert_eq!(refusals[0]["release_id"], "1.0.0");
+    let reason = refusals[0]["reason"].as_str().unwrap_or_default();
+    assert!(
+        reason.contains("trust admission") && reason.contains("revoked"),
+        "{report}"
+    );
+    assert!(report.get("resumed").is_none(), "{report}");
+    assert_eq!(drill.status()["active"]["release_id"], "2.0.0");
+}
