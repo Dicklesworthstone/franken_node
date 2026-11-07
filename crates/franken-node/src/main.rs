@@ -6315,6 +6315,632 @@ fn handle_safe_mode_command(command: SafeModeCommand) -> Result<()> {
     }
 }
 
+// -- deploy (bd-reality-20260923-26n9r.22) --
+
+const DEPLOY_CLI_SCHEMA_VERSION: &str = "franken-node/deploy-cli/v1";
+const DEPLOY_RUN_CLI_SCHEMA_VERSION: &str = "franken-node/deploy-run-cli/v1";
+
+/// The build a release is admitted under. A release admitted by another
+/// build is never selected as known-good: it must be re-admitted first.
+fn deploy_engine_compatibility() -> String {
+    format!(
+        "franken-node/{}+{}",
+        env!("CARGO_PKG_VERSION"),
+        option_env!("FRANKEN_NODE_GIT_SHA").unwrap_or("unknown")
+    )
+}
+
+/// The deployment root is the operator project the command runs in; its
+/// receipt signing key is the deployment authority.
+fn deploy_context(
+    name: &str,
+) -> Result<(
+    runtime::deployment::DeploymentStore,
+    runtime::deployment::DeploymentAuthority,
+)> {
+    let root = std::env::current_dir()
+        .and_then(|dir| dir.canonicalize())
+        .context("failed resolving the deployment root")?;
+    let store = runtime::deployment::DeploymentStore::open(&root, name)?;
+    let material = load_receipt_signing_material(None)?.ok_or_else(|| {
+        ActionableError::new(
+            "deployments are signed by the deployment root's receipt signing key, and none is configured (security.decision_receipt_signing_key_path)",
+            "franken-node init --profile balanced --out-dir .",
+        )
+    })?;
+    Ok((
+        store,
+        runtime::deployment::DeploymentAuthority::new(material.signing_key),
+    ))
+}
+
+fn deploy_require<'a>(value: Option<&'a str>, flag: &str, command: &str) -> Result<&'a str> {
+    value
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("`deploy {command}` requires {flag}"))
+}
+
+fn deploy_publisher_key(
+    path: &Path,
+    release_dir: &Path,
+) -> Result<(PathBuf, ed25519_dalek::VerifyingKey)> {
+    use supply_chain::registry_artifact::{absolute_artifact_path, read_artifact_file};
+    let path = absolute_artifact_path(path)?;
+    anyhow::ensure!(
+        !path.starts_with(release_dir),
+        "publisher public key must be retained outside the release directory"
+    );
+    let bytes = read_artifact_file(&path, 64 * 1024)
+        .with_context(|| format!("failed reading publisher public key {}", path.display()))?;
+    let key = parse_verifying_key_from_blob(&bytes)
+        .context("publisher public key is not a supported Ed25519 verification key")?;
+    Ok((path, key))
+}
+
+/// Everything a release must still satisfy before it is activated or run:
+/// its directory and config bytes, the identical publisher approval, the
+/// exact on-disk source graph that approval pins, and this build.
+fn verify_deploy_release(release: &runtime::deployment::ReleaseRecord) -> Result<()> {
+    #[cfg(not(unix))]
+    {
+        let _ = release;
+        anyhow::bail!("deployment release verification requires Unix");
+    }
+    #[cfg(unix)]
+    {
+        use supply_chain::module_resolution_graph::file_resolution::source_graph::{
+            GraphOptions, capture,
+        };
+        use supply_chain::registry_artifact::PublisherSourceGraphApproval;
+        let directory = release.release_dir.canonicalize().with_context(|| {
+            format!(
+                "release directory {} is absent",
+                release.release_dir.display()
+            )
+        })?;
+        anyhow::ensure!(
+            directory == release.release_dir && directory.is_dir(),
+            "release directory {} moved or is no longer a directory",
+            release.release_dir.display()
+        );
+        let config_sha256 = runtime::deployment::file_sha256(&directory.join("franken_node.toml"))
+            .context("release config franken_node.toml is unreadable")?;
+        anyhow::ensure!(
+            config_sha256 == release.config_sha256,
+            "release config changed after admission ({config_sha256} != {})",
+            release.config_sha256
+        );
+        let (_, key) = deploy_publisher_key(&release.publisher_public_key_path, &directory)?;
+        let observed = PublisherSourceGraphApproval::load(&release.registry_manifest, &key)
+            .context("publisher approval no longer verifies")?;
+        anyhow::ensure!(
+            observed == release.approval,
+            "publisher approval changed after admission"
+        );
+        release
+            .approval
+            .validate_run(&release.entrypoint, true, false, &[], None)?;
+        let captured = capture(&directory, &release.entrypoint, GraphOptions::default())
+            .context("release source graph is unreadable")?;
+        let graph = captured.report().input_hash.clone();
+        anyhow::ensure!(
+            graph == release.approval.graph_input_hash(),
+            "release source graph changed after admission ({graph} != {})",
+            release.approval.graph_input_hash()
+        );
+        let current = deploy_engine_compatibility();
+        anyhow::ensure!(
+            release.engine_compatibility == current,
+            "release was admitted under {} but this build is {current}; re-admit it with `deploy install`",
+            release.engine_compatibility
+        );
+        Ok(())
+    }
+}
+
+fn handle_deploy_install(args: &cli::DeployInstallArgs) -> Result<serde_json::Value> {
+    use supply_chain::registry_artifact::PublisherSourceGraphApproval;
+    let release_dir = args
+        .release_dir
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("`deploy install` requires --release-dir"))?;
+    let entrypoint = deploy_require(args.entrypoint.as_deref(), "--entrypoint", "install")?;
+    let manifest = args
+        .registry_artifact
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("`deploy install` requires --registry-artifact"))?;
+    let key_path = args
+        .publisher_public_key
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("`deploy install` requires --publisher-public-key"))?;
+    let (store, authority) = deploy_context(&args.name)?;
+    let release_dir = release_dir
+        .canonicalize()
+        .with_context(|| format!("release directory {} is absent", release_dir.display()))?;
+    anyhow::ensure!(release_dir.is_dir(), "--release-dir must be a directory");
+    anyhow::ensure!(
+        !store.root().starts_with(&release_dir),
+        "the deployment root's state must live outside the release directory"
+    );
+    let config_sha256 = runtime::deployment::file_sha256(&release_dir.join("franken_node.toml"))
+        .context("a release is a project: its franken_node.toml is required")?;
+    let (key_path, key) = deploy_publisher_key(key_path, &release_dir)?;
+    let manifest = supply_chain::registry_artifact::absolute_artifact_path(manifest)?;
+    let approval = PublisherSourceGraphApproval::load(&manifest, &key)?;
+    approval.validate_run(entrypoint, true, false, &[], None)?;
+    let release_id = args
+        .release_id
+        .clone()
+        .unwrap_or_else(|| approval.identity().version.clone());
+    let release = runtime::deployment::ReleaseRecord {
+        schema_version: runtime::deployment::RELEASE_SCHEMA.to_string(),
+        deployment: store.name().to_string(),
+        release_id,
+        release_dir,
+        entrypoint: entrypoint.to_string(),
+        config_sha256,
+        registry_manifest: manifest,
+        publisher_public_key_path: key_path,
+        approval,
+        engine_compatibility: deploy_engine_compatibility(),
+        installed_at_epoch_secs: current_unix_secs(),
+    };
+    verify_deploy_release(&release)?;
+    let lock = store.lock()?;
+    let created = store.install_release(&lock, &authority, release.clone())?;
+    Ok(serde_json::json!({
+        "schema_version": DEPLOY_CLI_SCHEMA_VERSION,
+        "command": "deploy.install",
+        "ok": true,
+        "deployment": store.name(),
+        "created": created,
+        "release": release,
+    }))
+}
+
+fn handle_deploy_activate(args: &cli::DeployActivateArgs) -> Result<serde_json::Value> {
+    let release_id = deploy_require(args.release.as_deref(), "--release", "activate")?;
+    let operator_id = deploy_require(args.operator_id.as_deref(), "--operator-id", "activate")?;
+    let (store, authority) = deploy_context(&args.name)?;
+    let lock = store.lock()?;
+    let release = store.release(&authority, release_id)?;
+    verify_deploy_release(&release)
+        .with_context(|| format!("release `{release_id}` cannot be activated"))?;
+    let activation = store.activate(
+        &lock,
+        &authority,
+        release_id,
+        runtime::deployment::ActivationReason::Operator,
+        Some(operator_id),
+        None,
+        current_unix_secs(),
+    )?;
+    Ok(serde_json::json!({
+        "schema_version": DEPLOY_CLI_SCHEMA_VERSION,
+        "command": "deploy.activate",
+        "ok": true,
+        "deployment": store.name(),
+        "activation": activation,
+    }))
+}
+
+fn handle_deploy_policy(args: &cli::DeployPolicyArgs) -> Result<serde_json::Value> {
+    use runtime::deployment::{CrashLoopAction, DeploymentPolicy, POLICY_SCHEMA, RestartPolicy};
+    let on_crash_loop =
+        match deploy_require(args.on_crash_loop.as_deref(), "--on-crash-loop", "policy")? {
+            "contain" => CrashLoopAction::Contain,
+            "rollback" => CrashLoopAction::Rollback,
+            other => anyhow::bail!("--on-crash-loop `{other}` must be `contain` or `rollback`"),
+        };
+    let restart = match args.restart.as_str() {
+        "operator" => RestartPolicy::Operator,
+        "automatic" => RestartPolicy::Automatic,
+        other => anyhow::bail!("--restart `{other}` must be `operator` or `automatic`"),
+    };
+    let operator_id = deploy_require(args.operator_id.as_deref(), "--operator-id", "policy")?;
+    let (store, authority) = deploy_context(&args.name)?;
+    let lock = store.lock()?;
+    let policy = DeploymentPolicy {
+        schema_version: POLICY_SCHEMA.to_string(),
+        deployment: store.name().to_string(),
+        on_crash_loop,
+        restart,
+        operator_id: operator_id.to_string(),
+        set_at_epoch_secs: current_unix_secs(),
+    };
+    store.set_policy(&lock, &authority, policy.clone())?;
+    Ok(serde_json::json!({
+        "schema_version": DEPLOY_CLI_SCHEMA_VERSION,
+        "command": "deploy.policy",
+        "ok": true,
+        "deployment": store.name(),
+        "policy": policy,
+    }))
+}
+
+fn handle_deploy_status(args: &cli::DeployStatusArgs) -> Result<serde_json::Value> {
+    let (store, authority) = deploy_context(&args.name)?;
+    let activations = store.activations(&authority)?;
+    let mut releases = Vec::new();
+    for release_id in store.release_ids()? {
+        let release = store.release(&authority, &release_id)?;
+        let health = store.health(&authority, &release_id)?;
+        releases.push(serde_json::json!({
+            "release_id": release.release_id,
+            "release_dir": release.release_dir,
+            "entrypoint": release.entrypoint,
+            "artifact": release.approval.identity(),
+            "graph_input_hash": release.approval.graph_input_hash(),
+            "engine_compatibility": release.engine_compatibility,
+            "healthy_runs": health.healthy_runs(),
+            "last_healthy_at_epoch_secs": health.last_healthy_at(),
+            "crash_looped": health.crash_looped(),
+        }));
+    }
+    Ok(serde_json::json!({
+        "schema_version": DEPLOY_CLI_SCHEMA_VERSION,
+        "command": "deploy.status",
+        "ok": true,
+        "deployment": store.name(),
+        "active": activations.last(),
+        "policy": store.policy(&authority)?,
+        "releases": releases,
+        "activations": activations,
+        "recoveries": store.recoveries(&authority)?,
+    }))
+}
+
+/// One supervised `run` of a release, executed by this same binary so the
+/// release passes the complete native admission path (publisher approval,
+/// frozen source graph pin, trust registry, safe-mode scopes).
+struct DeployChildRun {
+    exit_code: i32,
+    report: serde_json::Value,
+}
+
+fn run_deploy_release_child(
+    release: &runtime::deployment::ReleaseRecord,
+    app_args: &[String],
+) -> Result<DeployChildRun> {
+    let executable =
+        std::env::current_exe().context("failed locating the franken-node executable")?;
+    let mut command = std::process::Command::new(executable);
+    command
+        .current_dir(&release.release_dir)
+        .arg("run")
+        .arg(&release.entrypoint)
+        .args([
+            "--config",
+            "franken_node.toml",
+            "--runtime",
+            "franken-engine",
+            "--frozen-modules",
+            "--json",
+            "--registry-artifact",
+        ])
+        .arg(&release.registry_manifest)
+        .arg("--publisher-public-key")
+        .arg(&release.publisher_public_key_path);
+    if !app_args.is_empty() {
+        command.arg("--").args(app_args);
+    }
+    let output = command
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::inherit())
+        .output()
+        .context("failed starting the supervised release run")?;
+    let report = serde_json::from_slice(&output.stdout).with_context(|| {
+        format!(
+            "supervised run of release `{}` did not emit a JSON report",
+            release.release_id
+        )
+    })?;
+    Ok(DeployChildRun {
+        exit_code: output.status.code().unwrap_or(1),
+        report,
+    })
+}
+
+/// How the supervisor reads one child run.
+enum DeployRunVerdict {
+    Healthy { receipt_id: String },
+    CrashLoop(runtime::deployment::CrashLoopEvidence),
+    Crashed,
+    Failed,
+}
+
+fn classify_deploy_run(run: &DeployChildRun) -> DeployRunVerdict {
+    let report = &run.report;
+    if report["outcome"] == "native_engine_panic" {
+        let observation = &report["crash_loop"];
+        let counted_loop = observation["tracking_failure"].is_null()
+            && observation["counted"] == true
+            && observation["safe_mode_active"] == true
+            && observation["crashes_in_window"].as_u64() >= observation["threshold"].as_u64()
+            && observation["threshold"]
+                .as_u64()
+                .is_some_and(|threshold| threshold > 0);
+        if !counted_loop {
+            return DeployRunVerdict::Crashed;
+        }
+        return DeployRunVerdict::CrashLoop(runtime::deployment::CrashLoopEvidence {
+            session_nonce: observation["session_nonce"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+            entrypoint: observation["entrypoint"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+            observed_at_epoch_secs: observation["observed_at_epoch_secs"].as_u64().unwrap_or(0),
+            crashes_in_window: observation["crashes_in_window"]
+                .as_u64()
+                .and_then(|count| u32::try_from(count).ok())
+                .unwrap_or(u32::MAX),
+            threshold: observation["threshold"]
+                .as_u64()
+                .and_then(|threshold| u32::try_from(threshold).ok())
+                .unwrap_or(0),
+            window_secs: observation["window_secs"].as_u64().unwrap_or(0),
+            safe_mode_state_path: observation["state_path"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+        });
+    }
+    match report["receipt"]["receipt_id"].as_str() {
+        Some(receipt_id) if run.exit_code == 0 && report["success"] == true => {
+            DeployRunVerdict::Healthy {
+                receipt_id: receipt_id.to_string(),
+            }
+        }
+        _ => DeployRunVerdict::Failed,
+    }
+}
+
+fn deploy_guest_stdout(report: &serde_json::Value) -> Option<&str> {
+    report["dispatch"]["captured_output"]["stdout"].as_str()
+}
+
+/// Run the active release once; on a validated crash loop, recover per the
+/// signed policy. Returns the report and the process exit code.
+fn handle_deploy_run(args: &cli::DeployRunArgs) -> Result<(serde_json::Value, i32)> {
+    use runtime::deployment::{HealthEvent, RecoveryOutcome, RestartPolicy};
+    let (store, authority) = deploy_context(&args.name)?;
+    // The lock is held only around state transitions, never across the run.
+    let (activation, release) = {
+        let _lock = store.lock()?;
+        let activation = store.active(&authority)?.ok_or_else(|| {
+            ActionableError::new(
+                format!("deployment `{}` has no active release", store.name()),
+                "franken-node deploy activate <name> --release <id> --operator-id <operator>",
+            )
+        })?;
+        let release = store.release(&authority, &activation.release_id)?;
+        (activation, release)
+    };
+    verify_deploy_release(&release).with_context(|| {
+        format!(
+            "active release `{}` failed verification and was not started",
+            release.release_id
+        )
+    })?;
+    let run = run_deploy_release_child(&release, &args.app_args)?;
+    let verdict = classify_deploy_run(&run);
+    let mut report = serde_json::json!({
+        "schema_version": DEPLOY_RUN_CLI_SCHEMA_VERSION,
+        "command": "deploy.run",
+        "deployment": store.name(),
+        "release_id": release.release_id,
+        "activation_sequence": activation.sequence,
+        "run": run.report,
+    });
+    let (phase, exit_code) = match verdict {
+        DeployRunVerdict::Healthy { receipt_id } => {
+            let lock = store.lock()?;
+            store.record_health(
+                &lock,
+                &authority,
+                &release.release_id,
+                HealthEvent::HealthyRun {
+                    receipt_id,
+                    observed_at_epoch_secs: current_unix_secs(),
+                },
+            )?;
+            ("healthy", 0)
+        }
+        DeployRunVerdict::Failed => ("failed", run.exit_code.max(1)),
+        DeployRunVerdict::Crashed => ("crashed", run.exit_code.max(1)),
+        DeployRunVerdict::CrashLoop(evidence) => {
+            let recovery = {
+                let lock = store.lock()?;
+                let current = store.active(&authority)?;
+                if current.as_ref().map(|active| active.sequence) != Some(activation.sequence) {
+                    anyhow::bail!(
+                        "release `{}` crash-looped but the activation changed during the run; inspect `franken-node deploy status {}`",
+                        release.release_id,
+                        store.name()
+                    );
+                }
+                let policy = store.policy(&authority)?;
+                store.recover_from_crash_loop(
+                    &lock,
+                    &authority,
+                    &release.release_id,
+                    evidence,
+                    &policy,
+                    current_unix_secs(),
+                    &verify_deploy_release,
+                )?
+            };
+            report["recovery"] = serde_json::to_value(&recovery)?;
+            match (
+                recovery.outcome,
+                recovery.restart,
+                &recovery.selected_release_id,
+            ) {
+                (RecoveryOutcome::RolledBack, RestartPolicy::Automatic, Some(selected)) => {
+                    let selected = store.release(&authority, selected)?;
+                    let resumed = run_deploy_release_child(&selected, &args.app_args)?;
+                    let resumed_verdict = classify_deploy_run(&resumed);
+                    let (resume_phase, resume_code) = match resumed_verdict {
+                        DeployRunVerdict::Healthy { receipt_id } => {
+                            let lock = store.lock()?;
+                            store.record_health(
+                                &lock,
+                                &authority,
+                                &selected.release_id,
+                                HealthEvent::HealthyRun {
+                                    receipt_id,
+                                    observed_at_epoch_secs: current_unix_secs(),
+                                },
+                            )?;
+                            ("resumed_healthy", 0)
+                        }
+                        _ => ("resume_failed", resumed.exit_code.max(1)),
+                    };
+                    report["resumed"] = serde_json::json!({
+                        "release_id": selected.release_id,
+                        "run": resumed.report,
+                    });
+                    (resume_phase, resume_code)
+                }
+                (RecoveryOutcome::RolledBack, _, _) => ("rolled_back", run.exit_code.max(1)),
+                (RecoveryOutcome::ContainedNoKnownGood, _, _) => {
+                    ("contained_no_known_good", run.exit_code.max(1))
+                }
+                (RecoveryOutcome::Contained, _, _) => ("contained", run.exit_code.max(1)),
+            }
+        }
+    };
+    report["phase"] = serde_json::json!(phase);
+    report["ok"] = serde_json::json!(exit_code == 0);
+    Ok((report, exit_code))
+}
+
+fn render_deploy_human(report: &serde_json::Value) -> String {
+    let command = report["command"].as_str().unwrap_or("deploy");
+    let deployment = report["deployment"].as_str().unwrap_or("");
+    match command {
+        "deploy.install" => format!(
+            "deployment {deployment}: release {} admitted ({}) graph={}",
+            report["release"]["release_id"].as_str().unwrap_or(""),
+            if report["created"] == true {
+                "new"
+            } else {
+                "already admitted"
+            },
+            report["release"]["approval"]["graph_input_hash"]
+                .as_str()
+                .unwrap_or("")
+        ),
+        "deploy.activate" => format!(
+            "deployment {deployment}: release {} active (activation #{})",
+            report["activation"]["release_id"].as_str().unwrap_or(""),
+            report["activation"]["sequence"]
+        ),
+        "deploy.policy" => format!(
+            "deployment {deployment}: on crash loop {}, restart {}",
+            report["policy"]["on_crash_loop"].as_str().unwrap_or(""),
+            report["policy"]["restart"].as_str().unwrap_or("")
+        ),
+        "deploy.status" => {
+            let mut lines = vec![format!(
+                "deployment {deployment}: active release {} (on crash loop {})",
+                report["active"]["release_id"].as_str().unwrap_or("none"),
+                report["policy"]["on_crash_loop"]
+                    .as_str()
+                    .unwrap_or("contain")
+            )];
+            for release in report["releases"].as_array().into_iter().flatten() {
+                lines.push(format!(
+                    "  release {} healthy_runs={} crash_looped={}",
+                    release["release_id"].as_str().unwrap_or(""),
+                    release["healthy_runs"],
+                    release["crash_looped"]
+                ));
+            }
+            for recovery in report["recoveries"].as_array().into_iter().flatten() {
+                lines.push(format!(
+                    "  recovery #{}: {} crash-looped -> {} {}",
+                    recovery["sequence"],
+                    recovery["failed_release_id"].as_str().unwrap_or(""),
+                    recovery["outcome"].as_str().unwrap_or(""),
+                    recovery["selected_release_id"].as_str().unwrap_or("")
+                ));
+            }
+            lines.join("\n")
+        }
+        _ => {
+            let mut lines = Vec::new();
+            for run in [&report["run"], &report["resumed"]["run"]] {
+                if let Some(stdout) = deploy_guest_stdout(run) {
+                    lines.push(stdout.trim_end().to_string());
+                }
+            }
+            lines.push(format!(
+                "deployment {deployment}: release {} -> {}{}",
+                report["release_id"].as_str().unwrap_or(""),
+                report["phase"].as_str().unwrap_or(""),
+                report["resumed"]["release_id"]
+                    .as_str()
+                    .map(|selected| format!(" (now running {selected})"))
+                    .unwrap_or_default()
+            ));
+            lines.retain(|line| !line.is_empty());
+            lines.join("\n")
+        }
+    }
+}
+
+fn handle_deploy_command(command: cli::DeployCommand) -> Result<()> {
+    let (json, schema, name, outcome) = match &command {
+        cli::DeployCommand::Install(args) => (
+            args.json,
+            DEPLOY_CLI_SCHEMA_VERSION,
+            "deploy.install",
+            handle_deploy_install(args).map(|report| (report, 0)),
+        ),
+        cli::DeployCommand::Activate(args) => (
+            args.json,
+            DEPLOY_CLI_SCHEMA_VERSION,
+            "deploy.activate",
+            handle_deploy_activate(args).map(|report| (report, 0)),
+        ),
+        cli::DeployCommand::Policy(args) => (
+            args.json,
+            DEPLOY_CLI_SCHEMA_VERSION,
+            "deploy.policy",
+            handle_deploy_policy(args).map(|report| (report, 0)),
+        ),
+        cli::DeployCommand::Status(args) => (
+            args.json,
+            DEPLOY_CLI_SCHEMA_VERSION,
+            "deploy.status",
+            handle_deploy_status(args).map(|report| (report, 0)),
+        ),
+        cli::DeployCommand::Run(args) => (
+            args.json,
+            DEPLOY_RUN_CLI_SCHEMA_VERSION,
+            "deploy.run",
+            handle_deploy_run(args),
+        ),
+    };
+    let (report, exit_code) = match outcome {
+        Ok(outcome) => outcome,
+        Err(error) => return named_cli_fail(schema, name, json, error),
+    };
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!("{}", render_deploy_human(&report));
+    }
+    if exit_code != 0 {
+        fail_closed_after_json_with_code(exit_code);
+    }
+    Ok(())
+}
+
 const RUNTIME_ERROR_CLI_SCHEMA_VERSION: &str = "franken-node/runtime-error-cli/v1";
 
 fn emit_runtime_error_json(command: &str, message: &str) -> Result<()> {
@@ -35495,6 +36121,9 @@ fn main() -> Result<()> {
             }
         }
 
+        Command::Deploy(sub) => {
+            handle_deploy_command(sub)?;
+        }
         Command::SafeMode(sub) => {
             let (json, command_name, state_path) = match &sub {
                 SafeModeCommand::Enter(args) => (
@@ -36126,11 +36755,14 @@ fn main() -> Result<()> {
                         return trust_fail("trust.revoke", args.json, err);
                     }
                 } else {
-                    let card =
-                        match revoke_trust_card(&mut state.registry, &args.extension_id, now_secs) {
-                            Ok(card) => card,
-                            Err(err) => return trust_fail("trust.revoke", args.json, err),
-                        };
+                    let card = match revoke_trust_card(
+                        &mut state.registry,
+                        &args.extension_id,
+                        now_secs,
+                    ) {
+                        Ok(card) => card,
+                        Err(err) => return trust_fail("trust.revoke", args.json, err),
+                    };
                     if let Err(err) = persist_trust_card_cli_registry(&state) {
                         return trust_fail("trust.revoke", args.json, err);
                     }

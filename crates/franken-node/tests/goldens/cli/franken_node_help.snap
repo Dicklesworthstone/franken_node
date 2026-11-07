@@ -10,6 +10,7 @@ Commands:
   run             Run app under policy-governed runtime controls
   runtime         Local default lane snapshot and integer epoch compare (not a live node)
   safe-mode       Safe-mode operator lifecycle; persist is unsigned JSON (not Ed25519-signed)
+  deploy          Signed application deployments: admit releases, activate one, roll a crash-looping release back to a verified known-good release
   proofs          Proof-pipeline snapshot[PATH] inspection and restart-request artifacts (not a live broker)
   migrate         Migration audit, rewrite, and validation (rollback JSON is unsigned; validate is not lockstep)
   migrate-report  Export one-command migration assessment report

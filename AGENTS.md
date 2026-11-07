@@ -154,7 +154,7 @@ Current crate features:
 | `admin-tools` | opt-in | Enterprise governance, migration tools, and administrative functionality. |
 | `verifier-tools` | opt-in | Verifier-specific tooling, economy, and SDK surfaces. |
 | `advanced-features` | opt-in | Claims, conformance, encoding, extensions, federation, performance, and repair surfaces. |
-| `test-support` | opt-in | Shared test helpers; currently enables `control-plane` and `admin-tools`. |
+| `test-support` | opt-in | Shared test helpers; currently enables `control-plane` and `admin-tools`, and compiles the native-engine panic fault injection (`TEST_SUPPORT_NATIVE_ENGINE_PANIC_MARKER` in an entry source) used by crash-loop recovery drills. Never part of default or release builds. |
 | `loom-models` | opt-in | Compiles library-level `#[cfg(loom)]` model helpers for explicit Loom test invocations; it is not part of default or `test-support` builds. |
 | `asupersync-transport` | opt-in | Direct asupersync transport integration. |
 | `compression` | opt-in | Gzip/deflate support via `flate2`. |
