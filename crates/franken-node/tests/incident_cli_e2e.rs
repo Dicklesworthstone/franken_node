@@ -769,8 +769,11 @@ fn incident_counterfactual_json_fails_closed_when_bundle_flag_missing() {
     );
 }
 
+/// The production model re-decides the recorded effects of an authenticated
+/// bundle, so without a trust anchor it must fail closed in the JSON error
+/// contract before reading the bundle at all.
 #[test]
-fn incident_counterfactual_json_fails_closed_for_production_model() {
+fn incident_counterfactual_json_production_model_fails_closed_without_trust_anchor() {
     let workspace = config_only_workspace();
     let output = run_cli_in_workspace(
         workspace.path(),
@@ -800,14 +803,12 @@ fn incident_counterfactual_json_fails_closed_for_production_model() {
     assert_eq!(payload["ok"], false);
     let error = payload["error"].as_str().unwrap_or_default();
     assert!(
-        error.contains(
-            "counterfactual --model production requires the runtime's real policy decision"
-        ),
-        "production-model --json must name the honest gate: {payload}"
+        error.contains("requires a trusted public key"),
+        "production-model --json must name the missing trust anchor: {payload}"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        !stderr.contains("Error: counterfactual --model production"),
+        !stderr.contains("Error: incident replay requires a trusted public key"),
         "--json must not append a second human Error line after the JSON report: {stderr}"
     );
 }
