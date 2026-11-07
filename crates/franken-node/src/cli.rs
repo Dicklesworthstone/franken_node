@@ -2183,6 +2183,11 @@ pub struct FleetStatusArgs {
     /// `status.activated` is true only when a live coordinator answered.
     #[arg(long)]
     pub json: bool,
+
+    /// Draw the operator screen (frankentui panels: summary, nodes, pending
+    /// convergence) instead of text. Width follows `COLUMNS` (default 100).
+    #[arg(long, conflicts_with = "json")]
+    pub screen: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -3245,6 +3250,11 @@ pub struct DoctorArgs {
     /// Show verbose diagnostic output.
     #[arg(long)]
     pub verbose: bool,
+
+    /// Draw the operator screen (frankentui panels: summary and every check)
+    /// instead of text. Width follows `COLUMNS` (default 100).
+    #[arg(long, conflicts_with = "json")]
+    pub screen: bool,
 
     /// Optional doctor leaf (`close-condition`, `evidence-readiness`, …).
     /// Keep last so parent `--json` / `--profile` bind on `doctor` itself.

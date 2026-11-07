@@ -27919,6 +27919,82 @@ fn fleet_action_report(
     })
 }
 
+/// `--screen` width: the terminal's `COLUMNS`, else the screen default.
+fn operator_screen_width() -> u16 {
+    std::env::var("COLUMNS")
+        .ok()
+        .and_then(|columns| columns.trim().parse::<u16>().ok())
+        .unwrap_or(tools::operator_screens::DEFAULT_SCREEN_WIDTH)
+}
+
+fn serde_label<T: Serialize>(value: &T) -> String {
+    serde_json::to_value(value)
+        .ok()
+        .and_then(|value| value.as_str().map(ToString::to_string))
+        .unwrap_or_default()
+}
+
+/// The fleet screen shows the same report `fleet status` prints: the zone
+/// summary, every node heartbeat in the zone, and pending convergences.
+fn fleet_screen_model(report: &FleetCliStatusReport) -> tools::operator_screens::FleetScreenModel {
+    use tools::operator_screens::{FleetScreenConvergence, FleetScreenModel, FleetScreenNode};
+    let zone = &report.status.zone_id;
+    FleetScreenModel {
+        zone_id: zone.clone(),
+        transport: report.transport.to_string(),
+        live_control_plane: report.live_control_plane,
+        control_plane_url: report.control_plane_url.clone(),
+        activated: report.status.activated,
+        healthy_nodes: report.status.healthy_nodes,
+        total_nodes: report.status.total_nodes,
+        active_quarantines: report.status.active_quarantines,
+        active_revocations: report.status.active_revocations,
+        nodes: report
+            .state
+            .nodes
+            .iter()
+            .filter(|node| zone_matches_filter(&node.zone_id, zone))
+            .map(|node| FleetScreenNode {
+                node_id: node.node_id.clone(),
+                zone_id: node.zone_id.clone(),
+                health: serde_label(&node.health),
+                quarantine_version: node.quarantine_version,
+                last_seen: node
+                    .last_seen
+                    .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            })
+            .collect(),
+        convergences: report
+            .active_incidents
+            .iter()
+            .filter(|incident| zone_matches_filter(&incident.zone_id, zone))
+            .map(|incident| FleetScreenConvergence {
+                incident_id: incident.incident_id.clone(),
+                target_kind: serde_label(&incident.target_kind),
+                target: incident.target_id.clone(),
+                progress_pct: incident.convergence.progress_pct,
+            })
+            .collect(),
+    }
+}
+
+fn doctor_screen_model(report: &DoctorReport) -> tools::operator_screens::DoctorScreenModel {
+    tools::operator_screens::DoctorScreenModel {
+        overall_status: report.overall_status.as_str().to_string(),
+        profile: report.selected_profile.clone(),
+        checks: report
+            .checks
+            .iter()
+            .map(|check| tools::operator_screens::DoctorScreenCheck {
+                status: check.status.as_str().to_string(),
+                code: check.code.clone(),
+                scope: check.scope.clone(),
+                message: check.message.clone(),
+            })
+            .collect(),
+    }
+}
+
 fn emit_fleet_status_report(
     report: &FleetCliStatusReport,
     json: bool,
@@ -37027,7 +37103,16 @@ fn main() -> Result<()> {
                     Ok(report) => report,
                     Err(err) => return fleet_fail("fleet.status", args.json, err),
                 };
-                if let Err(err) = emit_fleet_status_report(&report, args.json, args.verbose) {
+                if args.screen {
+                    println!(
+                        "{}",
+                        tools::operator_screens::render_fleet_screen(
+                            &fleet_screen_model(&report),
+                            operator_screen_width(),
+                        )
+                    );
+                } else if let Err(err) = emit_fleet_status_report(&report, args.json, args.verbose)
+                {
                     return fleet_fail("fleet.status", args.json, err);
                 }
             }
@@ -37688,6 +37773,14 @@ fn main() -> Result<()> {
 
             if args.json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
+            } else if args.screen {
+                println!(
+                    "{}",
+                    tools::operator_screens::render_doctor_screen(
+                        &doctor_screen_model(&report),
+                        operator_screen_width(),
+                    )
+                );
             } else {
                 emit_operator_surface_output(
                     "doctor",
