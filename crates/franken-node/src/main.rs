@@ -685,6 +685,9 @@ struct TrustScanDeepMetadata {
     /// Package recency and maintainer signals from the packument
     /// (`supply_chain::npm_registry_signals`).
     registry_signals: supply_chain::npm_registry_signals::RegistrySignals,
+    /// The stable releases leading up to the resolved version, scored for
+    /// behaviour drift (`supply_chain::release_history`).
+    release_window: Vec<supply_chain::release_history::ReleaseCapabilities>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -20990,6 +20993,10 @@ fn parse_trust_scan_npm_metadata(
         }
     }
 
+    let release_window = resolved_version
+        .as_deref()
+        .map(|version| supply_chain::release_history::release_window(payload, version))
+        .unwrap_or_default();
     TrustScanDeepMetadata {
         publisher_id: Some(publisher_id),
         publisher_display_name: Some(publisher_display_name),
@@ -20998,7 +21005,81 @@ fn parse_trust_scan_npm_metadata(
         resolved_version,
         registry_integrity_hashes,
         registry_signals: supply_chain::npm_registry_signals::parse_registry_signals(payload),
+        release_window,
     }
+}
+
+/// Score the releases leading up to the resolved version and, when a finding
+/// reaches the profile's risk threshold, record it on the card with
+/// `mark_camouflage_suspected` (bd-reality-20260923-26n9r.15 deliverable 3).
+/// Re-scanning the same window does not re-mark the card.
+fn apply_release_history_camouflage(
+    registry: &mut supply_chain::trust_card::TrustCardRegistry,
+    extension_id: &str,
+    window: &[supply_chain::release_history::ReleaseCapabilities],
+    profile: Profile,
+    card: &supply_chain::trust_card::TrustCard,
+    now_secs: u64,
+    warnings: &mut Vec<String>,
+) -> Result<Option<supply_chain::trust_card::TrustCard>> {
+    use supply_chain::release_history::{assess_release_window, risk_bump_severity};
+    let Some(assessment) = assess_release_window(window.to_vec())
+        .map_err(|error| anyhow::anyhow!("release-history assessment failed: {error}"))?
+    else {
+        return Ok(None);
+    };
+    if assessment.hints.is_empty() {
+        return Ok(None);
+    }
+    let version = window.last().map_or("", |release| release.version.as_str());
+    let summary = format!(
+        "{extension_id}@{version}: release-history drift ({}) max_severity={:.2}",
+        assessment.changes.join("; "),
+        assessment.max_severity
+    );
+    let threshold = risk_bump_severity(profile);
+    let hints: Vec<_> = assessment
+        .hints
+        .iter()
+        .filter(|hint| hint.severity >= threshold)
+        .cloned()
+        .collect();
+    if hints.is_empty() {
+        warnings.push(format!(
+            "{summary}; below the {profile} risk threshold {threshold:.2}"
+        ));
+        return Ok(None);
+    }
+    let already_marked = hints.iter().all(|hint| {
+        card.camouflage_hints.iter().any(|record| {
+            record.kind == hint.kind.as_str()
+                && record.sample_indices == hint.sample_indices
+                && (record.severity - hint.severity).abs() < 1e-9
+        })
+    });
+    if already_marked {
+        return Ok(None);
+    }
+    let digest = sha2::Sha256::digest(serde_json::to_vec(window)?);
+    let marked = registry
+        .mark_camouflage_suspected(
+            extension_id,
+            &hints,
+            vec![VerifiedEvidenceRef {
+                evidence_id: format!("npm-release-history:{extension_id}@{version}"),
+                evidence_type: EvidenceType::ReputationSignal,
+                verified_at_epoch: now_secs,
+                verification_receipt_hash: format!("sha256:{}", hex::encode(digest)),
+            }],
+            now_secs,
+            "trace-cli-trust-scan-release-history",
+        )
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    warnings.push(format!(
+        "{summary}; risk raised to {:?} (the {profile} threshold is {threshold:.2})",
+        marked.user_facing_risk_assessment.level
+    ));
+    Ok(Some(marked))
 }
 
 fn fetch_trust_scan_dependent_count(
@@ -22021,6 +22102,20 @@ fn run_trust_scan(
             }
             created_cards = created_cards.saturating_add(1);
             (card, TrustScanItemStatus::Created)
+        };
+        let card = if deep_fetched {
+            apply_release_history_camouflage(
+                &mut state.registry,
+                &dependency.extension_id,
+                &deep_metadata.release_window,
+                config.profile,
+                &card,
+                now_secs,
+                &mut warnings,
+            )?
+            .unwrap_or(card)
+        } else {
+            card
         };
         warnings.extend(typosquat_warning);
         items.push(build_trust_scan_item(

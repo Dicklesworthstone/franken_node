@@ -14,6 +14,7 @@ pub mod provenance;
 pub mod provenance_gate;
 pub mod quarantine;
 pub mod registry_artifact;
+pub mod release_history;
 pub mod reputation;
 pub mod resolution_receipt;
 pub mod revocation_integration;

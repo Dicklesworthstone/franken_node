@@ -799,6 +799,10 @@ name = "trust_graph_cli_e2e"
 path = "tests/trust_graph_cli_e2e.rs"
 
 [[test]]
+name = "release_history_drift"
+path = "tests/release_history_drift.rs"
+
+[[test]]
 name = "operator_screens_cli_e2e"
 path = "tests/operator_screens_cli_e2e.rs"
 

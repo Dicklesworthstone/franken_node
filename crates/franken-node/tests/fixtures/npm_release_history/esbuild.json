@@ -1,0 +1,101 @@
+{
+ "_fixture": "Hermetic snapshot of registry.npmjs.org/esbuild trimmed on 2026-11-07 to the fields supply_chain::release_history reads (lifecycle scripts, dependencies, bin, gypfile, publish times).",
+ "name": "esbuild",
+ "time": {
+  "0.0.0": "2017-11-26T05:52:58.272Z",
+  "0.0.11": "2020-04-07T04:34:26.497Z",
+  "0.0.12": "2020-04-07T04:35:54.624Z",
+  "0.0.13": "2020-04-07T06:20:20.932Z",
+  "0.0.14": "2020-04-07T06:58:16.318Z",
+  "0.0.15": "2020-04-07T08:30:11.284Z",
+  "0.0.16": "2020-04-09T18:44:44.422Z",
+  "0.0.4": "2020-04-07T08:03:07.718Z",
+  "0.1.0": "2020-04-13T01:00:03.383Z",
+  "0.1.1": "2020-04-13T06:45:13.090Z",
+  "0.1.2": "2020-04-13T19:22:52.109Z",
+  "0.1.3": "2020-04-13T19:38:46.567Z"
+ },
+ "versions": {
+  "0.0.0": {},
+  "0.0.11": {
+   "dependencies": {
+    "esbuild-darwin-64": "0.0.11",
+    "esbuild-linux-64": "0.0.11",
+    "esbuild-windows-64": "0.0.11"
+   }
+  },
+  "0.0.12": {
+   "dependencies": {
+    "esbuild-darwin-64": "0.0.12",
+    "esbuild-linux-64": "0.0.12",
+    "esbuild-windows-64": "0.0.12"
+   }
+  },
+  "0.0.13": {
+   "scripts": {
+    "postinstall": "node install.js"
+   }
+  },
+  "0.0.14": {
+   "scripts": {
+    "postinstall": "node install.js"
+   }
+  },
+  "0.0.15": {
+   "bin": {
+    "esbuild": "bin/esbuild"
+   },
+   "scripts": {
+    "postinstall": "node install.js"
+   }
+  },
+  "0.0.16": {
+   "bin": {
+    "esbuild": "bin/esbuild"
+   },
+   "scripts": {
+    "postinstall": "node install.js"
+   }
+  },
+  "0.0.4": {
+   "bin": {
+    "esbuild": "bin/esbuild"
+   },
+   "scripts": {
+    "postinstall": "node install.js"
+   }
+  },
+  "0.1.0": {
+   "bin": {
+    "esbuild": "bin/esbuild"
+   },
+   "scripts": {
+    "postinstall": "node install.js"
+   }
+  },
+  "0.1.1": {
+   "bin": {
+    "esbuild": "bin/esbuild"
+   },
+   "scripts": {
+    "postinstall": "node install.js"
+   }
+  },
+  "0.1.2": {
+   "bin": {
+    "esbuild": "bin/esbuild"
+   },
+   "scripts": {
+    "postinstall": "node install.js"
+   }
+  },
+  "0.1.3": {
+   "bin": {
+    "esbuild": "bin/esbuild"
+   },
+   "scripts": {
+    "postinstall": "node install.js"
+   }
+  }
+ }
+}

@@ -60,10 +60,15 @@ Under `franken-node`:
   popular package is raised to high risk. This happens **before the
   package is admitted**. The scan does not see publisher account age
   (npm does not publish it) or a look-alike publisher username.
-- Behavior drift across releases is not yet on the card: the BPET
-  camouflage detector (`security::bpet::camouflage_detector`) can flag
-  `GradualCreep` in an observed-vs-declared capability series, but no
-  runtime path feeds it yet, so `camouflage_hints` stays empty.
+- The same `--deep` scan scores behavior drift across the package's own
+  recent releases: install hooks (`preinstall`/`install`/`postinstall`),
+  native builds, installed executables and runtime dependencies, from the
+  oldest of the last six stable releases up to the resolved one. The BPET
+  camouflage detector flags a phase shift or gradual creep, which lands on
+  the card as `camouflage_hints` and raises it to High at the profile's
+  threshold (strict 0.5, balanced 0.67, legacy-risky 0.9). This is
+  declared-manifest drift. Runtime behavior reaches the card only through
+  collector-attested `trust observe` measurements.
 - Under `strict`, `run` refuses a trusted dependency, and so the
   dependency never reaches the network, once the **revocation frontier**
   is more than 5 minutes old. Under `balanced` the same staleness is a
@@ -1526,7 +1531,7 @@ feature.
 
 | Primitive | Module | Properties | Reached by the default CLI |
 |---|---|---|---|
-| **Trust cards** | `supply_chain::trust_card` | Publisher identity, risk assessment, audit history, version tracking, camouflage hint, HMAC-signed snapshots, trusted-vs-untrusted source context | Yes: `trust`, `trust-card`, `run` preflight. Camouflage marking is library only |
+| **Trust cards** | `supply_chain::trust_card` | Publisher identity, risk assessment, audit history, version tracking, camouflage hint, HMAC-signed snapshots, trusted-vs-untrusted source context | Yes: `trust`, `trust-card`, `run` preflight. Camouflage marks come from `trust observe` and from `trust scan --deep` release-history drift |
 | **Revocation freshness gates** | `security::revocation_freshness{_gate}` | SafetyTier-based (Standard/Risky/Dangerous) age policies; `now >= expires_at` fail-closed semantics; bound to capability issuance | `revocation_freshness`: yes (`run` preflight, `remotecap issue`). `revocation_freshness_gate`: library only |
 | **Fleet quarantine state machine** | `api::fleet_quarantine`, `control_plane::fleet_transport`, `control_plane::fleet_http_server`, `control_plane::fleet_transport_http` | `QuarantineScope`, `FleetAction` (quarantine/revoke/release), signed `DecisionReceipt`, `ConvergencePhase` tracking, durable transport, live HTTP coordinator | Partly: `fleet serve/agent/status/release/reconcile` and `trust quarantine` run over the durable store or a live coordinator with signed decision receipts; `FleetControlManager` and the release-quorum logic are library only |
 | **Ecosystem reputation graph** | `supply_chain::trust_graph` | Publisher / extension / lockfile-dependency graph; rule-based trust propagation with per-node explanations; card-version transitions with audit causes; blast radius | Yes: `trust graph` |
@@ -1594,8 +1599,8 @@ The same model in words:
    artifacts that did not arrive with attestation metadata.
 4. **Reputation.** Trust cards aggregate what scans and syncs observe
    (vulnerabilities, typosquats, package age, maintainer fragility).
-   Camouflage assessment can raise a card's risk, but no command feeds
-   it trajectory data yet.
+   Camouflage assessment raises a card's risk from `trust observe`
+   measurements and from `trust scan --deep` release-history drift.
 5. **Currency.** Revocation freshness gates refuse risky and dangerous
    actions when the local frontier is older than policy allows.
 6. **Audience.** Capability tokens are bound to specific endpoints and
@@ -3531,7 +3536,7 @@ Profile selection changes concrete behavior. The salient differences:
 | Compatibility corpus pass rate (560 cases, 2026-09-26, same binary, back to back) | 70.71%: the same as balanced except `http` 3/50, since strict grants no network egress | 78.93% (fs 2/50) | 86.61% |
 | SSRF default | block | block | block |
 | Safe-mode auto-entry on crash-loop | after 3 validated native engine panics for one entrypoint in 60 s; a `deploy` policy can then roll back to a verified known-good release | same | same |
-| Camouflage severity threshold for risk bump | constant 0.50, not yet per profile | same | same |
+| Camouflage severity threshold for risk bump (`trust scan --deep` release-history drift) | 0.50 | 0.67 | 0.90 (`trust observe` findings use the card's fixed 0.50) |
 
 The profile string is canonicalized at load time and recorded in every
 decision receipt; replays under a different profile produce a
