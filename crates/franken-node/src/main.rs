@@ -29037,7 +29037,7 @@ const FLEET_CONTROL_PLANE_TOKEN_DEFAULT: &str = ".franken-node/keys/fleet-contro
 fn run_fleet_serve(args: &cli::FleetServeArgs) -> Result<()> {
     use control_plane::fleet_http_server::{
         FLEET_HTTP_LISTENING, FLEET_HTTP_SHUTDOWN, FleetControlPlaneService, FleetHttpEvent,
-        FleetHttpEventSink, FleetHttpServerConfig, FleetHttpServerControl,
+        FleetHttpEventSink, FleetHttpServerConfig, FleetHttpServerControl, FleetNodeCredentials,
         serve_fleet_control_plane,
     };
     use std::io::Write as _;
@@ -29066,7 +29066,7 @@ fn run_fleet_serve(args: &cli::FleetServeArgs) -> Result<()> {
         if !args.generate_token {
             anyhow::bail!(
                 "fleet control-plane token {} does not exist; rerun with --generate-token to \
-                 create it (0600) and copy it to each node's control_plane_token_path",
+                 create it (0600); use --node-credentials-file to enroll separate node credentials",
                 token_path.display()
             );
         }
@@ -29078,10 +29078,22 @@ fn run_fleet_serve(args: &cli::FleetServeArgs) -> Result<()> {
     let resolved = config::Config::resolve_for_fleet(None, config::CliOverrides::default())
         .map_err(|err| anyhow::anyhow!(err.to_string()))?;
     let state_dir = resolve_fleet_state_dir(Path::new("."), &resolved)?;
-    let service = Arc::new(
-        FleetControlPlaneService::open(state_dir.clone(), &token)
-            .map_err(|err| anyhow::anyhow!(err.to_string()))?,
-    );
+    let mut service = FleetControlPlaneService::open(state_dir.clone(), &token)
+        .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+    if let Some(path) = &args.node_credentials_file {
+        let credentials = FleetNodeCredentials::load(path)
+            .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+        service = service
+            .with_node_credentials(credentials)
+            .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+    }
+    let enrolled_node_count = service.enrolled_node_count();
+    let credential_mode = if args.node_credentials_file.is_some() {
+        "enrolled_nodes"
+    } else {
+        "shared_bearer"
+    };
+    let service = Arc::new(service);
     let control = FleetHttpServerControl::with_shutdown_flag(install_fleet_agent_shutdown_flag()?);
 
     let json = args.json;
@@ -29096,11 +29108,13 @@ fn run_fleet_serve(args: &cli::FleetServeArgs) -> Result<()> {
                 object.insert("state_dir".to_string(), store_display.clone().into());
                 object.insert("token_file".to_string(), token_display.clone().into());
                 object.insert("token_generated".to_string(), generated_token.into());
+                object.insert("credential_mode".to_string(), credential_mode.into());
+                object.insert("enrolled_node_count".to_string(), enrolled_node_count.into());
             }
             println!("{line}");
         } else if event.event_code == FLEET_HTTP_LISTENING {
             println!(
-                "fleet control plane listening on http://{} (store={store_display}, token={token_display}{})",
+                "fleet control plane listening on http://{} (store={store_display}, token={token_display}{}, credentials={credential_mode}, enrolled_nodes={enrolled_node_count})",
                 event.bound_addr.as_deref().unwrap_or("?"),
                 if generated_token { ", generated" } else { "" }
             );

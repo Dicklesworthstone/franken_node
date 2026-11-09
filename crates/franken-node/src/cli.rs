@@ -2191,10 +2191,17 @@ pub struct FleetServeArgs {
     #[arg(long, default_value = "127.0.0.1:9440")]
     pub bind: String,
 
-    /// File holding the bearer token clients must present. Defaults to
+    /// File holding the operator bearer token. Agents share it when no node
+    /// credentials file is configured. Defaults to
     /// `.franken-node/keys/fleet-control-plane.token`.
     #[arg(long)]
     pub token_file: Option<PathBuf>,
+
+    /// JSON enrollment binding each node bearer SHA-256 to one node and zone.
+    /// When configured, only enrolled node tokens may submit checkpoints;
+    /// the operator token retains read and administrative access.
+    #[arg(long)]
+    pub node_credentials_file: Option<PathBuf>,
 
     /// Create the token file (0600, 256 random bits) if it does not exist.
     #[arg(long)]
@@ -3989,6 +3996,7 @@ mod parser_contract_extra_tests {
             Command::Fleet(FleetCommand::Serve(args)) => {
                 assert_eq!(args.bind, "127.0.0.1:9440");
                 assert!(args.token_file.is_none());
+                assert!(args.node_credentials_file.is_none());
                 assert!(!args.generate_token);
                 assert!(!args.allow_non_loopback);
                 assert!(args.max_requests.is_none());
@@ -4003,6 +4011,8 @@ mod parser_contract_extra_tests {
             "127.0.0.1:0",
             "--token-file",
             "tok",
+            "--node-credentials-file",
+            "enrolled-nodes.json",
             "--generate-token",
             "--max-requests",
             "5",
@@ -4013,6 +4023,10 @@ mod parser_contract_extra_tests {
             Command::Fleet(FleetCommand::Serve(args)) => {
                 assert_eq!(args.bind, "127.0.0.1:0");
                 assert_eq!(args.token_file.as_deref(), Some(Path::new("tok")));
+                assert_eq!(
+                    args.node_credentials_file.as_deref(),
+                    Some(Path::new("enrolled-nodes.json"))
+                );
                 assert!(args.generate_token);
                 assert_eq!(args.max_requests, Some(5));
                 assert!(args.json);

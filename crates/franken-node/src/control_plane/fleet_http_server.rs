@@ -15,17 +15,23 @@
 //! staleness is judged on one clock for the whole fleet regardless of client
 //! clock skew.
 
+use std::collections::{BTreeMap, BTreeSet};
+use std::io::Read;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
+
+use crate::capacity_defaults::aliases::MAX_NODES_CAP;
 
 use super::fleet_transport::{
-    FleetActionRecord, FleetTransport, FleetTransportError, NodeStatus, validate_action_record,
-    validate_node_status,
+    FleetAction, FleetActionRecord, FleetTransport, FleetTransportError, NodeHealth, NodeStatus,
+    validate_action_record, validate_node_id, validate_node_status, validate_zone_id,
 };
 use super::fleet_transport_durable::DurableFleetTransport;
 use super::fleet_transport_http::{
@@ -43,6 +49,209 @@ pub const FLEET_HTTP_STORE_LABEL: &str = "frankensqlite_durable";
 pub const FLEET_HTTP_LISTENING: &str = "FLEET_HTTP_LISTENING";
 pub const FLEET_HTTP_REQUEST: &str = "FLEET_HTTP_REQUEST";
 pub const FLEET_HTTP_SHUTDOWN: &str = "FLEET_HTTP_SHUTDOWN";
+
+pub const FLEET_NODE_CREDENTIALS_SCHEMA: &str = "franken-node/fleet-node-credentials/v1";
+pub const MAX_FLEET_NODE_CREDENTIALS_BYTES: usize = 1 << 20;
+pub const MAX_FLEET_NODE_CREDENTIALS: usize = 1_024;
+
+/// Coordinator-owned enrollment. Only token digests belong in this file; the
+/// random bearer tokens remain in the separately provisioned agents' key files.
+/// Enrollment authenticates application checkpoints, not native quiescence.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NodeCredentialsDocument {
+    schema_version: String,
+    nodes: Vec<NodeCredentialRecord>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NodeCredentialRecord {
+    zone_id: String,
+    node_id: String,
+    token_sha256: String,
+}
+
+#[derive(Clone)]
+struct EnrolledNode {
+    zone_id: String,
+    node_id: String,
+    token_sha256: [u8; 32],
+}
+
+/// Validated, bounded enrollment for the existing TLS bearer transport. Each
+/// credential has exactly one concrete node/zone audience and no control-action
+/// authority. Restart the coordinator to apply an updated enrollment file.
+pub struct FleetNodeCredentials {
+    nodes: Vec<EnrolledNode>,
+}
+
+impl std::fmt::Debug for FleetNodeCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FleetNodeCredentials")
+            .field("node_count", &self.nodes.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl FleetNodeCredentials {
+    /// Load a bounded enrollment file without disclosing credential contents
+    /// in errors. Invalid/empty files never fall back to shared-token mode.
+    pub fn load(path: &Path) -> Result<Self, FleetTransportError> {
+        let file = std::fs::File::open(path).map_err(|_| {
+            FleetTransportError::not_initialized("cannot open fleet node credentials")
+        })?;
+        let metadata = file.metadata().map_err(|_| {
+            FleetTransportError::not_initialized("cannot inspect fleet node credentials")
+        })?;
+        if !metadata.is_file() || metadata.len() > MAX_FLEET_NODE_CREDENTIALS_BYTES as u64 {
+            return Err(FleetTransportError::not_initialized(
+                "fleet node credentials must be a regular file within the enrollment byte limit",
+            ));
+        }
+        let mut bytes = Vec::new();
+        file.take(MAX_FLEET_NODE_CREDENTIALS_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| {
+                FleetTransportError::not_initialized("cannot read fleet node credentials")
+            })?;
+        Self::from_json(&bytes)
+    }
+
+    pub fn from_json(bytes: &[u8]) -> Result<Self, FleetTransportError> {
+        if bytes.len() > MAX_FLEET_NODE_CREDENTIALS_BYTES {
+            return Err(FleetTransportError::not_initialized(
+                "fleet node credentials exceed the enrollment byte limit",
+            ));
+        }
+        let document: NodeCredentialsDocument = serde_json::from_slice(bytes).map_err(|_| {
+            FleetTransportError::not_initialized("invalid fleet node credentials document")
+        })?;
+        if document.schema_version != FLEET_NODE_CREDENTIALS_SCHEMA
+            || document.nodes.is_empty()
+            || document.nodes.len() > MAX_FLEET_NODE_CREDENTIALS
+        {
+            return Err(FleetTransportError::not_initialized(
+                "fleet node credentials require the supported schema and 1..=1024 enrolled nodes",
+            ));
+        }
+        let mut identities = BTreeSet::new();
+        let mut digests = BTreeSet::new();
+        let mut nodes = Vec::with_capacity(document.nodes.len());
+        for record in document.nodes {
+            validate_zone_id(&record.zone_id)?;
+            validate_node_id(&record.node_id)?;
+            if record.zone_id == "all"
+                || !identities.insert((record.zone_id.clone(), record.node_id.clone()))
+            {
+                return Err(FleetTransportError::not_initialized(
+                    "fleet node credentials require unique node/zone identities in concrete zones",
+                ));
+            }
+            if record.token_sha256.len() != 64
+                || !record
+                    .token_sha256
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            {
+                return Err(FleetTransportError::not_initialized(
+                    "fleet node credential pins must be lowercase SHA-256 digests",
+                ));
+            }
+            let digest: [u8; 32] = hex::decode(&record.token_sha256)
+                .ok()
+                .and_then(|bytes| bytes.try_into().ok())
+                .ok_or_else(|| {
+                    FleetTransportError::not_initialized("invalid fleet node credential pin")
+                })?;
+            if !digests.insert(digest) {
+                return Err(FleetTransportError::not_initialized(
+                    "fleet node credentials must not share a bearer token",
+                ));
+            }
+            nodes.push(EnrolledNode {
+                zone_id: record.zone_id,
+                node_id: record.node_id,
+                token_sha256: digest,
+            });
+        }
+        Ok(Self { nodes })
+    }
+}
+
+#[derive(Clone)]
+enum FleetPrincipal {
+    Operator,
+    Node { zone_id: String, node_id: String },
+}
+
+impl FleetPrincipal {
+    fn filter_actions(&self, actions: &mut Vec<FleetActionRecord>) {
+        if let Self::Node { zone_id, .. } = self {
+            actions.retain(|record| {
+                let action_zone = match &record.action {
+                    FleetAction::Quarantine { zone_id, .. }
+                    | FleetAction::Release { zone_id, .. }
+                    | FleetAction::PolicyUpdate { zone_id, .. } => zone_id,
+                    #[cfg(feature = "control-plane")]
+                    FleetAction::Revoke { scope, .. } => &scope.zone_id,
+                };
+                action_zone == "all" || action_zone == zone_id
+            });
+        }
+    }
+
+    fn filter_nodes(&self, nodes: &mut Vec<NodeStatus>) {
+        if let Self::Node { zone_id, node_id } = self {
+            nodes.retain(|status| &status.zone_id == zone_id && &status.node_id == node_id);
+        }
+    }
+}
+
+// Observations belong to one coordinator incarnation and bind the exact
+// accepted heartbeat. They are written/read on the same store thread as durable
+// heartbeats, so a concurrent request cannot authenticate an older read. A
+// different writer sharing the durable store cannot substitute a checkpoint
+// under an already authenticated identity. After restart, retained checkpoints
+// need a fresh node-authenticated heartbeat before convergence.
+type AuthenticatedNodes = BTreeMap<(String, String), NodeStatus>;
+
+fn enrolled_node_view(
+    nodes: &mut Vec<NodeStatus>,
+    credentials: &FleetNodeCredentials,
+    authenticated: &AuthenticatedNodes,
+) -> Result<(), FleetTransportError> {
+    let mut present = BTreeSet::new();
+    for node in nodes.iter_mut() {
+        present.insert((node.zone_id.clone(), node.node_id.clone()));
+        if authenticated.get(&(node.zone_id.clone(), node.node_id.clone())) != Some(&*node) {
+            node.applied_actions = None;
+        }
+    }
+    for node in &credentials.nodes {
+        if present.insert((node.zone_id.clone(), node.node_id.clone())) {
+            if nodes.len() >= MAX_NODES_CAP {
+                return Err(FleetTransportError::serialization(
+                    "enrolled fleet inventory exceeds the bounded node capacity",
+                ));
+            }
+            // Enrollment defines an expected participant, even before its
+            // first heartbeat. Absence must not shrink convergence's population.
+            nodes.push(NodeStatus {
+                zone_id: node.zone_id.clone(),
+                node_id: node.node_id.clone(),
+                last_seen: DateTime::<Utc>::UNIX_EPOCH,
+                quarantine_version: 0,
+                health: NodeHealth::Stale,
+                applied_actions: None,
+            });
+        }
+    }
+    nodes.sort_by(|left, right| {
+        (&left.zone_id, &left.node_id).cmp(&(&right.zone_id, &right.node_id))
+    });
+    Ok(())
+}
 
 /// One HTTP request as the service sees it.
 #[derive(Debug, Clone, Copy)]
@@ -133,15 +342,17 @@ pub struct FleetControlPlaneService {
     /// single-writer discipline the WAL store wants.
     store: Mutex<mpsc::Sender<StoreJob>>,
     token: String,
+    node_credentials: Option<Arc<FleetNodeCredentials>>,
     clock: fn() -> DateTime<Utc>,
 }
 
-type StoreJob = Box<dyn FnOnce(&mut DurableFleetTransport) + Send>;
+type StoreJob = Box<dyn FnOnce(&mut DurableFleetTransport, &mut AuthenticatedNodes) + Send>;
 
 impl std::fmt::Debug for FleetControlPlaneService {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FleetControlPlaneService")
             .field("token", &"<redacted>")
+            .field("enrolled_node_count", &self.enrolled_node_count())
             .finish_non_exhaustive()
     }
 }
@@ -172,9 +383,10 @@ impl FleetControlPlaneService {
                         return;
                     }
                 };
+                let mut authenticated_nodes = AuthenticatedNodes::new();
                 // Ends when the service (the only sender) is dropped.
                 while let Ok(job) = inbox.recv() {
-                    job(&mut transport);
+                    job(&mut transport, &mut authenticated_nodes);
                 }
             })
             .map_err(|err| FleetTransportError::io(format!("spawn fleet store thread: {err}")))?;
@@ -184,8 +396,66 @@ impl FleetControlPlaneService {
         Ok(Self {
             store: Mutex::new(jobs),
             token: token.to_string(),
+            node_credentials: None,
             clock: Utc::now,
         })
+    }
+
+    /// Require a distinct enrolled credential for every node acknowledgement.
+    /// The operator credential retains control-action and read authority only.
+    pub fn with_node_credentials(
+        mut self,
+        credentials: FleetNodeCredentials,
+    ) -> Result<Self, FleetTransportError> {
+        if self.node_credentials.is_some() {
+            return Err(FleetTransportError::not_initialized(
+                "restart the fleet coordinator to replace node enrollment",
+            ));
+        }
+        let operator_digest: [u8; 32] = Sha256::digest(self.token.as_bytes()).into();
+        if credentials
+            .nodes
+            .iter()
+            .any(|node| bool::from(operator_digest.ct_eq(&node.token_sha256)))
+        {
+            return Err(FleetTransportError::not_initialized(
+                "operator and node credentials must be distinct",
+            ));
+        }
+        self.node_credentials = Some(Arc::new(credentials));
+        Ok(self)
+    }
+
+    #[must_use]
+    pub fn enrolled_node_count(&self) -> usize {
+        self.node_credentials
+            .as_ref()
+            .map_or(0, |credentials| credentials.nodes.len())
+    }
+
+    fn authenticate(&self, authorization: Option<&str>) -> Option<FleetPrincipal> {
+        let token = authorization.and_then(parse_bearer_header)?;
+        validate_bearer_token(token).ok()?;
+        let is_operator = bearer_token_matches(token, &self.token);
+        let digest: [u8; 32] = Sha256::digest(token.as_bytes()).into();
+        let mut matched = None;
+        if let Some(credentials) = &self.node_credentials {
+            // Compare every pin in constant time; never stop at a matching
+            // prefix or skip later enrolled identities after a match.
+            for node in &credentials.nodes {
+                if bool::from(digest.ct_eq(&node.token_sha256)) {
+                    matched = Some(FleetPrincipal::Node {
+                        zone_id: node.zone_id.clone(),
+                        node_id: node.node_id.clone(),
+                    });
+                }
+            }
+        }
+        if is_operator {
+            Some(FleetPrincipal::Operator)
+        } else {
+            matched
+        }
     }
 
     /// Replace the heartbeat clock (deterministic tests).
@@ -235,18 +505,14 @@ impl FleetControlPlaneService {
             );
         }
 
-        let authorized = request
-            .authorization
-            .and_then(parse_bearer_header)
-            .is_some_and(|presented| bearer_token_matches(presented, &self.token));
-        if !authorized {
+        let Some(principal) = self.authenticate(request.authorization) else {
             return FleetHttpResponse::problem(
                 401,
                 "unauthorized",
                 "FLEET_HTTP_UNAUTHORIZED",
                 "a valid `Authorization: Bearer <token>` header is required",
             );
-        }
+        };
         if request.body.len() > FLEET_HTTP_MAX_REQUEST_BYTES {
             return FleetHttpResponse::problem(
                 413,
@@ -259,9 +525,42 @@ impl FleetControlPlaneService {
             );
         }
 
+        if request.method == "POST" {
+            let permitted = match (&principal, path) {
+                (FleetPrincipal::Operator, FLEET_HTTP_ACTIONS_PATH)
+                | (FleetPrincipal::Node { .. }, FLEET_HTTP_NODES_PATH) => true,
+                (FleetPrincipal::Operator, FLEET_HTTP_NODES_PATH) => {
+                    self.node_credentials.is_none()
+                }
+                _ => false,
+            };
+            if !permitted {
+                return FleetHttpResponse::problem(
+                    403,
+                    "forbidden",
+                    "FLEET_HTTP_CREDENTIAL_SCOPE",
+                    "credential is not authorized for this fleet operation",
+                );
+            }
+        }
+        if matches!(&principal, FleetPrincipal::Node { .. })
+            && request.method == "GET"
+            && path == FLEET_HTTP_STATE_PATH
+        {
+            return FleetHttpResponse::problem(
+                403,
+                "forbidden",
+                "FLEET_HTTP_CREDENTIAL_SCOPE",
+                "whole-fleet inventory and convergence require an operator credential",
+            );
+        }
+
+        let enrollment = self.node_credentials.clone();
+
         match (request.method, path) {
-            ("GET", FLEET_HTTP_ACTIONS_PATH) => self.with_transport(|transport| {
-                let actions = transport.list_actions()?;
+            ("GET", FLEET_HTTP_ACTIONS_PATH) => self.with_transport(move |transport, _| {
+                let mut actions = transport.list_actions()?;
+                principal.filter_actions(&mut actions);
                 Ok(FleetHttpResponse::json(
                     200,
                     "ok",
@@ -279,7 +578,7 @@ impl FleetControlPlaneService {
                 if let Err(err) = validate_action_record(&action) {
                     return invalid_record(&err);
                 }
-                self.with_transport(move |transport| {
+                self.with_transport(move |transport, _| {
                     transport.publish_action(&action)?;
                     Ok(FleetHttpResponse::json(
                         201,
@@ -292,17 +591,23 @@ impl FleetControlPlaneService {
                     ))
                 })
             }
-            ("GET", FLEET_HTTP_NODES_PATH) => self.with_transport(|transport| {
-                let nodes = transport.list_node_statuses()?;
-                Ok(FleetHttpResponse::json(
-                    200,
-                    "ok",
-                    &FleetHttpNodeList {
-                        schema_version: FLEET_HTTP_API_SCHEMA.to_string(),
-                        nodes,
-                    },
-                ))
-            }),
+            ("GET", FLEET_HTTP_NODES_PATH) => {
+                self.with_transport(move |transport, authenticated| {
+                    let mut nodes = transport.list_node_statuses()?;
+                    if let Some(credentials) = &enrollment {
+                        enrolled_node_view(&mut nodes, credentials, authenticated)?;
+                    }
+                    principal.filter_nodes(&mut nodes);
+                    Ok(FleetHttpResponse::json(
+                        200,
+                        "ok",
+                        &FleetHttpNodeList {
+                            schema_version: FLEET_HTTP_API_SCHEMA.to_string(),
+                            nodes,
+                        },
+                    ))
+                })
+            }
             ("POST", FLEET_HTTP_NODES_PATH) => {
                 let mut status: NodeStatus = match parse_body(request.body) {
                     Ok(status) => status,
@@ -311,10 +616,26 @@ impl FleetControlPlaneService {
                 if let Err(err) = validate_node_status(&status) {
                     return invalid_record(&err);
                 }
+                if let FleetPrincipal::Node { zone_id, node_id } = &principal
+                    && (status.zone_id != *zone_id || status.node_id != *node_id)
+                {
+                    return FleetHttpResponse::problem(
+                        403,
+                        "forbidden",
+                        "FLEET_HTTP_NODE_IDENTITY_MISMATCH",
+                        "heartbeat identity does not match the enrolled credential",
+                    );
+                }
                 let recorded_at = (self.clock)();
                 status.last_seen = recorded_at;
-                self.with_transport(move |transport| {
+                self.with_transport(move |transport, authenticated| {
                     transport.upsert_node_status(&status)?;
+                    if matches!(principal, FleetPrincipal::Node { .. }) {
+                        authenticated.insert(
+                            (status.zone_id.clone(), status.node_id.clone()),
+                            status.clone(),
+                        );
+                    }
                     Ok(FleetHttpResponse::json(
                         200,
                         "ok",
@@ -326,17 +647,22 @@ impl FleetControlPlaneService {
                     ))
                 })
             }
-            ("GET", FLEET_HTTP_STATE_PATH) => self.with_transport(|transport| {
-                let state = transport.read_shared_state()?;
-                Ok(FleetHttpResponse::json(
-                    200,
-                    "ok",
-                    &FleetHttpState {
-                        schema_version: FLEET_HTTP_API_SCHEMA.to_string(),
-                        state,
-                    },
-                ))
-            }),
+            ("GET", FLEET_HTTP_STATE_PATH) => {
+                self.with_transport(move |transport, authenticated| {
+                    let mut state = transport.read_shared_state()?;
+                    if let Some(credentials) = &enrollment {
+                        enrolled_node_view(&mut state.nodes, credentials, authenticated)?;
+                    }
+                    Ok(FleetHttpResponse::json(
+                        200,
+                        "ok",
+                        &FleetHttpState {
+                            schema_version: FLEET_HTTP_API_SCHEMA.to_string(),
+                            state,
+                        },
+                    ))
+                })
+            }
             (method, path) => method_not_allowed(method, path),
         }
     }
@@ -347,13 +673,14 @@ impl FleetControlPlaneService {
         &self,
         operation: impl FnOnce(
             &mut DurableFleetTransport,
+            &mut AuthenticatedNodes,
         ) -> Result<FleetHttpResponse, FleetTransportError>
         + Send
         + 'static,
     ) -> FleetHttpResponse {
         let (reply, answer) = mpsc::sync_channel(1);
-        let job: StoreJob = Box::new(move |transport| {
-            let _ = reply.send(operation(transport));
+        let job: StoreJob = Box::new(move |transport, authenticated| {
+            let _ = reply.send(operation(transport, authenticated));
         });
         let sent = {
             let sender = match self.store.lock() {
@@ -947,6 +1274,112 @@ mod tests {
         let err = FleetControlPlaneService::open(dir.path().join("fleet"), "short")
             .expect_err("weak token refused");
         assert!(err.to_string().contains("at least"), "{err}");
+    }
+
+    #[test]
+    fn node_credentials_reject_invalid_duplicate_and_unbounded_enrollment() {
+        let valid = serde_json::json!({
+            "schema_version": FLEET_NODE_CREDENTIALS_SCHEMA,
+            "nodes": [{"zone_id": "zone-a", "node_id": "node-a",
+                "token_sha256": hex::encode(Sha256::digest(b"node-a-independent-token"))}]
+        });
+        let parse = |value: &serde_json::Value| {
+            FleetNodeCredentials::from_json(&serde_json::to_vec(value).expect("encode document"))
+        };
+        assert!(parse(&valid).is_ok());
+        let mut empty = valid.clone();
+        empty["nodes"] = serde_json::json!([]);
+        let mut wrong_schema = valid.clone();
+        wrong_schema["schema_version"] = "future".into();
+        let mut duplicate_identity = valid.clone();
+        let mut second = duplicate_identity["nodes"][0].clone();
+        second["token_sha256"] = "b".repeat(64).into();
+        duplicate_identity["nodes"]
+            .as_array_mut()
+            .expect("nodes")
+            .push(second);
+        let mut duplicate_token = valid.clone();
+        let mut second = duplicate_token["nodes"][0].clone();
+        second["node_id"] = "node-b".into();
+        duplicate_token["nodes"]
+            .as_array_mut()
+            .expect("nodes")
+            .push(second);
+        let mut wildcard = valid.clone();
+        wildcard["nodes"][0]["zone_id"] = "all".into();
+        let mut invalid_id = valid.clone();
+        invalid_id["nodes"][0]["node_id"] = "../escape".into();
+        let mut short_digest = valid.clone();
+        short_digest["nodes"][0]["token_sha256"] = "a".repeat(63).into();
+        let mut uppercase_digest = valid.clone();
+        uppercase_digest["nodes"][0]["token_sha256"] = "A".repeat(64).into();
+        let mut plaintext = valid.clone();
+        plaintext["nodes"][0]["token"] = "secret-must-not-appear-in-errors".into();
+        let mut too_many = valid.clone();
+        too_many["nodes"] = serde_json::Value::Array(vec![
+            valid["nodes"][0].clone();
+            MAX_FLEET_NODE_CREDENTIALS + 1
+        ]);
+        for invalid in [
+            empty,
+            wrong_schema,
+            duplicate_identity,
+            duplicate_token,
+            wildcard,
+            invalid_id,
+            short_digest,
+            uppercase_digest,
+            plaintext,
+            too_many,
+        ] {
+            let error = parse(&invalid).expect_err("invalid enrollment must refuse");
+            assert!(
+                !error
+                    .to_string()
+                    .contains("secret-must-not-appear-in-errors")
+            );
+        }
+        let oversized = vec![b' '; MAX_FLEET_NODE_CREDENTIALS_BYTES + 1];
+        assert!(FleetNodeCredentials::from_json(&oversized).is_err());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("oversized-enrollment.json");
+        std::fs::write(&path, &oversized).expect("write oversized file");
+        assert!(FleetNodeCredentials::load(&path).is_err());
+        assert!(FleetNodeCredentials::load(dir.path()).is_err());
+    }
+
+    #[test]
+    fn enrolled_credentials_cannot_equal_the_operator_or_be_replaced_in_process() {
+        let enrollment = |token: &str| {
+            FleetNodeCredentials::from_json(
+                &serde_json::to_vec(&serde_json::json!({
+                    "schema_version": FLEET_NODE_CREDENTIALS_SCHEMA,
+                    "nodes": [{"zone_id": "zone-a", "node_id": "node-a",
+                        "token_sha256": hex::encode(Sha256::digest(token.as_bytes()))}]
+                }))
+                .expect("encode"),
+            )
+            .expect("valid enrollment")
+        };
+        let (_dir, service) = service();
+        let error = service
+            .with_node_credentials(enrollment(TOKEN))
+            .expect_err("role collision");
+        assert!(error.to_string().contains("distinct"));
+        assert!(!error.to_string().contains(TOKEN));
+        let (_dir, service) = self::service();
+        let service = service
+            .with_node_credentials(enrollment("first-node-credential"))
+            .expect("enroll node");
+        assert_eq!(service.enrolled_node_count(), 1);
+        let debug = format!("{service:?}");
+        assert!(!debug.contains(TOKEN));
+        assert!(!debug.contains("first-node-credential"));
+        assert!(
+            service
+                .with_node_credentials(enrollment("replacement-node-credential"))
+                .is_err()
+        );
     }
 
     #[test]

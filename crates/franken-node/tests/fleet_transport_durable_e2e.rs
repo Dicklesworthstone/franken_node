@@ -1158,6 +1158,283 @@ fn live_http_conflicts_and_legacy_routes_preserve_durable_actions_and_checkpoint
     );
 }
 
+#[cfg(feature = "fleet-control-plane-server")]
+#[test]
+fn live_http_enrollment_binds_identities_scopes_reads_and_requires_fresh_checkpoints() {
+    use frankenengine_node::control_plane::fleet_http_server::{
+        FLEET_NODE_CREDENTIALS_SCHEMA, FleetControlPlaneService, FleetHttpEventSink,
+        FleetHttpServerConfig, FleetHttpServerControl, FleetNodeCredentials,
+        serve_fleet_control_plane,
+    };
+    use frankenengine_node::control_plane::fleet_transport_http::HttpFleetTransport;
+    use sha2::{Digest, Sha256};
+    use std::sync::{Arc, mpsc};
+
+    struct StopOnDrop(Arc<FleetHttpServerControl>);
+    impl Drop for StopOnDrop {
+        fn drop(&mut self) {
+            self.0.request_shutdown();
+        }
+    }
+
+    let dir = tempfile::tempdir().expect("coordinator directory");
+    let operator_token = "operator-0123456789abcdef0123456789abcdef";
+    let first_a_token = "node-a-first-0123456789abcdef0123456789abcdef";
+    let rotated_a_token = "node-a-rotated-0123456789abcdef0123456789abcdef";
+    let node_b_token = "node-b-0123456789abcdef0123456789abcdef";
+    let action_a = sample_action("enrolled-a", "inc-a");
+    let mut action_b = sample_action("enrolled-b", "inc-b");
+    if let FleetAction::Quarantine { zone_id, .. } = &mut action_b.action {
+        *zone_id = "zone-b".into();
+    }
+    let mut action_all = sample_action("enrolled-all", "inc-all");
+    if let FleetAction::Quarantine { zone_id, .. } = &mut action_all.action {
+        *zone_id = "all".into();
+    }
+    let all_actions = vec![action_a.clone(), action_b.clone(), action_all.clone()];
+    let mut node_a = sample_node("enrolled-node-a");
+    node_a.applied_actions =
+        Some(fleet_application_checkpoint(&all_actions, "zone-a").expect("node-a checkpoint"));
+    let mut node_b = sample_node("enrolled-node-b");
+    node_b.zone_id = "zone-b".into();
+    node_b.applied_actions =
+        Some(fleet_application_checkpoint(&all_actions, "zone-b").expect("node-b checkpoint"));
+    {
+        let mut store = DurableFleetTransport::new(dir.path()).expect("legacy store");
+        store.initialize().expect("initialize legacy store");
+        for action in &all_actions {
+            store.publish_action(action).expect("retained action");
+        }
+        for node in [&node_a, &node_b] {
+            store.upsert_node_status(node).expect("legacy checkpoint");
+        }
+    }
+
+    // The second coordinator incarnation rotates one node credential and
+    // retains the durable store. Neither prior shared-bearer nor previously
+    // authenticated checkpoints may acquire fresh authority after restart.
+    for node_a_token in [first_a_token, rotated_a_token] {
+        let enrollment_path = dir.path().join("node-credentials.json");
+        std::fs::write(
+            &enrollment_path,
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version": FLEET_NODE_CREDENTIALS_SCHEMA,
+                "nodes": [
+                    {"zone_id": "zone-a", "node_id": "enrolled-node-a",
+                     "token_sha256": hex::encode(Sha256::digest(node_a_token.as_bytes()))},
+                    {"zone_id": "zone-b", "node_id": "enrolled-node-b",
+                     "token_sha256": hex::encode(Sha256::digest(node_b_token.as_bytes()))},
+                    {"zone_id": "zone-a", "node_id": "enrolled-node-missing",
+                     "token_sha256": hex::encode(Sha256::digest(b"missing-node-0123456789abcdef0123456789abcdef"))}
+                ]
+            }))
+            .expect("encode enrollment"),
+        )
+        .expect("write enrollment");
+        let service = FleetControlPlaneService::open(dir.path().to_path_buf(), operator_token)
+            .expect("open enrolled service")
+            .with_node_credentials(
+                FleetNodeCredentials::load(&enrollment_path).expect("enrollment"),
+            )
+            .expect("distinct operator and node identities");
+        assert_eq!(service.enrolled_node_count(), 3);
+        let service = Arc::new(service);
+        let control = FleetHttpServerControl::new();
+        let stop = StopOnDrop(Arc::clone(&control));
+        let (ready, bound) = mpsc::channel();
+        let sink: FleetHttpEventSink = Arc::new(move |event| {
+            if let Some(address) = &event.bound_addr {
+                let _ = ready.send(address.clone());
+            }
+        });
+        let server = std::thread::spawn(move || {
+            serve_fleet_control_plane(
+                service,
+                &FleetHttpServerConfig {
+                    bind: "127.0.0.1:0".into(),
+                    max_requests: None,
+                },
+                control,
+                sink,
+            )
+        });
+        let address = bound
+            .recv_timeout(Duration::from_secs(10))
+            .expect("listener ready");
+        let url = format!("http://{address}");
+        let client = |token: &str| {
+            HttpFleetTransport::new(&url, token, Duration::from_secs(5)).expect("HTTP client")
+        };
+        let mut operator = client(operator_token);
+        let mut agent_a = client(node_a_token);
+        let mut agent_b = client(node_b_token);
+        operator.initialize().expect("operator initialization");
+        agent_a.initialize().expect("node-a initialization");
+        agent_b.initialize().expect("node-b initialization");
+        let initial = operator.read_shared_state().expect("operator inventory");
+        assert_eq!(initial.actions, all_actions);
+        assert_eq!(initial.nodes.len(), 3);
+        assert!(
+            initial
+                .nodes
+                .iter()
+                .all(|node| node.applied_actions.is_none())
+        );
+
+        assert_eq!(
+            agent_a.list_actions().expect("zone-a actions"),
+            vec![action_a.clone(), action_all.clone()]
+        );
+        assert_eq!(
+            agent_b.list_actions().expect("zone-b actions"),
+            vec![action_b.clone(), action_all.clone()]
+        );
+        let own = agent_a.list_node_statuses().expect("node-a identity probe");
+        assert_eq!(own.len(), 1);
+        assert_eq!(own[0].node_id, node_a.node_id);
+        assert_eq!(own[0].zone_id, node_a.zone_id);
+        assert!(
+            agent_a
+                .read_shared_state()
+                .expect_err("no whole-fleet disclosure")
+                .to_string()
+                .contains("HTTP 403")
+        );
+        assert!(
+            agent_a
+                .publish_action(&release_action("node-release", "inc-a"))
+                .expect_err("agent has no control-action authority")
+                .to_string()
+                .contains("HTTP 403")
+        );
+        assert!(
+            operator
+                .upsert_node_status(&node_a)
+                .expect_err("operator cannot authenticate node acknowledgement")
+                .to_string()
+                .contains("HTTP 403")
+        );
+        let mut renamed_node = node_a.clone();
+        renamed_node.node_id = "renamed-node-a".into();
+        let mut changed_zone = node_a.clone();
+        changed_zone.zone_id = "zone-b".into();
+        for forged in [node_b.clone(), renamed_node, changed_zone] {
+            assert!(
+                agent_a
+                    .upsert_node_status(&forged)
+                    .expect_err("node identity substitution refused")
+                    .to_string()
+                    .contains("HTTP 403")
+            );
+        }
+        if node_a_token == rotated_a_token {
+            assert!(
+                client(first_a_token)
+                    .list_actions()
+                    .expect_err("rotated credential refused")
+                    .to_string()
+                    .contains("HTTP 401")
+            );
+        }
+        agent_a
+            .upsert_node_status(&node_a)
+            .expect("authenticated node-a checkpoint");
+        let partial = operator
+            .read_shared_state()
+            .expect("partial fresh inventory");
+        assert_eq!(
+            partial
+                .nodes
+                .iter()
+                .filter(|node| node.applied_actions.is_some())
+                .count(),
+            1
+        );
+        agent_b
+            .upsert_node_status(&node_b)
+            .expect("authenticated node-b checkpoint");
+        let complete = operator.read_shared_state().expect("fresh inventory");
+        assert_eq!(
+            complete.actions, all_actions,
+            "forbidden writes changed no action"
+        );
+        assert_eq!(
+            complete.nodes.len(),
+            3,
+            "forged identities were never stored"
+        );
+        for node in &complete.nodes {
+            if node.node_id == "enrolled-node-missing" {
+                assert_eq!(node.health, NodeHealth::Stale);
+                assert!(node.applied_actions.is_none());
+                assert_eq!(node.last_seen, chrono::DateTime::<Utc>::UNIX_EPOCH);
+                continue;
+            }
+            assert_eq!(
+                node.applied_actions,
+                Some(
+                    fleet_application_checkpoint(&all_actions, &node.zone_id)
+                        .expect("exact checkpoint")
+                )
+            );
+        }
+        // Another coordinator or local durable transport may share the store.
+        // An unauthenticated replacement must not inherit the genuine node's
+        // previously observed authority, even under the same node/zone key.
+        let mut replaced = complete
+            .nodes
+            .iter()
+            .find(|node| node.node_id == node_a.node_id)
+            .expect("authenticated node-a row")
+            .clone();
+        replaced
+            .applied_actions
+            .as_mut()
+            .expect("checkpoint")
+            .actions_sha256 = "0".repeat(64);
+        {
+            let mut other_writer = DurableFleetTransport::new(dir.path()).expect("second writer");
+            other_writer.initialize().expect("initialize second writer");
+            other_writer
+                .upsert_node_status(&replaced)
+                .expect("replace durable row outside enrolled HTTP authority");
+        }
+        let replaced_view = operator
+            .read_shared_state()
+            .expect("inventory after concurrent durable replacement");
+        assert!(
+            replaced_view
+                .nodes
+                .iter()
+                .find(|node| node.node_id == node_a.node_id)
+                .expect("retained node-a identity")
+                .applied_actions
+                .is_none()
+        );
+        assert_eq!(
+            replaced_view
+                .nodes
+                .iter()
+                .find(|node| node.node_id == node_b.node_id)
+                .expect("unchanged node-b acknowledgement")
+                .applied_actions,
+            node_b.applied_actions
+        );
+        agent_a
+            .upsert_node_status(&node_a)
+            .expect("only a new authenticated heartbeat restores the checkpoint");
+        assert_eq!(
+            agent_a.list_node_statuses().expect("restored node-a view")[0].applied_actions,
+            node_a.applied_actions
+        );
+        stop.0.request_shutdown();
+        server
+            .join()
+            .expect("server thread")
+            .expect("server drained");
+    }
+}
+
 #[test]
 fn legacy_import_rejects_conflicting_action_ids_without_replacing_history() {
     let dir = tempfile::tempdir().expect("tempdir");

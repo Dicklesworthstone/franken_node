@@ -8,6 +8,75 @@ The CLI uses a local FrankenSQLite durable store by default
 authenticated HTTP coordinator served by `franken-node fleet serve`. The explicit
 file transport remains available through the library.
 
+## Enrolled Agent Credentials
+
+The live coordinator can bind each agent credential to one exact node and zone:
+
+```bash
+franken-node fleet serve --token-file operator.token \
+  --node-credentials-file enrolled-nodes.json --json
+```
+
+`--token-file` remains the operator credential. Give each agent a separate random
+token through its existing `[fleet] control_plane_token_path`; do not copy the
+operator token to agents in this mode. The enrollment file holds SHA-256 pins of
+those tokens, computed from the token text without a trailing newline. For
+example, generate each token with `umask 077` followed by
+`openssl rand -hex 32 | tr -d '\n' > node-a.token`, then obtain its pin with
+`sha256sum node-a.token` (or `shasum -a 256 node-a.token` on macOS).
+
+```json
+{
+  "schema_version": "franken-node/fleet-node-credentials/v1",
+  "nodes": [
+    {
+      "zone_id": "zone-a",
+      "node_id": "node-a",
+      "token_sha256": "REPLACE_WITH_64_LOWERCASE_HEX_DIGITS"
+    }
+  ]
+}
+```
+
+The operator provisions this file on the coordinator. Each `(zone_id, node_id)`
+pair and token pin must be unique, node zones must be concrete (not `all`), and
+no node token may equal the operator token. The file is limited to 1 MiB and
+1,024 identities. Missing, malformed, empty, or ambiguous enrollment refuses
+startup. Pins and bearer tokens are not included in access logs or error text.
+
+| Credential | Read actions | Read nodes | Read whole fleet state | Publish actions | Submit heartbeat |
+|---|---|---|---|---|---|
+| Operator | All | All | Yes | Yes | Refused in enrolled mode |
+| Enrolled agent | Its zone and `all`, in append order | Its own identity only | Refused | Refused | Its exact node and zone only |
+
+Agent initialization continues to validate its authenticated node response.
+`fleet status`, `fleet reconcile`, and administration require the operator
+credential: they never present a filtered node view as whole-fleet convergence.
+An agent may not rename itself, switch zones, acknowledge another node, or
+publish a quarantine, release, revocation, or policy action. HTTP still requires
+HTTPS for non-loopback coordinator URLs; node identity is authenticated by the
+coordinator's credential mapping and the existing bearer transport.
+
+The enrollment is fixed for a coordinator process. Restart after changing pins
+or removing a credential. On startup, persisted application checkpoints remain
+unacknowledged in HTTP reads until their enrolled nodes submit fresh authenticated
+heartbeats. The stored records are preserved. This prevents historical
+shared-token heartbeats, a previous coordinator incarnation, or a removed
+credential from silently supplying fresh node-authenticated convergence.
+The coordinator retains the exact accepted heartbeat; a row changed by another
+writer sharing the durable store also needs a new authenticated heartbeat before
+its checkpoint can count.
+Enrolled nodes that have never heartbeated appear as stale with no checkpoint;
+they cannot disappear from the convergence population. Nodes that cannot
+authenticate remain pending; an operator token cannot replace their
+acknowledgement.
+
+Omitting `--node-credentials-file` retains the existing shared-bearer contract.
+Enrolled checkpoints prove which credential submitted an application claim;
+they do not prove native-session quiescence, successful effect cleanup, or an
+epoch barrier. Those stronger outcomes still require their separate session and
+effect evidence.
+
 ## Purpose
 
 Defines the operational policy for fleet-wide quarantine and revocation of nodes, tenants, or zones. These operations are used during security incidents, trust violations, or compliance breaches that require coordinated isolation of affected fleet segments.
@@ -147,8 +216,10 @@ crash between those writes causes idempotent desired-state reconciliation on
 restart; a failed poll clears an earlier checkpoint. The checkpoint represents
 the entire applied snapshot, so partial application conservatively remains
 non-converged. It is an authenticated agent claim through the existing transport,
-not a cryptographic attestation tied to an independently identified node: HTTP
-currently authenticates a shared bearer token.
+not a cryptographic quiescence attestation. With node enrollment enabled, the
+coordinator binds the submitted claim to the enrolled node and zone, and requires
+a fresh heartbeat after restart. Without enrollment, HTTP authenticates the
+shared bearer token and cannot distinguish node identities.
 
 Compaction retains unresolved quarantine history and unexpired incident history;
 revocations have no age-based expiry. A full in-memory action log refuses new
@@ -218,8 +289,8 @@ Only positive supported budgets are accepted. Unknown fields, invalid profile
 names, empty policies, and a digest that does not match the revision and contents
 are rejected. These checks also apply to direct HTTP and transport publications.
 The SHA-256 content commitment is an integrity binding; it is not an independent
-publisher signature. The HTTP coordinator continues to use its configured shared
-bearer authentication.
+publisher signature. HTTP policy publication requires the configured operator
+bearer credential; enrolled node credentials cannot publish control actions.
 
 Revisions increase within each exact action zone. Higher revisions must preserve
 or tighten every previously published restriction. Same-revision conflicting
