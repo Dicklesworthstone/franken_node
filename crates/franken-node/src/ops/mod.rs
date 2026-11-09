@@ -71,6 +71,8 @@ pub mod flow_gated_host_io;
 pub mod mitigation_synthesis;
 pub mod native_replay;
 #[cfg(feature = "engine")]
+pub(crate) mod native_session_control;
+#[cfg(feature = "engine")]
 pub mod native_session_inventory;
 pub mod operator_transcripts;
 pub mod proof_carrying_evidence;

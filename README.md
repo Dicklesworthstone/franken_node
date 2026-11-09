@@ -1078,6 +1078,19 @@ are listed separately, including when a project filter cannot attribute them.
 These records are the retained local population needed for later fleet drain
 reconciliation; they do not replace node enrollment or certify a fleet epoch.
 
+A responsive worker can now finish a cooperative stop requested by live control.
+Its inventory outcome is `control_stopped` only after the supervisor observes
+worker exit and verifies a final signed effect ledger. The outcome retains the
+ledger's counts and digest as `final_ledger_observed`. A hard stop or an unusable
+final response retains `interrupted` evidence instead. Neither outcome proves
+that a remote service completed or reversed an admitted request.
+`unknown_effect_sessions` also counts sessions whose final ledger contains a
+failed attempt, including cancellation after a request reached its peer.
+Final-ledger recovery during a control stop currently applies to runs without
+child-process authority. Process-authorized interruptions retain unknown effects
+after containment cleanup because their cancelled process receipts cannot yet
+distinguish pre-dispatch denial from a child that already ran.
+
 ```bash
 # coordinator
 franken-node fleet serve --bind 127.0.0.1:9440 --generate-token
@@ -2014,6 +2027,17 @@ and original timeout error with a separate `persistence_error`. Interrupted runs
 remain nonzero failures, produce no fabricated finalized host-effect ledger or
 automatic replay capture, and remain visible as source errors in incident
 coverage. `incident capture --from-run` explicitly refuses to certify them.
+
+Live controls can also stop a worker cooperatively. When that worker returns a
+valid final response within the bounded drain period, the interruption envelope
+additionally exposes `verified_final_host_effect_ledger`, also retained in
+`dispatch.host_effect_ledger` and the signed durable run decision. This is the
+worker's separately verified final ledger; the parent's WAL entries keep their
+original meaning. The original control refusal still makes the run fail, and
+replay certification remains unavailable. The final ledger is emitted even if
+receipt persistence fails. A cancellation observed after an admitted network
+call is recorded as a failed attempt with potentially unknown external effects,
+never as a pre-execution denial.
 
 An explicit `--evidence-path` can still import operator-authored evidence;
 the export reports `source_authenticated: false`. Captured-store files and inputs
@@ -4410,7 +4434,13 @@ operator should inspect and recover state.
 Already running native sessions retain their admitted entrypoint scopes and
 recheck local safe mode, dependency trust, and fleet policy every 250 ms between
 completed checks. A disallowed state interrupts the worker and its containment
-unit. A fleet update that changes effective instruction, parser, or network
+unit. The supervisor first requests cancellation over the authenticated session
+channel, closing admission to new host effects. It allows at most one second for
+the worker to drain and return final evidence, bounded further by the session's
+original absolute deadline. An unresponsive worker is killed through the existing
+containment boundary; reaching the absolute timeout still causes an immediate
+hard stop. Parent death or a malformed control frame still aborts the worker.
+A fleet update that changes effective instruction, parser, or network
 restrictions requires restarting the guest under that policy; equivalent newer
 revisions continue while advancing the observed revision floor. Applications
 are not automatically restarted. Renaming an already loaded entrypoint does
@@ -4424,7 +4454,9 @@ stopping the guest. `run --json` reports `control_trigger` and
 `control_indeterminate` (or `control_cleanup_unproven` if cleanup fails), with
 the actual interrupted-effect WAL and a persisted unsuccessful-run receipt.
 In-flight provider outcomes remain unknown; containment does not undo effects
-already committed. Remote fleet propagation still depends on agent polling,
+already committed. A cooperative stop can retain the provider's signed terminal
+failure without proving what a remote server did with its request. Remote fleet
+propagation still depends on agent polling,
 and a fleet action acknowledgement proves persistence rather than session
 quiescence. Live-control interruptions do not increment the panic counter.
 

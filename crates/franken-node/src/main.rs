@@ -11679,6 +11679,13 @@ fn build_run_decision_evidence_payload(
         payload["runtime_evidence_identity_capture_path"] =
             serde_json::to_value(&dispatch.runtime_evidence_identity_capture_path)
                 .context("failed serializing interrupted session identity path")?;
+        if let Some(ledger) = ledger {
+            // A cooperative stop may also recover a validated final response.
+            // Sign that complete ledger alongside the parent's WAL observation;
+            // the observation itself never becomes an engine-signed receipt.
+            payload["verified_final_host_effect_ledger"] = serde_json::to_value(ledger)
+                .context("failed serializing the cooperatively stopped run's final ledger")?;
+        }
     }
     Ok(payload)
 }
@@ -11756,6 +11763,13 @@ fn planned_run_incident_capture(
     receipt: &RunExecutionReceipt,
     dispatch: &ops::engine_dispatcher::RunDispatchReport,
 ) -> Option<RunIncidentCaptureRef> {
+    #[cfg(feature = "engine")]
+    if receipt.core.interruption_evidence.is_some() {
+        // A cooperative stop can recover a final ledger, but it remains an
+        // interrupted attempt. Do not name a replay incident that the source
+        // authenticator correctly refuses to certify.
+        return None;
+    }
     let ledger = dispatch.host_effect_ledger.as_ref()?;
     let tripped_control = !receipt.core.ssrf_violations.is_empty()
         || ledger.denied_count > 0
@@ -12174,8 +12188,8 @@ fn load_authenticated_run_ledger_record(
         .is_some_and(|evidence| !evidence.is_null())
     {
         anyhow::bail!(
-            "run {receipt_id} has indeterminate interrupted execution evidence; \
-             no finalized host-effect ledger is available for replay certification"
+            "run {receipt_id} has interrupted execution evidence; \
+             a recovered final ledger does not make control-stopped execution eligible for replay certification"
         );
     }
     let record_path = find_dated_record(
@@ -13729,8 +13743,7 @@ fn emit_failed_run_effect_evidence(
 /// `interrupted_indeterminate`.
 #[cfg(feature = "engine")]
 fn emit_interrupted_run_effect_evidence(
-    evidence: &ops::engine_dispatcher::NativeEffectInterruptionEvidence,
-    error: &str,
+    interruption: &ops::engine_dispatcher::NativeRunInterruption,
     json: bool,
     console_only: bool,
     persisted: Option<&RunCommandOutput>,
@@ -13739,19 +13752,29 @@ fn emit_interrupted_run_effect_evidence(
     if console_only {
         return Ok(());
     }
+    let evidence = interruption.effect_evidence();
+    let verified_final_ledger = interruption.verified_final_host_effect_ledger();
     if json {
         let mut envelope = serde_json::to_value(evidence)
             .context("failed serializing interrupted-run host-effect evidence")?;
         envelope["success"] = serde_json::Value::Bool(false);
-        envelope["error"] = serde_json::Value::String(error.to_string());
-        // Console is carried in the worker's final response. An interrupted
-        // worker has not supplied it; empty report buffers prove no absence.
+        envelope["error"] = serde_json::Value::String(interruption.to_string());
+        // Interrupted reports do not recover authenticated guest console, even
+        // when the final ledger is available. Empty buffers do not prove silence.
         envelope["guest_output_available"] = serde_json::Value::Bool(false);
+        if let Some(ledger) = verified_final_ledger {
+            envelope["verified_final_host_effect_ledger"] = serde_json::to_value(ledger)
+                .context("failed serializing the cooperative stop's verified final ledger")?;
+        }
         if let Some(output) = persisted {
             envelope["preflight"] = serde_json::to_value(&output.preflight)?;
             envelope["dispatch"] = serde_json::to_value(&output.dispatch)?;
             envelope["receipt"] = serde_json::to_value(&output.receipt)?;
             envelope["receipt_path"] = serde_json::Value::String(output.receipt_path.clone());
+        } else if let Some(dispatch) = interruption.dispatch_report() {
+            // Retain the product-signed identity capture needed to verify a
+            // recovered ledger even when receipt storage itself failed.
+            envelope["dispatch"] = serde_json::to_value(dispatch)?;
         }
         if let Some(error) = persistence_error {
             envelope["persistence_error"] = serde_json::Value::String(error.to_string());
@@ -13769,7 +13792,12 @@ fn emit_interrupted_run_effect_evidence(
             render_run_execution_receipt_summary(&output.receipt, Path::new(&output.receipt_path),)
         );
     }
-    if evidence.terminal_state == "timeout_cleanup_unproven"
+    if let Some(ledger) = verified_final_ledger {
+        println!(
+            "run stopped by live control with a verified final host-effect ledger; the control refusal remains in effect and replay certification is refused"
+        );
+        println!("{}", render_host_effect_ledger_human(ledger));
+    } else if evidence.terminal_state == "timeout_cleanup_unproven"
         || evidence.terminal_state == "control_cleanup_unproven"
     {
         println!(
@@ -36264,8 +36292,7 @@ fn main() -> Result<()> {
                             err.downcast_ref::<ops::engine_dispatcher::NativeRunInterruption>()
                         {
                             emit_interrupted_run_effect_evidence(
-                                interruption.effect_evidence(),
-                                &interruption.to_string(),
+                                interruption,
                                 json,
                                 console_only,
                                 None,
@@ -36445,8 +36472,7 @@ fn main() -> Result<()> {
                             error.downcast_ref::<ops::engine_dispatcher::NativeRunInterruption>()
                         {
                             emit_interrupted_run_effect_evidence(
-                                interruption.effect_evidence(),
-                                &interruption.to_string(),
+                                interruption,
                                 json,
                                 console_only,
                                 None,
@@ -36505,8 +36531,7 @@ fn main() -> Result<()> {
                 #[cfg(feature = "engine")]
                 if let Some(interruption) = interruption {
                     emit_interrupted_run_effect_evidence(
-                        interruption.effect_evidence(),
-                        &interruption.to_string(),
+                        interruption,
                         json,
                         console_only,
                         Some(&output),

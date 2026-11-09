@@ -314,7 +314,10 @@ console.log('UNAUTHORIZED_ARGV_RESULT:' + JSON.stringify(result));
     );
     assert!(!outcome.stdout.contains("UNAUTHORIZED_ARGV_RESULT:"));
     assert!(
-        outcome.stderr.to_ascii_lowercase().contains("ambient authority"),
+        outcome
+            .stderr
+            .to_ascii_lowercase()
+            .contains("ambient authority"),
         "failure must identify the authority boundary, not a generic parser failure: {}",
         outcome.stderr
     );
@@ -1088,6 +1091,7 @@ mod live_native_containment {
     #[derive(Clone, Copy)]
     enum ControlChange {
         SafeMode,
+        SafeModeUnresponsiveWorker,
         RevokeDependency,
         TightenFleet,
         EquivalentFleetRevision,
@@ -1327,8 +1331,37 @@ mod live_native_containment {
             .expect("admitted request belongs to a live native worker");
         child.1 = Some((worker_pid, worker_start.clone()));
 
+        if matches!(change, ControlChange::SafeModeUnresponsiveWorker) {
+            // Freeze the actual admitted worker, including its control reader.
+            // A cooperative request cannot complete, so this must exercise the
+            // supervisor's bounded hard-stop fallback with an unmatched effect.
+            use rustix::process::{Pid, PidfdFlags, Signal, pidfd_open, pidfd_send_signal};
+            let pid = Pid::from_raw(i32::try_from(worker_pid).unwrap()).unwrap();
+            let worker_handle = pidfd_open(pid, PidfdFlags::empty())
+                .expect("pin the actual admitted native worker");
+            assert_eq!(
+                process_start_time(worker_pid).as_deref(),
+                Some(worker_start.as_str())
+            );
+            pidfd_send_signal(&worker_handle, Signal::STOP)
+                .expect("freeze the admitted native worker through its pinned identity");
+            let stopped_at = Instant::now();
+            loop {
+                let status = std::fs::read_to_string(format!("/proc/{worker_pid}/status"))
+                    .expect("frozen worker status");
+                if status.lines().any(|line| {
+                    line.strip_prefix("State:")
+                        .is_some_and(|state| state.trim_start().starts_with('T'))
+                }) {
+                    break;
+                }
+                assert!(stopped_at.elapsed() < Duration::from_secs(2));
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+
         let expected_trigger = match change {
-            ControlChange::SafeMode => {
+            ControlChange::SafeMode | ControlChange::SafeModeUnresponsiveWorker => {
                 cli(
                     project.path(),
                     &[
@@ -1441,7 +1474,7 @@ mod live_native_containment {
                 .as_str()
                 .expect("original live-control cause");
             match change {
-                ControlChange::SafeMode => {
+                ControlChange::SafeMode | ControlChange::SafeModeUnresponsiveWorker => {
                     assert!(
                         detail.contains("run blocked by active safe mode"),
                         "{detail}"
@@ -1465,19 +1498,56 @@ mod live_native_containment {
             );
             assert_eq!(evidence["replay_certified"], false);
             assert_eq!(evidence["journal_complete"], true);
-            assert_eq!(evidence["interrupted_effect_count"], 1);
             assert!(evidence["completed_effect_count"].as_u64().unwrap_or(0) >= 1);
-            assert!(
-                evidence["entries"].as_array().unwrap().iter().any(|entry| {
-                    entry["effect_kind"] == "network_request"
-                        && entry["state"] == "interrupted_indeterminate"
-                        && entry.get("policy_outcome").is_none()
-                        && entry.get("allowed").is_none()
-                        && entry.get("denied").is_none()
-                }),
-                "admitted external effect must remain indeterminate: {evidence}"
-            );
-            assert!(evidence["dispatch"]["host_effect_ledger"].is_null());
+            let network_entry = evidence["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|entry| entry["effect_kind"] == "network_request")
+                .expect("the sink-observed request remains in the parent journal");
+            assert!(network_entry.get("policy_outcome").is_none());
+            assert!(network_entry.get("allowed").is_none());
+            assert!(network_entry.get("denied").is_none());
+            let hard_stop = matches!(change, ControlChange::SafeModeUnresponsiveWorker);
+            if hard_stop {
+                assert_eq!(evidence["interrupted_effect_count"], 1);
+                assert_eq!(network_entry["state"], "interrupted_indeterminate");
+                assert!(evidence["verified_final_host_effect_ledger"].is_null());
+                assert!(evidence["dispatch"]["host_effect_ledger"].is_null());
+            } else {
+                assert_eq!(evidence["interrupted_effect_count"], 0);
+                assert_eq!(network_entry["state"], "provider_returned");
+                let ledger: frankenengine_node::ops::engine_dispatcher::HostEffectLedger =
+                    serde_json::from_value(evidence["verified_final_host_effect_ledger"].clone())
+                        .expect("cooperative stop must return its final signed effect ledger");
+                assert_eq!(
+                    evidence["verified_final_host_effect_ledger"],
+                    evidence["dispatch"]["host_effect_ledger"]
+                );
+                assert!(
+                    ledger.allowed_count >= 1,
+                    "the initial write really happened"
+                );
+                assert!(
+                    ledger.failed_count >= 1,
+                    "the admitted HTTP call was interrupted"
+                );
+                assert_eq!(
+                    ledger.denied_count, 0,
+                    "cancellation after the sink received the request is not pre-execution denial"
+                );
+                let capture_path = Path::new(
+                    evidence["dispatch"]["runtime_evidence_identity_capture_path"]
+                        .as_str()
+                        .expect("independent product-signed session capture"),
+                );
+                frankenengine_node::ops::engine_dispatcher::verify_recorded_host_effect_ledger(
+                    project.path(),
+                    &ledger,
+                    capture_path,
+                )
+                .expect("retained ledger verifies independently against the product root");
+            }
             assert!(evidence["receipt"]["incident_capture"].is_null());
             assert_eq!(
                 evidence["receipt"]["interruption_evidence"]["control_trigger"],
@@ -1493,6 +1563,78 @@ mod live_native_containment {
             )
             .expect("persisted receipt JSON");
             assert_eq!(persisted, evidence["receipt"]);
+
+            use frankenengine_node::observability::evidence_ledger::{
+                DecisionKind, EvidenceEntry, verify_evidence_entry,
+            };
+            use frankenengine_node::observability::evidence_ledger_durable::DurableEvidenceLedger;
+            let decisions = DurableEvidenceLedger::open_default(project.path())
+                .expect("open retained run decisions")
+                .entries_json()
+                .expect("read retained run decisions");
+            let receipt_id = persisted["receipt_id"].as_str().unwrap();
+            let decision: EvidenceEntry = decisions
+                .iter()
+                .map(|row| serde_json::from_str::<EvidenceEntry>(row).unwrap())
+                .find(|entry| entry.decision_id == receipt_id)
+                .expect("live-control refusal retains a signed run decision");
+            let verifying_key = receipt_verifying_key(project.path());
+            verify_evidence_entry(&decision, &verifying_key)
+                .expect("the parent signs the final ledger and original interruption together");
+            assert_eq!(decision.decision_kind, DecisionKind::Deny);
+            assert_eq!(decision.payload["run_receipt_snapshot"], persisted);
+            assert_eq!(
+                decision.payload["verified_final_host_effect_ledger"],
+                evidence["verified_final_host_effect_ledger"]
+            );
+            if !hard_stop {
+                let mut altered = decision.clone();
+                altered.payload["verified_final_host_effect_ledger"]["failed_count"] =
+                    Value::from(0);
+                assert!(verify_evidence_entry(&altered, &verifying_key).is_err());
+            }
+
+            let inventory_output = Command::new(franken_node_bin())
+                .args(["fleet", "sessions", "--project"])
+                .arg(project.path())
+                .arg("--json")
+                .current_dir(project.path())
+                .output()
+                .expect("reopen retained native-session inventory in a new process");
+            assert!(inventory_output.status.success());
+            let inventory: Value = serde_json::from_slice(&inventory_output.stdout)
+                .expect("durable session inventory JSON");
+            assert_eq!(inventory["quiescence_certified"], false);
+            assert_eq!(
+                inventory["unknown_effect_sessions"], 1,
+                "a signed local failure cannot resolve what the HTTP peer did with an admitted request"
+            );
+            let retained = inventory["records"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|record| record["admission"]["session_nonce"] == evidence["session_nonce"])
+                .expect("the stopped attempt remains in the durable population");
+            assert_eq!(retained["outcome"]["process"], "worker_reaped");
+            assert_eq!(retained["outcome"]["containment_empty_observed"], false);
+            if hard_stop {
+                assert_eq!(retained["outcome"]["kind"], "interrupted");
+                assert_eq!(retained["outcome"]["effects"]["kind"], "interrupted");
+                assert_eq!(
+                    retained["outcome"]["effects"]["evidence"]["entries"],
+                    evidence["entries"]
+                );
+            } else {
+                assert_eq!(retained["outcome"]["kind"], "control_stopped");
+                assert_eq!(
+                    retained["outcome"]["effects"]["kind"],
+                    "final_ledger_observed"
+                );
+                assert_eq!(
+                    retained["outcome"]["effects"]["chain_head_hash"],
+                    evidence["verified_final_host_effect_ledger"]["chain_head_hash"]
+                );
+            }
         }
         let safe_mode = frankenengine_node::runtime::safe_mode::read_persisted_safe_mode(
             &project.path().join(".franken-node/safe-mode/state.json"),
@@ -1510,6 +1652,11 @@ mod live_native_containment {
     #[test]
     fn safe_mode_entry_terminates_an_already_running_native_session() {
         assert_native_session_observes_control(ControlChange::SafeMode);
+    }
+
+    #[test]
+    fn safe_mode_entry_hard_stops_an_unresponsive_native_worker_without_promoting_effects() {
+        assert_native_session_observes_control(ControlChange::SafeModeUnresponsiveWorker);
     }
 
     #[test]

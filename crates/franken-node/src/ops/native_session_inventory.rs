@@ -85,6 +85,9 @@ pub enum NativeSessionProcessObservation {
 pub enum NativeSessionOutcomeKind {
     Completed,
     ExecutionFailed,
+    /// Live control stopped the attempt, and its reaped worker supplied a
+    /// validated final ledger. This is not a containment or fleet certificate.
+    ControlStopped,
     Interrupted,
     TelemetryFailed,
     Panicked,
@@ -132,7 +135,14 @@ impl NativeSessionEffectObservation {
     }
 
     fn unknown(&self) -> bool {
-        matches!(self, Self::Interrupted { .. } | Self::Unknown)
+        match self {
+            // A signed failure is terminal local accounting, not evidence
+            // that an admitted operation made no external change. In
+            // particular, cancellation can follow a request reaching its peer.
+            Self::FinalLedgerObserved { failed_count, .. } => *failed_count > 0,
+            Self::Interrupted { .. } | Self::Unknown => true,
+            Self::NotStarted => false,
+        }
     }
 }
 
@@ -178,6 +188,8 @@ pub struct NativeSessionInventoryReport {
     /// Parent-observed worker reap, not remote effect or fleet quiescence.
     pub terminal_sessions: usize,
     pub unproven_process_sessions: usize,
+    /// Includes signed final ledgers with failed admitted attempts: knowing
+    /// that a provider returned does not resolve their possible external effects.
     pub unknown_effect_sessions: usize,
     pub records: Vec<NativeSessionInventoryRecord>,
     /// Older captures and captures provisioned before admission failed have no
@@ -238,10 +250,19 @@ fn validate_outcome(
     }
     if matches!(
         outcome.kind,
-        Kind::Completed | Kind::ExecutionFailed | Kind::TelemetryFailed | Kind::Panicked
+        Kind::Completed
+            | Kind::ExecutionFailed
+            | Kind::ControlStopped
+            | Kind::TelemetryFailed
+            | Kind::Panicked
     ) && outcome.process != Process::WorkerReaped
     {
         bail!("native-session final response lacks a parent-observed worker reap");
+    }
+    if outcome.kind == Kind::ControlStopped
+        && !matches!(outcome.effects, Effects::FinalLedgerObserved { .. })
+    {
+        bail!("cooperatively stopped native session lacks a validated final ledger");
     }
     match &outcome.effects {
         Effects::FinalLedgerObserved {
@@ -252,11 +273,13 @@ fn validate_outcome(
             chain_head_hash,
             ledger_sha256,
         } => {
-            if !matches!(outcome.kind, Kind::Completed | Kind::ExecutionFailed)
-                || allowed_count
-                    .checked_add(*denied_count)
-                    .and_then(|value| value.checked_add(*failed_count))
-                    != Some(*effect_count)
+            if !matches!(
+                outcome.kind,
+                Kind::Completed | Kind::ExecutionFailed | Kind::ControlStopped
+            ) || allowed_count
+                .checked_add(*denied_count)
+                .and_then(|value| value.checked_add(*failed_count))
+                != Some(*effect_count)
                 || !chain_head_hash
                     .strip_prefix("sha256:")
                     .is_some_and(valid_digest)
@@ -1055,6 +1078,119 @@ mod tests {
             read_inventory_at(&root, None).unwrap().records,
             report.records
         );
+    }
+
+    fn final_ledger_observation() -> NativeSessionEffectObservation {
+        // This fixture exercises inventory retention, not signature validation.
+        // Only the dispatcher may construct this summary from a verified ledger.
+        NativeSessionEffectObservation::FinalLedgerObserved {
+            effect_count: 3,
+            allowed_count: 1,
+            denied_count: 1,
+            failed_count: 1,
+            chain_head_hash: format!("sha256:{}", "a".repeat(64)),
+            ledger_sha256: "b".repeat(64),
+        }
+    }
+
+    #[test]
+    fn cooperative_stop_retains_final_ledger_after_reopening_without_certifying_quiescence() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("runtime-evidence");
+        let admission = fixture(&root, 30);
+        let nonce = admission.session_nonce.clone();
+        let mut guard = NativeSessionInventoryGuard::admit(&root, admission).unwrap();
+        guard.worker_started();
+        guard.worker_reaped();
+        guard.finish(
+            NativeSessionOutcomeKind::ControlStopped,
+            final_ledger_observation(),
+        );
+        drop(guard);
+
+        let report = read_inventory_at(&root, None).unwrap();
+        assert_eq!(report.pending_sessions, 0);
+        assert_eq!(report.terminal_sessions, 1);
+        assert_eq!(report.unknown_effect_sessions, 1);
+        assert!(!report.quiescence_certified);
+        assert_eq!(report.records[0].admission.session_nonce, nonce);
+        let outcome = report.records[0].outcome.as_ref().unwrap();
+        assert_eq!(outcome.kind, NativeSessionOutcomeKind::ControlStopped);
+        assert_eq!(
+            outcome.process,
+            NativeSessionProcessObservation::WorkerReaped
+        );
+        assert_eq!(outcome.effects, final_ledger_observation());
+        assert!(!outcome.containment_empty_observed);
+    }
+
+    #[test]
+    fn signed_failed_attempts_remain_unknown_even_with_complete_terminal_accounting() {
+        let mut effects = final_ledger_observation();
+        assert!(effects.unknown());
+        let NativeSessionEffectObservation::FinalLedgerObserved {
+            failed_count,
+            allowed_count,
+            ..
+        } = &mut effects
+        else {
+            unreachable!();
+        };
+        *failed_count = 0;
+        *allowed_count += 1;
+        assert!(!effects.unknown());
+        assert!(NativeSessionEffectObservation::Unknown.unknown());
+        assert!(!NativeSessionEffectObservation::NotStarted.unknown());
+    }
+
+    #[test]
+    fn cooperative_stop_requires_both_worker_reap_and_final_ledger() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("runtime-evidence");
+        let admission = fixture(&root, 31);
+        let guard = NativeSessionInventoryGuard::admit(&root, admission).unwrap();
+        let mut outcome = NativeSessionOutcome {
+            observed_at: Utc::now(),
+            kind: NativeSessionOutcomeKind::ControlStopped,
+            process: NativeSessionProcessObservation::Unproven,
+            containment_empty_observed: false,
+            effects: final_ledger_observation(),
+        };
+        assert!(guard.persist_outcome(&outcome).is_err());
+        outcome.process = NativeSessionProcessObservation::WorkerReaped;
+        outcome.effects = NativeSessionEffectObservation::Unknown;
+        assert!(guard.persist_outcome(&outcome).is_err());
+        assert!(
+            read_inventory_at(&root, None).unwrap().records[0]
+                .outcome
+                .is_none()
+        );
+        outcome.effects = final_ledger_observation();
+        guard.persist_outcome(&outcome).unwrap();
+        assert_eq!(
+            read_inventory_at(&root, None).unwrap().records[0].outcome,
+            Some(outcome)
+        );
+    }
+
+    #[test]
+    fn hard_interruption_cannot_be_promoted_to_a_final_ledger_observation() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("runtime-evidence");
+        let admission = fixture(&root, 32);
+        let guard = NativeSessionInventoryGuard::admit(&root, admission).unwrap();
+        let outcome = NativeSessionOutcome {
+            observed_at: Utc::now(),
+            kind: NativeSessionOutcomeKind::Interrupted,
+            process: NativeSessionProcessObservation::WorkerReaped,
+            containment_empty_observed: true,
+            effects: final_ledger_observation(),
+        };
+        assert!(guard.persist_outcome(&outcome).is_err());
+        let report = read_inventory_at(&root, None).unwrap();
+        assert_eq!(report.pending_sessions, 1);
+        assert_eq!(report.unknown_effect_sessions, 1);
+        assert!(!report.quiescence_certified);
     }
 
     #[test]

@@ -810,13 +810,33 @@ fn registry_revocation_stops_a_running_native_guest_and_retains_its_effect_obser
             .iter()
             .find(|record| record["admission"]["session_nonce"] == report["session_nonce"])
             .expect("revoked session remains in the durable inventory");
-        assert_eq!(retained["outcome"]["kind"], "interrupted");
         assert_eq!(retained["outcome"]["process"], "worker_reaped");
-        assert_eq!(retained["outcome"]["effects"]["kind"], "interrupted");
-        assert_eq!(
-            retained["outcome"]["effects"]["evidence"]["control_trigger"],
-            report["control_trigger"]
-        );
+        if report["verified_final_host_effect_ledger"].is_null() {
+            assert_eq!(retained["outcome"]["kind"], "interrupted");
+            assert_eq!(retained["outcome"]["effects"]["kind"], "interrupted");
+            assert_eq!(
+                retained["outcome"]["effects"]["evidence"]["control_trigger"],
+                report["control_trigger"]
+            );
+        } else {
+            // A responsive worker may now finalize its ledger after revocation.
+            // The run still fails, and this local observation cannot certify
+            // remote effect quiescence or erase its controlling trust refusal.
+            assert_eq!(retained["outcome"]["kind"], "control_stopped");
+            assert_eq!(
+                retained["outcome"]["effects"]["kind"],
+                "final_ledger_observed"
+            );
+            assert_eq!(
+                retained["outcome"]["effects"]["chain_head_hash"],
+                report["verified_final_host_effect_ledger"]["chain_head_hash"]
+            );
+            assert_eq!(
+                report["verified_final_host_effect_ledger"],
+                report["dispatch"]["host_effect_ledger"]
+            );
+            assert_eq!(report["interrupted_effect_count"], 0);
+        }
     }
 }
 
@@ -827,15 +847,36 @@ fn registry_source_capsule_admits_native_cjs_and_esm() {
     use frankenengine_node::tools::replay_bundle::parse_verified_run_ledger_record;
     for (esm, native_terminals) in [(false, false), (true, false), (false, true), (true, true)] {
         let (fixture, expected_output) = match (esm, native_terminals) {
-            (false, true) => (PublishedSourceFixture::with_modules("app.cjs", &[
-                ("app.cjs", "const path = require('node:path'); const value = require('./side.cjs'); console.log('PUBLISHER_APPROVED_WORKLOAD', path.join('value', String(value))); try { require('./optional.cjs'); } catch (error) { console.log('OPTIONAL', error.code); }\n"),
-                ("side.cjs", "module.exports = 42;\n"),
-            ]), "PUBLISHER_APPROVED_WORKLOAD value/42\nOPTIONAL MODULE_NOT_FOUND\n"),
-            (true, true) => (PublishedSourceFixture::with_modules("app.mjs", &[
-                ("app.mjs", "import {join} from 'node:path'; import value from './side.mjs'; console.log('PUBLISHER_APPROVED_WORKLOAD', join('value', String(value))); import('./optional.mjs').catch(error => console.log('OPTIONAL', error.code));\n"),
-                ("side.mjs", "export default 42;\n"),
-            ]), "PUBLISHER_APPROVED_WORKLOAD value/42\nOPTIONAL ERR_MODULE_NOT_FOUND\n"),
-            _ => (PublishedSourceFixture::new(esm), "PUBLISHER_APPROVED_WORKLOAD 42\n"),
+            (false, true) => (
+                PublishedSourceFixture::with_modules(
+                    "app.cjs",
+                    &[
+                        (
+                            "app.cjs",
+                            "const path = require('node:path'); const value = require('./side.cjs'); console.log('PUBLISHER_APPROVED_WORKLOAD', path.join('value', String(value))); try { require('./optional.cjs'); } catch (error) { console.log('OPTIONAL', error.code); }\n",
+                        ),
+                        ("side.cjs", "module.exports = 42;\n"),
+                    ],
+                ),
+                "PUBLISHER_APPROVED_WORKLOAD value/42\nOPTIONAL MODULE_NOT_FOUND\n",
+            ),
+            (true, true) => (
+                PublishedSourceFixture::with_modules(
+                    "app.mjs",
+                    &[
+                        (
+                            "app.mjs",
+                            "import {join} from 'node:path'; import value from './side.mjs'; console.log('PUBLISHER_APPROVED_WORKLOAD', join('value', String(value))); import('./optional.mjs').catch(error => console.log('OPTIONAL', error.code));\n",
+                        ),
+                        ("side.mjs", "export default 42;\n"),
+                    ],
+                ),
+                "PUBLISHER_APPROVED_WORKLOAD value/42\nOPTIONAL ERR_MODULE_NOT_FOUND\n",
+            ),
+            _ => (
+                PublishedSourceFixture::new(esm),
+                "PUBLISHER_APPROVED_WORKLOAD 42\n",
+            ),
         };
         let output = fixture.run(&["--frozen-module-graph-hash", &fixture.graph_hash]);
         assert!(
@@ -876,10 +917,9 @@ fn registry_source_capsule_admits_native_cjs_and_esm() {
             &manifest.extension.provenance,
         )
         .unwrap();
-        let provenance_hash =
-            frankenengine_node::supply_chain::registry_artifact::artifact_sha256(
-                provenance.as_bytes(),
-            );
+        let provenance_hash = frankenengine_node::supply_chain::registry_artifact::artifact_sha256(
+            provenance.as_bytes(),
+        );
         assert_eq!(
             publisher.publisher_provenance_sha256.as_deref(),
             Some(provenance_hash.as_str())
@@ -952,9 +992,13 @@ fn registry_source_capsule_admits_native_cjs_and_esm() {
             // commitment too. A newly installed optional module cannot borrow
             // the old signature, even when the entry source stays unchanged.
             fs::write(
-                fixture.project.path().join(if esm { "optional.mjs" } else { "optional.cjs" }),
+                fixture
+                    .project
+                    .path()
+                    .join(if esm { "optional.mjs" } else { "optional.cjs" }),
                 "console.log('UNAPPROVED_OPTIONAL_MODULE');\n",
-            ).unwrap();
+            )
+            .unwrap();
             fixture.assert_denied(&[], "ERR_MODULE_REGISTRY_PIN_MISMATCH");
         }
     }

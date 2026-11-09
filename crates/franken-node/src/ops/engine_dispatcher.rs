@@ -143,6 +143,10 @@ pub(super) const NATIVE_SESSION_MAX_DIAGNOSTIC_BYTES: usize = 1024 * 1024;
 const NATIVE_SESSION_MAX_GUEST_OUTPUT_BYTES: usize = 10 * 1024 * 1024;
 #[cfg(feature = "engine")]
 const NATIVE_SESSION_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(2);
+/// Live-control cancellation may finalize cooperatively, but never borrow time
+/// from the absolute execution deadline. A hard timeout has no drain grace.
+#[cfg(feature = "engine")]
+const NATIVE_SESSION_CONTROL_DRAIN_BUDGET: std::time::Duration = std::time::Duration::from_secs(1);
 #[cfg(feature = "engine")]
 const NATIVE_RUN_CONTROL_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
 /// Bound the time a guest can run without a completed local control check.
@@ -1573,12 +1577,29 @@ fn reconcile_native_session_output(
     }
 }
 
-#[cfg(feature = "engine")]
+#[cfg(all(feature = "engine", test))]
 fn native_effect_interruption_evidence(
     output: &[u8],
     output_cap_exceeded: bool,
     expected_nonce: &str,
     allow_test_harness_noise: bool,
+) -> NativeEffectInterruptionEvidence {
+    native_effect_interruption_evidence_with_terminal(
+        output,
+        output_cap_exceeded,
+        expected_nonce,
+        allow_test_harness_noise,
+        false,
+    )
+}
+
+#[cfg(feature = "engine")]
+fn native_effect_interruption_evidence_with_terminal(
+    output: &[u8],
+    output_cap_exceeded: bool,
+    expected_nonce: &str,
+    allow_test_harness_noise: bool,
+    terminal_response_verified: bool,
 ) -> NativeEffectInterruptionEvidence {
     let parsed = parse_native_session_output(output, allow_test_harness_noise);
     let mut reconciled = reconcile_native_session_output(parsed, expected_nonce);
@@ -1588,7 +1609,10 @@ fn native_effect_interruption_evidence(
             NATIVE_SESSION_MAX_OUTPUT_STREAM_BYTES
         ));
     }
-    if reconciled.response.is_some() && reconciled.protocol_error.is_none() {
+    if reconciled.response.is_some()
+        && reconciled.protocol_error.is_none()
+        && !terminal_response_verified
+    {
         reconciled.protocol_error = Some(
             "native-session final response was observed before interruption termination"
                 .to_string(),
@@ -1635,7 +1659,7 @@ fn native_timeout_effect_evidence(
     )
 }
 
-#[cfg(feature = "engine")]
+#[cfg(all(feature = "engine", test))]
 fn native_interruption_effect_evidence(
     response_output: std::result::Result<(&[u8], bool), &str>,
     cleanup_failure: Option<&str>,
@@ -1643,15 +1667,35 @@ fn native_interruption_effect_evidence(
     allow_test_harness_noise: bool,
     control_trigger: Option<NativeRunControlTrigger>,
 ) -> NativeEffectInterruptionEvidence {
+    native_interruption_effect_evidence_with_terminal(
+        response_output,
+        cleanup_failure,
+        expected_nonce,
+        allow_test_harness_noise,
+        control_trigger,
+        false,
+    )
+}
+
+#[cfg(feature = "engine")]
+fn native_interruption_effect_evidence_with_terminal(
+    response_output: std::result::Result<(&[u8], bool), &str>,
+    cleanup_failure: Option<&str>,
+    expected_nonce: &str,
+    allow_test_harness_noise: bool,
+    control_trigger: Option<NativeRunControlTrigger>,
+    terminal_response_verified: bool,
+) -> NativeEffectInterruptionEvidence {
     let (output, output_cap_exceeded, response_failure) = match response_output {
         Ok((output, output_cap_exceeded)) => (output, output_cap_exceeded, None),
         Err(error) => (&[][..], false, Some(error)),
     };
-    let mut evidence = native_effect_interruption_evidence(
+    let mut evidence = native_effect_interruption_evidence_with_terminal(
         output,
         output_cap_exceeded,
         expected_nonce,
         allow_test_harness_noise,
+        terminal_response_verified,
     );
     let interruption = if control_trigger.is_some() {
         evidence.terminal_state = "control_indeterminate".to_string();
@@ -2396,6 +2440,21 @@ struct WriteAheadHostIo<P: HostIoProvider> {
     emitter: Option<NativeEffectWalEmitter>,
 }
 
+/// A cancellation returned from inside an admitted provider call cannot undo
+/// its external effects. Preserve it as a failed attempt, never as evidence of
+/// a policy gate preventing the effect from reaching its sink.
+#[cfg(feature = "engine")]
+fn preserve_admitted_host_effect_outcome(outcome: HostIoOutcome) -> HostIoOutcome {
+    match outcome {
+        Err(HostIoError::Denied { reason }) if reason == "HOST_IO_EXECUTION_CANCELLED" => {
+            Err(HostIoError::Io {
+                detail: "admitted host effect was interrupted by execution cancellation; its external outcome may be unknown".to_string(),
+            })
+        }
+        outcome => outcome,
+    }
+}
+
 #[cfg(feature = "engine")]
 impl<P: HostIoProvider> WriteAheadHostIo<P> {
     fn new(inner: P, emitter: Option<NativeEffectWalEmitter>) -> Self {
@@ -2410,7 +2469,7 @@ impl<P: HostIoProvider> WriteAheadHostIo<P> {
         execute: impl FnOnce() -> HostIoOutcome,
     ) -> HostIoOutcome {
         let Some(emitter) = self.emitter.as_ref() else {
-            return execute();
+            return preserve_admitted_host_effect_outcome(execute());
         };
         let sequence = match emitter.admit(request) {
             Ok(sequence) => sequence,
@@ -2422,7 +2481,7 @@ impl<P: HostIoProvider> WriteAheadHostIo<P> {
                 });
             }
         };
-        let outcome = execute();
+        let outcome = preserve_admitted_host_effect_outcome(execute());
         if let Err(error) = emitter.complete(sequence) {
             // The provider may already have changed external state. Preserve its
             // real outcome for the finalized ledger; if the session is killed
@@ -2563,14 +2622,150 @@ impl NativeEngineCancellation {
         &self.token
     }
 
+    /// Request cancellation without waiting for a provider that may be blocked
+    /// while holding the effect gate. The supervisor owns the bounded drain and
+    /// hard-kill deadline; this control thread must remain able to observe EOF.
+    fn request_cancel(&self) {
+        self.token.cancel();
+    }
+
     #[cfg(test)]
     fn cancel_and_wait_for_effects(&self) {
-        self.token.cancel();
+        self.request_cancel();
         let effect_guard = self
             .effect_gate
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         drop(effect_guard);
+    }
+}
+
+#[cfg(feature = "engine")]
+fn observe_native_session_cancellation(
+    reader: &mut impl Read,
+    expected_nonce: &str,
+    cancellation: &NativeEngineCancellation,
+) -> io::Result<()> {
+    loop {
+        crate::ops::native_session_control::read_cancel_request(reader, expected_nonce)?;
+        cancellation.request_cancel();
+    }
+}
+
+#[cfg(feature = "engine")]
+fn native_session_control_drain_deadline(
+    started: Instant,
+    timeout: std::time::Duration,
+    now: Instant,
+) -> Option<Instant> {
+    let remaining = timeout.checked_sub(now.saturating_duration_since(started))?;
+    let budget = remaining.min(NATIVE_SESSION_CONTROL_DRAIN_BUDGET);
+    if budget.is_zero() {
+        None
+    } else {
+        now.checked_add(budget)
+    }
+}
+
+#[cfg(feature = "engine")]
+#[derive(Debug, Clone, Copy)]
+enum NativeSessionControlCommand {
+    Cancel,
+    Release,
+}
+
+#[cfg(feature = "engine")]
+struct NativeSessionRequestWriter {
+    commands: std::sync::mpsc::SyncSender<NativeSessionControlCommand>,
+    worker: thread::JoinHandle<()>,
+    outcome: std::sync::mpsc::Receiver<std::result::Result<(), String>>,
+}
+
+/// All potentially blocking control writes belong to this owned thread. The
+/// supervisor sends bounded commands with try_send and can always kill/reap at
+/// its deadline, including while the initial request has not finished writing.
+#[cfg(feature = "engine")]
+fn spawn_native_session_request_writer(
+    mut stream: impl Write + Send + 'static,
+    mut request_frame: Zeroizing<Vec<u8>>,
+    nonce: String,
+) -> io::Result<NativeSessionRequestWriter> {
+    let (sender, outcome) = std::sync::mpsc::channel();
+    let (commands, receiver) = std::sync::mpsc::sync_channel(1);
+    let worker = thread::Builder::new()
+        .name("franken-node-native-request-writer".to_string())
+        .spawn(move || {
+            let mut result = stream
+                .write_all(&request_frame)
+                .map_err(|error| format!("failed writing native-session request: {error}"));
+            // The authenticated stream remains live until worker exit. The
+            // serialized per-session signing seed does not need that lifetime.
+            request_frame.zeroize();
+            if result.is_ok() {
+                while let Ok(command) = receiver.recv() {
+                    match command {
+                        NativeSessionControlCommand::Cancel => {
+                            if let Err(error) =
+                                crate::ops::native_session_control::write_cancel_request(
+                                    &mut stream,
+                                    &nonce,
+                                )
+                            {
+                                result = Err(format!(
+                                    "failed requesting native-session cancellation: {error}"
+                                ));
+                                break;
+                            }
+                        }
+                        NativeSessionControlCommand::Release => break,
+                    }
+                }
+            }
+            drop(stream);
+            let _ = sender.send(result);
+        })?;
+    Ok(NativeSessionRequestWriter {
+        commands,
+        worker,
+        outcome,
+    })
+}
+
+#[cfg(feature = "engine")]
+fn receive_native_session_request_writer(
+    writer: NativeSessionRequestWriter,
+    allow_write_error_after_termination: bool,
+) -> std::result::Result<(), String> {
+    let NativeSessionRequestWriter {
+        commands,
+        worker,
+        outcome,
+    } = writer;
+    let _ = commands.try_send(NativeSessionControlCommand::Release);
+    // If a Cancel already fills the single slot, disconnection ends the loop
+    // after that command. Cleanup must never block while enqueueing Release.
+    drop(commands);
+    match outcome.recv_timeout(crate::config::timeouts::ENGINE_DISPATCH_PIPE_READER_TIMEOUT) {
+        Ok(write_result) => {
+            if worker.join().is_err() {
+                return Err("native-session request writer panicked".to_string());
+            }
+            if allow_write_error_after_termination {
+                Ok(())
+            } else {
+                write_result
+            }
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            Err("native-session request writer did not stop after worker termination".to_string())
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            if worker.join().is_err() {
+                Err("native-session request writer panicked".to_string())
+            } else {
+                Err("native-session request writer ended without a result".to_string())
+            }
+        }
     }
 }
 
@@ -4243,6 +4438,162 @@ fn validate_host_effect_ledger(
         .map_err(|error| format!("native-session ledger signature failed: {error}"))
 }
 
+/// Recover only the worker's independently signed terminal accounting. This is
+/// not a proof that an external effect committed, rolled back, or stayed silent:
+/// Failed receipts may describe admitted attempts with unknown external state.
+/// WAL request hashes and receipt argument hashes have different domains, so
+/// this also makes no claim of a cryptographic WAL-to-receipt bijection.
+#[cfg(feature = "engine")]
+fn verified_control_stop_ledger(
+    output: &[u8],
+    expected_nonce: &str,
+    trusted_identity: &EvidenceVerificationIdentity,
+    capture_replay: bool,
+    process_spawn_authority_granted: bool,
+    allow_test_harness_noise: bool,
+) -> std::result::Result<HostEffectLedger, String> {
+    if process_spawn_authority_granted {
+        // The engine process provider can return Denied after launching,
+        // signalling, or reaping a child. Its current final receipts cannot
+        // distinguish that attempted effect from a pre-dispatch refusal. Keep
+        // the real cancellation/containment cleanup, but withhold terminal
+        // accounting until that provider supplies a sound outcome contract.
+        return Err(
+            "native-session process authority does not yet support trustworthy cooperative terminal effect accounting; process outcomes remain unknown"
+                .to_string(),
+        );
+    }
+    let reconciled = reconcile_native_session_output(
+        parse_native_session_output(output, allow_test_harness_noise),
+        expected_nonce,
+    );
+    if let Some(error) = reconciled.protocol_error {
+        return Err(error);
+    }
+    if reconciled
+        .entries
+        .iter()
+        .any(|entry| entry.state != NativeEffectWalState::ProviderReturned)
+    {
+        return Err(
+            "native-session final response left an admitted host effect without completion"
+                .to_string(),
+        );
+    }
+    let (schema_version, nonce, ledger, stdout, stderr) = match reconciled.response {
+        Some(NativeSessionResponse::Completed {
+            schema_version,
+            nonce,
+            host_effect_ledger,
+            evidence_verification_identity,
+            stdout_base64,
+            stderr_base64,
+            native_replay,
+            ..
+        }) => {
+            if &evidence_verification_identity != trusted_identity {
+                return Err(
+                    "native-session response evidence identity did not match the product-signed capture"
+                        .to_string(),
+                );
+            }
+            if native_replay.is_some() != capture_replay {
+                return Err(
+                    "native-session replay capture did not match the requested capture mode"
+                        .to_string(),
+                );
+            }
+            if let Some(capture) = native_replay
+                && !matches!(
+                    capture.terminal_state()?,
+                    crate::ops::native_replay::NativeReplayTerminalState::Completed
+                )
+            {
+                return Err(
+                    "completed native-session response carried a failed replay capture".to_string(),
+                );
+            }
+            (
+                schema_version,
+                nonce,
+                host_effect_ledger,
+                stdout_base64,
+                stderr_base64,
+            )
+        }
+        Some(NativeSessionResponse::ExecutionFailed {
+            schema_version,
+            nonce,
+            host_effect_ledger,
+            stdout_base64,
+            stderr_base64,
+            native_replay,
+            ..
+        }) => {
+            if let Some(capture) = native_replay {
+                if !capture_replay {
+                    return Err("native-session replay inputs were not requested".to_string());
+                }
+                if !matches!(
+                    capture.terminal_state()?,
+                    crate::ops::native_replay::NativeReplayTerminalState::UncaughtException
+                        | crate::ops::native_replay::NativeReplayTerminalState::EngineFailure
+                ) {
+                    return Err("failed response carried a completed replay capture".to_string());
+                }
+            }
+            (
+                schema_version,
+                nonce,
+                host_effect_ledger,
+                stdout_base64,
+                stderr_base64,
+            )
+        }
+        _ => {
+            return Err(
+                "native-session control drain did not return terminal effect accounting"
+                    .to_string(),
+            );
+        }
+    };
+    if schema_version != NATIVE_SESSION_SCHEMA {
+        return Err("native-session response schema mismatch".to_string());
+    }
+    if !crate::security::constant_time::ct_eq(&nonce, expected_nonce) {
+        return Err("native-session response nonce mismatch".to_string());
+    }
+    // Validate even the console data we deliberately do not expose for an
+    // interrupted attempt. Malformed output cannot accompany trusted evidence.
+    decode_failed_guest_output(&stdout, &stderr)?;
+    let ledger = ledger.ok_or_else(|| {
+        "native-session control drain returned no finalized host-effect ledger".to_string()
+    })?;
+    validate_host_effect_ledger(&ledger, trusted_identity)?;
+    // Gates can contribute receipts without provider admission, but a final
+    // ledger with fewer total receipts than observed admissions is incomplete.
+    if ledger.effect_count < reconciled.entries.len() {
+        return Err("native-session final ledger omitted admitted provider effects".to_string());
+    }
+    if !reconciled.entries.is_empty()
+        && ledger.entries.iter().any(|entry| {
+            matches!(
+                &entry.receipt.policy_outcome,
+                crate::runtime::effect_receipt::PolicyOutcome::Denied { reason }
+                    if reason.contains("HOST_IO_EXECUTION_CANCELLED")
+            )
+        })
+    {
+        // Older or malformed workers can label an after-provider cancellation
+        // as a pre-dispatch denial. Without causal binding, withhold that claim.
+        return Err(
+            "native-session cancellation denial cannot account for admitted provider effects"
+                .to_string(),
+        );
+    }
+    Ok(ledger)
+}
+
 /// Re-verify a persisted host-effect ledger after the run: the identity
 /// capture at `capture_path` must sit in this user's runtime-evidence capture
 /// directory and be signed by this machine's runtime-evidence product root,
@@ -4350,6 +4701,7 @@ pub struct NativeEffectInterruptionEvidence {
 pub struct NativeRunInterruption {
     actionable: ActionableError,
     effect_evidence: Box<NativeEffectInterruptionEvidence>,
+    verified_final_host_effect_ledger: Option<Box<HostEffectLedger>>,
     runtime_evidence_identity_capture: Option<RuntimeEvidenceIdentityCapture>,
     runtime_evidence_identity_capture_path: Option<PathBuf>,
     dispatch_report: Option<Box<RunDispatchReport>>,
@@ -4362,10 +4714,25 @@ impl NativeRunInterruption {
         &self.effect_evidence
     }
 
+    /// A separately verified terminal ledger recovered during live-control
+    /// drain. This never changes the provider-returned/interrupted WAL states,
+    /// the control refusal, or the attempt's replay certification.
+    #[must_use]
+    pub fn verified_final_host_effect_ledger(&self) -> Option<&HostEffectLedger> {
+        self.verified_final_host_effect_ledger
+            .as_deref()
+            .or_else(|| {
+                self.dispatch_report
+                    .as_deref()
+                    .and_then(|report| report.host_effect_ledger.as_ref())
+            })
+    }
+
     /// The supervisor's report of the interrupted attempt. Its session identity
-    /// authenticates the provisioned key, not a finalized effect outcome. The
-    /// report contains no effect ledger, telemetry, or engine decision because
-    /// the worker did not complete the protocol that would authenticate them.
+    /// authenticates the provisioned key. A terminal effect ledger is retained
+    /// only when a live-control drain completed the validated worker protocol;
+    /// it is independent of the interrupted WAL and original control refusal.
+    /// The report contains no telemetry or engine decision.
     /// Guest output is unavailable; empty captured streams do not prove silence.
     #[must_use]
     pub fn dispatch_report(&self) -> Option<&RunDispatchReport> {
@@ -4396,7 +4763,10 @@ impl NativeRunInterruption {
                 stderr: Vec::new(),
             },
             telemetry: None,
-            host_effect_ledger: None,
+            host_effect_ledger: self
+                .verified_final_host_effect_ledger
+                .take()
+                .map(|ledger| *ledger),
             runtime_evidence_identity_capture: self.runtime_evidence_identity_capture.take(),
             runtime_evidence_identity_capture_path: self
                 .runtime_evidence_identity_capture_path
@@ -7321,28 +7691,31 @@ impl EngineDispatcher {
 
         // Read exactly one bounded frame without waiting for EOF. The parent
         // deliberately keeps stdin open for the rest of the session; a
-        // watchdog below treats EOF as proof that the supervising process died
-        // (including SIGKILL) and aborts this worker before it can outlive the
-        // trust boundary.
+        // watchdog below accepts only nonce-bound cancellation requests. EOF or
+        // a protocol fault still aborts this worker before it can outlive the
+        // supervising process (including after SIGKILL).
         let mut locked_stdin = stdin.lock();
         let request_frame = Zeroizing::new(
             read_native_session_frame(&mut locked_stdin, NATIVE_SESSION_MAX_REQUEST_BYTES)
                 .map_err(anyhow::Error::msg)?,
         );
         drop(locked_stdin);
+        let cancellation = NativeEngineCancellation::new();
+        let cancellation_for_control = cancellation.clone();
+        let control_nonce = expected_nonce.to_string();
         let _parent_liveness_watchdog = thread::Builder::new()
             .name("franken-node-native-parent-watchdog".to_string())
-            .spawn(|| {
+            .spawn(move || {
                 let stdin = io::stdin();
                 let mut control = stdin.lock();
-                let mut unexpected = [0_u8; 1];
-                loop {
-                    match control.read(&mut unexpected) {
-                        Ok(_) => std::process::abort(),
-                        Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                        Err(_) => std::process::abort(),
-                    }
-                }
+                let _ = observe_native_session_cancellation(
+                    &mut control,
+                    &control_nonce,
+                    &cancellation_for_control,
+                );
+                // Cancellation never releases parent liveness: continue
+                // reading until EOF/failure, then abort even while draining.
+                std::process::abort();
             })
             .context("failed spawning native-session parent-liveness watchdog")?;
         let request: NativeSessionRequest =
@@ -7515,7 +7888,6 @@ impl EngineDispatcher {
         let app_args = request.app_args;
         let capture_replay = request.capture_replay;
         let nonce = request.nonce;
-        let cancellation = NativeEngineCancellation::new();
         let effect_wal = NativeEffectWalEmitter::new(nonce.clone(), Box::new(io::stdout()));
         let spawned = spawn_caught_native_engine_worker(cleanup_for_worker, move || {
             #[cfg(feature = "test-support")]
@@ -7843,74 +8215,6 @@ impl EngineDispatcher {
                         Err(format!(
                             "native-session {label} reader ended without a result"
                         ))
-                    }
-                }
-            }
-        }
-
-        fn spawn_request_writer(
-            mut stream: impl Write + Send + 'static,
-            mut request_frame: Zeroizing<Vec<u8>>,
-        ) -> io::Result<(
-            mpsc::Sender<()>,
-            thread::JoinHandle<()>,
-            mpsc::Receiver<std::result::Result<(), String>>,
-        )> {
-            let (sender, receiver) = mpsc::channel();
-            let (release_sender, release_receiver) = mpsc::channel();
-            let worker = thread::Builder::new()
-                .name("franken-node-native-request-writer".to_string())
-                .spawn(move || {
-                    let result = stream
-                        .write_all(&request_frame)
-                        .map_err(|error| format!("failed writing native-session request: {error}"));
-                    // The control stream deliberately remains open until the
-                    // worker exits so Linux peer-credential checks retain a
-                    // live parent endpoint. The serialized session seed does
-                    // not need the same lifetime: erase the parent-side frame
-                    // immediately after the write completes.
-                    request_frame.zeroize();
-                    if result.is_ok() {
-                        let _ = release_receiver.recv();
-                    }
-                    drop(stream);
-                    let _ = sender.send(result);
-                })?;
-            Ok((release_sender, worker, receiver))
-        }
-
-        fn receive_request_writer(
-            writer: (
-                mpsc::Sender<()>,
-                thread::JoinHandle<()>,
-                mpsc::Receiver<std::result::Result<(), String>>,
-            ),
-            allow_write_error_after_termination: bool,
-        ) -> std::result::Result<(), String> {
-            let (release_sender, worker, receiver) = writer;
-            let _ = release_sender.send(());
-            match receiver
-                .recv_timeout(crate::config::timeouts::ENGINE_DISPATCH_PIPE_READER_TIMEOUT)
-            {
-                Ok(write_result) => {
-                    if worker.join().is_err() {
-                        return Err("native-session request writer panicked".to_string());
-                    }
-                    if allow_write_error_after_termination {
-                        Ok(())
-                    } else {
-                        write_result
-                    }
-                }
-                Err(mpsc::RecvTimeoutError::Timeout) => Err(
-                    "native-session request writer did not stop after worker termination"
-                        .to_string(),
-                ),
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    if worker.join().is_err() {
-                        Err("native-session request writer panicked".to_string())
-                    } else {
-                        Err("native-session request writer ended without a result".to_string())
                     }
                 }
             }
@@ -8636,7 +8940,11 @@ impl EngineDispatcher {
                 return Err(dispatch_error.to_actionable().into());
             }
         };
-        let request_writer = match spawn_request_writer(stdin, request_frame) {
+        let request_writer = match spawn_native_session_request_writer(
+            stdin,
+            request_frame,
+            nonce.clone(),
+        ) {
             Ok(writer) => writer,
             Err(error) => {
                 let cleanup_failure = native_session_cleanup_failure(
@@ -8677,40 +8985,117 @@ impl EngineDispatcher {
                     control_trigger,
                     worker_already_exited,
                 }) => {
-                    let process_cleanup = if worker_already_exited {
-                        session_inventory.worker_reaped();
-                        // try_wait already reaped this PID. Never send a
-                        // numeric PID/group signal that could hit a reused
-                        // identity. Process authority uses a pinned namespace
-                        // handle, whose existing empty proof still applies.
-                        match &containment {
-                            #[cfg(target_os = "linux")]
-                            NativeSessionContainment::Bubblewrap(unit) => {
-                                let result = wait_for_containment_unit_empty(unit);
-                                if result.is_ok() {
-                                    session_inventory.containment_empty();
+                    // A control refusal remains authoritative even if the
+                    // worker finalizes. Give only live-control interruption a
+                    // bounded cooperative drain; a hard deadline never waits.
+                    let mut observed_control_exit = None;
+                    if control_trigger.is_some() {
+                        if worker_already_exited {
+                            // Child caches a reaped status; this never signals a
+                            // numeric PID that could now identify another task.
+                            observed_control_exit = child.try_wait().ok().flatten();
+                        } else if let Some(drain_deadline) =
+                            native_session_control_drain_deadline(started, timeout, Instant::now())
+                            && request_writer
+                                .commands
+                                .try_send(NativeSessionControlCommand::Cancel)
+                                .is_ok()
+                        {
+                            loop {
+                                let now = Instant::now();
+                                if now >= drain_deadline || started.elapsed() >= timeout {
+                                    break;
                                 }
-                                result
+                                match child.try_wait() {
+                                    Ok(Some(status)) => {
+                                        observed_control_exit = Some(status);
+                                        break;
+                                    }
+                                    Ok(None) => {
+                                        thread::sleep(
+                                            NATIVE_SESSION_POLL_INTERVAL
+                                                .min(drain_deadline.saturating_duration_since(now))
+                                                .min(timeout.saturating_sub(started.elapsed())),
+                                        );
+                                    }
+                                    Err(_) => break,
+                                }
                             }
-                            NativeSessionContainment::ProcessGroup => Ok(()),
                         }
-                    } else {
-                        kill_and_reap_native_session(
-                            &mut child,
-                            &containment,
-                            &mut session_inventory,
-                        )
-                    };
-                    let request_writer_cleanup = receive_request_writer(request_writer, true);
+                        // A worker can exit during the final poll sleep. One
+                        // nonblocking status check avoids signaling that now
+                        // completed process or discarding its terminal evidence;
+                        // it never adds a wait beyond the execution deadline.
+                        if observed_control_exit.is_none() {
+                            observed_control_exit = child.try_wait().ok().flatten();
+                        }
+                    }
+                    let process_cleanup =
+                        if worker_already_exited || observed_control_exit.is_some() {
+                            session_inventory.worker_reaped();
+                            // try_wait already reaped this PID. Never send a
+                            // numeric PID/group signal that could hit a reused
+                            // identity. Process authority uses a pinned namespace
+                            // handle, whose existing empty proof still applies.
+                            match &containment {
+                                #[cfg(target_os = "linux")]
+                                NativeSessionContainment::Bubblewrap(unit) => {
+                                    let result = wait_for_containment_unit_empty(unit);
+                                    if result.is_ok() {
+                                        session_inventory.containment_empty();
+                                    }
+                                    result
+                                }
+                                NativeSessionContainment::ProcessGroup => Ok(()),
+                            }
+                        } else {
+                            kill_and_reap_native_session(
+                                &mut child,
+                                &containment,
+                                &mut session_inventory,
+                            )
+                        };
+                    let request_writer_cleanup =
+                        receive_native_session_request_writer(request_writer, true);
                     let response_drain = receive_reader(stdout_reader, "response");
                     let diagnostic_drain = receive_reader(stderr_reader, "diagnostics");
+                    let diagnostics_complete = diagnostic_drain
+                        .as_ref()
+                        .is_ok_and(|diagnostics| !diagnostics.cap_exceeded);
                     let cleanup_failure = native_session_cleanup_failure(
                         process_cleanup,
                         Some(request_writer_cleanup),
                         Some(response_drain.clone()),
                         Some(diagnostic_drain),
                     );
-                    let effect_evidence = native_interruption_effect_evidence(
+                    let mut terminal_evidence_rejection = None;
+                    let verified_final_host_effect_ledger = if cleanup_failure.is_none()
+                        && diagnostics_complete
+                        && observed_control_exit.is_some_and(|status| status.success())
+                    {
+                        response_drain.as_ref().ok().and_then(|response| {
+                            if response.cap_exceeded {
+                                return None;
+                            }
+                            match verified_control_stop_ledger(
+                                &response.bytes,
+                                &nonce,
+                                &expected_evidence_capture.evidence_verification_identity,
+                                capture_replay,
+                                process_spawn_admission.is_some(),
+                                cfg!(test),
+                            ) {
+                                Ok(ledger) => Some(Box::new(ledger)),
+                                Err(error) => {
+                                    terminal_evidence_rejection = Some(error);
+                                    None
+                                }
+                            }
+                        })
+                    } else {
+                        None
+                    };
+                    let mut effect_evidence = native_interruption_effect_evidence_with_terminal(
                         response_drain
                             .as_ref()
                             .map(|response| (response.bytes.as_slice(), response.cap_exceeded))
@@ -8719,13 +9104,31 @@ impl EngineDispatcher {
                         &nonce,
                         cfg!(test),
                         control_trigger.clone(),
+                        verified_final_host_effect_ledger.is_some(),
                     );
-                    session_inventory.finish(
-                        NativeSessionOutcomeKind::Interrupted,
-                        NativeSessionEffectObservation::Interrupted {
-                            evidence: Box::new(effect_evidence.clone()),
-                        },
-                    );
+                    if let Some(rejection) = terminal_evidence_rejection {
+                        let prefix = effect_evidence
+                            .protocol_error
+                            .take()
+                            .map_or_else(String::new, |error| format!("{error}; "));
+                        effect_evidence.protocol_error = Some(format!(
+                            "{prefix}terminal host-effect evidence was withheld: {rejection}"
+                        ));
+                        effect_evidence.journal_complete = false;
+                    }
+                    if let Some(ledger) = verified_final_host_effect_ledger.as_deref() {
+                        session_inventory.finish(
+                            NativeSessionOutcomeKind::ControlStopped,
+                            NativeSessionEffectObservation::from_verified_ledger(Some(ledger)),
+                        );
+                    } else {
+                        session_inventory.finish(
+                            NativeSessionOutcomeKind::Interrupted,
+                            NativeSessionEffectObservation::Interrupted {
+                                evidence: Box::new(effect_evidence.clone()),
+                            },
+                        );
+                    }
                     let actionable = if let Some(trigger) = control_trigger {
                         let cleanup_detail = cleanup_failure.map_or_else(String::new, |error| {
                             format!("; worker cleanup could not prove quiescence: {error}")
@@ -8757,6 +9160,7 @@ impl EngineDispatcher {
                     return Err(anyhow::Error::new(NativeRunInterruption {
                         actionable,
                         effect_evidence: Box::new(effect_evidence),
+                        verified_final_host_effect_ledger,
                         runtime_evidence_identity_capture: Some(expected_evidence_capture),
                         runtime_evidence_identity_capture_path: Some(evidence_capture_path),
                         dispatch_report: None,
@@ -8769,7 +9173,7 @@ impl EngineDispatcher {
                             &containment,
                             &mut session_inventory,
                         ),
-                        Some(receive_request_writer(request_writer, true)),
+                        Some(receive_native_session_request_writer(request_writer, true)),
                         Some(receive_reader(stdout_reader, "response")),
                         Some(receive_reader(stderr_reader, "diagnostics")),
                     );
@@ -8788,7 +9192,7 @@ impl EngineDispatcher {
             }
         };
 
-        let request_write_result = receive_request_writer(request_writer, false);
+        let request_write_result = receive_native_session_request_writer(request_writer, false);
         let response_result = receive_reader(stdout_reader, "response");
         let diagnostic_result = receive_reader(stderr_reader, "diagnostics");
         request_write_result.map_err(|message| {
@@ -11984,6 +12388,443 @@ mod tests {
     }
 
     #[cfg(feature = "engine")]
+    #[test]
+    fn native_control_drain_budget_never_extends_the_absolute_deadline() {
+        use std::time::Duration;
+
+        let started = Instant::now();
+        let now = started + Duration::from_secs(2);
+        let deadline = native_session_control_drain_deadline(started, Duration::from_secs(30), now)
+            .expect("live control has a bounded drain window");
+        assert_eq!(
+            deadline.duration_since(now),
+            NATIVE_SESSION_CONTROL_DRAIN_BUDGET
+        );
+        let clipped =
+            native_session_control_drain_deadline(started, Duration::from_millis(2_025), now)
+                .expect("remaining execution time is available");
+        assert_eq!(clipped.duration_since(now), Duration::from_millis(25));
+        for timeout in [
+            Duration::ZERO,
+            Duration::from_secs(1),
+            Duration::from_secs(2),
+        ] {
+            assert!(native_session_control_drain_deadline(started, timeout, now).is_none());
+        }
+        assert_eq!(
+            native_session_control_drain_deadline(started, Duration::MAX, now),
+            Some(deadline),
+            "an enormous configured timeout must not overflow Instant arithmetic"
+        );
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn native_control_watchdog_cancels_without_waiting_for_an_admitted_effect() {
+        use std::time::Duration;
+
+        let nonce = "00000000-0000-4000-8000-000000000181";
+        let cancellation = NativeEngineCancellation::new();
+        let held_effect = cancellation.effect_gate.lock().unwrap();
+        let mut requests = Vec::new();
+        for _ in 0..2 {
+            crate::ops::native_session_control::write_cancel_request(&mut requests, nonce).unwrap();
+        }
+        let observer_cancellation = cancellation.clone();
+        let (observed, result) = std::sync::mpsc::sync_channel(1);
+        let observer = thread::spawn(move || {
+            let error = observe_native_session_cancellation(
+                &mut io::Cursor::new(requests),
+                nonce,
+                &observer_cancellation,
+            )
+            .expect_err("EOF remains a parent-liveness failure after cancellation");
+            observed.send(error.kind()).unwrap();
+        });
+        assert_eq!(
+            result.recv_timeout(Duration::from_secs(1)).unwrap(),
+            io::ErrorKind::UnexpectedEof,
+            "the control thread must not wait on the held effect mutex"
+        );
+        assert!(cancellation.token().is_cancelled());
+        drop(held_effect);
+        observer.join().unwrap();
+
+        for foreign in [false, true] {
+            let cancellation = NativeEngineCancellation::new();
+            let mut bytes = Vec::new();
+            if foreign {
+                crate::ops::native_session_control::write_cancel_request(
+                    &mut bytes,
+                    "00000000-0000-4000-8000-000000000182",
+                )
+                .unwrap();
+            }
+            assert!(
+                observe_native_session_cancellation(
+                    &mut io::Cursor::new(bytes),
+                    nonce,
+                    &cancellation,
+                )
+                .is_err()
+            );
+            assert!(
+                !cancellation.token().is_cancelled(),
+                "EOF/foreign frames are not cancellation authority"
+            );
+        }
+    }
+
+    #[cfg(all(feature = "engine", unix))]
+    #[test]
+    fn native_control_writer_keeps_parent_liveness_open_after_cancellation() {
+        use std::os::unix::net::UnixStream;
+        use std::time::Duration;
+
+        let nonce = "00000000-0000-4000-8000-000000000183";
+        let (parent, mut worker) = UnixStream::pair().unwrap();
+        worker
+            .set_read_timeout(Some(Duration::from_millis(30)))
+            .unwrap();
+        let writer = spawn_native_session_request_writer(
+            parent,
+            Zeroizing::new(b"initial-request".to_vec()),
+            nonce.to_string(),
+        )
+        .unwrap();
+        let mut request = [0_u8; 15];
+        worker.read_exact(&mut request).unwrap();
+        assert_eq!(&request, b"initial-request");
+        writer
+            .commands
+            .try_send(NativeSessionControlCommand::Cancel)
+            .unwrap();
+        crate::ops::native_session_control::read_cancel_request(&mut worker, nonce).unwrap();
+        let mut byte = [0_u8; 1];
+        let still_open = worker
+            .read(&mut byte)
+            .expect_err("cancellation must keep the parent endpoint live");
+        assert!(matches!(
+            still_open.kind(),
+            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+        ));
+        receive_native_session_request_writer(writer, false).unwrap();
+        assert_eq!(
+            worker.read(&mut byte).unwrap(),
+            0,
+            "release closes parent liveness"
+        );
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn native_control_writer_backpressure_never_blocks_supervisor_commands() {
+        struct BlockedWriter {
+            entered: std::sync::mpsc::SyncSender<()>,
+            release: std::sync::mpsc::Receiver<()>,
+        }
+        impl Write for BlockedWriter {
+            fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+                self.entered.send(()).unwrap();
+                self.release.recv().unwrap();
+                Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "terminated worker",
+                ))
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let (entered, writing) = std::sync::mpsc::sync_channel(1);
+        let (terminate, release) = std::sync::mpsc::sync_channel(1);
+        let writer = spawn_native_session_request_writer(
+            BlockedWriter { entered, release },
+            Zeroizing::new(vec![1]),
+            "00000000-0000-4000-8000-000000000184".to_string(),
+        )
+        .unwrap();
+        writing
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        writer
+            .commands
+            .try_send(NativeSessionControlCommand::Cancel)
+            .unwrap();
+        assert!(matches!(
+            writer
+                .commands
+                .try_send(NativeSessionControlCommand::Release),
+            Err(std::sync::mpsc::TrySendError::Full(_)),
+        ));
+        terminate.send(()).unwrap();
+        receive_native_session_request_writer(writer, true).unwrap();
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn native_admitted_cancellation_is_an_attempt_and_later_calls_are_denied() {
+        use std::sync::atomic::AtomicUsize;
+
+        #[derive(Debug)]
+        struct CancelledProvider(Arc<AtomicUsize>);
+        impl HostIoProvider for CancelledProvider {
+            fn name(&self) -> &str {
+                "cancelled-after-provider-admission"
+            }
+            fn perform(&self, _: &HostIoRequest, _: &[HostIoCapability]) -> HostIoOutcome {
+                self.0.fetch_add(1, Ordering::AcqRel);
+                Err(HostIoError::Denied {
+                    reason: "HOST_IO_EXECUTION_CANCELLED".to_string(),
+                })
+            }
+        }
+        let calls = Arc::new(AtomicUsize::new(0));
+        let cancellation = NativeEngineCancellation::new();
+        let gate = CancellationGatedHostIo::new(
+            Arc::new(WriteAheadHostIo::new(
+                CancelledProvider(Arc::clone(&calls)),
+                Some(NativeEffectWalEmitter::new(
+                    "00000000-0000-4000-8000-000000000185".to_string(),
+                    Box::new(io::sink()),
+                )),
+            )),
+            cancellation.clone(),
+        );
+        let request = HostIoRequest::NetworkRecv {
+            endpoint: "127.0.0.1:80".to_string(),
+            max_len: 1,
+        };
+        let attempted = gate.perform(&request, &[HostIoCapability::NetworkRecv]);
+        assert!(
+            matches!(&attempted, Err(HostIoError::Io { detail }) if detail.contains("external outcome may be unknown"))
+        );
+        cancellation.request_cancel();
+        let denied = gate.perform(&request, &[HostIoCapability::NetworkRecv]);
+        assert!(matches!(&denied, Err(HostIoError::Denied { .. })));
+        assert_eq!(calls.load(Ordering::Acquire), 1);
+
+        let authority = host_effect_ledger_authority_for_test();
+        let ledger = EngineDispatcher::build_host_effect_ledger(
+            "control-cancel-admission-regression",
+            &[(request.clone(), attempted), (request, denied)],
+            &authority,
+            SecurityEpoch::from_raw(STANDARD_SECURITY_EPOCH),
+        )
+        .unwrap();
+        validate_host_effect_ledger(&ledger, &authority.verification_identity()).unwrap();
+        assert_eq!(ledger.failed_count, 1);
+        assert_eq!(ledger.denied_count, 1);
+        assert_eq!(ledger.entries[0].receipt.policy_outcome.label(), "failed");
+        assert_eq!(ledger.entries[1].receipt.policy_outcome.label(), "denied");
+        assert_eq!(
+            ledger.entries[0].receipt.flow_policy_verdict,
+            crate::runtime::effect_receipt::FlowPolicyVerdict::LabelClean
+        );
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn native_control_stop_final_ledger_is_verified_without_rewriting_interruption() {
+        let nonce = "00000000-0000-4000-8000-000000000186";
+        let grant = runtime_evidence_grant_for_test(nonce, [0x51; 32], [0x52; 32]);
+        let capture = grant.capture.clone();
+        let authority = grant.into_authority().unwrap();
+        let request = HostIoRequest::NetworkRecv {
+            endpoint: "127.0.0.1:80".to_string(),
+            max_len: 1,
+        };
+        let attempted = preserve_admitted_host_effect_outcome(Err(HostIoError::Denied {
+            reason: "HOST_IO_EXECUTION_CANCELLED".to_string(),
+        }));
+        let ledger = EngineDispatcher::build_host_effect_ledger(
+            "control-stop-final-accounting",
+            &[(request.clone(), attempted)],
+            &authority,
+            SecurityEpoch::from_raw(STANDARD_SECURITY_EPOCH),
+        )
+        .unwrap();
+        let output_for = |ledger: Option<HostEffectLedger>,
+                          response_nonce: &str,
+                          complete: bool,
+                          stdout: &str| {
+            let mut frames = vec![NativeSessionOutputFrame::HostEffectAdmitted {
+                schema_version: NATIVE_EFFECT_WAL_SCHEMA.to_string(),
+                nonce: nonce.to_string(),
+                sequence: 0,
+                effect_kind: request.kind().to_string(),
+                request_hash: native_effect_wal_request_hash(&request).unwrap(),
+            }];
+            if complete {
+                frames.push(NativeSessionOutputFrame::HostEffectCompleted {
+                    schema_version: NATIVE_EFFECT_WAL_SCHEMA.to_string(),
+                    nonce: nonce.to_string(),
+                    sequence: 0,
+                });
+            }
+            frames.push(NativeSessionOutputFrame::Final {
+                response: Box::new(NativeSessionResponse::ExecutionFailed {
+                    schema_version: NATIVE_SESSION_SCHEMA.to_string(),
+                    nonce: response_nonce.to_string(),
+                    message: "execution cancelled by supervisor".to_string(),
+                    invocation_settings: None,
+                    telemetry_report: None,
+                    host_effect_ledger: ledger,
+                    native_replay: None,
+                    stdout_base64: stdout.to_string(),
+                    stderr_base64: String::new(),
+                }),
+            });
+            frames
+                .into_iter()
+                .flat_map(|frame| {
+                    encode_native_session_frame(&frame, NATIVE_SESSION_MAX_RESPONSE_BYTES).unwrap()
+                })
+                .collect::<Vec<_>>()
+        };
+        let output = output_for(Some(ledger.clone()), nonce, true, "");
+        let verified = verified_control_stop_ledger(
+            &output,
+            nonce,
+            &capture.evidence_verification_identity,
+            false,
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(verified.failed_count, 1);
+        assert_eq!(verified.denied_count, 0);
+        assert_eq!(verified.chain_head_hash, ledger.chain_head_hash);
+        let process_rejection = verified_control_stop_ledger(
+            &output,
+            nonce,
+            &capture.evidence_verification_identity,
+            false,
+            true,
+            false,
+        )
+        .expect_err("even a valid signed response cannot resolve process-authorized outcomes");
+        assert!(process_rejection.contains("process outcomes remain unknown"));
+
+        let trigger = NativeRunControlTrigger::new(
+            NativeRunControlKind::SafeMode,
+            "operator stopped this attempt",
+        );
+        let evidence = native_interruption_effect_evidence_with_terminal(
+            Ok((&output, false)),
+            None,
+            nonce,
+            false,
+            Some(trigger.clone()),
+            true,
+        );
+        assert_eq!(evidence.control_trigger, Some(trigger));
+        assert!(evidence.journal_complete);
+        assert!(evidence.protocol_error.is_none());
+        assert_eq!(
+            evidence.entries[0].state,
+            NativeEffectWalState::ProviderReturned
+        );
+        assert!(!evidence.replay_certified);
+        let actionable =
+            ActionableError::new("original control refusal", "inspect retained evidence");
+        let original_error = actionable.to_string();
+        let mut interruption = NativeRunInterruption {
+            actionable,
+            effect_evidence: Box::new(evidence.clone()),
+            verified_final_host_effect_ledger: Some(Box::new(verified)),
+            runtime_evidence_identity_capture: Some(capture.clone()),
+            runtime_evidence_identity_capture_path: Some(PathBuf::from(
+                "/var/lib/franken-node/capture.json",
+            )),
+            dispatch_report: None,
+        };
+        assert_eq!(
+            interruption
+                .verified_final_host_effect_ledger()
+                .unwrap()
+                .failed_count,
+            1
+        );
+        interruption.attach_dispatch_report(
+            Path::new("/usr/bin/franken-node"),
+            Path::new("/srv/project/app.js"),
+            Path::new("/srv/project"),
+            Utc::now(),
+            std::time::Duration::from_millis(300),
+        );
+        assert_eq!(interruption.to_string(), original_error);
+        assert_eq!(interruption.effect_evidence(), &evidence);
+        assert_eq!(
+            interruption
+                .verified_final_host_effect_ledger()
+                .unwrap()
+                .failed_count,
+            1
+        );
+        let report = interruption.dispatch_report().unwrap();
+        assert_eq!(report.exit_code, Some(1));
+        assert_eq!(
+            report.host_effect_ledger.as_ref().unwrap().chain_head_hash,
+            ledger.chain_head_hash
+        );
+        assert!(report.native_replay.is_none());
+        assert!(report.captured_output.stdout.is_empty());
+
+        let mut tampered_ledger = ledger.clone();
+        tampered_ledger.trace_id.push_str(":tampered");
+        let empty_ledger = EngineDispatcher::build_host_effect_ledger(
+            "control-stop-empty-accounting",
+            &[],
+            &authority,
+            SecurityEpoch::from_raw(STANDARD_SECURITY_EPOCH),
+        )
+        .unwrap();
+        let false_denial = EngineDispatcher::build_host_effect_ledger(
+            "control-stop-false-denial",
+            &[(
+                request.clone(),
+                Err(HostIoError::Denied {
+                    reason: "HOST_IO_EXECUTION_CANCELLED".to_string(),
+                }),
+            )],
+            &authority,
+            SecurityEpoch::from_raw(STANDARD_SECURITY_EPOCH),
+        )
+        .unwrap();
+        let mut trailing = output.clone();
+        trailing.push(0);
+        for rejected in [
+            output_for(Some(ledger.clone()), nonce, false, ""),
+            output_for(
+                Some(ledger.clone()),
+                "00000000-0000-4000-8000-000000000187",
+                true,
+                "",
+            ),
+            output_for(Some(ledger.clone()), nonce, true, "invalid!"),
+            output_for(Some(tampered_ledger), nonce, true, ""),
+            output_for(Some(empty_ledger), nonce, true, ""),
+            output_for(Some(false_denial), nonce, true, ""),
+            output_for(None, nonce, true, ""),
+            trailing,
+        ] {
+            assert!(
+                verified_control_stop_ledger(
+                    &rejected,
+                    nonce,
+                    &capture.evidence_verification_identity,
+                    false,
+                    false,
+                    false,
+                )
+                .is_err(),
+                "invalid final output must not produce terminal accounting"
+            );
+        }
+    }
+
+    #[cfg(feature = "engine")]
     fn live_control_test_monitor(
         last_checked: Instant,
     ) -> (
@@ -13878,6 +14719,7 @@ mod tests {
                 "00000000-0000-4000-8000-000000000001",
                 false,
             )),
+            verified_final_host_effect_ledger: None,
             runtime_evidence_identity_capture: None,
             runtime_evidence_identity_capture_path: None,
             dispatch_report: None,
@@ -14283,6 +15125,7 @@ mod tests {
             let mut interruption = NativeRunInterruption {
                 actionable,
                 effect_evidence: Box::new(evidence),
+                verified_final_host_effect_ledger: None,
                 runtime_evidence_identity_capture: Some(capture.clone()),
                 runtime_evidence_identity_capture_path: Some(capture_path.clone()),
                 dispatch_report: None,
