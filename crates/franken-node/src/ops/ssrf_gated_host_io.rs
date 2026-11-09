@@ -918,7 +918,20 @@ impl<P: HostIoProvider, R: EndpointResolver> HostIoProvider for SsrfGatedHostIo<
             Arc::clone(&control),
         );
         let (host, port) = split_host_port(endpoint).expect("admitted endpoint");
-        self.check_operation(control.as_ref(), host, port)?;
+        if control.checkpoint().is_err() {
+            // Transport was invoked: cancellation cannot prove that no bytes
+            // reached the peer or that an external effect was rolled back.
+            // Keep a provider's existing I/O failure, including the inner WAL
+            // boundary's indeterminate-attempt classification, intact.
+            self.record_denial(host, port, "network_execution_cancelled_after_dispatch");
+            return Err(match outcome {
+                Err(error @ HostIoError::Io { .. }) => error,
+                _ => HostIoError::Io {
+                    detail: "HOST_IO_EXECUTION_CANCELLED after network provider dispatch; external outcome is unknown"
+                        .to_string(),
+                },
+            });
+        }
         outcome
     }
 }
@@ -1264,6 +1277,115 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         assert!(seen.lock().unwrap().is_empty());
         assert_eq!(gate.audit_records()[0].cidr_matched.as_deref(), Some("capability_missing"));
+    }
+
+    #[derive(Debug)]
+    struct OutcomeAtCancellation {
+        signal: Arc<Signal>,
+        outcome: HostIoOutcome,
+        cancel_after_dispatch: bool,
+        calls: AtomicUsize,
+    }
+
+    impl HostIoProvider for OutcomeAtCancellation {
+        fn name(&self) -> &str {
+            "outcome-at-cancellation"
+        }
+
+        fn perform(&self, _: &HostIoRequest, _: &[HostIoCapability]) -> HostIoOutcome {
+            panic!("supervised network effect used an uncontrolled entry")
+        }
+
+        fn perform_controlled(
+            &self,
+            _: &HostIoRequest,
+            _: &[HostIoCapability],
+            control: Arc<dyn HostIoControl>,
+        ) -> HostIoOutcome {
+            control.checkpoint()?;
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if self.cancel_after_dispatch {
+                self.signal.0.store(true, Ordering::Release);
+            }
+            self.outcome.clone()
+        }
+    }
+
+    impl PinnedNetworkProvider for OutcomeAtCancellation {}
+
+    #[test]
+    fn cancellation_after_transport_is_an_attempt_not_a_pre_dispatch_denial() {
+        for provider_outcome in [
+            Ok(HostIoResponse::NetworkSend { bytes_sent: 1 }),
+            Err(cancelled()),
+            Err(HostIoError::Io {
+                detail: "provider returned an indeterminate admitted attempt".to_string(),
+            }),
+        ] {
+            let signal = Arc::new(Signal::default());
+            let gate = SsrfGatedHostIo::with_policy(
+                OutcomeAtCancellation {
+                    signal: Arc::clone(&signal),
+                    outcome: provider_outcome.clone(),
+                    cancel_after_dispatch: true,
+                    calls: AtomicUsize::new(0),
+                },
+                SsrfPolicyTemplate::default_template("admitted-cancel".into()),
+                "admitted-cancel",
+            );
+            let result = gate.perform_controlled(
+                &request("93.184.216.34:80", false),
+                &[HostIoCapability::NetworkSend],
+                signal,
+            );
+            if matches!(&provider_outcome, Err(HostIoError::Io { .. })) {
+                assert_eq!(result, provider_outcome);
+            } else {
+                assert!(matches!(result, Err(HostIoError::Io { detail })
+                    if detail.contains("after network provider dispatch")
+                        && detail.contains("external outcome is unknown")
+                        && !detail.contains("private-supervisor-detail")));
+            }
+            assert_eq!(gate.inner.calls.load(Ordering::SeqCst), 1);
+            assert!(gate.audit_records().iter().any(|record| {
+                record.cidr_matched.as_deref()
+                    == Some("network_execution_cancelled_after_dispatch")
+            }));
+        }
+    }
+
+    #[test]
+    fn uncancelled_transport_preserves_success_and_provider_errors() {
+        for provider_outcome in [
+            Ok(HostIoResponse::NetworkSend { bytes_sent: 1 }),
+            Err(HostIoError::Io {
+                detail: "provider connection failed".to_string(),
+            }),
+            Err(HostIoError::Denied {
+                reason: "provider policy refused".to_string(),
+            }),
+        ] {
+            let signal = Arc::new(Signal::default());
+            let gate = SsrfGatedHostIo::with_policy(
+                OutcomeAtCancellation {
+                    signal: Arc::clone(&signal),
+                    outcome: provider_outcome.clone(),
+                    cancel_after_dispatch: false,
+                    calls: AtomicUsize::new(0),
+                },
+                SsrfPolicyTemplate::default_template("uncancelled".into()),
+                "uncancelled",
+            );
+            assert_eq!(
+                gate.perform_controlled(
+                    &request("93.184.216.34:80", false),
+                    &[HostIoCapability::NetworkSend],
+                    signal,
+                ),
+                provider_outcome,
+            );
+            assert_eq!(gate.inner.calls.load(Ordering::SeqCst), 1);
+        }
     }
 
     #[derive(Debug)]

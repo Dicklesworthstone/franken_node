@@ -508,6 +508,13 @@ mod operation_control {
         );
     }
 
+    fn assert_cancelled_after_dispatch(outcome: HostIoOutcome) {
+        assert!(matches!(outcome, Err(HostIoError::Io { detail })
+            if detail.contains("after network provider dispatch")
+                && detail.contains("external outcome is unknown")
+                && !detail.contains("private-control-diagnostic")));
+    }
+
     fn request(host: &str, port: u16, tls: bool) -> HostIoRequest {
         HostIoRequest::NetworkRequest {
             endpoint: format!("{host}:{port}"),
@@ -653,11 +660,11 @@ mod operation_control {
         // Keep the peer open without a ServerHello. EOF must not be what
         // releases the engine's wait, and no certificate exception is granted.
         signal.0.store(true, Ordering::Release);
-        assert_cancelled(finish(worker, result));
+        assert_cancelled_after_dispatch(finish(worker, result));
         assert!(!revocation.is_revoked());
         assert_eq!(observed.dns.load(Ordering::SeqCst), 1);
         assert!(gate.audit_records().iter().any(|entry|
-            entry.cidr_matched.as_deref() == Some("network_execution_cancelled")));
+            entry.cidr_matched.as_deref() == Some("network_execution_cancelled_after_dispatch")));
         drop(peer);
     }
 
@@ -695,11 +702,11 @@ mod operation_control {
         let cancelled_result = finish(first_worker, first_result);
         second_peer.write_all(REPLY).unwrap();
         let successful_result = finish(second_worker, second_result);
-        assert_cancelled(cancelled_result);
+        assert_cancelled_after_dispatch(cancelled_result);
         assert_eq!(successful_result, Ok(HostIoResponse::NetworkRequest { response: REPLY.to_vec() }));
         assert!(!revocation.is_revoked());
         assert_eq!(gate.audit_records().iter().filter(|entry|
-            entry.cidr_matched.as_deref() == Some("network_execution_cancelled")).count(), 1);
+            entry.cidr_matched.as_deref() == Some("network_execution_cancelled_after_dispatch")).count(), 1);
     }
 
     #[derive(Debug)]
@@ -786,7 +793,7 @@ mod operation_control {
             Resolver { state: observed.clone(), answers: vec![PUBLIC_V4.parse().unwrap()] },
         );
         let original = request("never-connect.invalid", 443, true);
-        assert_cancelled(gate.perform_controlled(&original, &[HostIoCapability::NetworkSend], signal.clone()));
+        assert_cancelled_after_dispatch(gate.perform_controlled(&original, &[HostIoCapability::NetworkSend], signal.clone()));
         assert_eq!(
             gate.perform_controlled(&original, &[HostIoCapability::NetworkSend], signal),
             Ok(HostIoResponse::NetworkRequest { response: REPLY.to_vec() }),
