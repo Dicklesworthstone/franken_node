@@ -34,19 +34,32 @@ function runOriginValid(origin, anchor) {
     && typeof origin.record_sha256 === "string" && /^[0-9a-f]{64}$/u.test(origin.record_sha256);
 }
 
-function factsValid(facts, format, anchor, runAnchor) {
+function runtimeOriginValid(origin, anchor) {
+  return keys(origin, ["session_nonce", "product_root_key_id", "producer_id", "evidence_key_id", "signed_epoch"])
+    && typeof origin.session_nonce === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u.test(origin.session_nonce)
+    && origin.product_root_key_id === `ed25519:${anchor}`
+    && typeof origin.producer_id === "string" && origin.producer_id.length > 0 && origin.producer_id.length <= 512
+    && typeof origin.evidence_key_id === "string" && /^ed25519:[0-9a-f]{64}$/u.test(origin.evidence_key_id)
+    && typeof origin.signed_epoch === "string" && /^(0|[1-9][0-9]{0,19})$/u.test(origin.signed_epoch)
+    && BigInt(origin.signed_epoch) <= 18_446_744_073_709_551_615n;
+}
+
+function factsValid(facts, format, anchor, runAnchor, runtimeAnchor) {
   const expected = {
     "incident-bundle": ["bundle_id", "incident_id", "created_at", "policy_version", "event_count", "integrity_hash", "decision_sequence_hash", "signer_public_key_hex", "signing_identity", "native_capture"],
     capsule: ["capsule_id", "expected_hash", "actual_hash", "signer_public_key_hex"],
     "signed-bundle": ["bundle_id", "incident_id", "event_count", "integrity_hash", "signer_public_key_hex"],
   }[format];
   if (runAnchor !== undefined) expected.push("run_origin");
+  if (runtimeAnchor !== undefined) expected.push("runtime_origin");
   if (!keys(facts, expected) || facts.signer_public_key_hex !== anchor) return false;
   for (const [key, value] of Object.entries(facts)) {
     if (key === "event_count") {
       if (!count(value)) return false;
     } else if (key === "run_origin") {
       if (!runOriginValid(value, runAnchor)) return false;
+    } else if (key === "runtime_origin") {
+      if (!runtimeOriginValid(value, runtimeAnchor)) return false;
     } else if (key === "native_capture") {
       if (value !== null && (!keys(value, ["payload_sha256", "payload_bytes", "captured_terminal_state", "host_io_exchange_count"])
           || !hex(value.payload_sha256, 64) || !["completed", "uncaught_exception", "engine_failure"].includes(value.captured_terminal_state)
@@ -61,9 +74,11 @@ function factsValid(facts, format, anchor, runAnchor) {
  * Authenticate original bytes; never executes a captured guest or discovers its own anchor.
  * An explicit trustedRunPublicKeyHex requires the original receipt-authority
  * signature and matching run data. Missing proof or downgraded scope fails.
+ * trustedRuntimePublicKeyHex additionally requires the original product-root
+ * and session signatures; it does not establish guest execution or cleanup.
  */
 export async function verifyArtifact(data, trustedPublicKeyHex, options) {
-  const { verifier, format = "incident-bundle", trustedRunPublicKeyHex, signatureHex, timeoutMs = 10_000 } = options ?? {};
+  const { verifier, format = "incident-bundle", trustedRunPublicKeyHex, trustedRuntimePublicKeyHex, signatureHex, timeoutMs = 10_000 } = options ?? {};
   if (!(data instanceof Uint8Array)) throw new VerifierError("INPUT_INVALID", "data must contain the original bytes");
   if (data.byteLength > MAX_INPUT_BYTES) throw new VerifierError("INPUT_TOO_LARGE", "evidence exceeds 64 MiB");
   if (typeof format !== "string" || !Object.hasOwn(SCOPES, format)) throw new VerifierError("UNSUPPORTED_FORMAT", "unsupported evidence format");
@@ -72,14 +87,20 @@ export async function verifyArtifact(data, trustedPublicKeyHex, options) {
     if (format !== "incident-bundle") throw new VerifierError("INPUT_INVALID", "original-run trust applies only to incident-bundle");
     if (!hex(trustedRunPublicKeyHex, 64)) throw new VerifierError("RUN_ANCHOR_INVALID", "expected a 32-byte hexadecimal run public key");
   }
+  if (trustedRuntimePublicKeyHex !== undefined) {
+    if (format !== "incident-bundle" || trustedRunPublicKeyHex === undefined) throw new VerifierError("INPUT_INVALID", "runtime trust requires incident-bundle and original-run trust");
+    if (!hex(trustedRuntimePublicKeyHex, 64)) throw new VerifierError("RUNTIME_ANCHOR_INVALID", "expected a 32-byte hexadecimal product-root public key");
+  }
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > 120_000) throw new VerifierError("TIMEOUT_INVALID", "timeoutMs must be finite and in (0, 120000]");
   if (typeof verifier !== "string" || verifier.length === 0 || verifier.includes("\0")) throw new VerifierError("EXECUTABLE_INVALID", "verifier must be a trusted executable path");
   const bytes = Buffer.from(data);
   const anchor = trustedPublicKeyHex.toLowerCase();
   const runAnchor = trustedRunPublicKeyHex?.toLowerCase();
-  const scope = runAnchor === undefined ? SCOPES[format] : "authenticated_run_incident";
+  const runtimeAnchor = trustedRuntimePublicKeyHex?.toLowerCase();
+  const scope = runtimeAnchor !== undefined ? "authenticated_runtime_incident" : runAnchor === undefined ? SCOPES[format] : "authenticated_run_incident";
   const args = ["verify", "--format", format, "--trusted-key-hex", anchor];
   if (runAnchor !== undefined) args.push("--trusted-run-key-hex", runAnchor);
+  if (runtimeAnchor !== undefined) args.push("--trusted-runtime-key-hex", runtimeAnchor);
   if (format === "signed-bundle") {
     if (!hex(signatureHex, 128)) throw new VerifierError("SIGNATURE_MALFORMED", "a detached 64-byte signature is required");
     args.push("--signature-hex", signatureHex);
@@ -112,7 +133,7 @@ export async function verifyArtifact(data, trustedPublicKeyHex, options) {
       }
       if (exitCode !== 0 || !keys(result, ["schema_version", "verdict", "format", "scope", "artifact_sha256", "facts"])
           || result.verdict !== "verified" || result.format !== format || result.scope !== scope
-          || result.artifact_sha256 !== createHash("sha256").update(bytes).digest("hex") || !factsValid(result.facts, format, anchor, runAnchor)) {
+          || result.artifact_sha256 !== createHash("sha256").update(bytes).digest("hex") || !factsValid(result.facts, format, anchor, runAnchor, runtimeAnchor)) {
         return reject(new VerifierError("PROTOCOL_INVALID", "verification response does not match the request"));
       }
       resolve(result);

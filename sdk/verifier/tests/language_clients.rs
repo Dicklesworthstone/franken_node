@@ -122,6 +122,9 @@ fn external_python_and_javascript_consumers_verify_signed_evidence() {
         if let Some(run_anchor) = case["run_anchor"].as_str() {
             verifier.args(["--trusted-run-key-hex", run_anchor]);
         }
+        if let Some(runtime_anchor) = case["runtime_anchor"].as_str() {
+            verifier.args(["--trusted-runtime-key-hex", runtime_anchor]);
+        }
         let mut child = verifier
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -146,10 +149,27 @@ fn external_python_and_javascript_consumers_verify_signed_evidence() {
             assert_eq!(response["artifact_sha256"], case["artifact_sha256"]);
             assert_eq!(response["verdict"], "verified");
             if let Some(run_anchor) = case["run_anchor"].as_str() {
-                assert_eq!(response["scope"], "authenticated_run_incident");
+                assert_eq!(
+                    response["scope"],
+                    if case["runtime_anchor"].is_string() {
+                        "authenticated_runtime_incident"
+                    } else {
+                        "authenticated_run_incident"
+                    }
+                );
                 assert_eq!(
                     response["facts"]["run_origin"]["signer_public_key_hex"],
                     run_anchor
+                );
+            }
+            if let Some(runtime_anchor) = case["runtime_anchor"].as_str() {
+                assert_eq!(
+                    response["facts"]["runtime_origin"]["product_root_key_id"],
+                    format!("ed25519:{runtime_anchor}")
+                );
+                assert_eq!(
+                    response["facts"]["runtime_origin"]["signed_epoch"],
+                    "18446744073709551615"
                 );
             }
         } else {

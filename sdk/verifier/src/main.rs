@@ -11,19 +11,21 @@ use frankenengine_verifier_sdk::capsule::{self, CapsuleError, CapsuleVerdict, Re
 use frankenengine_verifier_sdk::incident_bundle::{
     CapturedNativeTerminalState, IncidentBundleError, MAX_INCIDENT_BUNDLE_BYTES,
     decode_evidence_json, verify_incident_bundle, verify_incident_bundle_with_run_key,
+    verify_incident_bundle_with_runtime_keys,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 const PROTOCOL: &str = "franken-verifier-cli/v1";
 const MAX_RESPONSE_BYTES: usize = 64 * 1024;
-const USAGE: &str = "franken-verifier verify --format incident-bundle|capsule|signed-bundle --trusted-key-hex HEX [--trusted-run-key-hex HEX] [--signature-hex HEX] < artifact";
+const USAGE: &str = "franken-verifier verify --format incident-bundle|capsule|signed-bundle --trusted-key-hex HEX [--trusted-run-key-hex HEX [--trusted-runtime-key-hex HEX]] [--signature-hex HEX] < artifact";
 
 #[derive(Debug)]
 struct Request {
     format: String,
     anchor: VerifyingKey,
     run_anchor: Option<VerifyingKey>,
+    runtime_anchor: Option<VerifyingKey>,
     signature: Option<[u8; 64]>,
 }
 
@@ -51,13 +53,15 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
     if args.first().map(String::as_str) != Some("verify") {
         return Err(usage());
     }
-    let (mut format, mut anchor, mut run_anchor, mut signature) = (None, None, None, None);
+    let (mut format, mut anchor, mut run_anchor, mut runtime_anchor, mut signature) =
+        (None, None, None, None, None);
     let (options, remainder) = args[1..].as_chunks::<2>();
     for option in options {
         let slot = match option[0].as_str() {
             "--format" => &mut format,
             "--trusted-key-hex" => &mut anchor,
             "--trusted-run-key-hex" => &mut run_anchor,
+            "--trusted-runtime-key-hex" => &mut runtime_anchor,
             "--signature-hex" => &mut signature,
             _ => return Err(usage()),
         };
@@ -101,6 +105,25 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
         (_, Some(_)) => return Err(usage()),
         (_, None) => None,
     };
+    let runtime_anchor = match (format.as_str(), run_anchor.as_ref(), runtime_anchor) {
+        ("incident-bundle", Some(_), Some(text)) => {
+            let mut key = [0_u8; 32];
+            hex::decode_to_slice(text, &mut key).map_err(|_| {
+                failure(
+                    "RUNTIME_ANCHOR_INVALID",
+                    "expected a 32-byte hexadecimal product-root public key",
+                )
+            })?;
+            Some(VerifyingKey::from_bytes(&key).map_err(|_| {
+                failure(
+                    "RUNTIME_ANCHOR_INVALID",
+                    "invalid Ed25519 product-root public key",
+                )
+            })?)
+        }
+        (_, _, Some(_)) => return Err(usage()),
+        (_, _, None) => None,
+    };
     let signature = match (format.as_str(), signature) {
         ("signed-bundle", Some(text)) => {
             let mut bytes = [0_u8; 64];
@@ -125,6 +148,7 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
         format,
         anchor,
         run_anchor,
+        runtime_anchor,
         signature,
     })
 }
@@ -143,6 +167,15 @@ fn incident_failure(error: &IncidentBundleError) -> Failure {
         IncidentBundleError::RunOriginInvalid { .. } => "RUN_ORIGIN_INVALID",
         IncidentBundleError::RunOriginSignatureMalformed => "RUN_ORIGIN_SIGNATURE_MALFORMED",
         IncidentBundleError::RunOriginSignatureInvalid => "RUN_ORIGIN_SIGNATURE_INVALID",
+        IncidentBundleError::RuntimeOriginMissing => "RUNTIME_ORIGIN_MISSING",
+        IncidentBundleError::RuntimeOriginInvalid { .. } => "RUNTIME_ORIGIN_INVALID",
+        IncidentBundleError::RuntimeOriginSignerNotTrusted => "RUNTIME_ORIGIN_SIGNER_UNTRUSTED",
+        IncidentBundleError::RuntimeOriginCaptureSignatureInvalid => {
+            "RUNTIME_ORIGIN_CAPTURE_SIGNATURE_INVALID"
+        }
+        IncidentBundleError::RuntimeOriginLedgerSignatureInvalid => {
+            "RUNTIME_ORIGIN_LEDGER_SIGNATURE_INVALID"
+        }
         _ => "EVIDENCE_INVALID",
     };
     // Do not echo private evidence, attacker-controlled field names or payloads.
@@ -152,19 +185,36 @@ fn incident_failure(error: &IncidentBundleError) -> Failure {
 fn verify(request: &Request, bytes: &[u8]) -> Result<Value, Failure> {
     match request.format.as_str() {
         "incident-bundle" => {
-            let (verified, run_origin) = match &request.run_anchor {
-                Some(run_anchor) => {
-                    let verified =
-                        verify_incident_bundle_with_run_key(bytes, &request.anchor, run_anchor)
-                            .map_err(|error| incident_failure(&error))?;
-                    (verified.bundle, Some(verified.run_origin))
-                }
-                None => (
-                    verify_incident_bundle(bytes, &request.anchor)
-                        .map_err(|error| incident_failure(&error))?,
-                    None,
-                ),
-            };
+            let (verified, run_origin, runtime_origin) =
+                match (&request.run_anchor, &request.runtime_anchor) {
+                    (Some(run_anchor), Some(runtime_anchor)) => {
+                        let verified = verify_incident_bundle_with_runtime_keys(
+                            bytes,
+                            &request.anchor,
+                            run_anchor,
+                            runtime_anchor,
+                        )
+                        .map_err(|error| incident_failure(&error))?;
+                        (
+                            verified.bundle,
+                            Some(verified.run_origin),
+                            Some(verified.runtime_origin),
+                        )
+                    }
+                    (Some(run_anchor), None) => {
+                        let verified =
+                            verify_incident_bundle_with_run_key(bytes, &request.anchor, run_anchor)
+                                .map_err(|error| incident_failure(&error))?;
+                        (verified.bundle, Some(verified.run_origin), None)
+                    }
+                    (None, None) => (
+                        verify_incident_bundle(bytes, &request.anchor)
+                            .map_err(|error| incident_failure(&error))?,
+                        None,
+                        None,
+                    ),
+                    (None, Some(_)) => return Err(failure("USAGE", USAGE)),
+                };
             let capture = verified.native_capture.map(|capture| {
                 let state = match capture.captured_terminal_state {
                     CapturedNativeTerminalState::Completed => "completed",
@@ -188,6 +238,10 @@ fn verify(request: &Request, bytes: &[u8]) -> Result<Value, Failure> {
                     "signer_public_key_hex": origin.signer_public_key_hex,
                     "record_sha256": origin.record_sha256,
                 });
+            }
+            if let Some(origin) = runtime_origin {
+                result["scope"] = json!("authenticated_runtime_incident");
+                result["facts"]["runtime_origin"] = json!(origin);
             }
             Ok(result)
         }
@@ -353,6 +407,35 @@ mod tests {
             arguments(&malformed).unwrap_err().code,
             "RUN_ANCHOR_INVALID"
         );
+    }
+
+    #[test]
+    fn runtime_authority_requires_run_authority_and_never_falls_back() {
+        let mut strong = args("incident-bundle", ANCHOR);
+        strong.extend(["--trusted-runtime-key-hex".into(), ANCHOR.into()]);
+        assert_eq!(arguments(&strong).unwrap_err().code, "USAGE");
+        strong.extend(["--trusted-run-key-hex".into(), ANCHOR.into()]);
+        assert_eq!(
+            run(&strong, &mut &*FIXTURE).unwrap_err().code,
+            "RUN_ORIGIN_MISSING"
+        );
+        strong.extend(["--trusted-runtime-key-hex".into(), ANCHOR.into()]);
+        assert_eq!(arguments(&strong).unwrap_err().code, "USAGE");
+
+        let mut malformed = args("incident-bundle", ANCHOR);
+        malformed.extend([
+            "--trusted-run-key-hex".into(),
+            ANCHOR.into(),
+            "--trusted-runtime-key-hex".into(),
+            "malformed".into(),
+        ]);
+        assert_eq!(
+            arguments(&malformed).unwrap_err().code,
+            "RUNTIME_ANCHOR_INVALID"
+        );
+        let mut wrong_format = args("capsule", ANCHOR);
+        wrong_format.extend(["--trusted-runtime-key-hex".into(), ANCHOR.into()]);
+        assert_eq!(arguments(&wrong_format).unwrap_err().code, "USAGE");
     }
 
     #[test]

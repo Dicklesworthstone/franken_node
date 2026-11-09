@@ -18,7 +18,8 @@ for case in cases:
     try:
         result = verify_artifact(data, case["anchor"], verifier=executable,
                                  format=case["format"], signature_hex=case.get("signature_hex"),
-                                 trusted_run_public_key_hex=case.get("run_anchor"))
+                                 trusted_run_public_key_hex=case.get("run_anchor"),
+                                 trusted_runtime_public_key_hex=case.get("runtime_anchor"))
     except VerifierError as error:
         assert error.code == case["expected"], (case["name"], error.code, case["expected"])
         print(json.dumps({"case": case["name"], "result": error.code}), flush=True)
@@ -27,11 +28,14 @@ for case in cases:
         assert result["artifact_sha256"] == hashlib.sha256(data).hexdigest()
         if case["format"] == "incident-bundle":
             if case.get("run_anchor") is not None:
-                assert result["scope"] == "authenticated_run_incident"
+                assert result["scope"] == ("authenticated_runtime_incident" if case.get("runtime_anchor") else "authenticated_run_incident")
                 assert result["facts"]["run_origin"]["signer_public_key_hex"] == case["run_anchor"].lower()
                 assert result["facts"]["run_origin"]["receipt_hash"].startswith("sha256:")
                 if "event_count" in case:
                     assert result["facts"]["event_count"] == case["event_count"]
+                if case.get("runtime_anchor") is not None:
+                    assert result["facts"]["runtime_origin"]["product_root_key_id"] == "ed25519:" + case["runtime_anchor"]
+                    assert result["facts"]["runtime_origin"]["signed_epoch"] == "18446744073709551615"
             else:
                 assert result["scope"] == "authenticated_recorded_incident"
                 assert result["facts"]["event_count"] == 3
@@ -45,6 +49,8 @@ client_controls = [
     ("bad_key_shape", b"{}", {"trusted_public_key_hex": "00"}, "ANCHOR_INVALID"),
     ("bad_run_key_shape", b"{}", {"trusted_run_public_key_hex": "00"}, "RUN_ANCHOR_INVALID"),
     ("run_key_wrong_format", b"{}", {"format": "capsule", "trusted_run_public_key_hex": cases[0]["anchor"]}, "INPUT_INVALID"),
+    ("runtime_key_requires_run_key", b"{}", {"trusted_runtime_public_key_hex": cases[0]["anchor"]}, "INPUT_INVALID"),
+    ("bad_runtime_key_shape", b"{}", {"trusted_run_public_key_hex": cases[0]["anchor"], "trusted_runtime_public_key_hex": "00"}, "RUNTIME_ANCHOR_INVALID"),
     ("invalid_timeout", b"{}", {"timeout": 0}, "TIMEOUT_INVALID"),
     ("enormous_timeout_integer", b"{}", {"timeout": 10**1000}, "TIMEOUT_INVALID"),
     ("missing_executable", b"{}", {"verifier": str(root / "does-not-exist")}, "PROCESS_UNAVAILABLE"),
@@ -93,5 +99,18 @@ except VerifierError as error:
     print(json.dumps({"case": "protocol_run_unrequested_scope", "result": error.code}), flush=True)
 else:
     raise AssertionError("unsolicited original-run authority was accepted")
+runtime_anchor = next(case["runtime_anchor"] for case in cases if case["name"] == "independently_signed_runtime_origin")
+runtime_controls = ["runtime_scope_downgrade", "runtime_origin_missing", "runtime_wrong_root",
+                    "runtime_rounded_epoch", "runtime_overflow_epoch", "runtime_extra_claim"]
+for mode in runtime_controls:
+    try:
+        verify_artifact(json.dumps({"protocol_control": mode}).encode(), cases[0]["anchor"],
+                        verifier=str(root / "fake_verifier"), trusted_run_public_key_hex=run_anchor,
+                        trusted_runtime_public_key_hex=runtime_anchor.upper())
+    except VerifierError as error:
+        assert error.code == "PROTOCOL_INVALID", (mode, error.code)
+        print(json.dumps({"case": f"protocol_{mode}", "result": error.code}), flush=True)
+    else:
+        raise AssertionError(f"protocol_{mode}")
 print(json.dumps({"consumer": "python", "matrix_cases": len(cases), "client_cases": len(client_controls),
-                  "protocol_cases": len(controls) + len(run_controls) + 1, "passed": True}), flush=True)
+                  "protocol_cases": len(controls) + len(run_controls) + len(runtime_controls) + 1, "passed": True}), flush=True)

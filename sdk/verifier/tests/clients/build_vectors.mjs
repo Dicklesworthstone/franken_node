@@ -105,6 +105,69 @@ add("original_run_exporter_cannot_rewrite_signed_metadata", "incident-bundle", r
   origin.record_json = origin.record_json.replace(/("receipt_path"\s*:\s*)"(?:[^"\\]|\\.)*"/u, '$1"PRIVATE-substituted-receipt.json"');
 }), "RUN_ORIGIN_SIGNATURE_INVALID", testExporterOptions);
 
+// Independently encode all three signature protocols with Node crypto. The
+// effect entries originate in the existing producer fixture; the session
+// authority is a public test vector, not a claim of native guest execution.
+const seedKey = (byte) => createPrivateKey({ key: Buffer.concat([Buffer.from("302e020100300506032b657004220420", "hex"), Buffer.alloc(32, byte)]), format: "der", type: "pkcs8" });
+const publicBytes = (privateKey) => createPublicKey(privateKey).export({ format: "der", type: "spki" }).subarray(-32);
+const runtimeKey = seedKey(0x53), sessionKey = seedKey(0x64), originalRunKey = seedKey(0x41);
+assert.equal(publicBytes(originalRunKey).toString("hex"), runAnchor);
+const runtimeAnchor = publicBytes(runtimeKey).toString("hex");
+const u64be = (number) => { const bytes = Buffer.alloc(8); bytes.writeBigUInt64BE(BigInt(number)); return bytes; };
+const frame = (domain, bytes) => Buffer.concat([Buffer.from(domain), u64be(bytes.length), bytes]);
+function ordered(value) {
+  if (typeof value === "bigint") return value.toString();
+  if (Array.isArray(value)) return `[${value.map(ordered).join(",")}]`;
+  if (value !== null && typeof value === "object") return `{${Object.keys(value).map((key) => `${JSON.stringify(key)}:${ordered(value[key])}`).join(",")}}`;
+  return JSON.stringify(value);
+}
+const pick = (value, names) => Object.fromEntries(names.map((name) => [name, value[name]]));
+const runtimeRecord = JSON.parse(originalRun.initial_state_snapshot.run_origin.record_json);
+const ledger = pick(runtimeRecord.host_effect_ledger, ["schema_version", "trace_id", "chain_head_hash", "effect_count", "allowed_count", "denied_count", "failed_count"]);
+ledger.entries = runtimeRecord.host_effect_ledger.entries.map((entry) => {
+  const result = pick(entry, ["index", "prev_chain_hash", "receipt_hash", "chain_hash"]);
+  result.receipt = pick(entry.receipt, ["schema_version", "seq", "trace_id", "effect_kind", "policy_outcome", "pre_state_hash", "args_hash", "result_hash", "post_state_hash", "input_lineage_hash", "output_lineage_hash", "label_set_commitment", "declassification_ref", "flow_policy_verdict", "recorded_at_millis"]);
+  result.receipt.policy_outcome = pick(entry.receipt.policy_outcome, ["outcome", ...Object.keys(entry.receipt.policy_outcome).filter((name) => name !== "outcome")]);
+  return result;
+});
+const sessionNonce = "0199abcd-1234-7000-8000-123456789abc";
+const identity = {
+  producer_id: `franken-node.native-session:ed25519:${runtimeAnchor}:${sessionNonce}`,
+  key_provenance: { authority_class: "runtime", key_id: `ed25519:${hash(Buffer.concat([Buffer.from("franken-engine.evidence-signing-key.v1"), publicBytes(sessionKey)]))}`, activation_epoch: 7, rotation_sequence: 1 },
+  verification_key: { inner: [...publicBytes(sessionKey)] },
+};
+const identityCapture = {
+  schema_version: "franken-node/runtime-evidence-identity-capture/v1", session_nonce: sessionNonce,
+  product_root_key_id: `ed25519:${runtimeAnchor}`, product_root_verification_key_hex: runtimeAnchor,
+  evidence_verification_identity: identity,
+};
+identityCapture.signature_hex = sign(null, frame("franken-node.runtime-evidence-identity-capture.v1", Buffer.from(ordered(identityCapture))), runtimeKey).toString("hex");
+const zeroSignature = { lower: Array(32).fill(0), upper: Array(32).fill(0) };
+const envelope = { producer_id: identity.producer_id, key_provenance: identity.key_provenance, signed_epoch: 18_446_744_073_709_551_615n, verification_key: identity.verification_key, signature: zeroSignature };
+const ledgerBytes = frame("franken-node:host-effect-ledger-signature:v3\0", Buffer.from(ordered(ledger)));
+const sessionSignature = sign(null, Buffer.from(ordered(["franken-engine.detached-evidence-signature.v1", [...ledgerBytes], envelope])), sessionKey);
+envelope.signature = { lower: [...sessionSignature.subarray(0, 32)], upper: [...sessionSignature.subarray(32)] };
+runtimeRecord.host_effect_ledger = { ...ledger, signature: envelope };
+function runtimeIncident(mutator = () => {}) {
+  const value = clone(originalRun), record = clone(runtimeRecord), capture = clone(identityCapture);
+  mutator({ value, record, capture });
+  delete record.record_signature;
+  record.record_signature = sign(null, Buffer.concat([Buffer.from("franken-node/run-host-effect-ledger-record-signature/v1\0"), Buffer.from(canonical(record))]), originalRunKey).toString("hex");
+  value.initial_state_snapshot.run_origin.record_json = canonical(record);
+  if (capture !== null) value.initial_state_snapshot.runtime_evidence_identity_capture = capture;
+  value.signature = clone(incident.signature);
+  return resealIncident(value);
+}
+const runtimeOptions = { ...testExporterOptions, runtime_anchor: runtimeAnchor };
+const runtimeWire = runtimeIncident();
+add("independently_signed_runtime_origin", "incident-bundle", runtimeWire, "verified", runtimeOptions);
+add("runtime_origin_wrong_root", "incident-bundle", runtimeWire, "RUNTIME_ORIGIN_SIGNER_UNTRUSTED", { ...runtimeOptions, runtime_anchor: foreign });
+add("runtime_origin_requires_portable_capture", "incident-bundle", originalRunBytes, "RUNTIME_ORIGIN_MISSING", { ...originalRunOptions, runtime_anchor: runtimeAnchor });
+add("runtime_origin_invalid_capture_signature", "incident-bundle", runtimeIncident(({ capture }) => { capture.signature_hex = "00".repeat(64); }), "RUNTIME_ORIGIN_CAPTURE_SIGNATURE_INVALID", runtimeOptions);
+add("runtime_origin_invalid_session_signature", "incident-bundle", runtimeIncident(({ record }) => { record.host_effect_ledger.signature.signature = zeroSignature; }), "RUNTIME_ORIGIN_LEDGER_SIGNATURE_INVALID", runtimeOptions);
+add("runtime_origin_wrong_session_epoch", "incident-bundle", runtimeIncident(({ record }) => { record.host_effect_ledger.signature.signed_epoch = 6; }), "RUNTIME_ORIGIN_INVALID", runtimeOptions);
+add("runtime_origin_wrong_session_identity", "incident-bundle", runtimeIncident(({ record }) => { record.host_effect_ledger.signature.producer_id = "PRIVATE-substitute"; }), "RUNTIME_ORIGIN_INVALID", runtimeOptions);
+
 function captured(state) {
   const expected = { terminal_state: state, trace_id: "trace-vector-1", console_output: [] };
   if (state === "completed") Object.assign(expected, { ir4_witness: {}, execution_value: "42", instructions_executed: 7, nondeterminism_trace: {}, lane: "deterministic", exit_code: null, decisions: null });

@@ -4,7 +4,7 @@ import { verifyArtifact, VerifierError } from "./franken_verifier.mjs";
 import type { Verification, EvidenceFormat } from "./franken_verifier.mjs";
 
 const cases: Array<{ name: string; input_hex: string; anchor: string; format: EvidenceFormat;
-  signature_hex?: string; run_anchor?: string; event_count?: number; expected: string; artifact_sha256: string }> =
+  signature_hex?: string; run_anchor?: string; runtime_anchor?: string; event_count?: number; expected: string; artifact_sha256: string }> =
   JSON.parse(readFileSync("vectors.json", "utf8"));
 const positive = cases.find((item) => item.name === "genuine_cli_incident")!;
 const result: Verification = await verifyArtifact(Buffer.from(positive.input_hex, "hex"), positive.anchor,
@@ -34,4 +34,10 @@ try {
 } catch (error: unknown) {
   if (!(error instanceof VerifierError) || error.code !== "RUN_ORIGIN_MISSING") throw error;
 }
-console.log(JSON.stringify({ consumer: "typescript", positive: 2, negative: 2, passed: true }));
+const runtime = cases.find((item) => item.name === "independently_signed_runtime_origin")!;
+const runtimeVerified: Verification = await verifyArtifact(Buffer.from(runtime.input_hex, "hex"), runtime.anchor,
+  { verifier: resolve("verifier"), trustedRunPublicKeyHex: runtime.run_anchor, trustedRuntimePublicKeyHex: runtime.runtime_anchor });
+if (runtimeVerified.scope !== "authenticated_runtime_incident"
+    || runtimeVerified.facts.runtime_origin.product_root_key_id !== `ed25519:${runtime.runtime_anchor}`
+    || runtimeVerified.facts.runtime_origin.signed_epoch !== "18446744073709551615") throw new Error("TypeScript runtime-origin mismatch");
+console.log(JSON.stringify({ consumer: "typescript", positive: 3, negative: 2, passed: true }));

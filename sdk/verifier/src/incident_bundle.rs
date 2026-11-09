@@ -40,6 +40,10 @@
 //! When the exporter carries an original signed run record, the separate
 //! [`verify_incident_bundle_with_run_key`] API authenticates that statement
 //! against a second caller-supplied authority and binds it to this bundle.
+//! [`verify_incident_bundle_with_runtime_keys`] additionally authenticates the
+//! original engine ledger through a portable session identity capture and a
+//! third, independently supplied product-root key. None of these APIs executes
+//! the captured guest or certifies cleanup, current revocation or fleet state.
 
 #[path = "incident_bundle_structure.rs"]
 mod structure;
@@ -51,6 +55,10 @@ pub use native_capture::{CapturedNativeTerminalState, VerifiedNativeCaptureMetad
 #[path = "incident_run_origin.rs"]
 mod run_origin;
 pub use run_origin::VerifiedRunOrigin;
+
+#[path = "incident_runtime_origin.rs"]
+mod runtime_origin;
+pub use runtime_origin::VerifiedRuntimeOrigin;
 
 use ed25519_dalek::{Signature, VerifyingKey};
 use serde::de::{self, Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
@@ -116,6 +124,15 @@ pub struct VerifiedIncidentBundleWithRunOrigin {
     pub run_origin: VerifiedRunOrigin,
 }
 
+/// A bundle whose exporter, original run statement and engine ledger each
+/// authenticate under explicitly supplied trust authorities.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedIncidentBundleWithRuntimeOrigin {
+    pub bundle: VerifiedIncidentBundle,
+    pub run_origin: VerifiedRunOrigin,
+    pub runtime_origin: VerifiedRuntimeOrigin,
+}
+
 /// Why a bundle failed independent verification.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IncidentBundleError {
@@ -141,6 +158,11 @@ pub enum IncidentBundleError {
     RunOriginInvalid { reason: &'static str },
     RunOriginSignatureMalformed,
     RunOriginSignatureInvalid,
+    RuntimeOriginMissing,
+    RuntimeOriginInvalid { reason: &'static str },
+    RuntimeOriginSignerNotTrusted,
+    RuntimeOriginCaptureSignatureInvalid,
+    RuntimeOriginLedgerSignatureInvalid,
 }
 
 impl std::fmt::Display for IncidentBundleError {
@@ -213,6 +235,24 @@ impl std::fmt::Display for IncidentBundleError {
                 f,
                 "original run signature does not verify under the supplied run authority"
             ),
+            Self::RuntimeOriginMissing => {
+                write!(f, "bundle has no portable runtime identity capture")
+            }
+            Self::RuntimeOriginInvalid { reason } => {
+                write!(f, "original runtime evidence is invalid: {reason}")
+            }
+            Self::RuntimeOriginSignerNotTrusted => {
+                write!(
+                    f,
+                    "runtime product root is not the verifier-supplied trust anchor"
+                )
+            }
+            Self::RuntimeOriginCaptureSignatureInvalid => {
+                write!(f, "runtime identity capture signature does not verify")
+            }
+            Self::RuntimeOriginLedgerSignatureInvalid => {
+                write!(f, "original engine ledger signature does not verify")
+            }
         }
     }
 }
@@ -479,6 +519,41 @@ pub fn verify_incident_bundle_with_run_key(
     let bundle = verify_incident_value(&value, trusted_bundle_signer)?;
     let run_origin = run_origin::verify(&value, trusted_run_signer)?;
     Ok(VerifiedIncidentBundleWithRunOrigin { bundle, run_origin })
+}
+
+/// Verify exporter, original run and original engine-ledger authority offline.
+///
+/// The embedded public runtime identity capture must verify under the supplied
+/// product-root key; its exact session identity must then verify the original
+/// host-effect ledger's detached signature. No embedded key or filesystem path
+/// supplies trust. Historical bundles without that public capture fail closed.
+/// The existing two-key API retains its narrower recorded-statement scope.
+///
+/// This authenticates the recorded ledger, not native replay, effect commit
+/// status, quiescence, current revocation or deletion-resistant history. The
+/// independently signed run statement binds the native capture when present;
+/// the engine ledger signature does not separately sign that capture.
+///
+/// # Errors
+///
+/// Refuses any bundle/run-origin error, missing or malformed session capture,
+/// foreign product root, unsupported provenance, mismatched signing identity,
+/// pre-activation epoch or invalid root/session signature.
+pub fn verify_incident_bundle_with_runtime_keys(
+    bytes: &[u8],
+    trusted_bundle_signer: &VerifyingKey,
+    trusted_run_signer: &VerifyingKey,
+    trusted_product_root: &VerifyingKey,
+) -> Result<VerifiedIncidentBundleWithRuntimeOrigin, IncidentBundleError> {
+    let value = decode_evidence_json(bytes)?;
+    let bundle = verify_incident_value(&value, trusted_bundle_signer)?;
+    let run_origin = run_origin::verify(&value, trusted_run_signer)?;
+    let runtime_origin = runtime_origin::verify(&value, trusted_product_root)?;
+    Ok(VerifiedIncidentBundleWithRuntimeOrigin {
+        bundle,
+        run_origin,
+        runtime_origin,
+    })
 }
 
 fn verify_incident_value(

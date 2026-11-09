@@ -31,6 +31,7 @@ class Verification(TypedDict):
     verdict: Literal["verified"]
     format: EvidenceFormat
     scope: Literal["authenticated_recorded_incident", "authenticated_run_incident",
+                   "authenticated_runtime_incident",
                    "authenticated_capsule_content", "authenticated_sdk_replay_bundle"]
     artifact_sha256: str
     facts: dict[str, Any]
@@ -43,6 +44,16 @@ class RunOriginMetadata(TypedDict):
     receipt_hash: str
     signer_public_key_hex: str
     record_sha256: str
+
+
+class RuntimeOriginMetadata(TypedDict):
+    """Product-root and session authenticated ledger; not execution or cleanup."""
+
+    session_nonce: str
+    product_root_key_id: str
+    producer_id: str
+    evidence_key_id: str
+    signed_epoch: str
 
 
 class VerifierError(Exception):
@@ -83,7 +94,24 @@ def _run_origin_valid(origin: Any, anchor: str) -> bool:
     )
 
 
-def _facts_valid(facts: Any, format: str, anchor: str, run_anchor: str | None) -> bool:
+def _runtime_origin_valid(origin: Any, anchor: str) -> bool:
+    return (
+        isinstance(origin, dict)
+        and set(origin) == {"session_nonce", "product_root_key_id", "producer_id", "evidence_key_id", "signed_epoch"}
+        and isinstance(origin["session_nonce"], str)
+        and re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", origin["session_nonce"]) is not None
+        and origin["product_root_key_id"] == f"ed25519:{anchor}"
+        and isinstance(origin["producer_id"], str) and 0 < len(origin["producer_id"]) <= 512
+        and isinstance(origin["evidence_key_id"], str)
+        and re.fullmatch(r"ed25519:[0-9a-f]{64}", origin["evidence_key_id"]) is not None
+        and isinstance(origin["signed_epoch"], str)
+        and re.fullmatch(r"0|[1-9][0-9]{0,19}", origin["signed_epoch"]) is not None
+        and int(origin["signed_epoch"]) <= 2**64 - 1
+    )
+
+
+def _facts_valid(facts: Any, format: str, anchor: str, run_anchor: str | None,
+                 runtime_anchor: str | None) -> bool:
     if not isinstance(facts, dict) or facts.get("signer_public_key_hex") != anchor:
         return False
     expected = {
@@ -95,6 +123,8 @@ def _facts_valid(facts: Any, format: str, anchor: str, run_anchor: str | None) -
     }[format]
     if run_anchor is not None:
         expected.add("run_origin")
+    if runtime_anchor is not None:
+        expected.add("runtime_origin")
     if set(facts) != expected:
         return False
     for key, value in facts.items():
@@ -103,6 +133,9 @@ def _facts_valid(facts: Any, format: str, anchor: str, run_anchor: str | None) -
                 return False
         elif key == "run_origin":
             if run_anchor is None or not _run_origin_valid(value, run_anchor):
+                return False
+        elif key == "runtime_origin":
+            if runtime_anchor is None or not _runtime_origin_valid(value, runtime_anchor):
                 return False
         elif key == "native_capture":
             if value is not None:
@@ -131,6 +164,7 @@ def verify_artifact(
     verifier: str | os.PathLike[str],
     format: EvidenceFormat = "incident-bundle",
     trusted_run_public_key_hex: str | None = None,
+    trusted_runtime_public_key_hex: str | None = None,
     signature_hex: str | None = None,
     timeout: float = 10.0,
 ) -> Verification:
@@ -143,6 +177,9 @@ def verify_artifact(
     requires the original receipt authority's signature and matching run data.
     Missing proof, a different run signer or a narrower response is refused;
     the bundle exporter never supplies this separate authority implicitly.
+    Adding ``trusted_runtime_public_key_hex`` requires that run authority plus
+    the portable product-root/session signatures over the original effect ledger.
+    It does not establish guest replay, external effect completion or quiescence.
     The supplied executable is part of the caller's trusted verifier
     distribution. It is never inferred from an artifact or run through a shell.
     """
@@ -159,6 +196,11 @@ def verify_artifact(
             raise VerifierError("INPUT_INVALID", "original-run trust applies only to incident-bundle")
         if not _hex(trusted_run_public_key_hex, 64):
             raise VerifierError("RUN_ANCHOR_INVALID", "expected a 32-byte hexadecimal run public key")
+    if trusted_runtime_public_key_hex is not None:
+        if format != "incident-bundle" or trusted_run_public_key_hex is None:
+            raise VerifierError("INPUT_INVALID", "runtime trust requires incident-bundle and original-run trust")
+        if not _hex(trusted_runtime_public_key_hex, 64):
+            raise VerifierError("RUNTIME_ANCHOR_INVALID", "expected a 32-byte hexadecimal product-root public key")
     if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not 0 < timeout <= 120 or not math.isfinite(timeout):
         raise VerifierError("TIMEOUT_INVALID", "timeout must be finite and in (0, 120] seconds")
     try:
@@ -169,10 +211,14 @@ def verify_artifact(
         raise VerifierError("EXECUTABLE_INVALID", "verifier must be a trusted executable path")
     anchor = trusted_public_key_hex.lower()
     run_anchor = trusted_run_public_key_hex.lower() if trusted_run_public_key_hex is not None else None
-    scope = "authenticated_run_incident" if run_anchor is not None else _SCOPES[format]
+    runtime_anchor = trusted_runtime_public_key_hex.lower() if trusted_runtime_public_key_hex is not None else None
+    scope = ("authenticated_runtime_incident" if runtime_anchor is not None else
+             "authenticated_run_incident" if run_anchor is not None else _SCOPES[format])
     args = [executable, "verify", "--format", format, "--trusted-key-hex", anchor]
     if run_anchor is not None:
         args.extend(["--trusted-run-key-hex", run_anchor])
+    if runtime_anchor is not None:
+        args.extend(["--trusted-runtime-key-hex", runtime_anchor])
     if format == "signed-bundle":
         if not _hex(signature_hex, 128):
             raise VerifierError("SIGNATURE_MALFORMED", "a detached 64-byte signature is required")
@@ -207,6 +253,6 @@ def verify_artifact(
             or set(result) != {"schema_version", "verdict", "format", "scope", "artifact_sha256", "facts"}
             or result.get("format") != format or result.get("scope") != scope
             or result.get("artifact_sha256") != hashlib.sha256(data).hexdigest()
-            or not _facts_valid(result.get("facts"), format, anchor, run_anchor)):
+            or not _facts_valid(result.get("facts"), format, anchor, run_anchor, runtime_anchor)):
         raise VerifierError("PROTOCOL_INVALID", "verification response does not match the request")
     return result

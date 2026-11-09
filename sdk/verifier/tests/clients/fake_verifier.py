@@ -17,6 +17,8 @@ except (ValueError, AttributeError):
 anchor = sys.argv[sys.argv.index("--trusted-key-hex") + 1]
 run_anchor = (sys.argv[sys.argv.index("--trusted-run-key-hex") + 1]
               if "--trusted-run-key-hex" in sys.argv else "11" * 32)
+runtime_anchor = (sys.argv[sys.argv.index("--trusted-runtime-key-hex") + 1]
+                  if "--trusted-runtime-key-hex" in sys.argv else "22" * 32)
 response = {
     "schema_version": "franken-verifier-cli/v1", "verdict": "verified",
     "format": "incident-bundle", "scope": "authenticated_recorded_incident",
@@ -28,11 +30,19 @@ response = {
         "signing_identity": "339eefa3a988f613", "native_capture": None,
     },
 }
-if mode.startswith("run_"):
+if mode.startswith(("run_", "runtime_")):
     response["scope"] = "authenticated_run_incident"
     response["facts"]["run_origin"] = {
         "receipt_id": "run-protocol-control", "receipt_hash": "sha256:" + "a" * 64,
         "signer_public_key_hex": run_anchor, "record_sha256": "b" * 64,
+    }
+if mode.startswith("runtime_"):
+    response["scope"] = "authenticated_runtime_incident"
+    response["facts"]["runtime_origin"] = {
+        "session_nonce": "0199abcd-1234-7000-8000-123456789abc",
+        "product_root_key_id": "ed25519:" + runtime_anchor,
+        "producer_id": "runtime-protocol-control", "evidence_key_id": "ed25519:" + "c" * 64,
+        "signed_epoch": "18446744073709551615",
     }
 exit_code = 0
 if mode == "timeout":
@@ -88,6 +98,19 @@ elif mode == "run_extra_origin_field":
     response["facts"]["run_origin"]["engine_execution_verified"] = True
 elif mode == "run_origin_non_object":
     response["facts"]["run_origin"] = []
+elif mode == "runtime_scope_downgrade":
+    response["scope"] = "authenticated_run_incident"
+    del response["facts"]["runtime_origin"]
+elif mode == "runtime_origin_missing":
+    del response["facts"]["runtime_origin"]
+elif mode == "runtime_wrong_root":
+    response["facts"]["runtime_origin"]["product_root_key_id"] = "ed25519:" + anchor
+elif mode == "runtime_rounded_epoch":
+    response["facts"]["runtime_origin"]["signed_epoch"] = 2**64 - 1
+elif mode == "runtime_overflow_epoch":
+    response["facts"]["runtime_origin"]["signed_epoch"] = str(2**64)
+elif mode == "runtime_extra_claim":
+    response["facts"]["runtime_origin"]["quiescence_certified"] = True
 encoded = json.dumps(response, separators=(",", ":"), sort_keys=True)
 if mode == "duplicate":
     encoded = encoded[:-1] + ',"verdict":"verified"}'

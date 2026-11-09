@@ -9,6 +9,11 @@ Both keys must come from the verifier's own trust configuration. A key carried
 inside evidence never becomes a trust anchor. The same key can be supplied for
 both roles when the verifier explicitly trusts it for both purposes.
 
+A third independent product-root key can additionally authenticate the original
+engine effect ledger. The product now exports its public session identity
+capture with the incident, so this check works offline without access to the
+producing machine or its protected key directory.
+
 ## Offline executable
 
 ```sh
@@ -32,6 +37,24 @@ Omitting this option preserves the existing one-key interface and
 `authenticated_recorded_incident` scope. That result does not authenticate the
 original run statement, including when the bundle happens to carry one.
 
+To require the original engine ledger's session signature as well:
+
+```sh
+franken-verifier verify --format incident-bundle \
+  --trusted-key-hex "$TRUSTED_BUNDLE_PUBLIC_KEY" \
+  --trusted-run-key-hex "$TRUSTED_RUN_PUBLIC_KEY" \
+  --trusted-runtime-key-hex "$TRUSTED_PRODUCT_ROOT_PUBLIC_KEY" < incident.fnbundle
+```
+
+The third key requires the run key. Success has scope
+`authenticated_runtime_incident` and adds `facts.runtime_origin` with
+`session_nonce`, `product_root_key_id`, `producer_id`, `evidence_key_id` and
+`signed_epoch`. The epoch is a canonical decimal string, preserving every u64
+value in JavaScript. Missing portable evidence fails with
+`RUNTIME_ORIGIN_MISSING`; a foreign root, invalid capture signature and invalid
+engine signature have distinct `RUNTIME_ORIGIN_*` errors. None silently falls
+back to the one-key or two-key scope.
+
 ## Rust
 
 ```rust
@@ -53,6 +76,13 @@ fn audit_original_run(
 The result separates ordinary bundle facts in `bundle` from original-run
 attribution in `run_origin`. The existing `verify_incident_bundle` function and
 `VerifiedIncidentBundle` return type remain unchanged.
+
+For engine ledger authentication, call
+`verify_incident_bundle_with_runtime_keys(bytes, trusted_exporter,
+trusted_run_authority, trusted_product_root)`. It returns
+`VerifiedIncidentBundleWithRuntimeOrigin`, retaining `bundle` and `run_origin`
+and adding `runtime_origin: VerifiedRuntimeOrigin`. The Rust epoch field is
+`u64`; its serialized form is a decimal string.
 
 ## JavaScript, TypeScript, and Python
 
@@ -77,6 +107,12 @@ verified = verify_artifact(
 )
 print(verified["facts"]["run_origin"]["receipt_id"])
 ```
+
+Add `trustedRuntimePublicKeyHex: trustedProductRootHex` in JavaScript/TypeScript
+or `trusted_runtime_public_key_hex=trusted_product_root_hex` in Python to require
+runtime-origin verification. The bindings validate the returned root identity,
+scope and exact decimal epoch. Missing metadata, downgraded scope, rounded
+epochs and unsolicited claims are refused.
 
 ## What the stronger verification establishes
 
@@ -107,6 +143,21 @@ session certificate or separate ledger signature, rebuild module resolution,
 execute the guest, or certify native execution equivalence. Actual native
 replay remains a separate product operation.
 
+With the third key, the SDK additionally checks the product-root signature on
+the exact v1 session identity, its runtime authority class, derived public-key
+ID and initial key lineage. It requires the original ledger's producer, key and
+provenance to match that identity and its signed epoch to be at or after key
+activation. It then verifies the ledger's detached Ed25519 signature over the
+original ordered receipt bytes and all ledger summary fields. Lab identities,
+unsupported rotations, pre-activation signatures and substituted session keys
+fail even when the bundle exporter and run-record signer approve the change.
+
+This is original ledger attribution. It does not execute the guest, rederive
+the typed receipt ID, resolve module graphs, certify effect commitment or
+quiescence, establish current revocation state, or prove historical completeness.
+The native replay payload remains bound by the receipt-authority statement;
+the separate engine signature covers its host-effect ledger.
+
 ## Portable origin envelope and signature compatibility
 
 The exporter carries this object in `initial_state_snapshot.run_origin`:
@@ -132,3 +183,33 @@ by one zero byte. Verify the resulting bytes with Ed25519 under the caller's
 run authority. There is no length prefix. Unknown signed record members remain
 in the signature preimage. The raw carried record is never narrowed to a typed
 subset or re-signed by the exporter.
+
+## Portable engine identity and existing signature protocols
+
+`initial_state_snapshot.runtime_evidence_identity_capture` carries the complete
+original public `franken-node/runtime-evidence-identity-capture/v1` object.
+It contains the session nonce, product-root key identity, engine public identity
+and root signature. No private seed is exported. The outer bundle authenticates
+this member without changing or re-signing the original `record_json`; a
+verifier must still supply the product-root anchor independently.
+
+The SDK reproduces the existing producer encodings exactly:
+
+- Root capture: ordered typed JSON without `signature_hex`, prefixed with
+  `franken-node.runtime-evidence-identity-capture.v1` and a big-endian u64 payload
+  length, verified under the supplied product root.
+- Ledger payload: ordered typed JSON without its signature, prefixed with
+  `franken-node:host-effect-ledger-signature:v3` plus a zero byte and a big-endian
+  u64 payload length.
+- Engine detached signature: JSON tuple of
+  `franken-engine.detached-evidence-signature.v1`, framed ledger payload as a
+  byte array, and the original ordered envelope with both signature halves
+  replaced by zero arrays. Verification uses only the authenticated session key.
+
+The capture is bounded to 64 KiB and the encoded ledger to the product's 24 MiB
+native-response ceiling. Encoding itself is bounded before expanding the
+detached protocol's byte array. Duplicate JSON members, unknown identity fields
+and unsupported schema or provenance are rejected, with diagnostics that do
+not include private captured values. Older exports without a portable identity
+retain their previous narrower verification scope until the product can
+re-export their retained authenticated public capture.
