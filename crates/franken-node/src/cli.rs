@@ -327,6 +327,11 @@ pub struct RunArgs {
     #[arg(long, hide = true)]
     pub admitted_approval_sha256: Option<String>,
 
+    /// Canonical supervisor file retaining its operator safe-mode ancestry.
+    /// Internal deployment handoff: adds a restriction to the release's scopes.
+    #[arg(long, hide = true)]
+    pub admitted_operator_scope: Option<PathBuf>,
+
     /// Runtime selection. Profile-governed run accepts auto or franken-engine;
     /// node and bun fail closed because they cannot enforce engine capabilities.
     #[arg(long)]
@@ -436,6 +441,17 @@ impl RunArgs {
             self.admitted_config_sha256.is_some() == self.admitted_approval_sha256.is_some(),
             "deployment configuration and publisher approval commitments must be supplied together"
         );
+        if let Some(anchor) = &self.admitted_operator_scope {
+            anyhow::ensure!(
+                self.admitted_config_sha256.is_some(),
+                "an admitted operator scope requires deployment configuration and publisher approval commitments"
+            );
+            validate_system_binary_pathbuf(anchor)?;
+            anyhow::ensure!(
+                anchor.is_absolute(),
+                "an admitted operator scope requires an absolute anchor path"
+            );
+        }
         if self.admitted_config_sha256.is_some() {
             anyhow::ensure!(
                 self.config.is_some()
@@ -549,6 +565,9 @@ pub enum DeployCommand {
 
     /// Finish an interrupted signed activation after re-verifying its release and authority.
     Reconcile(DeployReconcileArgs),
+
+    /// Replace an exact pending activation with a freshly verified operator-selected release.
+    Supersede(DeploySupersedeArgs),
 }
 
 #[derive(Debug, Parser)]
@@ -661,6 +680,33 @@ pub struct DeployReconcileArgs {
     pub operator_id: Option<String>,
 
     /// Emit `franken-node/deploy-cli/v1` JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Parser)]
+pub struct DeploySupersedeArgs {
+    /// Deployment name.
+    #[arg(default_value = "")]
+    pub name: String,
+
+    /// Transaction digest from `deploy status` identifying the exact pending decision to replace.
+    #[arg(long)]
+    pub expected_pending_digest: Option<String>,
+
+    /// Admitted release to activate in place of the pending target.
+    #[arg(long)]
+    pub release: Option<String>,
+
+    /// Operator identity recorded in the signed replacement intent.
+    #[arg(long)]
+    pub operator_id: Option<String>,
+
+    /// Reason recorded with the superseded transaction; 1-512 bytes.
+    #[arg(long)]
+    pub reason: Option<String>,
+
+    /// Emit `franken-node/deploy-cli/v1` JSON; this command never starts a workload.
     #[arg(long)]
     pub json: bool,
 }
@@ -3835,6 +3881,35 @@ mod parser_contract_extra_tests {
             return Err("expected admitted run command".to_string());
         };
         args.validate_paths().map_err(|error| error.to_string())?;
+        let mut scoped = base.clone();
+        scoped.extend(["--admitted-operator-scope", "/operator/deployment.lock"]);
+        let Command::Run(args) = parse(&scoped).map_err(|error| error.to_string())?.command else {
+            return Err("expected operator-scoped admitted run".to_string());
+        };
+        args.validate_paths().map_err(|error| error.to_string())?;
+        assert_eq!(
+            args.admitted_operator_scope.as_deref(),
+            Some(Path::new("/operator/deployment.lock"))
+        );
+        for command in [
+            vec![
+                "franken-node",
+                "run",
+                "app.js",
+                "--admitted-operator-scope",
+                "/operator/deployment.lock",
+            ],
+            base.iter()
+                .copied()
+                .chain(["--admitted-operator-scope", "relative.lock"])
+                .collect(),
+        ] {
+            let Command::Run(args) = parse(&command).map_err(|error| error.to_string())?.command
+            else {
+                return Err("expected invalid operator-scoped run".to_string());
+            };
+            assert!(args.validate_paths().is_err());
+        }
         for extra in [
             vec!["--policy", "legacy-risky"],
             vec!["--engine-bin", "/bin/another-engine"],
@@ -5085,6 +5160,62 @@ mod tests {
                 assert!(args.json);
             }
             other => panic!("expected deploy reconcile, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deploy_supersede_requires_exact_operator_request_in_the_handler() {
+        let cli = <Cli as clap::Parser>::try_parse_from([
+            "franken-node",
+            "deploy",
+            "supersede",
+            "payments",
+            "--expected-pending-digest",
+            "sha256:pending-transaction",
+            "--release",
+            "repaired-v3",
+            "--operator-id",
+            "incident-operator",
+            "--reason",
+            "pending target lost publisher admission",
+            "--json",
+        ])
+        .expect("explicit supersession command must parse");
+        match cli.command {
+            Command::Deploy(DeployCommand::Supersede(args)) => {
+                assert_eq!(args.name, "payments");
+                assert_eq!(
+                    args.expected_pending_digest.as_deref(),
+                    Some("sha256:pending-transaction")
+                );
+                assert_eq!(args.release.as_deref(), Some("repaired-v3"));
+                assert_eq!(args.operator_id.as_deref(), Some("incident-operator"));
+                assert_eq!(
+                    args.reason.as_deref(),
+                    Some("pending target lost publisher admission")
+                );
+                assert!(args.json);
+            }
+            other => panic!("expected deploy supersede, got {other:?}"),
+        }
+
+        let cli = <Cli as clap::Parser>::try_parse_from([
+            "franken-node",
+            "deploy",
+            "supersede",
+            "--json",
+        ])
+        .expect("missing operands must reach the handler's structured error path");
+        match cli.command {
+            Command::Deploy(DeployCommand::Supersede(args)) => {
+                assert!(args.name.is_empty());
+                assert!(args.expected_pending_digest.is_none());
+                assert!(args.release.is_none());
+                assert!(args.operator_id.is_none());
+                assert!(args.reason.is_none());
+                assert!(args.json);
+            }
+            other => panic!("expected deploy supersede, got {other:?}"),
         }
     }
 

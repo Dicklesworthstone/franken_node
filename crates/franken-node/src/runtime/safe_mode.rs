@@ -375,6 +375,70 @@ pub fn enforce_run_safe_mode(entrypoint: &std::path::Path) -> anyhow::Result<()>
     enforce_admitted_run_safe_mode(&entrypoint)
 }
 
+/// An additional operator scope retained by a native run. Deployment releases
+/// may live outside their supervisor's project, so the release entrypoint alone
+/// cannot identify every scope that must remain in force. This restriction is
+/// carried in the authenticated worker admission and never grants authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdmittedSafeModeScope {
+    anchor: std::path::PathBuf,
+}
+
+impl AdmittedSafeModeScope {
+    /// Capture an existing, canonical supervisor file (the deployment lock).
+    /// Require the supplied path to be resolved already, preventing a replaced
+    /// symlink from silently selecting another operator scope at child startup.
+    pub fn capture(anchor: &std::path::Path) -> anyhow::Result<Self> {
+        use anyhow::Context;
+
+        let scope = Self {
+            anchor: anchor.to_path_buf(),
+        };
+        scope.validate()?;
+        let canonical = anchor.canonicalize().with_context(|| {
+            format!(
+                "resolve admitted operator scope anchor {}",
+                anchor.display()
+            )
+        })?;
+        anyhow::ensure!(
+            canonical.as_path() == anchor && canonical.is_file(),
+            "admitted operator scope anchor must be an existing canonical file"
+        );
+        scope.enforce()?;
+        Ok(scope)
+    }
+
+    /// Validate the retained representation after authenticated deserialization.
+    /// Scope checks use bounded, absolute ancestry, never caller-relative paths.
+    pub(crate) fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.anchor.is_absolute()
+                && self.anchor.parent().is_some()
+                && self.anchor.as_os_str().as_encoded_bytes().len() <= 4096
+                && !self.anchor.as_os_str().as_encoded_bytes().contains(&0)
+                && self.anchor.components().count() <= 128
+                && !self.anchor.components().any(|component| {
+                    matches!(
+                        component,
+                        std::path::Component::CurDir | std::path::Component::ParentDir
+                    )
+                }),
+            "admitted operator scope anchor must be a bounded absolute resolved file path"
+        );
+        Ok(())
+    }
+
+    /// Recheck the original ancestry without reopening or resolving the anchor.
+    /// Renaming the admitted file must not detach a running session from the
+    /// operator's scope. Existing malformed-state refusals remain in force.
+    pub fn enforce(&self) -> anyhow::Result<()> {
+        self.validate()?;
+        enforce_admitted_run_safe_mode(&self.anchor)
+    }
+}
+
 /// Recheck the scopes retained at native admission without reopening the entry
 /// source. A guest may legitimately rename or remove its source after loading;
 /// that must neither bypass the original scope nor invent an admission failure.
@@ -2223,6 +2287,108 @@ fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retained_operator_scope_controls_external_release_after_anchor_rename() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let operator = root.join("operator");
+        let release = root.join("external-release");
+        std::fs::create_dir_all(operator.join("deployments/app")).unwrap();
+        std::fs::create_dir(&release).unwrap();
+        let anchor = operator.join("deployments/app/deployment.lock");
+        std::fs::write(&anchor, "").unwrap();
+        let entrypoint = release.join("app.js");
+        std::fs::write(&entrypoint, "console.log('external release');").unwrap();
+        let scope = AdmittedSafeModeScope::capture(&anchor).unwrap();
+        let retained: AdmittedSafeModeScope =
+            serde_json::from_slice(&serde_json::to_vec(&scope).unwrap()).unwrap();
+        assert_eq!(retained, scope);
+        std::fs::rename(&anchor, operator.join("retained.lock")).unwrap();
+        retained.enforce().unwrap();
+
+        let state_path = operator.join(".franken-node/safe-mode/state.json");
+        update_persisted_safe_mode(&state_path, true, |controller| {
+            controller.enter_safe_mode(
+                SafeModeEntryReason::ExplicitFlag,
+                "2026-10-10T00:00:00Z",
+                "operator:external-release-test",
+                Vec::new(),
+            );
+            Ok(())
+        })
+        .unwrap();
+        // The release's own ancestry remains unrestricted. Only the retained
+        // supervisor scope can observe this operator action.
+        enforce_run_safe_mode(&entrypoint).unwrap();
+        let error = retained.enforce().unwrap_err().to_string();
+        assert!(error.contains("active safe mode"));
+        assert!(error.contains(state_path.to_str().unwrap()));
+
+        update_persisted_safe_mode(&state_path, false, |controller| {
+            controller
+                .exit_safe_mode(
+                    &ExitVerification {
+                        trust_state_consistent: true,
+                        no_unresolved_incidents: true,
+                        evidence_ledger_intact: true,
+                        operator_confirmed: true,
+                    },
+                    "operator",
+                    "2026-10-10T00:01:00Z",
+                )
+                .map_err(anyhow::Error::from)
+        })
+        .unwrap();
+        retained.enforce().unwrap();
+    }
+
+    #[test]
+    fn retained_operator_scope_rejects_malformed_state_and_invalid_wire_paths() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let anchor = root.join("deployment.lock");
+        std::fs::write(&anchor, "").unwrap();
+        let scope = AdmittedSafeModeScope::capture(&anchor).unwrap();
+        let state_path = root.join(".franken-node/safe-mode/state.json");
+        std::fs::create_dir_all(state_path.parent().unwrap()).unwrap();
+        std::fs::write(&state_path, "{\"truncated\":").unwrap();
+        assert!(
+            scope
+                .enforce()
+                .unwrap_err()
+                .to_string()
+                .contains("invalid safe-mode")
+        );
+
+        for anchor in [
+            "relative.lock".to_string(),
+            "/".to_string(),
+            "/operator/../different/deployment.lock".to_string(),
+            format!("/{}", "x".repeat(4096)),
+            format!("/{}deployment.lock", "nested/".repeat(128)),
+            "/operator/invalid\0.lock".to_string(),
+        ] {
+            let malformed: AdmittedSafeModeScope =
+                serde_json::from_value(serde_json::json!({"anchor": anchor})).unwrap();
+            assert!(malformed.enforce().is_err(), "invalid anchor {anchor:?}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn operator_scope_capture_rejects_missing_directory_and_redirected_anchors() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        assert!(AdmittedSafeModeScope::capture(&root.join("missing.lock")).is_err());
+        assert!(AdmittedSafeModeScope::capture(&root).is_err());
+        let anchor = root.join("deployment.lock");
+        std::fs::write(&anchor, "").unwrap();
+        let alias = root.join("redirected.lock");
+        std::os::unix::fs::symlink(&anchor, &alias).unwrap();
+        assert!(AdmittedSafeModeScope::capture(&alias).is_err());
+        AdmittedSafeModeScope::capture(&anchor).unwrap();
+    }
 
     #[test]
     fn admitted_safe_mode_scope_survives_entrypoint_rename() {

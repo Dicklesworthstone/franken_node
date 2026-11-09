@@ -1132,8 +1132,9 @@ receipt signing key, and emit `franken-node/deploy-cli/v1` with `--json`
 | `franken-node deploy activate <name>` | Re-verify an admitted release and append a signed, hash-chained activation (the pointer). Required: `--release`, `--operator-id`. |
 | `franken-node deploy policy <name>` | Set the signed crash-loop policy: `--on-crash-loop contain\|rollback`, `--restart operator\|automatic` (default `operator`), `--operator-id`. |
 | `franken-node deploy run <name>` | Verify and run the active release natively; record readiness on a healthy run; on a validated crash loop apply the policy (signed recovery record, pointer switch to the newest verified known-good release, optional single restart). Program args after `--`. |
-| `franken-node deploy status <name>` | Show the policy, activation chain, per-release readiness and crash-loop marks, and every recovery. |
+| `franken-node deploy status <name>` | Show the policy, committed activations and recoveries, pending transaction digest, superseded attempts, and per-release readiness and crash-loop marks. |
 | `franken-node deploy reconcile <name>` | Finish a retained, signed activation transaction after an interrupted write. Required: `--operator-id`. Rechecks the release and, for rollback, the current recovery policy and readiness. Never starts a workload. |
+| `franken-node deploy supersede <name>` | Replace an exact pending transaction with a freshly verified admitted release. Required: `--expected-pending-digest` (from status), `--release`, `--operator-id`, `--reason`. Retains abandoned attempts and their evidence; never starts a workload. |
 
 ### Ops and diagnostics
 
@@ -4489,9 +4490,11 @@ deployment record under `.franken-node/state/deployments/<name>/`).
 - `deploy status <name> [--json]` shows the policy, the activation chain,
   each release's readiness and crash-loop marks, and every committed recovery.
   An interrupted signed transition remains inspectable as `pending_activation`,
-  including its planned recovery; the active release and history still describe
-  the committed pointer. Inspection does not complete the transition or grant
-  authority to execute it. Use explicit reconciliation after reviewing the plan.
+  including its `transaction_digest` and planned recovery. Abandoned attempts
+  remain separately visible as `superseded_activations`, including each planned
+  recovery and the replacement attempt's sequence. The active release and
+  committed history describe the current pointer. Inspection does not complete
+  a transition or grant authority to execute it.
 - `deploy reconcile <name> --operator-id <op> [--json]` completes an interrupted
   signed activation transaction. The transaction records the intended
   activation and any crash recovery before the history, recovery receipt and
@@ -4503,13 +4506,42 @@ deployment record under `.franken-node/state/deployments/<name>/`).
   returns `reconciled: true`; repeating it returns `reconciled: false`.
   It never starts or repeats an application run: use `deploy run` explicitly
   after inspecting the outcome.
+- `deploy supersede <name> --expected-pending-digest <digest> --release <id>
+  --operator-id <op> --reason <reason> [--json]` replaces a pending decision
+  that cannot or should not complete, such as a rollback whose target was
+  revoked or whose recovery policy changed. Copy the digest from
+  `pending_activation.transaction_digest` in `deploy status --json`. The exact
+  digest prevents an old operator request from replacing a newer decision.
+  The replacement must be an installed release that passes current source,
+  configuration, publisher, trust and build admission. The original target
+  can remain revoked or unavailable.
+
+  The store signs a new intent binding the abandoned transaction, the committed
+  predecessor, operator and reason before completing any retained journal
+  records. It publishes the replacement pointer last. Abandoned activations
+  and planned rollback receipts remain inspectable, retain their original
+  identities, and never count as committed activations, completed recoveries
+  or known-good history. Their crash nonces and recovery sequence numbers
+  remain consumed. An interrupted replacement can be completed by `deploy
+  reconcile` or an identical `deploy supersede` retry, after fresh admission.
+  If that replacement also becomes inadmissible, use its new pending digest
+  to authorize another replacement. Repeating a completed request returns
+  `already_committed: true` only while that exact replacement is still current;
+  a stale request cannot move the pointer back. This is an operator activation
+  and never grants an automatic restart. Inspect the outcome, then use
+  `deploy run` explicitly.
 
 Recovery switches only the activation pointer. Release directories, the
 failed release, its crash records and the activation/recovery history are
 kept. Each release is its own run scope, so the crash-loop safe mode stays on
 the failed release, which can still be inspected and is still refused by a
-plain `run`. An operator safe mode on the deployment root still blocks every
-release. A missing, moved, edited, re-signed or foreign-build candidate is
+plain `run`. An operator safe mode on the deployment root blocks every release,
+including releases stored outside that root. The admitted native worker retains
+the operator scope alongside its own release scope and the existing live-control
+observer rechecks both during execution. Entering operator safe mode interrupts
+an already-running external release through the normal containment path;
+unfinished effects retain their indeterminate state and this interruption never
+counts as a native panic. A missing, moved, edited, re-signed or foreign-build candidate is
 refused. So is one that fails its current trust admission: the release's
 own authenticated trust registry must be current and must not revoke the
 approval's publisher key or exact artifact (`trust revoke --artifact-sha256`

@@ -3177,6 +3177,11 @@ pub struct RunTrustRequirements {
     /// dependency trust, operator capabilities, and execution limits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     registry_artifact_approval: Option<PublisherSourceGraphApproval>,
+    /// An additional supervisor scope, independent of the release's location.
+    /// Authenticated alongside the remaining admission so worker startup and
+    /// the live observer cannot forget the operator's safe-mode restriction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    operator_safe_mode_scope: Option<crate::runtime::safe_mode::AdmittedSafeModeScope>,
 }
 
 impl RunTrustRequirements {
@@ -3199,6 +3204,7 @@ impl RunTrustRequirements {
             registry_required: registry_required || !required_card_ids.is_empty(),
             dependency_capture: None,
             registry_artifact_approval: None,
+            operator_safe_mode_scope: None,
             required_card_ids: required_card_ids
                 .iter()
                 .cloned()
@@ -3231,6 +3237,27 @@ impl RunTrustRequirements {
         self.registry_artifact_approval = Some(approval);
         self.validate()?;
         Ok(self)
+    }
+
+    pub fn with_operator_safe_mode_scope(
+        mut self,
+        scope: crate::runtime::safe_mode::AdmittedSafeModeScope,
+    ) -> Result<Self> {
+        scope.validate()?;
+        self.operator_safe_mode_scope = Some(scope);
+        self.validate()?;
+        Ok(self)
+    }
+
+    /// Recheck the admitted operator restriction without re-resolving its
+    /// anchor. The release's own scopes are checked independently as well.
+    pub fn enforce_operator_safe_mode(&self) -> Result<()> {
+        if let Some(scope) = &self.operator_safe_mode_scope {
+            scope
+                .enforce()
+                .context("deployment operator safe-mode scope")?;
+        }
+        Ok(())
     }
 
     /// Both the dispatcher and worker reauthenticate the retained artifact,
@@ -3303,6 +3330,9 @@ impl RunTrustRequirements {
         Self::validate_bounds(&self.dependency_ids, &self.required_card_ids)?;
         if let Some(approval) = &self.registry_artifact_approval {
             approval.validate()?;
+        }
+        if let Some(scope) = &self.operator_safe_mode_scope {
+            scope.validate()?;
         }
         for ids in [&self.dependency_ids, &self.required_card_ids] {
             if ids.windows(2).any(|pair| pair[0] >= pair[1]) {
@@ -3592,6 +3622,13 @@ fn recheck_native_run_controls(
         return Ok(());
     }
 
+    requirements.enforce_operator_safe_mode().map_err(|error| {
+        NativeRunControlTrigger::new(NativeRunControlKind::SafeMode, format_args!("{error:#}"))
+    })?;
+    if cancelled.load(Ordering::Acquire) {
+        return Ok(());
+    }
+
     let mut effective = config.clone();
     let current_fleet = enforce_execution_fleet_policy(
         project_paths.project_root(),
@@ -3784,6 +3821,7 @@ pub struct EngineDispatcher {
     /// by public preflight. Optional only for explicit name-only library use.
     preflight_dependency_capture: Option<CapturedDependencyTrust>,
     registry_artifact_approval: Option<PublisherSourceGraphApproval>,
+    operator_safe_mode_scope: Option<crate::runtime::safe_mode::AdmittedSafeModeScope>,
     /// Whether preflight relied on an available authoritative registry. Only
     /// legacy-risky's explicitly skipped preflight may start without one.
     preflight_registry_required: bool,
@@ -6332,6 +6370,7 @@ impl Default for EngineDispatcher {
             preflight_dependency_ids: Vec::new(),
             preflight_dependency_capture: None,
             registry_artifact_approval: None,
+            operator_safe_mode_scope: None,
             preflight_registry_required: true,
             preflight_fleet_policy: None,
             app_args: Vec::new(),
@@ -6537,6 +6576,17 @@ impl EngineDispatcher {
         self
     }
 
+    /// Retain the deployment supervisor's independently located local control
+    /// scope. This only adds a restriction to the release's existing authority.
+    #[must_use]
+    pub fn with_operator_safe_mode_scope(
+        mut self,
+        scope: Option<crate::runtime::safe_mode::AdmittedSafeModeScope>,
+    ) -> Self {
+        self.operator_safe_mode_scope = scope;
+        self
+    }
+
     /// Preserve whether preflight consulted an authoritative registry. A false
     /// value only retains legacy-risky's existing missing/corrupt-state policy;
     /// newly available valid cards are always examined before execution.
@@ -6700,6 +6750,12 @@ impl EngineDispatcher {
             trust_requirements =
                 trust_requirements.with_registry_artifact_approval(approval.clone())?;
         }
+        if let Some(scope) = &self.operator_safe_mode_scope {
+            trust_requirements = trust_requirements.with_operator_safe_mode_scope(scope.clone())?;
+        }
+        trust_requirements
+            .enforce_operator_safe_mode()
+            .context("operator safe-mode admission failed at dispatch")?;
         trust_requirements
             .verify_registry_artifact(&project_paths, config)
             .context("publisher source admission failed at dispatch")?;
@@ -9937,6 +9993,14 @@ impl EngineDispatcher {
         // Worker startup, key provisioning, and telemetry setup can outlive
         // the parent's preflight decision. Read current signed trust state
         // here, on the worker's clock, before loading or executing guest code.
+        trust_requirements
+            .enforce_operator_safe_mode()
+            .map_err(|error| {
+                native_engine_spawn_error_with_telemetry_cleanup(
+                    format!("Native execution operator safe-mode admission failed: {error:#}"),
+                    &mut telemetry_guard,
+                )
+            })?;
         for warning in validate_execution_trust(
             project_paths.project_root(),
             config,
@@ -13179,6 +13243,82 @@ mod tests {
                     }
                 }
             }
+        }
+
+        #[test]
+        fn live_controls_retain_external_operator_scope_after_anchor_rename() {
+            use crate::runtime::safe_mode;
+
+            let fixture = PublisherFixture::new(42, "console.log(42);\n", true);
+            let operator = TempDir::new().expect("independent deployment operator");
+            let operator_root = operator
+                .path()
+                .canonicalize()
+                .expect("canonical operator root");
+            let anchor = operator_root.join("deployment.lock");
+            fs::write(&anchor, "").expect("operator scope anchor");
+            let scope = safe_mode::AdmittedSafeModeScope::capture(&anchor)
+                .expect("admit independent operator scope");
+            let requirements = fixture
+                .requirements()
+                .with_operator_safe_mode_scope(scope)
+                .expect("retain scope beside publisher authority");
+            let requirements: RunTrustRequirements =
+                serde_json::from_slice(&serde_json::to_vec(&requirements).unwrap())
+                    .expect("retained requirements survive the worker wire representation");
+            let now = Utc::now().timestamp().max(0) as u64;
+            let config = seed_empty_registry(fixture.directory.path(), now, true);
+            let paths = RunProjectPaths::resolve(Path::new("app.cjs"), fixture.directory.path())
+                .expect("external release paths");
+            assert!(!paths.entrypoint().starts_with(&operator_root));
+            let mut fleet_high_water = None;
+            let cancelled = AtomicBool::new(false);
+            recheck_native_run_controls(
+                &paths,
+                &config,
+                &requirements,
+                &mut fleet_high_water,
+                &cancelled,
+            )
+            .expect("both admitted scopes initially permit the release");
+
+            fs::rename(&anchor, operator_root.join("retained.lock"))
+                .expect("retain the anchor under a different name");
+            recheck_native_run_controls(
+                &paths,
+                &config,
+                &requirements,
+                &mut fleet_high_water,
+                &cancelled,
+            )
+            .expect("the observer does not reopen the renamed anchor");
+            let state_path = operator_root.join(".franken-node/safe-mode/state.json");
+            safe_mode::update_persisted_safe_mode(&state_path, true, |controller| {
+                controller.enter_safe_mode(
+                    safe_mode::SafeModeEntryReason::ExplicitFlag,
+                    "2026-11-09T00:00:00Z",
+                    "operator:external-deployment",
+                    Vec::new(),
+                );
+                Ok(())
+            })
+            .expect("operator enters safe mode after admission");
+            safe_mode::enforce_run_safe_mode(paths.entrypoint())
+                .expect("the external release ancestry alone remains unrestricted");
+            let trigger = recheck_native_run_controls(
+                &paths,
+                &config,
+                &requirements,
+                &mut fleet_high_water,
+                &cancelled,
+            )
+            .expect_err("retained operator scope reaches the live interruption path");
+            assert_eq!(trigger.kind, NativeRunControlKind::SafeMode);
+            assert!(trigger.detail.contains("active safe mode"), "{trigger:?}");
+            assert!(
+                trigger.detail.contains(state_path.to_str().unwrap()),
+                "{trigger:?}"
+            );
         }
 
         #[test]
@@ -20345,6 +20485,15 @@ mod tests {
     #[test]
     fn bd_wwjxn_native_session_frame_is_versioned_bounded_and_digest_checked() {
         let nonce = uuid::Uuid::now_v7().to_string();
+        let operator = TempDir::new().expect("native request operator scope");
+        let anchor = operator
+            .path()
+            .canonicalize()
+            .expect("canonical operator directory")
+            .join("deployment.lock");
+        fs::write(&anchor, "").expect("operator anchor");
+        let operator_scope = crate::runtime::safe_mode::AdmittedSafeModeScope::capture(&anchor)
+            .expect("capture nonempty operator restriction");
         let request = NativeSessionRequest {
             schema_version: NATIVE_SESSION_SCHEMA.to_string(),
             nonce: nonce.clone(),
@@ -20362,7 +20511,9 @@ mod tests {
                 &["npm:trusted".to_string()],
                 true,
             )
-            .expect("bounded trust requirements"),
+            .expect("bounded trust requirements")
+            .with_operator_safe_mode_scope(operator_scope.clone())
+            .expect("retain operator scope in authenticated request"),
             fleet_policy: None,
             policy_mode: "balanced".to_string(),
             config: Config::for_profile(Profile::Balanced),
@@ -20384,6 +20535,15 @@ mod tests {
         assert_eq!(decoded.config, request.config);
         assert_eq!(decoded.project_paths, request.project_paths);
         assert_eq!(decoded.trust_requirements, request.trust_requirements);
+        assert_eq!(
+            decoded.trust_requirements.operator_safe_mode_scope.as_ref(),
+            Some(&operator_scope)
+        );
+        decoded.trust_requirements.validate().unwrap();
+        decoded
+            .trust_requirements
+            .enforce_operator_safe_mode()
+            .unwrap();
         assert_eq!(decoded.fleet_policy, request.fleet_policy);
         assert_eq!(decoded.app_args, request.app_args);
         assert!(decoded.capture_replay);

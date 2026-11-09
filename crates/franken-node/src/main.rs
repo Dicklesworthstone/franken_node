@@ -6607,6 +6607,7 @@ fn handle_deploy_status(args: &cli::DeployStatusArgs) -> Result<serde_json::Valu
         "releases": releases,
         "activations": activations,
         "pending_activation": status.pending,
+        "superseded_activations": status.superseded,
         "recoveries": store.recoveries(&authority)?,
     }))
 }
@@ -6637,6 +6638,41 @@ fn handle_deploy_reconcile(args: &cli::DeployReconcileArgs) -> Result<serde_json
     }))
 }
 
+fn handle_deploy_supersede(args: &cli::DeploySupersedeArgs) -> Result<serde_json::Value> {
+    let expected_pending_digest = deploy_require(
+        args.expected_pending_digest.as_deref(),
+        "--expected-pending-digest",
+        "supersede",
+    )?;
+    let release_id = deploy_require(args.release.as_deref(), "--release", "supersede")?;
+    let operator_id = deploy_require(args.operator_id.as_deref(), "--operator-id", "supersede")?;
+    let reason = deploy_require(args.reason.as_deref(), "--reason", "supersede")?;
+    let (store, authority) = deploy_context(&args.name)?;
+    let lock = store.lock()?;
+    let outcome = store.supersede_pending(
+        &lock,
+        &authority,
+        expected_pending_digest,
+        release_id,
+        operator_id,
+        reason,
+        current_unix_secs(),
+        &verify_deploy_release,
+    )?;
+    Ok(serde_json::json!({
+        "schema_version": DEPLOY_CLI_SCHEMA_VERSION,
+        "command": "deploy.supersede",
+        "ok": true,
+        "deployment": store.name(),
+        "operator_id": operator_id,
+        "reason": reason,
+        "activation": outcome.activation,
+        "already_committed": outcome.already_committed,
+        "superseded_transaction_digest": outcome.superseded_transaction_digest,
+        "workload_started": false,
+    }))
+}
+
 /// Releases may live outside the operator project. Its safe-mode scope must
 /// still gate both the initial execution and an automatic recovery restart.
 /// The held lock is a real file inside that scope, so the canonical scope
@@ -6655,6 +6691,7 @@ struct DeployChildRun {
 }
 
 fn spawn_deploy_release_child(
+    store: &runtime::deployment::DeploymentStore,
     release: &runtime::deployment::ReleaseRecord,
     app_args: &[String],
 ) -> Result<std::process::Child> {
@@ -6687,7 +6724,9 @@ fn spawn_deploy_release_child(
         .arg("--admitted-config-sha256")
         .arg(&release.config_sha256)
         .arg("--admitted-approval-sha256")
-        .arg(approval_sha256);
+        .arg(approval_sha256)
+        .arg("--admitted-operator-scope")
+        .arg(store.root().join("deployment.lock"));
     // Preserve the ordinary guest environment, but do not let deployment
     // supervisor control variables reconfigure a release or select another
     // engine binary. Runtime policy is resolved from the committed bytes.
@@ -6812,7 +6851,7 @@ fn handle_deploy_run(args: &cli::DeployRunArgs) -> Result<(serde_json::Value, i3
                 release.release_id
             )
         })?;
-        let child = spawn_deploy_release_child(&release, &args.app_args)?;
+        let child = spawn_deploy_release_child(&store, &release, &args.app_args)?;
         (activation, release, child)
     };
     let run = finish_deploy_release_child(child, &release)?;
@@ -6902,7 +6941,7 @@ fn handle_deploy_run(args: &cli::DeployRunArgs) -> Result<(serde_json::Value, i3
                         let selected = store.release(&authority, selected)?;
                         verify_deploy_release(&selected)
                             .context("recovery release no longer passes current admission")?;
-                        let child = spawn_deploy_release_child(&selected, &args.app_args)?;
+                        let child = spawn_deploy_release_child(&store, &selected, &args.app_args)?;
                         Ok((selected, child))
                     })();
                     let (selected, child) = match restart {
@@ -7000,6 +7039,19 @@ fn render_deploy_human(report: &serde_json::Value) -> String {
                 "no pending activation".to_string()
             }
         ),
+        "deploy.supersede" => format!(
+            "deployment {deployment}: {} activation #{} for release {}; superseded transaction {}; no workload started",
+            if report["already_committed"] == true {
+                "replacement already committed as"
+            } else {
+                "committed replacement"
+            },
+            report["activation"]["sequence"],
+            report["activation"]["release_id"].as_str().unwrap_or(""),
+            report["superseded_transaction_digest"]
+                .as_str()
+                .unwrap_or("")
+        ),
         "deploy.status" => {
             let mut lines = vec![format!(
                 "deployment {deployment}: active release {} (on crash loop {})",
@@ -7008,11 +7060,29 @@ fn render_deploy_human(report: &serde_json::Value) -> String {
                     .as_str()
                     .unwrap_or("contain")
             )];
-            if let Some(pending) = report.get("pending_activation").filter(|value| !value.is_null()) {
+            if let Some(pending) = report
+                .get("pending_activation")
+                .filter(|value| !value.is_null())
+            {
                 lines.push(format!(
-                    "  pending activation #{} for release {}; inspect and use deploy reconcile to complete",
+                    "  pending activation #{} for release {}; transaction={}; use deploy reconcile to complete or deploy supersede to select a replacement",
                     pending["activation"]["sequence"],
-                    pending["activation"]["release_id"].as_str().unwrap_or("")
+                    pending["activation"]["release_id"].as_str().unwrap_or(""),
+                    pending["transaction_digest"].as_str().unwrap_or("")
+                ));
+            }
+            for superseded in report["superseded_activations"]
+                .as_array()
+                .into_iter()
+                .flatten()
+            {
+                lines.push(format!(
+                    "  superseded attempt #{} for release {}; replacement attempt #{}",
+                    superseded["activation"]["sequence"],
+                    superseded["activation"]["release_id"]
+                        .as_str()
+                        .unwrap_or(""),
+                    superseded["superseded_by_sequence"]
                 ));
             }
             for release in report["releases"].as_array().into_iter().flatten() {
@@ -7087,6 +7157,12 @@ fn handle_deploy_command(command: cli::DeployCommand) -> Result<()> {
             DEPLOY_CLI_SCHEMA_VERSION,
             "deploy.reconcile",
             handle_deploy_reconcile(args).map(|report| (report, 0)),
+        ),
+        cli::DeployCommand::Supersede(args) => (
+            args.json,
+            DEPLOY_CLI_SCHEMA_VERSION,
+            "deploy.supersede",
+            handle_deploy_supersede(args).map(|report| (report, 0)),
         ),
         cli::DeployCommand::Run(args) => (
             args.json,
@@ -29090,8 +29166,8 @@ fn run_fleet_serve(args: &cli::FleetServeArgs) -> Result<()> {
     let mut service = FleetControlPlaneService::open(state_dir.clone(), &token)
         .map_err(|err| anyhow::anyhow!(err.to_string()))?;
     if let Some(path) = &args.node_credentials_file {
-        let credentials = FleetNodeCredentials::load(path)
-            .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+        let credentials =
+            FleetNodeCredentials::load(path).map_err(|err| anyhow::anyhow!(err.to_string()))?;
         service = service
             .with_node_credentials(credentials)
             .map_err(|err| anyhow::anyhow!(err.to_string()))?;
@@ -29118,7 +29194,10 @@ fn run_fleet_serve(args: &cli::FleetServeArgs) -> Result<()> {
                 object.insert("token_file".to_string(), token_display.clone().into());
                 object.insert("token_generated".to_string(), generated_token.into());
                 object.insert("credential_mode".to_string(), credential_mode.into());
-                object.insert("enrolled_node_count".to_string(), enrolled_node_count.into());
+                object.insert(
+                    "enrolled_node_count".to_string(),
+                    enrolled_node_count.into(),
+                );
             }
             println!("{line}");
         } else if event.event_code == FLEET_HTTP_LISTENING {
@@ -35879,6 +35958,7 @@ fn main() -> Result<()> {
                 config,
                 admitted_config_sha256,
                 admitted_approval_sha256,
+                admitted_operator_scope,
                 runtime,
                 engine_bin,
                 compat_preflight,
@@ -35963,6 +36043,16 @@ fn main() -> Result<()> {
             {
                 return named_cli_fail("franken-node/run-error-cli/v1", "run", json, err);
             }
+            let operator_safe_mode_scope = match admitted_operator_scope
+                .as_deref()
+                .map(runtime::safe_mode::AdmittedSafeModeScope::capture)
+                .transpose()
+            {
+                Ok(scope) => scope,
+                Err(error) => {
+                    return named_cli_fail("franken-node/run-error-cli/v1", "run", json, error);
+                }
+            };
             let active_fleet_policy =
                 match control_plane::fleet_transport::enforce_active_fleet_policy(
                     project_paths.project_root(),
@@ -36101,6 +36191,7 @@ fn main() -> Result<()> {
                     .with_preflight_dependency_ids(preflight_dependency_ids)
                     .with_preflight_dependency_capture(Some(preflight.dependency_capture.clone()))
                     .with_registry_artifact_approval(registry_artifact_approval)
+                    .with_operator_safe_mode_scope(operator_safe_mode_scope)
                     .with_preflight_registry_requirement(preflight_registry_required)
                     .with_replay_capture(capture_replay)
                     .with_app_args(app_args);

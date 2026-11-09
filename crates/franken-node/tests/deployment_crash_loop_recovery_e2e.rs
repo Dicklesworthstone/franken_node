@@ -154,6 +154,16 @@ impl Drill {
     }
 
     fn publish_release_at(&self, version: &str, source: &str, dir: &Path) -> (PathBuf, PathBuf) {
+        self.publish_release_with_config(version, source, dir, None)
+    }
+
+    fn publish_release_with_config(
+        &self,
+        version: &str,
+        source: &str,
+        dir: &Path,
+        config: Option<&str>,
+    ) -> (PathBuf, PathBuf) {
         fs::create_dir_all(dir).expect("release dir");
         fs::write(dir.join("app.js"), source).expect("app source");
         fs::write(
@@ -161,7 +171,26 @@ impl Drill {
             format!("{{\"name\":\"deployed-app\",\"version\":\"{version}\"}}\n"),
         )
         .expect("package.json");
-        self.init_project(dir);
+        if let Some(config) = config {
+            // Bootstrap the registry and receipt key under this exact policy;
+            // replacing a generated registry key afterward would invalidate it.
+            fs::write(dir.join("release-policy.toml"), config)
+                .expect("explicit release bootstrap configuration");
+            self.ok(
+                dir,
+                &[
+                    "init",
+                    "--config",
+                    "release-policy.toml",
+                    "--out-dir",
+                    ".",
+                    "--json",
+                ],
+            );
+            assert!(dir.join(".franken-node/keys/receipt-signing.key").is_file());
+        } else {
+            self.init_project(dir);
+        }
         let capsule = format!("app-{version}.capsule");
         self.ok(
             self.registry.path(),
@@ -391,6 +420,24 @@ impl Drill {
         report
     }
 
+    fn supersede(&self, version: &str, pending_digest: &str) -> Value {
+        self.ok(self.root.path(), &supersede_args(version, pending_digest))
+    }
+
+    fn failed_supersede(&self, version: &str, pending_digest: &str) -> Value {
+        let output = self.cli(self.root.path(), &supersede_args(version, pending_digest));
+        assert!(!output.status.success(), "supersede unexpectedly succeeded");
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+            panic!(
+                "failed supersede must emit JSON ({error}):\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            )
+        });
+        assert_eq!(report["ok"], false, "{report}");
+        report
+    }
+
     fn artifact_digest(&self, version: &str) -> String {
         self.status()["releases"]
             .as_array()
@@ -425,6 +472,23 @@ const HEALTHY_V1: &str = "console.log('RELEASE_ONE_HEALTHY');\n";
 
 fn crashing_v2() -> String {
     format!("// {PANIC_MARKER}\nconsole.log('RELEASE_TWO_NEVER_PRINTS');\n")
+}
+
+fn supersede_args<'a>(version: &'a str, pending_digest: &'a str) -> [&'a str; 12] {
+    [
+        "deploy",
+        "supersede",
+        "app",
+        "--expected-pending-digest",
+        pending_digest,
+        "--release",
+        version,
+        "--operator-id",
+        "ops-recovery",
+        "--reason",
+        "replace an unavailable activation target",
+        "--json",
+    ]
 }
 
 fn guest_stdout(run: &Value) -> &str {
@@ -1062,4 +1126,762 @@ fn deployment_root_safe_mode_blocks_a_release_outside_that_directory() {
     );
     assert!(blocked.get("run").is_none(), "{blocked}");
     assert_eq!(drill.status()["releases"][0]["healthy_runs"], 1);
+}
+
+#[test]
+fn supersede_replaces_a_revoked_pending_target_without_rewriting_its_evidence() {
+    for stage in ["intent", "history"] {
+        let drill = Drill::new();
+        let rejected = drill.install("1.0.0", HEALTHY_V1);
+        drill.install("2.0.0", "console.log('REPLACEMENT_HEALTHY');\n");
+        let rejected_artifact = drill.artifact_digest("1.0.0");
+        drill.interrupt_activation(stage);
+        let intent_path = drill.state_path("transactions/0000000001.json");
+        let original_intent = fs::read(&intent_path).expect("retained original intent");
+        let original_history = fs::read(drill.state_path("activations/0000000001.json")).ok();
+        let pending = drill.status();
+        let digest = pending["pending_activation"]["transaction_digest"]
+            .as_str()
+            .expect("authenticated pending digest")
+            .to_string();
+        drill.ok(
+            &rejected,
+            &[
+                "trust",
+                "revoke",
+                "--artifact-sha256",
+                &rejected_artifact,
+                "--json",
+            ],
+        );
+        let refused = drill.failed_reconcile();
+        assert!(
+            refused["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("revoked")),
+            "{refused}"
+        );
+        let wrong_digest = format!("sha256:{}", "0".repeat(64));
+        drill.failed_supersede("2.0.0", &wrong_digest);
+        assert!(!drill.state_path("transactions/0000000002.json").exists());
+        assert_eq!(
+            fs::read(&intent_path).expect("unchanged intent"),
+            original_intent
+        );
+
+        let replaced = drill.supersede("2.0.0", &digest);
+        assert_eq!(replaced["command"], "deploy.supersede", "{replaced}");
+        assert_eq!(replaced["workload_started"], false, "{replaced}");
+        assert_eq!(replaced["already_committed"], false, "{replaced}");
+        assert_eq!(replaced["superseded_transaction_digest"], digest);
+        assert_eq!(replaced["activation"]["release_id"], "2.0.0");
+        assert_eq!(replaced["activation"]["sequence"], 2);
+        assert!(replaced.get("run").is_none());
+        let status = drill.status();
+        assert_eq!(status["active"]["release_id"], "2.0.0", "{status}");
+        assert!(status["pending_activation"].is_null());
+        assert_eq!(
+            status["activations"]
+                .as_array()
+                .expect("committed history")
+                .len(),
+            1
+        );
+        assert_eq!(status["activations"][0]["sequence"], 2);
+        assert!(
+            status["recoveries"]
+                .as_array()
+                .expect("recoveries")
+                .is_empty()
+        );
+        let superseded = status["superseded_activations"]
+            .as_array()
+            .expect("superseded attempts");
+        assert_eq!(superseded.len(), 1, "{status}");
+        assert_eq!(superseded[0]["activation"]["release_id"], "1.0.0");
+        assert_eq!(superseded[0]["transaction_digest"], digest);
+        assert_eq!(superseded[0]["superseded_by_sequence"], 2);
+        assert!(superseded[0]["planned_recovery"].is_null());
+        assert!(
+            status["releases"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|release| release["healthy_runs"] == 0)
+        );
+        assert_eq!(
+            fs::read(&intent_path).expect("retained original intent"),
+            original_intent
+        );
+        if let Some(history) = original_history {
+            assert_eq!(
+                fs::read(drill.state_path("activations/0000000001.json")).unwrap(),
+                history
+            );
+        }
+
+        // An exact retry observes the already committed replacement. A later
+        // operator activation makes that original compare-and-swap stale.
+        let pointer = fs::read(drill.state_path("active.json")).expect("replacement pointer");
+        let repeated = drill.supersede("2.0.0", &digest);
+        assert_eq!(repeated["already_committed"], true, "{repeated}");
+        assert_eq!(fs::read(drill.state_path("active.json")).unwrap(), pointer);
+        assert!(!drill.state_path("transactions/0000000003.json").exists());
+        let (code, healthy) = drill.run();
+        assert_eq!(code, Some(0), "stage {stage}: {healthy}");
+        assert_eq!(guest_stdout(&healthy["run"]), "REPLACEMENT_HEALTHY\n");
+        drill.activate("2.0.0");
+        let advanced_pointer =
+            fs::read(drill.state_path("active.json")).expect("new operator choice");
+        drill.failed_supersede("2.0.0", &digest);
+        assert_eq!(
+            fs::read(drill.state_path("active.json")).unwrap(),
+            advanced_pointer
+        );
+        assert!(!drill.state_path("transactions/0000000004.json").exists());
+
+        // The signed supersession authority must remain available even after
+        // an ordinary activation advances the pointer beyond the replacement.
+        let authority_path = drill.state_path("transactions/0000000002.json");
+        let retained_authority = drill
+            .root
+            .path()
+            .join("retained-supersession-authority.json");
+        fs::rename(&authority_path, &retained_authority).expect("retain authority outside journal");
+        let unavailable = drill.cli(drill.root.path(), &["deploy", "status", "app", "--json"]);
+        assert!(
+            !unavailable.status.success(),
+            "missing supersession must not turn canceled attempts into committed history"
+        );
+        let (code, blocked) = drill.run();
+        assert_ne!(code, Some(0), "{blocked}");
+        assert!(blocked.get("run").is_none(), "{blocked}");
+        assert_eq!(
+            fs::read(drill.state_path("active.json")).unwrap(),
+            advanced_pointer
+        );
+        fs::rename(&retained_authority, &authority_path).expect("restore authentic supersession");
+        assert_eq!(drill.status()["active"]["sequence"], 3);
+    }
+}
+
+#[test]
+fn supersede_rechecks_replacement_source_and_revocation_before_writing_authority() {
+    let drill = Drill::new();
+    drill.install("1.0.0", HEALTHY_V1);
+    let candidate_source = "console.log('CANDIDATE_TWO');\n";
+    let candidate = drill.install("2.0.0", candidate_source);
+    drill.install("3.0.0", "console.log('ADMITTED_REPLACEMENT');\n");
+    let candidate_artifact = drill.artifact_digest("2.0.0");
+    drill.interrupt_activation("history");
+    let intent_path = drill.state_path("transactions/0000000001.json");
+    let history_path = drill.state_path("activations/0000000001.json");
+    let original_intent = fs::read(&intent_path).expect("original intent");
+    let original_history = fs::read(&history_path).expect("original history");
+    let digest = drill.status()["pending_activation"]["transaction_digest"]
+        .as_str()
+        .expect("pending digest")
+        .to_string();
+    fs::write(
+        candidate.join("app.js"),
+        "console.log('UNAPPROVED_SOURCE');\n",
+    )
+    .expect("substitute candidate source");
+    let source_refusal = drill.failed_supersede("2.0.0", &digest);
+    assert!(
+        source_refusal["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("source graph changed after admission")),
+        "{source_refusal}"
+    );
+    assert!(!drill.state_path("transactions/0000000002.json").exists());
+    assert!(!drill.state_path("active.json").exists());
+
+    fs::write(candidate.join("app.js"), candidate_source).expect("restore admitted source");
+    drill.ok(
+        &candidate,
+        &[
+            "trust",
+            "revoke",
+            "--artifact-sha256",
+            &candidate_artifact,
+            "--json",
+        ],
+    );
+    let trust_refusal = drill.failed_supersede("2.0.0", &digest);
+    assert!(
+        trust_refusal["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("revoked")),
+        "{trust_refusal}"
+    );
+    assert!(!drill.state_path("transactions/0000000002.json").exists());
+    assert!(!drill.state_path("active.json").exists());
+    assert_eq!(fs::read(&intent_path).unwrap(), original_intent);
+    assert_eq!(fs::read(&history_path).unwrap(), original_history);
+    assert_eq!(
+        drill.status()["pending_activation"]["transaction_digest"],
+        digest
+    );
+
+    let replaced = drill.supersede("3.0.0", &digest);
+    assert_eq!(replaced["activation"]["release_id"], "3.0.0");
+    assert_eq!(replaced["activation"]["sequence"], 2);
+    let (code, healthy) = drill.run();
+    assert_eq!(code, Some(0), "{healthy}");
+    assert_eq!(guest_stdout(&healthy["run"]), "ADMITTED_REPLACEMENT\n");
+}
+
+#[test]
+fn interrupted_repeated_supersessions_never_reauthorize_abandoned_targets() {
+    for second_stage in ["superseded_history", "history"] {
+        let drill = Drill::new();
+        let original = drill.install("1.0.0", HEALTHY_V1);
+        let intermediate = drill.install("2.0.0", "console.log('INTERMEDIATE_NEVER_RUNS');\n");
+        drill.install("3.0.0", "console.log('FINAL_REPLACEMENT');\n");
+        let original_artifact = drill.artifact_digest("1.0.0");
+        let intermediate_artifact = drill.artifact_digest("2.0.0");
+        drill.interrupt_activation("intent");
+        let original_intent =
+            fs::read(drill.state_path("transactions/0000000001.json")).expect("original intent");
+        let first_digest = drill.status()["pending_activation"]["transaction_digest"]
+            .as_str()
+            .expect("original digest")
+            .to_string();
+        drill.ok(
+            &original,
+            &[
+                "trust",
+                "revoke",
+                "--artifact-sha256",
+                &original_artifact,
+                "--json",
+            ],
+        );
+        drill.interrupt(&supersede_args("2.0.0", &first_digest), "intent");
+        assert!(!drill.state_path("active.json").exists());
+        assert!(!drill.state_path("activations/0000000001.json").exists());
+        let intermediate_intent = fs::read(drill.state_path("transactions/0000000002.json"))
+            .expect("successor intent durable before canceled history");
+        let pending = drill.status();
+        assert_eq!(
+            pending["pending_activation"]["activation"]["release_id"], "2.0.0",
+            "{pending}"
+        );
+        assert_eq!(
+            pending["superseded_activations"].as_array().unwrap().len(),
+            1
+        );
+        assert!(pending["activations"].as_array().unwrap().is_empty());
+        let second_digest = pending["pending_activation"]["transaction_digest"]
+            .as_str()
+            .expect("latest pending digest")
+            .to_string();
+        drill.failed_supersede("3.0.0", &first_digest);
+        assert!(!drill.state_path("transactions/0000000003.json").exists());
+        drill.ok(
+            &intermediate,
+            &[
+                "trust",
+                "revoke",
+                "--artifact-sha256",
+                &intermediate_artifact,
+                "--json",
+            ],
+        );
+        let refused = drill.failed_reconcile();
+        assert!(
+            refused["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("revoked")),
+            "{refused}"
+        );
+        drill.interrupt(&supersede_args("3.0.0", &second_digest), second_stage);
+
+        // A fresh process reads a partially materialized supersession chain.
+        // Neither abandoned release ever becomes an execution authority.
+        let pending = drill.status();
+        assert!(pending["active"].is_null(), "{pending}");
+        assert!(pending["activations"].as_array().unwrap().is_empty());
+        assert_eq!(pending["pending_activation"]["activation"]["sequence"], 3);
+        assert_eq!(
+            pending["pending_activation"]["activation"]["release_id"],
+            "3.0.0"
+        );
+        assert_eq!(
+            pending["superseded_activations"].as_array().unwrap().len(),
+            2
+        );
+        assert_eq!(
+            pending["superseded_activations"][0]["superseded_by_sequence"],
+            2
+        );
+        assert_eq!(
+            pending["superseded_activations"][1]["superseded_by_sequence"],
+            3
+        );
+        let (code, blocked) = drill.run();
+        assert_ne!(code, Some(0), "{blocked}");
+        assert!(blocked.get("run").is_none(), "{blocked}");
+        assert!(!drill.state_path("active.json").exists());
+        assert_eq!(
+            fs::read(drill.state_path("transactions/0000000001.json")).unwrap(),
+            original_intent
+        );
+        assert_eq!(
+            fs::read(drill.state_path("transactions/0000000002.json")).unwrap(),
+            intermediate_intent
+        );
+
+        let reconciled = drill.reconcile();
+        assert_eq!(
+            reconciled["activation"]["release_id"], "3.0.0",
+            "{reconciled}"
+        );
+        assert_eq!(reconciled["workload_started"], false);
+        let status = drill.status();
+        assert_eq!(status["activations"].as_array().unwrap().len(), 1);
+        assert_eq!(status["activations"][0]["sequence"], 3);
+        assert!(status["pending_activation"].is_null());
+        assert_eq!(
+            status["superseded_activations"].as_array().unwrap().len(),
+            2
+        );
+        let (code, healthy) = drill.run();
+        assert_eq!(code, Some(0), "stage {second_stage}: {healthy}");
+        assert_eq!(guest_stdout(&healthy["run"]), "FINAL_REPLACEMENT\n");
+    }
+}
+
+#[test]
+fn supersede_archives_interrupted_rollback_without_claiming_a_committed_recovery() {
+    for original_stage in ["intent", "history", "recovery"] {
+        let drill = Drill::new();
+        let rejected = drill.install("1.0.0", HEALTHY_V1);
+        let failed = drill.install("2.0.0", &crashing_v2());
+        drill.install("3.0.0", "console.log('OPERATOR_RECOVERY');\n");
+        let rejected_artifact = drill.artifact_digest("1.0.0");
+        drill.policy("rollback", "automatic");
+        drill.activate("1.0.0");
+        let (code, healthy) = drill.run();
+        assert_eq!(code, Some(0), "{healthy}");
+        drill.activate("2.0.0");
+        drill.prime_crash_loop();
+        drill.interrupt(&["deploy", "run", "app", "--json"], original_stage);
+        let pointer = fs::read(drill.state_path("active.json")).expect("failed release pointer");
+        let intent =
+            fs::read(drill.state_path("transactions/0000000003.json")).expect("rollback intent");
+        let history = fs::read(drill.state_path("activations/0000000003.json")).ok();
+        let recovery = fs::read(drill.state_path("recoveries/0000000001.json")).ok();
+        let failed_health =
+            fs::read(drill.state_path("health/2.0.0.json")).expect("retained crash evidence");
+        let failed_safe_mode = fs::read(failed.join(".franken-node/safe-mode/state.json"))
+            .expect("failed release containment");
+        let pending = drill.status();
+        let digest = pending["pending_activation"]["transaction_digest"]
+            .as_str()
+            .expect("pending rollback digest")
+            .to_string();
+        let planned_recovery = pending["pending_activation"]["planned_recovery"].clone();
+        drill.policy("contain", "operator");
+        drill.ok(
+            &rejected,
+            &[
+                "trust",
+                "revoke",
+                "--artifact-sha256",
+                &rejected_artifact,
+                "--json",
+            ],
+        );
+        let refused = drill.failed_reconcile();
+        assert!(
+            refused["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("policy changed")),
+            "{refused}"
+        );
+
+        drill.interrupt(&supersede_args("3.0.0", &digest), "superseded_recovery");
+        let interrupted = drill.status();
+        assert_eq!(
+            interrupted["active"]["release_id"], "2.0.0",
+            "{interrupted}"
+        );
+        assert_eq!(
+            interrupted["pending_activation"]["activation"]["release_id"],
+            "3.0.0"
+        );
+        assert_eq!(
+            interrupted["pending_activation"]["activation"]["sequence"],
+            4
+        );
+        assert!(interrupted["recoveries"].as_array().unwrap().is_empty());
+        assert_eq!(
+            interrupted["superseded_activations"][0]["planned_recovery"],
+            planned_recovery
+        );
+        assert_eq!(fs::read(drill.state_path("active.json")).unwrap(), pointer);
+        assert_eq!(
+            fs::read(drill.state_path("transactions/0000000003.json")).unwrap(),
+            intent
+        );
+        if let Some(history) = history {
+            assert_eq!(
+                fs::read(drill.state_path("activations/0000000003.json")).unwrap(),
+                history
+            );
+        }
+        if let Some(recovery) = recovery {
+            assert_eq!(
+                fs::read(drill.state_path("recoveries/0000000001.json")).unwrap(),
+                recovery
+            );
+        }
+        let archived_recovery = fs::read(drill.state_path("recoveries/0000000001.json"))
+            .expect("archived recovery reservation");
+
+        // Retrying the exact operator request resumes its own signed intent;
+        // the superseded rollback's changed policy is never reinstated.
+        let replaced = drill.supersede("3.0.0", &digest);
+        assert_eq!(replaced["workload_started"], false, "{replaced}");
+        assert_eq!(replaced["activation"]["reason"], "operator");
+        assert!(replaced["activation"]["recovery_sequence"].is_null());
+        let status = drill.status();
+        assert_eq!(status["active"]["release_id"], "3.0.0", "{status}");
+        assert_eq!(status["activations"].as_array().unwrap().len(), 3);
+        assert_eq!(status["activations"][2]["sequence"], 4);
+        assert!(status["recoveries"].as_array().unwrap().is_empty());
+        assert_eq!(
+            status["superseded_activations"][0]["planned_recovery"],
+            planned_recovery
+        );
+        assert_eq!(
+            fs::read(drill.state_path("recoveries/0000000001.json")).unwrap(),
+            archived_recovery
+        );
+        assert_eq!(
+            fs::read(drill.state_path("health/2.0.0.json")).unwrap(),
+            failed_health
+        );
+        assert_eq!(
+            fs::read(failed.join(".franken-node/safe-mode/state.json")).unwrap(),
+            failed_safe_mode
+        );
+        let replacement = status["releases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|release| release["release_id"] == "3.0.0")
+            .expect("replacement");
+        assert_eq!(
+            replacement["healthy_runs"], 0,
+            "supersede must not restart: {status}"
+        );
+        let (code, resumed) = drill.run();
+        assert_eq!(code, Some(0), "stage {original_stage}: {resumed}");
+        assert_eq!(guest_stdout(&resumed["run"]), "OPERATOR_RECOVERY\n");
+    }
+}
+
+#[cfg(target_os = "linux")]
+mod external_release_live_control {
+    use super::*;
+    use std::collections::BTreeMap;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::process::{Child, Stdio};
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    fn process_start_time(pid: u32) -> Option<String> {
+        fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()?
+            .rsplit_once(") ")?
+            .1
+            .split_whitespace()
+            .nth(19)
+            .map(str::to_string)
+    }
+
+    /// Retain the identities of this test's deployment child and native worker.
+    /// The successful path proves they have exited before this guard drops;
+    /// a failed assertion cannot leave the blocked native workload behind.
+    struct DeploymentProcess {
+        child: Child,
+        descendants: BTreeMap<u32, String>,
+    }
+
+    impl DeploymentProcess {
+        fn remember_descendants(&mut self) {
+            // Once Child has reaped its process, its PID could be reused.
+            // Never inventory a different process after that point.
+            if !matches!(self.child.try_wait(), Ok(None)) {
+                return;
+            }
+            let mut parents = vec![self.child.id()];
+            while let Some(parent) = parents.pop() {
+                let Ok(children) =
+                    fs::read_to_string(format!("/proc/{parent}/task/{parent}/children"))
+                else {
+                    continue;
+                };
+                for child in children.split_whitespace() {
+                    if let Ok(pid) = child.parse::<u32>()
+                        && let Some(start) = process_start_time(pid)
+                        && self.descendants.insert(pid, start).is_none()
+                    {
+                        parents.push(pid);
+                    }
+                }
+            }
+        }
+    }
+
+    impl Drop for DeploymentProcess {
+        fn drop(&mut self) {
+            self.remember_descendants();
+            if let Some(kill) = ["/bin/kill", "/usr/bin/kill"]
+                .into_iter()
+                .find(|path| Path::new(path).is_file())
+            {
+                for (pid, start) in self.descendants.iter().rev() {
+                    if process_start_time(*pid).as_deref() == Some(start.as_str()) {
+                        let _ = Command::new(kill)
+                            .args(["-KILL", "--", &pid.to_string()])
+                            .stdin(Stdio::null())
+                            .stdout(Stdio::null())
+                            .stderr(Stdio::null())
+                            .status();
+                    }
+                }
+            }
+            if self.child.try_wait().ok().flatten().is_none() {
+                let _ = self.child.kill();
+                let _ = self.child.wait();
+            }
+        }
+    }
+
+    #[test]
+    fn deployment_operator_safe_mode_interrupts_an_external_release_during_real_io() {
+        const ADMISSION_DEADLINE: Duration = Duration::from_secs(30);
+        const CONTROL_DEADLINE: Duration = Duration::from_secs(15);
+        let drill = Drill::new();
+        let external = tempfile::tempdir().expect("external release");
+        let listener = TcpListener::bind("127.0.0.1:0").expect("real HTTP sink");
+        listener.set_nonblocking(true).expect("bounded accept");
+        let address = listener.local_addr().expect("HTTP sink address");
+        let source = format!(
+            "require('fs').writeFileSync('entered.marker', 'entered');\n\
+             require('http').get('http://{address}/', (res) => {{\n\
+               require('fs').writeFileSync('after.marker', res.body);\n\
+             }});\n"
+        );
+        let config = format!(
+            "profile = \"legacy-risky\"\n\
+             [[security.network_policy.allowlist]]\n\
+             host = \"127.0.0.1\"\n\
+             port = {}\n\
+             reason = \"real deployment containment regression sink\"\n",
+            address.port()
+        );
+        let (release, manifest) =
+            drill.publish_release_with_config("1.0.0", &source, external.path(), Some(&config));
+        assert!(!release.starts_with(drill.root.path()));
+        drill.install_published("1.0.0", &release, &manifest);
+        drill.activate("1.0.0");
+        drill.policy("rollback", "automatic");
+        let active = fs::read(drill.state_path("active.json")).expect("admitted activation");
+        let release_safe_mode_path = release.join(".franken-node/safe-mode/state.json");
+        let release_safe_mode_before = fs::read(&release_safe_mode_path).ok();
+
+        let (admitted_tx, admitted_rx) = mpsc::sync_channel(1);
+        let (release_tx, release_rx) = mpsc::sync_channel(1);
+        let server = std::thread::spawn(move || -> std::io::Result<()> {
+            let started = Instant::now();
+            let (mut stream, _) = loop {
+                match listener.accept() {
+                    Ok(connection) => break connection,
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::WouldBlock
+                            && started.elapsed() < ADMISSION_DEADLINE =>
+                    {
+                        if matches!(release_rx.try_recv(), Err(mpsc::TryRecvError::Disconnected)) {
+                            return Ok(());
+                        }
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => return Err(error),
+                }
+            };
+            stream.set_nonblocking(false)?;
+            stream.set_read_timeout(Some(ADMISSION_DEADLINE))?;
+            stream.set_write_timeout(Some(Duration::from_secs(2)))?;
+            let mut request = Vec::new();
+            stream.read_to_end(&mut request)?;
+            if admitted_tx.send(request).is_err() {
+                return Ok(());
+            }
+            if release_rx.recv_timeout(Duration::from_secs(45)).is_err() {
+                return Ok(());
+            }
+            stream.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\ntoo-late",
+            )?;
+            stream.flush()
+        });
+        let child = drill
+            .command(drill.root.path(), &["deploy", "run", "app", "--json"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("real deployed native workload");
+        let mut deployment = DeploymentProcess {
+            child,
+            descendants: BTreeMap::new(),
+        };
+        let request = admitted_rx
+            .recv_timeout(ADMISSION_DEADLINE)
+            .expect("admitted native HTTP effect reached the sink");
+        assert!(request.starts_with(b"GET / HTTP/1.1\r\n"));
+        assert!(release.join("entered.marker").is_file());
+        deployment.remember_descendants();
+        assert!(
+            deployment.descendants.len() >= 2,
+            "deployment must own its run child and native worker"
+        );
+
+        drill.ok(
+            drill.root.path(),
+            &[
+                "safe-mode",
+                "enter",
+                "--reason",
+                "explicit-flag",
+                "--operator-id",
+                "live-deployment-operator",
+                "--trust-state-hash",
+                "operator:external-release-control",
+                "--json",
+            ],
+        );
+        let stopped_at = Instant::now();
+        let status = loop {
+            match deployment
+                .child
+                .try_wait()
+                .expect("poll deployment supervisor")
+            {
+                Some(status) => break status,
+                None => {
+                    assert!(
+                        stopped_at.elapsed() < CONTROL_DEADLINE,
+                        "operator safe mode did not stop the external native session"
+                    );
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+        };
+        let mut stdout = String::new();
+        deployment
+            .child
+            .stdout
+            .take()
+            .expect("deployment stdout")
+            .read_to_string(&mut stdout)
+            .expect("deployment report");
+        let mut stderr = String::new();
+        deployment
+            .child
+            .stderr
+            .take()
+            .expect("deployment stderr")
+            .read_to_string(&mut stderr)
+            .expect("deployment diagnostics");
+        assert!(
+            deployment.descendants.iter().all(|(pid, start)| {
+                process_start_time(*pid).as_deref() != Some(start.as_str())
+            }),
+            "the run child and native worker must be reaped before deployment completion"
+        );
+        assert!(!release.join("after.marker").exists());
+        release_tx.send(()).expect("release the late HTTP response");
+        // Whether the peer accepts the late bytes says nothing about a guest
+        // callback; containment is proved by process exit and the absent file.
+        let _ = server.join().expect("join HTTP sink");
+        assert!(
+            !status.success(),
+            "live containment unexpectedly succeeded: {stdout}; {stderr}"
+        );
+        assert!(
+            !release.join("after.marker").exists(),
+            "late effect revived the guest"
+        );
+        let report: Value = serde_json::from_str(&stdout).unwrap_or_else(|error| {
+            panic!("invalid deployment report: {error}; {stdout}; {stderr}")
+        });
+        assert_eq!(report["phase"], "failed", "{report}");
+        assert_eq!(report["ok"], false);
+        assert!(report.get("recovery").is_none());
+        assert!(report.get("resumed").is_none());
+        let evidence = &report["run"];
+        assert_eq!(
+            evidence["schema_version"],
+            "franken-node/native-effect-interruption-evidence/v1"
+        );
+        assert_eq!(evidence["terminal_state"], "control_indeterminate");
+        assert_eq!(evidence["control_trigger"]["kind"], "safe_mode");
+        let detail = evidence["control_trigger"]["detail"]
+            .as_str()
+            .expect("operator containment cause");
+        assert!(
+            detail.contains("operator safe-mode scope") && detail.contains("active safe mode"),
+            "{detail}"
+        );
+        assert_eq!(evidence["journal_complete"], true);
+        assert_eq!(evidence["replay_certified"], false);
+        assert_eq!(evidence["interrupted_effect_count"], 1);
+        assert!(
+            evidence["entries"].as_array().unwrap().iter().any(|entry| {
+                entry["effect_kind"] == "network_request"
+                    && entry["state"] == "interrupted_indeterminate"
+                    && entry.get("policy_outcome").is_none()
+                    && entry.get("allowed").is_none()
+                    && entry.get("denied").is_none()
+            }),
+            "interrupted network effect must remain indeterminate: {evidence}"
+        );
+        let receipt_path = release.join(
+            evidence["receipt_path"]
+                .as_str()
+                .expect("durable receipt path"),
+        );
+        let persisted: Value =
+            serde_json::from_slice(&fs::read(receipt_path).expect("durable interruption receipt"))
+                .unwrap();
+        assert_eq!(persisted, evidence["receipt"]);
+        assert_eq!(fs::read(drill.state_path("active.json")).unwrap(), active);
+        let status = drill.status();
+        assert_eq!(status["active"]["release_id"], "1.0.0");
+        assert_eq!(status["releases"][0]["healthy_runs"], 0);
+        assert_eq!(status["releases"][0]["crash_looped"], false);
+        assert!(status["recoveries"].as_array().unwrap().is_empty());
+        let operator_state: Value = serde_json::from_slice(
+            &fs::read(drill.root.path().join(".franken-node/safe-mode/state.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(operator_state["active"], true);
+        assert!(
+            operator_state["native_crashes"]
+                .as_array()
+                .is_none_or(Vec::is_empty)
+        );
+        assert_eq!(
+            fs::read(&release_safe_mode_path).ok(),
+            release_safe_mode_before,
+            "operator containment must not be misclassified as a release crash"
+        );
+    }
 }
