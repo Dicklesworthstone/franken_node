@@ -6582,6 +6582,7 @@ fn handle_deploy_policy(args: &cli::DeployPolicyArgs) -> Result<serde_json::Valu
 
 fn handle_deploy_status(args: &cli::DeployStatusArgs) -> Result<serde_json::Value> {
     let (store, authority) = deploy_context(&args.name)?;
+    let _lock = store.lock()?;
     let activations = store.activations(&authority)?;
     let mut releases = Vec::new();
     for release_id in store.release_ids()? {
@@ -6612,6 +6613,41 @@ fn handle_deploy_status(args: &cli::DeployStatusArgs) -> Result<serde_json::Valu
     }))
 }
 
+fn handle_deploy_reconcile(args: &cli::DeployReconcileArgs) -> Result<serde_json::Value> {
+    let operator_id = deploy_require(args.operator_id.as_deref(), "--operator-id", "reconcile")?;
+    anyhow::ensure!(
+        operator_id.len() <= 512,
+        "operator id must be at most 512 bytes"
+    );
+    let (store, authority) = deploy_context(&args.name)?;
+    let lock = store.lock()?;
+    let activation = store.reconcile_pending(
+        &lock,
+        &authority,
+        current_unix_secs(),
+        &verify_deploy_release,
+    )?;
+    Ok(serde_json::json!({
+        "schema_version": DEPLOY_CLI_SCHEMA_VERSION,
+        "command": "deploy.reconcile",
+        "ok": true,
+        "deployment": store.name(),
+        "operator_id": operator_id,
+        "reconciled": activation.is_some(),
+        "activation": activation,
+        "workload_started": false,
+    }))
+}
+
+/// Releases may live outside the operator project. Its safe-mode scope must
+/// still gate both the initial execution and an automatic recovery restart.
+/// The held lock is a real file inside that scope, so the canonical scope
+/// walker does not need to infer the operator root from a release path.
+fn enforce_deploy_safe_mode(store: &runtime::deployment::DeploymentStore) -> Result<()> {
+    runtime::safe_mode::enforce_run_safe_mode(&store.root().join("deployment.lock"))
+        .context("deployment operator scope does not permit a new workload")
+}
+
 /// One supervised `run` of a release, executed by this same binary so the
 /// release passes the complete native admission path (publisher approval,
 /// frozen source graph pin, trust registry, safe-mode scopes).
@@ -6620,10 +6656,10 @@ struct DeployChildRun {
     report: serde_json::Value,
 }
 
-fn run_deploy_release_child(
+fn spawn_deploy_release_child(
     release: &runtime::deployment::ReleaseRecord,
     app_args: &[String],
-) -> Result<DeployChildRun> {
+) -> Result<std::process::Child> {
     let executable =
         std::env::current_exe().context("failed locating the franken-node executable")?;
     let mut command = std::process::Command::new(executable);
@@ -6646,11 +6682,21 @@ fn run_deploy_release_child(
     if !app_args.is_empty() {
         command.arg("--").args(app_args);
     }
-    let output = command
+    command
         .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::inherit())
-        .output()
-        .context("failed starting the supervised release run")?;
+        .spawn()
+        .context("failed starting the supervised release run")
+}
+
+fn finish_deploy_release_child(
+    child: std::process::Child,
+    release: &runtime::deployment::ReleaseRecord,
+) -> Result<DeployChildRun> {
+    let output = child
+        .wait_with_output()
+        .context("failed waiting for the supervised release run")?;
     let report = serde_json::from_slice(&output.stdout).with_context(|| {
         format!(
             "supervised run of release `{}` did not emit a JSON report",
@@ -6727,10 +6773,11 @@ fn deploy_guest_stdout(report: &serde_json::Value) -> Option<&str> {
 /// Run the active release once; on a validated crash loop, recover per the
 /// signed policy. Returns the report and the process exit code.
 fn handle_deploy_run(args: &cli::DeployRunArgs) -> Result<(serde_json::Value, i32)> {
-    use runtime::deployment::{HealthEvent, RecoveryOutcome, RestartPolicy};
+    use runtime::deployment::{CrashLoopAction, HealthEvent, RecoveryOutcome, RestartPolicy};
     let (store, authority) = deploy_context(&args.name)?;
-    // The lock is held only around state transitions, never across the run.
-    let (activation, release) = {
+    // Serialize admission and spawn with operator transitions. Release the
+    // lock before waiting, so a running workload cannot block containment.
+    let (activation, release, child) = {
         let _lock = store.lock()?;
         let activation = store.active(&authority)?.ok_or_else(|| {
             ActionableError::new(
@@ -6739,15 +6786,17 @@ fn handle_deploy_run(args: &cli::DeployRunArgs) -> Result<(serde_json::Value, i3
             )
         })?;
         let release = store.release(&authority, &activation.release_id)?;
-        (activation, release)
+        enforce_deploy_safe_mode(&store)?;
+        verify_deploy_release(&release).with_context(|| {
+            format!(
+                "active release `{}` failed verification and was not started",
+                release.release_id
+            )
+        })?;
+        let child = spawn_deploy_release_child(&release, &args.app_args)?;
+        (activation, release, child)
     };
-    verify_deploy_release(&release).with_context(|| {
-        format!(
-            "active release `{}` failed verification and was not started",
-            release.release_id
-        )
-    })?;
-    let run = run_deploy_release_child(&release, &args.app_args)?;
+    let run = finish_deploy_release_child(child, &release)?;
     let verdict = classify_deploy_run(&run);
     let mut report = serde_json::json!({
         "schema_version": DEPLOY_RUN_CLI_SCHEMA_VERSION,
@@ -6776,13 +6825,24 @@ fn handle_deploy_run(args: &cli::DeployRunArgs) -> Result<(serde_json::Value, i3
         DeployRunVerdict::CrashLoop(evidence) => {
             let recovery = {
                 let lock = store.lock()?;
+                // A concurrent operator activation cannot erase the failed
+                // release's crash history or make it eligible as known-good.
+                store.record_health(
+                    &lock,
+                    &authority,
+                    &release.release_id,
+                    HealthEvent::CrashLoop {
+                        evidence: evidence.clone(),
+                    },
+                )?;
                 let current = store.active(&authority)?;
                 if current.as_ref().map(|active| active.sequence) != Some(activation.sequence) {
-                    anyhow::bail!(
-                        "release `{}` crash-looped but the activation changed during the run; inspect `franken-node deploy status {}`",
-                        release.release_id,
-                        store.name()
+                    report["phase"] = serde_json::json!("contained_activation_changed");
+                    report["ok"] = serde_json::json!(false);
+                    report["recovery_error"] = serde_json::json!(
+                        "activation changed during the failed run; crash health retained without replacing the operator's activation"
                     );
+                    return Ok((report, run.exit_code.max(1)));
                 }
                 let policy = store.policy(&authority)?;
                 store.recover_from_crash_loop(
@@ -6802,8 +6862,40 @@ fn handle_deploy_run(args: &cli::DeployRunArgs) -> Result<(serde_json::Value, i3
                 &recovery.selected_release_id,
             ) {
                 (RecoveryOutcome::RolledBack, RestartPolicy::Automatic, Some(selected)) => {
-                    let selected = store.release(&authority, selected)?;
-                    let resumed = run_deploy_release_child(&selected, &args.app_args)?;
+                    let restart = (|| -> Result<_> {
+                        let _lock = store.lock()?;
+                        let current = store.active(&authority)?;
+                        anyhow::ensure!(
+                            current.as_ref().is_some_and(|active| {
+                                Some(active.sequence) == recovery.activation_sequence
+                                    && active.release_id == *selected
+                                    && active.recovery_sequence == Some(recovery.sequence)
+                            }),
+                            "activation changed before the recovery restart"
+                        );
+                        let policy = store.policy(&authority)?;
+                        anyhow::ensure!(
+                            policy.on_crash_loop == CrashLoopAction::Rollback
+                                && policy.restart == RestartPolicy::Automatic,
+                            "current deployment policy no longer authorizes an automatic restart"
+                        );
+                        enforce_deploy_safe_mode(&store)?;
+                        let selected = store.release(&authority, selected)?;
+                        verify_deploy_release(&selected)
+                            .context("recovery release no longer passes current admission")?;
+                        let child = spawn_deploy_release_child(&selected, &args.app_args)?;
+                        Ok((selected, child))
+                    })();
+                    let (selected, child) = match restart {
+                        Ok(admitted) => admitted,
+                        Err(error) => {
+                            report["phase"] = serde_json::json!("restart_refused");
+                            report["ok"] = serde_json::json!(false);
+                            report["restart_error"] = serde_json::json!(format!("{error:#}"));
+                            return Ok((report, run.exit_code.max(1)));
+                        }
+                    };
+                    let resumed = finish_deploy_release_child(child, &selected)?;
                     let resumed_verdict = classify_deploy_run(&resumed);
                     let (resume_phase, resume_code) = match resumed_verdict {
                         DeployRunVerdict::Healthy { receipt_id } => {
@@ -6818,6 +6910,17 @@ fn handle_deploy_run(args: &cli::DeployRunArgs) -> Result<(serde_json::Value, i3
                                 },
                             )?;
                             ("resumed_healthy", 0)
+                        }
+                        DeployRunVerdict::CrashLoop(evidence) => {
+                            let lock = store.lock()?;
+                            store.record_health(
+                                &lock,
+                                &authority,
+                                &selected.release_id,
+                                HealthEvent::CrashLoop { evidence },
+                            )?;
+                            // A recovery grants one restart, never a cascade.
+                            ("resume_failed", resumed.exit_code.max(1))
                         }
                         _ => ("resume_failed", resumed.exit_code.max(1)),
                     };
@@ -6865,6 +6968,18 @@ fn render_deploy_human(report: &serde_json::Value) -> String {
             "deployment {deployment}: on crash loop {}, restart {}",
             report["policy"]["on_crash_loop"].as_str().unwrap_or(""),
             report["policy"]["restart"].as_str().unwrap_or("")
+        ),
+        "deploy.reconcile" => format!(
+            "deployment {deployment}: {}; no workload started",
+            if report["reconciled"] == true {
+                format!(
+                    "reconciled activation #{} for release {}",
+                    report["activation"]["sequence"],
+                    report["activation"]["release_id"].as_str().unwrap_or("")
+                )
+            } else {
+                "no pending activation".to_string()
+            }
         ),
         "deploy.status" => {
             let mut lines = vec![format!(
@@ -6940,6 +7055,12 @@ fn handle_deploy_command(command: cli::DeployCommand) -> Result<()> {
             DEPLOY_CLI_SCHEMA_VERSION,
             "deploy.status",
             handle_deploy_status(args).map(|report| (report, 0)),
+        ),
+        cli::DeployCommand::Reconcile(args) => (
+            args.json,
+            DEPLOY_CLI_SCHEMA_VERSION,
+            "deploy.reconcile",
+            handle_deploy_reconcile(args).map(|report| (report, 0)),
         ),
         cli::DeployCommand::Run(args) => (
             args.json,

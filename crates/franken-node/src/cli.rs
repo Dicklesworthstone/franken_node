@@ -515,6 +515,9 @@ pub enum DeployCommand {
 
     /// Show releases, the activation chain, release health and recoveries.
     Status(DeployStatusArgs),
+
+    /// Finish an interrupted signed activation after re-verifying its release and authority.
+    Reconcile(DeployReconcileArgs),
 }
 
 #[derive(Debug, Parser)]
@@ -610,6 +613,21 @@ pub struct DeployStatusArgs {
     /// Deployment name.
     #[arg(default_value = "")]
     pub name: String,
+
+    /// Emit `franken-node/deploy-cli/v1` JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Parser)]
+pub struct DeployReconcileArgs {
+    /// Deployment name.
+    #[arg(default_value = "")]
+    pub name: String,
+
+    /// Operator explicitly requesting reconciliation; this command never starts a workload.
+    #[arg(long)]
+    pub operator_id: Option<String>,
 
     /// Emit `franken-node/deploy-cli/v1` JSON.
     #[arg(long)]
@@ -4925,6 +4943,44 @@ mod tests {
             parse_error_kind(&[]),
             clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
         );
+    }
+
+    #[test]
+    fn deploy_reconcile_parses_operator_and_preserves_json_failure_path() {
+        let cli = <Cli as clap::Parser>::try_parse_from([
+            "franken-node",
+            "deploy",
+            "reconcile",
+            "payments",
+            "--operator-id",
+            "incident-operator",
+            "--json",
+        ])
+        .expect("explicit reconciliation command must parse");
+        match cli.command {
+            Command::Deploy(DeployCommand::Reconcile(args)) => {
+                assert_eq!(args.name, "payments");
+                assert_eq!(args.operator_id.as_deref(), Some("incident-operator"));
+                assert!(args.json);
+            }
+            other => panic!("expected deploy reconcile, got {other:?}"),
+        }
+
+        let cli = <Cli as clap::Parser>::try_parse_from([
+            "franken-node",
+            "deploy",
+            "reconcile",
+            "--json",
+        ])
+        .expect("missing operands must reach the handler's structured error path");
+        match cli.command {
+            Command::Deploy(DeployCommand::Reconcile(args)) => {
+                assert!(args.name.is_empty());
+                assert!(args.operator_id.is_none());
+                assert!(args.json);
+            }
+            other => panic!("expected deploy reconcile, got {other:?}"),
+        }
     }
 
     #[test]

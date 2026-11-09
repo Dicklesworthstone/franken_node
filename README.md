@@ -1133,6 +1133,7 @@ receipt signing key, and emit `franken-node/deploy-cli/v1` with `--json`
 | `franken-node deploy policy <name>` | Set the signed crash-loop policy: `--on-crash-loop contain\|rollback`, `--restart operator\|automatic` (default `operator`), `--operator-id`. |
 | `franken-node deploy run <name>` | Verify and run the active release natively; record readiness on a healthy run; on a validated crash loop apply the policy (signed recovery record, pointer switch to the newest verified known-good release, optional single restart). Program args after `--`. |
 | `franken-node deploy status <name>` | Show the policy, activation chain, per-release readiness and crash-loop marks, and every recovery. |
+| `franken-node deploy reconcile <name>` | Finish a retained, signed activation transaction after an interrupted write. Required: `--operator-id`. Rechecks the release and, for rollback, the current recovery policy and readiness. Never starts a workload. |
 
 ### Ops and diagnostics
 
@@ -4472,9 +4473,26 @@ deployment record under `.franken-node/state/deployments/<name>/`).
   with `phase` = `healthy`, `failed`, `crashed`, `contained`,
   `contained_no_known_good`, `rolled_back`, `resumed_healthy` or
   `resume_failed`, plus the signed `recovery` record (including every refused
-  candidate and why).
+  candidate and why). Before an automatic restart, the supervisor rechecks the
+  exact activation, current restart policy, operator safe mode and release
+  admission while holding the deployment lock through process creation. A
+  failed recheck returns `restart_refused` and retains the recovery report.
+  If an operator changes the activation while a release is crashing, the
+  supervisor retains that release's crash mark and reports
+  `contained_activation_changed` without replacing the operator's choice.
 - `deploy status <name> [--json]` shows the policy, the activation chain,
   each release's readiness and crash-loop marks, and every recovery.
+- `deploy reconcile <name> --operator-id <op> [--json]` completes an interrupted
+  signed activation transaction. The transaction records the intended
+  activation and any crash recovery before the history, recovery receipt and
+  active pointer are committed. Reconciliation verifies that intent and the
+  exact preceding history, then rechecks the target release against current
+  trust. A rollback also requires the recorded recovery policy and known-good
+  readiness to remain valid. Altered or missing intent, conflicting records,
+  changed source and revoked targets stay contained. Successful reconciliation
+  returns `reconciled: true`; repeating it returns `reconciled: false`.
+  It never starts or repeats an application run: use `deploy run` explicitly
+  after inspecting the outcome.
 
 Recovery switches only the activation pointer. Release directories, the
 failed release, its crash records and the activation/recovery history are

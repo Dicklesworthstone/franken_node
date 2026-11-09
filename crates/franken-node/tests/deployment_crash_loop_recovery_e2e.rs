@@ -93,14 +93,21 @@ impl Drill {
         drill
     }
 
-    fn cli(&self, cwd: &Path, args: &[&str]) -> Output {
-        Command::new(binary())
+    fn command(&self, cwd: &Path, args: &[&str]) -> Command {
+        let mut command = Command::new(binary());
+        command
             .current_dir(cwd)
             .env("XDG_STATE_HOME", self.state_home.path())
             .env("XDG_CONFIG_HOME", self.state_home.path().join("config"))
             .env_remove("FRANKEN_NODE_PROFILE")
             .env_remove("FRANKEN_NODE_SECURITY_DECISION_RECEIPT_SIGNING_KEY_PATH")
-            .args(args)
+            .env_remove("FRANKEN_NODE_TEST_DEPLOYMENT_STOP_AFTER")
+            .args(args);
+        command
+    }
+
+    fn cli(&self, cwd: &Path, args: &[&str]) -> Output {
+        self.command(cwd, args)
             .output()
             .unwrap_or_else(|error| panic!("`{}`: {error}", args.join(" ")))
     }
@@ -142,14 +149,18 @@ impl Drill {
     /// and the publisher-signed manifest.
     fn publish_release(&self, version: &str, source: &str) -> (PathBuf, PathBuf) {
         let dir = self.root.path().join("releases").join(version);
-        fs::create_dir_all(&dir).expect("release dir");
+        self.publish_release_at(version, source, &dir)
+    }
+
+    fn publish_release_at(&self, version: &str, source: &str, dir: &Path) -> (PathBuf, PathBuf) {
+        fs::create_dir_all(dir).expect("release dir");
         fs::write(dir.join("app.js"), source).expect("app source");
         fs::write(
             dir.join("package.json"),
             format!("{{\"name\":\"deployed-app\",\"version\":\"{version}\"}}\n"),
         )
         .expect("package.json");
-        self.init_project(&dir);
+        self.init_project(dir);
         let capsule = format!("app-{version}.capsule");
         self.ok(
             self.registry.path(),
@@ -180,11 +191,16 @@ impl Drill {
             .registry
             .path()
             .join(published["manifest_path"].as_str().expect("manifest path"));
-        (dir, manifest)
+        (dir.to_path_buf(), manifest)
     }
 
     fn install(&self, version: &str, source: &str) -> PathBuf {
         let (dir, manifest) = self.publish_release(version, source);
+        self.install_published(version, &dir, &manifest);
+        dir
+    }
+
+    fn install_published(&self, version: &str, dir: &Path, manifest: &Path) {
         let installed = self.ok(
             self.root.path(),
             &[
@@ -204,7 +220,6 @@ impl Drill {
         );
         assert_eq!(installed["release"]["release_id"], version, "{installed}");
         assert_eq!(installed["created"], true);
-        dir
     }
 
     fn activate(&self, version: &str) {
@@ -258,9 +273,104 @@ impl Drill {
         self.ok(self.root.path(), &["deploy", "status", "app", "--json"])
     }
 
+    fn state_path(&self, relative: &str) -> PathBuf {
+        self.root
+            .path()
+            .join(".franken-node/state/deployments/app")
+            .join(relative)
+    }
+
+    /// Terminate the actual CLI after the selected record has been fsynced.
+    /// This hook is compiled only into test-support builds. The next command
+    /// is a fresh process which must recover from the retained signed bytes.
+    fn interrupt(&self, args: &[&str], stage: &str) {
+        let output = self
+            .command(self.root.path(), args)
+            .env("FRANKEN_NODE_TEST_DEPLOYMENT_STOP_AFTER", stage)
+            .output()
+            .expect("interrupted deployment command");
+        assert_eq!(
+            output.status.code(),
+            Some(86),
+            "expected durable interruption after {stage}:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn interrupt_activation(&self, stage: &str) {
+        self.interrupt(
+            &[
+                "deploy",
+                "activate",
+                "app",
+                "--release",
+                "1.0.0",
+                "--operator-id",
+                "ops-1",
+                "--json",
+            ],
+            stage,
+        );
+    }
+
+    fn reconcile(&self) -> Value {
+        self.ok(
+            self.root.path(),
+            &[
+                "deploy",
+                "reconcile",
+                "app",
+                "--operator-id",
+                "ops-recovery",
+                "--json",
+            ],
+        )
+    }
+
+    fn failed_reconcile(&self) -> Value {
+        let output = self.cli(
+            self.root.path(),
+            &[
+                "deploy",
+                "reconcile",
+                "app",
+                "--operator-id",
+                "ops-recovery",
+                "--json",
+            ],
+        );
+        assert!(!output.status.success(), "reconcile unexpectedly succeeded");
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+            panic!(
+                "failed reconcile must emit JSON ({error}):\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            )
+        });
+        assert_eq!(report["ok"], false, "{report}");
+        report
+    }
+
+    fn artifact_digest(&self, version: &str) -> String {
+        self.status()["releases"]
+            .as_array()
+            .expect("releases")
+            .iter()
+            .find(|release| release["release_id"] == version)
+            .and_then(|release| release["artifact"]["artifact_sha256"].as_str())
+            .expect("artifact digest")
+            .to_string()
+    }
+
     /// Crash the active (panicking) release until the supervisor's validated
     /// crash-loop threshold (three panics in 60 s) is reached.
     fn crash_until_loop(&self) -> (Option<i32>, Value) {
+        self.prime_crash_loop();
+        self.run()
+    }
+
+    fn prime_crash_loop(&self) {
         for attempt in 1..=2 {
             let (code, report) = self.run();
             assert_eq!(report["phase"], "crashed", "attempt {attempt}: {report}");
@@ -269,7 +379,6 @@ impl Drill {
             assert_eq!(report["run"]["crash_loop"]["crashes_in_window"], attempt);
             assert!(report.get("recovery").is_none(), "{report}");
         }
-        self.run()
     }
 }
 
@@ -506,4 +615,291 @@ fn a_revoked_known_good_release_is_refused_before_any_switch() {
     );
     assert!(report.get("resumed").is_none(), "{report}");
     assert_eq!(drill.status()["active"]["release_id"], "2.0.0");
+}
+
+#[test]
+fn reconcile_completes_interrupted_activation_without_starting_a_guest() {
+    for stage in ["intent", "history"] {
+        let drill = Drill::new();
+        drill.install("1.0.0", HEALTHY_V1);
+        drill.interrupt_activation(stage);
+
+        let intent = drill.state_path("transactions/0000000001.json");
+        let signed_intent = fs::read(&intent).expect("durable signed activation intent");
+        assert!(!drill.state_path("active.json").exists(), "stage {stage}");
+        let (code, blocked) = drill.run();
+        assert_ne!(code, Some(0), "stage {stage}: {blocked}");
+        assert_eq!(blocked["ok"], false, "{blocked}");
+        assert!(blocked.get("run").is_none(), "{blocked}");
+
+        // A different command cannot silently supersede the interrupted
+        // transition. Its original signed authorization remains intact.
+        let duplicate = drill.cli(
+            drill.root.path(),
+            &[
+                "deploy",
+                "activate",
+                "app",
+                "--release",
+                "1.0.0",
+                "--operator-id",
+                "ops-other",
+                "--json",
+            ],
+        );
+        assert!(!duplicate.status.success(), "stage {stage}");
+        assert_eq!(fs::read(&intent).expect("retained intent"), signed_intent);
+
+        let reconciled = drill.reconcile();
+        assert_eq!(reconciled["command"], "deploy.reconcile", "{reconciled}");
+        assert_eq!(
+            reconciled["reconciled"], true,
+            "stage {stage}: {reconciled}"
+        );
+        assert_eq!(reconciled["activation"]["release_id"], "1.0.0");
+        assert_eq!(reconciled["activation"]["sequence"], 1);
+        assert!(reconciled.get("run").is_none());
+        let status = drill.status();
+        assert_eq!(status["active"]["release_id"], "1.0.0", "{status}");
+        assert_eq!(status["releases"][0]["healthy_runs"], 0, "{status}");
+        assert_eq!(status["activations"].as_array().expect("history").len(), 1);
+        assert_eq!(fs::read(&intent).expect("retained intent"), signed_intent);
+
+        let repeated = drill.reconcile();
+        assert_eq!(repeated["reconciled"], false, "{repeated}");
+        assert!(repeated["activation"].is_null(), "{repeated}");
+        assert_eq!(drill.status()["releases"][0]["healthy_runs"], 0);
+
+        // An explicit subsequent run executes the admitted source, proving
+        // reconciliation restored a useful deployment rather than a report.
+        let (code, healthy) = drill.run();
+        assert_eq!(code, Some(0), "stage {stage}: {healthy}");
+        assert_eq!(healthy["phase"], "healthy", "{healthy}");
+        assert_eq!(guest_stdout(&healthy["run"]), "RELEASE_ONE_HEALTHY\n");
+    }
+}
+
+#[test]
+fn reconcile_completes_interrupted_crash_recovery_without_automatic_restart() {
+    for stage in ["intent", "history", "recovery"] {
+        let drill = Drill::new();
+        drill.install("1.0.0", HEALTHY_V1);
+        let failed_dir = drill.install("2.0.0", &crashing_v2());
+        drill.policy("rollback", "automatic");
+        drill.activate("1.0.0");
+        let (code, healthy) = drill.run();
+        assert_eq!(code, Some(0), "{healthy}");
+        assert_eq!(healthy["phase"], "healthy", "{healthy}");
+        drill.activate("2.0.0");
+        let previous_pointer = fs::read(drill.state_path("active.json")).expect("v2 pointer");
+        drill.prime_crash_loop();
+        drill.interrupt(&["deploy", "run", "app", "--json"], stage);
+
+        let intent_path = drill.state_path("transactions/0000000003.json");
+        let intent = fs::read(&intent_path).expect("signed rollback intent");
+        assert_eq!(
+            fs::read(drill.state_path("active.json")).expect("retained v2 pointer"),
+            previous_pointer,
+            "pointer must be committed after every signed record: stage {stage}"
+        );
+        let (code, blocked) = drill.run();
+        assert_ne!(code, Some(0), "stage {stage}: {blocked}");
+        assert!(blocked.get("run").is_none(), "{blocked}");
+
+        let reconciled = drill.reconcile();
+        assert_eq!(
+            reconciled["reconciled"], true,
+            "stage {stage}: {reconciled}"
+        );
+        assert_eq!(reconciled["activation"]["release_id"], "1.0.0");
+        assert_eq!(reconciled["activation"]["reason"], "crash_loop_rollback");
+        assert_eq!(reconciled["activation"]["sequence"], 3);
+        assert_eq!(reconciled["activation"]["recovery_sequence"], 1);
+        assert!(reconciled.get("run").is_none());
+        assert!(reconciled.get("resumed").is_none());
+        assert_eq!(
+            fs::read(&intent_path).expect("retained rollback intent"),
+            intent
+        );
+
+        let status = drill.status();
+        assert_eq!(status["active"]["release_id"], "1.0.0", "{status}");
+        assert_eq!(
+            status["activations"].as_array().expect("activations").len(),
+            3
+        );
+        assert_eq!(
+            status["recoveries"].as_array().expect("recoveries").len(),
+            1
+        );
+        assert_eq!(status["recoveries"][0]["outcome"], "rolled_back");
+        let good = status["releases"]
+            .as_array()
+            .expect("releases")
+            .iter()
+            .find(|release| release["release_id"] == "1.0.0")
+            .expect("known-good release");
+        assert_eq!(
+            good["healthy_runs"], 1,
+            "reconcile must not launch: {status}"
+        );
+        let failed_safe_mode: Value = serde_json::from_slice(
+            &fs::read(failed_dir.join(".franken-node/safe-mode/state.json"))
+                .expect("retained failed release containment"),
+        )
+        .expect("safe mode JSON");
+        assert_eq!(failed_safe_mode["active"], true);
+        assert!(failed_dir.join("app.js").is_file());
+
+        let completed_recovery = fs::read(drill.state_path("recoveries/0000000001.json"))
+            .expect("signed recovery outcome");
+        assert_eq!(drill.reconcile()["reconciled"], false);
+        assert_eq!(
+            fs::read(drill.state_path("recoveries/0000000001.json"))
+                .expect("unchanged recovery outcome"),
+            completed_recovery
+        );
+        let (code, resumed) = drill.run();
+        assert_eq!(code, Some(0), "stage {stage}: {resumed}");
+        assert_eq!(resumed["phase"], "healthy", "{resumed}");
+        assert_eq!(guest_stdout(&resumed["run"]), "RELEASE_ONE_HEALTHY\n");
+    }
+}
+
+#[test]
+fn reconcile_rechecks_target_source_before_completing_interrupted_activation() {
+    let drill = Drill::new();
+    let release = drill.install("1.0.0", HEALTHY_V1);
+    drill.interrupt_activation("history");
+    let intent_path = drill.state_path("transactions/0000000001.json");
+    let intent = fs::read(&intent_path).expect("signed activation intent");
+    let history_path = drill.state_path("activations/0000000001.json");
+    let history = fs::read(&history_path).expect("signed activation record");
+    fs::write(
+        release.join("app.js"),
+        "console.log('UNAPPROVED_REPLACEMENT');\n",
+    )
+    .expect("substitute source after interruption");
+
+    let refused = drill.failed_reconcile();
+    assert!(
+        refused["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("source graph changed after admission")),
+        "{refused}"
+    );
+    assert!(!drill.state_path("active.json").exists());
+    assert_eq!(fs::read(&intent_path).expect("retained intent"), intent);
+    assert_eq!(fs::read(&history_path).expect("retained history"), history);
+
+    // The refusal neither consumes nor rewrites authorization. Restoring
+    // the exact approved source permits a fresh independently checked retry.
+    fs::write(release.join("app.js"), HEALTHY_V1).expect("restore approved source");
+    assert_eq!(drill.reconcile()["reconciled"], true);
+    let (code, healthy) = drill.run();
+    assert_eq!(code, Some(0), "{healthy}");
+    assert_eq!(guest_stdout(&healthy["run"]), "RELEASE_ONE_HEALTHY\n");
+}
+
+#[test]
+fn reconcile_refuses_a_target_revoked_after_the_signed_intent() {
+    let drill = Drill::new();
+    let release = drill.install("1.0.0", HEALTHY_V1);
+    let artifact = drill.artifact_digest("1.0.0");
+    drill.interrupt_activation("history");
+    let intent_path = drill.state_path("transactions/0000000001.json");
+    let intent = fs::read(&intent_path).expect("signed activation intent");
+    drill.ok(
+        &release,
+        &["trust", "revoke", "--artifact-sha256", &artifact, "--json"],
+    );
+
+    let refused = drill.failed_reconcile();
+    let reason = refused["error"].as_str().expect("refusal reason");
+    assert!(
+        reason.contains("trust admission") && reason.contains("revoked"),
+        "{refused}"
+    );
+    assert!(!drill.state_path("active.json").exists());
+    assert_eq!(fs::read(&intent_path).expect("retained intent"), intent);
+    let (code, blocked) = drill.run();
+    assert_ne!(code, Some(0), "{blocked}");
+    assert!(blocked.get("run").is_none(), "{blocked}");
+}
+
+#[test]
+fn reconcile_refuses_forged_or_missing_authorization_without_guessing() {
+    let drill = Drill::new();
+    drill.install("1.0.0", HEALTHY_V1);
+    drill.interrupt_activation("history");
+    let intent_path = drill.state_path("transactions/0000000001.json");
+    let original = fs::read(&intent_path).expect("signed activation intent");
+    let mut forged: Value = serde_json::from_slice(&original).expect("intent JSON");
+    forged["signature_hex"] = Value::String("0".repeat(128));
+    fs::write(
+        &intent_path,
+        serde_json::to_vec_pretty(&forged).expect("forged JSON"),
+    )
+    .expect("replace signature");
+    let refused = drill.failed_reconcile();
+    assert!(
+        refused["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("signature")),
+        "{refused}"
+    );
+    assert!(!drill.state_path("active.json").exists());
+
+    fs::write(&intent_path, &original).expect("restore authentic intent");
+    let retained = drill.root.path().join("retained-activation-intent.json");
+    fs::rename(&intent_path, &retained).expect("preserve intent outside transaction history");
+    let missing = drill.failed_reconcile();
+    assert!(
+        missing["error"]
+            .as_str()
+            .is_some_and(|error| !error.is_empty())
+    );
+    assert!(!drill.state_path("active.json").exists());
+    fs::rename(&retained, &intent_path).expect("restore retained authorization");
+    assert_eq!(drill.reconcile()["reconciled"], true);
+    assert_eq!(fs::read(&intent_path).expect("retained intent"), original);
+}
+
+#[test]
+fn deployment_root_safe_mode_blocks_a_release_outside_that_directory() {
+    let drill = Drill::new();
+    let external = tempfile::tempdir().expect("external release directory");
+    let (release, manifest) = drill.publish_release_at("1.0.0", HEALTHY_V1, external.path());
+    assert!(!release.starts_with(drill.root.path()));
+    drill.install_published("1.0.0", &release, &manifest);
+    drill.activate("1.0.0");
+    let (code, healthy) = drill.run();
+    assert_eq!(code, Some(0), "{healthy}");
+    assert_eq!(guest_stdout(&healthy["run"]), "RELEASE_ONE_HEALTHY\n");
+    drill.ok(
+        drill.root.path(),
+        &[
+            "safe-mode",
+            "enter",
+            "--reason",
+            "explicit-flag",
+            "--operator-id",
+            "ops-1",
+            "--trust-state-hash",
+            "operator:test-state",
+            "--json",
+        ],
+    );
+
+    let (code, blocked) = drill.run();
+    assert_ne!(code, Some(0), "{blocked}");
+    assert_eq!(blocked["ok"], false, "{blocked}");
+    assert!(
+        blocked["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("safe mode")),
+        "{blocked}"
+    );
+    assert!(blocked.get("run").is_none(), "{blocked}");
+    assert_eq!(drill.status()["releases"][0]["healthy_runs"], 1);
 }
