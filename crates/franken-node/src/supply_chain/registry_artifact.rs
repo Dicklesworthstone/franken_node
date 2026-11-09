@@ -570,6 +570,18 @@ impl PublisherSourceGraphApproval {
         &self.identity
     }
 
+    /// Bind a supervisor's immutable approval to the actual child admission.
+    /// This covers the publisher key, manifest, artifact, source graph and
+    /// runtime authority together. It is a commitment, not a new signature or
+    /// a replacement for publisher verification and current trust admission.
+    pub fn admission_sha256(&self) -> Result<String> {
+        self.validate()?;
+        let mut digest = Sha256::new();
+        digest.update(b"franken-node/publisher-source-approval-handoff/v1\0");
+        digest.update(serde_json::to_vec(self)?);
+        Ok(format!("sha256:{}", hex::encode(digest.finalize())))
+    }
+
     pub fn runtime_authority(&self) -> Option<&ArtifactRuntimeAuthority> {
         self.identity.runtime_authority.as_ref()
     }
@@ -1557,6 +1569,44 @@ mod tests {
             ),
         ] {
             assert!(error.is_err());
+        }
+    }
+
+    #[test]
+    fn deployment_handoff_commitment_binds_the_entire_publisher_approval() {
+        let fixture = Fixture::new("console.log(require('./side.cjs'));\n")
+            .with_runtime_authority(&runtime_authority());
+        let approval = fixture.approval();
+        let commitment = approval.admission_sha256().unwrap();
+        let roundtrip: PublisherSourceGraphApproval =
+            serde_json::from_slice(&serde_json::to_vec(&approval).unwrap()).unwrap();
+        assert_eq!(roundtrip.admission_sha256().unwrap(), commitment);
+        for mutate in [
+            |value: &mut PublisherSourceGraphApproval| value.identity.version.push_str("-foreign"),
+            |value: &mut PublisherSourceGraphApproval| {
+                value.publisher_public_key_hex = "11".repeat(32)
+            },
+            |value: &mut PublisherSourceGraphApproval| {
+                value.manifest_sha256 = format!("sha256:{}", "2".repeat(64))
+            },
+            |value: &mut PublisherSourceGraphApproval| {
+                value.graph_input_hash = format!("sha256:{}", "3".repeat(64))
+            },
+            |value: &mut PublisherSourceGraphApproval| {
+                value.capsule_digest = format!("sha256:{}", "4".repeat(64))
+            },
+            |value: &mut PublisherSourceGraphApproval| value.entrypoint = "other.cjs".to_string(),
+            |value: &mut PublisherSourceGraphApproval| {
+                value.additional_conditions.push("development".to_string())
+            },
+            |value: &mut PublisherSourceGraphApproval| {
+                value.contained_symlinks = !value.contained_symlinks
+            },
+            |value: &mut PublisherSourceGraphApproval| value.identity.runtime_authority = None,
+        ] {
+            let mut substituted = approval.clone();
+            mutate(&mut substituted);
+            assert_ne!(substituted.admission_sha256().unwrap(), commitment);
         }
     }
 

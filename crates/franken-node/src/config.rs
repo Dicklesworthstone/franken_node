@@ -471,6 +471,56 @@ impl Config {
         Self::resolve_with_env(explicit_path, cli_overrides, &|key| std::env::var(key).ok())
     }
 
+    /// Resolve an admitted configuration from exactly the bytes its SHA-256
+    /// commitment covers. Deployment children use this at the authoritative
+    /// load boundary, so replacing the path after admission cannot substitute
+    /// a different policy. File and selected profile-block settings still use
+    /// the normal merge pipeline; ambient environment and CLI overrides are
+    /// deliberately excluded from this committed configuration.
+    pub fn resolve_pinned(
+        path: &Path,
+        expected_sha256: &str,
+    ) -> Result<ResolvedConfig, ConfigError> {
+        let content = read_config_content(path)?;
+        Self::resolve_pinned_content(path, &content, expected_sha256)
+    }
+
+    fn resolve_pinned_content(
+        path: &Path,
+        content: &str,
+        expected_sha256: &str,
+    ) -> Result<ResolvedConfig, ConfigError> {
+        let expected = expected_sha256.strip_prefix("sha256:").filter(|digest| {
+            digest.len() == 64
+                && digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        });
+        let Some(expected) = expected else {
+            return Err(ConfigError::ValidationFailed(
+                "admitted config commitment must be sha256:<64 lowercase hex digits>".to_string(),
+            ));
+        };
+        let observed = hex::encode(Sha256::digest(content.as_bytes()));
+        if observed != expected {
+            return Err(ConfigError::ValidationFailed(
+                "release config changed after admission".to_string(),
+            ));
+        }
+        // Parse the buffer just hashed, never reopen the path between the
+        // commitment check and policy construction.
+        let document =
+            toml::from_str(content).map_err(|e| ConfigError::ParseFailed(path.into(), e))?;
+        let resolved = Self::resolve_document(
+            Some(path.to_path_buf()),
+            document,
+            CliOverrides::default(),
+            &|_| None,
+        )?;
+        resolved.config.validate()?;
+        Ok(resolved)
+    }
+
     /// Resolve configuration using an injected environment lookup.
     ///
     /// This keeps precedence tests deterministic without mutating process-global
@@ -523,6 +573,15 @@ impl Config {
             ConfigDocument::default()
         };
 
+        Self::resolve_document(source_path, document, cli_overrides, env_lookup)
+    }
+
+    fn resolve_document(
+        source_path: Option<PathBuf>,
+        document: ConfigDocument,
+        cli_overrides: CliOverrides,
+        env_lookup: &impl Fn(&str) -> Option<String>,
+    ) -> Result<ResolvedConfig, ConfigError> {
         let mut decisions = vec![MergeDecision::new(
             MergeStage::Default,
             "profile",
@@ -3136,28 +3195,7 @@ struct ConfigDocument {
 
 impl ConfigDocument {
     fn load(path: &Path) -> Result<Self, ConfigError> {
-        // Open file and check size atomically to prevent TOCTOU file swapping
-        let mut file = File::open(path).map_err(|e| ConfigError::ReadFailed(path.into(), e))?;
-        let metadata = file
-            .metadata()
-            .map_err(|e| ConfigError::ReadFailed(path.into(), e))?;
-        if metadata.len() > MAX_CONFIG_FILE_BYTES {
-            return Err(ConfigError::ReadFailed(
-                path.into(),
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!(
-                        "Config file too large: {} bytes (limit: {} bytes)",
-                        metadata.len(),
-                        MAX_CONFIG_FILE_BYTES
-                    ),
-                ),
-            ));
-        }
-
-        let mut content = String::new();
-        file.read_to_string(&mut content)
-            .map_err(|e| ConfigError::ReadFailed(path.into(), e))?;
+        let content = read_config_content(path)?;
         toml::from_str(&content).map_err(|e| ConfigError::ParseFailed(path.into(), e))
     }
 
@@ -3168,6 +3206,36 @@ impl ConfigDocument {
             .find(|(raw, _)| normalize_profile_key(raw) == target)
             .map(|(_, overrides)| overrides)
     }
+}
+
+fn read_config_content(path: &Path) -> Result<String, ConfigError> {
+    let file = File::open(path).map_err(|e| ConfigError::ReadFailed(path.into(), e))?;
+    let metadata = file
+        .metadata()
+        .map_err(|e| ConfigError::ReadFailed(path.into(), e))?;
+    if !metadata.is_file() || metadata.len() > MAX_CONFIG_FILE_BYTES {
+        return Err(ConfigError::ReadFailed(
+            path.into(),
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Config must be a regular file no larger than 1048576 bytes",
+            ),
+        ));
+    }
+    let mut content = String::new();
+    file.take(MAX_CONFIG_FILE_BYTES + 1)
+        .read_to_string(&mut content)
+        .map_err(|e| ConfigError::ReadFailed(path.into(), e))?;
+    if content.len() as u64 > MAX_CONFIG_FILE_BYTES {
+        return Err(ConfigError::ReadFailed(
+            path.into(),
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Config file too large: limit is 1048576 bytes",
+            ),
+        ));
+    }
+    Ok(content)
 }
 
 /// Normalize profile key for case-insensitive matching.
@@ -6198,6 +6266,91 @@ authorized_api_keys = ["test-api-key"]
             "Error should include byte counts: {}",
             error_msg
         );
+    }
+
+    fn admitted_config_fixture() -> String {
+        "profile = \"balanced\"\n\
+         [trust]\nregistry_signing_key = \"x8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8c=\"\n\
+         [security]\nauthorized_api_keys = [\"test-api-key\"]\n\
+         [runtime]\nmax_instructions = 9000\n\
+         [profiles.balanced.runtime]\nmax_instructions = 7000\n"
+            .to_string()
+    }
+
+    #[test]
+    fn pinned_config_resolves_the_admitted_profile_block() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("franken_node.toml");
+        let content = admitted_config_fixture();
+        let commitment = format!("sha256:{}", hex::encode(Sha256::digest(content.as_bytes())));
+        std::fs::write(&path, &content).unwrap();
+
+        let resolved = Config::resolve_pinned(&path, &commitment).unwrap();
+        assert_eq!(resolved.selected_profile, Profile::Balanced);
+        assert_eq!(resolved.config.runtime.max_instructions, Some(7000));
+        assert_eq!(resolved.source_path.as_deref(), Some(path.as_path()));
+        assert!(resolved.decisions.iter().any(|decision| {
+            decision.stage == MergeStage::Profile && decision.field == "runtime.max_instructions"
+        }));
+        assert!(
+            resolved
+                .decisions
+                .iter()
+                .all(|decision| !matches!(decision.stage, MergeStage::Env | MergeStage::Cli))
+        );
+    }
+
+    #[test]
+    fn pinned_config_never_reopens_a_replaced_path_after_hashing() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("franken_node.toml");
+        let content = admitted_config_fixture();
+        let commitment = format!("sha256:{}", hex::encode(Sha256::digest(content.as_bytes())));
+        std::fs::write(&path, &content).unwrap();
+        let admitted_bytes = read_config_content(&path).unwrap();
+        // A deterministic handoff barrier: replace the path after the one
+        // bounded read, before the committed buffer is parsed and resolved.
+        std::fs::write(&path, "this is not a TOML policy").unwrap();
+        let resolved = Config::resolve_pinned_content(&path, &admitted_bytes, &commitment).unwrap();
+        assert_eq!(resolved.config.runtime.max_instructions, Some(7000));
+        let error = Config::resolve_pinned(&path, &commitment).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("release config changed after admission")
+        );
+    }
+
+    #[test]
+    fn pinned_config_rejects_missing_malformed_and_unvalidated_inputs() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("franken_node.toml");
+        let content = admitted_config_fixture();
+        std::fs::write(&path, &content).unwrap();
+        for commitment in [
+            "".to_string(),
+            "sha256:abcd".to_string(),
+            format!("sha256:{}", "A".repeat(64)),
+        ] {
+            assert!(
+                Config::resolve_pinned(&path, &commitment)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("commitment must be")
+            );
+        }
+        let invalid = "profile = \"balanced\"\n";
+        std::fs::write(&path, invalid).unwrap();
+        let commitment = format!("sha256:{}", hex::encode(Sha256::digest(invalid.as_bytes())));
+        assert!(
+            Config::resolve_pinned(&path, &commitment).is_err(),
+            "a matching commitment must never skip normal security validation"
+        );
+        assert!(
+            Config::resolve_pinned(&directory.path().join("missing.toml"), &commitment).is_err()
+        );
+        std::fs::write(&path, "#".repeat(MAX_CONFIG_FILE_BYTES as usize + 1)).unwrap();
+        assert!(Config::resolve_pinned(&path, &commitment).is_err());
     }
 
     #[test]
