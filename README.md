@@ -4462,7 +4462,13 @@ deployment record under `.franken-node/state/deployments/<name>/`).
   directory, config bytes, the identical publisher approval, the exact
   approved source graph, its current trust admission, and this build) and
   runs it through the complete
-  native `run` path with `--frozen-modules` and the publisher approval. A
+  native `run` path with `--frozen-modules` and the publisher approval. The
+  child hashes and parses the same bounded configuration buffer against the
+  admitted commitment, and checks the complete publisher approval identity
+  again before execution. Replacing either input between verification and
+  child startup fails closed. Release configuration uses the admitted file
+  and its selected profile block; the supervisor's `FRANKEN_NODE_*` and
+  `FRANKEN_ENGINE_*` environment overrides are not inherited. A
   healthy run (exit 0 with a signed receipt) records readiness for the
   release. When the run ends in a validated native engine panic that completes
   a crash loop, the supervisor marks the release `crash_looped` and applies the

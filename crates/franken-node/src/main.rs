@@ -6408,13 +6408,14 @@ fn verify_deploy_release(release: &runtime::deployment::ReleaseRecord) -> Result
             "release directory {} moved or is no longer a directory",
             release.release_dir.display()
         );
-        let config_sha256 = runtime::deployment::file_sha256(&directory.join("franken_node.toml"))
-            .context("release config franken_node.toml is unreadable")?;
-        anyhow::ensure!(
-            config_sha256 == release.config_sha256,
-            "release config changed after admission ({config_sha256} != {})",
-            release.config_sha256
-        );
+        // Hash and parse the same bounded buffer. Deployment policy comes
+        // only from the admitted file and its profile block, never from the
+        // supervisor's ambient FRANKEN_NODE_* overrides.
+        let release_config = config::Config::resolve_pinned(
+            &directory.join("franken_node.toml"),
+            &release.config_sha256,
+        )
+        .context("release config does not match its admission")?;
         let (_, key) = deploy_publisher_key(&release.publisher_public_key_path, &directory)?;
         let observed = PublisherSourceGraphApproval::load(&release.registry_manifest, &key)
             .context("publisher approval no longer verifies")?;
@@ -6436,11 +6437,6 @@ fn verify_deploy_release(release: &runtime::deployment::ReleaseRecord) -> Result
         // The same admission the release's own `run` performs: its project's
         // authenticated trust registry must be current and must not revoke
         // the approval's publisher key or exact artifact.
-        let release_config = config::Config::resolve(
-            Some(&directory.join("franken_node.toml")),
-            CliOverrides::default(),
-        )
-        .context("release config does not resolve")?;
         let requirements = ops::engine_dispatcher::RunTrustRequirements::new(&[], &[], false)?
             .with_registry_artifact_approval(release.approval.clone())?;
         ops::engine_dispatcher::validate_execution_trust(
@@ -6660,6 +6656,13 @@ fn spawn_deploy_release_child(
     release: &runtime::deployment::ReleaseRecord,
     app_args: &[String],
 ) -> Result<std::process::Child> {
+    // Bind the complete approval, including its publisher and authority
+    // envelope, rather than accepting a newly signed replacement at the same
+    // manifest path. The child checks this after authenticating what it loads.
+    let approval_sha256 = release.approval.admission_sha256()?;
+    #[cfg(target_os = "linux")]
+    let executable = PathBuf::from("/proc/self/exe");
+    #[cfg(not(target_os = "linux"))]
     let executable =
         std::env::current_exe().context("failed locating the franken-node executable")?;
     let mut command = std::process::Command::new(executable);
@@ -6678,7 +6681,21 @@ fn spawn_deploy_release_child(
         ])
         .arg(&release.registry_manifest)
         .arg("--publisher-public-key")
-        .arg(&release.publisher_public_key_path);
+        .arg(&release.publisher_public_key_path)
+        .arg("--admitted-config-sha256")
+        .arg(&release.config_sha256)
+        .arg("--admitted-approval-sha256")
+        .arg(approval_sha256);
+    // Preserve the ordinary guest environment, but do not let deployment
+    // supervisor control variables reconfigure a release or select another
+    // engine binary. Runtime policy is resolved from the committed bytes.
+    for (key, _) in std::env::vars_os() {
+        if key.to_str().is_some_and(|name| {
+            name.starts_with("FRANKEN_NODE_") || name.starts_with("FRANKEN_ENGINE_")
+        }) {
+            command.env_remove(key);
+        }
+    }
     if !app_args.is_empty() {
         command.arg("--").args(app_args);
     }
@@ -35837,6 +35854,8 @@ fn main() -> Result<()> {
                 structured_logs_jsonl,
                 trace_id,
                 config,
+                admitted_config_sha256,
+                admitted_approval_sha256,
                 runtime,
                 engine_bin,
                 compat_preflight,
@@ -35856,14 +35875,19 @@ fn main() -> Result<()> {
                     return named_cli_fail("franken-node/run-error-cli/v1", "run", json, err);
                 }
             };
-            let mut resolved = match config::Config::resolve(
-                config.as_deref(),
-                CliOverrides {
-                    profile: profile_override,
-                },
-            )
-            .context("failed resolving configuration for run")
-            {
+            let resolution = match (config.as_deref(), admitted_config_sha256.as_deref()) {
+                (Some(path), Some(commitment)) => config::Config::resolve_pinned(path, commitment),
+                (_, Some(_)) => Err(config::ConfigError::ValidationFailed(
+                    "an admitted deployment run requires --config".to_string(),
+                )),
+                (path, None) => config::Config::resolve(
+                    path,
+                    CliOverrides {
+                        profile: profile_override,
+                    },
+                ),
+            };
+            let mut resolved = match resolution.context("failed resolving configuration for run") {
                 Ok(resolved) => resolved,
                 Err(err) => {
                     return named_cli_fail("franken-node/run-error-cli/v1", "run", json, err);
@@ -35944,6 +35968,21 @@ fn main() -> Result<()> {
                 },
                 _ => None,
             };
+            if let Some(expected) = admitted_approval_sha256.as_deref() {
+                let binding = registry_artifact_approval
+                    .as_ref()
+                    .context("admitted deployment run is missing publisher approval")
+                    .and_then(|approval| {
+                        anyhow::ensure!(
+                            approval.admission_sha256()? == expected,
+                            "publisher approval changed after deployment admission"
+                        );
+                        Ok(())
+                    });
+                if let Err(error) = binding {
+                    return named_cli_fail("franken-node/run-error-cli/v1", "run", json, error);
+                }
+            }
             let preflight = match evaluate_run_trust_preflight(
                 &app_path,
                 &project_paths,

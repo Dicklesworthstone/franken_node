@@ -318,6 +318,15 @@ pub struct RunArgs {
     #[arg(long, value_parser = parse_safe_content_pathbuf)]
     pub config: Option<PathBuf>,
 
+    /// Exact configuration admitted by the deployment supervisor. Internal
+    /// handoff only: this restricts configuration and grants no authority.
+    #[arg(long, hide = true)]
+    pub admitted_config_sha256: Option<String>,
+
+    /// Exact publisher approval admitted by the deployment supervisor.
+    #[arg(long, hide = true)]
+    pub admitted_approval_sha256: Option<String>,
+
     /// Runtime selection. Profile-governed run accepts auto or franken-engine;
     /// node and bun fail closed because they cannot enforce engine capabilities.
     #[arg(long)]
@@ -421,6 +430,28 @@ impl RunArgs {
             .flatten()
         {
             validate_system_binary_pathbuf(path)?;
+        }
+
+        anyhow::ensure!(
+            self.admitted_config_sha256.is_some() == self.admitted_approval_sha256.is_some(),
+            "deployment configuration and publisher approval commitments must be supplied together"
+        );
+        if self.admitted_config_sha256.is_some() {
+            anyhow::ensure!(
+                self.config.is_some()
+                    && self.registry_artifact.is_some()
+                    && self.frozen_modules
+                    && self.runtime.as_deref() == Some("franken-engine"),
+                "an admitted deployment run requires explicit config, publisher approval, frozen modules and the native runtime"
+            );
+            anyhow::ensure!(
+                self.policy.is_none()
+                    && self.engine_bin.is_none()
+                    && self.frozen_module_symlinks.is_none()
+                    && self.frozen_module_graph_hash.is_none()
+                    && self.module_conditions.is_empty(),
+                "an admitted deployment run cannot override its configuration"
+            );
         }
 
         Ok(())
@@ -3769,6 +3800,66 @@ mod parser_contract_extra_tests {
             Some(PathBuf::from("runtime.pub"))
         );
         assert!(args.execute && args.json);
+        Ok(())
+    }
+
+    #[test]
+    fn admitted_deployment_requires_paired_pins_and_refuses_overrides() -> Result<(), String> {
+        let commitment = format!("sha256:{}", "1".repeat(64));
+        let base = vec![
+            "franken-node",
+            "run",
+            "app.js",
+            "--config",
+            "franken_node.toml",
+            "--runtime",
+            "franken-engine",
+            "--frozen-modules",
+            "--registry-artifact",
+            "artifact.json",
+            "--publisher-public-key",
+            "publisher.pub",
+            "--admitted-config-sha256",
+            &commitment,
+            "--admitted-approval-sha256",
+            &commitment,
+        ];
+        let Command::Run(args) = parse(&base).map_err(|error| error.to_string())?.command else {
+            return Err("expected admitted run command".to_string());
+        };
+        args.validate_paths().map_err(|error| error.to_string())?;
+        for extra in [
+            vec!["--policy", "legacy-risky"],
+            vec!["--engine-bin", "/bin/another-engine"],
+            vec!["--conditions", "development"],
+            vec!["--frozen-module-symlinks"],
+            vec!["--frozen-module-graph-hash", &commitment],
+        ] {
+            let mut command = base.clone();
+            command.extend(extra);
+            let Command::Run(args) = parse(&command).map_err(|error| error.to_string())?.command
+            else {
+                return Err("expected admitted run command".to_string());
+            };
+            assert!(
+                args.validate_paths()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("cannot override")
+            );
+        }
+        let Command::Run(args) = parse(&base[..base.len() - 2])
+            .map_err(|error| error.to_string())?
+            .command
+        else {
+            return Err("expected partially bound run".to_string());
+        };
+        assert!(
+            args.validate_paths()
+                .unwrap_err()
+                .to_string()
+                .contains("supplied together")
+        );
         Ok(())
     }
 
