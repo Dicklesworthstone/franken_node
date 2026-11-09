@@ -26,7 +26,7 @@
 //! trust admission (no publisher or artifact revocation) and engine
 //! compatibility (checked by the caller-supplied verifier).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -43,9 +43,11 @@ pub const DEPLOYMENTS_RELATIVE_DIR: &str = ".franken-node/state/deployments";
 pub const RELEASE_SCHEMA: &str = "franken-node/deployment-release/v1";
 pub const POLICY_SCHEMA: &str = "franken-node/deployment-policy/v1";
 pub const ACTIVATION_SCHEMA: &str = "franken-node/deployment-activation/v1";
+const SUPERSESSION_ACTIVATION_SCHEMA: &str = "franken-node/deployment-activation/v2";
 pub const HEALTH_SCHEMA: &str = "franken-node/deployment-release-health/v1";
 pub const RECOVERY_SCHEMA: &str = "franken-node/deployment-recovery/v1";
 const TRANSACTION_SCHEMA: &str = "franken-node/deployment-activation-transaction/v1";
+const SUPERSESSION_TRANSACTION_SCHEMA: &str = "franken-node/deployment-activation-transaction/v2";
 
 /// Domain separator for every deployment record signature.
 const SIGNATURE_DOMAIN: &[u8] = b"franken-node:deployment-record:v1\0";
@@ -222,6 +224,10 @@ pub struct ActivationRecord {
     pub recovery_sequence: Option<u64>,
     pub previous_activation_digest: Option<String>,
     pub activated_at_epoch_secs: u64,
+    /// A v2 activation requires its matching supersession intent forever.
+    /// Omitting the field preserves historical v1 signature preimages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supersedes_transaction_digest: Option<String>,
 }
 
 /// The supervisor's validated crash-loop observation for the failed release.
@@ -344,6 +350,25 @@ struct ActivationTransaction {
     activation: ActivationRecord,
     recovery: Option<RecoveryRecord>,
     recovery_policy: Option<DeploymentPolicy>,
+    /// Omitted for v1 so historical signature preimages remain byte-identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    supersedes: Option<SupersessionAuthority>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SupersessionAuthority {
+    superseded_sequence: u64,
+    superseded_transaction_digest: String,
+    /// Zero denotes the empty committed prefix, before the first activation.
+    committed_sequence: u64,
+    committed_activation_digest: Option<String>,
+    reason: String,
+}
+
+struct AuthenticatedTransaction {
+    payload: ActivationTransaction,
+    digest: String,
 }
 
 /// An authenticated operation that has not yet published its activation
@@ -351,8 +376,30 @@ struct ActivationTransaction {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PendingActivation {
+    pub transaction_digest: String,
     pub activation: ActivationRecord,
     pub planned_recovery: Option<RecoveryRecord>,
+}
+
+/// A canceled attempt retained in the raw signed journals. It never appears
+/// in the effective activation or recovery history and cannot establish readiness.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SupersededActivation {
+    pub transaction_digest: String,
+    pub activation: ActivationRecord,
+    pub planned_recovery: Option<RecoveryRecord>,
+    pub superseded_by_sequence: u64,
+    pub superseded_by_operator_id: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeploymentSupersedeOutcome {
+    pub activation: ActivationRecord,
+    pub already_committed: bool,
+    pub superseded_transaction_digest: String,
 }
 
 /// Read-only deployment history, including an interrupted signed operation.
@@ -361,12 +408,18 @@ pub struct PendingActivation {
 pub struct DeploymentActivationStatus {
     pub activations: Vec<ActivationRecord>,
     pub pending: Option<PendingActivation>,
+    pub superseded: Vec<SupersededActivation>,
 }
 
 struct ActivationState {
     committed: Vec<ActivationRecord>,
     recoveries: Vec<RecoveryRecord>,
     pending: Option<ActivationTransaction>,
+    pending_digest: Option<String>,
+    superseded: Vec<SupersededActivation>,
+    transactions: Vec<AuthenticatedTransaction>,
+    recovery_high_water: u64,
+    consumed_crash_nonces: BTreeSet<String>,
 }
 
 /// Validate a deployment or release identifier.
@@ -387,6 +440,14 @@ fn validate_operator_id(operator_id: &str) -> Result<()> {
     anyhow::ensure!(
         !operator_id.trim().is_empty() && operator_id.len() <= MAX_REASON_BYTES,
         "operator id must be non-empty and at most {MAX_REASON_BYTES} bytes"
+    );
+    Ok(())
+}
+
+fn validate_supersession_reason(reason: &str) -> Result<()> {
+    anyhow::ensure!(
+        !reason.trim().is_empty() && reason.len() <= MAX_REASON_BYTES,
+        "supersession reason must be non-empty and at most {MAX_REASON_BYTES} bytes"
     );
     Ok(())
 }
@@ -597,8 +658,11 @@ impl DeploymentStore {
         Ok(record.payload)
     }
 
-    fn activation_history(&self, authority: &DeploymentAuthority) -> Result<Vec<ActivationRecord>> {
-        let mut chain: Vec<ActivationRecord> = Vec::new();
+    fn activation_history(
+        &self,
+        authority: &DeploymentAuthority,
+    ) -> Result<Vec<SignedRecord<ActivationRecord>>> {
+        let mut chain = Vec::new();
         let mut previous_digest: Option<String> = None;
         for sequence in record_sequences(&self.root.join("activations"), MAX_ACTIVATIONS, true)? {
             let record: SignedRecord<ActivationRecord> =
@@ -606,8 +670,7 @@ impl DeploymentStore {
             authority.open(&record, "activation record")?;
             let activation = &record.payload;
             anyhow::ensure!(
-                activation.schema_version == ACTIVATION_SCHEMA
-                    && activation.deployment == self.name
+                activation.deployment == self.name
                     && activation.sequence == sequence
                     && activation.previous_activation_digest == previous_digest,
                 "activation chain of deployment `{}` is broken at sequence {sequence}",
@@ -615,7 +678,7 @@ impl DeploymentStore {
             );
             validate_activation_shape(activation)?;
             previous_digest = Some(record_digest(&record)?);
-            chain.push(record.payload);
+            chain.push(record);
         }
         Ok(chain)
     }
@@ -630,23 +693,51 @@ impl DeploymentStore {
         Ok(Some(record.payload))
     }
 
-    fn transactions(&self, authority: &DeploymentAuthority) -> Result<Vec<ActivationTransaction>> {
+    fn transactions(
+        &self,
+        authority: &DeploymentAuthority,
+    ) -> Result<Vec<AuthenticatedTransaction>> {
         let mut transactions = Vec::new();
         for sequence in record_sequences(&self.root.join("transactions"), MAX_ACTIVATIONS, false)? {
             let record: SignedRecord<ActivationTransaction> =
                 read_json(&self.transaction_path(sequence))?;
             authority.open(&record, "activation transaction")?;
+            let digest = record_digest(&record)?;
             let transaction = record.payload;
             anyhow::ensure!(
-                transaction.schema_version == TRANSACTION_SCHEMA
+                ((transaction.schema_version == TRANSACTION_SCHEMA
+                    && transaction.supersedes.is_none())
+                    || (transaction.schema_version == SUPERSESSION_TRANSACTION_SCHEMA
+                        && transaction.supersedes.is_some()))
                     && transaction.deployment == self.name
                     && transaction.activation.deployment == self.name
-                    && transaction.activation.schema_version == ACTIVATION_SCHEMA
                     && transaction.activation.sequence == sequence,
                 "activation transaction does not belong to deployment `{}` sequence {sequence}",
                 self.name
             );
             validate_activation_shape(&transaction.activation)?;
+            anyhow::ensure!(
+                transaction
+                    .activation
+                    .supersedes_transaction_digest
+                    .as_deref()
+                    == transaction
+                        .supersedes
+                        .as_ref()
+                        .map(|supersedes| supersedes.superseded_transaction_digest.as_str()),
+                "activation supersession marker differs from its signed intent"
+            );
+            if let Some(supersedes) = &transaction.supersedes {
+                anyhow::ensure!(
+                    transaction.activation.reason == ActivationReason::Operator
+                        && transaction.recovery.is_none()
+                        && transaction.recovery_policy.is_none()
+                        && supersedes.superseded_sequence.checked_add(1) == Some(sequence)
+                        && supersedes.committed_sequence < supersedes.superseded_sequence,
+                    "supersession must replace the immediately preceding uncommitted attempt with an operator activation"
+                );
+                validate_supersession_reason(&supersedes.reason)?;
+            }
             match (&transaction.recovery, &transaction.recovery_policy) {
                 (None, None) => anyhow::ensure!(
                     transaction.activation.reason == ActivationReason::Operator,
@@ -666,67 +757,149 @@ impl DeploymentStore {
                 }
                 _ => anyhow::bail!("activation transaction has incomplete recovery authority"),
             }
-            transactions.push(transaction);
+            transactions.push(AuthenticatedTransaction {
+                payload: transaction,
+                digest,
+            });
         }
         Ok(transactions)
     }
 
-    /// Authenticate both the committed prefix and any one incomplete signed
-    /// transition. Reading this state never completes or authorizes the intent.
+    /// Authenticate raw attempt journals before deriving effective history.
+    /// Multiple uncommitted intents are allowed only as an exact, bounded,
+    /// signed supersession chain. Reading never grants the canceled targets.
     fn activation_state(&self, authority: &DeploymentAuthority) -> Result<ActivationState> {
-        let mut chain = self.activation_history(authority)?;
+        let raw_chain = self.activation_history(authority)?;
         let pointer = self.pointer(authority)?;
         let committed_sequence = pointer.as_ref().map_or(0, |record| record.sequence);
         if let Some(pointer) = &pointer {
             anyhow::ensure!(
-                chain.iter().any(|activation| activation == pointer),
+                raw_chain.iter().any(|record| &record.payload == pointer),
                 "activation pointer is not an authenticated history link"
             );
         }
         let transactions = self.transactions(authority)?;
-        let mut unfinished = transactions
+        let by_sequence: BTreeMap<_, _> = transactions
             .iter()
-            .filter(|transaction| transaction.activation.sequence > committed_sequence);
-        let pending = unfinished.next().cloned();
-        anyhow::ensure!(
-            unfinished.next().is_none(),
-            "deployment has conflicting or nonconsecutive activation intents"
-        );
-        let mut recoveries = self.recovery_history(authority)?;
-        if let Some(transaction) = &pending {
-            let activation = &transaction.activation;
-            anyhow::ensure!(
-                activation.sequence == committed_sequence + 1,
-                "deployment has conflicting or nonconsecutive activation intents"
-            );
-            anyhow::ensure!(
-                chain.len() as u64 == committed_sequence
-                    || (chain.len() as u64 == activation.sequence
-                        && chain.last() == Some(activation)),
-                "partial activation history differs from its signed intent"
-            );
-            let previous_digest = if committed_sequence == 0 {
-                None
+            .map(|record| (record.payload.activation.sequence, record))
+            .collect();
+        for record in &raw_chain {
+            if record.payload.supersedes_transaction_digest.is_some() {
+                anyhow::ensure!(
+                    by_sequence
+                        .get(&record.payload.sequence)
+                        .is_some_and(|transaction| transaction.payload.activation
+                            == record.payload
+                            && transaction.payload.supersedes.is_some()),
+                    "superseding activation is missing its exact signed transaction"
+                );
+            }
+        }
+        let mut conceptual = BTreeMap::new();
+        let mut activation_digests = BTreeMap::new();
+        for record in &raw_chain {
+            conceptual.insert(record.payload.sequence, record.payload.clone());
+            activation_digests.insert(record.payload.sequence, record_digest(record)?);
+        }
+        for record in &transactions {
+            let activation = &record.payload.activation;
+            if let Some(existing) = conceptual.get(&activation.sequence) {
+                anyhow::ensure!(
+                    existing == activation,
+                    "partial activation history differs from its signed intent"
+                );
             } else {
-                let record: SignedRecord<ActivationRecord> =
-                    read_json(&self.activation_path(committed_sequence))?;
-                Some(record_digest(&record)?)
-            };
+                conceptual.insert(activation.sequence, activation.clone());
+                activation_digests.insert(
+                    activation.sequence,
+                    record_digest(&authority.seal(activation.clone())?)?,
+                );
+            }
+        }
+        let mut previous_digest = None;
+        for (index, (sequence, activation)) in conceptual.iter().enumerate() {
             anyhow::ensure!(
-                activation.previous_activation_digest == previous_digest,
-                "activation intent has a different predecessor"
+                *sequence == index as u64 + 1
+                    && activation.previous_activation_digest == previous_digest,
+                "activation intent has a different predecessor or sequence gap"
             );
-            if let Some(recovery) = &transaction.recovery {
-                if recoveries.last() == Some(recovery) {
-                    // The receipt becomes committed with its pointer. It
-                    // remains visible as a planned recovery until then.
-                    recoveries.pop();
-                } else {
-                    anyhow::ensure!(
-                        recovery.sequence == recoveries.len() as u64 + 1,
-                        "partial recovery history differs from its signed intent"
-                    );
-                }
+            previous_digest = activation_digests.get(sequence).cloned();
+        }
+
+        let mut superseded_by = BTreeMap::new();
+        for record in &transactions {
+            let transaction = &record.payload;
+            let Some(supersedes) = &transaction.supersedes else {
+                continue;
+            };
+            let original = by_sequence
+                .get(&supersedes.superseded_sequence)
+                .context("supersession lacks the authenticated original intent")?;
+            anyhow::ensure!(
+                original.digest == supersedes.superseded_transaction_digest
+                    && transaction.activation.activated_at_epoch_secs
+                        >= original.payload.activation.activated_at_epoch_secs
+                    && supersedes.committed_activation_digest
+                        == activation_digests
+                            .get(&supersedes.committed_sequence)
+                            .cloned(),
+                "supersession does not bind its exact pending intent and committed predecessor"
+            );
+            if let Some(previous) = &original.payload.supersedes {
+                anyhow::ensure!(
+                    supersedes.committed_sequence == previous.committed_sequence
+                        && supersedes.committed_activation_digest
+                            == previous.committed_activation_digest,
+                    "supersession changed the committed predecessor of its pending chain"
+                );
+            } else {
+                anyhow::ensure!(
+                    supersedes.committed_sequence + 1 == supersedes.superseded_sequence,
+                    "supersession does not start at the first uncommitted intent"
+                );
+            }
+            anyhow::ensure!(
+                superseded_by
+                    .insert(
+                        supersedes.superseded_sequence,
+                        transaction.activation.sequence
+                    )
+                    .is_none(),
+                "an activation attempt has conflicting supersession authorities"
+            );
+        }
+        anyhow::ensure!(
+            !superseded_by.contains_key(&committed_sequence),
+            "activation pointer names a superseded attempt"
+        );
+        for record in &transactions {
+            if let Some(supersedes) = &record.payload.supersedes {
+                anyhow::ensure!(
+                    !superseded_by.contains_key(&supersedes.committed_sequence),
+                    "supersession anchor is itself a canceled attempt"
+                );
+            }
+        }
+
+        let latest_sequence = conceptual.keys().next_back().copied().unwrap_or(0);
+        for sequence in committed_sequence + 1..=latest_sequence {
+            let record = by_sequence
+                .get(&sequence)
+                .context("uncommitted history has no authenticated activation intent")?;
+            if sequence > committed_sequence + 1 {
+                anyhow::ensure!(
+                    record
+                        .payload
+                        .supersedes
+                        .as_ref()
+                        .is_some_and(
+                            |supersedes| supersedes.committed_sequence == committed_sequence
+                        )
+                        && superseded_by.get(&(sequence - 1)) == Some(&sequence),
+                    "deployment has conflicting or nonconsecutive activation intents"
+                );
+            }
+            if let Some(recovery) = &record.payload.recovery {
                 anyhow::ensure!(
                     pointer
                         .as_ref()
@@ -734,32 +907,112 @@ impl DeploymentStore {
                     "recovery intent does not identify the active failed release"
                 );
             }
-            chain.truncate(usize::try_from(committed_sequence)?);
-        } else {
-            anyhow::ensure!(
-                pointer.as_ref() == chain.last(),
-                "activation pointer of deployment `{}` does not match its newest activation; reconcile a signed pending transaction",
-                self.name
-            );
         }
-        validate_recovery_history(&chain, &recoveries)?;
-        for transaction in transactions
+
+        let raw_recoveries = self.recovery_history(authority)?;
+        let mut reserved_recoveries: BTreeMap<_, _> = raw_recoveries
             .iter()
-            .filter(|intent| intent.activation.sequence <= committed_sequence)
-        {
-            anyhow::ensure!(
-                chain.iter().any(|record| record == &transaction.activation)
-                    && transaction
-                        .recovery
-                        .as_ref()
-                        .is_none_or(|recovery| recoveries.contains(recovery)),
-                "committed transaction differs from its authenticated history"
-            );
+            .map(|record| (record.sequence, record.clone()))
+            .collect();
+        let mut recovery_owners = BTreeSet::new();
+        for record in &transactions {
+            if let Some(recovery) = &record.payload.recovery {
+                anyhow::ensure!(
+                    recovery_owners.insert(recovery.sequence),
+                    "multiple intents reserve the same recovery sequence"
+                );
+                if let Some(existing) = reserved_recoveries.get(&recovery.sequence) {
+                    anyhow::ensure!(
+                        existing == recovery,
+                        "partial recovery history differs from its signed intent"
+                    );
+                } else {
+                    anyhow::ensure!(
+                        record.payload.activation.sequence > committed_sequence,
+                        "committed transaction is missing its retained recovery record"
+                    );
+                    reserved_recoveries.insert(recovery.sequence, recovery.clone());
+                }
+            }
         }
+        anyhow::ensure!(
+            reserved_recoveries
+                .keys()
+                .enumerate()
+                .all(|(index, sequence)| *sequence == index as u64 + 1),
+            "recovery reservations contain a sequence gap"
+        );
+        let all_activations: Vec<_> = conceptual.values().cloned().collect();
+        let all_recoveries: Vec<_> = reserved_recoveries.values().cloned().collect();
+        // This includes canceled reservations: their crash nonces and sequence
+        // numbers must never be recycled into a later recovery outcome.
+        validate_recovery_history(&all_activations, &all_recoveries)?;
+        let consumed_crash_nonces = all_recoveries
+            .iter()
+            .map(|record| record.crash.session_nonce.clone())
+            .collect();
+        let recovery_high_water = reserved_recoveries.keys().next_back().copied().unwrap_or(0);
+        let recoveries = all_recoveries
+            .into_iter()
+            .filter(|recovery| {
+                recovery.activation_sequence.is_none_or(|sequence| {
+                    sequence <= committed_sequence && !superseded_by.contains_key(&sequence)
+                })
+            })
+            .collect();
+        let committed = all_activations
+            .into_iter()
+            .filter(|activation| {
+                activation.sequence <= committed_sequence
+                    && !superseded_by.contains_key(&activation.sequence)
+            })
+            .collect();
+        let superseded = superseded_by
+            .iter()
+            .map(|(sequence, successor)| {
+                let original = by_sequence
+                    .get(sequence)
+                    .expect("validated supersession original");
+                let replacement = by_sequence
+                    .get(successor)
+                    .expect("validated supersession successor");
+                SupersededActivation {
+                    transaction_digest: original.digest.clone(),
+                    activation: original.payload.activation.clone(),
+                    planned_recovery: original.payload.recovery.clone(),
+                    superseded_by_sequence: *successor,
+                    superseded_by_operator_id: replacement
+                        .payload
+                        .activation
+                        .operator_id
+                        .clone()
+                        .expect("operator supersession"),
+                    reason: replacement
+                        .payload
+                        .supersedes
+                        .as_ref()
+                        .expect("supersession authority")
+                        .reason
+                        .clone(),
+                }
+            })
+            .collect();
+        let pending_record = (latest_sequence > committed_sequence).then(|| {
+            by_sequence
+                .get(&latest_sequence)
+                .expect("validated pending intent")
+        });
+        let pending = pending_record.map(|record| record.payload.clone());
+        let pending_digest = pending_record.map(|record| record.digest.clone());
         Ok(ActivationState {
-            committed: chain,
+            committed,
             recoveries,
             pending,
+            pending_digest,
+            superseded,
+            transactions,
+            recovery_high_water,
+            consumed_crash_nonces,
         })
     }
 
@@ -773,9 +1026,13 @@ impl DeploymentStore {
         Ok(DeploymentActivationStatus {
             activations: state.committed,
             pending: state.pending.map(|transaction| PendingActivation {
+                transaction_digest: state
+                    .pending_digest
+                    .expect("authenticated pending identity"),
                 activation: transaction.activation,
                 planned_recovery: transaction.recovery,
             }),
+            superseded: state.superseded,
         })
     }
 
@@ -828,6 +1085,7 @@ impl DeploymentStore {
             activation: activation.clone(),
             recovery: None,
             recovery_policy: None,
+            supersedes: None,
         };
         self.commit_transaction(authority, &transaction)?;
         Ok(activation)
@@ -871,6 +1129,7 @@ impl DeploymentStore {
             recovery_sequence,
             previous_activation_digest,
             activated_at_epoch_secs: now_secs,
+            supersedes_transaction_digest: None,
         };
         validate_activation_shape(&activation)?;
         Ok(activation)
@@ -894,22 +1153,49 @@ impl DeploymentStore {
         authority: &DeploymentAuthority,
         transaction: &ActivationTransaction,
     ) -> Result<()> {
-        let activation = authority.seal(transaction.activation.clone())?;
-        write_identical_or_new(
-            &self.activation_path(transaction.activation.sequence),
-            &activation,
-        )?;
-        deployment_stop_after("history");
-        if let Some(recovery) = &transaction.recovery {
+        let state = self.activation_state(authority)?;
+        anyhow::ensure!(
+            state.pending.as_ref() == Some(transaction),
+            "activation transaction is no longer the pending operation"
+        );
+        let committed_sequence = state.committed.last().map_or(0, |record| record.sequence);
+        for record in state
+            .transactions
+            .iter()
+            .filter(|record| record.payload.activation.sequence > committed_sequence)
+        {
+            let attempt = &record.payload;
+            let latest = attempt.activation.sequence == transaction.activation.sequence;
+            // Missing predecessor records are materialized from their original
+            // signed plans only after cancellation authority is durable. They
+            // remain superseded audit evidence, never committed recovery outcomes.
             write_identical_or_new(
-                &self.recovery_path(recovery.sequence),
-                &authority.seal(recovery.clone())?,
+                &self.activation_path(attempt.activation.sequence),
+                &authority.seal(attempt.activation.clone())?,
             )?;
-            deployment_stop_after("recovery");
+            deployment_stop_after(if latest {
+                "history"
+            } else {
+                "superseded_history"
+            });
+            if let Some(recovery) = &attempt.recovery {
+                write_identical_or_new(
+                    &self.recovery_path(recovery.sequence),
+                    &authority.seal(recovery.clone())?,
+                )?;
+                deployment_stop_after(if latest {
+                    "recovery"
+                } else {
+                    "superseded_recovery"
+                });
+            }
         }
         // The pointer is the commit point. Readers also authenticate every
         // linked record; neither a dangling recovery nor an intent is a run grant.
-        write_replace(&self.pointer_path(), &activation)
+        write_replace(
+            &self.pointer_path(),
+            &authority.seal(transaction.activation.clone())?,
+        )
     }
 
     /// Finish one authenticated interrupted activation without starting a
@@ -979,6 +1265,146 @@ impl DeploymentStore {
         self.finish_transaction(authority, &transaction)?;
         self.activations(authority)?;
         Ok(Some(activation.clone()))
+    }
+
+    /// Explicitly replace a pending operation under new operator authority.
+    /// The expected signed-intent digest is a compare-and-swap guard: retries
+    /// can complete the exact replacement, but cannot revive or overwrite it.
+    /// This operation never starts a guest or inherits automatic restart policy.
+    #[allow(clippy::too_many_arguments)]
+    pub fn supersede_pending(
+        &self,
+        lock: &DeploymentLock,
+        authority: &DeploymentAuthority,
+        expected_pending_digest: &str,
+        release_id: &str,
+        operator_id: &str,
+        reason: &str,
+        now_secs: u64,
+        verify: &dyn Fn(&ReleaseRecord) -> Result<()>,
+    ) -> Result<DeploymentSupersedeOutcome> {
+        self.require_lock(lock)?;
+        validate_identifier("release id", release_id)?;
+        validate_operator_id(operator_id)?;
+        validate_supersession_reason(reason)?;
+        let state = self.activation_state(authority)?;
+        let verify_target = |activation: &ActivationRecord| -> Result<()> {
+            let release = self.release(authority, &activation.release_id)?;
+            anyhow::ensure!(
+                release.installed_at_epoch_secs <= now_secs
+                    && activation.activated_at_epoch_secs <= now_secs,
+                "supersession target admission or operation is dated in the future"
+            );
+            verify(&release).context("supersession target failed current release verification")
+        };
+
+        if let Some(existing) = state.transactions.iter().find(|record| {
+            record
+                .payload
+                .supersedes
+                .as_ref()
+                .is_some_and(|supersedes| {
+                    supersedes.superseded_transaction_digest == expected_pending_digest
+                })
+        }) {
+            let transaction = &existing.payload;
+            let supersedes = transaction
+                .supersedes
+                .as_ref()
+                .expect("matched supersession");
+            anyhow::ensure!(
+                transaction.activation.release_id == release_id
+                    && transaction.activation.operator_id.as_deref() == Some(operator_id)
+                    && supersedes.reason == reason,
+                "pending identity already has a different signed supersession"
+            );
+            let already_committed =
+                state.pending.is_none() && state.committed.last() == Some(&transaction.activation);
+            anyhow::ensure!(
+                already_committed
+                    || state.pending_digest.as_deref() == Some(existing.digest.as_str()),
+                "supersession request is stale; a later operation owns the deployment"
+            );
+            verify_target(&transaction.activation)?;
+            if !already_committed {
+                self.finish_transaction(authority, transaction)?;
+                self.activations(authority)?;
+            }
+            return Ok(DeploymentSupersedeOutcome {
+                activation: transaction.activation.clone(),
+                already_committed,
+                superseded_transaction_digest: expected_pending_digest.to_string(),
+            });
+        }
+
+        anyhow::ensure!(
+            state.pending_digest.as_deref() == Some(expected_pending_digest),
+            "pending activation identity changed; inspect status before superseding"
+        );
+        let original = state
+            .pending
+            .as_ref()
+            .context("deployment has no pending activation")?;
+        let sequence = original
+            .activation
+            .sequence
+            .checked_add(1)
+            .filter(|sequence| *sequence <= MAX_ACTIVATIONS)
+            .context("supersession exceeds the deployment activation bound")?;
+        anyhow::ensure!(
+            original.activation.activated_at_epoch_secs <= now_secs,
+            "pending activation is dated in the future"
+        );
+        let predecessor: SignedRecord<ActivationRecord> = if self
+            .activation_path(original.activation.sequence)
+            .try_exists()?
+        {
+            read_json(&self.activation_path(original.activation.sequence))?
+        } else {
+            authority.seal(original.activation.clone())?
+        };
+        let committed_sequence = state.committed.last().map_or(0, |record| record.sequence);
+        let committed_activation_digest = if committed_sequence == 0 {
+            None
+        } else {
+            let record: SignedRecord<ActivationRecord> =
+                read_json(&self.activation_path(committed_sequence))?;
+            Some(record_digest(&record)?)
+        };
+        let activation = ActivationRecord {
+            schema_version: SUPERSESSION_ACTIVATION_SCHEMA.into(),
+            deployment: self.name.clone(),
+            sequence,
+            release_id: release_id.to_string(),
+            reason: ActivationReason::Operator,
+            operator_id: Some(operator_id.to_string()),
+            recovery_sequence: None,
+            previous_activation_digest: Some(record_digest(&predecessor)?),
+            activated_at_epoch_secs: now_secs,
+            supersedes_transaction_digest: Some(expected_pending_digest.to_string()),
+        };
+        verify_target(&activation)?;
+        let transaction = ActivationTransaction {
+            schema_version: SUPERSESSION_TRANSACTION_SCHEMA.into(),
+            deployment: self.name.clone(),
+            activation: activation.clone(),
+            recovery: None,
+            recovery_policy: None,
+            supersedes: Some(SupersessionAuthority {
+                superseded_sequence: original.activation.sequence,
+                superseded_transaction_digest: expected_pending_digest.to_string(),
+                committed_sequence,
+                committed_activation_digest,
+                reason: reason.to_string(),
+            }),
+        };
+        self.commit_transaction(authority, &transaction)?;
+        self.activations(authority)?;
+        Ok(DeploymentSupersedeOutcome {
+            activation,
+            already_committed: false,
+            superseded_transaction_digest: expected_pending_digest.to_string(),
+        })
     }
 
     /// Verified health of one release (empty when nothing was recorded).
@@ -1197,11 +1623,11 @@ impl DeploymentStore {
                 && policy.set_at_epoch_secs <= now_secs,
             "crash-loop evidence or recovery policy is invalid or future-dated"
         );
-        let prior_recoveries = self.recoveries(authority)?;
+        let prior_state = self.activation_state(authority)?;
         anyhow::ensure!(
-            !prior_recoveries
-                .iter()
-                .any(|recovery| recovery.crash.session_nonce == crash.session_nonce),
+            !prior_state
+                .consumed_crash_nonces
+                .contains(&crash.session_nonce),
             "crash-loop session nonce already has a recovery outcome"
         );
         self.record_health(
@@ -1212,7 +1638,7 @@ impl DeploymentStore {
                 evidence: crash.clone(),
             },
         )?;
-        let sequence = prior_recoveries.len() as u64 + 1;
+        let sequence = prior_state.recovery_high_water + 1;
         anyhow::ensure!(
             sequence <= MAX_RECOVERIES,
             "deployment `{}` exceeds {MAX_RECOVERIES} recoveries",
@@ -1273,6 +1699,7 @@ impl DeploymentStore {
                     activation,
                     recovery: Some(recovery.clone()),
                     recovery_policy: Some(policy.clone()),
+                    supersedes: None,
                 },
             )?;
         } else {
@@ -1286,6 +1713,14 @@ impl DeploymentStore {
 }
 
 fn validate_activation_shape(activation: &ActivationRecord) -> Result<()> {
+    anyhow::ensure!(
+        (activation.schema_version == ACTIVATION_SCHEMA
+            && activation.supersedes_transaction_digest.is_none())
+            || (activation.schema_version == SUPERSESSION_ACTIVATION_SCHEMA
+                && activation.supersedes_transaction_digest.is_some()
+                && activation.reason == ActivationReason::Operator),
+        "activation schema does not authenticate its supersession semantics"
+    );
     validate_identifier("release id", &activation.release_id)?;
     anyhow::ensure!(
         (1..=MAX_ACTIVATIONS).contains(&activation.sequence),
@@ -1988,6 +2423,7 @@ mod tests {
                 .unwrap(),
             recovery: None,
             recovery_policy: None,
+            supersedes: None,
         }
     }
 
@@ -2164,6 +2600,7 @@ mod tests {
             activation,
             recovery: Some(recovery),
             recovery_policy: Some(policy),
+            supersedes: None,
         }
     }
 
@@ -2391,6 +2828,10 @@ mod tests {
             assert_eq!(
                 status.pending,
                 Some(PendingActivation {
+                    transaction_digest: record_digest(
+                        &f.authority.seal(transaction.clone()).unwrap()
+                    )
+                    .unwrap(),
                     activation: transaction.activation.clone(),
                     planned_recovery: transaction.recovery.clone(),
                 })
@@ -2487,5 +2928,546 @@ mod tests {
                 .is_some()
         );
         assert!(f.store.recoveries(&f.authority).unwrap().is_empty());
+    }
+
+    fn journal_bytes(store: &DeploymentStore) -> BTreeMap<PathBuf, Vec<u8>> {
+        let mut retained = BTreeMap::new();
+        for directory in ["activations", "recoveries", "transactions"] {
+            let directory = store.root().join(directory);
+            if directory.exists() {
+                for entry in fs::read_dir(directory).unwrap() {
+                    let path = entry.unwrap().path();
+                    if path
+                        .extension()
+                        .is_some_and(|extension| extension == "json")
+                    {
+                        retained.insert(path.clone(), fs::read(path).unwrap());
+                    }
+                }
+            }
+        }
+        retained
+    }
+
+    #[test]
+    fn supersession_replaces_rejected_rollback_without_committing_its_outcome() {
+        for stage in ["intent", "history", "recovery"] {
+            let f = fixture();
+            let lock = f.store.lock().unwrap();
+            let original = pending_rollback(&f, &lock);
+            retain_intent(&f, &original);
+            if stage != "intent" {
+                write_new(
+                    &f.store.activation_path(3),
+                    &f.authority.seal(original.activation.clone()).unwrap(),
+                )
+                .unwrap();
+            }
+            if stage == "recovery" {
+                write_new(
+                    &f.store.recovery_path(1),
+                    &f.authority
+                        .seal(original.recovery.clone().unwrap())
+                        .unwrap(),
+                )
+                .unwrap();
+            }
+            let expected = f
+                .store
+                .activation_status(&f.authority)
+                .unwrap()
+                .pending
+                .unwrap()
+                .transaction_digest;
+            let retained = journal_bytes(&f.store);
+            // An operator withdraws the old rollback policy. Its intent must
+            // remain intact, but must not permanently prevent a new release.
+            let mut policy = original.recovery_policy.clone().unwrap();
+            policy.on_crash_loop = CrashLoopAction::Contain;
+            f.store
+                .set_policy(&lock, &f.authority, policy.clone())
+                .unwrap();
+            assert!(
+                f.store
+                    .reconcile_pending(&lock, &f.authority, 101, &|_| Ok(()))
+                    .is_err()
+            );
+            f.store
+                .install_release(&lock, &f.authority, test_release(&f.store, "v3"))
+                .unwrap();
+            let calls = std::cell::Cell::new(0);
+            let verify = |release: &ReleaseRecord| {
+                assert_eq!(
+                    release.release_id, "v3",
+                    "the rejected rollback target must not be reauthorized"
+                );
+                calls.set(calls.get() + 1);
+                Ok(())
+            };
+            let result = f
+                .store
+                .supersede_pending(
+                    &lock,
+                    &f.authority,
+                    &expected,
+                    "v3",
+                    "replacement-operator",
+                    "withdraw old recovery",
+                    101,
+                    &verify,
+                )
+                .unwrap();
+            assert!(!result.already_committed);
+            assert_eq!(result.activation.sequence, 4);
+            assert_eq!(result.activation.reason, ActivationReason::Operator);
+            assert_eq!(result.activation.recovery_sequence, None);
+            assert_eq!(
+                result.activation.schema_version,
+                SUPERSESSION_ACTIVATION_SCHEMA
+            );
+            let status = f.store.activation_status(&f.authority).unwrap();
+            assert!(status.pending.is_none());
+            assert_eq!(
+                status
+                    .activations
+                    .iter()
+                    .map(|record| record.sequence)
+                    .collect::<Vec<_>>(),
+                [1, 2, 4]
+            );
+            assert_eq!(status.superseded.len(), 1);
+            assert_eq!(status.superseded[0].activation.sequence, 3);
+            assert_eq!(status.superseded[0].planned_recovery, original.recovery);
+            assert_eq!(
+                status.superseded[0].superseded_by_operator_id,
+                "replacement-operator"
+            );
+            assert_eq!(status.superseded[0].reason, "withdraw old recovery");
+            assert!(f.store.recoveries(&f.authority).unwrap().is_empty());
+            assert_eq!(
+                f.store.recovery_history(&f.authority).unwrap().len(),
+                1,
+                "the canceled recovery's audit slot stays reserved"
+            );
+            for (path, bytes) in retained {
+                assert_eq!(fs::read(path).unwrap(), bytes);
+            }
+            let repeated = f
+                .store
+                .supersede_pending(
+                    &lock,
+                    &f.authority,
+                    &expected,
+                    "v3",
+                    "replacement-operator",
+                    "withdraw old recovery",
+                    102,
+                    &verify,
+                )
+                .unwrap();
+            assert!(repeated.already_committed);
+            assert_eq!(repeated.activation, result.activation);
+            assert_eq!(
+                calls.get(),
+                2,
+                "an idempotent success still rechecks current release trust"
+            );
+
+            // Later explicit operator work must not recycle the canceled
+            // recovery's crash nonce or its sequence, or be undone by a retry.
+            f.store
+                .activate(
+                    &lock,
+                    &f.authority,
+                    "v2",
+                    ActivationReason::Operator,
+                    Some("ops"),
+                    None,
+                    103,
+                )
+                .unwrap();
+            assert!(
+                f.store
+                    .recover_from_crash_loop(
+                        &lock,
+                        &f.authority,
+                        "v2",
+                        original.recovery.as_ref().unwrap().crash.clone(),
+                        &policy,
+                        104,
+                        &|_| Ok(())
+                    )
+                    .is_err()
+            );
+            let new_recovery = f
+                .store
+                .recover_from_crash_loop(
+                    &lock,
+                    &f.authority,
+                    "v2",
+                    crash("different-session"),
+                    &policy,
+                    104,
+                    &|_| Ok(()),
+                )
+                .unwrap();
+            assert_eq!(new_recovery.sequence, 2);
+            assert_eq!(f.store.recoveries(&f.authority).unwrap(), [new_recovery]);
+            assert!(
+                f.store
+                    .supersede_pending(
+                        &lock,
+                        &f.authority,
+                        &expected,
+                        "v3",
+                        "replacement-operator",
+                        "withdraw old recovery",
+                        105,
+                        &|_| panic!("stale request must be rejected first")
+                    )
+                    .is_err()
+            );
+            assert_eq!(
+                f.store.active(&f.authority).unwrap().unwrap().release_id,
+                "v2"
+            );
+        }
+    }
+
+    #[test]
+    fn supersession_requires_exact_pending_identity_reason_and_current_target() {
+        let f = fixture();
+        let lock = f.store.lock().unwrap();
+        let original = pending_operator(&f, &lock);
+        retain_intent(&f, &original);
+        f.store
+            .install_release(&lock, &f.authority, test_release(&f.store, "v2"))
+            .unwrap();
+        let expected = f
+            .store
+            .activation_status(&f.authority)
+            .unwrap()
+            .pending
+            .unwrap()
+            .transaction_digest;
+        let before = journal_bytes(&f.store);
+        for (digest, reason) in [
+            ("sha256:stale", "operator replacement"),
+            (expected.as_str(), " "),
+        ] {
+            assert!(
+                f.store
+                    .supersede_pending(
+                        &lock,
+                        &f.authority,
+                        digest,
+                        "v2",
+                        "ops",
+                        reason,
+                        30,
+                        &|_| Ok(())
+                    )
+                    .is_err()
+            );
+        }
+        assert!(
+            f.store
+                .supersede_pending(
+                    &lock,
+                    &f.authority,
+                    &expected,
+                    "v2",
+                    "ops",
+                    &"x".repeat(MAX_REASON_BYTES + 1),
+                    30,
+                    &|_| Ok(())
+                )
+                .is_err()
+        );
+        assert!(
+            f.store
+                .supersede_pending(
+                    &lock,
+                    &f.authority,
+                    &expected,
+                    "v2",
+                    "ops",
+                    "operator replacement",
+                    30,
+                    &|_| anyhow::bail!("publisher revoked")
+                )
+                .is_err()
+        );
+        assert_eq!(journal_bytes(&f.store), before);
+        assert!(!f.store.pointer_path().exists());
+        f.store
+            .supersede_pending(
+                &lock,
+                &f.authority,
+                &expected,
+                "v2",
+                "ops",
+                "operator replacement",
+                30,
+                &|_| Ok(()),
+            )
+            .unwrap();
+        let committed = journal_bytes(&f.store);
+        assert!(
+            f.store
+                .supersede_pending(
+                    &lock,
+                    &f.authority,
+                    &expected,
+                    "v2",
+                    "ops",
+                    "changed reason",
+                    31,
+                    &|_| Ok(())
+                )
+                .is_err()
+        );
+        assert!(
+            f.store
+                .supersede_pending(
+                    &lock,
+                    &f.authority,
+                    &expected,
+                    "v2",
+                    "ops",
+                    "operator replacement",
+                    31,
+                    &|_| anyhow::bail!("replacement now revoked")
+                )
+                .is_err()
+        );
+        assert_eq!(journal_bytes(&f.store), committed);
+        f.store
+            .record_health(&lock, &f.authority, "v1", healthy("outside-activation", 31))
+            .unwrap();
+        assert!(
+            f.store
+                .select_known_good(&f.authority, "v2", 32, &|_| panic!(
+                    "canceled attempts cannot become known-good"
+                ))
+                .unwrap()
+                .selected
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn interrupted_supersession_can_resume_or_be_superseded_without_resurrection() {
+        for replace_again in [false, true] {
+            let f = fixture();
+            let lock = f.store.lock().unwrap();
+            let original = pending_operator(&f, &lock);
+            retain_intent(&f, &original);
+            for release in ["v2", "v3"] {
+                f.store
+                    .install_release(&lock, &f.authority, test_release(&f.store, release))
+                    .unwrap();
+            }
+            let expected = f
+                .store
+                .activation_status(&f.authority)
+                .unwrap()
+                .pending
+                .unwrap()
+                .transaction_digest;
+            f.store
+                .supersede_pending(
+                    &lock,
+                    &f.authority,
+                    &expected,
+                    "v2",
+                    "ops",
+                    "first replacement",
+                    30,
+                    &|_| Ok(()),
+                )
+                .unwrap();
+            let retained_intents: Vec<_> = (1..=2)
+                .map(|sequence| {
+                    (
+                        f.store.transaction_path(sequence),
+                        fs::read(f.store.transaction_path(sequence)).unwrap(),
+                    )
+                })
+                .collect();
+            // Retain the fully generated bytes outside the canonical paths to
+            // reconstruct the precise durable intent-only crash boundary. The
+            // CLI companion tests reach this boundary by exiting the real process.
+            fs::rename(
+                f.store.pointer_path(),
+                f.store.root().join("retained-pointer.json"),
+            )
+            .unwrap();
+            for sequence in 1..=2 {
+                fs::rename(
+                    f.store.activation_path(sequence),
+                    f.store
+                        .root()
+                        .join(format!("retained-history-{sequence}.json")),
+                )
+                .unwrap();
+            }
+            let pending = f.store.activation_status(&f.authority).unwrap();
+            assert!(pending.activations.is_empty());
+            assert_eq!(pending.superseded.len(), 1);
+            assert_eq!(
+                pending.pending.as_ref().unwrap().activation.release_id,
+                "v2"
+            );
+            assert!(f.store.active(&f.authority).is_err());
+            let selected = if replace_again {
+                let latest = pending.pending.unwrap().transaction_digest;
+                f.store
+                    .supersede_pending(
+                        &lock,
+                        &f.authority,
+                        &latest,
+                        "v3",
+                        "another-operator",
+                        "second replacement",
+                        40,
+                        &|release| {
+                            assert_eq!(release.release_id, "v3");
+                            Ok(())
+                        },
+                    )
+                    .unwrap()
+                    .activation
+            } else {
+                f.store
+                    .supersede_pending(
+                        &lock,
+                        &f.authority,
+                        &expected,
+                        "v2",
+                        "ops",
+                        "first replacement",
+                        40,
+                        &|release| {
+                            assert_eq!(release.release_id, "v2");
+                            Ok(())
+                        },
+                    )
+                    .unwrap()
+                    .activation
+            };
+            let status = f.store.activation_status(&f.authority).unwrap();
+            assert_eq!(status.activations, [selected.clone()]);
+            assert_eq!(status.superseded.len(), if replace_again { 2 } else { 1 });
+            assert_eq!(f.store.active(&f.authority).unwrap(), Some(selected));
+            for (path, bytes) in retained_intents {
+                assert_eq!(fs::read(path).unwrap(), bytes);
+            }
+            if replace_again {
+                assert!(
+                    f.store
+                        .supersede_pending(
+                            &lock,
+                            &f.authority,
+                            &expected,
+                            "v2",
+                            "ops",
+                            "first replacement",
+                            41,
+                            &|_| Ok(())
+                        )
+                        .is_err()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn completed_supersession_requires_its_signed_intent_forever() {
+        let f = fixture();
+        let lock = f.store.lock().unwrap();
+        let original = pending_operator(&f, &lock);
+        retain_intent(&f, &original);
+        f.store
+            .install_release(&lock, &f.authority, test_release(&f.store, "v2"))
+            .unwrap();
+        let expected = f
+            .store
+            .activation_status(&f.authority)
+            .unwrap()
+            .pending
+            .unwrap()
+            .transaction_digest;
+        f.store
+            .supersede_pending(
+                &lock,
+                &f.authority,
+                &expected,
+                "v2",
+                "ops",
+                "replace rejected release",
+                30,
+                &|_| Ok(()),
+            )
+            .unwrap();
+        let pointer = fs::read(f.store.pointer_path()).unwrap();
+        fs::rename(
+            f.store.transaction_path(2),
+            f.store.root().join("retained-supersession.json"),
+        )
+        .unwrap();
+        assert!(f.store.activation_status(&f.authority).is_err());
+        assert!(f.store.active(&f.authority).is_err());
+        assert!(f.store.recoveries(&f.authority).is_err());
+        assert!(
+            f.store
+                .reconcile_pending(&lock, &f.authority, 31, &|_| Ok(()))
+                .is_err()
+        );
+        assert_eq!(fs::read(f.store.pointer_path()).unwrap(), pointer);
+    }
+
+    #[test]
+    fn historical_v1_activation_preimages_and_missing_legacy_intents_stay_distinct() {
+        let f = fixture();
+        let lock = f.store.lock().unwrap();
+        let original = pending_operator(&f, &lock);
+        assert!(
+            !serde_json::to_string(&original)
+                .unwrap()
+                .contains("supersedes")
+        );
+        assert!(
+            !serde_json::to_string(&original.activation)
+                .unwrap()
+                .contains("supersedes")
+        );
+        f.store
+            .activate(
+                &lock,
+                &f.authority,
+                "v1",
+                ActivationReason::Operator,
+                Some("ops"),
+                None,
+                20,
+            )
+            .unwrap();
+        fs::rename(
+            f.store.transaction_path(1),
+            f.store.root().join("retained-v1-intent.json"),
+        )
+        .unwrap();
+        assert_eq!(
+            f.store.active(&f.authority).unwrap().unwrap().release_id,
+            "v1"
+        );
+        assert!(
+            f.store
+                .activation_status(&f.authority)
+                .unwrap()
+                .superseded
+                .is_empty()
+        );
     }
 }
