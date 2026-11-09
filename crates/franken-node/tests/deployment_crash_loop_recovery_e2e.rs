@@ -18,6 +18,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+use frankenengine_node::runtime::deployment::ReleaseRecord;
 use serde_json::Value;
 
 const PANIC_MARKER: &str = "__FRANKEN_NODE_TEST_SUPPORT_NATIVE_ENGINE_PANIC__";
@@ -273,6 +274,44 @@ impl Drill {
         self.ok(self.root.path(), &["deploy", "status", "app", "--json"])
     }
 
+    fn admitted_release(&self, version: &str) -> ReleaseRecord {
+        let record: Value = serde_json::from_slice(
+            &fs::read(self.root.path().join(format!(
+                ".franken-node/state/deployments/app/releases/{version}.json"
+            )))
+            .expect("signed release record"),
+        )
+        .expect("release record JSON");
+        serde_json::from_value(record["payload"].clone()).expect("admitted release")
+    }
+
+    /// Exercise the child admission boundary after the supervisor has already
+    /// chosen a signed release. Tests can replace inputs deterministically
+    /// between these two phases without weakening or mocking native dispatch.
+    fn admitted_child(&self, release: &ReleaseRecord, manifest: &Path) -> Output {
+        self.cli(
+            &release.release_dir,
+            &[
+                "run",
+                &release.entrypoint,
+                "--config",
+                "franken_node.toml",
+                "--runtime",
+                "franken-engine",
+                "--frozen-modules",
+                "--json",
+                "--registry-artifact",
+                manifest.to_str().expect("manifest path"),
+                "--publisher-public-key",
+                self.public_key.to_str().expect("public key path"),
+                "--admitted-config-sha256",
+                &release.config_sha256,
+                "--admitted-approval-sha256",
+                &release.approval.admission_sha256().expect("approval pin"),
+            ],
+        )
+    }
+
     fn state_path(&self, relative: &str) -> PathBuf {
         self.root
             .path()
@@ -392,6 +431,92 @@ fn guest_stdout(run: &Value) -> &str {
     run["dispatch"]["captured_output"]["stdout"]
         .as_str()
         .unwrap_or_default()
+}
+
+#[test]
+fn admitted_child_binds_config_bytes_before_any_guest_execution() {
+    let drill = Drill::new();
+    let directory = drill.install("1.0.0", HEALTHY_V1);
+    let admitted = drill.admitted_release("1.0.0");
+    let allowed = drill.admitted_child(&admitted, &admitted.registry_manifest);
+    assert!(
+        allowed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&allowed.stdout)
+    );
+    let report: Value = serde_json::from_slice(&allowed.stdout).unwrap();
+    assert_eq!(guest_stdout(&report), "RELEASE_ONE_HEALTHY\n");
+
+    // Substitute after supervisor admission, before child load. Even a parse
+    // failure must be classified as a commitment mismatch, not consumed as
+    // new runtime configuration.
+    fs::write(
+        directory.join("franken_node.toml"),
+        "not an admitted TOML policy",
+    )
+    .unwrap();
+    let refused = drill.admitted_child(&admitted, &admitted.registry_manifest);
+    assert!(!refused.status.success());
+    let report: Value = serde_json::from_slice(&refused.stdout).unwrap();
+    assert!(
+        report["error"]
+            .as_str()
+            .unwrap()
+            .contains("release config changed after admission")
+    );
+    assert_eq!(guest_stdout(&report), "");
+    assert!(!report.to_string().contains("RELEASE_ONE_HEALTHY"));
+}
+
+#[test]
+fn admitted_child_rejects_another_valid_publishers_approval() {
+    let drill = Drill::new();
+    drill.install("1.0.0", HEALTHY_V1);
+    drill.install("2.0.0", HEALTHY_V1);
+    let admitted = drill.admitted_release("1.0.0");
+    let substituted = drill.admitted_release("2.0.0");
+    // Independently establish that the replacement has a real valid signature
+    // from the same publisher; rejection must be the exact admission binding.
+    substituted.approval.revalidate().unwrap();
+    let refused = drill.admitted_child(&admitted, &substituted.registry_manifest);
+    assert!(!refused.status.success());
+    let report: Value = serde_json::from_slice(&refused.stdout).unwrap();
+    assert!(
+        report["error"]
+            .as_str()
+            .unwrap()
+            .contains("publisher approval changed after deployment admission")
+    );
+    assert!(!report.to_string().contains("RELEASE_ONE_HEALTHY"));
+}
+
+#[test]
+fn supervised_release_uses_admitted_policy_without_supervisor_environment_overrides() {
+    let drill = Drill::new();
+    drill.install("1.0.0", HEALTHY_V1);
+    drill.activate("1.0.0");
+    let output = Command::new(binary())
+        .current_dir(drill.root.path())
+        .env("XDG_STATE_HOME", drill.state_home.path())
+        .env("XDG_CONFIG_HOME", drill.state_home.path().join("config"))
+        .env("FRANKEN_NODE_PROFILE", "strict")
+        .env("FRANKEN_NODE_RUNTIME_MAX_INSTRUCTIONS", "1")
+        .env(
+            "FRANKEN_ENGINE_BIN",
+            "/nonexistent/deployment-engine-override",
+        )
+        .env("FRANKEN_ENGINE_TIMEOUT_SECS", "0")
+        .args(["deploy", "run", "app", "--json"])
+        .output()
+        .expect("supervised deployment");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["phase"], "healthy");
+    assert_eq!(guest_stdout(&report["run"]), "RELEASE_ONE_HEALTHY\n");
 }
 
 #[test]
@@ -627,6 +752,21 @@ fn reconcile_completes_interrupted_activation_without_starting_a_guest() {
         let intent = drill.state_path("transactions/0000000001.json");
         let signed_intent = fs::read(&intent).expect("durable signed activation intent");
         assert!(!drill.state_path("active.json").exists(), "stage {stage}");
+        let pending = drill.status();
+        assert!(pending["active"].is_null(), "{pending}");
+        assert!(pending["activations"].as_array().unwrap().is_empty());
+        assert_eq!(
+            pending["pending_activation"]["activation"]["release_id"],
+            "1.0.0"
+        );
+        assert_eq!(pending["pending_activation"]["activation"]["sequence"], 1);
+        assert!(pending["pending_activation"]["planned_recovery"].is_null());
+        assert!(pending["recoveries"].as_array().unwrap().is_empty());
+        assert!(
+            !drill.state_path("active.json").exists(),
+            "status is read-only"
+        );
+        assert_eq!(fs::read(&intent).unwrap(), signed_intent);
         let (code, blocked) = drill.run();
         assert_ne!(code, Some(0), "stage {stage}: {blocked}");
         assert_eq!(blocked["ok"], false, "{blocked}");
@@ -662,6 +802,7 @@ fn reconcile_completes_interrupted_activation_without_starting_a_guest() {
         let status = drill.status();
         assert_eq!(status["active"]["release_id"], "1.0.0", "{status}");
         assert_eq!(status["releases"][0]["healthy_runs"], 0, "{status}");
+        assert!(status["pending_activation"].is_null());
         assert_eq!(status["activations"].as_array().expect("history").len(), 1);
         assert_eq!(fs::read(&intent).expect("retained intent"), signed_intent);
 
@@ -697,6 +838,16 @@ fn reconcile_completes_interrupted_crash_recovery_without_automatic_restart() {
 
         let intent_path = drill.state_path("transactions/0000000003.json");
         let intent = fs::read(&intent_path).expect("signed rollback intent");
+        let pending = drill.status();
+        assert_eq!(pending["active"]["release_id"], "2.0.0", "{pending}");
+        assert_eq!(pending["activations"].as_array().unwrap().len(), 2);
+        assert!(pending["recoveries"].as_array().unwrap().is_empty());
+        let planned = &pending["pending_activation"];
+        assert_eq!(planned["activation"]["sequence"], 3);
+        assert_eq!(planned["activation"]["release_id"], "1.0.0");
+        assert_eq!(planned["planned_recovery"]["outcome"], "rolled_back");
+        assert_eq!(planned["planned_recovery"]["failed_release_id"], "2.0.0");
+        assert_eq!(fs::read(&intent_path).unwrap(), intent);
         assert_eq!(
             fs::read(drill.state_path("active.json")).expect("retained v2 pointer"),
             previous_pointer,
@@ -724,6 +875,7 @@ fn reconcile_completes_interrupted_crash_recovery_without_automatic_restart() {
 
         let status = drill.status();
         assert_eq!(status["active"]["release_id"], "1.0.0", "{status}");
+        assert!(status["pending_activation"].is_null());
         assert_eq!(
             status["activations"].as_array().expect("activations").len(),
             3
@@ -791,6 +943,14 @@ fn reconcile_rechecks_target_source_before_completing_interrupted_activation() {
     assert!(!drill.state_path("active.json").exists());
     assert_eq!(fs::read(&intent_path).expect("retained intent"), intent);
     assert_eq!(fs::read(&history_path).expect("retained history"), history);
+    let pending = drill.status();
+    assert!(pending["active"].is_null(), "{pending}");
+    assert_eq!(
+        pending["pending_activation"]["activation"]["release_id"],
+        "1.0.0"
+    );
+    assert!(pending["activations"].as_array().unwrap().is_empty());
+    assert!(pending["recoveries"].as_array().unwrap().is_empty());
 
     // The refusal neither consumes nor rewrites authorization. Restoring
     // the exact approved source permits a fresh independently checked retry.

@@ -6579,7 +6579,8 @@ fn handle_deploy_policy(args: &cli::DeployPolicyArgs) -> Result<serde_json::Valu
 fn handle_deploy_status(args: &cli::DeployStatusArgs) -> Result<serde_json::Value> {
     let (store, authority) = deploy_context(&args.name)?;
     let _lock = store.lock()?;
-    let activations = store.activations(&authority)?;
+    let status = store.activation_status(&authority)?;
+    let activations = status.activations;
     let mut releases = Vec::new();
     for release_id in store.release_ids()? {
         let release = store.release(&authority, &release_id)?;
@@ -6605,6 +6606,7 @@ fn handle_deploy_status(args: &cli::DeployStatusArgs) -> Result<serde_json::Valu
         "policy": store.policy(&authority)?,
         "releases": releases,
         "activations": activations,
+        "pending_activation": status.pending,
         "recoveries": store.recoveries(&authority)?,
     }))
 }
@@ -7006,6 +7008,13 @@ fn render_deploy_human(report: &serde_json::Value) -> String {
                     .as_str()
                     .unwrap_or("contain")
             )];
+            if let Some(pending) = report.get("pending_activation").filter(|value| !value.is_null()) {
+                lines.push(format!(
+                    "  pending activation #{} for release {}; inspect and use deploy reconcile to complete",
+                    pending["activation"]["sequence"],
+                    pending["activation"]["release_id"].as_str().unwrap_or("")
+                ));
+            }
             for release in report["releases"].as_array().into_iter().flatten() {
                 lines.push(format!(
                     "  release {} healthy_runs={} crash_looped={}",

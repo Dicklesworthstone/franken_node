@@ -4487,7 +4487,11 @@ deployment record under `.franken-node/state/deployments/<name>/`).
   supervisor retains that release's crash mark and reports
   `contained_activation_changed` without replacing the operator's choice.
 - `deploy status <name> [--json]` shows the policy, the activation chain,
-  each release's readiness and crash-loop marks, and every recovery.
+  each release's readiness and crash-loop marks, and every committed recovery.
+  An interrupted signed transition remains inspectable as `pending_activation`,
+  including its planned recovery; the active release and history still describe
+  the committed pointer. Inspection does not complete the transition or grant
+  authority to execute it. Use explicit reconciliation after reviewing the plan.
 - `deploy reconcile <name> --operator-id <op> [--json]` completes an interrupted
   signed activation transaction. The transaction records the intended
   activation and any crash recovery before the history, recovery receipt and

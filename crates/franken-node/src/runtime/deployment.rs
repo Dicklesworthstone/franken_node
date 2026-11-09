@@ -346,6 +346,29 @@ struct ActivationTransaction {
     recovery_policy: Option<DeploymentPolicy>,
 }
 
+/// An authenticated operation that has not yet published its activation
+/// pointer. This is an inspectable plan, not authority to execute a release.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PendingActivation {
+    pub activation: ActivationRecord,
+    pub planned_recovery: Option<RecoveryRecord>,
+}
+
+/// Read-only deployment history, including an interrupted signed operation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeploymentActivationStatus {
+    pub activations: Vec<ActivationRecord>,
+    pub pending: Option<PendingActivation>,
+}
+
+struct ActivationState {
+    committed: Vec<ActivationRecord>,
+    recoveries: Vec<RecoveryRecord>,
+    pending: Option<ActivationTransaction>,
+}
+
 /// Validate a deployment or release identifier.
 pub fn validate_identifier(kind: &str, value: &str) -> Result<()> {
     anyhow::ensure!(
@@ -403,7 +426,7 @@ impl DeploymentStore {
     /// Serialize every read-modify-write of this deployment.
     pub fn lock(&self) -> Result<DeploymentLock> {
         use fs2::FileExt as _;
-        fs::create_dir_all(&self.root)
+        create_durable_directory(&self.root)
             .with_context(|| format!("create deployment state {}", self.root.display()))?;
         let path = self.root.join("deployment.lock");
         let file = OpenOptions::new()
@@ -417,13 +440,13 @@ impl DeploymentStore {
             .with_context(|| format!("lock deployment {}", self.name))?;
         Ok(DeploymentLock {
             _file: file,
-            store_root: self.root.clone(),
+            store_root: self.root.canonicalize()?,
         })
     }
 
     fn require_lock(&self, lock: &DeploymentLock) -> Result<()> {
         anyhow::ensure!(
-            lock.store_root == self.root,
+            lock.store_root == self.root.canonicalize()?,
             "deployment lock belongs to a different store"
         );
         Ok(())
@@ -648,34 +671,125 @@ impl DeploymentStore {
         Ok(transactions)
     }
 
+    /// Authenticate both the committed prefix and any one incomplete signed
+    /// transition. Reading this state never completes or authorizes the intent.
+    fn activation_state(&self, authority: &DeploymentAuthority) -> Result<ActivationState> {
+        let mut chain = self.activation_history(authority)?;
+        let pointer = self.pointer(authority)?;
+        let committed_sequence = pointer.as_ref().map_or(0, |record| record.sequence);
+        if let Some(pointer) = &pointer {
+            anyhow::ensure!(
+                chain.iter().any(|activation| activation == pointer),
+                "activation pointer is not an authenticated history link"
+            );
+        }
+        let transactions = self.transactions(authority)?;
+        let mut unfinished = transactions
+            .iter()
+            .filter(|transaction| transaction.activation.sequence > committed_sequence);
+        let pending = unfinished.next().cloned();
+        anyhow::ensure!(
+            unfinished.next().is_none(),
+            "deployment has conflicting or nonconsecutive activation intents"
+        );
+        let mut recoveries = self.recovery_history(authority)?;
+        if let Some(transaction) = &pending {
+            let activation = &transaction.activation;
+            anyhow::ensure!(
+                activation.sequence == committed_sequence + 1,
+                "deployment has conflicting or nonconsecutive activation intents"
+            );
+            anyhow::ensure!(
+                chain.len() as u64 == committed_sequence
+                    || (chain.len() as u64 == activation.sequence
+                        && chain.last() == Some(activation)),
+                "partial activation history differs from its signed intent"
+            );
+            let previous_digest = if committed_sequence == 0 {
+                None
+            } else {
+                let record: SignedRecord<ActivationRecord> =
+                    read_json(&self.activation_path(committed_sequence))?;
+                Some(record_digest(&record)?)
+            };
+            anyhow::ensure!(
+                activation.previous_activation_digest == previous_digest,
+                "activation intent has a different predecessor"
+            );
+            if let Some(recovery) = &transaction.recovery {
+                if recoveries.last() == Some(recovery) {
+                    // The receipt becomes committed with its pointer. It
+                    // remains visible as a planned recovery until then.
+                    recoveries.pop();
+                } else {
+                    anyhow::ensure!(
+                        recovery.sequence == recoveries.len() as u64 + 1,
+                        "partial recovery history differs from its signed intent"
+                    );
+                }
+                anyhow::ensure!(
+                    pointer
+                        .as_ref()
+                        .is_some_and(|active| active.release_id == recovery.failed_release_id),
+                    "recovery intent does not identify the active failed release"
+                );
+            }
+            chain.truncate(usize::try_from(committed_sequence)?);
+        } else {
+            anyhow::ensure!(
+                pointer.as_ref() == chain.last(),
+                "activation pointer of deployment `{}` does not match its newest activation; reconcile a signed pending transaction",
+                self.name
+            );
+        }
+        validate_recovery_history(&chain, &recoveries)?;
+        for transaction in transactions
+            .iter()
+            .filter(|intent| intent.activation.sequence <= committed_sequence)
+        {
+            anyhow::ensure!(
+                chain.iter().any(|record| record == &transaction.activation)
+                    && transaction
+                        .recovery
+                        .as_ref()
+                        .is_none_or(|recovery| recoveries.contains(recovery)),
+                "committed transaction differs from its authenticated history"
+            );
+        }
+        Ok(ActivationState {
+            committed: chain,
+            recoveries,
+            pending,
+        })
+    }
+
+    /// Inspect committed activations and a pending signed operation without
+    /// writing state or treating the operation as a current execution grant.
+    pub fn activation_status(
+        &self,
+        authority: &DeploymentAuthority,
+    ) -> Result<DeploymentActivationStatus> {
+        let state = self.activation_state(authority)?;
+        Ok(DeploymentActivationStatus {
+            activations: state.committed,
+            pending: state.pending.map(|transaction| PendingActivation {
+                activation: transaction.activation,
+                planned_recovery: transaction.recovery,
+            }),
+        })
+    }
+
     /// Verified activation chain, oldest first. The pointer must equal the
     /// newest link and every rollback must have its matching recovery record.
     /// A durable but unfinished intent never authorizes execution by itself.
     pub fn activations(&self, authority: &DeploymentAuthority) -> Result<Vec<ActivationRecord>> {
-        let chain = self.activation_history(authority)?;
+        let state = self.activation_state(authority)?;
         anyhow::ensure!(
-            self.pointer(authority)?.as_ref() == chain.last(),
-            "activation pointer of deployment `{}` does not match its newest activation; reconcile a signed pending transaction",
+            state.pending.is_none(),
+            "deployment `{}` has a pending signed activation transaction; use deploy reconcile",
             self.name
         );
-        let recoveries = self.recovery_history(authority)?;
-        validate_recovery_history(&chain, &recoveries)?;
-        for transaction in self.transactions(authority)? {
-            anyhow::ensure!(
-                chain
-                    .iter()
-                    .any(|activation| activation == &transaction.activation),
-                "deployment `{}` has a pending signed activation transaction; use deploy reconcile",
-                self.name
-            );
-            if let Some(recovery) = transaction.recovery {
-                anyhow::ensure!(
-                    recoveries.iter().any(|record| record == &recovery),
-                    "committed activation transaction has no matching recovery"
-                );
-            }
-        }
-        Ok(chain)
+        Ok(state.committed)
     }
 
     /// The release the pointer names, if any.
@@ -810,80 +924,15 @@ impl DeploymentStore {
         verify: &dyn Fn(&ReleaseRecord) -> Result<()>,
     ) -> Result<Option<ActivationRecord>> {
         self.require_lock(lock)?;
-        let chain = self.activation_history(authority)?;
-        let pointer = self.pointer(authority)?;
-        let committed_sequence = pointer.as_ref().map_or(0, |record| record.sequence);
-        if let Some(pointer) = &pointer {
-            anyhow::ensure!(
-                chain.iter().any(|activation| activation == pointer),
-                "activation pointer is not an authenticated history link"
-            );
-        }
-        let transactions = self.transactions(authority)?;
-        let mut pending = transactions
-            .iter()
-            .filter(|transaction| transaction.activation.sequence > committed_sequence);
-        let Some(transaction) = pending.next() else {
-            // A mismatch without a retained signed intent is not permission to
-            // choose either release, even if its individual signature is valid.
-            self.activations(authority)?;
+        let state = self.activation_state(authority)?;
+        let Some(transaction) = state.pending else {
             return Ok(None);
         };
-        anyhow::ensure!(
-            pending.next().is_none() && transaction.activation.sequence == committed_sequence + 1,
-            "deployment has conflicting or nonconsecutive activation intents"
-        );
         let activation = &transaction.activation;
         anyhow::ensure!(
-            chain.len() as u64 == committed_sequence
-                || (chain.len() as u64 == activation.sequence && chain.last() == Some(activation)),
-            "partial activation history differs from its signed intent"
+            activation.activated_at_epoch_secs <= now_secs,
+            "activation intent is dated in the future"
         );
-        let previous_digest = if committed_sequence == 0 {
-            None
-        } else {
-            let record: SignedRecord<ActivationRecord> =
-                read_json(&self.activation_path(committed_sequence))?;
-            Some(record_digest(&record)?)
-        };
-        anyhow::ensure!(
-            activation.previous_activation_digest == previous_digest
-                && activation.activated_at_epoch_secs <= now_secs,
-            "activation intent has a different predecessor or is dated in the future"
-        );
-
-        let recoveries = self.recovery_history(authority)?;
-        let committed_recoveries = if let Some(recovery) = &transaction.recovery {
-            if recoveries.last() == Some(recovery) {
-                &recoveries[..recoveries.len() - 1]
-            } else {
-                anyhow::ensure!(
-                    recovery.sequence == recoveries.len() as u64 + 1,
-                    "partial recovery history differs from its signed intent"
-                );
-                &recoveries[..]
-            }
-        } else {
-            &recoveries[..]
-        };
-        let committed_chain = &chain[..usize::try_from(committed_sequence)?];
-        validate_recovery_history(committed_chain, committed_recoveries)?;
-        for previous in transactions
-            .iter()
-            .filter(|intent| intent.activation.sequence <= committed_sequence)
-        {
-            anyhow::ensure!(
-                committed_chain
-                    .iter()
-                    .any(|record| record == &previous.activation)
-                    && previous
-                        .recovery
-                        .as_ref()
-                        .is_none_or(|recovery| committed_recoveries.contains(recovery)),
-                "committed transaction differs from its authenticated history"
-            );
-        }
-
         let release = self.release(authority, &activation.release_id)?;
         anyhow::ensure!(
             release.installed_at_epoch_secs <= now_secs,
@@ -897,11 +946,12 @@ impl DeploymentStore {
                 "recovery policy changed after the signed activation intent"
             );
             anyhow::ensure!(
-                pointer
-                    .as_ref()
+                state
+                    .committed
+                    .last()
                     .is_some_and(|active| active.release_id == recovery.failed_release_id)
                     && recovery.crash.observed_at_epoch_secs <= now_secs
-                    && !committed_recoveries.iter().any(
+                    && !state.recoveries.iter().any(
                         |previous| previous.crash.session_nonce == recovery.crash.session_nonce
                     ),
                 "recovery intent does not identify a fresh crash of the active release"
@@ -913,7 +963,11 @@ impl DeploymentStore {
             );
             let health = self.health(authority, &release.release_id)?;
             anyhow::ensure!(
-                !health.crash_looped()
+                state
+                    .committed
+                    .iter()
+                    .any(|previous| previous.release_id == release.release_id)
+                    && !health.crash_looped()
                     && health
                         .last_healthy_at()
                         .is_some_and(|observed| observed <= now_secs),
@@ -922,7 +976,7 @@ impl DeploymentStore {
         }
         verify(&release)
             .context("pending activation target failed current release verification")?;
-        self.finish_transaction(authority, transaction)?;
+        self.finish_transaction(authority, &transaction)?;
         self.activations(authority)?;
         Ok(Some(activation.clone()))
     }
@@ -1031,11 +1085,10 @@ impl DeploymentStore {
         Ok(recoveries)
     }
 
-    /// Verified recoveries, oldest first. Incomplete rollback transactions
-    /// remain unreadable until their signed activation intent is reconciled.
+    /// Verified committed recoveries, oldest first. An interrupted rollback
+    /// receipt remains visible only as a pending plan until its pointer commits.
     pub fn recoveries(&self, authority: &DeploymentAuthority) -> Result<Vec<RecoveryRecord>> {
-        self.activations(authority)?;
-        self.recovery_history(authority)
+        Ok(self.activation_state(authority)?.recoveries)
     }
 
     /// Search the activation history, newest first, for a known-good release:
@@ -1432,12 +1485,46 @@ fn write_identical_or_new<T: Serialize + DeserializeOwned + PartialEq>(
     }
 }
 
+/// Persist newly created directories and the parent entries that name them.
+/// Syncing only a record's immediate parent can lose the entire new history
+/// directory after power loss even when its activation pointer was flushed.
+fn create_durable_directory(path: &Path) -> Result<()> {
+    let mut missing = Vec::new();
+    let mut current = path.to_path_buf();
+    while !current.try_exists()? {
+        missing.push(current.clone());
+        let parent = current
+            .parent()
+            .context("deployment directory has no existing ancestor")?;
+        current = if parent.as_os_str().is_empty() {
+            PathBuf::from(".")
+        } else {
+            parent.to_path_buf()
+        };
+    }
+    fs::create_dir_all(path).with_context(|| format!("create {}", path.display()))?;
+    #[cfg(unix)]
+    for directory in missing.iter().rev() {
+        File::open(directory)?.sync_all()?;
+        let parent = directory
+            .parent()
+            .context("deployment directory has no parent")?;
+        let parent = if parent.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            parent
+        };
+        File::open(parent)?.sync_all()?;
+    }
+    Ok(())
+}
+
 /// Durably replace `path` (temp file, fsync, rename, directory fsync).
 fn write_replace<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let parent = path
         .parent()
         .context("deployment record path has no parent")?;
-    fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    create_durable_directory(parent)?;
     let bytes = serde_json::to_vec_pretty(value)?;
     anyhow::ensure!(
         bytes.len() as u64 <= MAX_RECORD_BYTES,
@@ -2256,5 +2343,149 @@ mod tests {
             .is_err()
         );
         assert_eq!(fs::read(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn pending_status_preserves_committed_history_at_every_durable_boundary() {
+        for (rollback, stage) in [
+            (false, "intent"),
+            (false, "history"),
+            (true, "intent"),
+            (true, "history"),
+            (true, "recovery"),
+        ] {
+            let f = fixture();
+            let lock = f.store.lock().unwrap();
+            let transaction = if rollback {
+                pending_rollback(&f, &lock)
+            } else {
+                pending_operator(&f, &lock)
+            };
+            let sequence = transaction.activation.sequence;
+            let previous_pointer = if rollback {
+                Some(fs::read(f.store.pointer_path()).unwrap())
+            } else {
+                None
+            };
+            retain_intent(&f, &transaction);
+            let intent = fs::read(f.store.transaction_path(sequence)).unwrap();
+            if stage != "intent" {
+                write_new(
+                    &f.store.activation_path(sequence),
+                    &f.authority.seal(transaction.activation.clone()).unwrap(),
+                )
+                .unwrap();
+            }
+            if stage == "recovery" {
+                write_new(
+                    &f.store.recovery_path(1),
+                    &f.authority
+                        .seal(transaction.recovery.clone().unwrap())
+                        .unwrap(),
+                )
+                .unwrap();
+            }
+
+            let status = f.store.activation_status(&f.authority).unwrap();
+            assert_eq!(status.activations.len() as u64, sequence - 1);
+            assert_eq!(
+                status.pending,
+                Some(PendingActivation {
+                    activation: transaction.activation.clone(),
+                    planned_recovery: transaction.recovery.clone(),
+                })
+            );
+            assert!(f.store.recoveries(&f.authority).unwrap().is_empty());
+            assert!(f.store.active(&f.authority).is_err());
+            match previous_pointer {
+                Some(pointer) => assert_eq!(fs::read(f.store.pointer_path()).unwrap(), pointer),
+                None => assert!(!f.store.pointer_path().exists()),
+            }
+            assert_eq!(
+                fs::read(f.store.transaction_path(sequence)).unwrap(),
+                intent
+            );
+            assert_eq!(f.store.recovery_path(1).exists(), stage == "recovery");
+
+            f.store
+                .reconcile_pending(&lock, &f.authority, 101, &|_| Ok(()))
+                .unwrap();
+            let committed = f.store.activation_status(&f.authority).unwrap();
+            assert!(committed.pending.is_none());
+            assert_eq!(committed.activations.len() as u64, sequence);
+            assert_eq!(
+                f.store.recoveries(&f.authority).unwrap(),
+                transaction.recovery.into_iter().collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn pending_status_refuses_a_conflicting_signed_recovery_receipt() {
+        let f = fixture();
+        let lock = f.store.lock().unwrap();
+        let transaction = pending_rollback(&f, &lock);
+        retain_intent(&f, &transaction);
+        let pointer = fs::read(f.store.pointer_path()).unwrap();
+        let mut conflicting = transaction.recovery.unwrap();
+        conflicting.crash.session_nonce = "different-crash".into();
+        write_new(
+            &f.store.recovery_path(1),
+            &f.authority.seal(conflicting).unwrap(),
+        )
+        .unwrap();
+        assert!(f.store.activation_status(&f.authority).is_err());
+        assert!(f.store.recoveries(&f.authority).is_err());
+        assert!(
+            f.store
+                .reconcile_pending(&lock, &f.authority, 101, &|_| Ok(()))
+                .is_err()
+        );
+        assert_eq!(fs::read(f.store.pointer_path()).unwrap(), pointer);
+        assert!(f.store.transaction_path(3).exists());
+    }
+
+    #[test]
+    fn rollback_reconciliation_requires_a_previously_activated_target() {
+        let f = fixture();
+        let lock = f.store.lock().unwrap();
+        let mut transaction = pending_rollback(&f, &lock);
+        f.store
+            .install_release(&lock, &f.authority, test_release(&f.store, "v3"))
+            .unwrap();
+        f.store
+            .record_health(
+                &lock,
+                &f.authority,
+                "v3",
+                healthy("outside-deployment", 100),
+            )
+            .unwrap();
+        transaction.activation.release_id = "v3".into();
+        transaction.recovery.as_mut().unwrap().selected_release_id = Some("v3".into());
+        retain_intent(&f, &transaction);
+        let pointer = fs::read(f.store.pointer_path()).unwrap();
+        let calls = std::cell::Cell::new(0);
+        let error = f
+            .store
+            .reconcile_pending(&lock, &f.authority, 101, &|_| {
+                calls.set(calls.get() + 1);
+                Ok(())
+            })
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("known-good readiness"),
+            "{error:#}"
+        );
+        assert_eq!(calls.get(), 0);
+        assert_eq!(fs::read(f.store.pointer_path()).unwrap(), pointer);
+        assert!(
+            f.store
+                .activation_status(&f.authority)
+                .unwrap()
+                .pending
+                .is_some()
+        );
+        assert!(f.store.recoveries(&f.authority).unwrap().is_empty());
     }
 }
