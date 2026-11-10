@@ -5,7 +5,9 @@
 //! extracting files, importing product code or evaluating JavaScript. The graph
 //! hash is bound to the signed capture, but is NOT recomputed here: completeness,
 //! resolution semantics, selected conditions and native replay still require the
-//! product's graph reconstruction and execution checks.
+//! product's graph reconstruction and execution checks. Metadata-only file
+//! observations bind recorded existence, without admitting file contents or
+//! supplying source bytes to execution.
 
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
@@ -68,6 +70,8 @@ struct Input {
 enum Content {
     Missing,
     Directory,
+    /// Regular-file existence only; no content length, digest, or payload.
+    FileMetadata,
     File { bytes: usize, sha256: String },
     Symlink { target: String, sha256: String },
 }
@@ -213,7 +217,7 @@ fn verify_frame(bytes: &[u8], graph_hash: &str) -> Result<()> {
             }
         }
         match &input.content {
-            Content::Missing => {}
+            Content::Missing | Content::FileMetadata => {}
             Content::Directory => {
                 directories.insert(input.path.as_str());
             }
@@ -371,6 +375,20 @@ pub(super) mod tests {
             &frame(&serde_json::to_vec(header).unwrap(), payload),
             &header.graph_hash,
         )
+    }
+
+    // Synthetic wire-level coverage of the producer's metadata-only variant.
+    // Preserve real captured file payloads, but use a separate graph commitment:
+    // this fixture does not claim a successful graph reconstruction or execution.
+    fn metadata_probe_parts() -> (Header, Vec<u8>) {
+        let (mut header, payload) = decode(&producer_sources());
+        header.graph_hash = format!("sha256:{}", "f".repeat(64));
+        header.inputs.push(Input {
+            path: "PRIVATE-SOURCE-SENTINEL.node".into(),
+            content: Content::FileMetadata,
+        });
+        header.inputs.sort_by(|left, right| left.path.cmp(&right.path));
+        (header, payload)
     }
 
     // Every capsule mutation below recomputes its capsule digest unless that
@@ -629,7 +647,109 @@ pub(super) mod tests {
             "absolute link with a matching digest",
             sources_from_parts(&absolute_link, &linked_payload),
         ));
+        let (metadata_header, metadata_payload) = metadata_probe_parts();
+        let metadata_json =
+            String::from_utf8(serde_json::to_vec(&metadata_header).unwrap()).unwrap();
+        for (case, replacement) in [
+            (
+                "metadata observation with a byte length",
+                r#"{"kind":"file_metadata","bytes":0}"#,
+            ),
+            (
+                "metadata observation with a content hash",
+                concat!(
+                    r#"{"kind":"file_metadata","sha256":""#,
+                    "0000000000000000000000000000000000000000000000000000000000000000",
+                    r#""}"#,
+                ),
+            ),
+            (
+                "metadata observation with a link target",
+                r#"{"kind":"file_metadata","target":"PRIVATE-SOURCE-SENTINEL"}"#,
+            ),
+        ] {
+            let malformed = metadata_json.replacen(r#"{"kind":"file_metadata"}"#, replacement, 1);
+            cases.push((
+                case,
+                sources_from_bytes(
+                    &frame(malformed.as_bytes(), &metadata_payload),
+                    &metadata_header.graph_hash,
+                ),
+            ));
+        }
+
+        let mut unclaimed_metadata = metadata_payload.clone();
+        unclaimed_metadata.extend_from_slice(b"PRIVATE-SOURCE-SENTINEL");
+        cases.push((
+            "metadata observation cannot claim additional payload bytes",
+            sources_from_parts(&metadata_header, &unclaimed_metadata),
+        ));
+        let mut relabeled_file = metadata_header.clone();
+        relabeled_file
+            .inputs
+            .iter_mut()
+            .rfind(|input| matches!(input.content, Content::File { .. }))
+            .unwrap()
+            .content = Content::FileMetadata;
+        cases.push((
+            "metadata observation cannot replace a retained file payload",
+            sources_from_parts(&relabeled_file, &metadata_payload),
+        ));
+        let mut metadata_root = metadata_header.clone();
+        metadata_root.inputs[0].content = Content::FileMetadata;
+        cases.push((
+            "metadata observation cannot be the root directory",
+            sources_from_parts(&metadata_root, &metadata_payload),
+        ));
+        let mut metadata_parent = metadata_header.clone();
+        metadata_parent
+            .inputs
+            .iter_mut()
+            .find(|input| input.path == "node_modules")
+            .unwrap()
+            .content = Content::FileMetadata;
+        cases.push((
+            "metadata observation cannot be a physical parent directory",
+            sources_from_parts(&metadata_parent, &metadata_payload),
+        ));
+        for (case, path) in [
+            ("metadata observation path traversal", "../PRIVATE-SOURCE-SENTINEL"),
+            ("metadata observation duplicate path", "app.mjs"),
+            (
+                "metadata observation without a captured parent",
+                "absent/PRIVATE-SOURCE-SENTINEL.node",
+            ),
+        ] {
+            let mut invalid_metadata = metadata_header.clone();
+            invalid_metadata
+                .inputs
+                .iter_mut()
+                .find(|input| matches!(input.content, Content::FileMetadata))
+                .unwrap()
+                .path = path.into();
+            invalid_metadata
+                .inputs
+                .sort_by(|left, right| left.path.cmp(&right.path));
+            cases.push((
+                case,
+                sources_from_parts(&invalid_metadata, &metadata_payload),
+            ));
+        }
         cases
+    }
+
+    #[test]
+    fn accepts_metadata_only_observations_without_consuming_source_payload() {
+        let (header, payload) = metadata_probe_parts();
+        // The new observation precedes actual files, so a byte-consumption
+        // mistake would also break the following files' content hashes.
+        assert!(matches!(header.inputs[1].content, Content::FileMetadata));
+        verify(&sources_from_parts(&header, &payload)).unwrap();
+        assert_eq!(
+            serde_json::to_value(&header.inputs[1].content).unwrap(),
+            json!({"kind": "file_metadata"})
+        );
+        assert_eq!(payload, decode(&producer_sources()).1);
     }
 
     #[test]
