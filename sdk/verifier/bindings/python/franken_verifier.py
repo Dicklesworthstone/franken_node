@@ -18,11 +18,12 @@ from typing import Any, Literal, TypedDict
 PROTOCOL = "franken-verifier-cli/v1"
 MAX_INPUT_BYTES = 64 * 1024 * 1024
 MAX_RESPONSE_BYTES = 64 * 1024 + 1
-EvidenceFormat = Literal["incident-bundle", "capsule", "signed-bundle"]
+EvidenceFormat = Literal["incident-bundle", "capsule", "signed-bundle", "resolution-receipt"]
 _SCOPES = {
     "incident-bundle": "authenticated_recorded_incident",
     "capsule": "authenticated_capsule_content",
     "signed-bundle": "authenticated_sdk_replay_bundle",
+    "resolution-receipt": "authenticated_resolution_decision",
 }
 
 
@@ -32,7 +33,8 @@ class Verification(TypedDict):
     format: EvidenceFormat
     scope: Literal["authenticated_recorded_incident", "authenticated_run_incident",
                    "authenticated_runtime_incident",
-                   "authenticated_capsule_content", "authenticated_sdk_replay_bundle"]
+                   "authenticated_capsule_content", "authenticated_sdk_replay_bundle",
+                   "authenticated_resolution_decision"]
     artifact_sha256: str
     facts: dict[str, Any]
 
@@ -80,6 +82,15 @@ def _hex(value: Any, length: int) -> bool:
     return isinstance(value, str) and re.fullmatch(f"[0-9a-fA-F]{{{length}}}", value) is not None
 
 
+def _bounded_text(value: Any) -> bool:
+    if not isinstance(value, str) or not value.strip():
+        return False
+    try:
+        return len(value.encode("utf-8")) <= 4096
+    except UnicodeEncodeError:
+        return False
+
+
 def _run_origin_valid(origin: Any, anchor: str) -> bool:
     return (
         isinstance(origin, dict)
@@ -120,6 +131,10 @@ def _facts_valid(facts: Any, format: str, anchor: str, run_anchor: str | None,
                             "signing_identity", "native_capture"},
         "capsule": {"capsule_id", "expected_hash", "actual_hash", "signer_public_key_hex"},
         "signed-bundle": {"bundle_id", "incident_id", "event_count", "integrity_hash", "signer_public_key_hex"},
+        "resolution-receipt": {"receipt_id", "crypto_suite", "module_graph_hash", "package_name",
+                               "requested_range", "policy_profile", "capability_budget_mode", "decision",
+                               "selected_version", "rejected_alternative_count", "canonical_hash",
+                               "signer_key_id", "signer_public_key_hex"},
     }[format]
     if run_anchor is not None:
         expected.add("run_origin")
@@ -127,6 +142,25 @@ def _facts_valid(facts: Any, format: str, anchor: str, run_anchor: str | None,
         expected.add("runtime_origin")
     if set(facts) != expected:
         return False
+    if format == "resolution-receipt":
+        selected = facts["selected_version"]
+        return (
+            all(_bounded_text(facts[key])
+                for key in ("receipt_id", "package_name", "requested_range"))
+            and all(isinstance(facts[key], str)
+                    and re.fullmatch(r"sha256:[0-9a-f]{64}", facts[key]) is not None
+                    for key in ("module_graph_hash", "canonical_hash", "signer_key_id"))
+            and facts["signer_key_id"] == "sha256:" + hashlib.sha256(
+                b"franken-node/resolution-receipt/signer-key-id/v1:" + bytes.fromhex(anchor)
+            ).hexdigest()
+            and facts["crypto_suite"] == "ed25519-v1"
+            and facts["policy_profile"] in ("strict", "balanced", "legacy_risky")
+            and facts["capability_budget_mode"] in ("advisory", "enforced")
+            and type(facts["rejected_alternative_count"]) is int
+            and 0 <= facts["rejected_alternative_count"] <= 1024
+            and (facts["decision"] == "reject" and selected is None
+                 or facts["decision"] == "admit" and _bounded_text(selected))
+        )
     for key, value in facts.items():
         if key == "event_count":
             if type(value) is not int or not 0 <= value <= 2**53 - 1:

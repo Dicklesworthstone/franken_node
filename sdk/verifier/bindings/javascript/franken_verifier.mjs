@@ -9,6 +9,7 @@ const SCOPES = Object.freeze({
   "incident-bundle": "authenticated_recorded_incident",
   capsule: "authenticated_capsule_content",
   "signed-bundle": "authenticated_sdk_replay_bundle",
+  "resolution-receipt": "authenticated_resolution_decision",
 });
 
 export class VerifierError extends Error {
@@ -25,6 +26,8 @@ const hex = (value, length) => typeof value === "string" && new RegExp(`^[0-9a-f
 const object = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
 const keys = (value, expected) => object(value) && Object.keys(value).length === expected.length && expected.every((key) => Object.hasOwn(value, key));
 const count = (value) => Number.isSafeInteger(value) && value >= 0;
+const boundedText = (value) => typeof value === "string" && value.trim().length > 0
+  && Buffer.byteLength(value, "utf8") <= 4096 && Buffer.from(value, "utf8").toString("utf8") === value;
 
 function runOriginValid(origin, anchor) {
   return keys(origin, ["receipt_id", "receipt_hash", "signer_public_key_hex", "record_sha256"])
@@ -49,10 +52,22 @@ function factsValid(facts, format, anchor, runAnchor, runtimeAnchor) {
     "incident-bundle": ["bundle_id", "incident_id", "created_at", "policy_version", "event_count", "integrity_hash", "decision_sequence_hash", "signer_public_key_hex", "signing_identity", "native_capture"],
     capsule: ["capsule_id", "expected_hash", "actual_hash", "signer_public_key_hex"],
     "signed-bundle": ["bundle_id", "incident_id", "event_count", "integrity_hash", "signer_public_key_hex"],
+    "resolution-receipt": ["receipt_id", "crypto_suite", "module_graph_hash", "package_name", "requested_range", "policy_profile", "capability_budget_mode", "decision", "selected_version", "rejected_alternative_count", "canonical_hash", "signer_key_id", "signer_public_key_hex"],
   }[format];
   if (runAnchor !== undefined) expected.push("run_origin");
   if (runtimeAnchor !== undefined) expected.push("runtime_origin");
   if (!keys(facts, expected) || facts.signer_public_key_hex !== anchor) return false;
+  if (format === "resolution-receipt") {
+    return ["receipt_id", "package_name", "requested_range"].every((key) => boundedText(facts[key]))
+      && ["module_graph_hash", "canonical_hash", "signer_key_id"].every((key) => typeof facts[key] === "string" && /^sha256:[0-9a-f]{64}$/u.test(facts[key]))
+      && facts.signer_key_id === `sha256:${createHash("sha256").update("franken-node/resolution-receipt/signer-key-id/v1:").update(Buffer.from(anchor, "hex")).digest("hex")}`
+      && facts.crypto_suite === "ed25519-v1"
+      && ["strict", "balanced", "legacy_risky"].includes(facts.policy_profile)
+      && ["advisory", "enforced"].includes(facts.capability_budget_mode)
+      && count(facts.rejected_alternative_count) && facts.rejected_alternative_count <= 1024
+      && (facts.decision === "reject" && facts.selected_version === null
+        || facts.decision === "admit" && boundedText(facts.selected_version));
+  }
   for (const [key, value] of Object.entries(facts)) {
     if (key === "event_count") {
       if (!count(value)) return false;

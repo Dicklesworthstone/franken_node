@@ -163,6 +163,8 @@ pub struct SignedResolutionReceipt {
 pub struct VerifiedResolutionReceipt {
     pub receipt_id: String,
     pub crypto_suite: String,
+    /// Authenticated graph commitment, not a claim that its modules executed.
+    pub module_graph_hash: String,
     pub package_name: String,
     pub requested_range: String,
     pub policy_profile: AdmissionProfile,
@@ -315,6 +317,7 @@ pub fn verify_signed_resolution_receipt(
     Ok(VerifiedResolutionReceipt {
         receipt_id: signed.receipt.receipt_id,
         crypto_suite: signed.receipt.crypto_suite,
+        module_graph_hash: signed.receipt.module_graph_hash,
         package_name: signed.receipt.package_name,
         requested_range: signed.receipt.requested_range,
         policy_profile: signed.receipt.policy_profile,
@@ -701,6 +704,7 @@ mod tests {
             verify_signed_resolution_receipt(&signing_key.verifying_key(), &bytes).expect("verify");
 
         assert_eq!(verified.crypto_suite, RESOLUTION_RECEIPT_CRYPTO_SUITE);
+        assert_eq!(verified.module_graph_hash, signed.receipt.module_graph_hash);
     }
 
     #[test]

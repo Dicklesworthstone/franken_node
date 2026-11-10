@@ -41,6 +41,12 @@ for case in cases:
                 assert result["facts"]["event_count"] == 3
                 assert result["facts"]["signing_identity"] == "339eefa3a988f613"
                 assert "run_origin" not in result["facts"]
+        elif case["format"] == "resolution-receipt":
+            assert result["scope"] == "authenticated_resolution_decision"
+            assert result["facts"]["decision"] == case["decision"]
+            assert result["facts"]["module_graph_hash"] == case["graph_hash"]
+            assert result["facts"]["selected_version"] == ("1.2.3" if case["decision"] == "admit" else None)
+            assert result["facts"]["capability_budget_mode"] == "enforced"
         assert "PRIVATE-" not in json.dumps(result)
         print(json.dumps({"case": case["name"], "result": "verified", "scope": result["scope"]}), flush=True)
 
@@ -112,5 +118,19 @@ for mode in runtime_controls:
         print(json.dumps({"case": f"protocol_{mode}", "result": error.code}), flush=True)
     else:
         raise AssertionError(f"protocol_{mode}")
+resolution_controls = ["resolution_invalid_decision", "resolution_reject_with_candidate",
+                       "resolution_admit_without_candidate", "resolution_bad_graph", "resolution_wrong_signer",
+                       "resolution_unsafe_count", "resolution_wrong_scope", "resolution_unknown_field",
+                       "resolution_bad_profile", "resolution_bad_budget_mode", "resolution_invalid_unicode"]
+for mode in resolution_controls:
+    try:
+        verify_artifact(json.dumps({"protocol_control": mode}).encode(), cases[0]["anchor"],
+                        verifier=str(root / "fake_verifier"), format="resolution-receipt")
+    except VerifierError as error:
+        assert error.code == "PROTOCOL_INVALID", (mode, error.code)
+        print(json.dumps({"case": f"protocol_{mode}", "result": error.code}), flush=True)
+    else:
+        raise AssertionError(f"protocol_{mode}")
 print(json.dumps({"consumer": "python", "matrix_cases": len(cases), "client_cases": len(client_controls),
-                  "protocol_cases": len(controls) + len(run_controls) + len(runtime_controls) + 1, "passed": True}), flush=True)
+                  "protocol_cases": len(controls) + len(run_controls) + len(runtime_controls)
+                  + len(resolution_controls) + 1, "passed": True}), flush=True)

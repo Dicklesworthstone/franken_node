@@ -40,4 +40,14 @@ const runtimeVerified: Verification = await verifyArtifact(Buffer.from(runtime.i
 if (runtimeVerified.scope !== "authenticated_runtime_incident"
     || runtimeVerified.facts.runtime_origin.product_root_key_id !== `ed25519:${runtime.runtime_anchor}`
     || runtimeVerified.facts.runtime_origin.signed_epoch !== "18446744073709551615") throw new Error("TypeScript runtime-origin mismatch");
-console.log(JSON.stringify({ consumer: "typescript", positive: 3, negative: 2, passed: true }));
+for (const name of ["resolution_signed_admission", "resolution_signed_rejection"]) {
+  const receipt = cases.find((item) => item.name === name)!;
+  const verified = await verifyArtifact(Buffer.from(receipt.input_hex, "hex"), receipt.anchor,
+    { verifier: resolve("verifier"), format: "resolution-receipt" });
+  if (verified.format !== "resolution-receipt" || verified.scope !== "authenticated_resolution_decision"
+      || !verified.facts.module_graph_hash.startsWith("sha256:")) throw new Error("TypeScript resolution scope mismatch");
+  if (name === "resolution_signed_admission"
+      ? verified.facts.decision !== "admit" || verified.facts.selected_version !== "1.2.3"
+      : verified.facts.decision !== "reject" || verified.facts.selected_version !== null) throw new Error("TypeScript resolution decision mismatch");
+}
+console.log(JSON.stringify({ consumer: "typescript", positive: 5, negative: 2, passed: true }));

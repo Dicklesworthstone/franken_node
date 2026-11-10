@@ -246,5 +246,57 @@ add("sdk_foreign_anchor", "signed-bundle", sdkWire, "SIGNATURE_INVALID", { ancho
 add("sdk_signature_required", "signed-bundle", sdkWire, "SIGNATURE_MALFORMED");
 add("sdk_signature_wrong", "signed-bundle", sdkWire, "SIGNATURE_INVALID", { signature_hex: "00".repeat(64) });
 add("sdk_noncanonical_bytes", "signed-bundle", `${sdkWire}\n`, "EVIDENCE_INVALID", { signature_hex: sdkSignature });
+
+// Resolution decisions use the published canonical JSON and domain-separated
+// Ed25519 protocol. Sign with Node crypto independently of the Rust verifier.
+const candidate = {
+  version: "1.2.3", package_path: "PRIVATE-package-path", resolved_url: "https://PRIVATE-registry.invalid/pkg.tgz",
+  integrity: `sha256:${hash("package")}`, trust_card_ref: "PRIVATE-trust-card", trust_status: "trusted",
+  bpet_risk_ref: "PRIVATE-bpet", bpet_risk: "low", dgis_risk_ref: "PRIVATE-dgis", dgis_risk: "low",
+  revocation_freshness_ref: "PRIVATE-revocation", revocation_freshness: "fresh",
+  compat_oracle_ref: "PRIVATE-compat", compat_status: "compatible", capability_budget_ref: "PRIVATE-budget",
+};
+const resolution = {
+  schema_version: "resolution-receipt-v1", crypto_suite: "ed25519-v1", receipt_id: "resolution-language-vector-1",
+  issued_at_millis: 18446744073709551615n, module_graph_hash: `sha256:${hash("source graph")}`,
+  package_name: "demo-package", requested_range: "^1", policy_profile: "strict", capability_budget_mode: "enforced",
+  decision: "admit", selected_version: candidate, rejected_alternatives: [],
+  evidence_refs: Object.fromEntries(["trust_card_refs", "bpet_risk_refs", "dgis_risk_refs", "revocation_freshness_refs",
+    "compat_oracle_refs", "capability_budget_refs", "policy_refs"].map((name) => [name, [`PRIVATE-${name}`]])),
+  rationale: "PRIVATE-resolver-rationale", canonical_hash: "",
+};
+function sealResolution(receipt) {
+  const payload = clone(receipt); delete payload.canonical_hash;
+  const bytes = Buffer.from(canonical(payload));
+  receipt.canonical_hash = `sha256:${hash(Buffer.concat([Buffer.from("franken-node/resolution-receipt/payload-hash/v1:"), u64(bytes.length), bytes]))}`;
+  return { receipt, signer_key_id: `sha256:${hash(Buffer.concat([Buffer.from("franken-node/resolution-receipt/signer-key-id/v1:"), Buffer.from(anchor, "hex")]))}`,
+    signature_algorithm: "ed25519-v1", signature: sign(null, Buffer.concat([Buffer.from("franken-node/resolution-receipt/signature/v1:"), Buffer.from(canonical(receipt))]), key).toString("hex") };
+}
+const signedResolution = sealResolution(clone(resolution));
+const resolutionWire = canonical(signedResolution);
+add("resolution_signed_admission", "resolution-receipt", resolutionWire, "verified", { decision: "admit", graph_hash: resolution.module_graph_hash });
+const rejectedResolution = clone(resolution);
+rejectedResolution.decision = "reject"; rejectedResolution.selected_version = null;
+rejectedResolution.rejected_alternatives = [{ candidate: { ...candidate, trust_status: "quarantined" }, reason: "trust_card_quarantined", rationale: "PRIVATE-quarantined" }];
+add("resolution_signed_rejection", "resolution-receipt", canonical(sealResolution(rejectedResolution)), "verified", { decision: "reject", graph_hash: resolution.module_graph_hash });
+add("resolution_foreign_anchor", "resolution-receipt", resolutionWire, "SIGNER_UNTRUSTED", { anchor: foreign });
+const graphMutation = clone(signedResolution); graphMutation.receipt.module_graph_hash = `sha256:${hash("different graph")}`;
+add("resolution_changed_graph", "resolution-receipt", canonical(graphMutation), "INTEGRITY_MISMATCH");
+const resealedResolution = sealResolution(graphMutation.receipt); resealedResolution.signature = signedResolution.signature;
+add("resolution_rehashed_without_signer", "resolution-receipt", canonical(resealedResolution), "SIGNATURE_INVALID");
+const zeroResolutionSignature = clone(signedResolution); zeroResolutionSignature.signature = "00".repeat(64);
+add("resolution_invalid_signature", "resolution-receipt", canonical(zeroResolutionSignature), "SIGNATURE_INVALID");
+const shortResolutionSignature = clone(signedResolution); shortResolutionSignature.signature = "aa";
+add("resolution_short_signature", "resolution-receipt", canonical(shortResolutionSignature), "SIGNATURE_MALFORMED");
+const absentCandidate = clone(resolution); absentCandidate.selected_version = null;
+add("resolution_admission_requires_candidate", "resolution-receipt", canonical(sealResolution(absentCandidate)), "EVIDENCE_INVALID");
+const contradictoryRejection = clone(resolution); contradictoryRejection.decision = "reject";
+add("resolution_rejection_cannot_select_candidate", "resolution-receipt", canonical(sealResolution(contradictoryRejection)), "EVIDENCE_INVALID");
+const inadmissible = clone(resolution); inadmissible.selected_version.trust_status = "revoked";
+add("resolution_signed_revoked_candidate", "resolution-receipt", canonical(sealResolution(inadmissible)), "EVIDENCE_INVALID");
+const unknownResolutionField = clone(signedResolution); unknownResolutionField.unsigned_claim = "trusted";
+add("resolution_unknown_unsigned_field", "resolution-receipt", canonical(unknownResolutionField), "EVIDENCE_INVALID");
+add("resolution_noncanonical_bytes", "resolution-receipt", `${resolutionWire}\n`, "EVIDENCE_INVALID");
+add("resolution_duplicate_member", "resolution-receipt", `${resolutionWire.slice(0, -1)},"signature":"00"}`, "JSON_INVALID");
 writeFileSync(output, JSON.stringify(cases));
 console.log(JSON.stringify({ vectors: cases.length, incident_sha256: hash(incidentBytes), capsule_expected_hash: capsule.manifest.expected_output_hash, sdk_integrity: sdk.integrity_hash }));

@@ -44,6 +44,19 @@ if mode.startswith("runtime_"):
         "producer_id": "runtime-protocol-control", "evidence_key_id": "ed25519:" + "c" * 64,
         "signed_epoch": "18446744073709551615",
     }
+if mode.startswith("resolution_"):
+    response["format"] = "resolution-receipt"
+    response["scope"] = "authenticated_resolution_decision"
+    response["facts"] = {
+        "receipt_id": "resolution-control", "crypto_suite": "ed25519-v1",
+        "module_graph_hash": "sha256:" + "a" * 64, "package_name": "demo-package",
+        "requested_range": "^1", "policy_profile": "strict", "capability_budget_mode": "enforced",
+        "decision": "admit", "selected_version": "1.2.3", "rejected_alternative_count": 0,
+        "canonical_hash": "sha256:" + "b" * 64,
+        "signer_key_id": "sha256:" + hashlib.sha256(
+            b"franken-node/resolution-receipt/signer-key-id/v1:" + bytes.fromhex(anchor)
+        ).hexdigest(), "signer_public_key_hex": anchor,
+    }
 exit_code = 0
 if mode == "timeout":
     time.sleep(5)
@@ -111,6 +124,28 @@ elif mode == "runtime_overflow_epoch":
     response["facts"]["runtime_origin"]["signed_epoch"] = str(2**64)
 elif mode == "runtime_extra_claim":
     response["facts"]["runtime_origin"]["quiescence_certified"] = True
+elif mode == "resolution_invalid_decision":
+    response["facts"]["decision"] = "verified"
+elif mode == "resolution_reject_with_candidate":
+    response["facts"]["decision"] = "reject"
+elif mode == "resolution_admit_without_candidate":
+    response["facts"]["selected_version"] = None
+elif mode == "resolution_bad_graph":
+    response["facts"]["module_graph_hash"] = "sha256:claimed"
+elif mode == "resolution_wrong_signer":
+    response["facts"]["signer_key_id"] = "sha256:" + "0" * 64
+elif mode == "resolution_unsafe_count":
+    response["facts"]["rejected_alternative_count"] = 1025
+elif mode == "resolution_wrong_scope":
+    response["scope"] = "guest_execution"
+elif mode == "resolution_unknown_field":
+    response["facts"]["execution_authorized"] = True
+elif mode == "resolution_bad_profile":
+    response["facts"]["policy_profile"] = "unsafe"
+elif mode == "resolution_bad_budget_mode":
+    response["facts"]["capability_budget_mode"] = "unlimited"
+elif mode == "resolution_invalid_unicode":
+    response["facts"]["package_name"] = "\ud800"
 encoded = json.dumps(response, separators=(",", ":"), sort_keys=True)
 if mode == "duplicate":
     encoded = encoded[:-1] + ',"verdict":"verified"}'

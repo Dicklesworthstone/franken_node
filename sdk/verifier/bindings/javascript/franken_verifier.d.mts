@@ -1,4 +1,4 @@
-export type EvidenceFormat = "incident-bundle" | "capsule" | "signed-bundle";
+export type EvidenceFormat = "incident-bundle" | "capsule" | "signed-bundle" | "resolution-receipt";
 export interface VerifierOptions {
   /** Trusted SDK executable, installed separately; never supplied by evidence. */
   verifier: string;
@@ -63,6 +63,20 @@ export interface SignedBundleFacts {
   integrity_hash: string;
   signer_public_key_hex: string;
 }
+/** Authenticated resolver decision; no grant of execution or package authority. */
+export type ResolutionReceiptFacts = {
+  receipt_id: string;
+  crypto_suite: "ed25519-v1";
+  module_graph_hash: string;
+  package_name: string;
+  requested_range: string;
+  policy_profile: "strict" | "balanced" | "legacy_risky";
+  capability_budget_mode: "advisory" | "enforced";
+  rejected_alternative_count: number;
+  canonical_hash: string;
+  signer_key_id: string;
+  signer_public_key_hex: string;
+} & ({ decision: "admit"; selected_version: string } | { decision: "reject"; selected_version: null });
 export type Verification = {
   schema_version: "franken-verifier-cli/v1";
   verdict: "verified";
@@ -73,6 +87,7 @@ export type Verification = {
   | { format: "incident-bundle"; scope: "authenticated_runtime_incident"; facts: RuntimeIncidentFacts }
   | { format: "capsule"; scope: "authenticated_capsule_content"; facts: CapsuleFacts }
   | { format: "signed-bundle"; scope: "authenticated_sdk_replay_bundle"; facts: SignedBundleFacts }
+  | { format: "resolution-receipt"; scope: "authenticated_resolution_decision"; facts: ResolutionReceiptFacts }
 );
 export class VerifierError extends Error {
   readonly code: string;

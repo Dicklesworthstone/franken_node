@@ -13,12 +13,15 @@ use frankenengine_verifier_sdk::incident_bundle::{
     decode_evidence_json, verify_incident_bundle, verify_incident_bundle_with_run_key,
     verify_incident_bundle_with_runtime_keys,
 };
+use frankenengine_verifier_sdk::resolution::{
+    ResolutionReceiptError, verify_signed_resolution_receipt,
+};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 const PROTOCOL: &str = "franken-verifier-cli/v1";
 const MAX_RESPONSE_BYTES: usize = 64 * 1024;
-const USAGE: &str = "franken-verifier verify --format incident-bundle|capsule|signed-bundle --trusted-key-hex HEX [--trusted-run-key-hex HEX [--trusted-runtime-key-hex HEX]] [--signature-hex HEX] < artifact";
+const USAGE: &str = "franken-verifier verify --format incident-bundle|capsule|signed-bundle|resolution-receipt --trusted-key-hex HEX [--trusted-run-key-hex HEX [--trusted-runtime-key-hex HEX]] [--signature-hex HEX] < artifact";
 
 #[derive(Debug)]
 struct Request {
@@ -75,7 +78,7 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
     let format = format.ok_or_else(usage)?;
     if !matches!(
         format.as_str(),
-        "incident-bundle" | "capsule" | "signed-bundle"
+        "incident-bundle" | "capsule" | "signed-bundle" | "resolution-receipt"
     ) {
         return Err(failure("UNSUPPORTED_FORMAT", "unsupported evidence format"));
     }
@@ -182,8 +185,45 @@ fn incident_failure(error: &IncidentBundleError) -> Failure {
     failure(code, "signed evidence verification failed")
 }
 
+fn resolution_failure(error: &ResolutionReceiptError) -> Failure {
+    let code = match error {
+        ResolutionReceiptError::Json(_) => "JSON_INVALID",
+        ResolutionReceiptError::HashMismatch { .. } => "INTEGRITY_MISMATCH",
+        ResolutionReceiptError::SignerKeyMismatch { .. } => "SIGNER_UNTRUSTED",
+        ResolutionReceiptError::SignatureHex(_)
+        | ResolutionReceiptError::SignatureMalformed { .. } => "SIGNATURE_MALFORMED",
+        ResolutionReceiptError::SignatureInvalid => "SIGNATURE_INVALID",
+        _ => "EVIDENCE_INVALID",
+    };
+    failure(code, "signed resolution receipt verification failed")
+}
+
 fn verify(request: &Request, bytes: &[u8]) -> Result<Value, Failure> {
     match request.format.as_str() {
+        "resolution-receipt" => {
+            let receipt = verify_signed_resolution_receipt(&request.anchor, bytes)
+                .map_err(|error| resolution_failure(&error))?;
+            // A verified signed rejection is still a rejection of the package.
+            // Authenticate the decision without treating it as run authority or
+            // exporting candidate paths, source URLs, rationale or evidence refs.
+            Ok(
+                json!({"scope": "authenticated_resolution_decision", "facts": {
+                    "receipt_id": receipt.receipt_id,
+                    "crypto_suite": receipt.crypto_suite,
+                    "module_graph_hash": receipt.module_graph_hash,
+                    "package_name": receipt.package_name,
+                    "requested_range": receipt.requested_range,
+                    "policy_profile": receipt.policy_profile,
+                    "capability_budget_mode": receipt.capability_budget_mode,
+                    "decision": receipt.decision,
+                    "selected_version": receipt.selected_version,
+                    "rejected_alternative_count": receipt.rejected_alternative_count,
+                    "canonical_hash": receipt.canonical_hash,
+                    "signer_key_id": receipt.signer_key_id,
+                    "signer_public_key_hex": hex::encode(request.anchor.as_bytes()),
+                }}),
+            )
+        }
         "incident-bundle" => {
             let (verified, run_origin, runtime_origin) =
                 match (&request.run_anchor, &request.runtime_anchor) {
@@ -454,6 +494,26 @@ mod tests {
         assert_eq!(
             arguments(&args("auto", ANCHOR)).unwrap_err().code,
             "UNSUPPORTED_FORMAT"
+        );
+    }
+
+    #[test]
+    fn resolution_receipts_require_their_own_explicit_format_and_anchor() {
+        assert!(arguments(&args("resolution-receipt", ANCHOR)).is_ok());
+        for option in [
+            "--trusted-run-key-hex",
+            "--trusted-runtime-key-hex",
+            "--signature-hex",
+        ] {
+            let mut request = args("resolution-receipt", ANCHOR);
+            request.extend([option.to_string(), ANCHOR.to_string()]);
+            assert_eq!(arguments(&request).unwrap_err().code, "USAGE");
+        }
+        assert_eq!(
+            run(&args("resolution-receipt", ANCHOR), &mut &*FIXTURE)
+                .unwrap_err()
+                .code,
+            "JSON_INVALID",
         );
     }
 

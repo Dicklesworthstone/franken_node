@@ -32,6 +32,12 @@ for (const test of cases) {
         assert.equal(result.facts.signing_identity, "339eefa3a988f613");
         assert.equal(Object.hasOwn(result.facts, "run_origin"), false);
       }
+    } else if (test.format === "resolution-receipt") {
+      assert.equal(result.scope, "authenticated_resolution_decision");
+      assert.equal(result.facts.decision, test.decision);
+      assert.equal(result.facts.module_graph_hash, test.graph_hash);
+      assert.equal(result.facts.selected_version, test.decision === "admit" ? "1.2.3" : null);
+      assert.equal(result.facts.capability_budget_mode, "enforced");
     }
     assert.equal(JSON.stringify(result).includes("PRIVATE-"), false);
     console.log(JSON.stringify({ case: test.name, result: "verified", scope: result.scope }));
@@ -87,5 +93,14 @@ for (const mode of runtimeControls) {
   (error) => error instanceof VerifierError && error.code === "PROTOCOL_INVALID", `protocol_${mode}`);
   console.log(JSON.stringify({ case: `protocol_${mode}`, result: "PROTOCOL_INVALID" }));
 }
+const resolutionControls = ["resolution_invalid_decision", "resolution_reject_with_candidate", "resolution_admit_without_candidate",
+  "resolution_bad_graph", "resolution_wrong_signer", "resolution_unsafe_count", "resolution_wrong_scope", "resolution_unknown_field",
+  "resolution_bad_profile", "resolution_bad_budget_mode", "resolution_invalid_unicode"];
+for (const mode of resolutionControls) {
+  await assert.rejects(verifyArtifact(Buffer.from(JSON.stringify({ protocol_control: mode })), cases[0].anchor,
+    { verifier: resolve("fake_verifier"), format: "resolution-receipt" }),
+  (error) => error instanceof VerifierError && error.code === "PROTOCOL_INVALID", `protocol_${mode}`);
+  console.log(JSON.stringify({ case: `protocol_${mode}`, result: "PROTOCOL_INVALID" }));
+}
 console.log(JSON.stringify({ consumer: "javascript", matrix_cases: cases.length, client_cases: clientControls.length,
-  protocol_cases: controls.length + runControls.length + runtimeControls.length + 1, passed: true }));
+  protocol_cases: controls.length + runControls.length + runtimeControls.length + resolutionControls.length + 1, passed: true }));

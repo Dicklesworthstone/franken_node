@@ -3942,6 +3942,26 @@ code, not a sandbox for running arbitrary verifier programs.
 | `incident-bundle` (default in bindings) | `authenticated_recorded_incident`: signed recorded events, hashes and bounded native-capture metadata | Embedded Ed25519 signature checked under the caller's anchor |
 | `capsule` | `authenticated_capsule_content`: independently re-derived signed payload/input hash | Signed SDK capsule JSON with strict fields |
 | `signed-bundle` | `authenticated_sdk_replay_bundle`: the distinct canonical SDK bundle format | Required detached `signature_hex` (Python), `signatureHex` (JS) or `--signature-hex` (CLI) |
+| `resolution-receipt` | `authenticated_resolution_decision`: signed package admission or rejection, profile, capability-budget mode and module-graph commitment | Embedded Ed25519 signature checked under the caller's resolver-authority key |
+
+To audit a module-resolution decision, supply the independently trusted
+resolver key and the original canonical signed receipt:
+
+```bash
+franken-verifier verify --format resolution-receipt \
+  --trusted-key-hex "$TRUSTED_RESOLVER_PUBLIC_KEY_HEX" < resolution-receipt.json
+```
+
+Use `format="resolution-receipt"` in Python or
+`format: "resolution-receipt"` in JavaScript/TypeScript. The result includes
+`facts.decision`, `selected_version`, `module_graph_hash`, `policy_profile`,
+`capability_budget_mode`, the signed receipt hash and signer identity. A valid
+signed rejection has `verdict: "verified"`, `decision: "reject"` and
+`selected_version: null`: the signature is authentic and the package remains
+rejected. Candidate paths, registry URLs, evidence references and private
+decision rationale are not returned. This authenticates the recorded resolver
+decision; it does not load packages, grant execution authority or establish
+current revocation status.
 
 These scopes do not execute a captured guest or establish original-policy
 equivalence. Integrity-only SDK bundles are never returned as authenticated
