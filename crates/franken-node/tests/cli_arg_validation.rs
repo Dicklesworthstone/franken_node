@@ -1,5 +1,7 @@
 use clap::{CommandFactory, Parser, error::ErrorKind};
-use frankenengine_node::cli::{Cli, Command, MigrateCommand, VerifyCommand};
+use frankenengine_node::cli::{
+    Cli, Command, MigrateCommand, MigrateRolloutAction, MigrateRolloutStage, VerifyCommand,
+};
 use std::path::PathBuf;
 
 /// Trigger every clap debug-assertion (argument-name uniqueness, group
@@ -16,6 +18,268 @@ fn cli_structure_passes_clap_debug_assertions() {
 
 fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
     Cli::try_parse_from(args)
+}
+
+fn rollout_command(project: &std::path::Path) -> std::process::Command {
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_franken-node"));
+    command
+        .current_dir(project)
+        .env_remove("FRANKEN_NODE_ROLLOUT_SIGNING_KEY")
+        .env_remove("FRANKEN_NODE_ROLLOUT_EXPECTED_HEAD_SHA256")
+        .args(["migrate", "rollout"])
+        .arg(project)
+        .arg("--json");
+    command
+}
+
+fn assert_rollout_error(output: &std::process::Output) {
+    assert!(
+        !output.status.success(),
+        "unexpected rollout success: {output:?}"
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|error| panic!("expected structured rollout refusal: {error}; {output:?}"));
+    assert_eq!(
+        report["schema_version"],
+        "franken-node/migrate-error-cli/v1"
+    );
+    assert_eq!(report["command"], "migrate.rollout");
+    assert_eq!(report["ok"], false);
+    assert!(!report["error"].as_str().unwrap().is_empty());
+}
+
+#[test]
+fn rollout_parser_distinguishes_automatic_progression_from_explicit_stages() {
+    let Command::Migrate(MigrateCommand::Rollout(defaults)) =
+        parse(&["franken-node", "migrate", "rollout", "project"])
+            .unwrap()
+            .command
+    else {
+        panic!("expected rollout");
+    };
+    assert_eq!(defaults.action, MigrateRolloutAction::Promote);
+    assert!(defaults.stage.is_none());
+    defaults.validate_intent().unwrap();
+    for (text, expected) in [
+        ("shadow", MigrateRolloutStage::Shadow),
+        ("canary", MigrateRolloutStage::Canary),
+        ("RAMP", MigrateRolloutStage::Ramp),
+        ("default", MigrateRolloutStage::Default),
+    ] {
+        let Command::Migrate(MigrateCommand::Rollout(args)) = parse(&[
+            "franken-node",
+            "migrate",
+            "rollout",
+            "project",
+            "--stage",
+            text,
+        ])
+        .unwrap()
+        .command
+        else {
+            panic!("expected rollout");
+        };
+        assert_eq!(args.stage, Some(expected));
+        args.validate_intent().unwrap();
+    }
+    for stage in ["canry", "defualt", "aborted", "rollback", ""] {
+        assert!(
+            parse(&[
+                "franken-node",
+                "migrate",
+                "rollout",
+                "project",
+                "--stage",
+                stage,
+            ])
+            .is_err(),
+            "invalid stage {stage:?} must never become automatic progression"
+        );
+    }
+}
+
+#[test]
+fn rollout_cli_rejects_invalid_intent_before_creating_storage() {
+    let mut cases: Vec<Vec<&str>> = vec![
+        vec!["--stage", "canry", "--force"],
+        vec!["--stage", "defualt"],
+        vec!["--stage", "aborted"],
+        vec!["--action", "rollbak"],
+        vec!["--ramp-pct", "0"],
+        vec!["--ramp-pct", "101"],
+        vec!["--stage", "shadow", "--ramp-pct", "25"],
+        vec!["--stage", "canary", "--ramp-pct", "25"],
+        vec!["--stage", "default", "--ramp-pct", "25", "--force"],
+    ];
+    for action in ["status", "rollback"] {
+        for flags in [
+            vec!["--stage", "ramp"],
+            vec!["--ramp-pct", "25"],
+            vec!["--force"],
+            vec!["--no-auto-rollback"],
+            vec!["--lockstep-report", "unread-evidence.json"],
+        ] {
+            let mut arguments = vec!["--action", action];
+            arguments.extend(flags);
+            cases.push(arguments);
+        }
+    }
+    for arguments in cases {
+        let project = tempfile::tempdir().unwrap();
+        let output = rollout_command(project.path())
+            .args(&arguments)
+            .output()
+            .unwrap();
+        assert_rollout_error(&output);
+        assert!(
+            !project.path().join(".franken-node").exists(),
+            "invalid intent {arguments:?} must be refused before opening storage"
+        );
+    }
+}
+
+#[test]
+fn rollout_cli_rejected_initial_transitions_do_not_create_a_state_record() {
+    for arguments in [
+        vec!["--stage", "default"],
+        vec!["--stage", "ramp", "--ramp-pct", "25"],
+        vec!["--ramp-pct", "25", "--force"],
+    ] {
+        let project = tempfile::tempdir().unwrap();
+        let output = rollout_command(project.path())
+            .args(["--migration-id", "invalid-transition"])
+            .args(&arguments)
+            .output()
+            .unwrap();
+        assert_rollout_error(&output);
+        assert!(
+            !project
+                .path()
+                .join(".franken-node/state/rollout/invalid-transition.json")
+                .exists(),
+            "invalid transition {arguments:?} must not persist admission"
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn rollout_cli_invalid_intent_cannot_restore_an_applied_source_transaction() {
+    use frankenengine_node::migration::{
+        rollback::{self, TransactionState},
+        rollout::{RolloutConfig, RolloutManager},
+        run_rewrite,
+    };
+    let project = tempfile::tempdir().unwrap();
+    let source = "const fs = require('fs');\nconsole.log(fs.existsSync('package.json'));\n";
+    std::fs::write(project.path().join("app.js"), source).unwrap();
+    std::fs::write(
+        project.path().join("package.json"),
+        r#"{"name":"rollout-intent","version":"1.0.0","engines":{"node":">=20"}}"#,
+    )
+    .unwrap();
+    assert!(run_rewrite(project.path(), true).unwrap().rewrites_applied > 0);
+    let rewritten = std::fs::read(project.path().join("app.js")).unwrap();
+    assert_ne!(rewritten, source.as_bytes());
+    let history = rollback::run(project.path(), None, false);
+    let transaction = &history
+        .history
+        .iter()
+        .find(|entry| entry.state == TransactionState::Applied)
+        .unwrap()
+        .transaction_id;
+    let manager = RolloutManager::new(project.path(), Some(transaction));
+    manager
+        .promote(
+            &RolloutConfig {
+                force: true,
+                ..RolloutConfig::default()
+            },
+            None,
+            None,
+        )
+        .unwrap();
+    // A misspelled stage used to select an automatic promotion, which in this
+    // state triggers real source restoration through the confidence gate.
+    let mut state = manager.load_or_init().unwrap();
+    state.confidence_score = 0.2;
+    manager.persist(&state).unwrap();
+    let state_path = project
+        .path()
+        .join(format!(".franken-node/state/rollout/{transaction}.json"));
+    let retained_state = std::fs::read(&state_path).unwrap();
+    for arguments in [
+        vec!["--stage", "canry"],
+        vec!["--stage", "defualt", "--force"],
+        vec!["--action", "rollback", "--stage", "ramp"],
+        vec!["--action", "rollback", "--ramp-pct", "25"],
+        vec!["--action", "rollback", "--force"],
+        vec!["--action", "rollback", "--no-auto-rollback"],
+        vec![
+            "--action",
+            "rollback",
+            "--lockstep-report",
+            "unread-evidence.json",
+        ],
+    ] {
+        let output = rollout_command(project.path())
+            .args(["--migration-id", transaction])
+            .args(&arguments)
+            .output()
+            .unwrap();
+        assert_rollout_error(&output);
+        assert_eq!(
+            std::fs::read(&state_path).unwrap(),
+            retained_state,
+            "{arguments:?}"
+        );
+        assert_eq!(
+            std::fs::read(project.path().join("app.js")).unwrap(),
+            rewritten,
+            "{arguments:?}"
+        );
+    }
+    let restored = rollout_command(project.path())
+        .args(["--migration-id", transaction, "--action", "rollback"])
+        .output()
+        .unwrap();
+    assert!(restored.status.success(), "{restored:?}");
+    let report: serde_json::Value = serde_json::from_slice(&restored.stdout).unwrap();
+    assert_eq!(report["status"], "rolled_back");
+    assert_eq!(report["source_rollback"]["restoration_recorded"], true);
+    assert_eq!(
+        std::fs::read_to_string(project.path().join("app.js")).unwrap(),
+        source
+    );
+}
+
+#[test]
+fn rollout_cli_valid_actions_preserve_progression_and_inferred_ramp() {
+    let project = tempfile::tempdir().unwrap();
+    for (arguments, stage, percentage) in [
+        (vec!["--action", "status"], "shadow", 0),
+        (vec!["--force"], "canary", 5),
+        (vec!["--force", "--ramp-pct", "40"], "ramp", 40),
+        (
+            vec!["--force", "--stage", "RAMP", "--ramp-pct", "100"],
+            "ramp",
+            100,
+        ),
+        (vec!["--force"], "default", 100),
+        (vec!["--action", "status"], "default", 100),
+        (vec!["--action", "rollback"], "aborted", 0),
+    ] {
+        let output = rollout_command(project.path())
+            .args(["--migration-id", "valid-progression"])
+            .args(&arguments)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{arguments:?}: {output:?}");
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["stage"], stage);
+        assert_eq!(report["ramp_pct"], percentage);
+        assert_eq!(report["lockstep_verified"], false);
+    }
 }
 
 #[test]

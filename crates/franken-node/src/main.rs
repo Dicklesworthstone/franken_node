@@ -35903,6 +35903,7 @@ fn clap_json_error_surface() -> (&'static str, &'static str) {
         ("migrate", Some("audit")) => (MIGRATE_ERROR_CLI_SCHEMA_VERSION, "migrate.audit"),
         ("migrate", Some("rewrite")) => (MIGRATE_ERROR_CLI_SCHEMA_VERSION, "migrate.rewrite"),
         ("migrate", Some("validate")) => (MIGRATE_ERROR_CLI_SCHEMA_VERSION, "migrate.validate"),
+        ("migrate", Some("rollout")) => (MIGRATE_ERROR_CLI_SCHEMA_VERSION, "migrate.rollout"),
         ("migrate", Some("report")) => (MIGRATE_ERROR_CLI_SCHEMA_VERSION, "migrate.report"),
         ("runtime", Some("lane")) => match positional.get(2).map(String::as_str) {
             Some("assign") => (RUNTIME_ERROR_CLI_SCHEMA_VERSION, "runtime.lane.assign"),
@@ -37180,6 +37181,9 @@ fn main() -> Result<()> {
                         "`migrate rollout` requires a project path",
                     );
                 }
+                if let Err(error) = args.validate_intent() {
+                    return migrate_fail("migrate.rollout", args.json, error);
+                }
 
                 let manager = migration::rollout::RolloutManager::new(
                     &args.project_path,
@@ -37193,16 +37197,16 @@ fn main() -> Result<()> {
                     ..Default::default()
                 };
 
-                let target_stage = args
-                    .stage
-                    .as_deref()
-                    .and_then(migration::rollout::RolloutStage::parse);
+                let target_stage = args.stage.map(Into::into);
 
-                let report = match args.action.as_str() {
-                    "status" => manager.status().map_err(|e| e.to_string()),
-                    "rollback" => manager.rollback("operator requested rollout rollback"),
-                    "promote" => manager.promote(&config, target_stage, args.ramp_pct),
-                    other => Err(format!("unknown rollout action: {other}")),
+                let report = match args.action {
+                    cli::MigrateRolloutAction::Status => manager.status().map_err(|e| e.to_string()),
+                    cli::MigrateRolloutAction::Rollback => {
+                        manager.rollback("operator requested rollout rollback")
+                    }
+                    cli::MigrateRolloutAction::Promote => {
+                        manager.promote(&config, target_stage, args.ramp_pct)
+                    }
                 };
 
                 let report = match report {

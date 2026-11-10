@@ -1361,6 +1361,34 @@ pub struct MigrateValidateArgs {
     pub attest_regression: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum MigrateRolloutAction {
+    Promote,
+    Rollback,
+    Status,
+}
+
+/// A requested promotion destination. Aborting is a separate action so a
+/// misspelled or inappropriate stage can never select automatic progression.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum MigrateRolloutStage {
+    Shadow,
+    Canary,
+    Ramp,
+    Default,
+}
+
+impl From<MigrateRolloutStage> for crate::migration::rollout::RolloutStage {
+    fn from(stage: MigrateRolloutStage) -> Self {
+        match stage {
+            MigrateRolloutStage::Shadow => Self::Shadow,
+            MigrateRolloutStage::Canary => Self::Canary,
+            MigrateRolloutStage::Ramp => Self::Ramp,
+            MigrateRolloutStage::Default => Self::Default,
+        }
+    }
+}
+
 #[derive(Debug, Parser)]
 pub struct MigrateRolloutArgs {
     /// Path to the project to roll out.
@@ -1374,15 +1402,15 @@ pub struct MigrateRolloutArgs {
     pub migration_id: Option<String>,
 
     /// Rollout action: promote, rollback, or status (default: promote).
-    #[arg(long, default_value = "promote", value_parser = ["promote", "rollback", "status"])]
-    pub action: String,
+    #[arg(long, value_enum, default_value = "promote")]
+    pub action: MigrateRolloutAction,
 
     /// Target stage override: shadow, canary, ramp, or default.
-    #[arg(long)]
-    pub stage: Option<String>,
+    #[arg(long, value_enum, ignore_case = true)]
+    pub stage: Option<MigrateRolloutStage>,
 
-    /// Target ramp percentage (0..=100) when in ramp stage.
-    #[arg(long)]
+    /// Target ramp percentage (1..=100); the resulting stage must be ramp.
+    #[arg(long, value_parser = clap::value_parser!(u8).range(1..=100))]
     pub ramp_pct: Option<u8>,
 
     /// Force stage progression bypassing confidence score checks.
@@ -1404,6 +1432,40 @@ pub struct MigrateRolloutArgs {
     /// Emit structured JSON output.
     #[arg(long)]
     pub json: bool,
+}
+
+impl MigrateRolloutArgs {
+    /// Check the entire requested action before opening rollout storage.
+    /// Ignoring promotion flags on rollback could otherwise restore sources
+    /// even though the operator submitted a contradictory request.
+    pub fn validate_intent(&self) -> Result<()> {
+        if self.action != MigrateRolloutAction::Promote {
+            for (flag, supplied) in [
+                ("--stage", self.stage.is_some()),
+                ("--ramp-pct", self.ramp_pct.is_some()),
+                ("--force", self.force),
+                ("--no-auto-rollback", self.no_auto_rollback),
+                ("--lockstep-report", self.lockstep_report.is_some()),
+            ] {
+                anyhow::ensure!(
+                    !supplied,
+                    "{flag} applies only to --action promote; the requested action was not performed"
+                );
+            }
+        }
+        if let Some(percentage) = self.ramp_pct {
+            anyhow::ensure!(
+                (1..=100).contains(&percentage),
+                "--ramp-pct must be between 1 and 100"
+            );
+            anyhow::ensure!(
+                self.stage
+                    .is_none_or(|stage| stage == MigrateRolloutStage::Ramp),
+                "--ramp-pct requires the ramp stage; the requested action was not performed"
+            );
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Parser)]
@@ -5386,7 +5448,7 @@ mod tests {
             Command::Migrate(MigrateCommand::Rollout(args)) => {
                 assert!(args.json);
                 assert!(args.project_path.as_os_str().is_empty());
-                assert_eq!(args.action, "promote");
+                assert_eq!(args.action, MigrateRolloutAction::Promote);
             }
             other => panic!("expected migrate rollout, got {other:?}"),
         }

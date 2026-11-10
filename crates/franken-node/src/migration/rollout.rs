@@ -612,14 +612,22 @@ impl RolloutManager {
         if let Some(state) = self.load_existing(store)? {
             return Ok(state);
         }
+        let state = self.prepare_initial_state()?;
+        self.persist_locked(store, &state)?;
+        Ok(state)
+    }
+
+    fn prepare_initial_state(&self) -> io::Result<RolloutState> {
         let mut state = RolloutState::new(
             self.migration_id.clone(),
-            self.project_path.canonicalize()?.to_string_lossy().into_owned(),
+            self.project_path
+                .canonicalize()?
+                .to_string_lossy()
+                .into_owned(),
         );
         if self.migration_id.starts_with("txn-") {
             self.bind_source_transaction(&mut state).map_err(invalid)?;
         }
-        self.persist_locked(store, &state)?;
         Ok(state)
     }
 
@@ -746,7 +754,12 @@ impl RolloutManager {
             return Err("rollout confidence must be finite and in [0,1]; ramp step must be in [1,100]".into());
         }
         let store = self.open_store().map_err(|e| e.to_string())?;
-        let mut state = self.load_or_init_locked(&store).map_err(|e| e.to_string())?;
+        let existing = self.load_existing(&store).map_err(|e| e.to_string())?;
+        let initialize = existing.is_none();
+        let mut state = match existing {
+            Some(state) => state,
+            None => self.prepare_initial_state().map_err(|e| e.to_string())?,
+        };
         if state.current_stage == RolloutStage::Aborted || state.status == RolloutStatus::Failed {
             return Err("cannot promote an aborted/rolled-back migration or one awaiting recovery".into());
         }
@@ -800,15 +813,27 @@ impl RolloutManager {
             {
                 return Err("promotion must follow Shadow -> Canary -> Ramp 100% -> Default".into());
             }
-            if state.confidence_score < config.min_confidence_score {
-                let reason = format!("confidence score {:.2} is below minimum threshold {:.2}", state.confidence_score, config.min_confidence_score);
-                if config.auto_rollback_on_failure
-                    && let Err(error) = self.rollback_locked(&store, state, &reason)
-                {
-                    return Err(format!("{reason}; automatic rollback did not complete: {error}"));
-                }
-                return Err(reason);
+        }
+        // Invalid transition intent must not create an initial state or signed
+        // revision. Once the request is coherent, retain the same initialization
+        // and recovery ordering as every other admitted rollout operation.
+        if initialize {
+            self.persist_locked(&store, &state)
+                .map_err(|e| e.to_string())?;
+        }
+        if !config.force && state.confidence_score < config.min_confidence_score {
+            let reason = format!(
+                "confidence score {:.2} is below minimum threshold {:.2}",
+                state.confidence_score, config.min_confidence_score
+            );
+            if config.auto_rollback_on_failure
+                && let Err(error) = self.rollback_locked(&store, state, &reason)
+            {
+                return Err(format!(
+                    "{reason}; automatic rollback did not complete: {error}"
+                ));
             }
+            return Err(reason);
         }
         // Idempotent stage requests must still examine supplied evidence: a
         // completed rollout is not permission to ignore an authenticated FAIL.
@@ -1257,6 +1282,36 @@ mod tests {
         let mgr = RolloutManager::new(dir.path(), Some("mig-test-03"));
         let err = mgr.promote(&RolloutConfig::default(), Some(RolloutStage::Default), None).unwrap_err();
         assert!(err.contains("cannot skip from Shadow directly to Default"));
+    }
+
+    #[test]
+    fn invalid_initial_promotion_does_not_persist_an_admission() {
+        for (stage, percentage, force) in [
+            (Some(RolloutStage::Default), None, false),
+            (Some(RolloutStage::Ramp), Some(25), false),
+            (Some(RolloutStage::Aborted), None, true),
+            (Some(RolloutStage::Canary), Some(25), true),
+            (Some(RolloutStage::Ramp), Some(0), true),
+            (Some(RolloutStage::Ramp), Some(101), true),
+            (None, Some(25), true),
+        ] {
+            let dir = tempdir().unwrap();
+            let mgr = RolloutManager::new(dir.path(), Some("invalid-intent"));
+            let config = RolloutConfig {
+                force,
+                ..RolloutConfig::default()
+            };
+            assert!(
+                mgr.promote(&config, stage, percentage).is_err(),
+                "{stage:?} {percentage:?}"
+            );
+            assert!(
+                !dir.path()
+                    .join(".franken-node/state/rollout/invalid-intent.json")
+                    .exists(),
+                "a rejected transition must not become a durable rollout admission"
+            );
+        }
     }
 
     #[test]
