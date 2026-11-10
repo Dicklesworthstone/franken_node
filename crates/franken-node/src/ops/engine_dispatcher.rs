@@ -919,6 +919,103 @@ fn append_runtime_evidence_containment_mask(
     Ok(())
 }
 
+#[cfg(all(feature = "engine", target_os = "linux"))]
+struct BubblewrapNativeWorkerImage {
+    // Keep the private source path alive until the worker and its containment
+    // have been reaped. No executable descriptor is inherited by the child.
+    _directory: tempfile::TempDir,
+    executable: PathBuf,
+}
+
+#[cfg(all(feature = "engine", target_os = "linux"))]
+impl BubblewrapNativeWorkerImage {
+    fn open(worker_path: &Path, protected_state_root: &Path) -> Result<Self> {
+        use rustix::fs::{Mode, OFlags, open};
+
+        if !worker_path.is_absolute() {
+            anyhow::bail!("contained native-session worker path must be absolute");
+        }
+        // In the CLI this opens /proc/self/exe before Bubblewrap replaces the
+        // process image. Resolving that path in Bubblewrap would execute
+        // Bubblewrap itself; canonicalizing it would race an installed-image
+        // replacement. Snapshot the opened image instead, once per session.
+        let source = open(
+            worker_path,
+            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK,
+            Mode::empty(),
+        )
+        .with_context(|| format!("open contained native worker {}", worker_path.display()))?;
+        Self::from_open_file(std::fs::File::from(source), protected_state_root)
+    }
+
+    fn from_open_file(mut source: std::fs::File, protected_state_root: &Path) -> Result<Self> {
+        use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
+
+        if !protected_state_root.is_absolute() {
+            anyhow::bail!("contained native-session image state root must be absolute");
+        }
+        let before = source
+            .metadata()
+            .context("inspect opened contained native worker")?;
+        if !before.is_file() || before.permissions().mode() & 0o111 == 0 || before.len() == 0 {
+            anyhow::bail!(
+                "contained native-session worker must be a nonempty executable regular file"
+            );
+        }
+        let copy_limit = before
+            .len()
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("contained native-session worker image is too large"))?;
+        let directory = tempfile::Builder::new()
+            .prefix("native-worker-image-")
+            .tempdir_in(protected_state_root)
+            .context("create private contained native worker image directory")?;
+        let executable = directory.path().join("native-session-worker");
+        let mut snapshot = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&executable)
+            .context("create contained native worker image")?;
+        // Limit both memory and the read length. An unexpectedly growing or
+        // truncated source must not turn startup into an unbounded copy or
+        // admit a partial executable. atime changes from this read are benign.
+        let copied = std::io::copy(&mut (&mut source).take(copy_limit), &mut snapshot)
+            .context("snapshot contained native worker image")?;
+        let after = source
+            .metadata()
+            .context("reinspect opened contained native worker")?;
+        if copied != before.len()
+            || after.len() != before.len()
+            || after.mtime() != before.mtime()
+            || after.mtime_nsec() != before.mtime_nsec()
+            || after.ctime() != before.ctime()
+            || after.ctime_nsec() != before.ctime_nsec()
+        {
+            anyhow::bail!("contained native-session worker image changed while being copied");
+        }
+        snapshot
+            .set_permissions(std::fs::Permissions::from_mode(0o500))
+            .context("seal contained native worker image permissions")?;
+        // Executing a file while any writable descriptor remains open fails
+        // with ETXTBSY; none may escape into Bubblewrap or a concurrent spawn.
+        drop(snapshot);
+        Ok(Self {
+            _directory: directory,
+            executable,
+        })
+    }
+
+    fn append_read_only_bind(&self, command: &mut Command) {
+        // Mount only this image after the evidence-state mask. The persistent
+        // keys and other sessions' temporary images stay hidden from guests.
+        command
+            .arg("--ro-bind")
+            .arg(&self.executable)
+            .arg(&self.executable);
+    }
+}
+
 #[cfg(feature = "engine")]
 pub(super) fn validate_runtime_evidence_private_file_metadata(
     path: &Path,
@@ -8625,6 +8722,20 @@ impl EngineDispatcher {
         );
         drop(request);
 
+        // Hold the private snapshot through every worker/containment cleanup
+        // path. Ordinary sessions continue to execute their pinned path
+        // directly; only Bubblewrap needs a stable path in its new namespace.
+        #[cfg(target_os = "linux")]
+        let contained_worker_image = process_spawn_admission
+            .map(|_| {
+                BubblewrapNativeWorkerImage::open(
+                    native_session_worker_path,
+                    &runtime_evidence_state_root,
+                )
+            })
+            .transpose()
+            .context("pin native-session executable for Bubblewrap")?;
+
         let started = Instant::now();
         let mut worker_args = Vec::<OsString>::new();
         #[cfg(test)]
@@ -8683,6 +8794,9 @@ impl EngineDispatcher {
                     )
                     .into());
                 }
+                let worker_image = contained_worker_image.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("Bubblewrap native-session worker image was not prepared")
+                })?;
                 let mut command = Command::new(containment.binary_path());
                 command.args([
                     "--info-fd",
@@ -8725,11 +8839,12 @@ impl EngineDispatcher {
                         .arg(telemetry_root)
                         .arg(telemetry_root);
                 }
+                worker_image.append_read_only_bind(&mut command);
                 command
                     .args(["--proc", "/proc", "--dev", "/dev", "--chdir"])
                     .arg(&working_dir)
                     .arg("--")
-                    .arg(native_session_worker_path)
+                    .arg(&worker_image.executable)
                     .args(&worker_args);
                 command
             }
@@ -14909,6 +15024,117 @@ mod tests {
             append_runtime_evidence_containment_mask(&mut command, Path::new("relative/state"))
                 .expect_err("a relative mask target must fail closed");
         assert!(relative_error.to_string().contains("must be absolute"));
+    }
+
+    #[cfg(all(feature = "engine", target_os = "linux"))]
+    #[test]
+    fn bubblewrap_native_worker_image_survives_replacement_and_preserves_evidence_mask() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        if !Path::new("/usr/bin/bwrap").is_file() {
+            eprintln!("SKIP: /usr/bin/bwrap is required for the contained image regression");
+            return;
+        }
+        let work = tempfile::tempdir().expect("create contained image fixture");
+        let state_root = work.path().join("private-state");
+        let key_directory = state_root.join("keys");
+        std::fs::create_dir_all(&key_directory).expect("create private key directory");
+        let private_key = key_directory.join("product-root.key");
+        std::fs::write(&private_key, b"must remain hidden").expect("write private key fixture");
+
+        let installed = work.path().join("installed-worker");
+        let replacement = work.path().join("replacement-worker");
+        std::fs::copy("/bin/echo", &installed).expect("copy original executable");
+        std::fs::copy("/bin/false", &replacement).expect("copy different executable");
+        let opened = std::fs::File::open(&installed).expect("pin original executable");
+        std::fs::rename(&replacement, &installed).expect("replace installed executable");
+        // The installed path now names false, and the opened echo inode has
+        // been unlinked. Any canonicalized/reopened path would lose the image.
+        let image = BubblewrapNativeWorkerImage::from_open_file(opened, &state_root)
+            .expect("snapshot the opened, unlinked executable");
+        let staged_path = image.executable.clone();
+        assert_eq!(
+            std::fs::read(&staged_path).expect("read staged executable"),
+            std::fs::read("/bin/echo").expect("read original executable bytes")
+        );
+        assert_eq!(
+            std::fs::metadata(&staged_path)
+                .expect("inspect staged executable")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o500
+        );
+
+        let mut command = Command::new("/usr/bin/bwrap");
+        command.args([
+            "--unshare-user",
+            "--disable-userns",
+            "--assert-userns-disabled",
+            "--unshare-pid",
+            "--unshare-cgroup",
+            "--unshare-ipc",
+            "--unshare-uts",
+            "--new-session",
+            "--cap-drop",
+            "ALL",
+            "--ro-bind",
+            "/",
+            "/",
+        ]);
+        append_runtime_evidence_containment_mask(&mut command, &state_root)
+            .expect("mask parent-owned keys");
+        image.append_read_only_bind(&mut command);
+        command
+            .args([
+                "--proc",
+                "/proc",
+                "--dev",
+                "/dev",
+                "--",
+                "/bin/sh",
+                "-c",
+                r#"test ! -e "$1/keys/product-root.key" || exit 81
+test -x "$2" || exit 82
+if chmod 0700 "$2" 2>/dev/null; then exit 83; fi
+exec "$2" pinned-worker-image"#,
+                "contained-image-regression",
+            ])
+            .arg(&state_root)
+            .arg(&staged_path);
+        let output = command.output().expect("launch actual Bubblewrap");
+        assert!(
+            output.status.success(),
+            "contained image failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout, b"pinned-worker-image\n");
+        assert_eq!(
+            std::fs::read(&private_key).expect("parent key remains intact"),
+            b"must remain hidden"
+        );
+        drop(image);
+        assert!(!staged_path.exists(), "reaped worker image must be cleaned up");
+    }
+
+    #[cfg(all(feature = "engine", target_os = "linux"))]
+    #[test]
+    fn bubblewrap_native_worker_image_refuses_invalid_sources() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let work = tempfile::tempdir().expect("create invalid image fixture");
+        let source = work.path().join("worker");
+        std::fs::write(&source, b"not executable").expect("write invalid executable");
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o600))
+            .expect("remove executable permissions");
+        assert!(BubblewrapNativeWorkerImage::open(&source, work.path()).is_err());
+        std::fs::write(&source, b"").expect("truncate invalid executable");
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o500))
+            .expect("set executable permissions");
+        assert!(BubblewrapNativeWorkerImage::open(&source, work.path()).is_err());
+        assert!(BubblewrapNativeWorkerImage::open(work.path(), work.path()).is_err());
+        assert!(BubblewrapNativeWorkerImage::open(Path::new("relative-worker"), work.path()).is_err());
     }
 
     #[cfg(feature = "engine")]

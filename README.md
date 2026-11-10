@@ -2494,9 +2494,15 @@ because the project directory is also the guest filesystem sandbox root.
 
 These directories are created lazily with owner-only permissions. Native
 startup fails closed if the resolved user-state directory is inside the guest
-project root. A process-spawn-enabled Bubblewrap worker additionally masks the
-complete runtime-evidence directory with an empty `tmpfs`, so an allowed child
-utility cannot read the parent-owned root through the read-only host-root bind.
+project root. A process-spawn-enabled Bubblewrap worker masks the complete
+runtime-evidence directory with a fresh `tmpfs`, then exposes only a read-only
+snapshot of its opened executable under that mask. Parent-owned keys and other
+session state remain hidden from allowed child utilities. The snapshot preserves
+the executable's bytes across replacement of its installed pathname and avoids
+resolving `/proc/self/exe` after Bubblewrap has become the current process.
+Each contained launch stages one executable copy; the protected state filesystem
+must permit execution, and a `noexec` mount causes startup to fail closed. Normal
+supervisor cleanup removes the snapshot after reaping the worker.
 
 Every durable write goes through an atomic-rename + directory-fsync
 TempFileGuard; readers take an `fs2` advisory lock when consistency
