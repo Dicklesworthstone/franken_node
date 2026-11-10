@@ -49,7 +49,7 @@
 mod structure;
 
 #[path = "incident_native_capture.rs"]
-mod native_capture;
+pub(crate) mod native_capture;
 pub use native_capture::{CapturedNativeTerminalState, VerifiedNativeCaptureMetadata};
 
 #[path = "incident_run_origin.rs"]

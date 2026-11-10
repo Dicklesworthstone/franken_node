@@ -13,6 +13,9 @@ use frankenengine_verifier_sdk::incident_bundle::{
     decode_evidence_json, verify_incident_bundle, verify_incident_bundle_with_run_key,
     verify_incident_bundle_with_runtime_keys,
 };
+use frankenengine_verifier_sdk::publisher_source::{
+    MAX_PUBLISHER_SOURCE_INPUT_BYTES, PublisherSourceError, verify_publisher_source_input,
+};
 use frankenengine_verifier_sdk::resolution::{
     ResolutionReceiptError, verify_signed_resolution_receipt,
 };
@@ -21,7 +24,7 @@ use sha2::{Digest, Sha256};
 
 const PROTOCOL: &str = "franken-verifier-cli/v1";
 const MAX_RESPONSE_BYTES: usize = 64 * 1024;
-const USAGE: &str = "franken-verifier verify --format incident-bundle|capsule|signed-bundle|resolution-receipt --trusted-key-hex HEX [--trusted-run-key-hex HEX [--trusted-runtime-key-hex HEX]] [--signature-hex HEX] < artifact";
+const USAGE: &str = "franken-verifier verify --format incident-bundle|capsule|signed-bundle|resolution-receipt|publisher-source --trusted-key-hex HEX [--trusted-run-key-hex HEX [--trusted-runtime-key-hex HEX]] [--signature-hex HEX] < artifact";
 
 #[derive(Debug)]
 struct Request {
@@ -78,7 +81,7 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
     let format = format.ok_or_else(usage)?;
     if !matches!(
         format.as_str(),
-        "incident-bundle" | "capsule" | "signed-bundle" | "resolution-receipt"
+        "incident-bundle" | "capsule" | "signed-bundle" | "resolution-receipt" | "publisher-source"
     ) {
         return Err(failure("UNSUPPORTED_FORMAT", "unsupported evidence format"));
     }
@@ -128,7 +131,7 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
         (_, _, None) => None,
     };
     let signature = match (format.as_str(), signature) {
-        ("signed-bundle", Some(text)) => {
+        ("signed-bundle" | "publisher-source", Some(text)) => {
             let mut bytes = [0_u8; 64];
             hex::decode_to_slice(text, &mut bytes).map_err(|_| {
                 failure(
@@ -138,7 +141,7 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
             })?;
             Some(bytes)
         }
-        ("signed-bundle", None) => {
+        ("signed-bundle" | "publisher-source", None) => {
             return Err(failure(
                 "SIGNATURE_MALFORMED",
                 "detached signature is required",
@@ -198,8 +201,34 @@ fn resolution_failure(error: &ResolutionReceiptError) -> Failure {
     failure(code, "signed resolution receipt verification failed")
 }
 
+fn publisher_source_failure(error: &PublisherSourceError) -> Failure {
+    let code = match error {
+        PublisherSourceError::InputTooLarge => "INPUT_TOO_LARGE",
+        PublisherSourceError::InputJsonInvalid => "JSON_INVALID",
+        PublisherSourceError::SignatureInvalid => "SIGNATURE_INVALID",
+        PublisherSourceError::ArtifactHashMismatch => "INTEGRITY_MISMATCH",
+        _ => "EVIDENCE_INVALID",
+    };
+    failure(code, "publisher-signed source verification failed")
+}
+
 fn verify(request: &Request, bytes: &[u8]) -> Result<Value, Failure> {
     match request.format.as_str() {
+        "publisher-source" => {
+            let signature = request
+                .signature
+                .as_ref()
+                .ok_or_else(|| failure("SIGNATURE_MALFORMED", "detached signature is required"))?;
+            let verified = verify_publisher_source_input(bytes, signature, &request.anchor)
+                .map_err(|error| publisher_source_failure(&error))?;
+            // These are authenticated publisher statements and captured bytes.
+            // The independent reader does not reconstruct the native graph,
+            // establish current revocation, or authorize workload execution.
+            Ok(json!({
+                "scope": "authenticated_publisher_source_content",
+                "facts": verified,
+            }))
+        }
         "resolution-receipt" => {
             let receipt = verify_signed_resolution_receipt(&request.anchor, bytes)
                 .map_err(|error| resolution_failure(&error))?;
@@ -337,19 +366,28 @@ fn verify(request: &Request, bytes: &[u8]) -> Result<Value, Failure> {
 
 fn run(args: &[String], input: &mut impl Read) -> Result<Value, Failure> {
     let request = arguments(args)?;
+    let input_limit = if request.format == "publisher-source" {
+        MAX_PUBLISHER_SOURCE_INPUT_BYTES
+    } else {
+        MAX_INCIDENT_BUNDLE_BYTES
+    };
     let mut bytes = Vec::new();
     input
-        .take(MAX_INCIDENT_BUNDLE_BYTES as u64 + 1)
+        .take(input_limit as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|_| Failure {
             code: "INPUT_IO",
             message: "cannot read evidence from stdin",
             exit: 2,
         })?;
-    if bytes.len() > MAX_INCIDENT_BUNDLE_BYTES {
+    if bytes.len() > input_limit {
         return Err(failure(
             "INPUT_TOO_LARGE",
-            "evidence exceeds the 64 MiB input limit",
+            if request.format == "publisher-source" {
+                "publisher source evidence exceeds its bounded input limit"
+            } else {
+                "evidence exceeds the 64 MiB input limit"
+            },
         ));
     }
     let mut result = verify(&request, &bytes)?;
@@ -514,6 +552,192 @@ mod tests {
                 .unwrap_err()
                 .code,
             "JSON_INVALID",
+        );
+    }
+
+    fn publisher_source_cli_fixture(with_authority: bool) -> (Vec<String>, Vec<u8>, Vec<u8>) {
+        use base64::Engine as _;
+        use ed25519_dalek::{Signer, SigningKey};
+
+        // Keep the real producer's source capsule unchanged. This test signs
+        // a separate registration statement; it does not simulate a registry
+        // admission, provenance attestation, or native execution.
+        let vectors: Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/module_source_capsules.json"
+        ))
+        .unwrap();
+        let capsule = base64::engine::general_purpose::STANDARD
+            .decode(
+                vectors["vectors"][0]["module_sources"]["capsule_base64"]
+                    .as_str()
+                    .unwrap(),
+            )
+            .unwrap();
+        let mut manifest = json!({
+            "schema_version": "franken-node/extension-registration-manifest/v1",
+            "name": "source-audit",
+            "publisher_id": "independent-publisher",
+            "initial_version": {
+                "version": "1.0.0",
+                "parent_version": null,
+                "content_hash": hex::encode(Sha256::digest(&capsule)),
+                "registered_at": "2026-11-10T00:00:00Z",
+                "compatible_with": [],
+            },
+            "tags": [],
+        });
+        if with_authority {
+            manifest["schema_version"] = json!("franken-node/extension-registration-manifest/v2");
+            manifest["runtime_authority"] = json!({
+                "schema_version": "franken-node/artifact-runtime-authority/v1",
+                "policy_revision": "source-audit-policy",
+                "allowed_capabilities": ["console", "heap_allocate", "vm_dispatch"],
+                "allow_process_shape": false,
+                "max_instructions": u64::MAX,
+                "max_registers": 128,
+                "max_call_depth": 32,
+                "max_heap_objects": 128,
+                "max_total_memory_bytes": u64::MAX,
+                "max_console_entries": 8,
+                "max_parse_source_bytes": 65536,
+                "max_parse_tokens": 4096,
+                "max_parse_recursion_depth": 32,
+            });
+        }
+        let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
+        let signer = SigningKey::from_bytes(&[21_u8; 32]);
+        let mut arguments = args(
+            "publisher-source",
+            &hex::encode(signer.verifying_key().as_bytes()),
+        );
+        arguments.extend([
+            "--signature-hex".to_string(),
+            hex::encode(signer.sign(&manifest_bytes).to_bytes()),
+        ]);
+        let input = serde_json::to_vec(&json!({
+            "schema_version": "franken-verifier/publisher-source-input/v1",
+            "manifest_base64": base64::engine::general_purpose::STANDARD.encode(&manifest_bytes),
+            "capsule_base64": base64::engine::general_purpose::STANDARD.encode(&capsule),
+        }))
+        .unwrap();
+        (arguments, input, capsule)
+    }
+
+    #[test]
+    fn publisher_source_cli_authenticates_exact_bytes_without_an_execution_claim() {
+        for with_authority in [false, true] {
+            let (arguments, input, capsule) = publisher_source_cli_fixture(with_authority);
+            let verified = run(&arguments, &mut input.as_slice()).unwrap();
+            assert_eq!(verified["format"], "publisher-source");
+            assert_eq!(verified["scope"], "authenticated_publisher_source_content");
+            assert_eq!(verified["verdict"], "verified");
+            assert_eq!(
+                verified["artifact_sha256"],
+                hex::encode(Sha256::digest(&input)),
+            );
+            let facts = &verified["facts"];
+            assert_eq!(facts["package_name"], "source-audit");
+            assert_eq!(facts["publisher_id"], "independent-publisher");
+            assert_eq!(
+                facts["artifact_sha256"],
+                format!("sha256:{}", hex::encode(Sha256::digest(&capsule))),
+            );
+            assert_eq!(facts["capsule"]["graph_hash_recomputed"], false);
+            assert_eq!(facts["capsule"]["capsule_bytes"], capsule.len());
+            assert!(facts["capsule"]["file_count"].as_u64().unwrap() > 0);
+            if with_authority {
+                assert_eq!(
+                    facts["runtime_authority"]["max_instructions"],
+                    u64::MAX.to_string(),
+                );
+                assert_eq!(
+                    facts["runtime_authority"]["max_total_memory_bytes"],
+                    u64::MAX.to_string(),
+                );
+            } else {
+                assert!(facts["runtime_authority"].is_null());
+            }
+            let report = verified.to_string();
+            assert!(!report.contains("node_modules"));
+            assert!(!report.contains("PRIVATE-SOURCE-SENTINEL"));
+            assert!(facts.get("entrypoint").is_none());
+            assert!(facts.get("provenance").is_none());
+        }
+    }
+
+    #[test]
+    fn publisher_source_requires_its_detached_signature_and_independent_anchor() {
+        assert_eq!(
+            arguments(&args("publisher-source", ANCHOR))
+                .unwrap_err()
+                .code,
+            "SIGNATURE_MALFORMED",
+        );
+        let (mut malformed, input, _) = publisher_source_cli_fixture(false);
+        *malformed.last_mut().unwrap() = "invalid-signature".into();
+        assert_eq!(
+            arguments(&malformed).unwrap_err().code,
+            "SIGNATURE_MALFORMED"
+        );
+
+        let (mut foreign, _, _) = publisher_source_cli_fixture(false);
+        foreign[4] = ANCHOR.to_string();
+        assert_eq!(
+            run(&foreign, &mut input.as_slice()).unwrap_err().code,
+            "SIGNATURE_INVALID",
+        );
+        for option in ["--trusted-run-key-hex", "--trusted-runtime-key-hex"] {
+            let (mut unrelated, _, _) = publisher_source_cli_fixture(false);
+            unrelated.extend([option.to_string(), ANCHOR.to_string()]);
+            assert_eq!(arguments(&unrelated).unwrap_err().code, "USAGE");
+        }
+        let (mut duplicate, _, _) = publisher_source_cli_fixture(false);
+        duplicate.extend(["--signature-hex".to_string(), "00".repeat(64)]);
+        assert_eq!(arguments(&duplicate).unwrap_err().code, "USAGE");
+    }
+
+    #[test]
+    fn publisher_source_transport_does_not_hide_tampering_or_extra_claims() {
+        use base64::Engine as _;
+
+        let (arguments, input, mut capsule) = publisher_source_cli_fixture(false);
+        let mut transport: Value = serde_json::from_slice(&input).unwrap();
+        *capsule.last_mut().unwrap() ^= 1;
+        transport["capsule_base64"] =
+            json!(base64::engine::general_purpose::STANDARD.encode(capsule));
+        let changed = serde_json::to_vec(&transport).unwrap();
+        assert_eq!(
+            run(&arguments, &mut changed.as_slice()).unwrap_err().code,
+            "INTEGRITY_MISMATCH",
+        );
+
+        let mut transport: Value = serde_json::from_slice(&input).unwrap();
+        transport["execution_authorized"] = json!(true);
+        let extra = serde_json::to_vec(&transport).unwrap();
+        assert_eq!(
+            run(&arguments, &mut extra.as_slice()).unwrap_err().code,
+            "EVIDENCE_INVALID",
+        );
+        let mut duplicate = br#"{"schema_version":"duplicate","#.to_vec();
+        duplicate.extend_from_slice(&input[1..]);
+        let refusal = run(&arguments, &mut duplicate.as_slice()).unwrap_err();
+        assert_eq!(refusal.code, "JSON_INVALID");
+        assert_eq!(
+            refusal.message,
+            "publisher-signed source verification failed"
+        );
+    }
+
+    #[test]
+    fn publisher_source_stream_uses_its_own_bound_before_decoding() {
+        let (arguments, _, _) = publisher_source_cli_fixture(false);
+        let mut input = io::repeat(b' ').take(MAX_PUBLISHER_SOURCE_INPUT_BYTES as u64 + 2);
+        let refusal = run(&arguments, &mut input).unwrap_err();
+        assert_eq!(refusal.code, "INPUT_TOO_LARGE");
+        assert_eq!(
+            input.limit(),
+            1,
+            "stop reading at the publisher transport bound"
         );
     }
 

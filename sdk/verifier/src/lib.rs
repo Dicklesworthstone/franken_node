@@ -70,6 +70,7 @@ pub mod counterfactual;
 pub mod honesty_manifest;
 pub mod incident_bundle;
 pub mod migration_throughput;
+pub mod publisher_source;
 pub mod resolution;
 
 /// SDK version string for compatibility checks.

@@ -22,6 +22,8 @@ for case in cases:
                                  trusted_runtime_public_key_hex=case.get("runtime_anchor"))
     except VerifierError as error:
         assert error.code == case["expected"], (case["name"], error.code, case["expected"])
+        if case["format"] == "publisher-source":
+            assert "PRIVATE-" not in str(error)
         print(json.dumps({"case": case["name"], "result": error.code}), flush=True)
     else:
         assert case["expected"] == "verified", case["name"]
@@ -47,6 +49,10 @@ for case in cases:
             assert result["facts"]["module_graph_hash"] == case["graph_hash"]
             assert result["facts"]["selected_version"] == ("1.2.3" if case["decision"] == "admit" else None)
             assert result["facts"]["capability_budget_mode"] == "enforced"
+        if case["format"] == "publisher-source":
+            assert result["scope"] == "authenticated_publisher_source_content"
+            assert result["facts"] == case["publisher_facts"]
+            assert result["facts"]["capsule"]["graph_hash_recomputed"] is False
         assert "PRIVATE-" not in json.dumps(result)
         print(json.dumps({"case": case["name"], "result": "verified", "scope": result["scope"]}), flush=True)
 
@@ -131,6 +137,20 @@ for mode in resolution_controls:
         print(json.dumps({"case": f"protocol_{mode}", "result": error.code}), flush=True)
     else:
         raise AssertionError(f"protocol_{mode}")
+publisher_controls = ["publisher_wrong_scope", "publisher_wrong_signer", "publisher_graph_recomputed",
+                      "publisher_unknown_field", "publisher_authority_missing", "publisher_v1_authority",
+                      "publisher_rounded_ceiling", "publisher_overflow_ceiling", "publisher_zero_ceiling",
+                      "publisher_invalid_capability", "publisher_authority_extra", "publisher_count_inconsistent",
+                      "publisher_unsafe_count", "publisher_bad_digest", "publisher_capsule_not_object"]
+for mode in publisher_controls:
+    try:
+        verify_artifact(json.dumps({"protocol_control": mode}).encode(), cases[0]["anchor"],
+                        verifier=str(root / "fake_verifier"), format="publisher-source", signature_hex="00" * 64)
+    except VerifierError as error:
+        assert error.code == "PROTOCOL_INVALID", (mode, error.code)
+        print(json.dumps({"case": f"protocol_{mode}", "result": error.code}), flush=True)
+    else:
+        raise AssertionError(f"protocol_{mode}")
 print(json.dumps({"consumer": "python", "matrix_cases": len(cases), "client_cases": len(client_controls),
                   "protocol_cases": len(controls) + len(run_controls) + len(runtime_controls)
-                  + len(resolution_controls) + 1, "passed": True}), flush=True)
+                  + len(resolution_controls) + len(publisher_controls) + 1, "passed": True}), flush=True)

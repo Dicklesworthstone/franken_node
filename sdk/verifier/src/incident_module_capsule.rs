@@ -1,6 +1,7 @@
 //! Independent byte-integrity inspection of the public FNSGCAP1 wire format.
 //!
-//! The capsule digest is authenticated by the enclosing incident bundle. This
+//! The capsule digest is authenticated by the enclosing incident bundle or the
+//! publisher's signed registration manifest. This
 //! reader checks the capsule and all its recorded bytes without opening paths,
 //! extracting files, importing product code or evaluating JavaScript. The graph
 //! hash is bound to the signed capture, but is NOT recomputed here: completeness,
@@ -72,8 +73,14 @@ enum Content {
     Directory,
     /// Regular-file existence only; no content length, digest, or payload.
     FileMetadata,
-    File { bytes: usize, sha256: String },
-    Symlink { target: String, sha256: String },
+    File {
+        bytes: usize,
+        sha256: String,
+    },
+    Symlink {
+        target: String,
+        sha256: String,
+    },
 }
 
 fn valid_digest(value: &str) -> bool {
@@ -87,7 +94,7 @@ fn valid_hash(value: &str) -> bool {
     value.strip_prefix("sha256:").is_some_and(valid_digest)
 }
 
-fn capsule_digest(bytes: &[u8]) -> String {
+pub(crate) fn capsule_digest(bytes: &[u8]) -> String {
     let mut hash = Sha256::new();
     hash.update(HASH_DOMAIN);
     hash.update((bytes.len() as u64).to_le_bytes());
@@ -124,7 +131,35 @@ fn canonical_conditions(values: &[String]) -> bool {
         && values.windows(2).all(|pair| pair[0] < pair[1])
 }
 
-fn verify_frame(bytes: &[u8], graph_hash: &str) -> Result<()> {
+/// Byte-integrity facts from a capsule whose enclosing statement was verified.
+/// No source path, link target, condition name, or source bytes are returned.
+/// The recorded graph commitment is authenticated, never recomputed here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SourceCapsuleSummary {
+    pub schema_version: String,
+    pub graph_input_hash: String,
+    pub graph_hash_recomputed: bool,
+    pub capsule_bytes: usize,
+    pub payload_bytes: usize,
+    pub input_count: usize,
+    pub file_count: usize,
+    pub metadata_file_count: usize,
+    pub directory_count: usize,
+    pub missing_count: usize,
+    pub symlink_count: usize,
+    pub symlink_policy: String,
+    /// Explicit complete condition override; None means native defaults.
+    pub condition_count: Option<usize>,
+    pub additional_condition_count: usize,
+}
+
+/// The caller authenticates and bounds these bytes before inspection. Incident
+/// verification additionally supplies its separately captured graph commitment.
+pub(crate) fn inspect_authenticated(bytes: &[u8]) -> Result<SourceCapsuleSummary> {
+    verify_frame(bytes, None)
+}
+
+fn verify_frame(bytes: &[u8], graph_hash: Option<&str>) -> Result<SourceCapsuleSummary> {
     if bytes.len() < PREFIX_BYTES || &bytes[..8] != MAGIC {
         return Err(invalid(FIELD, "invalid source capsule framing"));
     }
@@ -154,7 +189,7 @@ fn verify_frame(bytes: &[u8], graph_hash: &str) -> Result<()> {
             "unsupported source capsule schema or graph hash",
         ));
     }
-    if !ct_str_eq(&header.graph_hash, graph_hash) {
+    if graph_hash.is_some_and(|expected| !ct_str_eq(&header.graph_hash, expected)) {
         return Err(invalid(
             FIELD,
             "source capsule graph hash disagrees with captured graph identity",
@@ -276,7 +311,37 @@ fn verify_frame(bytes: &[u8], graph_hash: &str) -> Result<()> {
             "source capsule is missing its root or contains unclaimed payload bytes",
         ));
     }
-    Ok(())
+    let mut counts = [0_usize; 5];
+    for input in &header.inputs {
+        let kind = match &input.content {
+            Content::File { .. } => 0,
+            Content::FileMetadata => 1,
+            Content::Directory => 2,
+            Content::Missing => 3,
+            Content::Symlink { .. } => 4,
+        };
+        counts[kind] += 1;
+    }
+    Ok(SourceCapsuleSummary {
+        schema_version: header.schema_version,
+        graph_input_hash: header.graph_hash,
+        graph_hash_recomputed: false,
+        capsule_bytes: bytes.len(),
+        payload_bytes: payload.len(),
+        input_count: header.inputs.len(),
+        file_count: counts[0],
+        metadata_file_count: counts[1],
+        directory_count: counts[2],
+        missing_count: counts[3],
+        symlink_count: counts[4],
+        symlink_policy: match options.symlink_policy {
+            SymlinkPolicy::Reject => "reject",
+            SymlinkPolicy::Contained => "contained",
+        }
+        .into(),
+        condition_count: options.conditions.as_ref().map(Vec::len),
+        additional_condition_count: options.additional_conditions.len(),
+    })
 }
 
 pub(super) fn verify(value: &Value) -> Result<()> {
@@ -322,7 +387,7 @@ pub(super) fn verify(value: &Value) -> Result<()> {
             "source capsule digest does not match captured bytes",
         ));
     }
-    verify_frame(&bytes, graph_hash)
+    verify_frame(&bytes, Some(graph_hash)).map(|_| ())
 }
 
 #[cfg(test)]
@@ -387,7 +452,9 @@ pub(super) mod tests {
             path: "PRIVATE-SOURCE-SENTINEL.node".into(),
             content: Content::FileMetadata,
         });
-        header.inputs.sort_by(|left, right| left.path.cmp(&right.path));
+        header
+            .inputs
+            .sort_by(|left, right| left.path.cmp(&right.path));
         (header, payload)
     }
 
@@ -713,7 +780,10 @@ pub(super) mod tests {
             sources_from_parts(&metadata_parent, &metadata_payload),
         ));
         for (case, path) in [
-            ("metadata observation path traversal", "../PRIVATE-SOURCE-SENTINEL"),
+            (
+                "metadata observation path traversal",
+                "../PRIVATE-SOURCE-SENTINEL",
+            ),
             ("metadata observation duplicate path", "app.mjs"),
             (
                 "metadata observation without a captured parent",

@@ -50,4 +50,20 @@ for (const name of ["resolution_signed_admission", "resolution_signed_rejection"
       ? verified.facts.decision !== "admit" || verified.facts.selected_version !== "1.2.3"
       : verified.facts.decision !== "reject" || verified.facts.selected_version !== null) throw new Error("TypeScript resolution decision mismatch");
 }
-console.log(JSON.stringify({ consumer: "typescript", positive: 5, negative: 2, passed: true }));
+for (const name of ["publisher_source_v1_fixture_2", "publisher_source_v2_fixture_2"]) {
+  const source = cases.find((item) => item.name === name)!;
+  const verified = await verifyArtifact(Buffer.from(source.input_hex, "hex"), source.anchor,
+    { verifier: resolve("verifier"), format: "publisher-source", signatureHex: source.signature_hex });
+  if (verified.format !== "publisher-source" || verified.scope !== "authenticated_publisher_source_content"
+      || verified.facts.capsule.graph_hash_recomputed !== false || verified.facts.capsule.symlink_count !== 1
+      || !verified.facts.artifact_sha256.startsWith("sha256:")) throw new Error("TypeScript publisher source mismatch");
+  if (verified.facts.registration_schema === "franken-node/extension-registration-manifest/v1") {
+    const absent: null = verified.facts.runtime_authority;
+    if (absent !== null) throw new Error("TypeScript v1 source grants authority");
+  } else if (verified.facts.runtime_authority.max_instructions !== "18446744073709551615"
+      || verified.facts.runtime_authority.max_total_memory_bytes !== "18446744073709551615"
+      || verified.facts.runtime_authority.max_heap_objects !== "4294967295") {
+    throw new Error("TypeScript publisher ceilings lost precision");
+  }
+}
+console.log(JSON.stringify({ consumer: "typescript", positive: 7, negative: 2, passed: true }));

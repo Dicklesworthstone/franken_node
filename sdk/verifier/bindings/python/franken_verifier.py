@@ -18,12 +18,13 @@ from typing import Any, Literal, TypedDict
 PROTOCOL = "franken-verifier-cli/v1"
 MAX_INPUT_BYTES = 64 * 1024 * 1024
 MAX_RESPONSE_BYTES = 64 * 1024 + 1
-EvidenceFormat = Literal["incident-bundle", "capsule", "signed-bundle", "resolution-receipt"]
+EvidenceFormat = Literal["incident-bundle", "capsule", "signed-bundle", "resolution-receipt", "publisher-source"]
 _SCOPES = {
     "incident-bundle": "authenticated_recorded_incident",
     "capsule": "authenticated_capsule_content",
     "signed-bundle": "authenticated_sdk_replay_bundle",
     "resolution-receipt": "authenticated_resolution_decision",
+    "publisher-source": "authenticated_publisher_source_content",
 }
 
 
@@ -34,7 +35,7 @@ class Verification(TypedDict):
     scope: Literal["authenticated_recorded_incident", "authenticated_run_incident",
                    "authenticated_runtime_incident",
                    "authenticated_capsule_content", "authenticated_sdk_replay_bundle",
-                   "authenticated_resolution_decision"]
+                   "authenticated_resolution_decision", "authenticated_publisher_source_content"]
     artifact_sha256: str
     facts: dict[str, Any]
 
@@ -121,6 +122,90 @@ def _runtime_origin_valid(origin: Any, anchor: str) -> bool:
     )
 
 
+_PUBLISHER_CAPABILITIES = {
+    "builtin", "console", "env_read", "fs_read", "fs_write", "heap_allocate",
+    "module_load", "network_egress", "process_spawn", "random_read", "timer", "vm_dispatch",
+}
+_PUBLISHER_LIMITS = {
+    "max_instructions": 2**64 - 1, "max_registers": 65536, "max_call_depth": 10000,
+    "max_heap_objects": 2**32 - 1, "max_total_memory_bytes": 2**64 - 1,
+    "max_console_entries": 2**32 - 1, "max_parse_source_bytes": 2097152,
+    "max_parse_tokens": 131072, "max_parse_recursion_depth": 384,
+}
+
+
+def _publisher_text(value: Any, limit: int) -> bool:
+    return (_bounded_text(value) and value == value.strip()
+            and len(value.encode("utf-8")) <= limit
+            and re.search(r"[\x00-\x1f\x7f-\x9f]", value) is None)
+
+
+def _digest(value: Any) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", value) is not None
+
+
+def _decimal_limit(value: Any, limit: int) -> bool:
+    return (isinstance(value, str) and re.fullmatch(r"[1-9][0-9]{0,19}", value) is not None
+            and int(value) <= limit)
+
+
+def _publisher_authority_valid(authority: Any) -> bool:
+    if not isinstance(authority, dict) or set(authority) != {
+        "schema_version", "policy_revision", "allowed_capabilities", "allow_process_shape",
+        *_PUBLISHER_LIMITS,
+    }:
+        return False
+    capabilities = authority["allowed_capabilities"]
+    return (
+        authority["schema_version"] == "franken-node/artifact-runtime-authority/v1"
+        and _publisher_text(authority["policy_revision"], 128)
+        and type(authority["allow_process_shape"]) is bool
+        and isinstance(capabilities, list) and len(capabilities) <= len(_PUBLISHER_CAPABILITIES)
+        and all(isinstance(value, str) and value in _PUBLISHER_CAPABILITIES for value in capabilities)
+        and len(set(capabilities)) == len(capabilities)
+        and {"console", "heap_allocate", "vm_dispatch"}.issubset(capabilities)
+        and all(_decimal_limit(authority[name], limit) for name, limit in _PUBLISHER_LIMITS.items())
+    )
+
+
+def _publisher_source_valid(facts: dict[str, Any], anchor: str) -> bool:
+    summary = facts["capsule"]
+    counts = ("file_count", "metadata_file_count", "directory_count", "missing_count", "symlink_count")
+    if not isinstance(summary, dict) or set(summary) != {
+        "schema_version", "graph_input_hash", "graph_hash_recomputed", "capsule_bytes", "payload_bytes",
+        "input_count", *counts, "symlink_policy", "condition_count", "additional_condition_count",
+    }:
+        return False
+    if not all(type(summary[name]) is int and 0 <= summary[name] <= 1024
+               for name in ("input_count", *counts)):
+        return False
+    condition_count = summary["condition_count"]
+    additional_count = summary["additional_condition_count"]
+    return (
+        _publisher_text(facts["package_name"], 256) and _publisher_text(facts["publisher_id"], 256)
+        and _publisher_text(facts["version"], 128)
+        and re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", facts["version"]) is not None
+        and all(_digest(facts[name]) for name in ("manifest_sha256", "artifact_sha256", "capsule_digest"))
+        and facts["signer_key_id"] == hashlib.sha256(
+            b"artifact_signing_keyid_v1:" + (32).to_bytes(8, "little") + bytes.fromhex(anchor)
+        ).hexdigest()[:16]
+        and (facts["registration_schema"] == "franken-node/extension-registration-manifest/v1"
+             and facts["runtime_authority"] is None
+             or facts["registration_schema"] == "franken-node/extension-registration-manifest/v2"
+             and _publisher_authority_valid(facts["runtime_authority"]))
+        and summary["schema_version"] == "franken-node/module-source-capsule/v1"
+        and _digest(summary["graph_input_hash"]) and summary["graph_hash_recomputed"] is False
+        and type(summary["capsule_bytes"]) is int and 12 <= summary["capsule_bytes"] <= 5 * 1024 * 1024
+        and type(summary["payload_bytes"]) is int and 0 <= summary["payload_bytes"] <= summary["capsule_bytes"] - 12
+        and summary["input_count"] > 0 and sum(summary[name] for name in counts) == summary["input_count"]
+        and summary["symlink_policy"] in ("reject", "contained")
+        and (summary["symlink_policy"] == "contained" or summary["symlink_count"] == 0)
+        and (condition_count is None or type(condition_count) is int and 0 <= condition_count <= 64)
+        and type(additional_count) is int and 0 <= additional_count <= 62
+        and (condition_count is None or condition_count + additional_count <= 64)
+    )
+
+
 def _facts_valid(facts: Any, format: str, anchor: str, run_anchor: str | None,
                  runtime_anchor: str | None) -> bool:
     if not isinstance(facts, dict) or facts.get("signer_public_key_hex") != anchor:
@@ -135,6 +220,9 @@ def _facts_valid(facts: Any, format: str, anchor: str, run_anchor: str | None,
                                "requested_range", "policy_profile", "capability_budget_mode", "decision",
                                "selected_version", "rejected_alternative_count", "canonical_hash",
                                "signer_key_id", "signer_public_key_hex"},
+        "publisher-source": {"registration_schema", "package_name", "publisher_id", "version",
+                             "manifest_sha256", "artifact_sha256", "capsule_digest", "signer_key_id",
+                             "signer_public_key_hex", "runtime_authority", "capsule"},
     }[format]
     if run_anchor is not None:
         expected.add("run_origin")
@@ -142,6 +230,8 @@ def _facts_valid(facts: Any, format: str, anchor: str, run_anchor: str | None,
         expected.add("runtime_origin")
     if set(facts) != expected:
         return False
+    if format == "publisher-source":
+        return _publisher_source_valid(facts, anchor)
     if format == "resolution-receipt":
         selected = facts["selected_version"]
         return (
@@ -253,12 +343,12 @@ def verify_artifact(
         args.extend(["--trusted-run-key-hex", run_anchor])
     if runtime_anchor is not None:
         args.extend(["--trusted-runtime-key-hex", runtime_anchor])
-    if format == "signed-bundle":
+    if format in ("signed-bundle", "publisher-source"):
         if not _hex(signature_hex, 128):
             raise VerifierError("SIGNATURE_MALFORMED", "a detached 64-byte signature is required")
         args.extend(["--signature-hex", signature_hex])
     elif signature_hex is not None:
-        raise VerifierError("INPUT_INVALID", "detached signatures apply only to signed-bundle")
+        raise VerifierError("INPUT_INVALID", "detached signatures apply only to signed-bundle or publisher-source")
     try:
         process = subprocess.run(args, input=data, capture_output=True, timeout=timeout,
                                  check=False, shell=False)

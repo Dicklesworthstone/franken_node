@@ -5,7 +5,7 @@ import { createHash, createPrivateKey, createPublicKey, sign } from "node:crypto
 import { readFileSync, writeFileSync } from "node:fs";
 import assert from "node:assert/strict";
 
-const [incidentPath, sdkBundlePath, seedPath, output, originalRunPath, exporterAnchorPath, runAnchorPath] = process.argv.slice(2);
+const [incidentPath, sdkBundlePath, seedPath, output, originalRunPath, exporterAnchorPath, runAnchorPath, sourceCapsulesPath] = process.argv.slice(2);
 const anchor = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a";
 const foreign = "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c";
 const seed = Buffer.from(readFileSync(seedPath, "utf8").trim(), "hex");
@@ -298,5 +298,138 @@ const unknownResolutionField = clone(signedResolution); unknownResolutionField.u
 add("resolution_unknown_unsigned_field", "resolution-receipt", canonical(unknownResolutionField), "EVIDENCE_INVALID");
 add("resolution_noncanonical_bytes", "resolution-receipt", `${resolutionWire}\n`, "EVIDENCE_INVALID");
 add("resolution_duplicate_member", "resolution-receipt", `${resolutionWire.slice(0, -1)},"signature":"00"}`, "JSON_INVALID");
+// Sign exact registration bytes independently, retaining each genuine product
+// capsule without regeneration. Reading the capsule header below computes
+// expected public counts only; no source or module is executed.
+const sourceFixtures = JSON.parse(readFileSync(sourceCapsulesPath, "utf8"));
+assert.equal(sourceFixtures.execution_performed, false);
+assert.equal(sourceFixtures.vectors.length, 3);
+const sourceAuthority = {
+  schema_version: "franken-node/artifact-runtime-authority/v1", policy_revision: "publisher-policy-1",
+  allowed_capabilities: ["console", "heap_allocate", "vm_dispatch"], allow_process_shape: false,
+  max_instructions: 18_446_744_073_709_551_615n, max_registers: 65_536,
+  max_call_depth: 10_000, max_heap_objects: 4_294_967_295,
+  max_total_memory_bytes: 18_446_744_073_709_551_615n, max_console_entries: 4_294_967_295,
+  max_parse_source_bytes: 2_097_152, max_parse_tokens: 131_072, max_parse_recursion_depth: 384,
+};
+function sourceManifest(capsuleBytes, version = 1) {
+  const manifest = {
+    schema_version: `franken-node/extension-registration-manifest/v${version}`,
+    name: "source-vector", publisher_id: "publisher-node-vector",
+    initial_version: { version: "1.2.3", parent_version: null, content_hash: hash(capsuleBytes),
+      registered_at: "2026-11-10T00:00:00Z", compatible_with: [] },
+    tags: ["PRIVATE-publisher-tag"],
+  };
+  if (version === 2) manifest.runtime_authority = clone(sourceAuthority);
+  return manifest;
+}
+function sourceInput(manifestBytes, capsuleBytes) {
+  return JSON.stringify({
+    schema_version: "franken-verifier/publisher-source-input/v1",
+    manifest_base64: manifestBytes.toString("base64"), capsule_base64: capsuleBytes.toString("base64"),
+  });
+}
+function sourceFacts(manifest, manifestBytes, capsuleBytes) {
+  assert.equal(capsuleBytes.subarray(0, 8).toString("ascii"), "FNSGCAP1");
+  const headerLength = capsuleBytes.readUInt32LE(8);
+  const header = JSON.parse(capsuleBytes.subarray(12, 12 + headerLength));
+  const countKind = (kind) => header.inputs.filter((input) => input.content.kind === kind).length;
+  const runtimeAuthority = manifest.runtime_authority === undefined ? null
+    : Object.fromEntries(Object.entries(manifest.runtime_authority).map(([name, value]) =>
+      [name, name.startsWith("max_") ? String(value) : value]));
+  return {
+    registration_schema: manifest.schema_version, package_name: manifest.name, publisher_id: manifest.publisher_id,
+    version: manifest.initial_version.version, manifest_sha256: `sha256:${hash(manifestBytes)}`,
+    artifact_sha256: `sha256:${hash(capsuleBytes)}`,
+    capsule_digest: `sha256:${hash(Buffer.concat([Buffer.from("franken-node/module-source-capsule/v1\0"), u64(capsuleBytes.length), capsuleBytes]))}`,
+    signer_key_id: hash(Buffer.concat([Buffer.from("artifact_signing_keyid_v1:"), u64(32), Buffer.from(anchor, "hex")])).slice(0, 16),
+    signer_public_key_hex: anchor, runtime_authority: runtimeAuthority,
+    capsule: {
+      schema_version: header.schema_version, graph_input_hash: header.graph_hash, graph_hash_recomputed: false,
+      capsule_bytes: capsuleBytes.length, payload_bytes: capsuleBytes.length - 12 - headerLength,
+      input_count: header.inputs.length, file_count: countKind("file"), metadata_file_count: countKind("file_metadata"),
+      directory_count: countKind("directory"), missing_count: countKind("missing"), symlink_count: countKind("symlink"),
+      symlink_policy: header.options.symlink_policy, condition_count: header.options.conditions?.length ?? null,
+      additional_condition_count: header.options.additional_conditions?.length ?? 0,
+    },
+  };
+}
+function addSource(name, capsuleBytes, manifest, expected = "verified", options = {}) {
+  const manifestBytes = Buffer.from(ordered(manifest));
+  add(name, "publisher-source", sourceInput(manifestBytes, capsuleBytes), expected, {
+    signature_hex: sign(null, manifestBytes, key).toString("hex"),
+    ...(expected === "verified" ? { publisher_facts: sourceFacts(manifest, manifestBytes, capsuleBytes) } : {}),
+    ...options,
+  });
+}
+for (const [index, fixture] of sourceFixtures.vectors.entries()) {
+  const sourceBytes = Buffer.from(fixture.module_sources.capsule_base64, "base64");
+  for (const version of [1, 2]) {
+    const manifest = sourceManifest(sourceBytes, version);
+    const facts = sourceFacts(manifest, Buffer.from(ordered(manifest)), sourceBytes);
+    assert.equal(facts.capsule_digest, fixture.module_sources.capsule_digest);
+    assert.equal(facts.capsule.graph_input_hash, fixture.module_sources.graph_input_hash);
+    assert.equal(facts.capsule.input_count, fixture.observation_count);
+    addSource(`publisher_source_v${version}_fixture_${index}`, sourceBytes, manifest);
+  }
+}
+const sourceBytes = Buffer.from(sourceFixtures.vectors[0].module_sources.capsule_base64, "base64");
+const registration = sourceManifest(sourceBytes, 2);
+const registrationBytes = Buffer.from(ordered(registration));
+const sourceWire = sourceInput(registrationBytes, sourceBytes);
+const sourceSignature = sign(null, registrationBytes, key).toString("hex");
+assert(registrationBytes.includes(Buffer.from('"max_instructions":18446744073709551615')));
+const formattedRegistration = sourceManifest(sourceBytes, 1);
+const formattedBytes = Buffer.from(JSON.stringify(formattedRegistration, null, 2) + "\n");
+add("publisher_source_exact_formatted_manifest", "publisher-source", sourceInput(formattedBytes, sourceBytes), "verified", {
+  signature_hex: sign(null, formattedBytes, key).toString("hex"),
+  publisher_facts: sourceFacts(formattedRegistration, formattedBytes, sourceBytes),
+});
+add("publisher_source_foreign_anchor", "publisher-source", sourceWire, "SIGNATURE_INVALID", { anchor: foreign, signature_hex: sourceSignature });
+add("publisher_source_invalid_signature", "publisher-source", sourceWire, "SIGNATURE_INVALID", { signature_hex: "00".repeat(64) });
+add("publisher_source_signature_required", "publisher-source", sourceWire, "SIGNATURE_MALFORMED");
+add("publisher_source_signature_short", "publisher-source", sourceWire, "SIGNATURE_MALFORMED", { signature_hex: "aa" });
+const mutatedManifest = clone(registration); mutatedManifest.name = "other-source";
+add("publisher_source_changed_signed_bytes", "publisher-source",
+  sourceInput(Buffer.from(ordered(mutatedManifest)), sourceBytes), "SIGNATURE_INVALID", { signature_hex: sourceSignature });
+const changedSource = Buffer.from(sourceBytes); changedSource[changedSource.length - 1] ^= 1;
+add("publisher_source_changed_capsule", "publisher-source", sourceInput(registrationBytes, changedSource), "INTEGRITY_MISMATCH", { signature_hex: sourceSignature });
+const wrongArtifactHash = clone(registration); wrongArtifactHash.initial_version.content_hash = "0".repeat(64);
+addSource("publisher_source_signed_wrong_hash", sourceBytes, wrongArtifactHash, "INTEGRITY_MISMATCH");
+const unknownRegistration = clone(registration); unknownRegistration.schema_version = "franken-node/extension-registration-manifest/v99";
+addSource("publisher_source_signed_unknown_schema", sourceBytes, unknownRegistration, "EVIDENCE_INVALID");
+const unknownRegistrationMember = clone(registration); unknownRegistrationMember.execution_authorized = true;
+addSource("publisher_source_signed_unknown_member", sourceBytes, unknownRegistrationMember, "EVIDENCE_INVALID");
+const v1Authority = clone(registration); v1Authority.schema_version = "franken-node/extension-registration-manifest/v1";
+addSource("publisher_source_v1_cannot_smuggle_authority", sourceBytes, v1Authority, "EVIDENCE_INVALID");
+const absentAuthority = clone(registration); delete absentAuthority.runtime_authority;
+addSource("publisher_source_v2_requires_authority", sourceBytes, absentAuthority, "EVIDENCE_INVALID");
+const badCapabilities = clone(registration); badCapabilities.runtime_authority.allowed_capabilities = ["console", "vm_dispatch"];
+addSource("publisher_source_missing_required_capability", sourceBytes, badCapabilities, "EVIDENCE_INVALID");
+const badCeiling = clone(registration); badCeiling.runtime_authority.max_parse_tokens = 131_073;
+addSource("publisher_source_excessive_parser_ceiling", sourceBytes, badCeiling, "EVIDENCE_INVALID");
+const numericCeilingString = clone(registration); numericCeilingString.runtime_authority.max_instructions = "18446744073709551615";
+addSource("publisher_source_manifest_ceiling_requires_integer", sourceBytes, numericCeilingString, "EVIDENCE_INVALID");
+const badCapsule = Buffer.from("PRIVATE-PUBLISHER-SOURCE-SENTINEL");
+addSource("publisher_source_signed_malformed_capsule", badCapsule, sourceManifest(badCapsule), "EVIDENCE_INVALID");
+addSource("publisher_source_signed_corrupt_file_payload", changedSource, sourceManifest(changedSource), "EVIDENCE_INVALID");
+const headerLength = sourceBytes.readUInt32LE(8);
+const header = JSON.parse(sourceBytes.subarray(12, 12 + headerLength));
+header.graph_hash = "sha256:invalid";
+const malformedHeader = Buffer.from(JSON.stringify(header));
+const malformedPrefix = Buffer.alloc(12); malformedPrefix.write("FNSGCAP1"); malformedPrefix.writeUInt32LE(malformedHeader.length, 8);
+const malformedGraphCapsule = Buffer.concat([malformedPrefix, malformedHeader, sourceBytes.subarray(12 + headerLength)]);
+addSource("publisher_source_signed_bad_graph_digest", malformedGraphCapsule, sourceManifest(malformedGraphCapsule), "EVIDENCE_INVALID");
+add("publisher_source_transport_duplicate", "publisher-source", sourceWire.slice(0, -1) + ',"capsule_base64":""}',
+  "JSON_INVALID", { signature_hex: sourceSignature });
+const duplicateRegistration = Buffer.from(ordered(registration).slice(0, -1) + ',"name":"duplicate"}');
+add("publisher_source_signed_duplicate_manifest", "publisher-source", sourceInput(duplicateRegistration, sourceBytes),
+  "EVIDENCE_INVALID", { signature_hex: sign(null, duplicateRegistration, key).toString("hex") });
+const transportUnknown = JSON.parse(sourceWire); transportUnknown.execution_authorized = true;
+add("publisher_source_transport_unknown", "publisher-source", JSON.stringify(transportUnknown), "EVIDENCE_INVALID", { signature_hex: sourceSignature });
+const transportSchema = JSON.parse(sourceWire); transportSchema.schema_version = "franken-verifier/publisher-source-input/v99";
+add("publisher_source_transport_schema", "publisher-source", JSON.stringify(transportSchema), "EVIDENCE_INVALID", { signature_hex: sourceSignature });
+const noncanonicalBase64 = JSON.parse(sourceWire); noncanonicalBase64.capsule_base64 += "\n";
+add("publisher_source_noncanonical_base64", "publisher-source", JSON.stringify(noncanonicalBase64), "EVIDENCE_INVALID", { signature_hex: sourceSignature });
 writeFileSync(output, JSON.stringify(cases));
 console.log(JSON.stringify({ vectors: cases.length, incident_sha256: hash(incidentBytes), capsule_expected_hash: capsule.manifest.expected_output_hash, sdk_integrity: sdk.integrity_hash }));

@@ -3931,6 +3931,13 @@ What it exposes:
   bundle`. It re-derives the integrity and decision-sequence hashes, rejects
   unsigned fields, and checks the Ed25519 signature under the verifier's own
   anchor.
+- `publisher_source`: `verify_publisher_source(manifest_bytes, signature,
+  capsule_bytes, &trusted_publisher)` authenticates an exact publisher-signed
+  registration and its FNSGCAP1 source capsule. It checks every captured file
+  digest and returns source-free identity, capsule counts, and any signed
+  execution ceilings. `verify_publisher_source_input` accepts the portable
+  transport used by the CLI and language clients. This verification requires
+  no product or engine installation.
 - `bundle`: the SDK's own `ReplayBundle` byte-stream format (`serialize`,
   `deserialize`, `hash`, `integrity_hash`, `seal`, `sign_bundle`,
   `verify_ed25519_signature`, `verify_signed_bundle`, `verify`). This is a
@@ -4026,6 +4033,7 @@ code, not a sandbox for running arbitrary verifier programs.
 | `capsule` | `authenticated_capsule_content`: independently re-derived signed payload/input hash | Signed SDK capsule JSON with strict fields |
 | `signed-bundle` | `authenticated_sdk_replay_bundle`: the distinct canonical SDK bundle format | Required detached `signature_hex` (Python), `signatureHex` (JS) or `--signature-hex` (CLI) |
 | `resolution-receipt` | `authenticated_resolution_decision`: signed package admission or rejection, profile, capability-budget mode and module-graph commitment | Embedded Ed25519 signature checked under the caller's resolver-authority key |
+| `publisher-source` | `authenticated_publisher_source_content`: publisher-signed registration, source-capsule byte integrity, and declared execution ceilings | Required detached registration `signature_hex` (Python), `signatureHex` (JS) or `--signature-hex` (CLI), checked under the caller's publisher key |
 
 To audit a module-resolution decision, supply the independently trusted
 resolver key and the original canonical signed receipt:
@@ -4045,6 +4053,58 @@ rejected. Candidate paths, registry URLs, evidence references and private
 decision rationale are not returned. This authenticates the recorded resolver
 decision; it does not load packages, grant execution authority or establish
 current revocation status.
+
+To audit a publisher-approved source capsule before deployment, pass the exact
+signed registration bytes and raw capsule bytes in this transport:
+
+```json
+{
+  "schema_version": "franken-verifier/publisher-source-input/v1",
+  "manifest_base64": "<base64 of the exact signed registration bytes>",
+  "capsule_base64": "<base64 of the raw FNSGCAP1 capsule>"
+}
+```
+
+The existing `registry publish` envelope retains the registration in
+`manifest_bytes_b64` and its detached signature in
+`extension.signature.signature_bytes`. Preserve the registration bytes;
+parsing and re-encoding them changes what was signed. Supply the capsule as
+an explicit input and obtain the publisher public key independently of the
+envelope. The verifier never opens paths named by an artifact.
+
+```bash
+franken-verifier verify --format publisher-source \
+  --trusted-key-hex "$TRUSTED_PUBLISHER_PUBLIC_KEY_HEX" \
+  --signature-hex "$REGISTRATION_SIGNATURE_HEX" < publisher-source.json
+```
+
+In Python, use `verify_artifact(packet_bytes, publisher_key_hex,
+format="publisher-source", signature_hex=registration_signature_hex,
+verifier="/trusted/bin/franken-verifier")`. In JavaScript or TypeScript,
+use `verifyArtifact(packetBytes, publisherKeyHex, {format: "publisher-source",
+signatureHex: registrationSignatureHex, verifier: "/trusted/bin/franken-verifier"})`.
+
+Source-only v1 registrations return `runtime_authority: null`. V2 requires the
+complete signed authority, including supported capabilities, mandatory engine
+capabilities, and bounded positive resource ceilings. All nine numeric ceilings
+serialize as decimal strings, preserving full `u64` values across languages.
+These are the publisher's ceilings, not grants of operator permissions.
+
+The result binds three distinct inputs: top-level `artifact_sha256` hashes the
+original transport bytes; `facts.manifest_sha256` hashes the exact signed
+registration; `facts.artifact_sha256` hashes the raw capsule and must match its
+signed content hash. `facts.capsule_digest` uses the separate FNSGCAP1 domain.
+Each decoded input is bounded to 5 MiB, and the encoded transport has its own
+smaller limit than the general 64 MiB verifier input limit. Capsule metadata
+reports counts and commitments without source paths, link targets, condition
+names, or source content. Metadata-only file observations consume no payload.
+
+`facts.capsule.graph_hash_recomputed` is always `false`: this SDK authenticates
+the recorded graph commitment and verifies its retained bytes, without
+reconstructing resolution or executing JavaScript. Success does not certify
+current revocation, registry lifecycle, provenance, graph completeness, or
+enforcement of the declared ceilings. Deployment still performs those applicable
+admission and execution checks through the native runtime.
 
 These scopes do not execute a captured guest or establish original-policy
 equivalence. Integrity-only SDK bundles are never returned as authenticated

@@ -8,6 +8,7 @@ export async function audit(data: Uint8Array, anchor: string, executable: string
     if (verified.format === "incident-bundle") return verified.facts.incident_id;
     if (verified.format === "capsule") return verified.facts.capsule_id;
     if (verified.format === "resolution-receipt") return verified.facts.receipt_id;
+    if (verified.format === "publisher-source") return verified.facts.package_name;
     return verified.facts.bundle_id;
   } catch (error: unknown) {
     if (error instanceof VerifierError) return error.code;
@@ -33,6 +34,23 @@ export async function auditRuntimeOrigin(
   });
   if (verified.scope !== "authenticated_runtime_incident") throw new Error("runtime-origin proof required");
   return `${verified.facts.runtime_origin.session_nonce}:${verified.facts.runtime_origin.signed_epoch}`;
+}
+
+export async function auditPublisherSource(
+  data: Uint8Array, anchor: string, signature: string, executable: string,
+): Promise<string> {
+  const verified = await verifyArtifact(data, anchor, {
+    verifier: executable, format: "publisher-source", signatureHex: signature,
+  });
+  if (verified.format !== "publisher-source") throw new Error("publisher source content required");
+  const reconstructed: false = verified.facts.capsule.graph_hash_recomputed;
+  if (reconstructed) throw new Error("source content cannot establish graph reconstruction");
+  if (verified.facts.registration_schema === "franken-node/extension-registration-manifest/v1") {
+    const absent: null = verified.facts.runtime_authority;
+    return `${verified.facts.artifact_sha256}:${absent}`;
+  }
+  const instructionCeiling: string = verified.facts.runtime_authority.max_instructions;
+  return `${verified.facts.artifact_sha256}:${instructionCeiling}`;
 }
 
 export async function auditResolution(data: Uint8Array, anchor: string, executable: string): Promise<string | null> {

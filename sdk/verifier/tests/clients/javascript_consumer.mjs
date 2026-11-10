@@ -39,11 +39,17 @@ for (const test of cases) {
       assert.equal(result.facts.selected_version, test.decision === "admit" ? "1.2.3" : null);
       assert.equal(result.facts.capability_budget_mode, "enforced");
     }
+    if (test.format === "publisher-source") {
+      assert.equal(result.scope, "authenticated_publisher_source_content");
+      assert.deepEqual(result.facts, test.publisher_facts);
+      assert.equal(result.facts.capsule.graph_hash_recomputed, false);
+    }
     assert.equal(JSON.stringify(result).includes("PRIVATE-"), false);
     console.log(JSON.stringify({ case: test.name, result: "verified", scope: result.scope }));
   } catch (error) {
     assert(error instanceof VerifierError, `${test.name}: ${error}`);
     assert.equal(error.code, test.expected, test.name);
+    if (test.format === "publisher-source") assert.equal(error.message.includes("PRIVATE-"), false);
     console.log(JSON.stringify({ case: test.name, result: error.code }));
   }
 }
@@ -102,5 +108,15 @@ for (const mode of resolutionControls) {
   (error) => error instanceof VerifierError && error.code === "PROTOCOL_INVALID", `protocol_${mode}`);
   console.log(JSON.stringify({ case: `protocol_${mode}`, result: "PROTOCOL_INVALID" }));
 }
+const publisherControls = ["publisher_wrong_scope", "publisher_wrong_signer", "publisher_graph_recomputed",
+  "publisher_unknown_field", "publisher_authority_missing", "publisher_v1_authority", "publisher_rounded_ceiling",
+  "publisher_overflow_ceiling", "publisher_zero_ceiling", "publisher_invalid_capability", "publisher_authority_extra",
+  "publisher_count_inconsistent", "publisher_unsafe_count", "publisher_bad_digest", "publisher_capsule_not_object"];
+for (const mode of publisherControls) {
+  await assert.rejects(verifyArtifact(Buffer.from(JSON.stringify({ protocol_control: mode })), cases[0].anchor,
+    { verifier: resolve("fake_verifier"), format: "publisher-source", signatureHex: "00".repeat(64) }),
+  (error) => error instanceof VerifierError && error.code === "PROTOCOL_INVALID", `protocol_${mode}`);
+  console.log(JSON.stringify({ case: `protocol_${mode}`, result: "PROTOCOL_INVALID" }));
+}
 console.log(JSON.stringify({ consumer: "javascript", matrix_cases: cases.length, client_cases: clientControls.length,
-  protocol_cases: controls.length + runControls.length + runtimeControls.length + resolutionControls.length + 1, passed: true }));
+  protocol_cases: controls.length + runControls.length + runtimeControls.length + resolutionControls.length + publisherControls.length + 1, passed: true }));

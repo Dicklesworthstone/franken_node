@@ -16,7 +16,7 @@ use sha2::{Digest, Sha256};
 use super::{IncidentBundleError, UnambiguousJson, ct_str_eq};
 
 #[path = "incident_module_capsule.rs"]
-mod module_capsule;
+pub(crate) mod module_capsule;
 
 const CAPTURE_SCHEMA: &str = "franken-node/native-replay-capture/v3";
 const MAX_PAYLOAD_BYTES: usize = 4 * 1024 * 1024;

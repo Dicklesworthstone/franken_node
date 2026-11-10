@@ -102,7 +102,8 @@ fn external_python_and_javascript_consumers_verify_signed_evidence() {
         .arg(root.join("vectors.json"))
         .arg(sdk.join("tests/fixtures/run_origin_protocol/producer-run.fnbundle"))
         .arg(sdk.join("tests/fixtures/run_origin_protocol/bundle-authority.pub"))
-        .arg(sdk.join("tests/fixtures/run_origin_protocol/run-authority.pub"));
+        .arg(sdk.join("tests/fixtures/run_origin_protocol/run-authority.pub"))
+        .arg(sdk.join("tests/fixtures/module_source_capsules.json"));
     checked(&mut vectors);
     let cases: Vec<serde_json::Value> =
         serde_json::from_slice(&fs::read(root.join("vectors.json")).unwrap()).unwrap();
@@ -148,6 +149,12 @@ fn external_python_and_javascript_consumers_verify_signed_evidence() {
             );
             assert_eq!(response["artifact_sha256"], case["artifact_sha256"]);
             assert_eq!(response["verdict"], "verified");
+            if case["format"] == "publisher-source" {
+                assert_eq!(response["scope"], "authenticated_publisher_source_content");
+                assert_eq!(response["facts"], case["publisher_facts"]);
+                assert_eq!(response["facts"]["capsule"]["graph_hash_recomputed"], false);
+                assert!(!response.to_string().contains("PRIVATE-"));
+            }
             if let Some(run_anchor) = case["run_anchor"].as_str() {
                 assert_eq!(
                     response["scope"],

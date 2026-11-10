@@ -10,6 +10,7 @@ const SCOPES = Object.freeze({
   capsule: "authenticated_capsule_content",
   "signed-bundle": "authenticated_sdk_replay_bundle",
   "resolution-receipt": "authenticated_resolution_decision",
+  "publisher-source": "authenticated_publisher_source_content",
 });
 
 export class VerifierError extends Error {
@@ -47,16 +48,71 @@ function runtimeOriginValid(origin, anchor) {
     && BigInt(origin.signed_epoch) <= 18_446_744_073_709_551_615n;
 }
 
+const publisherText = (value, limit) => boundedText(value) && value === value.trim()
+  && Buffer.byteLength(value, "utf8") <= limit && !/[\u0000-\u001f\u007f-\u009f]/u.test(value);
+const digest = (value) => typeof value === "string" && /^sha256:[0-9a-f]{64}$/u.test(value);
+const decimalLimit = (value, limit) => typeof value === "string" && /^[1-9][0-9]{0,19}$/u.test(value)
+  && BigInt(value) <= limit;
+const PUBLISHER_CAPABILITIES = ["builtin", "console", "env_read", "fs_read", "fs_write", "heap_allocate",
+  "module_load", "network_egress", "process_spawn", "random_read", "timer", "vm_dispatch"];
+const PUBLISHER_LIMITS = Object.freeze({
+  max_instructions: 18_446_744_073_709_551_615n, max_registers: 65_536n,
+  max_call_depth: 10_000n, max_heap_objects: 4_294_967_295n,
+  max_total_memory_bytes: 18_446_744_073_709_551_615n, max_console_entries: 4_294_967_295n,
+  max_parse_source_bytes: 2_097_152n, max_parse_tokens: 131_072n, max_parse_recursion_depth: 384n,
+});
+
+function publisherAuthorityValid(authority) {
+  return keys(authority, ["schema_version", "policy_revision", "allowed_capabilities", "allow_process_shape", ...Object.keys(PUBLISHER_LIMITS)])
+    && authority.schema_version === "franken-node/artifact-runtime-authority/v1"
+    && publisherText(authority.policy_revision, 128)
+    && typeof authority.allow_process_shape === "boolean"
+    && Array.isArray(authority.allowed_capabilities)
+    && authority.allowed_capabilities.length <= PUBLISHER_CAPABILITIES.length
+    && new Set(authority.allowed_capabilities).size === authority.allowed_capabilities.length
+    && authority.allowed_capabilities.every((value) => PUBLISHER_CAPABILITIES.includes(value))
+    && ["console", "heap_allocate", "vm_dispatch"].every((value) => authority.allowed_capabilities.includes(value))
+    && Object.entries(PUBLISHER_LIMITS).every(([name, limit]) => decimalLimit(authority[name], limit));
+}
+
+function publisherSourceValid(facts, anchor) {
+  const summary = facts.capsule;
+  const counts = ["file_count", "metadata_file_count", "directory_count", "missing_count", "symlink_count"];
+  return publisherText(facts.package_name, 256) && publisherText(facts.publisher_id, 256)
+    && publisherText(facts.version, 128) && /^[0-9]+\.[0-9]+\.[0-9]+$/u.test(facts.version)
+    && ["manifest_sha256", "artifact_sha256", "capsule_digest"].every((name) => digest(facts[name]))
+    && facts.signer_key_id === createHash("sha256").update("artifact_signing_keyid_v1:")
+      .update(Buffer.from([32, 0, 0, 0, 0, 0, 0, 0])).update(Buffer.from(anchor, "hex")).digest("hex").slice(0, 16)
+    && (facts.registration_schema === "franken-node/extension-registration-manifest/v1" && facts.runtime_authority === null
+      || facts.registration_schema === "franken-node/extension-registration-manifest/v2" && publisherAuthorityValid(facts.runtime_authority))
+    && keys(summary, ["schema_version", "graph_input_hash", "graph_hash_recomputed", "capsule_bytes", "payload_bytes",
+      "input_count", ...counts, "symlink_policy", "condition_count", "additional_condition_count"])
+    && summary.schema_version === "franken-node/module-source-capsule/v1"
+    && digest(summary.graph_input_hash) && summary.graph_hash_recomputed === false
+    && count(summary.capsule_bytes) && summary.capsule_bytes >= 12 && summary.capsule_bytes <= 5 * 1024 * 1024
+    && count(summary.payload_bytes) && summary.payload_bytes <= summary.capsule_bytes - 12
+    && count(summary.input_count) && summary.input_count > 0 && summary.input_count <= 1024
+    && counts.every((name) => count(summary[name]) && summary[name] <= summary.input_count)
+    && counts.reduce((total, name) => total + summary[name], 0) === summary.input_count
+    && ["reject", "contained"].includes(summary.symlink_policy)
+    && (summary.symlink_policy === "contained" || summary.symlink_count === 0)
+    && (summary.condition_count === null || count(summary.condition_count) && summary.condition_count <= 64)
+    && count(summary.additional_condition_count) && summary.additional_condition_count <= 62
+    && (summary.condition_count === null || summary.condition_count + summary.additional_condition_count <= 64);
+}
+
 function factsValid(facts, format, anchor, runAnchor, runtimeAnchor) {
   const expected = {
     "incident-bundle": ["bundle_id", "incident_id", "created_at", "policy_version", "event_count", "integrity_hash", "decision_sequence_hash", "signer_public_key_hex", "signing_identity", "native_capture"],
     capsule: ["capsule_id", "expected_hash", "actual_hash", "signer_public_key_hex"],
     "signed-bundle": ["bundle_id", "incident_id", "event_count", "integrity_hash", "signer_public_key_hex"],
     "resolution-receipt": ["receipt_id", "crypto_suite", "module_graph_hash", "package_name", "requested_range", "policy_profile", "capability_budget_mode", "decision", "selected_version", "rejected_alternative_count", "canonical_hash", "signer_key_id", "signer_public_key_hex"],
+    "publisher-source": ["registration_schema", "package_name", "publisher_id", "version", "manifest_sha256", "artifact_sha256", "capsule_digest", "signer_key_id", "signer_public_key_hex", "runtime_authority", "capsule"],
   }[format];
   if (runAnchor !== undefined) expected.push("run_origin");
   if (runtimeAnchor !== undefined) expected.push("runtime_origin");
   if (!keys(facts, expected) || facts.signer_public_key_hex !== anchor) return false;
+  if (format === "publisher-source") return publisherSourceValid(facts, anchor);
   if (format === "resolution-receipt") {
     return ["receipt_id", "package_name", "requested_range"].every((key) => boundedText(facts[key]))
       && ["module_graph_hash", "canonical_hash", "signer_key_id"].every((key) => typeof facts[key] === "string" && /^sha256:[0-9a-f]{64}$/u.test(facts[key]))
@@ -116,10 +172,10 @@ export async function verifyArtifact(data, trustedPublicKeyHex, options) {
   const args = ["verify", "--format", format, "--trusted-key-hex", anchor];
   if (runAnchor !== undefined) args.push("--trusted-run-key-hex", runAnchor);
   if (runtimeAnchor !== undefined) args.push("--trusted-runtime-key-hex", runtimeAnchor);
-  if (format === "signed-bundle") {
+  if (format === "signed-bundle" || format === "publisher-source") {
     if (!hex(signatureHex, 128)) throw new VerifierError("SIGNATURE_MALFORMED", "a detached 64-byte signature is required");
     args.push("--signature-hex", signatureHex);
-  } else if (signatureHex !== undefined) throw new VerifierError("INPUT_INVALID", "detached signatures apply only to signed-bundle");
+  } else if (signatureHex !== undefined) throw new VerifierError("INPUT_INVALID", "detached signatures apply only to signed-bundle or publisher-source");
   return new Promise((resolve, reject) => {
     const child = execFile(verifier, args, {
       encoding: "buffer", shell: false, timeout: Math.ceil(timeoutMs),

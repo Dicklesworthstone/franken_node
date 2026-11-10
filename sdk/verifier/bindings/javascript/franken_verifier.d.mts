@@ -1,4 +1,4 @@
-export type EvidenceFormat = "incident-bundle" | "capsule" | "signed-bundle" | "resolution-receipt";
+export type EvidenceFormat = "incident-bundle" | "capsule" | "signed-bundle" | "resolution-receipt" | "publisher-source";
 export interface VerifierOptions {
   /** Trusted SDK executable, installed separately; never supplied by evidence. */
   verifier: string;
@@ -7,6 +7,7 @@ export interface VerifierOptions {
   trustedRunPublicKeyHex?: string;
   /** Independent product root; requires original-run trust and portable session evidence. */
   trustedRuntimePublicKeyHex?: string;
+  /** Required detached signature for signed-bundle and publisher-source. */
   signatureHex?: string;
   timeoutMs?: number;
 }
@@ -77,6 +78,58 @@ export type ResolutionReceiptFacts = {
   signer_key_id: string;
   signer_public_key_hex: string;
 } & ({ decision: "admit"; selected_version: string } | { decision: "reject"; selected_version: null });
+/** Publisher-signed ceilings; these are not grants of runtime authority. */
+export interface PublisherRuntimeAuthority {
+  schema_version: "franken-node/artifact-runtime-authority/v1";
+  policy_revision: string;
+  allowed_capabilities: Array<"builtin" | "console" | "env_read" | "fs_read" | "fs_write" | "heap_allocate"
+    | "module_load" | "network_egress" | "process_spawn" | "random_read" | "timer" | "vm_dispatch">;
+  allow_process_shape: boolean;
+  /** All numeric ceilings are exact positive decimal strings, including u32 fields. */
+  max_instructions: string;
+  max_registers: string;
+  max_call_depth: string;
+  max_heap_objects: string;
+  max_total_memory_bytes: string;
+  max_console_entries: string;
+  max_parse_source_bytes: string;
+  max_parse_tokens: string;
+  max_parse_recursion_depth: string;
+}
+/** Authenticated capsule content metadata; paths and source bytes are not returned. */
+export interface PublisherSourceCapsule {
+  schema_version: "franken-node/module-source-capsule/v1";
+  graph_input_hash: string;
+  /** The standalone SDK does not reconstruct the module graph. */
+  graph_hash_recomputed: false;
+  capsule_bytes: number;
+  payload_bytes: number;
+  input_count: number;
+  file_count: number;
+  metadata_file_count: number;
+  directory_count: number;
+  missing_count: number;
+  symlink_count: number;
+  symlink_policy: "reject" | "contained";
+  /** Null means the producer selected its native default conditions. */
+  condition_count: number | null;
+  additional_condition_count: number;
+}
+/** Publisher authentication, not provenance, revocation, graph reconstruction or execution. */
+export type PublisherSourceFacts = {
+  package_name: string;
+  publisher_id: string;
+  version: string;
+  manifest_sha256: string;
+  artifact_sha256: string;
+  capsule_digest: string;
+  signer_key_id: string;
+  signer_public_key_hex: string;
+  capsule: PublisherSourceCapsule;
+} & (
+  { registration_schema: "franken-node/extension-registration-manifest/v1"; runtime_authority: null }
+  | { registration_schema: "franken-node/extension-registration-manifest/v2"; runtime_authority: PublisherRuntimeAuthority }
+);
 export type Verification = {
   schema_version: "franken-verifier-cli/v1";
   verdict: "verified";
@@ -88,6 +141,7 @@ export type Verification = {
   | { format: "capsule"; scope: "authenticated_capsule_content"; facts: CapsuleFacts }
   | { format: "signed-bundle"; scope: "authenticated_sdk_replay_bundle"; facts: SignedBundleFacts }
   | { format: "resolution-receipt"; scope: "authenticated_resolution_decision"; facts: ResolutionReceiptFacts }
+  | { format: "publisher-source"; scope: "authenticated_publisher_source_content"; facts: PublisherSourceFacts }
 );
 export class VerifierError extends Error {
   readonly code: string;

@@ -57,6 +57,33 @@ if mode.startswith("resolution_"):
             b"franken-node/resolution-receipt/signer-key-id/v1:" + bytes.fromhex(anchor)
         ).hexdigest(), "signer_public_key_hex": anchor,
     }
+if mode.startswith("publisher_"):
+    response["format"] = "publisher-source"
+    response["scope"] = "authenticated_publisher_source_content"
+    response["facts"] = {
+        "registration_schema": "franken-node/extension-registration-manifest/v2",
+        "package_name": "source-vector", "publisher_id": "publisher-control", "version": "1.2.3",
+        "manifest_sha256": "sha256:" + "a" * 64, "artifact_sha256": "sha256:" + "b" * 64,
+        "capsule_digest": "sha256:" + "c" * 64, "signer_public_key_hex": anchor,
+        "signer_key_id": hashlib.sha256(
+            b"artifact_signing_keyid_v1:" + (32).to_bytes(8, "little") + bytes.fromhex(anchor)
+        ).hexdigest()[:16],
+        "runtime_authority": {
+            "schema_version": "franken-node/artifact-runtime-authority/v1", "policy_revision": "control-v1",
+            "allowed_capabilities": ["console", "heap_allocate", "vm_dispatch"], "allow_process_shape": False,
+            "max_instructions": "18446744073709551615", "max_registers": "65536",
+            "max_call_depth": "10000", "max_heap_objects": "4294967295",
+            "max_total_memory_bytes": "18446744073709551615", "max_console_entries": "4294967295",
+            "max_parse_source_bytes": "2097152", "max_parse_tokens": "131072", "max_parse_recursion_depth": "384",
+        },
+        "capsule": {
+            "schema_version": "franken-node/module-source-capsule/v1",
+            "graph_input_hash": "sha256:" + "d" * 64, "graph_hash_recomputed": False,
+            "capsule_bytes": 128, "payload_bytes": 16, "input_count": 3, "file_count": 1,
+            "metadata_file_count": 0, "directory_count": 1, "missing_count": 1, "symlink_count": 0,
+            "symlink_policy": "reject", "condition_count": None, "additional_condition_count": 0,
+        },
+    }
 exit_code = 0
 if mode == "timeout":
     time.sleep(5)
@@ -146,6 +173,36 @@ elif mode == "resolution_bad_budget_mode":
     response["facts"]["capability_budget_mode"] = "unlimited"
 elif mode == "resolution_invalid_unicode":
     response["facts"]["package_name"] = "\ud800"
+elif mode == "publisher_wrong_scope":
+    response["scope"] = "publisher_execution_authorized"
+elif mode == "publisher_wrong_signer":
+    response["facts"]["signer_key_id"] = "0" * 16
+elif mode == "publisher_graph_recomputed":
+    response["facts"]["capsule"]["graph_hash_recomputed"] = True
+elif mode == "publisher_unknown_field":
+    response["facts"]["provenance_verified"] = True
+elif mode == "publisher_authority_missing":
+    response["facts"]["runtime_authority"] = None
+elif mode == "publisher_v1_authority":
+    response["facts"]["registration_schema"] = "franken-node/extension-registration-manifest/v1"
+elif mode == "publisher_rounded_ceiling":
+    response["facts"]["runtime_authority"]["max_instructions"] = 2**64 - 1
+elif mode == "publisher_overflow_ceiling":
+    response["facts"]["runtime_authority"]["max_total_memory_bytes"] = str(2**64)
+elif mode == "publisher_zero_ceiling":
+    response["facts"]["runtime_authority"]["max_heap_objects"] = "0"
+elif mode == "publisher_invalid_capability":
+    response["facts"]["runtime_authority"]["allowed_capabilities"].append("unrestricted")
+elif mode == "publisher_authority_extra":
+    response["facts"]["runtime_authority"]["execution_authorized"] = True
+elif mode == "publisher_count_inconsistent":
+    response["facts"]["capsule"]["metadata_file_count"] = 1
+elif mode == "publisher_unsafe_count":
+    response["facts"]["capsule"]["input_count"] = 2**53
+elif mode == "publisher_bad_digest":
+    response["facts"]["capsule_digest"] = "sha256:claimed"
+elif mode == "publisher_capsule_not_object":
+    response["facts"]["capsule"] = []
 encoded = json.dumps(response, separators=(",", ":"), sort_keys=True)
 if mode == "duplicate":
     encoded = encoded[:-1] + ',"verdict":"verified"}'
