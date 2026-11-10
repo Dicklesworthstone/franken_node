@@ -113,14 +113,18 @@ const NATIVE_ENGINE_WORKER_NAME: &str = "franken-node-native-engine";
 /// Private argv marker for the one-shot native-session worker.  It is parsed
 /// before Clap so the worker can never recursively enter the public `run`
 /// command.
+///
+/// Version 8 requires complete failed-attempt journal accounting. Advance the
+/// marker, frame and schema together: a configured older worker must reject the
+/// request before executing under the stronger contract.
 #[cfg(feature = "engine")]
-const NATIVE_SESSION_WORKER_ARG: &str = "__franken-native-session-worker-v7";
+const NATIVE_SESSION_WORKER_ARG: &str = "__franken-native-session-worker-v8";
 #[cfg(feature = "engine")]
-const NATIVE_SESSION_SCHEMA: &str = "franken-node/native-session/v7";
+const NATIVE_SESSION_SCHEMA: &str = "franken-node/native-session/v8";
 #[cfg(feature = "engine")]
-const NATIVE_SESSION_FRAME_MAGIC: &[u8; 12] = b"FNNS-IPC-V7\0";
+const NATIVE_SESSION_FRAME_MAGIC: &[u8; 12] = b"FNNS-IPC-V8\0";
 #[cfg(feature = "engine")]
-const NATIVE_SESSION_PROTOCOL_VERSION: u32 = 7;
+const NATIVE_SESSION_PROTOCOL_VERSION: u32 = 8;
 #[cfg(feature = "engine")]
 const NATIVE_SESSION_FRAME_HEADER_BYTES: usize = 12 + 4 + 8 + 32;
 #[cfg(feature = "engine")]
@@ -4690,17 +4694,6 @@ fn verified_control_stop_ledger(
     process_spawn_authority_granted: bool,
     allow_test_harness_noise: bool,
 ) -> std::result::Result<HostEffectLedger, String> {
-    if process_spawn_authority_granted {
-        // The engine process provider can return Denied after launching,
-        // signalling, or reaping a child. Its current final receipts cannot
-        // distinguish that attempted effect from a pre-dispatch refusal. Keep
-        // the real cancellation/containment cleanup, but withhold terminal
-        // accounting until that provider supplies a sound outcome contract.
-        return Err(
-            "native-session process authority does not yet support trustworthy cooperative terminal effect accounting; process outcomes remain unknown"
-                .to_string(),
-        );
-    }
     let reconciled = reconcile_native_session_output(
         parse_native_session_output(output, allow_test_harness_noise),
         expected_nonce,
@@ -4808,6 +4801,27 @@ fn verified_control_stop_ledger(
         "native-session control drain returned no finalized host-effect ledger".to_string()
     })?;
     validate_host_effect_ledger(&ledger, trusted_identity)?;
+    if process_spawn_authority_granted
+        && ledger.entries.iter().any(|entry| {
+            matches!(
+                entry.receipt.effect_kind,
+                crate::runtime::effect_receipt::EffectKind::Spawn
+            )
+        })
+    {
+        // The v8 worker contract signs failed journals only after checking
+        // their complete reservation map. Older configured workers cannot
+        // accept the versioned request or return an accepted final response.
+        // A verified ledger with no process entries therefore supports an
+        // unused process grant. Actual process
+        // receipts still cannot establish every child's terminal outcome:
+        // successful cleanup can conceal an earlier watchdog failure. Keep
+        // those attempts indeterminate even after namespace-empty cleanup.
+        return Err(
+            "native-session process receipts do not yet establish complete child terminal outcomes; process outcomes remain unknown"
+                .to_string(),
+        );
+    }
     // Gates can contribute receipts without provider admission, but a final
     // ledger with fewer total receipts than observed admissions is incomplete.
     if ledger.effect_count < reconciled.entries.len() {
@@ -12996,7 +13010,7 @@ mod tests {
         assert_eq!(verified.failed_count, 1);
         assert_eq!(verified.denied_count, 0);
         assert_eq!(verified.chain_head_hash, ledger.chain_head_hash);
-        let process_rejection = verified_control_stop_ledger(
+        let process_authorized = verified_control_stop_ledger(
             &output,
             nonce,
             &capture.evidence_verification_identity,
@@ -13004,8 +13018,9 @@ mod tests {
             true,
             false,
         )
-        .expect_err("even a valid signed response cannot resolve process-authorized outcomes");
-        assert!(process_rejection.contains("process outcomes remain unknown"));
+        .expect("unused process authority does not invalidate complete host-I/O accounting");
+        assert_eq!(process_authorized.failed_count, 1);
+        assert_eq!(process_authorized.chain_head_hash, ledger.chain_head_hash);
 
         let trigger = NativeRunControlTrigger::new(
             NativeRunControlKind::SafeMode,
@@ -13110,17 +13125,161 @@ mod tests {
             output_for(None, nonce, true, ""),
             trailing,
         ] {
+            for process_authority in [false, true] {
+                assert!(
+                    verified_control_stop_ledger(
+                        &rejected,
+                        nonce,
+                        &capture.evidence_verification_identity,
+                        false,
+                        process_authority,
+                        false,
+                    )
+                    .is_err(),
+                    "invalid final output must not produce terminal accounting"
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn native_control_stop_recovers_unused_process_authority_but_not_process_receipts() {
+        use frankenengine_extension_host::process_spawn::{
+            ProcessExit, ProcessLaunch, ProcessSpawnResponse,
+        };
+
+        let nonce = "00000000-0000-4000-8000-000000000188";
+        let grant = runtime_evidence_grant_for_test(nonce, [0x53; 32], [0x54; 32]);
+        let identity = grant.capture.evidence_verification_identity.clone();
+        let authority = grant.into_authority().unwrap();
+        let output_for = |ledger, schema_version: &str| {
+            encode_native_session_frame(
+                &NativeSessionOutputFrame::Final {
+                    response: Box::new(NativeSessionResponse::ExecutionFailed {
+                        schema_version: schema_version.into(),
+                        nonce: nonce.into(),
+                        message: "execution cancelled by supervisor".into(),
+                        invocation_settings: None,
+                        telemetry_report: None,
+                        host_effect_ledger: Some(ledger),
+                        native_replay: None,
+                        stdout_base64: String::new(),
+                        stderr_base64: String::new(),
+                    }),
+                },
+                NATIVE_SESSION_MAX_RESPONSE_BYTES,
+            )
+            .unwrap()
+        };
+        let empty = EngineDispatcher::build_host_effect_ledger(
+            "unused-process-grant",
+            &[],
+            &authority,
+            SecurityEpoch::from_raw(STANDARD_SECURITY_EPOCH),
+        )
+        .unwrap();
+        let empty_output = output_for(empty.clone(), NATIVE_SESSION_SCHEMA);
+        let recovered =
+            verified_control_stop_ledger(&empty_output, nonce, &identity, false, true, false)
+                .expect("a complete signed empty journal proves no process crossing");
+        assert_eq!(recovered.effect_count, 0);
+        assert_eq!(recovered.chain_head_hash, empty.chain_head_hash);
+
+        // An explicitly configured older worker receives a fresh signing key,
+        // so signature validity alone cannot establish the stronger producer
+        // contract. Reject its envelope even when the ledger signature is valid.
+        let mut obsolete_frame = empty_output.clone();
+        obsolete_frame[..NATIVE_SESSION_FRAME_MAGIC.len()].copy_from_slice(b"FNNS-IPC-V7\0");
+        let version_start = NATIVE_SESSION_FRAME_MAGIC.len();
+        obsolete_frame[version_start..version_start + 4].copy_from_slice(&7_u32.to_be_bytes());
+        let mut obsolete_version = empty_output.clone();
+        obsolete_version[version_start..version_start + 4].copy_from_slice(&7_u32.to_be_bytes());
+        for output in [&obsolete_frame, &obsolete_version] {
+            let bounded_frame = read_native_session_frame(
+                &mut std::io::Cursor::new(output),
+                NATIVE_SESSION_MAX_REQUEST_BYTES,
+            )
+            .expect("an obsolete header can still contain a bounded frame");
             assert!(
-                verified_control_stop_ledger(
-                    &rejected,
-                    nonce,
-                    &capture.evidence_verification_identity,
-                    false,
-                    false,
+                decode_native_session_frame::<NativeSessionOutputFrame>(
+                    &bounded_frame,
+                    NATIVE_SESSION_MAX_REQUEST_BYTES,
                     false,
                 )
                 .is_err(),
-                "invalid final output must not produce terminal accounting"
+                "the worker frame decoder must reject the obsolete contract before execution"
+            );
+        }
+        for output in [
+            output_for(empty.clone(), "franken-node/native-session/v7"),
+            obsolete_frame,
+            obsolete_version,
+        ] {
+            assert!(
+                verified_control_stop_ledger(&output, nonce, &identity, false, true, false)
+                    .is_err(),
+                "an older worker cannot establish complete process-attempt accounting"
+            );
+        }
+
+        let request = ProcessSpawnRequest::Run {
+            launch: ProcessLaunch {
+                executable: "/usr/bin/printf".into(),
+                argv: vec!["child".into()],
+                env: Default::default(),
+                cwd: Some("/work".into()),
+                shell: false,
+                stdio: Default::default(),
+            },
+            stdin: Vec::new(),
+            timeout_millis: Some(1_000),
+        };
+        let admission = ChildProcessSpawnAdmission::verified_for_test(
+            u64::MAX,
+            PathBuf::from("/usr/bin/bwrap"),
+        );
+        for outcome in [
+            Ok(ProcessSpawnResponse::Run {
+                exit: ProcessExit {
+                    success: true,
+                    code: Some(0),
+                    signal: None,
+                },
+                stdout: b"child".to_vec(),
+                stderr: Vec::new(),
+            }),
+            Err(ProcessSpawnError::CapabilityMissing {
+                capability: ProcessSpawnCapability::Spawn,
+            }),
+            Err(ProcessSpawnError::TimedOut {
+                runtime_millis: 1_000,
+            }),
+        ] {
+            let ledger = EngineDispatcher::build_host_effect_journal_ledger(
+                "process-grant-used",
+                &[HostEffectJournalEntry::ProcessSpawn {
+                    request: request.clone(),
+                    outcome,
+                }],
+                Some(&admission),
+                None,
+                &authority,
+                SecurityEpoch::from_raw(STANDARD_SECURITY_EPOCH),
+            )
+            .unwrap();
+            let rejected = verified_control_stop_ledger(
+                &output_for(ledger, NATIVE_SESSION_SCHEMA),
+                nonce,
+                &identity,
+                false,
+                true,
+                false,
+            )
+            .expect_err("process receipts require distinct child terminal accounting");
+            assert!(
+                rejected.contains("process outcomes remain unknown"),
+                "{rejected}"
             );
         }
     }
@@ -22298,7 +22457,7 @@ exec "$2" pinned-worker-image"#,
             NATIVE_SESSION_MAX_REQUEST_BYTES,
             false,
         )
-        .expect_err("a v4 frame must not enter the v5 worker");
+        .expect_err("an obsolete frame must not enter the current worker");
         assert!(version_error.contains("unsupported native-session protocol version 4"));
 
         let mut trailing = frame;

@@ -1475,7 +1475,9 @@ fn begin_drain_at(
             let report = drain_report(previous, &records)?;
             if previous.actions == *checkpoint {
                 if previous.maintenance_hold_ids != maintenance_hold_ids {
-                    bail!("native-session maintenance owners disagree with their exact action history");
+                    bail!(
+                        "native-session maintenance owners disagree with their exact action history"
+                    );
                 }
                 tx.commit()?;
                 return Ok(report);
@@ -2852,6 +2854,53 @@ mod tests {
             assert_eq!(
                 result.checkpoint.indeterminate_sessions,
                 u64::from(!expected_terminal)
+            );
+        }
+    }
+
+    #[test]
+    fn cooperative_unused_process_authority_requires_containment_and_known_effects() {
+        for (empty, failed, expected_terminal) in [
+            (false, false, false),
+            (true, false, true),
+            (true, true, false),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("evidence");
+            let mut admission = fixture(&root, 35);
+            admission.process_spawn_authority_granted = Some(true);
+            let project = admission.project_root.clone();
+            let mut guard = NativeSessionInventoryGuard::admit(&root, admission, 0).unwrap();
+            guard.worker_started();
+            begin_drain_at(&root, &project, "node-a", "prod", &actions(1)).unwrap();
+            guard.worker_reaped();
+            if empty {
+                guard.containment_empty();
+            }
+            let effects = NativeSessionEffectObservation::FinalLedgerObserved {
+                effect_count: usize::from(failed),
+                allowed_count: 0,
+                denied_count: 0,
+                failed_count: usize::from(failed),
+                chain_head_hash: format!("sha256:{}", "a".repeat(64)),
+                ledger_sha256: "b".repeat(64),
+            };
+            guard.finish(NativeSessionOutcomeKind::ControlStopped, effects);
+            let result = finish_drain_at(&root, &project, "node-a", "prod", &actions(1)).unwrap();
+            assert_eq!(result.checkpoint.is_complete(), expected_terminal);
+            assert_eq!(
+                result.checkpoint.terminal_sessions,
+                u64::from(expected_terminal)
+            );
+            assert_eq!(
+                result.checkpoint.indeterminate_sessions,
+                u64::from(!expected_terminal)
+            );
+            assert_eq!(result.checkpoint.fence_held, !expected_terminal);
+            assert!(!result.fleet_quiescence_certified);
+            assert_eq!(
+                admission_ticket_at(&root, &project).is_ok(),
+                expected_terminal
             );
         }
     }

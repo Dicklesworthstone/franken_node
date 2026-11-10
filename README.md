@@ -1234,10 +1234,18 @@ final response retains `interrupted` evidence instead. Neither outcome proves
 that a remote service completed or reversed an admitted request.
 `unknown_effect_sessions` also counts sessions whose final ledger contains a
 failed attempt, including cancellation after a request reached its peer.
-Final-ledger recovery during a control stop currently applies to runs without
-child-process authority. Process-authorized interruptions retain unknown effects
-after containment cleanup because their cancelled process receipts cannot yet
-distinguish pre-dispatch denial from a child that already ran.
+Final-ledger recovery during a control stop also supports an unused child-process
+grant: the complete signed journal must contain no process attempt, and the
+supervisor must observe the process containment empty before the inventory can
+finish draining that session. Any process receipt still retains unknown effects
+after cleanup, because process receipts do not yet establish every child's
+terminal outcome. Failed host-I/O attempts also remain indeterminate. Failed
+execution journals with unfinished reservations are not signed as complete, and
+process cancellation, timeout, or partial output never proves a pre-dispatch
+denial. The private supervisor/worker protocol is now v8; configured worker
+executables must be upgraded with the supervisor, and older workers are refused
+before guest execution. These rules apply to newly supervised runs and do not
+recertify older process outcomes or establish fleet-wide quiescence.
 
 ```bash
 # coordinator
