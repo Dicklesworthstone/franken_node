@@ -6398,8 +6398,9 @@ fn verify_deploy_release(release: &runtime::deployment::ReleaseRecord) -> Result
     }
     #[cfg(unix)]
     {
-        use supply_chain::module_resolution_graph::file_resolution::source_graph::{
-            GraphOptions, capture,
+        use supply_chain::module_resolution_graph::file_resolution::{
+            SymlinkPolicy,
+            source_graph::{GraphOptions, capture},
         };
         use supply_chain::registry_artifact::PublisherSourceGraphApproval;
         let directory = release.release_dir.canonicalize().with_context(|| {
@@ -6428,10 +6429,29 @@ fn verify_deploy_release(release: &runtime::deployment::ReleaseRecord) -> Result
             observed == release.approval,
             "publisher approval changed after admission"
         );
-        release
-            .approval
-            .validate_run(&release.entrypoint, true, false, &[], None)?;
-        let captured = capture(&directory, &release.entrypoint, GraphOptions::default())
+        // Select the same source closure as the admitted child: these options
+        // come only from the exact release config (including its profile), not
+        // supervisor environment or defaults that could select another branch.
+        // The publisher's approval must independently permit that selection.
+        let runtime = &release_config.config.runtime;
+        let contained_symlinks = runtime.frozen_module_symlinks == Some(true);
+        release.approval.validate_run(
+            &release.entrypoint,
+            true,
+            contained_symlinks,
+            &runtime.module_conditions,
+            runtime.frozen_module_graph_hash.as_deref(),
+        )?;
+        let options = GraphOptions {
+            symlink_policy: if contained_symlinks {
+                SymlinkPolicy::Contained
+            } else {
+                SymlinkPolicy::Reject
+            },
+            additional_conditions: runtime.module_conditions.clone(),
+            ..GraphOptions::default()
+        };
+        let captured = capture(&directory, &release.entrypoint, options)
             .context("release source graph is unreadable")?;
         let graph = captured.report().input_hash.clone();
         anyhow::ensure!(
@@ -6490,7 +6510,6 @@ fn handle_deploy_install(args: &cli::DeployInstallArgs) -> Result<serde_json::Va
     let (key_path, key) = deploy_publisher_key(key_path, &release_dir)?;
     let manifest = supply_chain::registry_artifact::absolute_artifact_path(manifest)?;
     let approval = PublisherSourceGraphApproval::load(&manifest, &key)?;
-    approval.validate_run(entrypoint, true, false, &[], None)?;
     let release_id = args
         .release_id
         .clone()

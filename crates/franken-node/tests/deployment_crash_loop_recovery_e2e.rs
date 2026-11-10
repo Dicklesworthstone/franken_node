@@ -195,19 +195,28 @@ impl Drill {
         } else {
             self.init_project(dir);
         }
+        let (_, manifest) = self.publish_source_graph(version, dir, &[]);
+        (dir.to_path_buf(), manifest)
+    }
+
+    fn publish_source_graph(
+        &self,
+        version: &str,
+        dir: &Path,
+        options: &[&str],
+    ) -> (Value, PathBuf) {
         let capsule = format!("app-{version}.capsule");
-        self.ok(
-            self.registry.path(),
-            &[
-                "verify",
-                "source-graph",
-                dir.to_str().expect("utf-8"),
-                "app.js",
-                "--write-source-capsule",
-                &capsule,
-                "--json",
-            ],
-        );
+        let mut arguments = vec![
+            "verify",
+            "source-graph",
+            dir.to_str().expect("utf-8"),
+            "app.js",
+            "--write-source-capsule",
+            &capsule,
+            "--json",
+        ];
+        arguments.extend_from_slice(options);
+        let graph = self.ok(self.registry.path(), &arguments);
         let published = self.ok(
             self.registry.path(),
             &[
@@ -225,7 +234,77 @@ impl Drill {
             .registry
             .path()
             .join(published["manifest_path"].as_str().expect("manifest path"));
-        (dir.to_path_buf(), manifest)
+        (graph, manifest)
+    }
+
+    /// A real npm workspace link and nested CJS/ESM export selection. The
+    /// publisher approves the same options the release's profile selects;
+    /// unselected branches throw if defaults accidentally replace that policy.
+    fn publish_workspace_release(&self, version: &str, esm: bool) -> (PathBuf, PathBuf) {
+        use std::os::unix::fs::symlink;
+
+        let dir = self.root.path().join("releases").join(version);
+        let package = dir.join("packages/shared");
+        fs::create_dir_all(&package).unwrap();
+        fs::create_dir_all(dir.join("node_modules")).unwrap();
+        fs::write(
+            dir.join("package.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "name": "deployed-app", "version": version, "private": true,
+                "type": if esm { "module" } else { "commonjs" },
+                "workspaces": ["packages/*"], "dependencies": {"shared": "workspace:*"},
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            package.join("package.json"),
+            r#"{"name":"shared","version":"1.0.0","exports":{"deployment":{"import":"./selected.mjs","require":"./selected.cjs"},"import":"./default.mjs","require":"./default.cjs"}}"#,
+        )
+        .unwrap();
+        for (name, source) in [
+            ("selected.cjs", "module.exports = require('./value.cjs');\n"),
+            ("value.cjs", "module.exports = 'WORKSPACE_SELECTED_CJS';\n"),
+            (
+                "selected.mjs",
+                "import value from './value.mjs'; export default value;\n",
+            ),
+            ("value.mjs", "export default 'WORKSPACE_SELECTED_ESM';\n"),
+            ("default.cjs", "throw Error('UNAPPROVED_DEFAULT_BRANCH');\n"),
+            ("default.mjs", "throw Error('UNAPPROVED_DEFAULT_BRANCH');\n"),
+        ] {
+            fs::write(package.join(name), source).unwrap();
+        }
+        symlink("../packages/shared", dir.join("node_modules/shared")).unwrap();
+        fs::write(
+            dir.join("app.js"),
+            if esm {
+                "import value from 'shared'; console.log(value);\n"
+            } else {
+                "console.log(require('shared'));\n"
+            },
+        )
+        .unwrap();
+        self.init_project(&dir);
+        let (graph, manifest) = self.publish_source_graph(
+            version,
+            &dir,
+            &["--allow-contained-symlinks", "--conditions", "deployment"],
+        );
+        assert_eq!(graph["fully_resolved"], true, "{graph}");
+        set_release_runtime(&dir, "frozen_modules", toml::Value::Boolean(true));
+        set_release_runtime(&dir, "frozen_module_symlinks", toml::Value::Boolean(true));
+        set_release_runtime(
+            &dir,
+            "module_conditions",
+            toml::Value::Array(vec![toml::Value::String("deployment".into())]),
+        );
+        set_release_runtime(
+            &dir,
+            "frozen_module_graph_hash",
+            toml::Value::String(graph["input_hash"].as_str().unwrap().to_string()),
+        );
+        (dir, manifest)
     }
 
     fn install(&self, version: &str, source: &str) -> PathBuf {
@@ -474,6 +553,27 @@ impl Drill {
 
 const HEALTHY_V1: &str = "console.log('RELEASE_ONE_HEALTHY');\n";
 
+fn set_release_runtime(dir: &Path, field: &str, value: toml::Value) {
+    let path = dir.join("franken_node.toml");
+    let mut document: toml::Value =
+        toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    let mut section = &mut document;
+    // Exercise effective profile configuration, not just the root document's
+    // runtime table. Existing registry and receipt authority stay unchanged.
+    for name in ["profiles", "balanced", "runtime"] {
+        section = section
+            .as_table_mut()
+            .unwrap()
+            .entry(name.to_string())
+            .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+    }
+    section
+        .as_table_mut()
+        .unwrap()
+        .insert(field.to_string(), value);
+    fs::write(path, toml::to_string_pretty(&document).unwrap()).unwrap();
+}
+
 fn crashing_v2() -> String {
     format!("// {PANIC_MARKER}\nconsole.log('RELEASE_TWO_NEVER_PRINTS');\n")
 }
@@ -499,6 +599,227 @@ fn guest_stdout(run: &Value) -> &str {
     run["dispatch"]["captured_output"]["stdout"]
         .as_str()
         .unwrap_or_default()
+}
+
+fn assert_workspace_run(run: &Value, admitted: &ReleaseRecord, expected: &str) {
+    assert_eq!(guest_stdout(run), expected, "{run}");
+    let graph = &run["dispatch"]["engine_decision"]["frozen_modules"];
+    assert_eq!(graph["contained_symlinks"], true, "{graph}");
+    assert_eq!(graph["graph_input_hash"], admitted.approval.graph_input_hash());
+    assert_eq!(
+        graph["publisher_artifact"],
+        serde_json::to_value(admitted.approval.identity()).unwrap(),
+    );
+    assert!(!run.to_string().contains("UNAPPROVED_DEFAULT_BRANCH"));
+}
+
+#[test]
+fn workspace_deployment_runs_its_signed_branch_and_recovers_to_it_after_a_crash_loop() {
+    let drill = Drill::new();
+    let (release, manifest) = drill.publish_workspace_release("1.0.0", false);
+    drill.install_published("1.0.0", &release, &manifest);
+    let admitted = drill.admitted_release("1.0.0");
+    drill.activate("1.0.0");
+    let (code, healthy) = drill.run();
+    assert_eq!(code, Some(0), "{healthy}");
+    assert_eq!(healthy["phase"], "healthy", "{healthy}");
+    assert_workspace_run(&healthy["run"], &admitted, "WORKSPACE_SELECTED_CJS\n");
+
+    let failed = drill.install("2.0.0", &crashing_v2());
+    drill.policy("rollback", "automatic");
+    drill.activate("2.0.0");
+    let (code, recovered) = drill.crash_until_loop();
+    assert_eq!(code, Some(0), "{recovered}");
+    assert_eq!(recovered["phase"], "resumed_healthy", "{recovered}");
+    assert_eq!(recovered["recovery"]["selected_release_id"], "1.0.0");
+    assert_eq!(
+        recovered["recovery"]["candidate_refusals"],
+        serde_json::json!([]),
+    );
+    assert_workspace_run(
+        &recovered["resumed"]["run"],
+        &admitted,
+        "WORKSPACE_SELECTED_CJS\n",
+    );
+    assert_eq!(drill.status()["active"]["release_id"], "1.0.0");
+    assert!(failed.join("app.js").is_file());
+    let failed_state: Value = serde_json::from_slice(
+        &fs::read(failed.join(".franken-node/safe-mode/state.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(failed_state["active"], true);
+}
+
+#[test]
+fn workspace_deployment_reconciles_and_executes_the_profile_selected_esm_branch() {
+    let drill = Drill::new();
+    let (release, manifest) = drill.publish_workspace_release("1.0.0", true);
+    drill.install_published("1.0.0", &release, &manifest);
+    let admitted = drill.admitted_release("1.0.0");
+    drill.interrupt_activation("intent");
+    let reconciled = drill.reconcile();
+    assert_eq!(reconciled["reconciled"], true, "{reconciled}");
+    assert!(reconciled.get("run").is_none());
+    assert_eq!(drill.status()["releases"][0]["healthy_runs"], 0);
+
+    // The supervisor's ambient options must not replace the signed release
+    // policy or leak to the child, including during a resumed activation.
+    let output = drill
+        .command(drill.root.path(), &["deploy", "run", "app", "--json"])
+        .env("FRANKEN_NODE_RUNTIME_FROZEN_MODULE_SYMLINKS", "false")
+        .env("FRANKEN_NODE_RUNTIME_MODULE_CONDITIONS", r#"["unapproved"]"#)
+        .env("FRANKEN_NODE_PROFILE", "strict")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout),
+    );
+    let healthy: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(healthy["phase"], "healthy", "{healthy}");
+    assert_workspace_run(&healthy["run"], &admitted, "WORKSPACE_SELECTED_ESM\n");
+}
+
+#[test]
+fn workspace_deployment_refuses_unapproved_options_before_admission() {
+    let drill = Drill::new();
+    let (release, manifest) = drill.publish_workspace_release("1.0.0", false);
+    let config = release.join("franken_node.toml");
+    let original = fs::read(&config).unwrap();
+    for (field, value, expected) in [
+        (
+            "module_conditions",
+            toml::Value::Array(vec![toml::Value::String("different".into())]),
+            "run conditions do not match",
+        ),
+        (
+            "frozen_module_symlinks",
+            toml::Value::Boolean(false),
+            "run symlink policy does not match",
+        ),
+        (
+            "frozen_module_graph_hash",
+            toml::Value::String(format!("sha256:{}", "0".repeat(64))),
+            "explicit frozen module graph pin conflicts",
+        ),
+    ] {
+        fs::write(&config, &original).unwrap();
+        set_release_runtime(&release, field, value);
+        let output = drill.cli(
+            drill.root.path(),
+            &[
+                "deploy",
+                "install",
+                "app",
+                "--release-dir",
+                release.to_str().unwrap(),
+                "--entrypoint",
+                "app.js",
+                "--registry-artifact",
+                manifest.to_str().unwrap(),
+                "--publisher-public-key",
+                drill.public_key.to_str().unwrap(),
+                "--json",
+            ],
+        );
+        assert!(
+            !output.status.success(),
+            "{field} must require publisher approval",
+        );
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(
+            report["error"].as_str().unwrap().contains(expected),
+            "{field}: {report}",
+        );
+        assert!(!drill.state_path("releases/1.0.0.json").exists());
+        assert!(!drill.state_path("active.json").exists());
+    }
+    fs::write(config, original).unwrap();
+    drill.install_published("1.0.0", &release, &manifest);
+}
+
+#[test]
+fn workspace_deployment_keeps_config_source_and_link_retargeting_bound_after_admission() {
+    use std::os::unix::fs::symlink;
+
+    let drill = Drill::new();
+    let (release, manifest) = drill.publish_workspace_release("1.0.0", false);
+    drill.install_published("1.0.0", &release, &manifest);
+    drill.activate("1.0.0");
+    let admitted = drill.admitted_release("1.0.0");
+    let active = fs::read(drill.state_path("active.json")).unwrap();
+    let config = release.join("franken_node.toml");
+    let original_config = fs::read(&config).unwrap();
+    set_release_runtime(
+        &release,
+        "module_conditions",
+        toml::Value::Array(vec![toml::Value::String("different".into())]),
+    );
+    let (code, blocked) = drill.run();
+    assert_ne!(code, Some(0), "{blocked}");
+    assert!(blocked["error"].as_str().unwrap().contains("release config"));
+    assert!(blocked.get("run").is_none());
+    let child = drill.admitted_child(&admitted, &manifest);
+    assert!(!child.status.success());
+    let child: Value = serde_json::from_slice(&child.stdout).unwrap();
+    assert!(
+        child["error"]
+            .as_str()
+            .unwrap()
+            .contains("release config changed after admission"),
+    );
+    fs::write(config, original_config).unwrap();
+
+    let selected = release.join("packages/shared/value.cjs");
+    let original_source = fs::read(&selected).unwrap();
+    fs::write(
+        &selected,
+        "module.exports = 'WORKSPACE_SELECTED_CJS'; // changed bytes\n",
+    )
+    .unwrap();
+    let (code, blocked) = drill.run();
+    assert_ne!(code, Some(0), "{blocked}");
+    assert!(
+        blocked["error"]
+            .as_str()
+            .unwrap()
+            .contains("source graph changed"),
+    );
+    assert!(blocked.get("run").is_none());
+    fs::write(selected, original_source).unwrap();
+
+    // Keep the replacement outside packages/* so restoring the original link
+    // does not leave a second workspace declaration with the same package name.
+    let replacement = release.join("replacement-shared");
+    fs::create_dir_all(&replacement).unwrap();
+    for name in ["package.json", "selected.cjs", "value.cjs"] {
+        fs::copy(
+            release.join("packages/shared").join(name),
+            replacement.join(name),
+        )
+        .unwrap();
+    }
+    let link = release.join("node_modules/shared");
+    let retained = release.join("original-workspace-link");
+    fs::rename(&link, &retained).unwrap();
+    symlink("../replacement-shared", &link).unwrap();
+    let (code, blocked) = drill.run();
+    assert_ne!(code, Some(0), "{blocked}");
+    assert!(
+        blocked["error"]
+            .as_str()
+            .unwrap()
+            .contains("source graph changed"),
+    );
+    assert!(blocked.get("run").is_none());
+    fs::rename(&link, release.join("changed-workspace-link")).unwrap();
+    fs::rename(retained, link).unwrap();
+    assert_eq!(fs::read(drill.state_path("active.json")).unwrap(), active);
+
+    let (code, healthy) = drill.run();
+    assert_eq!(code, Some(0), "{healthy}");
+    assert_workspace_run(&healthy["run"], &admitted, "WORKSPACE_SELECTED_CJS\n");
 }
 
 #[cfg(target_os = "linux")]

@@ -4587,7 +4587,16 @@ record and readiness remain intact.
   publish` (a `verify source-graph --write-source-capsule` capsule). Admission
   verifies the publisher approval and re-captures the on-disk source graph,
   which must equal the approved pin. `--release-id` defaults to the artifact
-  version.
+  version. Capture the capsule with the same contained-symlink policy and
+  additional export conditions as the release's effective configuration:
+  `runtime.frozen_module_symlinks` and `runtime.module_conditions`, including
+  settings in its selected profile. This supports contained npm workspace links
+  and condition-selected CommonJS/ESM package exports. Deployment verifies
+  those settings against the publisher approval and honors an explicit
+  `runtime.frozen_module_graph_hash` pin during installation, activation,
+  execution, reconciliation, and recovery. Set them before installation;
+  subsequent configuration changes require a new admission. Ambient
+  supervisor environment settings cannot replace the pinned release policy.
 - `deploy activate <name> --release <id> --operator-id <op>` re-verifies the
   release and appends a signed, hash-chained activation; the newest link is
   the activation pointer.
