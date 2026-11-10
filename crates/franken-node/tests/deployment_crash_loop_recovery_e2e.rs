@@ -95,7 +95,11 @@ impl Drill {
     }
 
     fn command(&self, cwd: &Path, args: &[&str]) -> Command {
-        let mut command = Command::new(binary());
+        self.command_with_binary(Path::new(binary()), cwd, args)
+    }
+
+    fn command_with_binary(&self, executable: &Path, cwd: &Path, args: &[&str]) -> Command {
+        let mut command = Command::new(executable);
         command
             .current_dir(cwd)
             .env("XDG_STATE_HOME", self.state_home.path())
@@ -495,6 +499,194 @@ fn guest_stdout(run: &Value) -> &str {
     run["dispatch"]["captured_output"]["stdout"]
         .as_str()
         .unwrap_or_default()
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn deployment_admission_binds_executable_bytes_even_with_the_same_version() {
+    use std::io::Write as _;
+
+    let drill = Drill::new();
+    drill.install("1.0.0", HEALTHY_V1);
+    drill.activate("1.0.0");
+    let admitted = drill.admitted_release("1.0.0");
+    let (_, digest) = admitted
+        .engine_compatibility
+        .rsplit_once("/sha256:")
+        .expect("admission includes the executable commitment");
+    assert_eq!(digest.len(), 64);
+    assert!(digest.bytes().all(|byte| byte.is_ascii_hexdigit()));
+
+    let binaries = tempfile::tempdir().expect("copied executable directory");
+    let copied = binaries.path().join("franken-node-copy");
+    fs::copy(binary(), &copied).expect("copy exact executable");
+    let args = ["deploy", "run", "app", "--json"];
+    let allowed = drill
+        .command_with_binary(&copied, drill.root.path(), &args)
+        .output()
+        .expect("run the byte-identical copy");
+    assert!(
+        allowed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&allowed.stdout)
+    );
+    let allowed: Value = serde_json::from_slice(&allowed.stdout).expect("deployment report");
+    assert_eq!(allowed["phase"], "healthy");
+    assert_eq!(guest_stdout(&allowed["run"]), "RELEASE_ONE_HEALTHY\n");
+    let before = drill.status();
+
+    // An ELF trailer changes the binary commitment without changing its
+    // executable instructions, package version, or compiled Git revision.
+    // No source, release, signature or policy fixture is altered.
+    {
+        let mut executable = fs::OpenOptions::new()
+            .append(true)
+            .open(&copied)
+            .expect("open completed executable copy");
+        executable
+            .write_all(b"\nfranken-node-different-build-regression\n")
+            .expect("change executable identity");
+        executable.sync_all().expect("persist changed executable");
+    }
+    let original_version = drill.cli(drill.root.path(), &["--version"]);
+    let changed_version = drill
+        .command_with_binary(&copied, drill.root.path(), &["--version"])
+        .output()
+        .expect("changed executable still runs");
+    assert!(original_version.status.success());
+    assert!(changed_version.status.success());
+    assert_eq!(changed_version.stdout, original_version.stdout);
+
+    for arguments in [
+        vec!["deploy", "run", "app", "--json"],
+        vec![
+            "deploy",
+            "activate",
+            "app",
+            "--release",
+            "1.0.0",
+            "--operator-id",
+            "ops-other-build",
+            "--json",
+        ],
+    ] {
+        let refused = drill
+            .command_with_binary(&copied, drill.root.path(), &arguments)
+            .output()
+            .expect("different-build deployment request");
+        assert!(!refused.status.success());
+        let refused: Value = serde_json::from_slice(&refused.stdout).expect("refusal report");
+        assert!(
+            refused["error"].as_str().is_some_and(|error| {
+                error.contains("release was admitted under") && error.contains("sha256:")
+            }),
+            "{refused}"
+        );
+        assert!(!refused.to_string().contains("RELEASE_ONE_HEALTHY"));
+        assert_eq!(
+            drill.status(),
+            before,
+            "refusal must not rewrite deployment state"
+        );
+    }
+
+    drill.interrupt_activation("intent");
+    let pending = drill.status();
+    assert!(!pending["pending_activation"].is_null());
+    let refused = drill
+        .command_with_binary(
+            &copied,
+            drill.root.path(),
+            &[
+                "deploy",
+                "reconcile",
+                "app",
+                "--operator-id",
+                "ops-other-build",
+                "--json",
+            ],
+        )
+        .output()
+        .expect("different-build pending reconciliation");
+    assert!(!refused.status.success());
+    let refused: Value = serde_json::from_slice(&refused.stdout).expect("reconciliation refusal");
+    assert!(
+        refused["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("release was admitted under")),
+        "{refused}"
+    );
+    assert_eq!(
+        drill.status(),
+        pending,
+        "signed pending intent must remain unchanged"
+    );
+    assert_eq!(drill.reconcile()["reconciled"], true);
+    assert_eq!(drill.run().1["phase"], "healthy");
+}
+
+#[test]
+fn historical_revision_only_deployment_is_readable_but_cannot_run() {
+    use frankenengine_node::runtime::deployment::{
+        ActivationReason, DeploymentAuthority, DeploymentStore,
+    };
+
+    let drill = Drill::new();
+    drill.install("1.0.0", HEALTHY_V1);
+    let mut historical = drill.admitted_release("1.0.0");
+    historical.release_id = "legacy".to_string();
+    historical.engine_compatibility = historical
+        .engine_compatibility
+        .rsplit_once("/sha256:")
+        .expect("current admission contains an executable commitment")
+        .0
+        .to_string();
+
+    // Construct a genuinely signed historical record with the deployment's
+    // own authority. Rejecting an invalid signature would miss this regression.
+    let key_hex =
+        fs::read_to_string(drill.root.path().join(".franken-node/keys/receipt-signing.key"))
+            .expect("deployment authority");
+    let secret: [u8; 32] = hex::decode(key_hex.trim())
+        .expect("hex signing key")
+        .try_into()
+        .expect("32-byte signing key");
+    let authority = DeploymentAuthority::new(ed25519_dalek::SigningKey::from_bytes(&secret));
+    let store = DeploymentStore::open(drill.root.path(), "app").expect("deployment store");
+    {
+        let lock = store.lock().expect("deployment lock");
+        store
+            .install_release(&lock, &authority, historical.clone())
+            .expect("retain authenticated legacy admission");
+        store
+            .activate(
+                &lock,
+                &authority,
+                "legacy",
+                ActivationReason::Operator,
+                Some("historical-operator"),
+                None,
+                historical.installed_at_epoch_secs,
+            )
+            .expect("historical activation");
+    }
+
+    let before = drill.status();
+    assert_eq!(before["active"]["release_id"], "legacy");
+    let (code, refused) = drill.run();
+    assert_ne!(code, Some(0));
+    assert!(
+        refused["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("release was admitted under")),
+        "{refused}"
+    );
+    assert!(!refused.to_string().contains("RELEASE_ONE_HEALTHY"));
+    assert_eq!(
+        drill.status(),
+        before,
+        "historical signatures are not upgraded"
+    );
 }
 
 #[test]

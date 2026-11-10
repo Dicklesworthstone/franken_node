@@ -6323,14 +6323,19 @@ fn handle_safe_mode_command(command: SafeModeCommand) -> Result<()> {
 const DEPLOY_CLI_SCHEMA_VERSION: &str = "franken-node/deploy-cli/v1";
 const DEPLOY_RUN_CLI_SCHEMA_VERSION: &str = "franken-node/deploy-run-cli/v1";
 
-/// The build a release is admitted under. A release admitted by another
-/// build is never selected as known-good: it must be re-admitted first.
-fn deploy_engine_compatibility() -> String {
-    format!(
-        "franken-node/{}+{}",
+/// Bind deployment readiness to the actual executable bytes, including the
+/// linked engine and build features. A product Git revision alone cannot
+/// identify those inputs. Historical revision-only admissions remain readable
+/// but cannot authorize execution under this stronger identity.
+fn deploy_engine_compatibility() -> Result<String> {
+    let binary_sha256 = current_binary_sha256().context(
+        "cannot authenticate this deployment executable; no release may be admitted, activated or run",
+    )?;
+    Ok(format!(
+        "franken-node/{}+{}/{binary_sha256}",
         env!("CARGO_PKG_VERSION"),
         option_env!("FRANKEN_NODE_GIT_SHA").unwrap_or("unknown")
-    )
+    ))
 }
 
 /// The deployment root is the operator project the command runs in; its
@@ -6446,7 +6451,7 @@ fn verify_deploy_release(release: &runtime::deployment::ReleaseRecord) -> Result
             current_unix_secs(),
         )
         .context("release fails its current trust admission")?;
-        let current = deploy_engine_compatibility();
+        let current = deploy_engine_compatibility()?;
         anyhow::ensure!(
             release.engine_compatibility == current,
             "release was admitted under {} but this build is {current}; re-admit it with `deploy install`",
@@ -6500,7 +6505,7 @@ fn handle_deploy_install(args: &cli::DeployInstallArgs) -> Result<serde_json::Va
         registry_manifest: manifest,
         publisher_public_key_path: key_path,
         approval,
-        engine_compatibility: deploy_engine_compatibility(),
+        engine_compatibility: deploy_engine_compatibility()?,
         installed_at_epoch_secs: current_unix_secs(),
     };
     verify_deploy_release(&release)?;
@@ -9760,14 +9765,32 @@ fn host_load_average_1m() -> Option<f64> {
         .ok()
 }
 
-/// SHA-256 of the running executable, identifying the exact build.
-#[cfg(feature = "engine")]
+/// SHA-256 of the executable, computed without retaining its bytes in memory.
+/// Linux opens the running image even when its original path was replaced.
+/// Other platforms resolve the same executable path used to spawn a deployment
+/// child; they do not provide Linux's mapped-image identity guarantee here.
 fn current_binary_sha256() -> Option<String> {
-    let bytes = std::fs::read(std::env::current_exe().ok()?).ok()?;
-    Some(format!(
-        "sha256:{}",
-        hex::encode(sha2::Sha256::digest(&bytes))
-    ))
+    use std::io::Read as _;
+
+    #[cfg(target_os = "linux")]
+    let executable = PathBuf::from("/proc/self/exe");
+    #[cfg(not(target_os = "linux"))]
+    let executable = std::env::current_exe().ok()?;
+    let mut file = std::fs::File::open(executable).ok()?;
+    let mut hasher = sha2::Sha256::new();
+    let mut buffer = [0_u8; 8 * 1024];
+    loop {
+        let read = match file.read(&mut buffer) {
+            Ok(read) => read,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return None,
+        };
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Some(format!("sha256:{}", hex::encode(hasher.finalize())))
 }
 
 /// bd-kfseq: run the committed compatibility corpus across bun (reference

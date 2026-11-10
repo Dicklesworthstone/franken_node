@@ -4509,6 +4509,18 @@ observation drives a signed recovery to an earlier release (below).
 directory (the *deployment root*, whose receipt signing key signs every
 deployment record under `.franken-node/state/deployments/<name>/`).
 
+Release admission binds the SHA-256 of the executable as well as its product
+version and revision. A rebuild against a different engine, feature set or
+compiler cannot reuse an older release's readiness merely because the product
+Git revision is unchanged. Linux hashes the running image through
+`/proc/self/exe`; other platforms hash the executable path used to launch the
+supervised child, without Linux's mapped-image guarantee. Failure to read the
+executable refuses admission and execution. Historical records containing only
+a version and revision remain inspectable but cannot authorize activation,
+reconciliation, recovery or execution under the stronger identity. Re-admit the
+release with `deploy install --release-id <new-id>` so its previous signed
+record and readiness remain intact.
+
 - `deploy install <name> --release-dir <dir> --entrypoint <file>
   --registry-artifact <manifest> --publisher-public-key <key>` admits one
   immutable release. A release is its own project directory (its own
