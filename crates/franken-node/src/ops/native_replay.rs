@@ -615,6 +615,63 @@ mod supervised {
         }
 
         #[test]
+        fn replay_supervisor_accepts_only_consistent_completed_outcomes() {
+            // This exercises the process protocol, not engine equivalence.
+            // Actual replay matches are covered by incident CLI integration.
+            let expected = NativeReplayOutcome {
+                schema_version: NATIVE_REPLAY_OUTCOME_SCHEMA.to_string(),
+                replay_kind: "native_reexecution".to_string(),
+                verification_scope: "guest_execution".to_string(),
+                module_load_disabled: true,
+                matched: true,
+                divergences: Vec::new(),
+                captured_trace_id: "captured-protocol-fixture".to_string(),
+                replay_trace_id: "replayed-protocol-fixture".to_string(),
+                captured_terminal_state: super::super::NativeReplayTerminalState::Completed,
+                replay_terminal_state: super::super::NativeReplayTerminalState::Completed,
+                terminal_state_match: true,
+                ir3_hash_match: Some(true),
+                ir4_witness_match: Some(true),
+                execution_value_match: Some(true),
+                instruction_count_match: Some(true),
+                console_match: true,
+                host_effects_match: true,
+                nondeterminism_trace_match: Some(true),
+                lane_match: Some(true),
+                exit_code_match: Some(true),
+                exception_value_match: None,
+                decisions_match: None,
+                policy_comparison_note: "protocol acceptance fixture".to_string(),
+            };
+            let script = "printf '%s' \"$$\" > \"$2\"; /bin/cat \"$1\"";
+            let mut response = refusal_response();
+            response.outcome = Ok(expected.clone());
+            let frame = encode_frame(&response).unwrap();
+            let (outcome, pid) = shell_fixture(script, &frame, Duration::from_secs(2));
+            assert_eq!(outcome.unwrap(), expected);
+            assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists());
+
+            for invalid in ["schema", "matched", "divergences"] {
+                let mut outcome = expected.clone();
+                match invalid {
+                    "schema" => outcome.schema_version.push_str("-other"),
+                    "matched" => outcome.matched = false,
+                    "divergences" => outcome.divergences.push("console".to_string()),
+                    _ => unreachable!(),
+                }
+                response.outcome = Ok(outcome);
+                let frame = encode_frame(&response).unwrap();
+                let (outcome, pid) = shell_fixture(script, &frame, Duration::from_secs(2));
+                assert!(
+                    outcome
+                        .unwrap_err()
+                        .contains("invalid verification outcome")
+                );
+                assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists());
+            }
+        }
+
+        #[test]
         fn replay_supervisor_reaps_timeout_abort_and_invalid_output() {
             let frame = encode_frame(&refusal_response()).unwrap();
             for (script, timeout, expected) in [

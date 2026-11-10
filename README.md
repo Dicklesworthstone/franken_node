@@ -1050,6 +1050,8 @@ Every fleet command, and `trust quarantine`, talks to one of two stores:
 | `franken-node fleet serve` | Run the live coordinator: serves this node's durable fleet store over HTTP (fastapi_rust listener on the asupersync runtime). Routes: `GET /v2/fleet/health` (open), `GET/POST /v2/fleet/actions`, `GET/POST /v2/fleet/nodes`, `GET /v2/fleet/state` (bearer token, constant-time compare). V2 preserves coordinator append order; upgrade coordinator and agents together because legacy routes are refused before mutation. Validates every record, caps bodies at 64 KiB, stamps heartbeats with its own clock. Flags: `--bind` (default `127.0.0.1:9440`; port 0 picks a free port, printed first on stdout), `--token-file` (default `.franken-node/keys/fleet-control-plane.token`), `--generate-token` (create a 0600 256-bit token), `--allow-non-loopback` (plaintext listener; only behind TLS termination or an encrypted overlay), `--max-requests`, `--json` (JSONL `FLEET_HTTP_LISTENING` / `FLEET_HTTP_REQUEST` / `FLEET_HTTP_SHUTDOWN` events). |
 | `franken-node fleet status` | Show fleet/quarantine state from the configured store. `activated` is true only when a live coordinator answered. Flags: `--zone`, `--verbose`, `--json`, `--screen` (the operator screen: frankentui summary, node-heartbeat and pending-convergence panels drawn from the same report, width from `COLUMNS`; excludes `--json`). |
 | `franken-node fleet sessions` | Inspect this operator's durable local native-session inventory, pending admissions, observed worker termination and unknown effects. Flags: `--project <directory>`, `--json`. Requires the native engine. |
+| `franken-node fleet hold` | Publish a durable native-admission maintenance owner for `--zone <zone\|all>`, with `--reason`. `--id` makes retries refer to the same owner; `--wait` requires fresh terminal drain observations with admission still fenced. Flags: `--json`. |
+| `franken-node fleet resume` | Remove only the maintenance owner selected by `--hold <action-id>`, retaining its original zone. `--wait` checks application; other owners can keep admission fenced. Optional: `--reason`, `--json`. Does not start workloads. |
 | `franken-node fleet describe <node>` | Describe one fleet node with zone context and incident state. Flags: `--zone`, `--json`. |
 | `franken-node fleet release` | Retire one fleet quarantine incident with signed receipts and application convergence. Preserves local quarantine, other scoped incidents, and permanent revocation. `--zone` disambiguates a shared incident ID; `--zone all` selects its global scope. `--incident` is handler-required so `--json` failures emit `franken-node/fleet-error-cli/v1`. |
 | `franken-node fleet reconcile` | Reconcile the fleet-action log and wait for convergence. Times out fail-closed (same as `fleet release`). Flags: `--json`. |
@@ -1108,7 +1110,8 @@ attempts and either an explicit absence of process-spawn authority or a proven
 empty containment boundary. Missing outcomes, historical identities with no
 lifecycle record, unknown process authority, and unresolved external effects
 keep admission fenced. A completed drain reopens admission under the applied
-policy; polling the same snapshot does not cancel newly admitted work.
+policy unless an explicit maintenance owner holds it closed; polling the same
+snapshot does not cancel newly admitted work.
 Indeterminate effects currently have no automatic reconciliation path; restarting
 the agent cannot clear those retained obligations.
 
@@ -1142,6 +1145,47 @@ coordinator URL. It explicitly keeps `fleet_quiescence_certified=false` because
 local admission fences may already have reopened. Ordinary reconciliation
 continues to emit v1 receipts. A timeout emits no success receipt; inspect
 `fleet status --json` for the outstanding node observations.
+
+For maintenance that must keep admission closed after draining, use an explicit
+hold. Run the agents continuously, then publish and wait from the operator:
+
+```bash
+franken-node fleet hold --zone us-east --id rollout-2026-11-10 \
+  --reason "replace the admitted runtime" --wait --json
+
+# Perform maintenance only after outcome=held and evidence.complete=true.
+# Resume this owner when maintenance is complete; no workload is restarted.
+franken-node fleet resume --hold rollout-2026-11-10 --wait --json
+```
+
+Without `--wait`, the command reports publication and any current observations;
+publication alone does not mean agents have drained. A waiting hold succeeds only
+when every observed participant has a fresh, exact action checkpoint and a fully
+terminal native population with its admission fence still held. Such nodes
+report `health: maintenance`, distinct from ordinary healthy/open admission.
+Unknown effects and missing or stale nodes continue to block readiness. A held
+fence also keeps `fleet reconcile --require-native-drain` pending.
+
+Hold ownership is the immutable action ID. Repeating `fleet hold` with the same
+`--id`, zone, and reason reuses the action. A resumed ID cannot be reactivated.
+Resuming one owner preserves all other active owners, including fleet-wide holds;
+the receipt reports `owner_resumed_admission_still_held` until no other owner
+remains. A global owner must be resumed globally, using its original ID. Repeated
+resume calls reuse the original resume action and do not drain newly admitted
+work. At most 64 owners may be active in one retained fleet history.
+
+Agents persist hold ownership together with the retained drain and recover it
+on restart. Resumption cannot skip unresolved sessions or actions that failed to
+apply. The signed `franken-node/fleet-maintenance-receipt/v1` binds the exact
+publication, owner, transport, freshness threshold, action checkpoints, retained
+node identities, and drain observations. Timeout or observation failure returns
+a nonzero exit with the published owner ID still available in JSON; it does not
+undo the action. `admission_resumed` describes reopening the local native fence;
+quarantine, revocation, policy, and deployment checks still apply. These are local
+supervisor observations with `fleet_quiescence_certified=false`, not a committed
+distributed epoch. Use enrolled HTTP node credentials for authenticated remote
+observations, and upgrade coordinator and agents together before publishing the
+new action variants.
 
 A responsive worker can now finish a cooperative stop requested by live control.
 Its inventory outcome is `control_stopped` only after the supervisor observes

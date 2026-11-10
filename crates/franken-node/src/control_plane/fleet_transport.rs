@@ -46,6 +46,8 @@ pub const FLEET_SHARED_STATE_SCHEMA: &str = "franken-node/fleet-transport-state/
 pub const FLEET_ACTION_LOG_FILE: &str = "actions.jsonl";
 pub const FLEET_NODE_DIR: &str = "nodes";
 pub const FLEET_LOCK_DIR: &str = "locks";
+/// Bound owner metadata independently of the much larger historical action log.
+pub const MAX_NATIVE_SESSION_MAINTENANCE_HOLDS: usize = 64;
 const FLEET_ACTION_COMPACTION_LOCK_FILE: &str = "actions.compaction.lock";
 const FLEET_SHARED_STATE_LOCK_FILE: &str = "shared-state.snapshot.lock";
 const MAX_NODE_ID_LEN: usize = 128;
@@ -224,6 +226,9 @@ pub enum FleetTargetKind {
 #[serde(rename_all = "snake_case")]
 pub enum NodeHealth {
     Healthy,
+    /// The exact action snapshot is applied and its retained native population
+    /// is terminal, while an explicit maintenance owner keeps admission fenced.
+    Maintenance,
     Degraded,
     Quarantined,
     Stale,
@@ -471,6 +476,15 @@ pub enum FleetAction {
     Release {
         zone_id: String,
         incident_id: String,
+        reason: Option<String>,
+    },
+    /// Its immutable action ID owns this persistent native admission hold.
+    NativeSessionHold { zone_id: String, reason: String },
+    /// Release only the named hold in its original exact zone. Other holds,
+    /// quarantines, revocations and unresolved effects remain authoritative.
+    NativeSessionResume {
+        zone_id: String,
+        hold_action_id: String,
         reason: Option<String>,
     },
     PolicyUpdate {
@@ -1078,8 +1092,14 @@ impl NativeSessionDrainCheckpoint {
 
     #[must_use]
     pub fn is_complete(&self) -> bool {
-        !self.fence_held
-            && self.pending_sessions == 0
+        !self.fence_held && self.population_is_terminal()
+    }
+
+    /// Terminal local accounting is independent of whether an operator's
+    /// maintenance hold continues to fence admission.
+    #[must_use]
+    pub fn population_is_terminal(&self) -> bool {
+        self.pending_sessions == 0
             && self.indeterminate_sessions == 0
             && self.terminal_sessions == self.admitted_sessions
     }
@@ -1107,26 +1127,14 @@ pub fn fleet_application_checkpoint(
     zone_id: &str,
 ) -> Result<FleetApplicationCheckpoint, FleetTransportError> {
     validate_zone_id(zone_id)?;
-    if actions.len() > MAX_ACTION_LOG_ENTRIES {
-        return Err(FleetTransportError::serialization(format!(
-            "fleet action snapshot exceeds {MAX_ACTION_LOG_ENTRIES} entries"
-        )));
-    }
-    let mut relevant = Vec::new();
-    let mut ids = BTreeSet::new();
-    for record in actions {
-        validate_action_record(record)?;
-        if !ids.insert(record.action_id.as_str()) {
-            return Err(FleetTransportError::serialization(format!(
-                "fleet action snapshot repeats action_id `{}`",
-                record.action_id
-            )));
-        }
-        let action_zone = fleet_action_zone(&record.action);
-        if action_zone == "all" || action_zone == zone_id {
-            relevant.push(record);
-        }
-    }
+    let _ = validated_native_session_holds(actions)?;
+    let relevant = actions
+        .iter()
+        .filter(|record| {
+            let action_zone = fleet_action_zone(&record.action);
+            action_zone == "all" || action_zone == zone_id
+        })
+        .collect::<Vec<_>>();
     let mut hasher = Sha256::new();
     hasher.update(b"franken-node/fleet-applied-actions/v2\0");
     hasher.update((zone_id.len() as u64).to_le_bytes());
@@ -1145,10 +1153,108 @@ pub fn fleet_application_checkpoint(
     })
 }
 
+/// Validate the complete ordered history before resolving native hold owners.
+/// An explicit resume cannot name a future action, another action kind, or a
+/// different zone. Repeating a resume for the same known owner is idempotent.
+fn validated_native_session_holds(
+    actions: &[FleetActionRecord],
+) -> Result<BTreeMap<&str, (&str, bool)>, FleetTransportError> {
+    if actions.len() > MAX_ACTION_LOG_ENTRIES {
+        return Err(FleetTransportError::serialization(format!(
+            "fleet action snapshot exceeds {MAX_ACTION_LOG_ENTRIES} entries"
+        )));
+    }
+    let mut ids = BTreeSet::new();
+    let mut holds = BTreeMap::new();
+    let mut active_count = 0_usize;
+    for record in actions {
+        validate_action_record(record)?;
+        if !ids.insert(record.action_id.as_str()) {
+            return Err(FleetTransportError::serialization(format!(
+                "fleet action snapshot repeats action_id `{}`",
+                record.action_id
+            )));
+        }
+        match &record.action {
+            FleetAction::NativeSessionHold { zone_id, .. } => {
+                if active_count >= MAX_NATIVE_SESSION_MAINTENANCE_HOLDS {
+                    return Err(FleetTransportError::serialization(format!(
+                        "native-session maintenance exceeds {MAX_NATIVE_SESSION_MAINTENANCE_HOLDS} simultaneous hold owners",
+                    )));
+                }
+                holds.insert(record.action_id.as_str(), (zone_id.as_str(), true));
+                active_count += 1;
+            }
+            FleetAction::NativeSessionResume {
+                zone_id,
+                hold_action_id,
+                ..
+            } => {
+                let Some((owner_zone, active)) = holds.get_mut(hold_action_id.as_str()) else {
+                    return Err(FleetTransportError::serialization(
+                        "native-session resume requires a preceding hold action",
+                    ));
+                };
+                if *owner_zone != zone_id.as_str() {
+                    return Err(FleetTransportError::serialization(
+                        "native-session resume must use its hold's exact original zone",
+                    ));
+                }
+                if *active {
+                    *active = false;
+                    active_count -= 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(holds)
+}
+
+/// Active immutable hold action IDs affecting one concrete zone, or every
+/// active hold when inspecting the fleet-wide `all` audience.
+pub fn fleet_native_session_holds(
+    actions: &[FleetActionRecord],
+    zone_id: &str,
+) -> Result<BTreeSet<String>, FleetTransportError> {
+    validate_zone_id(zone_id)?;
+    Ok(validated_native_session_holds(actions)?
+        .into_iter()
+        .filter(|(_, (owner_zone, active))| {
+            *active && (zone_id == "all" || *owner_zone == "all" || *owner_zone == zone_id)
+        })
+        .map(|(action_id, _)| action_id.to_owned())
+        .collect())
+}
+
+/// Validate hold/resume references under the same lock or transaction that
+/// admits a publication, preventing a bad resume from poisoning the action log.
+pub fn validate_fleet_native_session_publication(
+    record: &FleetActionRecord,
+    existing: &[FleetActionRecord],
+) -> Result<(), FleetTransportError> {
+    if !matches!(
+        record.action,
+        FleetAction::NativeSessionHold { .. } | FleetAction::NativeSessionResume { .. }
+    ) {
+        return Ok(());
+    }
+    if existing.contains(record) {
+        let _ = validated_native_session_holds(existing)?;
+    } else {
+        let mut candidate = existing.to_vec();
+        candidate.push(record.clone());
+        let _ = validated_native_session_holds(&candidate)?;
+    }
+    Ok(())
+}
+
 fn fleet_action_zone(action: &FleetAction) -> &str {
     match action {
         FleetAction::Quarantine { zone_id, .. }
         | FleetAction::Release { zone_id, .. }
+        | FleetAction::NativeSessionHold { zone_id, .. }
+        | FleetAction::NativeSessionResume { zone_id, .. }
         | FleetAction::PolicyUpdate { zone_id, .. } => zone_id,
         #[cfg(feature = "control-plane")]
         FleetAction::Revoke { scope, .. } => &scope.zone_id,
@@ -1256,6 +1362,9 @@ pub enum FleetNativeDrainReadiness {
     MissingApplicationCheckpoint,
     ApplicationSnapshotMismatch,
     MissingNativeDrain,
+    HoldNotActive,
+    HoldStillActive,
+    MaintenanceFenceMissing,
 }
 
 /// One exact node/zone identity in a reconciliation's retained population.
@@ -1471,6 +1580,214 @@ fn native_drain_readiness(
         // partition and application binding, before deriving readiness.
         Some(drain) if drain.is_complete() => FleetNativeDrainReadiness::Ready,
         Some(_) => FleetNativeDrainReadiness::AdmissionFenced,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FleetNativeSessionHoldTarget {
+    Held,
+    Resumed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FleetNativeSessionHoldNodeEvidence {
+    pub zone_id: String,
+    pub node_id: String,
+    pub expected_actions: FleetApplicationCheckpoint,
+    pub last_seen: Option<DateTime<Utc>>,
+    pub health: Option<NodeHealth>,
+    pub applied_actions: Option<FleetApplicationCheckpoint>,
+    pub native_session_drain: Option<NativeSessionDrainCheckpoint>,
+    pub active_hold_ids: Vec<String>,
+    pub ready: bool,
+    pub reason: FleetNativeDrainReadiness,
+    pub admission_resumed: bool,
+}
+
+/// Current local supervisor observations for one immutable maintenance owner.
+/// A completed resume can leave admission fenced by another active owner.
+/// Neither outcome certifies distributed quiescence or restarts a workload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FleetNativeSessionHoldEvidence {
+    pub schema_version: String,
+    pub scope: String,
+    pub observed_at: DateTime<Utc>,
+    pub stale_after: Duration,
+    pub action_count: u64,
+    pub hold_action_id: String,
+    pub hold_zone_id: String,
+    pub target: FleetNativeSessionHoldTarget,
+    pub complete: bool,
+    pub admission_resumed: bool,
+    pub fleet_quiescence_certified: bool,
+    pub uncovered_zones: Vec<String>,
+    pub nodes: Vec<FleetNativeSessionHoldNodeEvidence>,
+}
+
+/// Observe the exact original hold audience, retaining every identity supplied
+/// by the caller. Unrelated zones are still validated, but cannot satisfy or
+/// block this owner's readiness. Callers retain action/source continuity and
+/// the union of returned identities across polling, as for drain evidence.
+pub fn fleet_native_session_hold_evidence(
+    state: &FleetSharedState,
+    hold_action_id: &str,
+    target: FleetNativeSessionHoldTarget,
+    required_nodes: &BTreeSet<(String, String)>,
+    now: DateTime<Utc>,
+    stale_after: Duration,
+) -> Result<FleetNativeSessionHoldEvidence, FleetTransportError> {
+    validate_action_id(hold_action_id)?;
+    let observed = fleet_native_drain_evidence(state, required_nodes, now, stale_after)?;
+    let hold_zone_id = state
+        .actions
+        .iter()
+        .find_map(|record| {
+            if record.action_id != hold_action_id {
+                return None;
+            }
+            match &record.action {
+                FleetAction::NativeSessionHold { zone_id, .. } => Some(zone_id.clone()),
+                _ => None,
+            }
+        })
+        .ok_or_else(|| {
+            FleetTransportError::serialization(
+                "native-session maintenance evidence requires a retained hold action",
+            )
+        })?;
+    if required_nodes
+        .iter()
+        .any(|(zone, _)| hold_zone_id != "all" && zone != &hold_zone_id)
+    {
+        return Err(FleetTransportError::serialization(
+            "retained maintenance participant is outside the hold's original zone",
+        ));
+    }
+    let requested_active =
+        fleet_native_session_holds(&state.actions, &hold_zone_id)?.contains(hold_action_id);
+    let target_satisfied = match target {
+        FleetNativeSessionHoldTarget::Held => requested_active,
+        FleetNativeSessionHoldTarget::Resumed => !requested_active,
+    };
+    let mut holds_by_zone = BTreeMap::<String, Vec<String>>::new();
+    let mut nodes = Vec::new();
+    for node in observed.nodes {
+        if hold_zone_id != "all" && node.zone_id != hold_zone_id {
+            continue;
+        }
+        let active_hold_ids = match holds_by_zone.get(&node.zone_id) {
+            Some(holds) => holds.clone(),
+            None => {
+                let holds: Vec<_> = fleet_native_session_holds(&state.actions, &node.zone_id)?
+                    .into_iter()
+                    .collect();
+                holds_by_zone.insert(node.zone_id.clone(), holds.clone());
+                holds
+            }
+        };
+        let reason = native_session_hold_readiness(
+            &node,
+            !active_hold_ids.is_empty(),
+            target_satisfied,
+            target,
+        );
+        let ready = reason == FleetNativeDrainReadiness::Ready;
+        nodes.push(FleetNativeSessionHoldNodeEvidence {
+            zone_id: node.zone_id,
+            node_id: node.node_id,
+            expected_actions: node.expected_actions,
+            last_seen: node.last_seen,
+            health: node.health,
+            applied_actions: node.applied_actions,
+            native_session_drain: node.native_session_drain,
+            admission_resumed: ready && active_hold_ids.is_empty(),
+            active_hold_ids,
+            ready,
+            reason,
+        });
+    }
+    let uncovered_zones = if nodes.iter().all(|node| node.last_seen.is_none()) {
+        vec![hold_zone_id.clone()]
+    } else {
+        Vec::new()
+    };
+    let complete = target_satisfied
+        && !nodes.is_empty()
+        && uncovered_zones.is_empty()
+        && nodes.iter().all(|node| node.ready);
+    Ok(FleetNativeSessionHoldEvidence {
+        schema_version: "franken-node/fleet-native-session-hold-evidence/v1".to_owned(),
+        scope: "local_supervisor_maintenance_observations".to_owned(),
+        observed_at: now,
+        stale_after,
+        action_count: observed.action_count,
+        hold_action_id: hold_action_id.to_owned(),
+        hold_zone_id,
+        target,
+        complete,
+        admission_resumed: complete && nodes.iter().all(|node| node.admission_resumed),
+        fleet_quiescence_certified: false,
+        uncovered_zones,
+        nodes,
+    })
+}
+
+fn native_session_hold_readiness(
+    node: &FleetNativeDrainNodeEvidence,
+    has_active_holds: bool,
+    target_satisfied: bool,
+    target: FleetNativeSessionHoldTarget,
+) -> FleetNativeDrainReadiness {
+    if matches!(
+        node.reason,
+        FleetNativeDrainReadiness::MissingNode
+            | FleetNativeDrainReadiness::NoApplicableActions
+            | FleetNativeDrainReadiness::FutureHeartbeat
+            | FleetNativeDrainReadiness::StaleHeartbeat
+    ) {
+        return node.reason;
+    }
+    if !target_satisfied {
+        return match target {
+            FleetNativeSessionHoldTarget::Held => FleetNativeDrainReadiness::HoldNotActive,
+            FleetNativeSessionHoldTarget::Resumed => FleetNativeDrainReadiness::HoldStillActive,
+        };
+    }
+    let Some(drain) = &node.native_session_drain else {
+        return FleetNativeDrainReadiness::MissingNativeDrain;
+    };
+    if drain.applied_actions != node.expected_actions {
+        return FleetNativeDrainReadiness::DrainSnapshotMismatch;
+    }
+    if drain.indeterminate_sessions > 0 {
+        return FleetNativeDrainReadiness::IndeterminateSessions;
+    }
+    if drain.pending_sessions > 0 {
+        return FleetNativeDrainReadiness::PendingSessions;
+    }
+    let expected_health = if has_active_holds {
+        if !drain.fence_held {
+            return FleetNativeDrainReadiness::MaintenanceFenceMissing;
+        }
+        NodeHealth::Maintenance
+    } else {
+        if drain.fence_held {
+            return FleetNativeDrainReadiness::AdmissionFenced;
+        }
+        NodeHealth::Healthy
+    };
+    if node.health != Some(expected_health) {
+        return FleetNativeDrainReadiness::NodeUnhealthy;
+    }
+    match &node.applied_actions {
+        None => FleetNativeDrainReadiness::MissingApplicationCheckpoint,
+        Some(applied) if applied != &node.expected_actions => {
+            FleetNativeDrainReadiness::ApplicationSnapshotMismatch
+        }
+        Some(_) => FleetNativeDrainReadiness::Ready,
     }
 }
 
@@ -2783,6 +3100,7 @@ impl FleetTransport for FileFleetTransport {
                     }
                 }
                 if already_published {
+                    validate_fleet_native_session_publication(action, &existing)?;
                     // The previous attempt may have written the whole record
                     // before failing to sync. An exact retry must establish
                     // the same durability boundary as a fresh publication.
@@ -2800,6 +3118,7 @@ impl FleetTransport for FileFleetTransport {
                     )));
                 }
                 validate_fleet_policy_publication(action, &existing)?;
+                validate_fleet_native_session_publication(action, &existing)?;
                 let payload = serde_json::to_vec(action).map_err(|err| {
                     FleetTransportError::serialization(format!(
                         "failed serializing fleet action {}: {err}",
@@ -2924,7 +3243,7 @@ pub fn validate_node_id(node_id: &str) -> Result<&str, FleetTransportError> {
     validate_transport_identifier(node_id, "node_id", MAX_NODE_ID_LEN)
 }
 
-fn validate_action_id(action_id: &str) -> Result<&str, FleetTransportError> {
+pub(crate) fn validate_action_id(action_id: &str) -> Result<&str, FleetTransportError> {
     validate_transport_identifier(action_id, "action_id", MAX_ACTION_ID_LEN)
 }
 
@@ -3000,6 +3319,21 @@ pub fn validate_action_record(action: &FleetActionRecord) -> Result<(), FleetTra
                 validate_action_text_field("release reason", reason)?;
             }
         }
+        FleetAction::NativeSessionHold { zone_id, reason } => {
+            validate_zone_id(zone_id)?;
+            validate_action_text_field("native-session hold reason", reason)?;
+        }
+        FleetAction::NativeSessionResume {
+            zone_id,
+            hold_action_id,
+            reason,
+        } => {
+            validate_zone_id(zone_id)?;
+            validate_action_id(hold_action_id)?;
+            if let Some(reason) = reason {
+                validate_action_text_field("native-session resume reason", reason)?;
+            }
+        }
         FleetAction::PolicyUpdate {
             zone_id,
             policy_version,
@@ -3057,11 +3391,22 @@ pub fn validate_node_status(status: &NodeStatus) -> Result<(), FleetTransportErr
     validate_node_id(&status.node_id)?;
     if let Some(checkpoint) = &status.applied_actions {
         checkpoint.validate()?;
-        if status.health != NodeHealth::Healthy {
+        if !matches!(status.health, NodeHealth::Healthy | NodeHealth::Maintenance) {
             return Err(FleetTransportError::serialization(
-                "only a healthy node can acknowledge an applied fleet snapshot",
+                "only a healthy or drained maintenance node can acknowledge an applied fleet snapshot",
             ));
         }
+    }
+    if status.health == NodeHealth::Maintenance
+        && !status.native_session_drain.as_ref().is_some_and(|drain| {
+            drain.fence_held
+                && drain.population_is_terminal()
+                && status.applied_actions.as_ref() == Some(&drain.applied_actions)
+        })
+    {
+        return Err(FleetTransportError::serialization(
+            "maintenance acknowledgement requires an applied, terminal native population with admission still fenced",
+        ));
     }
     if let Some(drain) = &status.native_session_drain {
         drain.validate()?;

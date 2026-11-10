@@ -148,10 +148,12 @@ use frankenengine_node::api::fleet_quarantine::{
 use frankenengine_node::control_plane::fleet_transport::{
     FLEET_ACTION_LOG_FILE, FLEET_NODE_DIR, FleetAction as PersistedFleetAction,
     FleetActionRecord as PersistedFleetActionRecord, FleetConvergenceReceiptSignature,
-    FleetNativeDrainEvidence, FleetSharedState, FleetTargetKind as PersistedFleetTargetKind,
+    FleetNativeDrainEvidence, FleetNativeSessionHoldEvidence, FleetNativeSessionHoldTarget,
+    FleetSharedState, FleetTargetKind as PersistedFleetTargetKind,
     FleetTransport as PersistedFleetTransport, FleetTransportError,
     NodeHealth as PersistedNodeHealth, NodeStatus as PersistedNodeStatus,
     fleet_convergence_receipt_verdict, fleet_native_drain_evidence,
+    fleet_native_session_hold_evidence, fleet_native_session_holds,
     sign_fleet_convergence_receipt_payload, wait_until_fleet_converged_or_timeout,
 };
 use frankenengine_node::control_plane::fleet_transport_durable;
@@ -11259,7 +11261,9 @@ fn count_active_fleet_quarantines(fleet_state_dir: &Path) -> Result<u64> {
             }
             #[cfg(feature = "control-plane")]
             PersistedFleetAction::Revoke { .. } => {}
-            PersistedFleetAction::PolicyUpdate { .. } => {}
+            PersistedFleetAction::PolicyUpdate { .. }
+            | PersistedFleetAction::NativeSessionHold { .. }
+            | PersistedFleetAction::NativeSessionResume { .. } => {}
         }
     }
     Ok(u64::try_from(active_incidents.len()).unwrap_or(u64::MAX))
@@ -27390,6 +27394,58 @@ struct FleetCliConvergenceObservation {
     native_session_drain: Option<FleetCliNativeDrainObservation>,
 }
 
+#[derive(Serialize)]
+struct FleetCliMaintenanceReport {
+    schema_version: &'static str,
+    command: &'static str,
+    ok: bool,
+    receipt: FleetCliMaintenanceReceipt,
+}
+
+#[derive(Serialize)]
+struct FleetCliMaintenanceReceipt {
+    #[serde(flatten)]
+    payload: FleetCliMaintenanceReceiptPayload,
+    signature: FleetConvergenceReceiptSignature,
+}
+
+#[derive(Serialize)]
+struct FleetCliMaintenanceReceiptPayload {
+    schema_version: &'static str,
+    operation: &'static str,
+    hold_action_id: String,
+    zone_id: String,
+    published_action: PersistedFleetActionRecord,
+    publication_created: bool,
+    wait_requested: bool,
+    outcome: &'static str,
+    completed_at: DateTime<Utc>,
+    elapsed_ms: u64,
+    timeout_ms: u64,
+    timed_out: bool,
+    transport: &'static str,
+    live_control_plane: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    control_plane_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    state_dir: Option<PathBuf>,
+    evidence: Option<FleetNativeSessionHoldEvidence>,
+    observation_error: Option<String>,
+    fleet_quiescence_certified: bool,
+}
+
+enum FleetMaintenanceRequest<'a> {
+    Hold {
+        zone: &'a str,
+        reason: &'a str,
+        id: Option<&'a str>,
+    },
+    Resume {
+        hold: &'a str,
+        reason: Option<&'a str>,
+    },
+}
+
 fn resolve_fleet_state_dir(
     project_root: &Path,
     resolved: &config::ResolvedConfig,
@@ -27702,6 +27758,8 @@ fn persisted_fleet_action_zone(action: &PersistedFleetAction) -> &str {
     match action {
         PersistedFleetAction::Quarantine { zone_id, .. }
         | PersistedFleetAction::Release { zone_id, .. }
+        | PersistedFleetAction::NativeSessionHold { zone_id, .. }
+        | PersistedFleetAction::NativeSessionResume { zone_id, .. }
         | PersistedFleetAction::PolicyUpdate { zone_id, .. } => zone_id,
         #[cfg(feature = "control-plane")]
         PersistedFleetAction::Revoke { scope, .. } => &scope.zone_id,
@@ -27781,7 +27839,9 @@ fn derive_active_fleet_incidents(
             }
             #[cfg(feature = "control-plane")]
             PersistedFleetAction::Revoke { .. } => {}
-            PersistedFleetAction::PolicyUpdate { .. } => {}
+            PersistedFleetAction::PolicyUpdate { .. }
+            | PersistedFleetAction::NativeSessionHold { .. }
+            | PersistedFleetAction::NativeSessionResume { .. } => {}
         }
     }
 
@@ -27872,9 +27932,10 @@ fn derive_active_fleet_incidents(
                     },
                 })
             }
-            PersistedFleetAction::Release { .. } | PersistedFleetAction::PolicyUpdate { .. } => {
-                None
-            }
+            PersistedFleetAction::Release { .. }
+            | PersistedFleetAction::PolicyUpdate { .. }
+            | PersistedFleetAction::NativeSessionHold { .. }
+            | PersistedFleetAction::NativeSessionResume { .. } => None,
             #[cfg(feature = "control-plane")]
             PersistedFleetAction::Revoke { .. } => None,
         })
@@ -28020,6 +28081,307 @@ fn handle_fleet_sessions(args: &cli::FleetSessionsArgs) -> Result<()> {
         }
         Ok(())
     }
+}
+
+fn fleet_maintenance_report(
+    project_root: &Path,
+    request: FleetMaintenanceRequest<'_>,
+    wait: bool,
+) -> Result<FleetCliMaintenanceReport> {
+    use control_plane::fleet_transport::{
+        validate_action_record, validate_fleet_native_session_publication, validate_zone_id,
+    };
+    let (command, operation, target) = match &request {
+        FleetMaintenanceRequest::Hold { zone, reason, .. } => {
+            validate_zone_id(zone)?;
+            if reason.trim().is_empty() {
+                anyhow::bail!("`fleet hold` requires --reason");
+            }
+            ("fleet.hold", "hold", FleetNativeSessionHoldTarget::Held)
+        }
+        FleetMaintenanceRequest::Resume { hold, .. } => {
+            if hold.is_empty() {
+                anyhow::bail!("`fleet resume` requires --hold");
+            }
+            (
+                "fleet.resume",
+                "resume",
+                FleetNativeSessionHoldTarget::Resumed,
+            )
+        }
+    };
+    // Resolve the signer before publishing a durable action. Keep this exact
+    // transport handle for every observation: a config edit cannot switch the
+    // coordinator, store, token or timeout midway through maintenance.
+    let signing_material = load_fleet_signing_material()?;
+    let (timeout_seconds, state_dir, mut transport) = open_fleet_transport(project_root)?;
+    let timeout = Duration::from_secs(timeout_seconds);
+    let initial = transport.read_shared_state()?;
+    fleet_native_drain_evidence(&initial, &BTreeSet::new(), Utc::now(), timeout)?;
+
+    let (hold_action_id, zone_id, published_action, publication_created) = match request {
+        FleetMaintenanceRequest::Hold { zone, reason, id } => {
+            let owner = id.map_or_else(|| fleet_operation_id("hold"), str::to_owned);
+            let action = PersistedFleetAction::NativeSessionHold {
+                zone_id: zone.to_owned(),
+                reason: reason.to_owned(),
+            };
+            let (record, created) = match initial.actions.iter().find(|r| r.action_id == owner) {
+                Some(record) => {
+                    if record.action != action {
+                        anyhow::bail!(
+                            "hold ID `{owner}` already names a different action or reason"
+                        );
+                    }
+                    if !fleet_native_session_holds(&initial.actions, zone)?.contains(&owner) {
+                        anyhow::bail!("hold `{owner}` was already resumed; use a new owner ID");
+                    }
+                    (record.clone(), false)
+                }
+                None => (
+                    PersistedFleetActionRecord {
+                        action_id: owner.clone(),
+                        emitted_at: Utc::now(),
+                        action,
+                    },
+                    true,
+                ),
+            };
+            (owner, zone.to_owned(), record, created)
+        }
+        FleetMaintenanceRequest::Resume { hold, reason } => {
+            let zone = initial
+                .actions
+                .iter()
+                .find_map(|record| {
+                    if record.action_id != hold {
+                        return None;
+                    }
+                    match &record.action {
+                        PersistedFleetAction::NativeSessionHold { zone_id, .. } => {
+                            Some(zone_id.clone())
+                        }
+                        _ => None,
+                    }
+                })
+                .ok_or_else(|| {
+                    anyhow::anyhow!("hold `{hold}` is not present in the retained action history")
+                })?;
+            let previous = initial.actions.iter().find(|record| {
+                matches!(&record.action, PersistedFleetAction::NativeSessionResume { hold_action_id, .. }
+                    if hold_action_id == hold)
+            });
+            let (record, created) = if let Some(previous) = previous {
+                if let PersistedFleetAction::NativeSessionResume {
+                    reason: old_reason, ..
+                } = &previous.action
+                    && reason.is_some_and(|reason| old_reason.as_deref() != Some(reason))
+                {
+                    anyhow::bail!("hold `{hold}` already has a resume with a different reason");
+                }
+                (previous.clone(), false)
+            } else {
+                // Concurrent retries collide on one immutable resume identity
+                // instead of appending fresh checkpoints that drain new work.
+                let action_id = format!(
+                    "fleet-native-resume-{}",
+                    hex::encode(sha2::Sha256::digest(hold.as_bytes())),
+                );
+                (
+                    PersistedFleetActionRecord {
+                        action_id,
+                        emitted_at: Utc::now(),
+                        action: PersistedFleetAction::NativeSessionResume {
+                            zone_id: zone.clone(),
+                            hold_action_id: hold.to_owned(),
+                            reason: reason.map(str::to_owned),
+                        },
+                    },
+                    true,
+                )
+            };
+            (hold.to_owned(), zone, record, created)
+        }
+    };
+    validate_action_record(&published_action)?;
+    validate_fleet_native_session_publication(&published_action, &initial.actions)?;
+    let mut retained_actions = initial.actions;
+    let mut required_nodes: BTreeSet<(String, String)> = initial
+        .nodes
+        .iter()
+        .filter(|node| node_matches_filter(node, &zone_id))
+        .map(|node| (node.zone_id.clone(), node.node_id.clone()))
+        .collect();
+    if publication_created {
+        transport.publish_action(&published_action).with_context(|| {
+            format!("maintenance publication for hold `{hold_action_id}` was not acknowledged; retry with the same owner ID")
+        })?;
+    }
+
+    let started = std::time::Instant::now();
+    let mut evidence = None;
+    let mut observe = || -> std::result::Result<bool, FleetTransportError> {
+        let state = transport.read_shared_state()?;
+        if !state.actions.starts_with(&retained_actions) {
+            return Err(FleetTransportError::stale_state(
+                "maintenance observation lost or changed its retained action history",
+            ));
+        }
+        // Include nodes first seen while waiting and never forget a missing
+        // participant. The evidence helper enforces the combined bounded set.
+        required_nodes.extend(
+            state
+                .nodes
+                .iter()
+                .filter(|node| node_matches_filter(node, &zone_id))
+                .map(|node| (node.zone_id.clone(), node.node_id.clone())),
+        );
+        let found = state
+            .actions
+            .iter()
+            .find(|record| record.action_id == published_action.action_id);
+        if let Some(found) = found {
+            if found != &published_action {
+                return Err(FleetTransportError::stale_state(
+                    "maintenance observation substituted the published action",
+                ));
+            }
+            let observed = fleet_native_session_hold_evidence(
+                &state,
+                &hold_action_id,
+                target,
+                &required_nodes,
+                Utc::now(),
+                timeout,
+            )?;
+            let complete = observed.complete;
+            evidence = Some(observed);
+            retained_actions = state.actions;
+            Ok(complete)
+        } else {
+            fleet_native_drain_evidence(&state, &required_nodes, Utc::now(), timeout)?;
+            retained_actions = state.actions;
+            evidence = None;
+            Ok(false)
+        }
+    };
+    let (mut timed_out, observation_error) = if wait {
+        match wait_until_fleet_converged_or_timeout(timeout, &mut observe) {
+            Ok(result) => (result.timed_out, None),
+            Err(error) => (false, Some(error.to_string())),
+        }
+    } else {
+        (false, observe().err().map(|error| error.to_string()))
+    };
+    let elapsed = started.elapsed();
+    // A blocking transport read may finish after the budget. Its observations
+    // can be retained as evidence, but cannot turn a late result into success.
+    timed_out |= wait && elapsed >= timeout;
+    let complete = evidence.as_ref().is_some_and(|observed| observed.complete);
+    let ok = observation_error.is_none() && (!wait || (!timed_out && complete));
+    let outcome = if observation_error.is_some() {
+        "published_observation_failed"
+    } else if timed_out {
+        "published_timed_out"
+    } else if !wait {
+        "published"
+    } else if target == FleetNativeSessionHoldTarget::Held {
+        "held"
+    } else if evidence
+        .as_ref()
+        .is_some_and(|observed| observed.admission_resumed)
+    {
+        "admission_resumed"
+    } else {
+        "owner_resumed_admission_still_held"
+    };
+    let payload = FleetCliMaintenanceReceiptPayload {
+        schema_version: "franken-node/fleet-maintenance-receipt/v1",
+        operation,
+        hold_action_id,
+        zone_id,
+        published_action,
+        publication_created,
+        wait_requested: wait,
+        outcome,
+        completed_at: Utc::now(),
+        elapsed_ms: duration_millis_u64(elapsed),
+        timeout_ms: timeout_seconds.saturating_mul(1_000),
+        timed_out,
+        transport: transport.kind().label(),
+        live_control_plane: transport.kind().live(),
+        control_plane_url: transport.control_plane_url(),
+        state_dir: (transport.kind() == FleetTransportKind::File).then_some(state_dir),
+        evidence,
+        observation_error,
+        fleet_quiescence_certified: false,
+    };
+    let signature = sign_fleet_convergence_receipt_payload(
+        &payload,
+        &signing_material.signing_key,
+        signing_material.source,
+        "fleet-control-plane",
+    )
+    .with_context(|| {
+        format!(
+            "hold `{}` was published but its receipt could not be signed",
+            payload.hold_action_id
+        )
+    })?;
+    Ok(FleetCliMaintenanceReport {
+        schema_version: "franken-node/fleet-maintenance-cli/v1",
+        command,
+        ok,
+        receipt: FleetCliMaintenanceReceipt { payload, signature },
+    })
+}
+
+fn handle_fleet_maintenance(
+    request: FleetMaintenanceRequest<'_>,
+    wait: bool,
+    json: bool,
+) -> Result<()> {
+    let report = fleet_maintenance_report(Path::new("."), request, wait)?;
+    let payload = &report.receipt.payload;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        if !report.ok {
+            fail_closed_after_json();
+        }
+    } else {
+        println!(
+            "{}: hold={} zone={} outcome={} action={}",
+            report.command,
+            payload.hold_action_id,
+            payload.zone_id,
+            payload.outcome,
+            payload.published_action.action_id
+        );
+        if let Some(observed) = &payload.evidence {
+            println!(
+                "  observed_nodes={} complete={} admission_resumed={} fleet_quiescence_certified=false",
+                observed.nodes.len(),
+                observed.complete,
+                observed.admission_resumed
+            );
+        }
+        if !wait {
+            println!(
+                "  Publication is not an application acknowledgement; use --wait with the same hold ID to observe readiness."
+            );
+        }
+        if !report.ok {
+            anyhow::bail!(
+                "maintenance for hold `{}` was published but readiness was not established: {}",
+                payload.hold_action_id,
+                payload
+                    .observation_error
+                    .as_deref()
+                    .unwrap_or("convergence timed out; the action remains in force")
+            );
+        }
+    }
+    Ok(())
 }
 
 fn fleet_status_report(project_root: &Path, requested_zone: &str) -> Result<FleetCliStatusReport> {
@@ -29812,6 +30174,21 @@ fn run_fleet_agent(args: &FleetAgentArgs) -> Result<()> {
                             })
                     }
                 }
+                PersistedFleetAction::NativeSessionHold { .. }
+                | PersistedFleetAction::NativeSessionResume { .. } => {
+                    #[cfg(feature = "engine")]
+                    {
+                        // begin/finish reconcile the durable owners and the
+                        // exact retained population under the admission lock.
+                        Ok(())
+                    }
+                    #[cfg(not(feature = "engine"))]
+                    {
+                        Err(anyhow::anyhow!(
+                            "native-session maintenance requires an engine build; admission was not fenced"
+                        ))
+                    }
+                }
                 #[cfg(feature = "control-plane")]
                 PersistedFleetAction::Revoke {
                     extension_id,
@@ -29923,7 +30300,15 @@ fn run_fleet_agent(args: &FleetAgentArgs) -> Result<()> {
                     &resolved.zone_id,
                     &expected_checkpoint,
                 ) {
-                    Ok(report) => native_drain = report,
+                    Ok(report) => {
+                        native_drain = report;
+                        if !native_drain.maintenance_hold_ids.is_empty()
+                            && native_drain.checkpoint.fence_held
+                            && native_drain.checkpoint.population_is_terminal()
+                        {
+                            node_health = NodeHealth::Maintenance;
+                        }
+                    }
                     Err(error) => {
                         node_health = NodeHealth::Degraded;
                         tracing::error!(node_id = resolved.node_id.as_str(), %error,
@@ -29936,12 +30321,13 @@ fn run_fleet_agent(args: &FleetAgentArgs) -> Result<()> {
                     }
                 }
             }
-            if !native_drain.checkpoint.is_complete() {
+            if node_health != NodeHealth::Maintenance && !native_drain.checkpoint.is_complete() {
                 node_health = NodeHealth::Degraded;
             }
             // A retained completed drain must not be republished as a fresh
             // application acknowledgement when reconciliation now failed.
-            (node_health == NodeHealth::Healthy || native_drain.checkpoint.fence_held)
+            (matches!(node_health, NodeHealth::Healthy | NodeHealth::Maintenance)
+                || native_drain.checkpoint.fence_held)
                 .then_some(native_drain.checkpoint)
         };
         #[cfg(not(feature = "engine"))]
@@ -29959,7 +30345,8 @@ fn run_fleet_agent(args: &FleetAgentArgs) -> Result<()> {
             // restart. Failure or an unresolved local drain replaces any
             // earlier application checkpoint with None. The separate drain
             // field does not certify a distributed epoch barrier.
-            applied_actions: (node_health == NodeHealth::Healthy).then_some(expected_checkpoint),
+            applied_actions: matches!(node_health, NodeHealth::Healthy | NodeHealth::Maintenance)
+                .then_some(expected_checkpoint),
             native_session_drain,
         };
         transport
@@ -29979,6 +30366,7 @@ fn run_fleet_agent(args: &FleetAgentArgs) -> Result<()> {
             last_action_id: last_seen_action_id.clone(),
             node_health: match node_status.health {
                 NodeHealth::Healthy => "healthy",
+                NodeHealth::Maintenance => "maintenance",
                 NodeHealth::Degraded => "degraded",
                 NodeHealth::Quarantined => "quarantined",
                 NodeHealth::Stale => "stale",
@@ -36008,6 +36396,8 @@ fn clap_json_error_surface() -> (&'static str, &'static str) {
         ("fleet", Some("describe")) => (FLEET_CLI_ERROR_SCHEMA_VERSION, "fleet.describe"),
         ("fleet", Some("status")) => (FLEET_CLI_ERROR_SCHEMA_VERSION, "fleet.status"),
         ("fleet", Some("reconcile")) => (FLEET_CLI_ERROR_SCHEMA_VERSION, "fleet.reconcile"),
+        ("fleet", Some("hold")) => (FLEET_CLI_ERROR_SCHEMA_VERSION, "fleet.hold"),
+        ("fleet", Some("resume")) => (FLEET_CLI_ERROR_SCHEMA_VERSION, "fleet.resume"),
         ("ltv", Some("attest")) => (LTV_ERROR_CLI_SCHEMA, "ltv.attest"),
         ("ltv", Some("verify-as-of")) => (LTV_ERROR_CLI_SCHEMA, "ltv.verify-as-of"),
         ("incident", Some("bundle")) => ("franken-node/incident-error-cli/v1", "incident.bundle"),
@@ -37902,6 +38292,25 @@ fn main() -> Result<()> {
             FleetCommand::Sessions(args) => {
                 if let Err(err) = handle_fleet_sessions(&args) {
                     return fleet_fail("fleet.sessions", args.json, err);
+                }
+            }
+            FleetCommand::Hold(args) => {
+                let request = FleetMaintenanceRequest::Hold {
+                    zone: &args.zone,
+                    reason: &args.reason,
+                    id: args.id.as_deref(),
+                };
+                if let Err(err) = handle_fleet_maintenance(request, args.wait, args.json) {
+                    return fleet_fail("fleet.hold", args.json, err);
+                }
+            }
+            FleetCommand::Resume(args) => {
+                let request = FleetMaintenanceRequest::Resume {
+                    hold: &args.hold,
+                    reason: args.reason.as_deref(),
+                };
+                if let Err(err) = handle_fleet_maintenance(request, args.wait, args.json) {
+                    return fleet_fail("fleet.resume", args.json, err);
                 }
             }
             FleetCommand::Describe(args) => {

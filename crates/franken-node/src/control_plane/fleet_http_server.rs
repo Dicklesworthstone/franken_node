@@ -192,6 +192,8 @@ impl FleetPrincipal {
                 let action_zone = match &record.action {
                     FleetAction::Quarantine { zone_id, .. }
                     | FleetAction::Release { zone_id, .. }
+                    | FleetAction::NativeSessionHold { zone_id, .. }
+                    | FleetAction::NativeSessionResume { zone_id, .. }
                     | FleetAction::PolicyUpdate { zone_id, .. } => zone_id,
                     #[cfg(feature = "control-plane")]
                     FleetAction::Revoke { scope, .. } => &scope.zone_id,
@@ -227,6 +229,13 @@ fn enrolled_node_view(
         if authenticated.get(&(node.zone_id.clone(), node.node_id.clone())) != Some(&*node) {
             node.applied_actions = None;
             node.native_session_drain = None;
+            if node.health == NodeHealth::Maintenance {
+                // Maintenance is an acknowledgement of a held terminal drain,
+                // so it cannot survive removal of its authenticated evidence.
+                // Keep the participant visible after coordinator restart and
+                // allow a fresh enrolled heartbeat to establish it again.
+                node.health = NodeHealth::Stale;
+            }
         }
     }
     for node in &credentials.nodes {
@@ -1383,6 +1392,99 @@ mod tests {
                 .with_node_credentials(enrollment("replacement-node-credential"))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn maintenance_view_requires_a_fresh_authenticated_heartbeat() {
+        use crate::control_plane::fleet_transport::{
+            NativeSessionDrainCheckpoint, fleet_application_checkpoint, validate_node_status,
+        };
+        let hold = FleetActionRecord {
+            action_id: "maintenance-a".into(),
+            emitted_at: fixed_clock(),
+            action: FleetAction::NativeSessionHold {
+                zone_id: "zone-a".into(),
+                reason: "replace admitted runtime".into(),
+            },
+        };
+        let checkpoint = fleet_application_checkpoint(&[hold], "zone-a").unwrap();
+        let mut held = heartbeat("node-a");
+        held.health = NodeHealth::Maintenance;
+        held.applied_actions = Some(checkpoint.clone());
+        held.native_session_drain = Some(NativeSessionDrainCheckpoint {
+            applied_actions: checkpoint,
+            session_set_sha256: hex::encode(Sha256::digest(b"unit-test-empty-population")),
+            admitted_sessions: 0,
+            terminal_sessions: 0,
+            pending_sessions: 0,
+            indeterminate_sessions: 0,
+            fence_held: true,
+        });
+        validate_node_status(&held).unwrap();
+        let credentials = FleetNodeCredentials {
+            nodes: vec![EnrolledNode {
+                zone_id: "zone-a".into(),
+                node_id: "node-a".into(),
+                token_sha256: Sha256::digest(b"independent-node-credential").into(),
+            }],
+        };
+        let mut nodes = vec![held.clone()];
+        enrolled_node_view(&mut nodes, &credentials, &AuthenticatedNodes::new()).unwrap();
+        assert_eq!(
+            nodes.len(),
+            1,
+            "restart must not erase the enrolled participant"
+        );
+        assert_eq!(nodes[0].health, NodeHealth::Stale);
+        assert!(nodes[0].applied_actions.is_none());
+        assert!(nodes[0].native_session_drain.is_none());
+        validate_node_status(&nodes[0]).expect("unverified maintenance remains a readable status");
+
+        let authenticated = BTreeMap::from([(("zone-a".into(), "node-a".into()), held.clone())]);
+        let mut nodes = vec![held.clone()];
+        enrolled_node_view(&mut nodes, &credentials, &authenticated).unwrap();
+        assert_eq!(nodes, vec![held]);
+        nodes[0].last_seen = fixed_clock();
+        enrolled_node_view(&mut nodes, &credentials, &authenticated).unwrap();
+        assert_eq!(
+            nodes[0].health,
+            NodeHealth::Stale,
+            "changed retained status is not authenticated"
+        );
+    }
+
+    #[test]
+    fn maintenance_actions_preserve_enrolled_zone_filtering() {
+        let mut actions = Vec::new();
+        for zone in ["all", "zone-a", "zone-b"] {
+            let hold = format!("hold-{zone}");
+            actions.push(FleetActionRecord {
+                action_id: hold.clone(),
+                emitted_at: fixed_clock(),
+                action: FleetAction::NativeSessionHold {
+                    zone_id: zone.into(),
+                    reason: "maintenance".into(),
+                },
+            });
+            actions.push(FleetActionRecord {
+                action_id: format!("resume-{zone}"),
+                emitted_at: fixed_clock(),
+                action: FleetAction::NativeSessionResume {
+                    zone_id: zone.into(),
+                    hold_action_id: hold,
+                    reason: None,
+                },
+            });
+        }
+        let all = actions.clone();
+        FleetPrincipal::Node {
+            zone_id: "zone-a".into(),
+            node_id: "node-a".into(),
+        }
+        .filter_actions(&mut actions);
+        assert_eq!(actions, all[..4]);
+        crate::control_plane::fleet_transport::fleet_application_checkpoint(&actions, "zone-a")
+            .expect("filter retains each applicable resume's original owner");
     }
 
     #[test]

@@ -17,10 +17,12 @@ use chrono::{DateTime, Utc};
 use frankenengine_node::capacity_defaults::aliases::{MAX_ACTION_LOG_ENTRIES, MAX_NODES_CAP};
 use frankenengine_node::control_plane::fleet_transport::{
     FLEET_SHARED_STATE_SCHEMA, FileFleetTransport, FleetAction, FleetActionRecord,
-    FleetNativeDrainEvidence, FleetNativeDrainReadiness, FleetSharedState, FleetTargetKind,
-    FleetTransport, FleetTransportError, NativeSessionDrainCheckpoint, NativeSessionDrainState,
+    FleetNativeDrainEvidence, FleetNativeDrainReadiness, FleetNativeSessionHoldTarget,
+    FleetSharedState, FleetTargetKind, FleetTransport, FleetTransportError,
+    MAX_NATIVE_SESSION_MAINTENANCE_HOLDS, NativeSessionDrainCheckpoint, NativeSessionDrainState,
     NodeHealth, NodeStatus, fleet_action_snapshot_prefix, fleet_application_checkpoint,
-    fleet_native_drain_evidence, validate_node_status,
+    fleet_native_drain_evidence, fleet_native_session_hold_evidence, fleet_native_session_holds,
+    validate_node_status,
 };
 use frankenengine_node::control_plane::fleet_transport_durable::{
     DurableFleetTransport, count_active_quarantine_actions,
@@ -80,6 +82,402 @@ fn completed_drain(node: &NodeStatus) -> NativeSessionDrainCheckpoint {
         indeterminate_sessions: 0,
         fence_held: false,
     }
+}
+
+fn maintenance_action(id: &str, zone: &str, resume: Option<&str>) -> FleetActionRecord {
+    FleetActionRecord {
+        action_id: id.to_owned(),
+        emitted_at: DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
+        action: match resume {
+            None => FleetAction::NativeSessionHold {
+                zone_id: zone.to_owned(),
+                reason: "operator maintenance".to_owned(),
+            },
+            Some(owner) => FleetAction::NativeSessionResume {
+                zone_id: zone.to_owned(),
+                hold_action_id: owner.to_owned(),
+                reason: None,
+            },
+        },
+    }
+}
+
+fn acknowledge_maintenance(state: &mut FleetSharedState, now: DateTime<Utc>) {
+    for node in &mut state.nodes {
+        if node.zone_id != "zone-a" {
+            continue;
+        }
+        let holds = fleet_native_session_holds(&state.actions, &node.zone_id).unwrap();
+        node.last_seen = now;
+        node.applied_actions =
+            Some(fleet_application_checkpoint(&state.actions, &node.zone_id).unwrap());
+        node.health = if holds.is_empty() {
+            NodeHealth::Healthy
+        } else {
+            NodeHealth::Maintenance
+        };
+        let mut drain = completed_drain(node);
+        drain.fence_held = !holds.is_empty();
+        node.native_session_drain = Some(drain);
+    }
+}
+
+fn maintenance_state() -> (FleetSharedState, DateTime<Utc>) {
+    let now = DateTime::from_timestamp(1_800_000_000, 0).unwrap();
+    let mut unrelated = sample_action("outside-action", "outside-incident");
+    if let FleetAction::Quarantine { zone_id, .. } = &mut unrelated.action {
+        *zone_id = "zone-b".to_owned();
+    }
+    let mut outside = sample_node("outside-node");
+    outside.zone_id = "zone-b".to_owned();
+    outside.health = NodeHealth::Degraded;
+    outside.last_seen = now - chrono::TimeDelta::hours(1);
+    let mut state = FleetSharedState {
+        schema_version: FLEET_SHARED_STATE_SCHEMA.to_owned(),
+        actions: vec![
+            maintenance_action("hold-a", "zone-a", None),
+            maintenance_action("hold-b", "zone-a", None),
+            unrelated,
+        ],
+        nodes: vec![sample_node("node-b"), sample_node("node-a"), outside],
+    };
+    acknowledge_maintenance(&mut state, now);
+    (state, now)
+}
+
+#[test]
+fn native_session_hold_owners_compose_and_require_a_known_exact_prior_zone() {
+    let mut actions = vec![
+        maintenance_action("global", "all", None),
+        maintenance_action("east", "zone-a", None),
+    ];
+    assert_eq!(
+        fleet_native_session_holds(&actions, "zone-a").unwrap(),
+        BTreeSet::from(["east".to_owned(), "global".to_owned()])
+    );
+    assert_eq!(
+        fleet_native_session_holds(&actions, "zone-b").unwrap(),
+        BTreeSet::from(["global".to_owned()])
+    );
+    actions.push(maintenance_action("resume-global", "all", Some("global")));
+    actions.push(maintenance_action(
+        "resume-global-again",
+        "all",
+        Some("global"),
+    ));
+    assert_eq!(
+        fleet_native_session_holds(&actions, "zone-a").unwrap(),
+        BTreeSet::from(["east".to_owned()])
+    );
+    assert!(
+        fleet_native_session_holds(&actions, "zone-b")
+            .unwrap()
+            .is_empty()
+    );
+    for bad in [
+        maintenance_action("future", "zone-a", Some("not-yet-held")),
+        maintenance_action("wrong-zone", "zone-a", Some("global")),
+        maintenance_action("not-a-hold", "all", Some("resume-global")),
+    ] {
+        let mut invalid = actions.clone();
+        invalid.push(bad);
+        assert!(fleet_native_session_holds(&invalid, "zone-b").is_err());
+        assert!(
+            fleet_application_checkpoint(&invalid, "zone-b").is_err(),
+            "unrelated scopes do not hide malformed history"
+        );
+    }
+    let forward = vec![
+        maintenance_action("resume-first", "zone-a", Some("future-hold")),
+        maintenance_action("future-hold", "zone-a", None),
+    ];
+    assert!(fleet_native_session_holds(&forward, "zone-a").is_err());
+    let mut bounded: Vec<_> = (0..MAX_NATIVE_SESSION_MAINTENANCE_HOLDS)
+        .map(|n| maintenance_action(&format!("owner-{n}"), "all", None))
+        .collect();
+    assert_eq!(
+        fleet_native_session_holds(&bounded, "zone-a")
+            .unwrap()
+            .len(),
+        MAX_NATIVE_SESSION_MAINTENANCE_HOLDS
+    );
+    bounded.push(maintenance_action("one-too-many", "zone-a", None));
+    assert!(fleet_native_session_holds(&bounded, "zone-a").is_err());
+    bounded.pop();
+    bounded.push(maintenance_action("release-slot", "all", Some("owner-0")));
+    bounded.push(maintenance_action("replacement-owner", "zone-a", None));
+    assert_eq!(
+        fleet_native_session_holds(&bounded, "zone-a")
+            .unwrap()
+            .len(),
+        MAX_NATIVE_SESSION_MAINTENANCE_HOLDS
+    );
+}
+
+#[test]
+fn native_session_hold_publication_rejects_invalid_resume_without_mutating_either_store() {
+    for durable in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let mut transport: Box<dyn FleetTransport> = if durable {
+            Box::new(DurableFleetTransport::new(directory.path()).unwrap())
+        } else {
+            Box::new(FileFleetTransport::new(directory.path()))
+        };
+        transport.initialize().unwrap();
+        assert!(
+            transport
+                .publish_action(&maintenance_action("forward", "zone-a", Some("hold")))
+                .is_err()
+        );
+        assert!(transport.list_actions().unwrap().is_empty());
+        let hold = maintenance_action("hold", "all", None);
+        transport.publish_action(&hold).unwrap();
+        transport.publish_action(&hold).unwrap();
+        assert!(
+            transport
+                .publish_action(&maintenance_action("wrong-zone", "zone-a", Some("hold")))
+                .is_err()
+        );
+        assert_eq!(transport.list_actions().unwrap(), vec![hold.clone()]);
+        let resume = maintenance_action("resume", "all", Some("hold"));
+        transport.publish_action(&resume).unwrap();
+        transport.publish_action(&resume).unwrap();
+        assert_eq!(transport.list_actions().unwrap(), vec![hold, resume]);
+        assert!(
+            fleet_native_session_holds(&transport.list_actions().unwrap(), "zone-a")
+                .unwrap()
+                .is_empty()
+        );
+    }
+}
+
+#[test]
+fn native_session_maintenance_acknowledgement_requires_exact_held_terminal_population() {
+    let (state, _) = maintenance_state();
+    let valid = state.nodes[0].clone();
+    validate_node_status(&valid).unwrap();
+    let mut invalid = Vec::new();
+    let mut missing = valid.clone();
+    missing.applied_actions = None;
+    invalid.push(missing);
+    let mut missing = valid.clone();
+    missing.native_session_drain = None;
+    invalid.push(missing);
+    let mut opened = valid.clone();
+    opened.native_session_drain.as_mut().unwrap().fence_held = false;
+    invalid.push(opened);
+    let mut healthy = valid.clone();
+    healthy.health = NodeHealth::Healthy;
+    invalid.push(healthy);
+    let mut pending = valid.clone();
+    pending
+        .native_session_drain
+        .as_mut()
+        .unwrap()
+        .terminal_sessions = 1;
+    pending
+        .native_session_drain
+        .as_mut()
+        .unwrap()
+        .pending_sessions = 1;
+    invalid.push(pending);
+    let mut unknown = valid.clone();
+    unknown
+        .native_session_drain
+        .as_mut()
+        .unwrap()
+        .terminal_sessions = 1;
+    unknown
+        .native_session_drain
+        .as_mut()
+        .unwrap()
+        .indeterminate_sessions = 1;
+    invalid.push(unknown);
+    for node in invalid {
+        assert!(validate_node_status(&node).is_err());
+    }
+}
+
+#[test]
+fn native_session_hold_evidence_scopes_exact_owners_and_preserves_other_holds_on_resume() {
+    let (mut state, now) = maintenance_state();
+    let observe = |state: &FleetSharedState, target| {
+        fleet_native_session_hold_evidence(
+            state,
+            "hold-a",
+            target,
+            &BTreeSet::new(),
+            now,
+            Duration::from_secs(30),
+        )
+        .unwrap()
+    };
+    let held = observe(&state, FleetNativeSessionHoldTarget::Held);
+    assert!(held.complete);
+    assert!(!held.admission_resumed);
+    assert!(!held.fleet_quiescence_certified);
+    assert_eq!(held.hold_zone_id, "zone-a");
+    assert_eq!(
+        held.nodes.len(),
+        2,
+        "unrelated stale zone does not block this hold"
+    );
+    assert_eq!(held.nodes[0].node_id, "node-a");
+    assert_eq!(held.nodes[0].active_hold_ids, vec!["hold-a", "hold-b"]);
+    assert!(
+        held.nodes
+            .iter()
+            .all(|node| node.ready && !node.admission_resumed)
+    );
+    assert!(!observe(&state, FleetNativeSessionHoldTarget::Resumed).complete);
+    assert!(
+        !fleet_native_drain_evidence(&state, &BTreeSet::new(), now, Duration::from_secs(30))
+            .unwrap()
+            .complete
+    );
+
+    state
+        .actions
+        .push(maintenance_action("resume-a", "zone-a", Some("hold-a")));
+    assert!(
+        !observe(&state, FleetNativeSessionHoldTarget::Resumed).complete,
+        "older checkpoints cannot confirm a new resume"
+    );
+    acknowledge_maintenance(&mut state, now);
+    let remaining = observe(&state, FleetNativeSessionHoldTarget::Resumed);
+    assert!(remaining.complete);
+    assert!(!remaining.admission_resumed);
+    assert_eq!(remaining.nodes[0].active_hold_ids, vec!["hold-b"]);
+    assert_eq!(remaining.nodes[0].health, Some(NodeHealth::Maintenance));
+    assert!(!observe(&state, FleetNativeSessionHoldTarget::Held).complete);
+
+    state
+        .actions
+        .push(maintenance_action("resume-b", "zone-a", Some("hold-b")));
+    acknowledge_maintenance(&mut state, now);
+    let resumed = observe(&state, FleetNativeSessionHoldTarget::Resumed);
+    assert!(resumed.complete);
+    assert!(resumed.admission_resumed);
+    assert!(
+        resumed
+            .nodes
+            .iter()
+            .all(|node| node.active_hold_ids.is_empty() && node.admission_resumed)
+    );
+    let encoded = serde_json::to_value(&resumed).unwrap();
+    assert_eq!(encoded["target"], "resumed");
+    assert_eq!(
+        encoded["stale_after"],
+        serde_json::json!({"secs":30,"nanos":0})
+    );
+}
+
+#[test]
+fn native_session_hold_evidence_retains_missing_identities_and_refuses_incomplete_observations() {
+    let (base, now) = maintenance_state();
+    let required: BTreeSet<_> = base
+        .nodes
+        .iter()
+        .filter(|node| node.zone_id == "zone-a")
+        .map(|node| (node.zone_id.clone(), node.node_id.clone()))
+        .collect();
+    let observe = |state: &FleetSharedState| {
+        fleet_native_session_hold_evidence(
+            state,
+            "hold-a",
+            FleetNativeSessionHoldTarget::Held,
+            &required,
+            now,
+            Duration::from_secs(30),
+        )
+        .unwrap()
+    };
+    let mut renamed = base.clone();
+    renamed.nodes[0].node_id = "replacement".to_owned();
+    let lost = observe(&renamed);
+    assert!(!lost.complete);
+    assert!(
+        lost.nodes
+            .iter()
+            .any(|node| node.reason == FleetNativeDrainReadiness::MissingNode)
+    );
+    assert_eq!(lost.nodes.len(), 3);
+    for (last_seen, reason) in [
+        (
+            now - chrono::TimeDelta::seconds(30),
+            FleetNativeDrainReadiness::StaleHeartbeat,
+        ),
+        (
+            now + chrono::TimeDelta::nanoseconds(1),
+            FleetNativeDrainReadiness::FutureHeartbeat,
+        ),
+    ] {
+        let mut state = base.clone();
+        state.nodes[0].last_seen = last_seen;
+        let evidence = observe(&state);
+        assert!(!evidence.complete);
+        assert!(evidence.nodes.iter().any(|node| node.reason == reason));
+    }
+    for indeterminate in [false, true] {
+        let mut state = base.clone();
+        let node = &mut state.nodes[0];
+        node.health = NodeHealth::Degraded;
+        node.applied_actions = None;
+        let drain = node.native_session_drain.as_mut().unwrap();
+        drain.terminal_sessions = 1;
+        drain.pending_sessions = u64::from(!indeterminate);
+        drain.indeterminate_sessions = u64::from(indeterminate);
+        assert!(!observe(&state).complete);
+    }
+    let mut opened = base.clone();
+    opened.nodes[0].health = NodeHealth::Healthy;
+    opened.nodes[0]
+        .native_session_drain
+        .as_mut()
+        .unwrap()
+        .fence_held = false;
+    assert!(
+        observe(&opened)
+            .nodes
+            .iter()
+            .any(|node| node.reason == FleetNativeDrainReadiness::MaintenanceFenceMissing)
+    );
+    let mut empty = base.clone();
+    empty.nodes.clear();
+    assert!(!observe(&empty).complete);
+    let no_nodes = fleet_native_session_hold_evidence(
+        &empty,
+        "hold-a",
+        FleetNativeSessionHoldTarget::Held,
+        &BTreeSet::new(),
+        now,
+        Duration::from_secs(30),
+    )
+    .unwrap();
+    assert!(!no_nodes.complete);
+    assert_eq!(no_nodes.uncovered_zones, vec!["zone-a"]);
+    assert!(
+        fleet_native_session_hold_evidence(
+            &base,
+            "outside-action",
+            FleetNativeSessionHoldTarget::Held,
+            &BTreeSet::new(),
+            now,
+            Duration::from_secs(30)
+        )
+        .is_err()
+    );
+    assert!(
+        fleet_native_session_hold_evidence(
+            &base,
+            "hold-a",
+            FleetNativeSessionHoldTarget::Held,
+            &BTreeSet::from([("zone-b".to_owned(), "wrong-audience".to_owned())]),
+            now,
+            Duration::from_secs(30)
+        )
+        .is_err()
+    );
 }
 
 fn complete_native_drain_state() -> (FleetSharedState, DateTime<Utc>) {

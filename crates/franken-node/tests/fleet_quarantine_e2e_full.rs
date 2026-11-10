@@ -223,7 +223,9 @@ fn active_incidents_from_actions(actions: &[FleetActionRecord]) -> BTreeSet<Stri
                 active_incidents.remove(incident_id);
             }
             PersistedFleetAction::Revoke { .. } => {}
-            PersistedFleetAction::PolicyUpdate { .. } => {}
+            PersistedFleetAction::PolicyUpdate { .. }
+            | PersistedFleetAction::NativeSessionHold { .. }
+            | PersistedFleetAction::NativeSessionResume { .. } => {}
         }
     }
     active_incidents

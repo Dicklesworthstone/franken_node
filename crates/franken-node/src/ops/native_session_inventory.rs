@@ -20,8 +20,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::control_plane::fleet_transport::{
-    FleetActionRecord, FleetApplicationCheckpoint, NativeSessionDrainCheckpoint,
-    fleet_action_snapshot_prefix, fleet_application_checkpoint, validate_node_id, validate_zone_id,
+    FleetActionRecord, FleetApplicationCheckpoint, MAX_NATIVE_SESSION_MAINTENANCE_HOLDS,
+    NativeSessionDrainCheckpoint, fleet_action_snapshot_prefix, fleet_application_checkpoint,
+    fleet_native_session_holds, validate_action_id, validate_node_id, validate_zone_id,
 };
 
 use super::engine_dispatcher::{
@@ -56,7 +57,9 @@ const MAX_RESERVED_BYTES: usize = crate::capacity_defaults::base::SMALL * 1024 *
 // Preserve the existing inventory population bound, including historical
 // captures whose project is unknown. UUID spelling is bounded below; allow
 // JSON punctuation and fixed identity/checkpoint metadata without truncation.
-const MAX_DRAIN_BYTES: usize = (MAX_STORED_SESSIONS + MAX_IDENTITY_CAPTURES) * 68 + 64 * 1024;
+const MAX_DRAIN_BYTES: usize = (MAX_STORED_SESSIONS + MAX_IDENTITY_CAPTURES) * 68
+    + MAX_NATIVE_SESSION_MAINTENANCE_HOLDS * 132
+    + 64 * 1024;
 const MAX_RETAINED_DRAINS: usize = crate::capacity_defaults::base::STANDARD;
 
 pub(crate) fn fleet_policy_observation_digest(
@@ -106,6 +109,10 @@ pub struct NativeSessionDrainReport {
     pub zone_id: String,
     pub session_nonces: Vec<String>,
     pub checkpoint: NativeSessionDrainCheckpoint,
+    /// Immutable action IDs that independently keep this project's admission
+    /// fenced. Clearing one owner cannot release any other owner's hold.
+    #[serde(default)]
+    pub maintenance_hold_ids: Vec<String>,
     /// Local terminal accounting is not a distributed epoch/barrier proof.
     pub fleet_quiescence_certified: bool,
 }
@@ -121,6 +128,12 @@ struct StoredNativeSessionDrain {
     session_nonces: Vec<String>,
     actions: FleetApplicationCheckpoint,
     fence_held: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    maintenance_hold_ids: Vec<String>,
+    /// Set only by finish after the caller successfully applied this exact
+    /// snapshot. A terminal population alone cannot skip an unapplied hold.
+    #[serde(default)]
+    actions_applied: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1141,6 +1154,12 @@ fn latest_drain(
         || drain.project_root != project_root
         || drain.generation == 0
         || drain.session_nonces.len() > MAX_STORED_SESSIONS + MAX_IDENTITY_CAPTURES
+        || drain.maintenance_hold_ids.len() > MAX_NATIVE_SESSION_MAINTENANCE_HOLDS
+        || drain
+            .maintenance_hold_ids
+            .windows(2)
+            .any(|pair| pair[0] >= pair[1])
+        || (!drain.maintenance_hold_ids.is_empty() && !drain.fence_held)
         || drain
             .session_nonces
             .windows(2)
@@ -1151,6 +1170,9 @@ fn latest_drain(
     uuid::Uuid::parse_str(&drain.drain_id)?;
     validate_node_id(&drain.node_id)?;
     validate_zone_id(&drain.zone_id)?;
+    for hold_id in &drain.maintenance_hold_ids {
+        validate_action_id(hold_id)?;
+    }
     for nonce in &drain.session_nonces {
         uuid::Uuid::parse_str(nonce)?;
         if nonce.len() > 64 {
@@ -1262,6 +1284,7 @@ fn drain_report(
         zone_id: drain.zone_id.clone(),
         session_nonces: drain.session_nonces.clone(),
         checkpoint,
+        maintenance_hold_ids: drain.maintenance_hold_ids.clone(),
         fleet_quiescence_certified: false,
     })
 }
@@ -1389,9 +1412,9 @@ fn acquire_agent_at(
 /// Fence admission before applying a changed nonempty fleet snapshot. An
 /// initial empty snapshot records a completed checkpoint without cancellation. The
 /// population is captured atomically with that fence in the admission store.
-/// If a previous drain is still held, return that exact checkpoint unchanged:
-/// the caller must reconcile its matching action-log prefix first. Never apply
-/// a later release and silently discard an older unresolved population.
+/// An unresolved population stays pinned to its exact checkpoint. A fully
+/// terminal held population may advance an append-only snapshot without
+/// opening admission, making an explicit maintenance resume reachable.
 /// Before reconciliation, recover any exact signed supervisor outcomes whose
 /// database writes were interrupted. This changes no observation or authority.
 pub fn begin_local_native_session_drain(
@@ -1432,6 +1455,9 @@ fn begin_drain_at(
     if fleet_application_checkpoint(action_history, zone_id)? != *checkpoint {
         bail!("native-session drain checkpoint does not match the supplied action history");
     }
+    let maintenance_hold_ids: Vec<_> = fleet_native_session_holds(action_history, zone_id)?
+        .into_iter()
+        .collect();
     let key = project_key(project_root)?;
     // Includes old identity captures with unknown projects. The transaction
     // below also includes every admission committed since this observation.
@@ -1446,8 +1472,19 @@ fn begin_drain_at(
         let records = read_records_in_transaction(&tx)?;
         if let Some(previous) = &previous {
             check_drain_owner(previous, node_id, zone_id)?;
-            if previous.fence_held || previous.actions == *checkpoint {
-                let report = drain_report(previous, &records)?;
+            let report = drain_report(previous, &records)?;
+            if previous.actions == *checkpoint {
+                if previous.maintenance_hold_ids != maintenance_hold_ids {
+                    bail!("native-session maintenance owners disagree with their exact action history");
+                }
+                tx.commit()?;
+                return Ok(report);
+            }
+            if previous.fence_held
+                && (previous.maintenance_hold_ids.is_empty()
+                    || !previous.actions_applied
+                    || !report.checkpoint.population_is_terminal())
+            {
                 tx.commit()?;
                 return Ok(report);
             }
@@ -1482,7 +1519,16 @@ fn begin_drain_at(
                     .iter()
                     .map(|capture| capture.session_nonce.clone()),
             )
+            .chain(
+                previous
+                    .iter()
+                    .filter(|drain| drain.fence_held)
+                    .flat_map(|drain| drain.session_nonces.iter().cloned()),
+            )
             .collect();
+        if nonces.len() > MAX_STORED_SESSIONS + MAX_IDENTITY_CAPTURES {
+            bail!("native-session drain population exceeds its retained identity bound");
+        }
         let generation = previous
             .as_ref()
             .map_or(0, |drain| drain.generation)
@@ -1501,6 +1547,8 @@ fn begin_drain_at(
             },
             actions: checkpoint.clone(),
             fence_held: checkpoint.action_count != 0,
+            maintenance_hold_ids: maintenance_hold_ids.clone(),
+            actions_applied: false,
         };
         let report = drain_report(&drain, &records)?;
         tx.execute_with_params(
@@ -1531,8 +1579,9 @@ fn begin_drain_at(
 }
 
 /// Poll the exact retained population after successful action application.
-/// Pending/unknown effects keep the durable fence held across restarts. A
-/// completed report permits new admissions under freshly rechecked controls;
+/// Pending/unknown effects and explicit maintenance owners keep the durable
+/// fence held across restarts. Only a terminal population with no remaining
+/// hold owner permits new admissions under freshly rechecked controls;
 /// it certifies neither a distributed barrier nor external rollback.
 /// Recover already authenticated observations before evaluating that population;
 /// a missing or indeterminate observation never becomes terminal by inference.
@@ -1573,11 +1622,16 @@ fn finish_drain_at(
         }
         let records = read_records_in_transaction(&tx)?;
         let report = drain_report(&drain, &records)?;
+        let mut changed = !drain.actions_applied;
+        drain.actions_applied = true;
         if drain.fence_held
-            && report.checkpoint.pending_sessions == 0
-            && report.checkpoint.indeterminate_sessions == 0
+            && report.checkpoint.population_is_terminal()
+            && drain.maintenance_hold_ids.is_empty()
         {
             drain.fence_held = false;
+            changed = true;
+        }
+        if changed {
             tx.execute_with_params(
                 "UPDATE native_session_drains SET state_json = ?1 WHERE drain_id = ?2;",
                 &[
@@ -1986,6 +2040,8 @@ mod tests {
                 .collect(),
             actions: actions(1),
             fence_held: true,
+            maintenance_hold_ids: Vec::new(),
+            actions_applied: false,
         };
         let bytes = bounded_json(&drain, MAX_DRAIN_BYTES).unwrap();
         assert!(
@@ -2033,6 +2089,316 @@ mod tests {
             checkpoint,
             &action_history(checkpoint.action_count),
         )
+    }
+
+    fn maintenance_action(id: &str, resume: Option<&str>) -> FleetActionRecord {
+        use crate::control_plane::fleet_transport::FleetAction;
+        FleetActionRecord {
+            action_id: id.to_owned(),
+            emitted_at: DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
+            action: match resume {
+                None => FleetAction::NativeSessionHold {
+                    zone_id: "prod".to_owned(),
+                    reason: "operator maintenance".to_owned(),
+                },
+                Some(owner) => FleetAction::NativeSessionResume {
+                    zone_id: "prod".to_owned(),
+                    hold_action_id: owner.to_owned(),
+                    reason: None,
+                },
+            },
+        }
+    }
+
+    #[test]
+    fn maintenance_owners_hold_terminal_sessions_until_each_explicit_resume() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("evidence");
+        let admission = fixture(&root, 61);
+        let project = admission.project_root.clone();
+        let nonce = admission.session_nonce.clone();
+        let mut guard = NativeSessionInventoryGuard::admit(&root, admission, 0).unwrap();
+        guard.worker_started();
+        let mut history = vec![maintenance_action("hold-a", None)];
+        let first_checkpoint = fleet_application_checkpoint(&history, "prod").unwrap();
+        let pending = super::begin_drain_at(
+            &root,
+            &project,
+            "node-a",
+            "prod",
+            &first_checkpoint,
+            &history,
+        )
+        .unwrap();
+        assert_eq!(pending.maintenance_hold_ids, vec!["hold-a"]);
+        assert_eq!(pending.checkpoint.pending_sessions, 1);
+        assert!(admission_ticket_at(&root, &project).is_err());
+        guard.worker_reaped();
+        guard.finish(
+            NativeSessionOutcomeKind::ControlStopped,
+            successful_ledger_observation(),
+        );
+        let held = finish_drain_at(&root, &project, "node-a", "prod", &first_checkpoint).unwrap();
+        assert!(held.checkpoint.population_is_terminal());
+        assert!(held.checkpoint.fence_held);
+        assert!(!held.checkpoint.is_complete());
+        assert_eq!(held.session_nonces, vec![nonce.clone()]);
+        assert_eq!(held.maintenance_hold_ids, vec!["hold-a"]);
+        assert!(admission_ticket_at(&root, &project).is_err());
+        assert_eq!(
+            super::begin_drain_at(
+                &root,
+                &project,
+                "node-a",
+                "prod",
+                &first_checkpoint,
+                &history,
+            )
+            .unwrap(),
+            held,
+            "reopening never drops a durable maintenance owner"
+        );
+
+        history.push(maintenance_action("hold-b", None));
+        let second_checkpoint = fleet_application_checkpoint(&history, "prod").unwrap();
+        let second = super::begin_drain_at(
+            &root,
+            &project,
+            "node-a",
+            "prod",
+            &second_checkpoint,
+            &history,
+        )
+        .unwrap();
+        assert_eq!(second.generation, held.generation + 1);
+        assert_eq!(second.session_nonces, held.session_nonces);
+        assert_eq!(
+            second.checkpoint.session_set_sha256,
+            held.checkpoint.session_set_sha256
+        );
+        assert_eq!(second.maintenance_hold_ids, vec!["hold-a", "hold-b"]);
+        assert!(second.checkpoint.fence_held);
+        assert!(
+            finish_drain_at(&root, &project, "node-a", "prod", &second_checkpoint)
+                .unwrap()
+                .checkpoint
+                .fence_held
+        );
+
+        history.push(maintenance_action("resume-a", Some("hold-a")));
+        let checkpoint = fleet_application_checkpoint(&history, "prod").unwrap();
+        let begun = super::begin_drain_at(&root, &project, "node-a", "prod", &checkpoint, &history)
+            .unwrap();
+        assert_eq!(begun.maintenance_hold_ids, vec!["hold-b"]);
+        let one_owner = finish_drain_at(&root, &project, "node-a", "prod", &checkpoint).unwrap();
+        assert!(one_owner.checkpoint.fence_held);
+        assert!(admission_ticket_at(&root, &project).is_err());
+
+        history.push(maintenance_action("resume-b", Some("hold-b")));
+        let checkpoint = fleet_application_checkpoint(&history, "prod").unwrap();
+        let applying =
+            super::begin_drain_at(&root, &project, "node-a", "prod", &checkpoint, &history)
+                .unwrap();
+        assert!(applying.maintenance_hold_ids.is_empty());
+        assert!(
+            applying.checkpoint.fence_held,
+            "resume still requires successful application"
+        );
+        assert!(admission_ticket_at(&root, &project).is_err());
+        let resumed = finish_drain_at(&root, &project, "node-a", "prod", &checkpoint).unwrap();
+        assert!(resumed.checkpoint.is_complete());
+        assert_eq!(resumed.session_nonces, vec![nonce]);
+        assert_eq!(
+            admission_ticket_at(&root, &project).unwrap(),
+            resumed.generation
+        );
+        assert!(!resumed.fleet_quiescence_certified);
+        assert!(
+            super::begin_drain_at(
+                &root,
+                &project,
+                "node-a",
+                "prod",
+                &first_checkpoint,
+                &history[..1],
+            )
+            .is_err(),
+            "old history cannot re-open or replace the applied snapshot"
+        );
+        let next =
+            NativeSessionInventoryGuard::admit(&root, fixture(&root, 62), resumed.generation)
+                .expect("explicit new admission after the final owner resumes");
+        drop(next);
+    }
+
+    #[test]
+    fn maximum_length_maintenance_owner_survives_reopen_and_explicit_resume() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("evidence");
+        let admission = fixture(&root, 65);
+        let project = admission.project_root.clone();
+        drop(NativeSessionInventoryGuard::admit(&root, admission, 0).unwrap());
+        let owner = "h".repeat(128);
+        let mut history = vec![maintenance_action(&owner, None)];
+        let held_checkpoint = fleet_application_checkpoint(&history, "prod").unwrap();
+        super::begin_drain_at(
+            &root,
+            &project,
+            "node-a",
+            "prod",
+            &held_checkpoint,
+            &history,
+        )
+        .unwrap();
+        let held = finish_drain_at(&root, &project, "node-a", "prod", &held_checkpoint).unwrap();
+        assert_eq!(held.maintenance_hold_ids, vec![owner.clone()]);
+        assert!(held.checkpoint.fence_held);
+        assert_eq!(
+            super::begin_drain_at(
+                &root,
+                &project,
+                "node-a",
+                "prod",
+                &held_checkpoint,
+                &history
+            )
+            .unwrap(),
+            held,
+        );
+        assert!(admission_ticket_at(&root, &project).is_err());
+        history.push(maintenance_action("resume-long-owner", Some(&owner)));
+        let resumed_checkpoint = fleet_application_checkpoint(&history, "prod").unwrap();
+        super::begin_drain_at(
+            &root,
+            &project,
+            "node-a",
+            "prod",
+            &resumed_checkpoint,
+            &history,
+        )
+        .unwrap();
+        let resumed =
+            finish_drain_at(&root, &project, "node-a", "prod", &resumed_checkpoint).unwrap();
+        assert!(resumed.maintenance_hold_ids.is_empty());
+        assert!(resumed.checkpoint.is_complete());
+        assert_eq!(
+            admission_ticket_at(&root, &project).unwrap(),
+            resumed.generation
+        );
+    }
+
+    #[test]
+    fn maintenance_resume_cannot_erase_pending_or_unknown_retained_effects() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("evidence");
+        let admission = fixture(&root, 63);
+        let project = admission.project_root.clone();
+        let mut guard = NativeSessionInventoryGuard::admit(&root, admission, 0).unwrap();
+        guard.worker_started();
+        let mut history = vec![maintenance_action("hold-pending", None)];
+        let retained = fleet_application_checkpoint(&history, "prod").unwrap();
+        let pending =
+            super::begin_drain_at(&root, &project, "node-a", "prod", &retained, &history).unwrap();
+        history.push(maintenance_action("resume-pending", Some("hold-pending")));
+        let latest = fleet_application_checkpoint(&history, "prod").unwrap();
+        assert_eq!(
+            super::begin_drain_at(&root, &project, "node-a", "prod", &latest, &history,).unwrap(),
+            pending
+        );
+        assert!(finish_drain_at(&root, &project, "node-a", "prod", &latest).is_err());
+        guard.worker_reaped();
+        guard.finish(
+            NativeSessionOutcomeKind::ControlStopped,
+            NativeSessionEffectObservation::Unknown,
+        );
+        let unknown = finish_drain_at(&root, &project, "node-a", "prod", &retained).unwrap();
+        assert_eq!(unknown.checkpoint.indeterminate_sessions, 1);
+        assert_eq!(unknown.maintenance_hold_ids, vec!["hold-pending"]);
+        assert!(unknown.checkpoint.fence_held);
+        assert_eq!(
+            super::begin_drain_at(&root, &project, "node-a", "prod", &latest, &history,).unwrap(),
+            unknown
+        );
+        assert!(admission_ticket_at(&root, &project).is_err());
+        assert!(
+            super::begin_drain_at(&root, &project, "another-node", "prod", &latest, &history,)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn terminal_population_cannot_advance_an_unapplied_hold_or_ordinary_drain() {
+        for maintenance in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("evidence");
+            let admission = fixture(&root, 64);
+            let project = admission.project_root.clone();
+            // A session that never spawned is positively terminal, but that
+            // says nothing about whether its fleet actions were applied.
+            drop(NativeSessionInventoryGuard::admit(&root, admission, 0).unwrap());
+            let first_history = if maintenance {
+                vec![maintenance_action("hold-unapplied", None)]
+            } else {
+                action_history(1)
+            };
+            let first_checkpoint = fleet_application_checkpoint(&first_history, "prod").unwrap();
+            let first = super::begin_drain_at(
+                &root,
+                &project,
+                "node-a",
+                "prod",
+                &first_checkpoint,
+                &first_history,
+            )
+            .unwrap();
+            assert!(first.checkpoint.population_is_terminal());
+            assert!(first.checkpoint.fence_held);
+            let latest_history = if maintenance {
+                let mut history = first_history.clone();
+                history.push(maintenance_action(
+                    "resume-unapplied",
+                    Some("hold-unapplied"),
+                ));
+                history
+            } else {
+                action_history(2)
+            };
+            let latest_checkpoint = fleet_application_checkpoint(&latest_history, "prod").unwrap();
+            assert_eq!(
+                super::begin_drain_at(
+                    &root,
+                    &project,
+                    "node-a",
+                    "prod",
+                    &latest_checkpoint,
+                    &latest_history,
+                )
+                .unwrap(),
+                first
+            );
+            assert!(admission_ticket_at(&root, &project).is_err());
+            let applied =
+                finish_drain_at(&root, &project, "node-a", "prod", &first_checkpoint).unwrap();
+            assert_eq!(applied.checkpoint.fence_held, maintenance);
+            let advancing = super::begin_drain_at(
+                &root,
+                &project,
+                "node-a",
+                "prod",
+                &latest_checkpoint,
+                &latest_history,
+            )
+            .unwrap();
+            assert_eq!(advancing.checkpoint.applied_actions, latest_checkpoint);
+            assert!(advancing.checkpoint.fence_held);
+            assert_eq!(advancing.session_nonces, first.session_nonces);
+            assert!(
+                finish_drain_at(&root, &project, "node-a", "prod", &latest_checkpoint,)
+                    .unwrap()
+                    .checkpoint
+                    .is_complete()
+            );
+        }
     }
 
     fn successful_ledger_observation() -> NativeSessionEffectObservation {

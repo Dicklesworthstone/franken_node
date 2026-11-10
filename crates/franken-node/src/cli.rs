@@ -2239,6 +2239,12 @@ pub enum FleetCommand {
     /// Inspect locally recorded native sessions and unresolved supervision.
     Sessions(FleetSessionsArgs),
 
+    /// Drain native sessions and retain a durable admission hold for maintenance.
+    Hold(FleetHoldArgs),
+
+    /// Resume one maintenance owner without clearing other owners' holds.
+    Resume(FleetResumeArgs),
+
     /// Describe one node from the configured fleet store.
     Describe(FleetDescribeArgs),
 
@@ -2362,6 +2368,50 @@ pub struct FleetSessionsArgs {
     pub project: Option<PathBuf>,
 
     /// Emit records and counts as JSON, including unresolved observations.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Parser)]
+pub struct FleetHoldArgs {
+    /// Exact zone, or `all` for every enrolled zone.
+    #[arg(long, default_value = "")]
+    pub zone: String,
+
+    /// Operator explanation retained in the immutable hold action.
+    #[arg(long, default_value = "")]
+    pub reason: String,
+
+    /// Stable owner action ID for retries. A resumed ID cannot be reactivated.
+    #[arg(long)]
+    pub id: Option<String>,
+
+    /// Wait for fresh exact-snapshot drain and admission-fence observations.
+    /// A timeout leaves the published hold in force.
+    #[arg(long)]
+    pub wait: bool,
+
+    /// Emit the publication and signed maintenance observations as JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Parser)]
+pub struct FleetResumeArgs {
+    /// Hold action ID returned by `fleet hold`. Its original zone is retained.
+    #[arg(long, default_value = "")]
+    pub hold: String,
+
+    /// Optional operator explanation for this owner's resume action.
+    #[arg(long)]
+    pub reason: Option<String>,
+
+    /// Wait for nodes to apply the resume. Other active owners keep admission
+    /// fenced; the result explicitly reports whether admission reopened.
+    #[arg(long)]
+    pub wait: bool,
+
+    /// Emit the publication and signed maintenance observations as JSON.
     #[arg(long)]
     pub json: bool,
 }

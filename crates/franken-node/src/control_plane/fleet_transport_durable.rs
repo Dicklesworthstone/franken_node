@@ -37,7 +37,8 @@ use crate::capacity_defaults::aliases::{MAX_ACTION_LOG_ENTRIES, MAX_NODES_CAP};
 use super::fleet_transport::{
     FLEET_ACTION_LOG_FILE, FleetAction, FleetActionRecord, FleetSharedState, FleetTransport,
     FleetTransportError, MAX_ACTION_RECORD_BYTES, NodeStatus, validate_action_record,
-    validate_fleet_policy_publication, validate_node_status,
+    validate_fleet_native_session_publication, validate_fleet_policy_publication,
+    validate_node_status,
 };
 
 const FLEET_DB_FILE: &str = "fleet-state.db";
@@ -366,7 +367,8 @@ impl DurableFleetTransport {
             FleetAction::PolicyUpdate {
                 artifact: Some(_),
                 ..
-            }
+            } | FleetAction::NativeSessionHold { .. }
+                | FleetAction::NativeSessionResume { .. }
         ) {
             let rows = tx
                 .query(&format!(
@@ -384,6 +386,7 @@ impl DurableFleetTransport {
                 .map(|row| parse_action_row(&row.values()[0]))
                 .collect::<Result<Vec<_>, _>>()?;
             validate_fleet_policy_publication(record, &existing)?;
+            validate_fleet_native_session_publication(record, &existing)?;
         }
         tx.execute_with_params(
             "INSERT INTO fleet_actions(action_id, emitted_at, action_json)
@@ -688,7 +691,9 @@ pub fn count_active_quarantine_actions(state_dir: &Path) -> Result<u64, FleetTra
             FleetAction::Release { incident_id, .. } => {
                 active_incidents.remove(&incident_id);
             }
-            FleetAction::PolicyUpdate { .. } => {}
+            FleetAction::PolicyUpdate { .. }
+            | FleetAction::NativeSessionHold { .. }
+            | FleetAction::NativeSessionResume { .. } => {}
             #[cfg(feature = "control-plane")]
             FleetAction::Revoke { .. } => {}
         }

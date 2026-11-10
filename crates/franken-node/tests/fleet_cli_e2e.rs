@@ -1630,6 +1630,492 @@ fn jsonl_stdout(output: &Output, label: &str) -> serde_json::Value {
     serde_json::Value::Array(lines)
 }
 
+struct MaintenanceCliFixture {
+    project: tempfile::TempDir,
+    fleet_state_dir: PathBuf,
+    config_home: PathBuf,
+    signing_key_path: PathBuf,
+    signing_key: ed25519_dalek::SigningKey,
+}
+
+impl MaintenanceCliFixture {
+    fn new() -> Self {
+        let project = tempdir().expect("maintenance project");
+        let fleet_state_dir = project.path().join("fleet-state");
+        let state_home = runtime_state_home_for_fleet(project.path(), &fleet_state_dir);
+        let (signing_key_path, signing_key) =
+            write_test_signing_key(&state_home, "maintenance-fleet.key", 83);
+        let fixture = Self {
+            project,
+            fleet_state_dir,
+            config_home: state_home.join("config"),
+            signing_key_path,
+            signing_key,
+        };
+        fixture.success(&["init", "--profile", "balanced", "--out-dir", ".", "--json"]);
+        std::fs::write(
+            fixture.project.path().join("app.cjs"),
+            "console.log('MAINTENANCE_NATIVE_ADMISSION');\n",
+        )
+        .expect("native admission fixture");
+        fixture
+    }
+
+    fn run(&self, args: &[&str], timeout_seconds: &str) -> Output {
+        run_cli_in_dir_with_fleet_state_and_env(
+            self.project.path(),
+            args,
+            &self.fleet_state_dir,
+            &[
+                ("XDG_CONFIG_HOME", self.config_home.to_str().unwrap()),
+                (
+                    "FRANKEN_NODE_SECURITY_DECISION_RECEIPT_SIGNING_KEY_PATH",
+                    self.signing_key_path.to_str().unwrap(),
+                ),
+                (
+                    "FRANKEN_NODE_FLEET_CONVERGENCE_TIMEOUT_SECONDS",
+                    timeout_seconds,
+                ),
+            ],
+        )
+    }
+
+    fn success(&self, args: &[&str]) -> serde_json::Value {
+        let output = self.run(args, "30");
+        assert!(
+            output.status.success(),
+            "{} failed: {}\n{}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        json_stdout(&output, "maintenance CLI")
+    }
+
+    fn actions(&self) -> Vec<FleetActionRecord> {
+        seed_durable_transport(&self.fleet_state_dir)
+            .list_actions()
+            .expect("retained maintenance actions")
+    }
+
+    #[cfg(all(feature = "engine", unix))]
+    fn restart_agent(&self, health: &str, fence_held: bool, population: u64) {
+        let poll = self.success(&[
+            "fleet",
+            "agent",
+            "--node-id",
+            "maintenance-node",
+            "--zone",
+            "east",
+            "--fallback-file-transport",
+            "--once",
+            "--json",
+        ]);
+        assert_eq!(poll["node_health"], health);
+        let drain = &poll["native_session_drain"];
+        assert_eq!(drain["fence_held"], fence_held);
+        assert_eq!(drain["admitted_sessions"], population);
+        assert_eq!(drain["terminal_sessions"], population);
+        assert_eq!(drain["pending_sessions"], 0);
+        assert_eq!(drain["indeterminate_sessions"], 0);
+        assert_eq!(
+            drain["applied_actions"],
+            serde_json::to_value(fleet_application_checkpoint(&self.actions(), "east").unwrap())
+                .unwrap()
+        );
+    }
+
+    #[cfg(all(feature = "engine", unix))]
+    fn assert_native_admission(&self, allowed: bool) {
+        let output = self.run(
+            &[
+                "run",
+                "app.cjs",
+                "--config",
+                "franken_node.toml",
+                "--runtime",
+                "franken-engine",
+                "--json",
+            ],
+            "30",
+        );
+        assert_eq!(
+            output.status.success(),
+            allowed,
+            "native admission: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report = json_stdout(&output, "native maintenance admission");
+        if allowed {
+            assert_eq!(
+                report["dispatch"]["captured_output"]["stdout"],
+                "MAINTENANCE_NATIVE_ADMISSION\n"
+            );
+        } else {
+            assert_eq!(report["schema_version"], "franken-node/run-error-cli/v1");
+            assert!(
+                report["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("native-session admission is fenced"),
+                "{report}"
+            );
+        }
+    }
+}
+
+#[test]
+#[cfg(all(feature = "engine", unix))]
+fn fleet_maintenance_owners_survive_agent_restarts_until_each_explicit_resume() {
+    let fixture = MaintenanceCliFixture::new();
+    // Retain an actual completed worker obligation before closing admission.
+    fixture.assert_native_admission(true);
+    // An empty action snapshot does not begin a drain population.
+    fixture.restart_agent("healthy", false, 0);
+
+    let published = fixture.success(&[
+        "fleet",
+        "hold",
+        "--zone",
+        "east",
+        "--reason",
+        "operator A maintenance",
+        "--id",
+        "maintenance-a",
+        "--json",
+    ]);
+    assert_eq!(
+        published["schema_version"],
+        "franken-node/fleet-maintenance-cli/v1"
+    );
+    assert_eq!(published["receipt"]["outcome"], "published");
+    assert_eq!(published["receipt"]["publication_created"], true);
+    assert_eq!(published["receipt"]["wait_requested"], false);
+    assert_eq!(published["receipt"]["evidence"]["complete"], false);
+    assert_convergence_receipt_signature_round_trips(&published["receipt"], &fixture.signing_key);
+
+    fixture.restart_agent("maintenance", true, 1);
+    fixture.assert_native_admission(false);
+    let held = fixture.success(&[
+        "fleet",
+        "hold",
+        "--zone",
+        "east",
+        "--reason",
+        "operator A maintenance",
+        "--id",
+        "maintenance-a",
+        "--wait",
+        "--json",
+    ]);
+    assert_eq!(held["receipt"]["publication_created"], false);
+    assert_eq!(
+        held["receipt"]["published_action"],
+        published["receipt"]["published_action"]
+    );
+    assert_eq!(held["receipt"]["outcome"], "held");
+    assert_eq!(held["receipt"]["evidence"]["complete"], true);
+    assert_eq!(held["receipt"]["evidence"]["admission_resumed"], false);
+    assert_eq!(held["receipt"]["fleet_quiescence_certified"], false);
+    assert_eq!(
+        held["receipt"]["evidence"]["nodes"][0]["active_hold_ids"],
+        serde_json::json!(["maintenance-a"])
+    );
+    assert_convergence_receipt_signature_round_trips(&held["receipt"], &fixture.signing_key);
+    assert_eq!(fixture.actions().len(), 1);
+    // A fresh agent process must restore the durable owner instead of opening
+    // admission just because every retained worker is already terminal.
+    fixture.restart_agent("maintenance", true, 1);
+    fixture.assert_native_admission(false);
+
+    fixture.success(&[
+        "fleet",
+        "hold",
+        "--zone",
+        "east",
+        "--reason",
+        "operator B maintenance",
+        "--id",
+        "maintenance-b",
+        "--json",
+    ]);
+    fixture.restart_agent("maintenance", true, 1);
+    let two_owners = fixture.success(&[
+        "fleet",
+        "hold",
+        "--zone",
+        "east",
+        "--reason",
+        "operator B maintenance",
+        "--id",
+        "maintenance-b",
+        "--wait",
+        "--json",
+    ]);
+    assert_eq!(
+        two_owners["receipt"]["evidence"]["nodes"][0]["active_hold_ids"],
+        serde_json::json!(["maintenance-a", "maintenance-b"])
+    );
+    assert_eq!(fixture.actions().len(), 2);
+
+    let resumed_a = fixture.success(&[
+        "fleet",
+        "resume",
+        "--hold",
+        "maintenance-a",
+        "--reason",
+        "operator A finished",
+        "--json",
+    ]);
+    assert_eq!(resumed_a["receipt"]["publication_created"], true);
+    fixture.restart_agent("maintenance", true, 1);
+    let still_held = fixture.success(&[
+        "fleet",
+        "resume",
+        "--hold",
+        "maintenance-a",
+        "--reason",
+        "operator A finished",
+        "--wait",
+        "--json",
+    ]);
+    assert_eq!(still_held["receipt"]["publication_created"], false);
+    assert_eq!(
+        still_held["receipt"]["published_action"],
+        resumed_a["receipt"]["published_action"]
+    );
+    assert_eq!(
+        still_held["receipt"]["outcome"],
+        "owner_resumed_admission_still_held"
+    );
+    assert_eq!(still_held["receipt"]["evidence"]["complete"], true);
+    assert_eq!(
+        still_held["receipt"]["evidence"]["admission_resumed"],
+        false
+    );
+    assert_eq!(
+        still_held["receipt"]["evidence"]["nodes"][0]["active_hold_ids"],
+        serde_json::json!(["maintenance-b"])
+    );
+    assert_convergence_receipt_signature_round_trips(&still_held["receipt"], &fixture.signing_key);
+    fixture.assert_native_admission(false);
+    assert_eq!(fixture.actions().len(), 3);
+
+    fixture.success(&["fleet", "resume", "--hold", "maintenance-b", "--json"]);
+    fixture.restart_agent("healthy", false, 1);
+    let resumed = fixture.success(&[
+        "fleet",
+        "resume",
+        "--hold",
+        "maintenance-b",
+        "--wait",
+        "--json",
+    ]);
+    assert_eq!(resumed["receipt"]["publication_created"], false);
+    assert_eq!(resumed["receipt"]["outcome"], "admission_resumed");
+    assert_eq!(resumed["receipt"]["evidence"]["complete"], true);
+    assert_eq!(resumed["receipt"]["evidence"]["admission_resumed"], true);
+    assert_eq!(
+        resumed["receipt"]["evidence"]["nodes"][0]["active_hold_ids"],
+        serde_json::json!([])
+    );
+    assert_eq!(
+        resumed["receipt"]["evidence"]["fleet_quiescence_certified"],
+        false
+    );
+    assert_convergence_receipt_signature_round_trips(&resumed["receipt"], &fixture.signing_key);
+    assert_eq!(fixture.actions().len(), 4);
+    fixture.assert_native_admission(true);
+}
+
+#[test]
+fn fleet_maintenance_publication_retries_reject_unknown_or_changed_owners() {
+    let fixture = MaintenanceCliFixture::new();
+    let original = fixture.success(&[
+        "fleet",
+        "hold",
+        "--zone",
+        "east",
+        "--reason",
+        "scheduled work",
+        "--id",
+        "retry-owner",
+        "--json",
+    ]);
+    let retry = fixture.success(&[
+        "fleet",
+        "hold",
+        "--zone",
+        "east",
+        "--reason",
+        "scheduled work",
+        "--id",
+        "retry-owner",
+        "--json",
+    ]);
+    assert_eq!(retry["receipt"]["publication_created"], false);
+    assert_eq!(
+        retry["receipt"]["published_action"],
+        original["receipt"]["published_action"]
+    );
+    assert_convergence_receipt_signature_round_trips(&retry["receipt"], &fixture.signing_key);
+    assert_eq!(fixture.actions().len(), 1);
+    for args in [
+        vec![
+            "fleet",
+            "hold",
+            "--zone",
+            "west",
+            "--reason",
+            "scheduled work",
+            "--id",
+            "retry-owner",
+            "--json",
+        ],
+        vec![
+            "fleet",
+            "hold",
+            "--zone",
+            "east",
+            "--reason",
+            "changed work",
+            "--id",
+            "retry-owner",
+            "--json",
+        ],
+        vec!["fleet", "resume", "--hold", "unknown-owner", "--json"],
+    ] {
+        let output = fixture.run(&args, "30");
+        assert!(
+            !output.status.success(),
+            "accepted changed or unknown owner"
+        );
+        let failure = json_stdout(&output, "maintenance retry refusal");
+        assert_eq!(failure["schema_version"], "franken-node/fleet-error-cli/v1");
+        assert_eq!(failure["ok"], false);
+        assert!(failure.get("receipt").is_none());
+        assert_eq!(fixture.actions().len(), 1);
+    }
+
+    let resumed = fixture.success(&[
+        "fleet",
+        "resume",
+        "--hold",
+        "retry-owner",
+        "--reason",
+        "work finished",
+        "--json",
+    ]);
+    let resumed_retry = fixture.success(&["fleet", "resume", "--hold", "retry-owner", "--json"]);
+    assert_eq!(resumed_retry["receipt"]["publication_created"], false);
+    assert_eq!(
+        resumed_retry["receipt"]["published_action"],
+        resumed["receipt"]["published_action"]
+    );
+    assert_convergence_receipt_signature_round_trips(
+        &resumed_retry["receipt"],
+        &fixture.signing_key,
+    );
+    for args in [
+        vec![
+            "fleet",
+            "hold",
+            "--zone",
+            "east",
+            "--reason",
+            "scheduled work",
+            "--id",
+            "retry-owner",
+            "--json",
+        ],
+        vec![
+            "fleet",
+            "resume",
+            "--hold",
+            "retry-owner",
+            "--reason",
+            "different completion",
+            "--json",
+        ],
+    ] {
+        let output = fixture.run(&args, "30");
+        assert!(
+            !output.status.success(),
+            "accepted a retired or changed owner"
+        );
+        assert_eq!(
+            json_stdout(&output, "retired maintenance owner")["schema_version"],
+            "franken-node/fleet-error-cli/v1"
+        );
+        assert_eq!(fixture.actions().len(), 2);
+    }
+}
+
+#[test]
+#[cfg(all(feature = "engine", unix))]
+fn fleet_maintenance_timeout_retains_owner_across_late_agent_restarts() {
+    let fixture = MaintenanceCliFixture::new();
+    let output = fixture.run(
+        &[
+            "fleet",
+            "hold",
+            "--zone",
+            "east",
+            "--reason",
+            "waiting for agent",
+            "--id",
+            "timed-owner",
+            "--wait",
+            "--json",
+        ],
+        "1",
+    );
+    assert!(
+        !output.status.success(),
+        "an unseen node cannot acknowledge a hold"
+    );
+    let timed_out = json_stdout(&output, "retained maintenance timeout");
+    assert_eq!(
+        timed_out["schema_version"],
+        "franken-node/fleet-maintenance-cli/v1"
+    );
+    assert_eq!(timed_out["ok"], false);
+    assert_eq!(timed_out["receipt"]["publication_created"], true);
+    assert_eq!(timed_out["receipt"]["timed_out"], true);
+    assert_eq!(timed_out["receipt"]["outcome"], "published_timed_out");
+    assert_eq!(timed_out["receipt"]["evidence"]["complete"], false);
+    assert_eq!(timed_out["receipt"]["evidence"]["admission_resumed"], false);
+    assert_convergence_receipt_signature_round_trips(&timed_out["receipt"], &fixture.signing_key);
+    let retained = fixture.actions();
+    assert_eq!(retained.len(), 1);
+    assert_eq!(retained[0].action_id, "timed-owner");
+    assert!(matches!(
+        retained[0].action,
+        FleetAction::NativeSessionHold { .. }
+    ));
+
+    fixture.restart_agent("maintenance", true, 0);
+    fixture.assert_native_admission(false);
+    let completed = fixture.success(&[
+        "fleet",
+        "hold",
+        "--zone",
+        "east",
+        "--reason",
+        "waiting for agent",
+        "--id",
+        "timed-owner",
+        "--wait",
+        "--json",
+    ]);
+    assert_eq!(completed["receipt"]["publication_created"], false);
+    assert_eq!(completed["receipt"]["outcome"], "held");
+    assert_eq!(fixture.actions(), retained);
+    fixture.restart_agent("maintenance", true, 0);
+    fixture.assert_native_admission(false);
+}
+
 #[test]
 #[cfg(all(feature = "engine", unix))]
 fn fleet_sessions_retains_native_completion_across_cli_restarts_and_project_filters() {
