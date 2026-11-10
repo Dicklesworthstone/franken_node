@@ -998,6 +998,104 @@ pub struct FleetApplicationCheckpoint {
     pub actions_sha256: String,
 }
 
+impl FleetApplicationCheckpoint {
+    pub fn validate(&self) -> Result<(), FleetTransportError> {
+        if self.action_count > MAX_ACTION_LOG_ENTRIES as u64 {
+            return Err(FleetTransportError::serialization(
+                "fleet application checkpoint action count exceeds the bounded history",
+            ));
+        }
+        if !is_lowercase_sha256(&self.actions_sha256) {
+            return Err(FleetTransportError::serialization(
+                "fleet application checkpoint must contain a lowercase SHA-256 digest",
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn is_lowercase_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+/// Outcome of a retained local admission fence and its exact session population.
+/// This does not certify remote effects, a fleet epoch barrier, or global quiescence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeSessionDrainState {
+    Pending,
+    Indeterminate,
+    Completed,
+}
+
+/// Local supervisor accounting bound to the same ordered action snapshot as
+/// policy application. The session-set digest commits to retained admission
+/// nonces, rather than a PID or an entrypoint name that can be reused.
+/// Enrolled HTTP transports authenticate this observation with the existing
+/// node credential. File and shared-bearer transports carry local observations
+/// without enrolled-node authority. This is not a cryptographic attestation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeSessionDrainCheckpoint {
+    pub applied_actions: FleetApplicationCheckpoint,
+    pub session_set_sha256: String,
+    pub admitted_sessions: u64,
+    pub terminal_sessions: u64,
+    pub pending_sessions: u64,
+    pub indeterminate_sessions: u64,
+    /// The admission fence is released only after the retained population is
+    /// terminal with no unknown effect obligations and policy is applied.
+    pub fence_held: bool,
+}
+
+impl NativeSessionDrainCheckpoint {
+    pub fn validate(&self) -> Result<(), FleetTransportError> {
+        self.applied_actions.validate()?;
+        if !is_lowercase_sha256(&self.session_set_sha256) {
+            return Err(FleetTransportError::serialization(
+                "native session drain must contain a lowercase session-set SHA-256 digest",
+            ));
+        }
+        let accounted = self
+            .terminal_sessions
+            .checked_add(self.pending_sessions)
+            .and_then(|count| count.checked_add(self.indeterminate_sessions));
+        if accounted != Some(self.admitted_sessions) {
+            return Err(FleetTransportError::serialization(
+                "native session drain counts do not partition the retained admission population",
+            ));
+        }
+        if !self.fence_held && !self.is_complete() {
+            return Err(FleetTransportError::serialization(
+                "native session drain cannot release its fence with pending or indeterminate sessions",
+            ));
+        }
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
+        !self.fence_held
+            && self.pending_sessions == 0
+            && self.indeterminate_sessions == 0
+            && self.terminal_sessions == self.admitted_sessions
+    }
+
+    #[must_use]
+    pub fn state(&self) -> NativeSessionDrainState {
+        if self.indeterminate_sessions > 0 {
+            NativeSessionDrainState::Indeterminate
+        } else if self.is_complete() {
+            NativeSessionDrainState::Completed
+        } else {
+            NativeSessionDrainState::Pending
+        }
+    }
+}
+
 /// Bind the full immutable records affecting `zone_id` in the coordinator's
 /// append order. Wildcard actions apply to every zone. Both record contents
 /// and order matter: quarantine followed by release is different from release
@@ -1024,13 +1122,7 @@ pub fn fleet_application_checkpoint(
                 record.action_id
             )));
         }
-        let action_zone = match &record.action {
-            FleetAction::Quarantine { zone_id, .. }
-            | FleetAction::Release { zone_id, .. }
-            | FleetAction::PolicyUpdate { zone_id, .. } => zone_id,
-            #[cfg(feature = "control-plane")]
-            FleetAction::Revoke { scope, .. } => &scope.zone_id,
-        };
+        let action_zone = fleet_action_zone(&record.action);
         if action_zone == "all" || action_zone == zone_id {
             relevant.push(record);
         }
@@ -1053,6 +1145,56 @@ pub fn fleet_application_checkpoint(
     })
 }
 
+fn fleet_action_zone(action: &FleetAction) -> &str {
+    match action {
+        FleetAction::Quarantine { zone_id, .. }
+        | FleetAction::Release { zone_id, .. }
+        | FleetAction::PolicyUpdate { zone_id, .. } => zone_id,
+        #[cfg(feature = "control-plane")]
+        FleetAction::Revoke { scope, .. } => &scope.zone_id,
+    }
+}
+
+/// Recover the exact ordered, zone-relevant prefix bound to a retained
+/// checkpoint. New actions can follow it, but missing, reordered or rewritten
+/// records cannot supersede an unfinished local drain or extend a completed
+/// one. The entire supplied history is validated before selecting its prefix,
+/// including records for other zones and records beyond the checkpoint.
+pub fn fleet_action_snapshot_prefix(
+    actions: &[FleetActionRecord],
+    zone_id: &str,
+    checkpoint: &FleetApplicationCheckpoint,
+) -> Result<Vec<FleetActionRecord>, FleetTransportError> {
+    checkpoint.validate()?;
+    let current = fleet_application_checkpoint(actions, zone_id)?;
+    if checkpoint.action_count > current.action_count {
+        return Err(FleetTransportError::stale_state(
+            "fleet action history no longer contains the retained checkpoint's complete prefix",
+        ));
+    }
+    let count = usize::try_from(checkpoint.action_count).map_err(|_| {
+        FleetTransportError::serialization(
+            "fleet action checkpoint count exceeds this platform's capacity",
+        )
+    })?;
+    let prefix = actions
+        .iter()
+        .filter(|record| {
+            let action_zone = fleet_action_zone(&record.action);
+            action_zone == "all" || action_zone == zone_id
+        })
+        .take(count)
+        .cloned()
+        .collect::<Vec<_>>();
+    let observed = fleet_application_checkpoint(&prefix, zone_id)?;
+    if &observed != checkpoint {
+        return Err(FleetTransportError::stale_state(
+            "fleet action history no longer contains the retained checkpoint's exact ordered prefix",
+        ));
+    }
+    Ok(prefix)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeStatus {
     pub zone_id: String,
@@ -1063,6 +1205,10 @@ pub struct NodeStatus {
     /// Missing on historical heartbeats; absence never proves convergence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub applied_actions: Option<FleetApplicationCheckpoint>,
+    /// Separate local drain accounting. Historical/application-only heartbeats
+    /// have no drain evidence; absence must never be interpreted as completion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_session_drain: Option<NativeSessionDrainCheckpoint>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1331,6 +1477,7 @@ impl FleetTransportLayout {
 ///     quarantine_version: 1,
 ///     health: NodeHealth::Quarantined,
 ///     applied_actions: None,
+///     native_session_drain: None,
 /// };
 /// transport.upsert_node_status(&status)?;
 ///
@@ -1466,6 +1613,7 @@ pub trait FleetTransport {
     ///     quarantine_version: 0,  // Not quarantined
     ///     health: NodeHealth::Healthy,
     ///     applied_actions: None,
+    ///     native_session_drain: None,
     /// };
     /// transport.upsert_node_status(&status)?;
     /// # Ok(())
@@ -2672,24 +2820,29 @@ pub fn validate_node_status(status: &NodeStatus) -> Result<(), FleetTransportErr
     validate_zone_id(&status.zone_id)?;
     validate_node_id(&status.node_id)?;
     if let Some(checkpoint) = &status.applied_actions {
-        if checkpoint.action_count > MAX_ACTION_LOG_ENTRIES as u64 {
-            return Err(FleetTransportError::serialization(
-                "fleet application checkpoint action count exceeds the bounded history",
-            ));
-        }
-        if checkpoint.actions_sha256.len() != 64
-            || !checkpoint
-                .actions_sha256
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        {
-            return Err(FleetTransportError::serialization(
-                "fleet application checkpoint must contain a lowercase SHA-256 digest",
-            ));
-        }
+        checkpoint.validate()?;
         if status.health != NodeHealth::Healthy {
             return Err(FleetTransportError::serialization(
                 "only a healthy node can acknowledge an applied fleet snapshot",
+            ));
+        }
+    }
+    if let Some(drain) = &status.native_session_drain {
+        drain.validate()?;
+        if !drain.is_complete() && status.health == NodeHealth::Healthy {
+            return Err(FleetTransportError::serialization(
+                "a node with pending or indeterminate native drain obligations cannot report healthy convergence",
+            ));
+        }
+        if status
+            .applied_actions
+            .as_ref()
+            .is_some_and(|applied| applied != &drain.applied_actions)
+            || (drain.is_complete()
+                && status.applied_actions.as_ref() != Some(&drain.applied_actions))
+        {
+            return Err(FleetTransportError::serialization(
+                "native session drain is not bound to the node's applied fleet snapshot",
             ));
         }
     }
@@ -3007,6 +3160,7 @@ mod tests {
                 quarantine_version: status.quarantine_version,
                 health: status.health,
                 applied_actions: status.applied_actions.clone(),
+                native_session_drain: status.native_session_drain.clone(),
             };
 
             if let Some(existing) = self
@@ -3094,6 +3248,7 @@ mod tests {
             quarantine_version,
             health,
             applied_actions: None,
+            native_session_drain: None,
         }
     }
 
@@ -3576,6 +3731,7 @@ mod tests {
             quarantine_version: 1,
             health: NodeHealth::Healthy,
             applied_actions: None,
+            native_session_drain: None,
         };
         fs::write(
             transport.layout().nodes_dir().join("node-bad.json"),
@@ -3663,6 +3819,7 @@ mod tests {
                 quarantine_version: 7,
                 health: NodeHealth::Healthy,
                 applied_actions: None,
+                native_session_drain: None,
             }],
         };
 
@@ -3740,6 +3897,7 @@ mod tests {
                 quarantine_version: 2,
                 health: NodeHealth::Healthy,
                 applied_actions: None,
+                native_session_drain: None,
             })
             .expect("upsert node");
         transport
@@ -3752,6 +3910,7 @@ mod tests {
                 quarantine_version: 3,
                 health: NodeHealth::Degraded,
                 applied_actions: None,
+                native_session_drain: None,
             })
             .expect("upsert node");
 
@@ -4715,6 +4874,7 @@ mod tests {
                             quarantine_version: 1,
                             health: NodeHealth::Healthy,
                             applied_actions: None,
+                            native_session_drain: None,
                         });
 
                         // Should reject malicious identifiers gracefully
@@ -4766,6 +4926,7 @@ mod tests {
                     quarantine_version: extreme_version,
                     health: NodeHealth::Healthy,
                     applied_actions: None,
+                    native_session_drain: None,
                 });
 
                 // Should handle extreme version numbers gracefully
@@ -4896,6 +5057,7 @@ mod tests {
                                 quarantine_version: op_id as u64,
                                 health: NodeHealth::Healthy,
                                 applied_actions: None,
+                                native_session_drain: None,
                             });
                         } else {
                             let _ = transport.publish_action(&FleetActionRecord {
@@ -4975,6 +5137,7 @@ mod tests {
                     quarantine_version: 1,
                     health: NodeHealth::Healthy,
                     applied_actions: None,
+                    native_session_drain: None,
                 });
 
                 // Should reject path traversal attempts
@@ -5139,6 +5302,7 @@ mod tests {
                     quarantine_version: 1,
                     health: NodeHealth::Healthy,
                     applied_actions: None,
+                    native_session_drain: None,
                 });
 
                 // Node ID validation should reject malicious strings
@@ -5186,6 +5350,7 @@ mod tests {
                     quarantine_version: 1,
                     health: NodeHealth::Healthy,
                     applied_actions: None,
+                    native_session_drain: None,
                 })
                 .expect("upsert boundary node");
 
@@ -5200,6 +5365,7 @@ mod tests {
                     quarantine_version: 1,
                     health: NodeHealth::Healthy,
                     applied_actions: None,
+                    native_session_drain: None,
                 })
                 .expect("upsert fresh node");
 
@@ -5214,6 +5380,7 @@ mod tests {
                     quarantine_version: 1,
                     health: NodeHealth::Healthy,
                     applied_actions: None,
+                    native_session_drain: None,
                 })
                 .expect("upsert stale node");
 

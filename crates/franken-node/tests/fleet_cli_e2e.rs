@@ -1178,6 +1178,7 @@ fn seed_realistic_multi_zone_fleet(
                 quarantine_version: 3, // Current baseline
                 health: *health,
                 applied_actions: None,
+                native_session_drain: None,
             })
             .expect("upsert node status");
     }
@@ -1301,6 +1302,7 @@ fn seed_partial_reconcile_scenario(
                 quarantine_version,
                 health,
                 applied_actions: None,
+                native_session_drain: None,
             })
             .expect("upsert mixed reconcile node");
     }
@@ -2099,6 +2101,7 @@ fn fleet_release_fails_on_convergence_timeout() {
             quarantine_version: 8,
             health: NodeHealth::Healthy,
             applied_actions: None,
+            native_session_drain: None,
         })
         .expect("write pre-release node heartbeat");
 
@@ -2246,6 +2249,7 @@ fn fleet_reconcile_waits_for_delayed_node_convergence_receipt() {
             last_seen: now,
             quarantine_version: 9,
             health: NodeHealth::Healthy,
+            native_session_drain: None,
             applied_actions: Some(
                 fleet_application_checkpoint(
                     &transport.list_actions().expect("actions"),
@@ -2263,6 +2267,7 @@ fn fleet_reconcile_waits_for_delayed_node_convergence_receipt() {
             quarantine_version: 1,
             health: NodeHealth::Degraded,
             applied_actions: None,
+            native_session_drain: None,
         })
         .expect("write delayed stale node");
 
@@ -2302,6 +2307,7 @@ fn fleet_reconcile_waits_for_delayed_node_convergence_receipt() {
                                     last_seen: Utc::now(),
                                     quarantine_version: 9,
                                     health: NodeHealth::Healthy,
+                                    native_session_drain: None,
                                     applied_actions: Some(
                                         fleet_application_checkpoint(&actions, "zone-delayed")
                                             .expect("checkpoint"),
@@ -2433,6 +2439,7 @@ fn asupersync_fleet_transport_converges_simulated_two_node_mode() {
             quarantine_version: 7,
             health: NodeHealth::Healthy,
             applied_actions: None,
+            native_session_drain: None,
         })
         .expect("node-a status");
     node_b
@@ -2443,6 +2450,7 @@ fn asupersync_fleet_transport_converges_simulated_two_node_mode() {
             quarantine_version: 7,
             health: NodeHealth::Healthy,
             applied_actions: None,
+            native_session_drain: None,
         })
         .expect("node-b status");
 
@@ -3572,6 +3580,7 @@ fn fleet_agent_cannot_acknowledge_logging_only_policy_updates_or_old_heartbeats(
             last_seen: now,
             quarantine_version: u64::MAX,
             health: NodeHealth::Healthy,
+            native_session_drain: None,
             applied_actions: Some(
                 fleet_application_checkpoint(&[], "zone-policy").expect("empty checkpoint"),
             ),
@@ -3819,6 +3828,7 @@ fn fleet_reconcile_requires_target_zone_coverage_and_counts_relevant_nodes_once(
                 last_seen: Utc::now(),
                 quarantine_version: u64::MAX,
                 health: NodeHealth::Healthy,
+                native_session_drain: None,
                 applied_actions: Some(
                     fleet_application_checkpoint(&actions, "west").expect("west checkpoint"),
                 ),
@@ -3900,6 +3910,7 @@ fn fleet_reconcile_requires_target_zone_coverage_and_counts_relevant_nodes_once(
                     quarantine_version: 0,
                     health: NodeHealth::Degraded,
                     applied_actions: None,
+                    native_session_drain: None,
                 })
                 .expect("unrelated degraded node");
         }
@@ -4784,6 +4795,7 @@ fn fleet_describe_json_reports_node_state_and_zone_context() {
             quarantine_version: 3,
             health: NodeHealth::Healthy,
             applied_actions: None,
+            native_session_drain: None,
         })
         .expect("write described node");
 
@@ -5347,6 +5359,7 @@ fn fleet_cli_json_output_matrix_matches_snapshots() {
             last_seen: now,
             quarantine_version: 3,
             health: NodeHealth::Healthy,
+            native_session_drain: None,
             applied_actions: Some(
                 fleet_application_checkpoint(
                     &status_transport.list_actions().expect("actions"),
@@ -5364,6 +5377,7 @@ fn fleet_cli_json_output_matrix_matches_snapshots() {
             quarantine_version: 1,
             health: NodeHealth::Degraded,
             applied_actions: None,
+            native_session_drain: None,
         })
         .expect("write stale status node");
 
@@ -5491,6 +5505,7 @@ fn fleet_cli_json_output_matrix_matches_snapshots() {
             quarantine_version: 1,
             health: NodeHealth::Degraded,
             applied_actions: None,
+            native_session_drain: None,
         })
         .expect("write timeout node");
     let timeout_output = run_cli_in_dir_with_fleet_state_and_env(
@@ -6125,6 +6140,7 @@ fn fleet_release_handles_realistic_partial_release_scenarios_across_multi_incide
                     last_seen: Utc::now(),
                     quarantine_version: 6,
                     health: NodeHealth::Healthy,
+                    native_session_drain: None,
                     applied_actions: Some(
                         fleet_application_checkpoint(
                             &agent_transport.list_actions().expect("actions"),
@@ -6290,6 +6306,7 @@ fn fleet_reconcile_with_complete_transport_verification() {
             quarantine_version: 8,                    // Behind by 1 version
             health: NodeHealth::Healthy,
             applied_actions: None,
+            native_session_drain: None,
         })
         .expect("upsert stale node");
 
@@ -6439,6 +6456,7 @@ fn fleet_reconcile_with_complete_transport_verification() {
                 last_seen: Utc::now(),
                 quarantine_version: 9,
                 health: NodeHealth::Healthy,
+                native_session_drain: None,
                 applied_actions: Some(
                     fleet_application_checkpoint(
                         &agent_transport.list_actions().expect("actions"),

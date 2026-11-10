@@ -226,6 +226,7 @@ fn enrolled_node_view(
         present.insert((node.zone_id.clone(), node.node_id.clone()));
         if authenticated.get(&(node.zone_id.clone(), node.node_id.clone())) != Some(&*node) {
             node.applied_actions = None;
+            node.native_session_drain = None;
         }
     }
     for node in &credentials.nodes {
@@ -244,6 +245,7 @@ fn enrolled_node_view(
                 quarantine_version: 0,
                 health: NodeHealth::Stale,
                 applied_actions: None,
+                native_session_drain: None,
             });
         }
     }
@@ -1074,6 +1076,7 @@ mod tests {
             quarantine_version: 3,
             health: NodeHealth::Healthy,
             applied_actions: None,
+            native_session_drain: None,
         }
     }
 

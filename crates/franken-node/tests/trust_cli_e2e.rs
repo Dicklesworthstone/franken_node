@@ -2971,6 +2971,7 @@ fn trust_quarantine_propagates_through_fleet_transport_pipeline() {
                 quarantine_version: 0,
                 health: NodeHealth::Healthy,
                 applied_actions: None,
+                native_session_drain: None,
             })
             .expect("seed node status");
     }
@@ -3082,6 +3083,7 @@ fn trust_quarantine_propagates_through_fleet_transport_pipeline() {
                 quarantine_version,
                 health: NodeHealth::Healthy,
                 applied_actions: None,
+                native_session_drain: None,
             })
             .expect("advance node convergence");
     }

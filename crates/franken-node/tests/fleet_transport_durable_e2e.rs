@@ -17,7 +17,8 @@ use chrono::Utc;
 use frankenengine_node::capacity_defaults::aliases::{MAX_ACTION_LOG_ENTRIES, MAX_NODES_CAP};
 use frankenengine_node::control_plane::fleet_transport::{
     FileFleetTransport, FleetAction, FleetActionRecord, FleetTargetKind, FleetTransport,
-    FleetTransportError, NodeHealth, NodeStatus, fleet_application_checkpoint,
+    FleetTransportError, NativeSessionDrainCheckpoint, NativeSessionDrainState, NodeHealth,
+    NodeStatus, fleet_action_snapshot_prefix, fleet_application_checkpoint, validate_node_status,
 };
 use frankenengine_node::control_plane::fleet_transport_durable::{
     DurableFleetTransport, count_active_quarantine_actions,
@@ -63,6 +64,157 @@ fn sample_node(node_id: &str) -> NodeStatus {
         quarantine_version: 0,
         health: NodeHealth::Healthy,
         applied_actions: None,
+        native_session_drain: None,
+    }
+}
+
+fn completed_drain(node: &NodeStatus) -> NativeSessionDrainCheckpoint {
+    NativeSessionDrainCheckpoint {
+        applied_actions: node.applied_actions.clone().expect("applied snapshot"),
+        session_set_sha256: "a3".repeat(32),
+        admitted_sessions: 2,
+        terminal_sessions: 2,
+        pending_sessions: 0,
+        indeterminate_sessions: 0,
+        fence_held: false,
+    }
+}
+
+#[test]
+fn native_session_drain_rejects_unaccounted_sessions_and_unapplied_completion() {
+    let action = sample_action("drain-contract", "drain-incident");
+    let checkpoint = fleet_application_checkpoint(&[action], "zone-a").expect("checkpoint");
+    let mut node = sample_node("drain-node");
+    node.applied_actions = Some(checkpoint.clone());
+    let completed = completed_drain(&node);
+    node.native_session_drain = Some(completed.clone());
+    validate_node_status(&node).expect("applied and completed");
+    assert!(completed.is_complete());
+    assert_eq!(completed.state(), NativeSessionDrainState::Completed);
+
+    let mut missing_application = node.clone();
+    missing_application.applied_actions = None;
+    assert!(validate_node_status(&missing_application).is_err());
+    let mut wrong_actions = node.clone();
+    wrong_actions.applied_actions =
+        Some(fleet_application_checkpoint(&[], "zone-a").expect("different action snapshot"));
+    assert!(validate_node_status(&wrong_actions).is_err());
+
+    let mut pending = completed.clone();
+    pending.terminal_sessions = 1;
+    pending.pending_sessions = 1;
+    pending.fence_held = true;
+    node.health = NodeHealth::Degraded;
+    node.applied_actions = None;
+    node.native_session_drain = Some(pending.clone());
+    validate_node_status(&node).expect("retained pending obligation after failed application");
+    assert_eq!(pending.state(), NativeSessionDrainState::Pending);
+    assert!(!pending.is_complete());
+    let mut premature_healthy = node.clone();
+    premature_healthy.health = NodeHealth::Healthy;
+    premature_healthy.applied_actions = Some(checkpoint);
+    assert!(validate_node_status(&premature_healthy).is_err());
+
+    let mut unknown = pending.clone();
+    unknown.pending_sessions = 0;
+    unknown.indeterminate_sessions = 1;
+    node.native_session_drain = Some(unknown.clone());
+    validate_node_status(&node).expect("unknown effects remain represented");
+    assert_eq!(unknown.state(), NativeSessionDrainState::Indeterminate);
+    assert!(!unknown.is_complete());
+
+    let mut unfenced_pending = pending.clone();
+    unfenced_pending.fence_held = false;
+    let mut unfenced_unknown = unknown;
+    unfenced_unknown.fence_held = false;
+    let mut unaccounted = pending.clone();
+    unaccounted.admitted_sessions = 3;
+    let mut overflow = pending.clone();
+    overflow.terminal_sessions = u64::MAX;
+    overflow.admitted_sessions = 0;
+    let mut bad_session_digest = completed.clone();
+    bad_session_digest.session_set_sha256 = "A".repeat(64);
+    let mut bad_actions_digest = completed.clone();
+    bad_actions_digest.applied_actions.actions_sha256 = "a".repeat(63);
+    for invalid in [
+        unfenced_pending,
+        unfenced_unknown,
+        unaccounted,
+        overflow,
+        bad_session_digest,
+        bad_actions_digest,
+    ] {
+        assert!(
+            invalid.validate().is_err(),
+            "accepted invalid drain {invalid:?}"
+        );
+    }
+
+    let mut held = completed;
+    held.fence_held = true;
+    held.validate()
+        .expect("terminal census still awaits policy application");
+    assert_eq!(held.state(), NativeSessionDrainState::Pending);
+    assert!(!held.is_complete());
+    let mut malformed = serde_json::to_value(&held).expect("encode");
+    malformed["quiescence_certified"] = true.into();
+    assert!(serde_json::from_value::<NativeSessionDrainCheckpoint>(malformed).is_err());
+}
+
+#[test]
+fn native_session_drain_survives_file_and_sql_reopen_without_discarding_unknowns() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let action = sample_action("drain-retained", "drain-incident");
+    let checkpoint =
+        fleet_application_checkpoint(std::slice::from_ref(&action), "zone-a").expect("checkpoint");
+    for durable in [false, true] {
+        let root = directory.path().join(if durable { "sql" } else { "file" });
+        let open = || -> Box<dyn FleetTransport> {
+            if durable {
+                Box::new(DurableFleetTransport::new(&root).expect("SQL store"))
+            } else {
+                Box::new(FileFleetTransport::new(&root))
+            }
+        };
+        let mut transport = open();
+        transport.initialize().expect("initialize");
+        transport.publish_action(&action).expect("action");
+        let mut node = sample_node("retained-drain-node");
+        node.applied_actions = Some(checkpoint.clone());
+        node.native_session_drain = Some(completed_drain(&node));
+        transport.upsert_node_status(&node).expect("complete drain");
+        drop(transport);
+        let mut reopened = open();
+        reopened.initialize().expect("reopen");
+        assert_eq!(
+            reopened.list_node_statuses().expect("read"),
+            vec![node.clone()]
+        );
+
+        node.applied_actions = None;
+        node.health = NodeHealth::Degraded;
+        let drain = node.native_session_drain.as_mut().expect("drain");
+        drain.terminal_sessions = 0;
+        drain.pending_sessions = 1;
+        drain.indeterminate_sessions = 1;
+        drain.fence_held = true;
+        reopened
+            .upsert_node_status(&node)
+            .expect("retain unknown outcomes");
+        let mut forged_complete = node.clone();
+        forged_complete
+            .native_session_drain
+            .as_mut()
+            .expect("drain")
+            .fence_held = false;
+        assert!(reopened.upsert_node_status(&forged_complete).is_err());
+        drop(reopened);
+        let mut reopened = open();
+        reopened.initialize().expect("reopen pending drain");
+        assert_eq!(
+            reopened.list_node_statuses().expect("retained unknowns"),
+            vec![node]
+        );
     }
 }
 
@@ -483,6 +635,114 @@ fn application_checkpoints_bind_zone_wildcards_and_complete_immutable_records() 
 }
 
 #[test]
+fn retained_action_prefix_preserves_zone_and_wildcard_order_across_appends() {
+    let first = sample_action("prefix-zone", "prefix-incident");
+    let mut foreign = sample_action("prefix-foreign", "foreign-incident");
+    if let FleetAction::Quarantine { zone_id, .. } = &mut foreign.action {
+        *zone_id = "zone-b".to_string();
+    }
+    let mut wildcard = sample_action("prefix-wildcard", "global-incident");
+    if let FleetAction::Quarantine { zone_id, .. } = &mut wildcard.action {
+        *zone_id = "all".to_string();
+    }
+    let retained_actions = vec![first.clone(), foreign.clone(), wildcard.clone()];
+    let retained = fleet_application_checkpoint(&retained_actions, "zone-a").expect("retained");
+    let appended = release_action("prefix-release", "prefix-incident");
+    let expanded = vec![
+        foreign.clone(),
+        first.clone(),
+        wildcard.clone(),
+        appended.clone(),
+    ];
+    assert_eq!(
+        fleet_action_snapshot_prefix(&expanded, "zone-a", &retained).expect("retained prefix"),
+        vec![first.clone(), wildcard.clone()],
+        "new actions wait and unrelated-zone records do not change relevant order"
+    );
+    let current = fleet_application_checkpoint(&expanded, "zone-a").expect("current");
+    assert_eq!(
+        fleet_action_snapshot_prefix(&expanded, "zone-a", &current).expect("full relevant history"),
+        vec![first, wildcard, appended]
+    );
+    let empty = fleet_application_checkpoint(&[], "zone-a").expect("empty retained prefix");
+    assert!(
+        fleet_action_snapshot_prefix(&expanded, "zone-a", &empty)
+            .expect("empty prefix remains valid after appends")
+            .is_empty()
+    );
+    let foreign_checkpoint =
+        fleet_application_checkpoint(&[foreign], "zone-b").expect("other zone checkpoint");
+    assert!(matches!(
+        fleet_action_snapshot_prefix(&expanded, "zone-a", &foreign_checkpoint),
+        Err(FleetTransportError::StaleState { .. })
+    ));
+}
+
+#[test]
+fn retained_action_prefix_rejects_missing_rewritten_reordered_and_inflated_history() {
+    let first = sample_action("retained-first", "retained-incident");
+    let release = release_action("retained-release", "retained-incident");
+    let actions = vec![first.clone(), release.clone()];
+    let retained = fleet_application_checkpoint(&actions, "zone-a").expect("retained");
+    let mut changed = first.clone();
+    changed.emitted_at -= chrono::TimeDelta::seconds(1);
+    let rewritten = vec![changed, release.clone()];
+    let reordered = vec![release.clone(), first.clone()];
+    let replaced = vec![
+        release.clone(),
+        sample_action("retained-replacement", "new-incident"),
+    ];
+    let missing = vec![release];
+    for history in [&rewritten, &reordered, &replaced, &missing] {
+        assert!(matches!(
+            fleet_action_snapshot_prefix(history, "zone-a", &retained),
+            Err(FleetTransportError::StaleState { .. })
+        ));
+    }
+    let mut inflated = retained.clone();
+    inflated.action_count += 1;
+    assert!(matches!(
+        fleet_action_snapshot_prefix(&actions, "zone-a", &inflated),
+        Err(FleetTransportError::StaleState { .. })
+    ));
+    inflated.action_count = u64::MAX;
+    assert!(matches!(
+        fleet_action_snapshot_prefix(&actions, "zone-a", &inflated),
+        Err(FleetTransportError::SerializationError { .. })
+    ));
+    let mut malformed = retained;
+    malformed.actions_sha256 = "AB".repeat(32);
+    assert!(matches!(
+        fleet_action_snapshot_prefix(&actions, "zone-a", &malformed),
+        Err(FleetTransportError::SerializationError { .. })
+    ));
+}
+
+#[test]
+fn retained_action_prefix_validates_the_entire_bounded_source_history() {
+    let first = sample_action("bounded-first", "bounded-incident");
+    let retained =
+        fleet_application_checkpoint(std::slice::from_ref(&first), "zone-a").expect("retained");
+    let mut invalid_foreign = sample_action("invalid-foreign", "foreign-incident");
+    if let FleetAction::Quarantine { zone_id, .. } = &mut invalid_foreign.action {
+        *zone_id = "zone-b".to_string();
+    }
+    invalid_foreign.action_id.clear();
+    let malformed_tail = vec![first.clone(), invalid_foreign];
+    let duplicate_tail = vec![first.clone(), first.clone()];
+    let oversized = vec![first; MAX_ACTION_LOG_ENTRIES + 1];
+    let empty = fleet_application_checkpoint(&[], "zone-a").expect("empty prefix");
+    for checkpoint in [&retained, &empty] {
+        for history in [&malformed_tail, &duplicate_tail, &oversized] {
+            assert!(matches!(
+                fleet_action_snapshot_prefix(history, "zone-a", checkpoint),
+                Err(FleetTransportError::SerializationError { .. })
+            ));
+        }
+    }
+}
+
+#[test]
 fn application_checkpoints_survive_file_and_sql_storage_and_failed_poll_clears_them() {
     let dir = tempfile::tempdir().expect("tempdir");
     let action = sample_action("checkpoint-persist", "checkpoint-incident");
@@ -557,6 +817,7 @@ fn application_checkpoints_survive_file_and_sql_storage_and_failed_poll_clears_t
     });
     let decoded: NodeStatus = serde_json::from_value(historical.clone()).expect("legacy heartbeat");
     assert!(decoded.applied_actions.is_none());
+    assert!(decoded.native_session_drain.is_none());
     assert_eq!(
         serde_json::to_value(decoded).expect("same historical bytes"),
         historical
@@ -1086,6 +1347,7 @@ fn live_http_conflicts_and_legacy_routes_preserve_durable_actions_and_checkpoint
         fleet_application_checkpoint(std::slice::from_ref(&original), "zone-a")
             .expect("application checkpoint"),
     );
+    node.native_session_drain = Some(completed_drain(&node));
     client
         .upsert_node_status(&node)
         .expect("checkpoint heartbeat over socket");
@@ -1094,6 +1356,10 @@ fn live_http_conflicts_and_legacy_routes_preserve_durable_actions_and_checkpoint
         .expect("checkpoint state over socket");
     assert_eq!(received.nodes.len(), 1);
     assert_eq!(received.nodes[0].applied_actions, node.applied_actions);
+    assert_eq!(
+        received.nodes[0].native_session_drain,
+        node.native_session_drain
+    );
 
     // Version negotiation must happen before mutation. A v1 client checks
     // response schemas only after POST, so v2 must not expose writable v1
@@ -1156,6 +1422,13 @@ fn live_http_conflicts_and_legacy_routes_preserve_durable_actions_and_checkpoint
             .applied_actions,
         node.applied_actions
     );
+    assert_eq!(
+        reopened
+            .list_node_statuses()
+            .expect("durable drain checkpoint")[0]
+            .native_session_drain,
+        node.native_session_drain
+    );
 }
 
 #[cfg(feature = "fleet-control-plane-server")]
@@ -1195,10 +1468,12 @@ fn live_http_enrollment_binds_identities_scopes_reads_and_requires_fresh_checkpo
     let mut node_a = sample_node("enrolled-node-a");
     node_a.applied_actions =
         Some(fleet_application_checkpoint(&all_actions, "zone-a").expect("node-a checkpoint"));
+    node_a.native_session_drain = Some(completed_drain(&node_a));
     let mut node_b = sample_node("enrolled-node-b");
     node_b.zone_id = "zone-b".into();
     node_b.applied_actions =
         Some(fleet_application_checkpoint(&all_actions, "zone-b").expect("node-b checkpoint"));
+    node_b.native_session_drain = Some(completed_drain(&node_b));
     {
         let mut store = DurableFleetTransport::new(dir.path()).expect("legacy store");
         store.initialize().expect("initialize legacy store");
@@ -1280,6 +1555,12 @@ fn live_http_enrollment_binds_identities_scopes_reads_and_requires_fresh_checkpo
                 .iter()
                 .all(|node| node.applied_actions.is_none())
         );
+        assert!(
+            initial
+                .nodes
+                .iter()
+                .all(|node| node.native_session_drain.is_none())
+        );
 
         assert_eq!(
             agent_a.list_actions().expect("zone-a actions"),
@@ -1350,6 +1631,14 @@ fn live_http_enrollment_binds_identities_scopes_reads_and_requires_fresh_checkpo
                 .count(),
             1
         );
+        assert_eq!(
+            partial
+                .nodes
+                .iter()
+                .filter(|node| node.native_session_drain.is_some())
+                .count(),
+            1
+        );
         agent_b
             .upsert_node_status(&node_b)
             .expect("authenticated node-b checkpoint");
@@ -1367,6 +1656,7 @@ fn live_http_enrollment_binds_identities_scopes_reads_and_requires_fresh_checkpo
             if node.node_id == "enrolled-node-missing" {
                 assert_eq!(node.health, NodeHealth::Stale);
                 assert!(node.applied_actions.is_none());
+                assert!(node.native_session_drain.is_none());
                 assert_eq!(node.last_seen, chrono::DateTime::<Utc>::UNIX_EPOCH);
                 continue;
             }
@@ -1377,6 +1667,7 @@ fn live_http_enrollment_binds_identities_scopes_reads_and_requires_fresh_checkpo
                         .expect("exact checkpoint")
                 )
             );
+            assert_eq!(node.native_session_drain, Some(completed_drain(node)));
         }
         // Another coordinator or local durable transport may share the store.
         // An unauthenticated replacement must not inherit the genuine node's
@@ -1392,6 +1683,14 @@ fn live_http_enrollment_binds_identities_scopes_reads_and_requires_fresh_checkpo
             .as_mut()
             .expect("checkpoint")
             .actions_sha256 = "0".repeat(64);
+        replaced
+            .native_session_drain
+            .as_mut()
+            .expect("drain")
+            .applied_actions = replaced
+            .applied_actions
+            .clone()
+            .expect("replaced application");
         {
             let mut other_writer = DurableFleetTransport::new(dir.path()).expect("second writer");
             other_writer.initialize().expect("initialize second writer");
@@ -1411,6 +1710,15 @@ fn live_http_enrollment_binds_identities_scopes_reads_and_requires_fresh_checkpo
                 .applied_actions
                 .is_none()
         );
+        assert!(
+            replaced_view
+                .nodes
+                .iter()
+                .find(|node| node.node_id == node_a.node_id)
+                .expect("retained node-a identity")
+                .native_session_drain
+                .is_none()
+        );
         assert_eq!(
             replaced_view
                 .nodes
@@ -1427,6 +1735,42 @@ fn live_http_enrollment_binds_identities_scopes_reads_and_requires_fresh_checkpo
             agent_a.list_node_statuses().expect("restored node-a view")[0].applied_actions,
             node_a.applied_actions
         );
+        assert_eq!(
+            agent_a.list_node_statuses().expect("restored node-a drain")[0].native_session_drain,
+            node_a.native_session_drain
+        );
+        // Changing only the retained population must also invalidate the
+        // authentication of a row: a matching application ACK is insufficient.
+        let mut altered_population = operator
+            .read_shared_state()
+            .expect("fresh state")
+            .nodes
+            .into_iter()
+            .find(|node| node.node_id == node_a.node_id)
+            .expect("node-a");
+        altered_population
+            .native_session_drain
+            .as_mut()
+            .expect("drain")
+            .session_set_sha256 = "d4".repeat(32);
+        {
+            let mut other_writer =
+                DurableFleetTransport::new(dir.path()).expect("population writer");
+            other_writer
+                .initialize()
+                .expect("initialize population writer");
+            other_writer
+                .upsert_node_status(&altered_population)
+                .expect("write changed census");
+        }
+        let view = agent_a
+            .list_node_statuses()
+            .expect("changed population view");
+        assert!(view[0].applied_actions.is_none());
+        assert!(view[0].native_session_drain.is_none());
+        agent_a
+            .upsert_node_status(&node_a)
+            .expect("reauthenticate exact census");
         stop.0.request_shutdown();
         server
             .join()

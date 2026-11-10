@@ -206,6 +206,7 @@ fn seed_transport_nodes(transport: &mut FileFleetTransport, zone_id: &str) {
                 quarantine_version: 0,
                 health,
                 applied_actions: None,
+                native_session_drain: None,
             })
             .expect("upsert real fleet node status");
     }

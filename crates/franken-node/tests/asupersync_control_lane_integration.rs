@@ -284,6 +284,7 @@ fn asupersync_fleet_transport_read_snapshots_record_events_independently() {
             quarantine_version: 3,
             health: NodeHealth::Healthy,
             applied_actions: None,
+            native_session_drain: None,
         })
         .expect("upsert node");
 
@@ -494,6 +495,7 @@ fn asupersync_fleet_transport_retains_restricted_request_cancellation() {
             quarantine_version: 1,
             health: NodeHealth::Healthy,
             applied_actions: None,
+            native_session_drain: None,
         };
         transport.initialize().expect("initialize");
         transport.publish_action(&action).expect("publish before cancellation");

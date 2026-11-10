@@ -19354,6 +19354,7 @@ mod fleet_command_tests {
                 quarantine_version: 4,
                 health: PersistedNodeHealth::Healthy,
                 applied_actions: None,
+                native_session_drain: None,
             }],
         };
 
@@ -19401,6 +19402,7 @@ mod fleet_command_tests {
                         quarantine_version: 4,
                         health: PersistedNodeHealth::Healthy,
                         applied_actions: None,
+                        native_session_drain: None,
                     },
                     PersistedNodeStatus {
                         zone_id: "prod".to_string(),
@@ -19411,6 +19413,7 @@ mod fleet_command_tests {
                         quarantine_version: 1,
                         health: PersistedNodeHealth::Degraded,
                         applied_actions: None,
+                        native_session_drain: None,
                     },
                 ],
             },
@@ -19423,6 +19426,7 @@ mod fleet_command_tests {
                 quarantine_version: 1,
                 health: PersistedNodeHealth::Degraded,
                 applied_actions: None,
+                native_session_drain: None,
             }],
             active_incidents: Vec::new(),
             transport_kind: FleetTransportKind::File,
@@ -19506,6 +19510,7 @@ mod fleet_command_tests {
             quarantine_version: 1,
             health: PersistedNodeHealth::Healthy,
             applied_actions: None,
+            native_session_drain: None,
         };
         assert!(node_matches_filter(&node, "all"));
         assert!(node_matches_filter(&node, "prod"));
@@ -19527,6 +19532,7 @@ mod fleet_command_tests {
             quarantine_version: 1,
             health: PersistedNodeHealth::Healthy,
             applied_actions: None,
+            native_session_drain: None,
         };
         assert!(!node_matches_filter(&node, "prod"));
         assert!(!node_matches_filter(&node, "west"));
@@ -19601,6 +19607,7 @@ mod fleet_command_tests {
                 control_plane::fleet_transport::fleet_application_checkpoint(&actions, "prod")
                     .expect("checkpoint"),
             ),
+            native_session_drain: None,
         };
         let stale = PersistedNodeStatus {
             zone_id: "prod".to_string(),
@@ -19609,6 +19616,7 @@ mod fleet_command_tests {
             quarantine_version: 0,
             health: PersistedNodeHealth::Degraded,
             applied_actions: None,
+            native_session_drain: None,
         };
         let loaded = LoadedFleetState {
             state_dir: PathBuf::from("/tmp/fleet"),
@@ -19672,6 +19680,7 @@ mod fleet_command_tests {
                 quarantine_version: 3,
                 health: PersistedNodeHealth::Healthy,
                 applied_actions: None,
+                native_session_drain: None,
             }],
         };
 
@@ -19736,6 +19745,7 @@ mod fleet_command_tests {
                 quarantine_version: 2,
                 health: PersistedNodeHealth::Healthy,
                 applied_actions: None,
+                native_session_drain: None,
             }],
         };
 
@@ -28377,6 +28387,16 @@ fn emit_fleet_status_report(
             "{}",
             render_fleet_status_human(&report.status, verbose, kind)
         );
+        for node in report
+            .state
+            .nodes
+            .iter()
+            .filter(|node| node_matches_filter(node, &report.status.zone_id))
+        {
+            if let Some(line) = render_fleet_native_drain_human(node) {
+                println!("{line}");
+            }
+        }
     }
     Ok(())
 }
@@ -28405,6 +28425,17 @@ fn emit_fleet_action_report(report: &FleetCliActionReport, json: bool) -> Result
                 "\n  convergence_receipt_elapsed_ms={} timed_out={}",
                 receipt.payload.elapsed_ms, receipt.payload.timed_out
             ));
+        }
+        for node in report
+            .state
+            .nodes
+            .iter()
+            .filter(|node| node_matches_filter(node, &report.status.zone_id))
+        {
+            if let Some(line) = render_fleet_native_drain_human(node) {
+                rendered.push('\n');
+                rendered.push_str(&line);
+            }
         }
         println!("{rendered}");
     }
@@ -28590,6 +28621,23 @@ fn render_fleet_status_human(
     FleetStatusPresentationView::render(&model)
 }
 
+fn render_fleet_native_drain_human(node: &PersistedNodeStatus) -> Option<String> {
+    node.native_session_drain.as_ref().map(|drain| {
+        format!(
+            "  local_native_drain node={} zone={} state={:?} actions={} admitted={} terminal={} pending={} indeterminate={} admission_fenced={}",
+            node.node_id,
+            node.zone_id,
+            drain.state(),
+            drain.applied_actions.action_count,
+            drain.admitted_sessions,
+            drain.terminal_sessions,
+            drain.pending_sessions,
+            drain.indeterminate_sessions,
+            drain.fence_held,
+        )
+    })
+}
+
 fn render_fleet_node_human(report: &FleetCliNodeReport) -> String {
     let node = &report.node;
     let mut lines = vec![
@@ -28616,6 +28664,9 @@ fn render_fleet_node_human(report: &FleetCliNodeReport) -> String {
             .collect::<Vec<_>>()
             .join(", ");
         lines.push(format!("  active_incidents={incidents}"));
+    }
+    if let Some(line) = render_fleet_native_drain_human(node) {
+        lines.push(line);
     }
     lines.push(format!(
         "  transport={} live_control_plane={} activated_source={}",
@@ -29612,6 +29663,7 @@ fn run_fleet_agent(args: &FleetAgentArgs) -> Result<()> {
             // crash before publication causes idempotent reconciliation on
             // restart. Failure replaces any earlier checkpoint with None.
             applied_actions: (node_health == NodeHealth::Healthy).then_some(expected_checkpoint),
+            native_session_drain: None,
         };
         transport
             .upsert_node_status(&node_status)

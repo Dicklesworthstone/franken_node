@@ -889,6 +889,7 @@ fn seed_fleet_nodes(
             quarantine_version: node.quarantine_version,
             health: node.health,
             applied_actions: None,
+            native_session_drain: None,
         })?;
     }
     Ok(())
