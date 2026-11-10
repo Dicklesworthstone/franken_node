@@ -56,7 +56,7 @@ use frankenengine_engine::{
 };
 #[cfg(feature = "engine")]
 use frankenengine_extension_host::host_effect_journal::{
-    HostEffectJournalEntry, InMemoryHostEffectJournal,
+    HostEffectJournalAttemptRecord, HostEffectJournalEntry, InMemoryHostEffectJournal,
 };
 #[cfg(feature = "engine")]
 use frankenengine_extension_host::host_io::{
@@ -3501,7 +3501,11 @@ impl DeploymentActivationRefused {
 
 impl std::fmt::Display for DeploymentActivationRefused {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "deployment activation restriction: {}", self.detail)
+        write!(
+            formatter,
+            "deployment activation restriction: {}",
+            self.detail
+        )
     }
 }
 
@@ -3996,12 +4000,14 @@ fn recheck_native_run_controls(
         return Ok(());
     }
 
-    requirements.enforce_deployment_activation().map_err(|error| {
-        NativeRunControlTrigger::new(
-            NativeRunControlKind::ActivationInterrupted,
-            format_args!("{error:#}"),
-        )
-    })?;
+    requirements
+        .enforce_deployment_activation()
+        .map_err(|error| {
+            NativeRunControlTrigger::new(
+                NativeRunControlKind::ActivationInterrupted,
+                format_args!("{error:#}"),
+            )
+        })?;
     if cancelled.load(Ordering::Acquire) {
         return Ok(());
     }
@@ -4619,6 +4625,55 @@ fn validate_host_effect_ledger(
         .signature
         .verify_detached(&signature_payload, trusted_identity)
         .map_err(|error| format!("native-session ledger signature failed: {error}"))
+}
+
+/// A failure trace can retain only the completed prefix when journal
+/// finalization fails. Never sign that prefix as the attempt's complete effect
+/// ledger: an omitted reservation may already have reached a live provider.
+/// Each native invocation installs a fresh journal, whose first sequence is 0.
+#[cfg(feature = "engine")]
+fn validate_failed_host_effect_journal(
+    entries: &[HostEffectJournalEntry],
+    records: &[HostEffectJournalAttemptRecord],
+) -> std::result::Result<(), &'static str> {
+    if entries.len() != records.len() {
+        return Err(
+            "failed native effect journal contains an incomplete reservation or hidden suffix",
+        );
+    }
+    for (index, (entry, record)) in entries.iter().zip(records).enumerate() {
+        match record {
+            HostEffectJournalAttemptRecord::Completed {
+                sequence,
+                entry: recorded,
+            } if usize::try_from(*sequence) == Ok(index) && recorded == entry => {}
+            _ => {
+                return Err("failed native effect journal is not a complete ordered attempt");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Only typed pre-dispatch refusals establish that a process effect did not
+/// run. In particular, cancellation/expiry can be observed after launching or
+/// signalling a child, and output limits can fail after it already executed.
+/// Preserve the guest's error; this classification controls evidence only.
+#[cfg(feature = "engine")]
+fn process_spawn_error_may_have_effect(error: &ProcessSpawnError) -> bool {
+    match error {
+        ProcessSpawnError::FlowPolicyBlocked | ProcessSpawnError::CapabilityMissing { .. } => false,
+        ProcessSpawnError::PolicyViolation { code, .. } => code == "process_tree_escape",
+        ProcessSpawnError::Denied { .. }
+        | ProcessSpawnError::LimitExceeded { .. }
+        | ProcessSpawnError::UnknownHandle { .. }
+        | ProcessSpawnError::InvalidState { .. }
+        | ProcessSpawnError::NotImplemented { .. }
+        | ProcessSpawnError::TimedOut { .. }
+        | ProcessSpawnError::Io { .. }
+        | ProcessSpawnError::ReplayDivergence { .. }
+        | ProcessSpawnError::PartialOutputFailed { .. } => true,
+    }
 }
 
 /// Recover only the worker's independently signed terminal accounting. This is
@@ -11053,8 +11108,14 @@ impl EngineDispatcher {
                     // only its evidence is recovered, never fabricated: the
                     // ledger is omitted entirely when the engine could not
                     // certify the attempt's effect boundary.
-                    let host_effect_ledger = match orchestrator.last_failed_trace_id() {
-                        Some(failed_trace_id) => Some(
+                    let host_effect_ledger = match (
+                        orchestrator.last_failed_trace_id(),
+                        validate_failed_host_effect_journal(
+                            orchestrator.last_failed_host_effect_journal(),
+                            orchestrator.last_failed_host_effect_journal_records(),
+                        ),
+                    ) {
+                        (Some(failed_trace_id), Ok(())) => Some(
                             Self::build_host_effect_journal_ledger(
                                 failed_trace_id,
                                 orchestrator.last_failed_host_effect_journal(),
@@ -11077,7 +11138,16 @@ impl EngineDispatcher {
                                 .with_invocation_settings(invocation_settings)
                             })?,
                         ),
-                        None => None,
+                        (Some(_), Err(reason)) => {
+                            tracing::warn!(
+                                execution_mode = "native",
+                                phase = "execution",
+                                reason,
+                                "Withheld incomplete native host-effect ledger"
+                            );
+                            None
+                        }
+                        (None, _) => None,
                     };
                     if let Some(ledger) = host_effect_ledger.as_ref() {
                         tracing::info!(
@@ -11537,15 +11607,9 @@ impl EngineDispatcher {
                             recorded_at_millis,
                             EffectLineageFields::label_clean_denied(),
                         );
-                        if let Err(append_err) = chain.append(receipt) {
-                            tracing::warn!(
-                                execution_mode = "native",
-                                seq,
-                                error = %append_err,
-                                "Stopped harvesting host-effect ledger after append failure"
-                            );
-                            break;
-                        }
+                        chain.append(receipt).with_context(|| {
+                            format!("native process receipt {seq} could not be appended")
+                        })?;
                         continue;
                     };
                     let capability_ref = format!(
@@ -11610,18 +11674,10 @@ impl EngineDispatcher {
                                 lineage,
                             )
                         }
-                        // The admission and policy let the spawn through and the
-                        // host could not complete it (an I/O error, a timeout
-                        // kill, an unimplemented operation, a stale handle). That
-                        // is a failed effect, not a policy decision (bd-bwn5a),
-                        // exactly as for filesystem and network effects.
-                        Err(
-                            error @ (ProcessSpawnError::Io { .. }
-                            | ProcessSpawnError::TimedOut { .. }
-                            | ProcessSpawnError::NotImplemented { .. }
-                            | ProcessSpawnError::UnknownHandle { .. }
-                            | ProcessSpawnError::InvalidState { .. }),
-                        ) => {
+                        // A provider error can follow an actual child effect.
+                        // Cancellation, output limits and bounded partial output
+                        // are not proof of a pre-dispatch policy refusal.
+                        Err(error) if process_spawn_error_may_have_effect(error) => {
                             failed_count = failed_count.saturating_add(1);
                             let lineage = EffectLineageFields {
                                 input_lineage_hash: EFFECT_RECEIPT_EMPTY_LINEAGE_HASH.to_string(),
@@ -11677,15 +11733,9 @@ impl EngineDispatcher {
                             )
                         }
                     };
-                    if let Err(append_err) = chain.append(lineage) {
-                        tracing::warn!(
-                            execution_mode = "native",
-                            seq,
-                            error = %append_err,
-                            "Stopped harvesting host-effect ledger after append failure"
-                        );
-                        break;
-                    }
+                    chain.append(lineage).with_context(|| {
+                        format!("native process receipt {seq} could not be appended")
+                    })?;
                     continue;
                 }
             };
@@ -11955,17 +12005,9 @@ impl EngineDispatcher {
                 }
             };
 
-            if let Err(append_err) = chain.append(receipt) {
-                // Fail-closed: stop extending the ledger rather than emit a
-                // partial/incorrect chain, and surface what was lost.
-                tracing::warn!(
-                    execution_mode = "native",
-                    seq,
-                    error = %append_err,
-                    "Stopped harvesting host-effect ledger after append failure"
-                );
-                break;
-            }
+            chain.append(receipt).with_context(|| {
+                format!("native host-effect receipt {seq} could not be appended")
+            })?;
         }
 
         let schema_version = crate::schema_versions::HOST_EFFECT_LEDGER.to_string();
@@ -14443,9 +14485,8 @@ mod tests {
                 hex::encode(publisher_key.verifying_key().as_bytes()),
             )
             .unwrap();
-            let authority = DeploymentAuthority::new(ed25519_dalek::SigningKey::from_bytes(
-                &[55; 32],
-            ));
+            let authority =
+                DeploymentAuthority::new(ed25519_dalek::SigningKey::from_bytes(&[55; 32]));
             let store = DeploymentStore::open(&operator_root, "app").unwrap();
             let restriction = {
                 let lock = store.lock().unwrap();
@@ -14507,7 +14548,9 @@ mod tests {
             let other_paths =
                 RunProjectPaths::resolve(Path::new("app.cjs"), other_release.path()).unwrap();
             assert!(
-                watched.verify_registry_artifact(&other_paths, &config).is_err(),
+                watched
+                    .verify_registry_artifact(&other_paths, &config)
+                    .is_err(),
                 "a direct library caller cannot attach another release's activation restriction"
             );
             let mut fleet_high_water = None;
@@ -14534,7 +14577,10 @@ mod tests {
                         43,
                     )
                     .unwrap();
-                assert_eq!(next.sequence, 2, "same-release activation changes generation");
+                assert_eq!(
+                    next.sequence, 2,
+                    "same-release activation changes generation"
+                );
                 store
                     .capture_activation_restriction(&lock, &authority, &next)
                     .unwrap()
@@ -14544,7 +14590,9 @@ mod tests {
                 .expect_err("stale admission cannot start guest code")
                 .context("dispatch admission");
             assert!(
-                refusal.downcast_ref::<DeploymentActivationRefused>().is_some(),
+                refusal
+                    .downcast_ref::<DeploymentActivationRefused>()
+                    .is_some(),
                 "the CLI must retain a typed admission-only refusal through context"
             );
             let trigger = recheck_native_run_controls(
@@ -14556,7 +14604,10 @@ mod tests {
             )
             .expect_err("a new generation retires the opted-in run");
             assert_eq!(trigger.kind, NativeRunControlKind::ActivationInterrupted);
-            assert_eq!(serde_json::to_value(&trigger).unwrap()["kind"], "activation_interrupted");
+            assert_eq!(
+                serde_json::to_value(&trigger).unwrap()["kind"],
+                "activation_interrupted"
+            );
             recheck_native_run_controls(
                 &paths,
                 &config,
@@ -15375,7 +15426,10 @@ exec "$2" pinned-worker-image"#,
             b"must remain hidden"
         );
         drop(image);
-        assert!(!staged_path.exists(), "reaped worker image must be cleaned up");
+        assert!(
+            !staged_path.exists(),
+            "reaped worker image must be cleaned up"
+        );
     }
 
     #[cfg(all(feature = "engine", target_os = "linux"))]
@@ -15394,7 +15448,9 @@ exec "$2" pinned-worker-image"#,
             .expect("set executable permissions");
         assert!(BubblewrapNativeWorkerImage::open(&source, work.path()).is_err());
         assert!(BubblewrapNativeWorkerImage::open(work.path(), work.path()).is_err());
-        assert!(BubblewrapNativeWorkerImage::open(Path::new("relative-worker"), work.path()).is_err());
+        assert!(
+            BubblewrapNativeWorkerImage::open(Path::new("relative-worker"), work.path()).is_err()
+        );
     }
 
     #[cfg(feature = "engine")]
@@ -21288,6 +21344,192 @@ exec "$2" pinned-worker-image"#,
         assert!(rejection.contains("signature failed"), "{rejection}");
     }
 
+    #[test]
+    #[cfg(feature = "engine")]
+    fn failed_native_effect_journal_rejects_holes_and_hidden_completed_suffixes() {
+        use frankenengine_extension_host::host_io::HostIoResponse;
+
+        let journal = InMemoryHostEffectJournal::recording();
+        journal.begin_execution().unwrap();
+        validate_failed_host_effect_journal(&journal.attempt_entries(), &journal.attempt_records())
+            .unwrap();
+        let first = HostIoRequest::FsRead {
+            path: "first".into(),
+        };
+        let first_outcome = Ok(HostIoResponse::FsRead {
+            bytes: b"first".to_vec(),
+        });
+        journal.record_host_io(&first, &first_outcome).unwrap();
+        let process = ProcessSpawnRequest::Cleanup {
+            handle: "pending-child".into(),
+        };
+        let _uncompleted = journal.reserve_process_spawn(&process).unwrap();
+        let later = HostIoRequest::FsRead {
+            path: "later".into(),
+        };
+        journal.record_host_io(&later, &first_outcome).unwrap();
+
+        assert_eq!(journal.attempt_entries().len(), 1);
+        assert_eq!(journal.attempt_records().len(), 3);
+        assert!(journal.finish_execution().is_err());
+        assert!(
+            validate_failed_host_effect_journal(
+                &journal.attempt_entries(),
+                &journal.attempt_records(),
+            )
+            .is_err(),
+            "a valid completed prefix must not authorize a final ledger"
+        );
+
+        // Omitting every completed prefix entry cannot turn the attempted
+        // process crossing into a signed claim that no effects occurred.
+        assert!(validate_failed_host_effect_journal(&[], &journal.attempt_records()).is_err());
+    }
+
+    #[test]
+    #[cfg(feature = "engine")]
+    fn failed_native_effect_journal_requires_exact_dense_completed_records() {
+        use frankenengine_extension_host::host_io::HostIoResponse;
+
+        let journal = InMemoryHostEffectJournal::recording();
+        journal.begin_execution().unwrap();
+        for path in ["first", "second"] {
+            journal
+                .record_host_io(
+                    &HostIoRequest::FsRead { path: path.into() },
+                    &Ok(HostIoResponse::FsRead {
+                        bytes: path.as_bytes().to_vec(),
+                    }),
+                )
+                .unwrap();
+        }
+        let entries = journal.finish_execution().unwrap();
+        let records = journal.attempt_records();
+        validate_failed_host_effect_journal(&entries, &records).unwrap();
+
+        let mut wrong_sequence = records.clone();
+        if let HostEffectJournalAttemptRecord::Completed { sequence, .. } = &mut wrong_sequence[1] {
+            *sequence = 2;
+        }
+        let mut wrong_entry = records.clone();
+        if let HostEffectJournalAttemptRecord::Completed { entry, .. } = &mut wrong_entry[1] {
+            *entry = entries[0].clone();
+        }
+        let mut reordered = records.clone();
+        reordered.reverse();
+        let mut uncompleted = records.clone();
+        uncompleted[1] = HostEffectJournalAttemptRecord::Uncompleted {
+            sequence: 1,
+            family: "host_io".into(),
+            request_kind: "fs_read".into(),
+            request_digest: [1; 32],
+        };
+        for invalid in [
+            wrong_sequence,
+            wrong_entry,
+            reordered,
+            uncompleted,
+            records[..1].to_vec(),
+        ] {
+            assert!(validate_failed_host_effect_journal(&entries, &invalid).is_err());
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "engine")]
+    fn process_cancellation_and_partial_output_never_prove_pre_dispatch_denial() {
+        for error in [
+            ProcessSpawnError::Denied {
+                reason: "execution cancelled after launch".into(),
+            },
+            ProcessSpawnError::Denied {
+                reason: "authority expired while waiting".into(),
+            },
+            ProcessSpawnError::PolicyViolation {
+                code: "process_tree_escape".into(),
+                detail: "descendant retained stdout".into(),
+            },
+            ProcessSpawnError::LimitExceeded {
+                limit: "stdout".into(),
+                actual: 2,
+                maximum: 1,
+            },
+            ProcessSpawnError::PartialOutputFailed {
+                failure: Box::new(ProcessSpawnError::TimedOut { runtime_millis: 1 }),
+                signal: Some(9),
+                partial_stdout: vec![],
+                partial_stderr: vec![],
+            },
+            ProcessSpawnError::PartialOutputFailed {
+                failure: Box::new(ProcessSpawnError::PolicyViolation {
+                    code: "process_tree_escape".into(),
+                    detail: "escaped descendant".into(),
+                }),
+                signal: None,
+                partial_stdout: b"already ran".to_vec(),
+                partial_stderr: vec![],
+            },
+        ] {
+            assert!(process_spawn_error_may_have_effect(&error), "{error:?}");
+        }
+        for error in [
+            ProcessSpawnError::FlowPolicyBlocked,
+            ProcessSpawnError::CapabilityMissing {
+                capability: ProcessSpawnCapability::Spawn,
+            },
+            ProcessSpawnError::PolicyViolation {
+                code: "executable_denied".into(),
+                detail: "not authorized for dispatch".into(),
+            },
+        ] {
+            assert!(!process_spawn_error_may_have_effect(&error), "{error:?}");
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "engine")]
+    fn native_effect_ledger_append_failure_never_signs_a_partial_chain() {
+        use frankenengine_extension_host::host_io::HostIoResponse;
+        let authority = host_effect_ledger_authority_for_test();
+        let ordinary = HostEffectJournalEntry::HostIo {
+            request: HostIoRequest::FsRead {
+                path: "file".into(),
+            },
+            outcome: Ok(HostIoResponse::FsRead { bytes: vec![] }),
+        };
+        let process = HostEffectJournalEntry::ProcessSpawn {
+            request: ProcessSpawnRequest::Cleanup {
+                handle: "child".into(),
+            },
+            outcome: Err(ProcessSpawnError::UnknownHandle {
+                handle: "child".into(),
+            }),
+        };
+        let admission = ChildProcessSpawnAdmission::verified_for_test(
+            u64::MAX,
+            PathBuf::from("/usr/bin/bwrap"),
+        );
+        for (entry, admitted) in [
+            (ordinary, None),
+            (process.clone(), None),
+            (process, Some(&admission)),
+        ] {
+            let error = EngineDispatcher::build_host_effect_journal_ledger(
+                "",
+                &[entry],
+                admitted,
+                None,
+                &authority,
+                SecurityEpoch::from_raw(STANDARD_SECURITY_EPOCH),
+            )
+            .unwrap_err();
+            assert!(
+                error.to_string().contains("could not be appended"),
+                "{error}"
+            );
+        }
+    }
+
     /// bd-x85a7/bd-at11s: process effects share the same journal and signed
     /// receipt chain as filesystem/network effects. The process receipt is
     /// bound to the reauthenticated token and policy subject, never to a broad
@@ -21460,6 +21702,38 @@ exec "$2" pinned-worker-image"#,
                 }),
             },
             HostEffectJournalEntry::ProcessSpawn {
+                request: request.clone(),
+                outcome: Err(ProcessSpawnError::Denied {
+                    reason: "PROCESS_SPAWN_EXECUTION_CANCELLED".into(),
+                }),
+            },
+            HostEffectJournalEntry::ProcessSpawn {
+                request: request.clone(),
+                outcome: Err(ProcessSpawnError::PartialOutputFailed {
+                    failure: Box::new(ProcessSpawnError::TimedOut {
+                        runtime_millis: 1_000,
+                    }),
+                    signal: Some(9),
+                    partial_stdout: b"private-child-output".to_vec(),
+                    partial_stderr: b"private-child-error".to_vec(),
+                }),
+            },
+            HostEffectJournalEntry::ProcessSpawn {
+                request: request.clone(),
+                outcome: Err(ProcessSpawnError::PolicyViolation {
+                    code: "process_tree_escape".into(),
+                    detail: "stdout remained open after process-group teardown".into(),
+                }),
+            },
+            HostEffectJournalEntry::ProcessSpawn {
+                request: request.clone(),
+                outcome: Err(ProcessSpawnError::LimitExceeded {
+                    limit: "stdout_bytes".into(),
+                    actual: 1025,
+                    maximum: 1024,
+                }),
+            },
+            HostEffectJournalEntry::ProcessSpawn {
                 request,
                 outcome: Err(ProcessSpawnError::PolicyViolation {
                     code: "executable_denied".to_string(),
@@ -21481,11 +21755,11 @@ exec "$2" pinned-worker-image"#,
         )
         .expect("sign process host-effect ledger");
 
-        assert_eq!(ledger.effect_count, 3);
+        assert_eq!(ledger.effect_count, 7);
         assert_eq!(ledger.allowed_count, 0);
-        assert_eq!(ledger.failed_count, 2);
+        assert_eq!(ledger.failed_count, 6);
         assert_eq!(ledger.denied_count, 1);
-        for entry in &ledger.entries[..2] {
+        for entry in &ledger.entries[..6] {
             assert!(
                 matches!(
                     &entry.receipt.policy_outcome,
@@ -21498,9 +21772,13 @@ exec "$2" pinned-worker-image"#,
             assert!(entry.receipt.result_hash.is_none());
         }
         assert!(matches!(
-            &ledger.entries[2].receipt.policy_outcome,
+            &ledger.entries[6].receipt.policy_outcome,
             PolicyOutcome::Denied { .. }
         ));
+        let serialized = serde_json::to_string(&ledger).unwrap();
+        assert!(!serialized.contains("private-child-output"));
+        assert!(!serialized.contains("private-child-error"));
+        assert_ledger_sdk_verifiable(&ledger);
     }
 
     #[test]
