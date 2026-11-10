@@ -29,22 +29,26 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use fsqlite::compat::{Transaction, TransactionExt};
 use fsqlite::{Connection, SqliteValue};
 
 use crate::capacity_defaults::aliases::{MAX_ACTION_LOG_ENTRIES, MAX_NODES_CAP};
 
 use super::fleet_transport::{
-    FLEET_ACTION_LOG_FILE, FleetAction, FleetActionRecord, FleetSharedState, FleetTransport,
-    FleetTransportError, MAX_ACTION_RECORD_BYTES, NodeStatus, validate_action_record,
+    FLEET_ACTION_LOG_FILE, FLEET_GUARDED_POLICY_RECEIPT_SCHEMA, FleetAction, FleetActionRecord,
+    FleetGuardedPolicyObservationScope, FleetGuardedPolicyReceipt, FleetSharedState, FleetTransport,
+    FleetTransportError, GuardedFleetPolicyPublication, MAX_ACTION_RECORD_BYTES,
+    MAX_GUARDED_POLICY_RECEIPT_BYTES, MAX_GUARDED_POLICY_STALE_AFTER, NodeStatus, validate_action_record,
     validate_fleet_native_session_publication, validate_fleet_policy_publication,
-    validate_node_status,
+    validate_guarded_fleet_policy_publication, validate_node_status,
 };
 
 const FLEET_DB_FILE: &str = "fleet-state.db";
 const FLEET_DB_SCHEMA_VERSION: &str = "franken-node/fleet-durable-store/v1";
 const META_INITIALIZED_KEY: &str = "initialized";
 const META_JSONL_IMPORT_KEY: &str = "legacy_jsonl_imported";
+const META_MUTATION_CONFLICT_KEY: &str = "action_node_mutation_conflict";
 /// bd-ymbjw: fsqlite surfaces WAL write-write races as immediate
 /// "database is busy (snapshot conflict …)" errors. Unlike a plain lock wait,
 /// a snapshot conflict is not resolved by `busy_timeout` — the failing
@@ -141,6 +145,23 @@ fn enforce_table_capacity(
             "{table} exceeds the maximum {capacity} records; refusing to discard retained fleet state"
         )));
     }
+    Ok(())
+}
+
+/// Every action/status writer changes this same row inside its transaction.
+/// A guarded publication cannot commit a decision from an older node snapshot
+/// while another writer changes an unrelated node/action row. The value only
+/// forces a real write conflict; it is not an epoch or externally visible clock.
+fn serialize_fleet_mutation(tx: &Transaction<'_>) -> Result<(), FleetTransportError> {
+    tx.execute_with_params(
+        "INSERT INTO fleet_meta(key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value;",
+        &[
+            SqliteValue::Text(META_MUTATION_CONFLICT_KEY.into()),
+            SqliteValue::Text(uuid::Uuid::now_v7().to_string().into()),
+        ],
+    )
+    .map_err(|error| FleetTransportError::io(error.to_string()))?;
     Ok(())
 }
 
@@ -354,14 +375,26 @@ impl DurableFleetTransport {
         record: &FleetActionRecord,
     ) -> Result<(), FleetTransportError> {
         validate_action_record(record)?;
-        let action_json = serde_json::to_string(record)
-            .map_err(|err| FleetTransportError::serialization(err.to_string()))?;
         // Explicit transaction: the commit is the WAL-durable boundary under
         // synchronous=FULL; a bare statement can sit in the retained
         // autocommit overlay and die with the process.
         let mut tx = connection
             .transaction()
             .map_err(|err| FleetTransportError::io(err.to_string()))?;
+        serialize_fleet_mutation(&tx)?;
+        Self::insert_action_in_transaction(&tx, record)?;
+        tx.commit()
+            .map_err(|err| FleetTransportError::io(err.to_string()))?;
+        Ok(())
+    }
+
+    fn insert_action_in_transaction(
+        tx: &Transaction<'_>,
+        record: &FleetActionRecord,
+    ) -> Result<(), FleetTransportError> {
+        validate_action_record(record)?;
+        let action_json = serde_json::to_string(record)
+            .map_err(|err| FleetTransportError::serialization(err.to_string()))?;
         if matches!(
             &record.action,
             FleetAction::PolicyUpdate {
@@ -421,9 +454,7 @@ impl DurableFleetTransport {
                 record.action_id
             )));
         }
-        enforce_table_capacity(&tx, "fleet_actions", MAX_ACTION_LOG_ENTRIES)?;
-        tx.commit()
-            .map_err(|err| FleetTransportError::io(err.to_string()))?;
+        enforce_table_capacity(tx, "fleet_actions", MAX_ACTION_LOG_ENTRIES)?;
         Ok(())
     }
 
@@ -437,6 +468,7 @@ impl DurableFleetTransport {
         let mut tx = connection
             .transaction()
             .map_err(|err| FleetTransportError::io(err.to_string()))?;
+        serialize_fleet_mutation(&tx)?;
         tx.execute_with_params(
             "INSERT INTO fleet_nodes(zone_id, node_id, status_json)
              VALUES (?1, ?2, ?3)
@@ -496,6 +528,140 @@ impl DurableFleetTransport {
                 Ok(status)
             })
             .collect()
+    }
+
+    /// Atomically publish under a maintenance hold after projecting the
+    /// transaction's actual node snapshot. The HTTP coordinator supplies its
+    /// incarnation-bound enrolled-heartbeat projection here; it must never
+    /// substitute evidence received from the publishing client.
+    ///
+    /// Both callbacks are rerun after a snapshot conflict. `now` is sampled
+    /// after the node projection, so a retried admission cannot reuse an older
+    /// freshness decision. Original committed receipts are returned unchanged
+    /// apart from the explicit retry flag, including after a later resume.
+    pub fn publish_policy_with_maintenance_guard_projected(
+        &mut self,
+        request: &GuardedFleetPolicyPublication,
+        observation_scope: FleetGuardedPolicyObservationScope,
+        max_stale_after: Duration,
+        now: impl Fn() -> DateTime<Utc>,
+        project_nodes: impl Fn(&mut Vec<NodeStatus>) -> Result<(), FleetTransportError>,
+    ) -> Result<FleetGuardedPolicyReceipt, FleetTransportError> {
+        request.validate()?;
+        if max_stale_after.is_zero() {
+            return Err(FleetTransportError::stale_state(
+                "guarded policy coordinator freshness must be positive",
+            ));
+        }
+        self.ensure_initialized()?;
+        self.with_connection(|connection| {
+            let mut tx = connection
+                .transaction()
+                .map_err(|error| FleetTransportError::io(error.to_string()))?;
+            serialize_fleet_mutation(&tx)?;
+            let retained = tx
+                .query_with_params(
+                    "SELECT hold_action_id, receipt_json FROM fleet_guarded_policy_publications
+                     WHERE action_id = ?1;",
+                    &[SqliteValue::Text(request.action.action_id.clone().into())],
+                )
+                .map_err(|error| FleetTransportError::io(error.to_string()))?;
+            if let [row] = retained.as_slice() {
+                let [owner, receipt_json] = row.values() else {
+                    return Err(FleetTransportError::serialization(
+                        "stored guarded policy receipt has an invalid row shape",
+                    ));
+                };
+                let raw = text(receipt_json, "receipt_json")?;
+                if raw.len() > MAX_GUARDED_POLICY_RECEIPT_BYTES {
+                    return Err(FleetTransportError::serialization(
+                        "stored guarded policy receipt exceeds its byte bound",
+                    ));
+                }
+                let mut receipt: FleetGuardedPolicyReceipt = serde_json::from_str(&raw)
+                    .map_err(|error| FleetTransportError::serialization(error.to_string()))?;
+                receipt.validate()?;
+                if receipt.already_published
+                    || text(owner, "hold_action_id")? != receipt.guard.hold_action_id
+                {
+                    return Err(FleetTransportError::serialization(
+                        "stored guarded policy receipt has inconsistent admission identity",
+                    ));
+                }
+                if receipt.action != request.action
+                    || receipt.guard.hold_action_id != request.guard.hold_action_id
+                {
+                    return Err(FleetTransportError::action_conflict(
+                        "guarded policy action already belongs to a different action or hold",
+                    ));
+                }
+                let actions = tx
+                    .query_with_params(
+                        "SELECT action_json FROM fleet_actions WHERE action_id = ?1;",
+                        &[SqliteValue::Text(request.action.action_id.clone().into())],
+                    )
+                    .map_err(|error| FleetTransportError::io(error.to_string()))?;
+                if actions.len() != 1
+                    || parse_action_row(&actions[0].values()[0])? != receipt.action
+                {
+                    return Err(FleetTransportError::serialization(
+                        "guarded policy receipt no longer matches its immutable action",
+                    ));
+                }
+                receipt.already_published = true;
+                tx.commit()
+                    .map_err(|error| FleetTransportError::io(error.to_string()))?;
+                return Ok(receipt);
+            }
+            if !retained.is_empty() {
+                return Err(FleetTransportError::serialization(
+                    "guarded policy receipt identity is not unique",
+                ));
+            }
+            let mut state = FleetSharedState {
+                schema_version: super::fleet_transport::FLEET_SHARED_STATE_SCHEMA.to_owned(),
+                actions: Self::query_actions(connection)?,
+                nodes: Self::query_nodes(connection)?,
+            };
+            project_nodes(&mut state.nodes)?;
+            let accepted_at = now();
+            let evidence = validate_guarded_fleet_policy_publication(
+                request,
+                &state,
+                accepted_at,
+                max_stale_after.min(MAX_GUARDED_POLICY_STALE_AFTER),
+            )?;
+            let receipt = FleetGuardedPolicyReceipt {
+                schema_version: FLEET_GUARDED_POLICY_RECEIPT_SCHEMA.to_owned(),
+                action: request.action.clone(),
+                guard: request.guard.clone(),
+                evidence,
+                accepted_at,
+                observation_scope,
+                already_published: false,
+                fleet_quiescence_certified: false,
+            };
+            // Reject oversized or contradictory evidence before appending
+            // either record. A failed commit rolls both records back together.
+            receipt.validate()?;
+            let receipt_json = serde_json::to_string(&receipt)
+                .map_err(|error| FleetTransportError::serialization(error.to_string()))?;
+            Self::insert_action_in_transaction(&tx, &request.action)?;
+            tx.execute_with_params(
+                "INSERT INTO fleet_guarded_policy_publications(action_id, hold_action_id, receipt_json)
+                 VALUES (?1, ?2, ?3);",
+                &[
+                    SqliteValue::Text(request.action.action_id.clone().into()),
+                    SqliteValue::Text(request.guard.hold_action_id.clone().into()),
+                    SqliteValue::Text(receipt_json.into()),
+                ],
+            )
+            .map_err(|error| FleetTransportError::io(error.to_string()))?;
+            enforce_table_capacity(&tx, "fleet_guarded_policy_publications", MAX_ACTION_LOG_ENTRIES)?;
+            tx.commit()
+                .map_err(|error| FleetTransportError::io(error.to_string()))?;
+            Ok(receipt)
+        })
     }
 
     /// Same staleness helper as [`FileFleetTransport::list_stale_nodes`].
@@ -579,6 +745,15 @@ impl FleetTransport for DurableFleetTransport {
                 )
                 .map_err(|err| FleetTransportError::io(err.to_string()))?;
             connection
+                .execute(
+                    "CREATE TABLE IF NOT EXISTS fleet_guarded_policy_publications (
+                        action_id TEXT PRIMARY KEY REFERENCES fleet_actions(action_id),
+                        hold_action_id TEXT NOT NULL,
+                        receipt_json TEXT NOT NULL
+                    );",
+                )
+                .map_err(|err| FleetTransportError::io(err.to_string()))?;
+            connection
                 .execute_with_params(
                     "INSERT INTO fleet_meta(key, value) VALUES (?1, ?2)
                      ON CONFLICT(key) DO UPDATE SET value = excluded.value;",
@@ -609,6 +784,19 @@ impl FleetTransport for DurableFleetTransport {
     fn publish_action(&mut self, action: &FleetActionRecord) -> Result<(), FleetTransportError> {
         self.ensure_initialized()?;
         self.with_connection(|connection| Self::insert_action(connection, action))
+    }
+
+    fn publish_policy_with_maintenance_guard(
+        &mut self,
+        request: &GuardedFleetPolicyPublication,
+    ) -> Result<FleetGuardedPolicyReceipt, FleetTransportError> {
+        self.publish_policy_with_maintenance_guard_projected(
+            request,
+            FleetGuardedPolicyObservationScope::LocalSupervisorObservations,
+            MAX_GUARDED_POLICY_STALE_AFTER,
+            Utc::now,
+            |_| Ok(()),
+        )
     }
 
     fn list_actions(&self) -> Result<Vec<FleetActionRecord>, FleetTransportError> {

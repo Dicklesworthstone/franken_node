@@ -268,6 +268,60 @@ discard that project's earlier restrictions. Policy publication reports
 agent has applied it. Local `fleet policy status` reads the durable activation,
 and reconciliation requires the existing exact-snapshot application checkpoint.
 
+### Publish while native admission is held
+
+For a policy transition that requires a drained native population, first publish
+an explicit maintenance owner and wait for the agents to hold admission. Keep
+the agents running throughout the transition:
+
+```bash
+franken-node fleet hold --zone production --id policy-rollout-2 \
+  --reason "tighten runtime policy" --wait --json
+franken-node fleet policy publish --zone production --revision 2 \
+  --file runtime-policy.json --hold policy-rollout-2 --json
+franken-node fleet hold --zone production --id policy-rollout-2 \
+  --reason "tighten runtime policy" --wait --json
+franken-node fleet resume --hold policy-rollout-2 --wait --json
+```
+
+The first wait establishes terminal native populations with admission fenced.
+The guarded publication then checks that the complete ordered action history
+still matches the operator's snapshot and that every participant has fresh,
+terminal, fenced observations for its exact action checkpoint. The durable
+store performs these checks, appends the executable policy, and retains the
+receipt in one WAL transaction. All action and heartbeat writers participate in
+the same transaction conflict point, including independent local processes.
+Upgrade all store writers before using the guard.
+
+The second wait observes the newly published policy checkpoint while the hold
+is still active. Only the explicit resume removes this owner; other owners and
+unresolved native obligations still keep admission closed. The policy must name
+the hold's exact original zone, including `all` for a global hold. Heartbeats
+must be younger than the configured convergence timeout, capped at 300 seconds.
+No affected participants, a missing retained node, a resumed owner, stale or
+future heartbeats, pending effects, and a changed action history all refuse a
+new publication. A failure never falls back to ordinary publication.
+
+Over HTTP, `POST /v2/fleet/policies/guarded` accepts a
+`GuardedFleetPolicyPublication` and returns a `FleetGuardedPolicyReceipt`.
+Only the operator credential may publish. The coordinator must have node
+enrollment configured and checks its own exact node-authenticated heartbeat
+view inside the transaction; credentials from the operator or another node
+cannot substitute acknowledgements. A coordinator restart requires fresh
+node heartbeats before a new guarded publication. Guard requests are bounded
+to 512 KiB and receipts to 8 MiB; ordinary route request limits remain 64 KiB.
+
+Guarded CLI output uses `franken-node/fleet-policy-publish-cli/v2` with the
+retained receipt in `guarded_publication`. Its `observation_scope` distinguishes
+local supervisor observations from enrolled node observations. If the response
+is lost, repeat the same policy file, revision, zone, and hold: the original
+action and receipt are returned with `already_published: true`, even after a
+later resume. This is historical evidence at `accepted_at`, not a new readiness
+decision. An action originally published without a guard cannot be certified
+retroactively. The receipt is retained transaction evidence, not an independent
+publisher signature; `activated: false` and `fleet_quiescence_certified: false`
+retain their existing meanings.
+
 Run from the enrolled project authority. Selecting a nested directory, a nearer
 package marker, or an absolute file through the library API cannot hide an
 enclosing project's enrollment. Such narrower authorities are refused with a

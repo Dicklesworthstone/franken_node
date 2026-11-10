@@ -1766,6 +1766,259 @@ impl MaintenanceCliFixture {
 }
 
 #[test]
+#[cfg(feature = "fleet-control-plane-server")]
+fn live_http_guarded_policy_requires_enrolled_fresh_hold_and_retains_original_retry() {
+    use frankenengine_node::control_plane::fleet_http_server::{
+        FLEET_NODE_CREDENTIALS_SCHEMA, FleetControlPlaneService, FleetHttpEventSink,
+        FleetHttpServerConfig, FleetHttpServerControl, FleetNodeCredentials,
+        serve_fleet_control_plane,
+    };
+    use frankenengine_node::control_plane::fleet_transport::{
+        FleetGuardedPolicyObservationScope, FleetPolicyMaintenanceGuard,
+        GuardedFleetPolicyPublication, fleet_action_log_checkpoint,
+    };
+    use frankenengine_node::control_plane::fleet_transport_http::HttpFleetTransport;
+    use std::sync::{Arc, mpsc};
+
+    struct StopOnDrop(Arc<FleetHttpServerControl>);
+    impl Drop for StopOnDrop {
+        fn drop(&mut self) {
+            self.0.request_shutdown();
+        }
+    }
+
+    let directory = tempdir().expect("guarded HTTP coordinator");
+    let operator_token = "guard-operator-0123456789abcdef0123456789abcdef";
+    let node_token = "guard-node-0123456789abcdef0123456789abcdef";
+    let credentials = directory.path().join("node-credentials.json");
+    std::fs::write(
+        &credentials,
+        serde_json::to_vec(&serde_json::json!({
+            "schema_version": FLEET_NODE_CREDENTIALS_SCHEMA,
+            "nodes": [{
+                "zone_id": "east", "node_id": "guarded-node",
+                "token_sha256": hex::encode(Sha256::digest(node_token.as_bytes()))
+            }]
+        }))
+        .unwrap(),
+    )
+    .expect("node enrollment");
+    let start = |enrolled: bool| {
+        let service = FleetControlPlaneService::open(directory.path().to_path_buf(), operator_token)
+            .expect("open guarded coordinator");
+        let service = if enrolled {
+            service
+                .with_node_credentials(FleetNodeCredentials::load(&credentials).unwrap())
+                .unwrap()
+        } else {
+            service
+        };
+        let control = FleetHttpServerControl::new();
+        let stop = StopOnDrop(Arc::clone(&control));
+        let (ready, bound) = mpsc::channel();
+        let events: FleetHttpEventSink = Arc::new(move |event| {
+            if let Some(address) = &event.bound_addr {
+                let _ = ready.send(address.clone());
+            }
+        });
+        let server = std::thread::spawn(move || {
+            serve_fleet_control_plane(
+                Arc::new(service),
+                &FleetHttpServerConfig {
+                    bind: "127.0.0.1:0".into(),
+                    max_requests: None,
+                },
+                control,
+                events,
+            )
+        });
+        let address = bound
+            .recv_timeout(Duration::from_secs(10))
+            .expect("HTTP listener ready");
+        (format!("http://{address}"), stop, server)
+    };
+    let client = |url: &str, token: &str| {
+        HttpFleetTransport::new(url, token, Duration::from_secs(5)).expect("guarded HTTP client")
+    };
+    let hold = FleetActionRecord {
+        action_id: "http-policy-hold".into(),
+        emitted_at: Utc::now(),
+        action: FleetAction::NativeSessionHold {
+            zone_id: "east".into(),
+            reason: "policy update".into(),
+        },
+    };
+    let checkpoint = fleet_application_checkpoint(std::slice::from_ref(&hold), "east").unwrap();
+    let mut population = Sha256::new();
+    population.update(b"franken-node/local-native-drain-population/v1\0");
+    population.update(0_u64.to_be_bytes());
+    // This test exercises authenticated HTTP observations. Actual native
+    // worker draining and admission are exercised by the companion CLI tests.
+    let node = NodeStatus {
+        zone_id: "east".into(),
+        node_id: "guarded-node".into(),
+        last_seen: Utc::now(),
+        quarantine_version: 0,
+        health: NodeHealth::Maintenance,
+        applied_actions: Some(checkpoint.clone()),
+        native_session_drain: Some(NativeSessionDrainCheckpoint {
+            applied_actions: checkpoint,
+            session_set_sha256: hex::encode(population.finalize()),
+            admitted_sessions: 0,
+            terminal_sessions: 0,
+            pending_sessions: 0,
+            indeterminate_sessions: 0,
+            fence_held: true,
+        }),
+    };
+    let mut request = GuardedFleetPolicyPublication {
+        action: executable_policy_action("guarded-http-policy", "east", 1, 1000),
+        guard: FleetPolicyMaintenanceGuard {
+            hold_action_id: hold.action_id.clone(),
+            expected_action_log: fleet_action_log_checkpoint(std::slice::from_ref(&hold)).unwrap(),
+            required_nodes: [("east".to_string(), "guarded-node".to_string())].into(),
+            stale_after: Duration::from_secs(30),
+        },
+    };
+
+    let (url, stop, server) = start(false);
+    let mut operator = client(&url, operator_token);
+    operator.initialize().unwrap();
+    operator.publish_action(&hold).unwrap();
+    operator.upsert_node_status(&node).unwrap();
+    let refused = operator
+        .publish_policy_with_maintenance_guard(&request)
+        .expect_err("shared bearer observations cannot establish enrolled-node authority")
+        .to_string();
+    assert!(
+        refused.contains("HTTP 409")
+            && refused.contains("FLEET_HTTP_NODE_ENROLLMENT_REQUIRED"),
+        "{refused}"
+    );
+    assert_eq!(operator.list_actions().unwrap(), [hold.clone()]);
+    stop.0.request_shutdown();
+    assert!(server.join().unwrap().unwrap() > 0);
+
+    let (url, stop, server) = start(true);
+    let mut operator = client(&url, operator_token);
+    let mut agent = client(&url, node_token);
+    operator.initialize().unwrap();
+    agent.initialize().unwrap();
+    let reopened = operator.read_shared_state().unwrap();
+    assert!(
+        reopened
+            .nodes
+            .iter()
+            .all(|node| node.native_session_drain.is_none())
+    );
+    let refused = operator
+        .publish_policy_with_maintenance_guard(&request)
+        .expect_err("an old shared-bearer checkpoint cannot become a fresh enrolled observation")
+        .to_string();
+    assert!(
+        refused.contains("HTTP 409") && refused.contains("FLEET_HTTP_STALE_STATE"),
+        "{refused}"
+    );
+    assert!(
+        agent
+            .publish_policy_with_maintenance_guard(&request)
+            .unwrap_err()
+            .to_string()
+            .contains("HTTP 403"),
+        "enrolled nodes cannot publish operator policy actions"
+    );
+    agent.upsert_node_status(&node).unwrap();
+    let unrelated = FleetActionRecord {
+        action_id: "west-append-before-guard".into(),
+        emitted_at: Utc::now(),
+        action: FleetAction::Release {
+            zone_id: "west".into(),
+            incident_id: "west-retired-incident".into(),
+            reason: None,
+        },
+    };
+    operator.publish_action(&unrelated).unwrap();
+    let refused = operator
+        .publish_policy_with_maintenance_guard(&request)
+        .expect_err("the full action log changed even though the east node checkpoint did not")
+        .to_string();
+    assert!(
+        refused.contains("HTTP 409") && refused.contains("FLEET_HTTP_STALE_STATE"),
+        "{refused}"
+    );
+    let state = operator.read_shared_state().unwrap();
+    assert_eq!(state.actions.len(), 2);
+    request.guard.expected_action_log = fleet_action_log_checkpoint(&state.actions).unwrap();
+    let admitted = operator
+        .publish_policy_with_maintenance_guard(&request)
+        .unwrap();
+    admitted.validate().unwrap();
+    assert_eq!(admitted.action, request.action);
+    assert_eq!(
+        admitted.observation_scope,
+        FleetGuardedPolicyObservationScope::EnrolledNodeObservations
+    );
+    assert!(!admitted.already_published);
+    assert!(!admitted.fleet_quiescence_certified);
+    assert!(admitted.evidence.complete);
+    assert!(!admitted.evidence.admission_resumed);
+    assert_eq!(admitted.evidence.nodes.len(), 1);
+    assert_eq!(admitted.guard.expected_action_log.action_count, 2);
+    operator
+        .publish_action(&FleetActionRecord {
+            action_id: "http-policy-resume".into(),
+            emitted_at: Utc::now(),
+            action: FleetAction::NativeSessionResume {
+                zone_id: "east".into(),
+                hold_action_id: hold.action_id.clone(),
+                reason: None,
+            },
+        })
+        .unwrap();
+    let mut expected_retry = admitted.clone();
+    expected_retry.already_published = true;
+    assert_eq!(
+        operator
+            .publish_policy_with_maintenance_guard(&request)
+            .unwrap(),
+        expected_retry
+    );
+    assert_eq!(operator.list_actions().unwrap().len(), 4);
+    let mut different_owner = request.clone();
+    different_owner.guard.hold_action_id = "another-owner".into();
+    assert!(
+        operator
+            .publish_policy_with_maintenance_guard(&different_owner)
+            .is_err()
+    );
+    stop.0.request_shutdown();
+    assert!(server.join().unwrap().unwrap() > 0);
+
+    // Restart clears live checkpoint authority, but must not erase the
+    // evidence atomically admitted with the already-published policy.
+    let (url, stop, server) = start(true);
+    let mut operator = client(&url, operator_token);
+    operator.initialize().unwrap();
+    assert!(
+        operator
+            .read_shared_state()
+            .unwrap()
+            .nodes
+            .iter()
+            .all(|node| node.native_session_drain.is_none())
+    );
+    assert_eq!(
+        operator
+            .publish_policy_with_maintenance_guard(&request)
+            .unwrap(),
+        expected_retry
+    );
+    assert_eq!(operator.list_actions().unwrap().len(), 4);
+    stop.0.request_shutdown();
+    assert!(server.join().unwrap().unwrap() > 0);
+}
+
+#[test]
 #[cfg(all(feature = "engine", unix))]
 fn fleet_maintenance_owners_survive_agent_restarts_until_each_explicit_resume() {
     let fixture = MaintenanceCliFixture::new();
@@ -2114,6 +2367,226 @@ fn fleet_maintenance_timeout_retains_owner_across_late_agent_restarts() {
     assert_eq!(fixture.actions(), retained);
     fixture.restart_agent("maintenance", true, 0);
     fixture.assert_native_admission(false);
+}
+
+#[test]
+#[cfg(all(feature = "engine", unix))]
+fn fleet_guarded_policy_publication_keeps_admission_closed_until_applied_and_resumed() {
+    use frankenengine_node::control_plane::fleet_transport::{
+        FleetGuardedPolicyObservationScope, FleetGuardedPolicyReceipt,
+    };
+
+    let fixture = MaintenanceCliFixture::new();
+    fixture.assert_native_admission(true);
+    std::fs::write(
+        fixture.project.path().join("policy.json"),
+        r#"{"minimum_profile":"strict","max_instructions":1000,"block_private_network":true}"#,
+    )
+    .expect("guarded policy input");
+    let publish = [
+        "fleet",
+        "policy",
+        "publish",
+        "--zone",
+        "east",
+        "--revision",
+        "1",
+        "--file",
+        "policy.json",
+        "--hold",
+        "policy-maintenance",
+        "--json",
+    ];
+    fixture.success(&[
+        "fleet",
+        "hold",
+        "--zone",
+        "east",
+        "--reason",
+        "guarded policy update",
+        "--id",
+        "policy-maintenance",
+        "--json",
+    ]);
+    let premature = fixture.run(&publish, "30");
+    assert!(
+        !premature.status.success(),
+        "publication requires an applied held population"
+    );
+    assert_eq!(
+        json_stdout(&premature, "unacknowledged policy hold")["schema_version"],
+        "franken-node/fleet-error-cli/v1"
+    );
+    assert_eq!(fixture.actions().len(), 1);
+    fixture.restart_agent("maintenance", true, 1);
+    fixture.assert_native_admission(false);
+
+    let published = fixture.success(&publish);
+    assert_eq!(
+        published["schema_version"],
+        "franken-node/fleet-policy-publish-cli/v2"
+    );
+    assert_eq!(published["published"], true);
+    assert_eq!(published["already_published"], false);
+    assert_eq!(published["activated"], false);
+    let admitted: FleetGuardedPolicyReceipt =
+        serde_json::from_value(published["guarded_publication"].clone())
+            .expect("typed guarded publication receipt");
+    admitted.validate().expect("consistent admitted evidence");
+    assert_eq!(
+        admitted.observation_scope,
+        FleetGuardedPolicyObservationScope::LocalSupervisorObservations
+    );
+    assert!(!admitted.already_published);
+    assert!(!admitted.fleet_quiescence_certified);
+    assert_eq!(admitted.guard.hold_action_id, "policy-maintenance");
+    assert_eq!(admitted.guard.expected_action_log.action_count, 1);
+    assert!(admitted.evidence.complete);
+    assert!(!admitted.evidence.admission_resumed);
+    assert_eq!(admitted.evidence.nodes.len(), 1);
+    assert_eq!(
+        admitted.evidence.nodes[0].active_hold_ids,
+        ["policy-maintenance"]
+    );
+    assert_eq!(
+        admitted.evidence.nodes[0]
+            .native_session_drain
+            .as_ref()
+            .unwrap()
+            .terminal_sessions,
+        1
+    );
+    assert_eq!(
+        published["action"],
+        serde_json::to_value(&admitted.action).unwrap()
+    );
+    assert_eq!(fixture.actions().len(), 2);
+    assert!(
+        load_active_fleet_policy(fixture.project.path())
+            .unwrap()
+            .is_none()
+    );
+    // The lost-response retry must survive the new action making the node's
+    // old checkpoint stale. It returns the original accepted observation.
+    let assert_original_retry = || {
+        let retried = fixture.success(&publish);
+        assert_eq!(retried["already_published"], true);
+        let receipt: FleetGuardedPolicyReceipt =
+            serde_json::from_value(retried["guarded_publication"].clone()).unwrap();
+        let mut expected = admitted.clone();
+        expected.already_published = true;
+        assert_eq!(receipt, expected);
+    };
+    assert_original_retry();
+    fixture.assert_native_admission(false);
+
+    fixture.restart_agent("maintenance", true, 1);
+    let active = load_active_fleet_policy(fixture.project.path())
+        .unwrap()
+        .unwrap();
+    assert_eq!(active.policies["east"].revision, 1);
+    assert_eq!(
+        active.policies["east"].policy.minimum_profile,
+        Some(frankenengine_node::config::Profile::Strict)
+    );
+    let strict_run = [
+        "run",
+        "app.cjs",
+        "--config",
+        "franken_node.toml",
+        "--runtime",
+        "franken-engine",
+        "--policy",
+        "strict",
+        "--json",
+    ];
+    let held = fixture.run(&strict_run, "30");
+    assert!(
+        !held.status.success(),
+        "policy activation must not resume admission"
+    );
+    assert!(
+        json_stdout(&held, "policy applied while held")["error"]
+            .as_str()
+            .unwrap()
+            .contains("native-session admission is fenced")
+    );
+    fixture.success(&["fleet", "resume", "--hold", "policy-maintenance", "--json"]);
+    fixture.restart_agent("healthy", false, 1);
+    let resumed = fixture.success(&strict_run);
+    assert_eq!(
+        resumed["dispatch"]["captured_output"]["stdout"],
+        "MAINTENANCE_NATIVE_ADMISSION\n"
+    );
+    let weaker = fixture.run(&["run", "app.cjs", "--policy", "balanced", "--json"], "30");
+    assert!(
+        !weaker.status.success(),
+        "resumption must retain the applied policy"
+    );
+    assert!(
+        json_stdout(&weaker, "applied policy after resume")["error"]
+            .as_str()
+            .unwrap()
+            .contains("activated fleet policy requires profile `strict`")
+    );
+    // Even after explicit resume and new work, retry is historical evidence
+    // of the original atomic publication, never a new current-readiness claim.
+    assert_original_retry();
+    assert_eq!(fixture.actions().len(), 3);
+}
+
+#[test]
+#[cfg(all(feature = "engine", unix))]
+fn fleet_guarded_policy_refuses_to_retroactively_certify_unguarded_publication() {
+    let fixture = MaintenanceCliFixture::new();
+    std::fs::write(
+        fixture.project.path().join("policy.json"),
+        r#"{"max_instructions":1000}"#,
+    )
+    .expect("unguarded policy input");
+    let publish = [
+        "fleet",
+        "policy",
+        "publish",
+        "--zone",
+        "east",
+        "--revision",
+        "1",
+        "--file",
+        "policy.json",
+        "--json",
+    ];
+    let original = fixture.success(&publish);
+    assert!(original.get("guarded_publication").is_none());
+    fixture.success(&[
+        "fleet",
+        "hold",
+        "--zone",
+        "east",
+        "--reason",
+        "later maintenance",
+        "--id",
+        "later-owner",
+        "--json",
+    ]);
+    fixture.restart_agent("maintenance", true, 0);
+    let before = fixture.actions();
+    let mut guarded = publish.to_vec();
+    guarded.extend(["--hold", "later-owner"]);
+    let refused = fixture.run(&guarded, "30");
+    assert!(
+        !refused.status.success(),
+        "a later hold cannot attest an earlier publication"
+    );
+    let refused = json_stdout(&refused, "retroactive policy evidence refused");
+    assert_eq!(refused["schema_version"], "franken-node/fleet-error-cli/v1");
+    assert!(refused.get("guarded_publication").is_none());
+    assert_eq!(fixture.actions(), before);
+    fixture.assert_native_admission(false);
+    let retry = fixture.success(&publish);
+    assert_eq!(retry["already_published"], true);
+    assert_eq!(retry["action"], original["action"]);
+    assert!(retry.get("guarded_publication").is_none());
 }
 
 #[test]

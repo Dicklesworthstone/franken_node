@@ -1056,7 +1056,7 @@ Every fleet command, and `trust quarantine`, talks to one of two stores:
 | `franken-node fleet release` | Retire one fleet quarantine incident with signed receipts and application convergence. Preserves local quarantine, other scoped incidents, and permanent revocation. `--zone` disambiguates a shared incident ID; `--zone all` selects its global scope. `--incident` is handler-required so `--json` failures emit `franken-node/fleet-error-cli/v1`. |
 | `franken-node fleet reconcile` | Reconcile the fleet-action log and wait for convergence. Times out fail-closed (same as `fleet release`). Flags: `--json`. |
 | `franken-node fleet agent` | Pull fleet actions, apply them to this node's trust-card registry, and push a heartbeat each cycle. `--zone` is handler-required so `--json` failures emit `franken-node/fleet-error-cli/v1` instead of a human clap error. Flags: `--node-id`, `--poll-interval-secs`, `--max-cycles`, `--once`, `--json`. |
-| `franken-node fleet policy publish` | Publish a validated restrictive executable runtime policy (`--file` with the `FleetRuntimePolicy` fields) to an exact `--zone` or `all`, with a positive, increasing `--revision`. Publication is not an application acknowledgement. Flags: `--json`. |
+| `franken-node fleet policy publish` | Publish a validated restrictive executable runtime policy (`--file` with the `FleetRuntimePolicy` fields) to an exact `--zone` or `all`, with a positive, increasing `--revision`. `--hold <owner>` atomically requires fresh, terminal maintenance observations and retains the publication evidence. Publication is not an application acknowledgement. Flags: `--json`. |
 | `franken-node fleet policy status` | Show this project's durable fleet policy for new run admission, with applied revisions and the complete executable policy. Flags: `--json`. |
 
 Native supervisors durably record admission before starting a worker. The local
@@ -1186,6 +1186,37 @@ supervisor observations with `fleet_quiescence_certified=false`, not a committed
 distributed epoch. Use enrolled HTTP node credentials for authenticated remote
 observations, and upgrade coordinator and agents together before publishing the
 new action variants.
+
+Use the hold as an atomic precondition when publishing an executable fleet policy:
+
+```bash
+franken-node fleet policy publish --zone us-east --revision 2 \
+  --file runtime-policy.json --hold rollout-2026-11-10 --json
+
+# Agents apply the policy while admission remains fenced. Repeat the original
+# hold to wait for the new action checkpoint before explicitly resuming it.
+franken-node fleet hold --zone us-east --id rollout-2026-11-10 \
+  --reason "replace the admitted runtime" --wait --json
+franken-node fleet resume --hold rollout-2026-11-10 --wait --json
+```
+
+The durable store checks the exact full action log, the hold's original zone,
+and every retained or newly observed participant in the transaction that commits
+the policy and its receipt. Missing, stale, future, nonterminal, or unfenced
+observations refuse publication. Heartbeat freshness uses the configured
+convergence timeout, capped at 300 seconds. The HTTP route requires node
+enrollment; a shared operator bearer cannot provide node observations for this
+guard. All participating writers must use the upgraded transport.
+
+Guarded JSON output uses `franken-node/fleet-policy-publish-cli/v2` and includes
+`guarded_publication`. Repeating the same file, revision, zone, and hold recovers
+the original receipt after a lost response, including after the hold has been
+resumed. Its `accepted_at` and evidence describe the original publication;
+`already_published: true` does not assert current maintenance readiness. An
+ordinary policy publication cannot later acquire a guarded receipt. The receipt
+is retained transaction evidence, not an independent signature or a global
+epoch certificate. Publication neither releases the hold nor proves policy
+application; `activated` and `fleet_quiescence_certified` remain false.
 
 A responsive worker can now finish a cooperative stop requested by live control.
 Its inventory outcome is `control_stopped` only after the supervisor observes

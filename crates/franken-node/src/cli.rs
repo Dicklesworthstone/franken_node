@@ -2286,6 +2286,10 @@ pub struct FleetPolicyPublishArgs {
     /// Exact zone, or `all` for fleet-wide restrictions.
     #[arg(long, default_value = "")]
     pub zone: String,
+    /// Atomically require this maintenance owner and fresh terminal, fenced
+    /// node observations before publication. The hold remains active.
+    #[arg(long)]
+    pub hold: Option<String>,
     /// Emit JSON; publication is not an application acknowledgement.
     #[arg(long)]
     pub json: bool,

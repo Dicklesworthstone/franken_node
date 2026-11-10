@@ -48,6 +48,11 @@ pub const FLEET_NODE_DIR: &str = "nodes";
 pub const FLEET_LOCK_DIR: &str = "locks";
 /// Bound owner metadata independently of the much larger historical action log.
 pub const MAX_NATIVE_SESSION_MAINTENANCE_HOLDS: usize = 64;
+pub const MAX_GUARDED_POLICY_REQUEST_BYTES: usize = 512 * 1024;
+pub const MAX_GUARDED_POLICY_RECEIPT_BYTES: usize = 8 * 1024 * 1024;
+pub const MAX_GUARDED_POLICY_STALE_AFTER: Duration = Duration::from_secs(300);
+pub const FLEET_GUARDED_POLICY_RECEIPT_SCHEMA: &str =
+    "franken-node/fleet-guarded-policy-publication/v1";
 const FLEET_ACTION_COMPACTION_LOCK_FILE: &str = "actions.compaction.lock";
 const FLEET_SHARED_STATE_LOCK_FILE: &str = "shared-state.snapshot.lock";
 const MAX_NODE_ID_LEN: usize = 128;
@@ -1035,6 +1040,49 @@ fn is_lowercase_sha256(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+/// The complete coordinator append sequence, including every concrete zone.
+/// Unlike an application checkpoint for zone `all`, this never filters out
+/// concrete-zone actions. It is a publication precondition, not an epoch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FleetActionLogCheckpoint {
+    pub action_count: u64,
+    pub actions_sha256: String,
+}
+
+impl FleetActionLogCheckpoint {
+    pub fn validate(&self) -> Result<(), FleetTransportError> {
+        if self.action_count > MAX_ACTION_LOG_ENTRIES as u64
+            || !is_lowercase_sha256(&self.actions_sha256)
+        {
+            return Err(FleetTransportError::serialization(
+                "full fleet action checkpoint requires a bounded count and lowercase SHA-256",
+            ));
+        }
+        Ok(())
+    }
+}
+
+pub fn fleet_action_log_checkpoint(
+    actions: &[FleetActionRecord],
+) -> Result<FleetActionLogCheckpoint, FleetTransportError> {
+    let _ = validated_native_session_holds(actions)?;
+    let mut digest = Sha256::new();
+    digest.update(b"franken-node/fleet-action-log/v1\0");
+    digest.update((actions.len() as u64).to_le_bytes());
+    for record in actions {
+        let value = serde_json::to_value(record)
+            .map_err(|error| FleetTransportError::serialization(error.to_string()))?;
+        let bytes = canonical_bytes(&value);
+        digest.update((bytes.len() as u64).to_le_bytes());
+        digest.update(bytes);
+    }
+    Ok(FleetActionLogCheckpoint {
+        action_count: actions.len() as u64,
+        actions_sha256: hex::encode(digest.finalize()),
+    })
+}
+
 /// Outcome of a retained local admission fence and its exact session population.
 /// This does not certify remote effects, a fleet epoch barrier, or global quiescence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1791,6 +1839,268 @@ fn native_session_hold_readiness(
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FleetPolicyMaintenanceGuard {
+    pub hold_action_id: String,
+    pub expected_action_log: FleetActionLogCheckpoint,
+    pub required_nodes: BTreeSet<(String, String)>,
+    pub stale_after: Duration,
+}
+
+impl FleetPolicyMaintenanceGuard {
+    pub fn validate(&self) -> Result<(), FleetTransportError> {
+        validate_action_id(&self.hold_action_id)?;
+        self.expected_action_log.validate()?;
+        if self.stale_after.is_zero() || self.stale_after > MAX_GUARDED_POLICY_STALE_AFTER {
+            return Err(FleetTransportError::stale_state(
+                "guarded policy freshness must be positive and at most 300 seconds",
+            ));
+        }
+        if self.required_nodes.len() > MAX_NODES_CAP {
+            return Err(FleetTransportError::serialization(
+                "guarded policy retained participants exceed the node capacity",
+            ));
+        }
+        for (zone, node) in &self.required_nodes {
+            validate_zone_id(zone)?;
+            validate_node_id(node)?;
+            if zone == "all" {
+                return Err(FleetTransportError::serialization(
+                    "guarded policy participants require concrete zones",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuardedFleetPolicyPublication {
+    pub action: FleetActionRecord,
+    pub guard: FleetPolicyMaintenanceGuard,
+}
+
+impl GuardedFleetPolicyPublication {
+    pub fn validate(&self) -> Result<(), FleetTransportError> {
+        validate_action_record(&self.action)?;
+        self.guard.validate()?;
+        let zone = guarded_policy_zone(&self.action)?;
+        if self
+            .guard
+            .required_nodes
+            .iter()
+            .any(|(participant_zone, _)| zone != "all" && participant_zone != zone)
+        {
+            return Err(FleetTransportError::serialization(
+                "guarded policy participant is outside the publication zone",
+            ));
+        }
+        validate_guarded_json_bound(self, MAX_GUARDED_POLICY_REQUEST_BYTES)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FleetGuardedPolicyObservationScope {
+    LocalSupervisorObservations,
+    EnrolledNodeObservations,
+}
+
+/// The evidence accepted in the same durable transaction as the policy action.
+/// Exact retries return this original evidence, with only `already_published`
+/// changed. It does not assert current readiness after the accepted instant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FleetGuardedPolicyReceipt {
+    pub schema_version: String,
+    pub action: FleetActionRecord,
+    pub guard: FleetPolicyMaintenanceGuard,
+    pub evidence: FleetNativeSessionHoldEvidence,
+    pub accepted_at: DateTime<Utc>,
+    pub observation_scope: FleetGuardedPolicyObservationScope,
+    pub already_published: bool,
+    pub fleet_quiescence_certified: bool,
+}
+
+impl FleetGuardedPolicyReceipt {
+    pub fn validate(&self) -> Result<(), FleetTransportError> {
+        GuardedFleetPolicyPublication {
+            action: self.action.clone(),
+            guard: self.guard.clone(),
+        }
+        .validate()?;
+        let evidence = &self.evidence;
+        if self.schema_version != FLEET_GUARDED_POLICY_RECEIPT_SCHEMA
+            || self.fleet_quiescence_certified
+            || evidence.schema_version != "franken-node/fleet-native-session-hold-evidence/v1"
+            || evidence.scope != "local_supervisor_maintenance_observations"
+            || evidence.observed_at != self.accepted_at
+            || evidence.hold_action_id != self.guard.hold_action_id
+            || evidence.hold_zone_id != guarded_policy_zone(&self.action)?
+            || evidence.target != FleetNativeSessionHoldTarget::Held
+            || !evidence.complete
+            || evidence.admission_resumed
+            || evidence.fleet_quiescence_certified
+            || !evidence.uncovered_zones.is_empty()
+            || evidence.action_count != self.guard.expected_action_log.action_count
+            || evidence.action_count == 0
+            || evidence.stale_after.is_zero()
+            || evidence.stale_after > self.guard.stale_after
+            || evidence.nodes.is_empty()
+            || evidence.nodes.len() > MAX_NODES_CAP
+        {
+            return Err(FleetTransportError::serialization(
+                "guarded policy receipt contradicts its accepted hold evidence",
+            ));
+        }
+        let threshold = chrono::TimeDelta::from_std(evidence.stale_after)
+            .map_err(|error| FleetTransportError::serialization(error.to_string()))?;
+        let mut identities = BTreeSet::new();
+        let mut previous_identity = None;
+        for node in &evidence.nodes {
+            let identity = (node.zone_id.clone(), node.node_id.clone());
+            if previous_identity.as_ref().is_some_and(|previous| previous >= &identity)
+                || (evidence.hold_zone_id != "all" && node.zone_id != evidence.hold_zone_id)
+                || node.expected_actions.action_count == 0
+                || node.expected_actions.action_count > evidence.action_count
+                || !node.ready
+                || node.reason != FleetNativeDrainReadiness::Ready
+                || node.admission_resumed
+                || node.health != Some(NodeHealth::Maintenance)
+                || node.applied_actions.as_ref() != Some(&node.expected_actions)
+                || node.active_hold_ids.is_empty()
+                || node.active_hold_ids.len() > MAX_NATIVE_SESSION_MAINTENANCE_HOLDS
+                || node.active_hold_ids.windows(2).any(|pair| pair[0] >= pair[1])
+                || !node.active_hold_ids.contains(&self.guard.hold_action_id)
+            {
+                return Err(FleetTransportError::serialization(
+                    "guarded policy receipt has an invalid held participant",
+                ));
+            }
+            for owner in &node.active_hold_ids {
+                validate_action_id(owner)?;
+            }
+            let last_seen = node.last_seen.ok_or_else(|| {
+                FleetTransportError::serialization("guarded policy receipt lacks a heartbeat")
+            })?;
+            if last_seen > self.accepted_at
+                || self.accepted_at.signed_duration_since(last_seen) >= threshold
+            {
+                return Err(FleetTransportError::serialization(
+                    "guarded policy receipt contains a stale or future heartbeat",
+                ));
+            }
+            let status = NodeStatus {
+                zone_id: node.zone_id.clone(),
+                node_id: node.node_id.clone(),
+                last_seen,
+                quarantine_version: 0,
+                health: NodeHealth::Maintenance,
+                applied_actions: node.applied_actions.clone(),
+                native_session_drain: node.native_session_drain.clone(),
+            };
+            validate_node_status(&status)?;
+            if node.zone_id == "all" {
+                return Err(FleetTransportError::serialization(
+                    "guarded policy receipt requires concrete participant zones",
+                ));
+            }
+            identities.insert(identity.clone());
+            previous_identity = Some(identity);
+        }
+        if !self.guard.required_nodes.is_subset(&identities) {
+            return Err(FleetTransportError::serialization(
+                "guarded policy receipt dropped a retained participant",
+            ));
+        }
+        validate_guarded_json_bound(self, MAX_GUARDED_POLICY_RECEIPT_BYTES)
+    }
+}
+
+fn guarded_policy_zone(action: &FleetActionRecord) -> Result<&str, FleetTransportError> {
+    match &action.action {
+        FleetAction::PolicyUpdate {
+            zone_id,
+            artifact: Some(_),
+            ..
+        } => Ok(zone_id),
+        _ => Err(FleetTransportError::serialization(
+            "maintenance-guarded publication requires an executable policy action",
+        )),
+    }
+}
+
+fn validate_guarded_json_bound<T: Serialize>(
+    value: &T,
+    limit: usize,
+) -> Result<(), FleetTransportError> {
+    struct BoundWriter {
+        remaining: usize,
+    }
+    impl std::io::Write for BoundWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.remaining = self.remaining.checked_sub(bytes.len()).ok_or_else(|| {
+                std::io::Error::other("guarded policy payload exceeds its byte bound")
+            })?;
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    serde_json::to_writer(BoundWriter { remaining: limit }, value)
+        .map_err(|error| FleetTransportError::serialization(error.to_string()))
+}
+
+/// Evaluate a guard against one authoritative transaction snapshot. The caller
+/// must serialize the read/decision/action write together and apply any enrolled
+/// credential projection before this call. Client-supplied evidence is unused.
+pub fn validate_guarded_fleet_policy_publication(
+    request: &GuardedFleetPolicyPublication,
+    state: &FleetSharedState,
+    now: DateTime<Utc>,
+    max_stale_after: Duration,
+) -> Result<FleetNativeSessionHoldEvidence, FleetTransportError> {
+    request.validate()?;
+    if max_stale_after.is_zero() {
+        return Err(FleetTransportError::stale_state(
+            "guarded policy coordinator freshness must be positive",
+        ));
+    }
+    if fleet_action_log_checkpoint(&state.actions)? != request.guard.expected_action_log {
+        return Err(FleetTransportError::stale_state(
+            "guarded policy publication requires the exact retained full action log",
+        ));
+    }
+    if state.actions.iter().any(|record| record.action_id == request.action.action_id) {
+        return Err(FleetTransportError::action_conflict(
+            "existing policy action requires its original durable guarded receipt",
+        ));
+    }
+    validate_fleet_policy_publication(&request.action, &state.actions)?;
+    let evidence = fleet_native_session_hold_evidence(
+        state,
+        &request.guard.hold_action_id,
+        FleetNativeSessionHoldTarget::Held,
+        &request.guard.required_nodes,
+        now,
+        request.guard.stale_after.min(max_stale_after),
+    )?;
+    if evidence.hold_zone_id != guarded_policy_zone(&request.action)? {
+        return Err(FleetTransportError::serialization(
+            "guarded policy must use its maintenance hold's exact original zone",
+        ));
+    }
+    if !evidence.complete {
+        return Err(FleetTransportError::stale_state(
+            "guarded policy requires fresh terminal held observations for every retained participant",
+        ));
+    }
+    Ok(evidence)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FleetTransportError {
@@ -2105,6 +2415,18 @@ pub trait FleetTransport {
     /// # }
     /// ```
     fn publish_action(&mut self, action: &FleetActionRecord) -> Result<(), FleetTransportError>;
+
+    /// Atomically admit an executable policy while its retained maintenance
+    /// audience is freshly observed held. Optional transports must implement
+    /// the transaction contract explicitly; a read-then-write fallback is unsafe.
+    fn publish_policy_with_maintenance_guard(
+        &mut self,
+        _request: &GuardedFleetPolicyPublication,
+    ) -> Result<FleetGuardedPolicyReceipt, FleetTransportError> {
+        Err(FleetTransportError::not_initialized(
+            "this fleet transport does not support atomic maintenance-guarded policy publication",
+        ))
+    }
 
     /// Retrieve all fleet actions in their durable append order.
     ///

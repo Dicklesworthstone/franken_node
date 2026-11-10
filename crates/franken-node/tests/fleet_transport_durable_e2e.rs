@@ -18,11 +18,15 @@ use frankenengine_node::capacity_defaults::aliases::{MAX_ACTION_LOG_ENTRIES, MAX
 use frankenengine_node::control_plane::fleet_transport::{
     FLEET_SHARED_STATE_SCHEMA, FileFleetTransport, FleetAction, FleetActionRecord,
     FleetNativeDrainEvidence, FleetNativeDrainReadiness, FleetNativeSessionHoldTarget,
-    FleetSharedState, FleetTargetKind, FleetTransport, FleetTransportError,
+    FleetGuardedPolicyObservationScope, FleetGuardedPolicyReceipt, FleetPolicyArtifact,
+    FleetPolicyMaintenanceGuard, FleetRuntimePolicy, FleetSharedState, FleetTargetKind,
+    FleetTransport, FleetTransportError, GuardedFleetPolicyPublication,
+    FLEET_GUARDED_POLICY_RECEIPT_SCHEMA,
     MAX_NATIVE_SESSION_MAINTENANCE_HOLDS, NativeSessionDrainCheckpoint, NativeSessionDrainState,
-    NodeHealth, NodeStatus, fleet_action_snapshot_prefix, fleet_application_checkpoint,
+    NodeHealth, NodeStatus, fleet_action_log_checkpoint, fleet_action_snapshot_prefix,
+    fleet_application_checkpoint,
     fleet_native_drain_evidence, fleet_native_session_hold_evidence, fleet_native_session_holds,
-    validate_node_status,
+    validate_guarded_fleet_policy_publication, validate_node_status,
 };
 use frankenengine_node::control_plane::fleet_transport_durable::{
     DurableFleetTransport, count_active_quarantine_actions,
@@ -143,6 +147,391 @@ fn maintenance_state() -> (FleetSharedState, DateTime<Utc>) {
     };
     acknowledge_maintenance(&mut state, now);
     (state, now)
+}
+
+fn guarded_policy_request(state: &FleetSharedState, id: &str) -> GuardedFleetPolicyPublication {
+    let artifact = FleetPolicyArtifact::new(
+        1,
+        FleetRuntimePolicy {
+            block_private_network: true,
+            ..FleetRuntimePolicy::default()
+        },
+    )
+    .unwrap();
+    GuardedFleetPolicyPublication {
+        action: FleetActionRecord {
+            action_id: id.to_owned(),
+            emitted_at: DateTime::from_timestamp(1_800_000_000, 0).unwrap(),
+            action: FleetAction::PolicyUpdate {
+                zone_id: "zone-a".to_owned(),
+                policy_version: "guarded-revision-1".to_owned(),
+                changed_fields: vec!["block_private_network".to_owned()],
+                artifact: Some(artifact),
+            },
+        },
+        guard: FleetPolicyMaintenanceGuard {
+            hold_action_id: "hold-a".to_owned(),
+            expected_action_log: fleet_action_log_checkpoint(&state.actions).unwrap(),
+            required_nodes: state
+                .nodes
+                .iter()
+                .filter(|node| node.zone_id == "zone-a")
+                .map(|node| (node.zone_id.clone(), node.node_id.clone()))
+                .collect(),
+            stale_after: Duration::from_secs(30),
+        },
+    }
+}
+
+#[test]
+fn guarded_policy_full_log_checkpoint_covers_concrete_zones_and_append_order() {
+    let (state, now) = maintenance_state();
+    let request = guarded_policy_request(&state, "guarded-policy");
+    assert_eq!(request.guard.expected_action_log.action_count, 3);
+    assert_eq!(fleet_application_checkpoint(&state.actions, "all").unwrap().action_count, 0);
+    let evidence = validate_guarded_fleet_policy_publication(
+        &request, &state, now, Duration::from_secs(30),
+    ).unwrap();
+    assert!(evidence.complete);
+    assert_eq!(evidence.nodes.len(), 2);
+    let mut changed = state.clone();
+    if let FleetAction::Quarantine { reason, .. } = &mut changed.actions[2].action {
+        *reason = "different concrete-zone history".to_owned();
+    }
+    assert_eq!(
+        fleet_application_checkpoint(&changed.actions, "all").unwrap(),
+        fleet_application_checkpoint(&state.actions, "all").unwrap(),
+    );
+    assert_ne!(fleet_action_log_checkpoint(&changed.actions).unwrap(), request.guard.expected_action_log);
+    assert!(validate_guarded_fleet_policy_publication(&request, &changed, now, Duration::from_secs(30)).is_err());
+    changed.actions.swap(0, 1);
+    assert_ne!(fleet_action_log_checkpoint(&changed.actions).unwrap(), request.guard.expected_action_log);
+    changed.actions.push(changed.actions[0].clone());
+    assert!(fleet_action_log_checkpoint(&changed.actions).is_err());
+}
+
+#[test]
+fn guarded_policy_requires_exact_held_scope_and_current_fresh_participants() {
+    let (state, now) = maintenance_state();
+    let request = guarded_policy_request(&state, "guarded-policy");
+    for invalid in [
+        {
+            let mut changed = state.clone();
+            changed.nodes.retain(|node| node.node_id != "node-a");
+            changed
+        },
+        {
+            let mut changed = state.clone();
+            changed.nodes[0].last_seen = now + chrono::TimeDelta::nanoseconds(1);
+            changed
+        },
+        {
+            let mut changed = state.clone();
+            changed.nodes[0].last_seen = now - chrono::TimeDelta::seconds(30);
+            changed
+        },
+        {
+            let mut changed = state.clone();
+            let node = &mut changed.nodes[0];
+            node.health = NodeHealth::Degraded;
+            node.applied_actions = None;
+            let drain = node.native_session_drain.as_mut().unwrap();
+            drain.terminal_sessions -= 1;
+            drain.pending_sessions = 1;
+            changed
+        },
+        {
+            let mut changed = state.clone();
+            let node = &mut changed.nodes[0];
+            node.health = NodeHealth::Degraded;
+            node.applied_actions = None;
+            let drain = node.native_session_drain.as_mut().unwrap();
+            drain.terminal_sessions -= 1;
+            drain.indeterminate_sessions = 1;
+            changed
+        },
+    ] {
+        assert!(validate_guarded_fleet_policy_publication(&request, &invalid, now, Duration::from_secs(30)).is_err());
+    }
+    let mut stale_under_server_policy = state.clone();
+    stale_under_server_policy.nodes[0].last_seen = now - chrono::TimeDelta::seconds(10);
+    assert!(validate_guarded_fleet_policy_publication(&request, &stale_under_server_policy, now, Duration::from_secs(10)).is_err());
+    assert!(validate_guarded_fleet_policy_publication(&request, &state, now, Duration::ZERO).is_err());
+
+    let mut wrong_scope = request.clone();
+    if let FleetAction::PolicyUpdate { zone_id, .. } = &mut wrong_scope.action.action {
+        *zone_id = "all".to_owned();
+    }
+    assert!(validate_guarded_fleet_policy_publication(&wrong_scope, &state, now, Duration::from_secs(30)).is_err());
+    let mut resumed = state.clone();
+    resumed.actions.push(maintenance_action("resume-a", "zone-a", Some("hold-a")));
+    acknowledge_maintenance(&mut resumed, now);
+    let request = guarded_policy_request(&resumed, "guarded-policy");
+    assert!(validate_guarded_fleet_policy_publication(&request, &resumed, now, Duration::from_secs(30)).is_err(),
+        "another owner's held fence cannot substitute for the requested owner");
+}
+
+#[test]
+fn guarded_policy_receipt_rejects_contradictory_evidence_and_bounded_payload_overflow() {
+    let (state, now) = maintenance_state();
+    let request = guarded_policy_request(&state, "guarded-policy");
+    let receipt = FleetGuardedPolicyReceipt {
+        schema_version: FLEET_GUARDED_POLICY_RECEIPT_SCHEMA.to_owned(),
+        action: request.action.clone(),
+        guard: request.guard.clone(),
+        evidence: validate_guarded_fleet_policy_publication(&request, &state, now, Duration::from_secs(20)).unwrap(),
+        accepted_at: now,
+        observation_scope: FleetGuardedPolicyObservationScope::LocalSupervisorObservations,
+        already_published: false,
+        fleet_quiescence_certified: false,
+    };
+    receipt.validate().unwrap();
+    assert_eq!(receipt.evidence.stale_after, Duration::from_secs(20));
+    let encoded = serde_json::to_vec(&receipt).unwrap();
+    assert_eq!(serde_json::from_slice::<FleetGuardedPolicyReceipt>(&encoded).unwrap(), receipt);
+    for invalid in [
+        { let mut value = receipt.clone(); value.evidence.nodes.pop(); value },
+        { let mut value = receipt.clone(); value.evidence.nodes[0].native_session_drain.as_mut().unwrap().fence_held = false; value },
+        { let mut value = receipt.clone(); value.evidence.nodes[0].active_hold_ids = vec!["hold-b".into()]; value },
+        { let mut value = receipt.clone(); value.evidence.nodes[0].last_seen = Some(now + chrono::TimeDelta::nanoseconds(1)); value },
+        { let mut value = receipt.clone(); value.evidence.action_count += 1; value },
+        { let mut value = receipt.clone(); value.evidence.target = FleetNativeSessionHoldTarget::Resumed; value },
+        { let mut value = receipt.clone(); value.fleet_quiescence_certified = true; value },
+    ] {
+        assert!(invalid.validate().is_err());
+    }
+    for threshold in [Duration::ZERO, Duration::from_secs(301)] {
+        let mut invalid = request.clone();
+        invalid.guard.stale_after = threshold;
+        assert!(invalid.validate().is_err());
+    }
+    let mut oversized_request = request.clone();
+    let long_zone = "z".repeat(128);
+    if let FleetAction::PolicyUpdate { zone_id, .. } = &mut oversized_request.action.action {
+        *zone_id = long_zone.clone();
+    }
+    oversized_request.guard.required_nodes = (0..2_500)
+        .map(|n| (long_zone.clone(), format!("{n:05}{}", "n".repeat(123))))
+        .collect();
+    assert!(oversized_request.validate().unwrap_err().to_string().contains("byte bound"));
+
+    let mut oversized_receipt = receipt;
+    oversized_receipt.guard.required_nodes.clear();
+    let mut node = oversized_receipt.evidence.nodes[0].clone();
+    node.active_hold_ids = (0..63)
+        .map(|n| format!("{n:03}{}", "h".repeat(125)))
+        .chain(std::iter::once("hold-a".to_owned()))
+        .collect();
+    oversized_receipt.evidence.nodes = (0..1_200)
+        .map(|n| { let mut node = node.clone(); node.node_id = format!("node-{n:05}"); node })
+        .collect();
+    assert!(oversized_receipt.validate().unwrap_err().to_string().contains("byte bound"));
+}
+
+fn seed_guarded_policy_transport(
+    path: &std::path::Path,
+    state: &FleetSharedState,
+) -> DurableFleetTransport {
+    let mut transport = DurableFleetTransport::new(path).unwrap();
+    transport.initialize().unwrap();
+    for action in &state.actions {
+        transport.publish_action(action).unwrap();
+    }
+    for node in &state.nodes {
+        transport.upsert_node_status(node).unwrap();
+    }
+    transport
+}
+
+#[test]
+fn guarded_policy_durable_retry_preserves_original_admission_after_resume_and_reopen() {
+    let temp = tempfile::tempdir().unwrap();
+    let (state, now) = maintenance_state();
+    let request = guarded_policy_request(&state, "guarded-policy");
+    let mut transport = seed_guarded_policy_transport(temp.path(), &state);
+    let receipt = transport.publish_policy_with_maintenance_guard_projected(
+        &request,
+        FleetGuardedPolicyObservationScope::LocalSupervisorObservations,
+        Duration::from_secs(20),
+        || now,
+        |_| Ok(()),
+    ).unwrap();
+    receipt.validate().unwrap();
+    assert!(!receipt.already_published);
+    assert_eq!(receipt.guard, request.guard);
+    assert_eq!(receipt.evidence.stale_after, Duration::from_secs(20));
+    assert_eq!(transport.list_actions().unwrap().last(), Some(&request.action));
+    drop(transport);
+
+    let mut transport = DurableFleetTransport::new(temp.path()).unwrap();
+    transport.initialize().unwrap();
+    transport.publish_action(&maintenance_action("resume-a", "zone-a", Some("hold-a"))).unwrap();
+    let mut retry = request.clone();
+    retry.guard.expected_action_log = fleet_action_log_checkpoint(&transport.list_actions().unwrap()).unwrap();
+    retry.guard.stale_after = Duration::from_secs(1);
+    retry.guard.required_nodes.insert(("zone-a".to_owned(), "newly-missing".to_owned()));
+    let repeated = transport.publish_policy_with_maintenance_guard_projected(
+        &retry,
+        FleetGuardedPolicyObservationScope::LocalSupervisorObservations,
+        Duration::from_secs(1),
+        || panic!("a retry must not manufacture a new observation"),
+        |_| panic!("a retry must use its original persisted evidence"),
+    ).unwrap();
+    let mut expected = receipt;
+    expected.already_published = true;
+    assert_eq!(repeated, expected);
+    assert_eq!(transport.list_actions().unwrap().len(), state.actions.len() + 2);
+    for conflict in [
+        { let mut changed = retry.clone(); changed.action.emitted_at += chrono::TimeDelta::seconds(1); changed },
+        { let mut changed = retry.clone(); changed.guard.hold_action_id = "hold-b".to_owned(); changed },
+    ] {
+        assert!(matches!(transport.publish_policy_with_maintenance_guard(&conflict), Err(FleetTransportError::ActionConflict { .. })));
+    }
+}
+
+#[test]
+fn guarded_policy_durable_refusals_leave_actions_and_receipts_unchanged() {
+    let temp = tempfile::tempdir().unwrap();
+    let (state, now) = maintenance_state();
+    let request = guarded_policy_request(&state, "guarded-policy");
+    let mut transport = seed_guarded_policy_transport(temp.path(), &state);
+    let result = transport.publish_policy_with_maintenance_guard_projected(
+        &request,
+        FleetGuardedPolicyObservationScope::EnrolledNodeObservations,
+        Duration::from_secs(30),
+        || now,
+        |nodes| {
+            let mut unseen = sample_node("enrolled-but-unseen");
+            unseen.last_seen = DateTime::<Utc>::UNIX_EPOCH;
+            unseen.health = NodeHealth::Stale;
+            nodes.push(unseen);
+            Ok(())
+        },
+    );
+    assert!(result.is_err(), "an unobserved enrolled participant must block publication");
+    assert_eq!(transport.list_actions().unwrap(), state.actions);
+    let connection = Connection::open(temp.path().join(FLEET_DB_FILE).to_string_lossy().as_ref()).unwrap();
+    let rows = connection.query("SELECT COUNT(*) FROM fleet_guarded_policy_publications;").unwrap();
+    assert_eq!(rows[0].values(), &[SqliteValue::Integer(0)]);
+    drop(connection);
+
+    let mut changed = sample_action("concurrent-other-zone", "outside-two");
+    if let FleetAction::Quarantine { zone_id, .. } = &mut changed.action {
+        *zone_id = "zone-b".to_owned();
+    }
+    transport.publish_action(&changed).unwrap();
+    assert!(transport.publish_policy_with_maintenance_guard_projected(
+        &request,
+        FleetGuardedPolicyObservationScope::LocalSupervisorObservations,
+        Duration::from_secs(30),
+        || now,
+        |_| Ok(()),
+    ).is_err());
+    assert_eq!(transport.list_actions().unwrap().len(), state.actions.len() + 1);
+
+    // A formerly unguarded action cannot acquire a fabricated historical guard.
+    transport.publish_action(&request.action).unwrap();
+    let mut existing = request;
+    existing.guard.expected_action_log = fleet_action_log_checkpoint(&transport.list_actions().unwrap()).unwrap();
+    assert!(matches!(transport.publish_policy_with_maintenance_guard_projected(
+        &existing,
+        FleetGuardedPolicyObservationScope::LocalSupervisorObservations,
+        Duration::from_secs(30),
+        || now,
+        |_| Ok(()),
+    ), Err(FleetTransportError::ActionConflict { .. })));
+    let connection = Connection::open(temp.path().join(FLEET_DB_FILE).to_string_lossy().as_ref()).unwrap();
+    let rows = connection.query("SELECT COUNT(*) FROM fleet_guarded_policy_publications;").unwrap();
+    assert_eq!(rows[0].values(), &[SqliteValue::Integer(0)]);
+}
+
+#[test]
+fn guarded_policy_serializes_concurrent_node_and_action_mutations() {
+    use std::sync::mpsc;
+    for action_mutation in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let (mut state, _) = maintenance_state();
+        acknowledge_maintenance(&mut state, Utc::now());
+        let request = guarded_policy_request(&state, "guarded-policy");
+        drop(seed_guarded_policy_transport(temp.path(), &state));
+        let (guard_ready_tx, guard_ready_rx) = mpsc::channel();
+        let (writer_ready_tx, writer_ready_rx) = mpsc::channel();
+        let (guard_start_tx, guard_start_rx) = mpsc::channel();
+        let (writer_start_tx, writer_start_rx) = mpsc::channel();
+        let (snapshot_tx, snapshot_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (writer_result_tx, writer_result_rx) = mpsc::channel();
+        let guard_path = temp.path().to_owned();
+        let request_for_guard = request.clone();
+        let guard = std::thread::spawn(move || {
+            let mut transport = DurableFleetTransport::new(guard_path).unwrap();
+            transport.initialize().unwrap();
+            guard_ready_tx.send(()).unwrap();
+            guard_start_rx.recv().unwrap();
+            let first = std::cell::Cell::new(true);
+            transport.publish_policy_with_maintenance_guard_projected(
+                &request_for_guard,
+                FleetGuardedPolicyObservationScope::LocalSupervisorObservations,
+                Duration::from_secs(30),
+                Utc::now,
+                |_| {
+                    if first.replace(false) {
+                        snapshot_tx.send(()).unwrap();
+                        release_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+                    }
+                    Ok(())
+                },
+            )
+        });
+        let writer_path = temp.path().to_owned();
+        let mut degraded = state.nodes[0].clone();
+        degraded.health = NodeHealth::Degraded;
+        degraded.applied_actions = None;
+        let writer = std::thread::spawn(move || {
+            let mut transport = DurableFleetTransport::new(writer_path).unwrap();
+            transport.initialize().unwrap();
+            writer_ready_tx.send(()).unwrap();
+            writer_start_rx.recv().unwrap();
+            let result = if action_mutation {
+                let mut action = sample_action("racing-other-zone", "racing-incident");
+                if let FleetAction::Quarantine { zone_id, .. } = &mut action.action {
+                    *zone_id = "zone-b".to_owned();
+                }
+                transport.publish_action(&action)
+            } else {
+                transport.upsert_node_status(&degraded)
+            };
+            writer_result_tx.send(result.is_ok()).unwrap();
+            result
+        });
+        guard_ready_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        writer_ready_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        guard_start_tx.send(()).unwrap();
+        snapshot_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        writer_start_tx.send(()).unwrap();
+        // Both legitimate storage models are accepted: the common row can
+        // block the second writer, or let it win and abort the older snapshot.
+        // It must never let that older snapshot commit after the writer wins.
+        let writer_won_before_guard_commit = writer_result_rx
+            .recv_timeout(Duration::from_millis(200))
+            .unwrap_or(false);
+        release_tx.send(()).unwrap();
+        let guarded = guard.join().unwrap();
+        writer.join().unwrap().expect("concurrent mutation eventually commits");
+        let mut transport = DurableFleetTransport::new(temp.path()).unwrap();
+        transport.initialize().unwrap();
+        let published = transport.list_actions().unwrap().iter().any(|action| action.action_id == request.action.action_id);
+        if writer_won_before_guard_commit {
+            assert!(guarded.is_err(), "a stale snapshot committed after a conflicting node/action mutation");
+            assert!(!published);
+        } else {
+            assert_eq!(published, guarded.is_ok());
+        }
+        if let Ok(receipt) = guarded {
+            receipt.validate().unwrap();
+            assert_eq!(receipt.guard, request.guard);
+        }
+    }
 }
 
 #[test]

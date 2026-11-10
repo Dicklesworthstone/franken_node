@@ -30,15 +30,18 @@ use subtle::ConstantTimeEq;
 use crate::capacity_defaults::aliases::MAX_NODES_CAP;
 
 use super::fleet_transport::{
-    FleetAction, FleetActionRecord, FleetTransport, FleetTransportError, NodeHealth, NodeStatus,
-    validate_action_record, validate_node_id, validate_node_status, validate_zone_id,
+    FleetAction, FleetActionRecord, FleetGuardedPolicyObservationScope, FleetTransport,
+    FleetTransportError, GuardedFleetPolicyPublication, MAX_GUARDED_POLICY_REQUEST_BYTES,
+    MAX_GUARDED_POLICY_STALE_AFTER, NodeHealth, NodeStatus, validate_action_record, validate_node_id,
+    validate_node_status, validate_zone_id,
 };
 use super::fleet_transport_durable::DurableFleetTransport;
 use super::fleet_transport_http::{
-    FLEET_HTTP_ACTIONS_PATH, FLEET_HTTP_API_SCHEMA, FLEET_HTTP_HEALTH_PATH,
-    FLEET_HTTP_MAX_REQUEST_BYTES, FLEET_HTTP_NODES_PATH, FLEET_HTTP_STATE_PATH, FleetHttpAck,
-    FleetHttpActionList, FleetHttpHealth, FleetHttpNodeList, FleetHttpProblem, FleetHttpState,
-    bearer_token_matches, parse_bearer_header, validate_bearer_token,
+    FLEET_HTTP_ACTIONS_PATH, FLEET_HTTP_API_SCHEMA, FLEET_HTTP_GUARDED_POLICY_PATH,
+    FLEET_HTTP_HEALTH_PATH, FLEET_HTTP_MAX_REQUEST_BYTES, FLEET_HTTP_NODES_PATH,
+    FLEET_HTTP_STATE_PATH, FleetHttpAck, FleetHttpActionList, FleetHttpHealth, FleetHttpNodeList,
+    FleetHttpProblem, FleetHttpState, bearer_token_matches, parse_bearer_header,
+    validate_bearer_token,
 };
 
 /// Service name reported by the health route.
@@ -491,6 +494,7 @@ impl FleetControlPlaneService {
                 | FLEET_HTTP_ACTIONS_PATH
                 | FLEET_HTTP_NODES_PATH
                 | FLEET_HTTP_STATE_PATH
+                | FLEET_HTTP_GUARDED_POLICY_PATH
         );
         if !known_path {
             return FleetHttpResponse::problem(
@@ -524,13 +528,18 @@ impl FleetControlPlaneService {
                 "a valid `Authorization: Bearer <token>` header is required",
             );
         };
-        if request.body.len() > FLEET_HTTP_MAX_REQUEST_BYTES {
+        let request_limit = if path == FLEET_HTTP_GUARDED_POLICY_PATH {
+            MAX_GUARDED_POLICY_REQUEST_BYTES
+        } else {
+            FLEET_HTTP_MAX_REQUEST_BYTES
+        };
+        if request.body.len() > request_limit {
             return FleetHttpResponse::problem(
                 413,
                 "too_large",
                 "FLEET_HTTP_BODY_TOO_LARGE",
                 format!(
-                    "request body is {} bytes; the limit is {FLEET_HTTP_MAX_REQUEST_BYTES}",
+                    "request body is {} bytes; the route limit is {request_limit}",
                     request.body.len()
                 ),
             );
@@ -539,6 +548,7 @@ impl FleetControlPlaneService {
         if request.method == "POST" {
             let permitted = match (&principal, path) {
                 (FleetPrincipal::Operator, FLEET_HTTP_ACTIONS_PATH)
+                | (FleetPrincipal::Operator, FLEET_HTTP_GUARDED_POLICY_PATH)
                 | (FleetPrincipal::Node { .. }, FLEET_HTTP_NODES_PATH) => true,
                 (FleetPrincipal::Operator, FLEET_HTTP_NODES_PATH) => {
                     self.node_credentials.is_none()
@@ -599,6 +609,42 @@ impl FleetControlPlaneService {
                             accepted: action.action_id.clone(),
                             recorded_at: None,
                         },
+                    ))
+                })
+            }
+            ("POST", FLEET_HTTP_GUARDED_POLICY_PATH) => {
+                let Some(enrollment) = enrollment else {
+                    return FleetHttpResponse::problem(
+                        409,
+                        "conflict",
+                        "FLEET_HTTP_NODE_ENROLLMENT_REQUIRED",
+                        "guarded policy publication requires enrolled node credentials and fresh node-authenticated maintenance observations",
+                    );
+                };
+                let publication: GuardedFleetPolicyPublication = match parse_body(request.body) {
+                    Ok(publication) => publication,
+                    Err(response) => return response,
+                };
+                if let Err(err) = publication.validate() {
+                    return invalid_record(&err);
+                }
+                let clock = self.clock;
+                self.with_transport(move |transport, authenticated| {
+                    // Project the exact authenticated observations within the
+                    // durable transaction, on the same serialized store thread
+                    // as heartbeat acceptance. Missing enrolled nodes remain
+                    // participants and cannot disappear from the guard.
+                    let receipt = transport.publish_policy_with_maintenance_guard_projected(
+                        &publication,
+                        FleetGuardedPolicyObservationScope::EnrolledNodeObservations,
+                        MAX_GUARDED_POLICY_STALE_AFTER,
+                        clock,
+                        |nodes| enrolled_node_view(nodes, &enrollment, authenticated),
+                    )?;
+                    Ok(FleetHttpResponse::json(
+                        if receipt.already_published { 200 } else { 201 },
+                        "ok",
+                        &receipt,
                     ))
                 })
             }
@@ -745,6 +791,12 @@ fn store_error(err: &FleetTransportError) -> FleetHttpResponse {
             409,
             "conflict",
             "FLEET_HTTP_ACTION_CONFLICT",
+            err.to_string(),
+        ),
+        FleetTransportError::StaleState { .. } => FleetHttpResponse::problem(
+            409,
+            "conflict",
+            "FLEET_HTTP_STALE_STATE",
             err.to_string(),
         ),
         FleetTransportError::LockContention { .. } => {
@@ -899,7 +951,7 @@ pub fn serve_fleet_control_plane(
         .with_parse_limits(ParseLimits {
             // Headers plus the largest body the service accepts; anything
             // bigger is cut off by the parser before a handler allocates it.
-            max_request_size: FLEET_HTTP_MAX_REQUEST_BYTES.saturating_add(16 * 1024),
+            max_request_size: MAX_GUARDED_POLICY_REQUEST_BYTES.saturating_add(16 * 1024),
             ..ParseLimits::default()
         });
     let server = Arc::new(TcpServer::new(server_config));
@@ -1015,6 +1067,7 @@ fn build_fleet_app(
         .get(FLEET_HTTP_HEALTH_PATH, route("GET"))
         .get(FLEET_HTTP_ACTIONS_PATH, route("GET"))
         .post(FLEET_HTTP_ACTIONS_PATH, route("POST"))
+        .post(FLEET_HTTP_GUARDED_POLICY_PATH, route("POST"))
         .get(FLEET_HTTP_NODES_PATH, route("GET"))
         .post(FLEET_HTTP_NODES_PATH, route("POST"))
         .get(FLEET_HTTP_STATE_PATH, route("GET"))

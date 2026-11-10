@@ -27550,6 +27550,20 @@ impl PersistedFleetTransport for FleetTransportHandle {
         }
     }
 
+    fn publish_policy_with_maintenance_guard(
+        &mut self,
+        request: &control_plane::fleet_transport::GuardedFleetPolicyPublication,
+    ) -> std::result::Result<
+        control_plane::fleet_transport::FleetGuardedPolicyReceipt,
+        FleetTransportError,
+    > {
+        match self {
+            Self::Durable(transport) => transport.publish_policy_with_maintenance_guard(request),
+            #[cfg(feature = "http-client")]
+            Self::Http(transport) => transport.publish_policy_with_maintenance_guard(request),
+        }
+    }
+
     fn list_actions(
         &self,
     ) -> std::result::Result<Vec<PersistedFleetActionRecord>, FleetTransportError> {
@@ -29250,7 +29264,10 @@ fn render_fleet_action_human(action: &FleetActionResult, kind: FleetTransportKin
 // ── Fleet Agent Mode ─────────────────────────────────────────────────────────
 
 fn run_fleet_policy_publish(args: &cli::FleetPolicyPublishArgs) -> Result<()> {
-    use control_plane::fleet_transport::{FleetPolicyArtifact, FleetRuntimePolicy};
+    use control_plane::fleet_transport::{
+        FleetPolicyArtifact, FleetPolicyMaintenanceGuard, FleetRuntimePolicy,
+        GuardedFleetPolicyPublication, MAX_GUARDED_POLICY_STALE_AFTER, fleet_action_log_checkpoint,
+    };
     control_plane::fleet_transport::validate_zone_id(&args.zone)?;
     let revision = args
         .revision
@@ -29275,9 +29292,20 @@ fn run_fleet_policy_publish(args: &cli::FleetPolicyPublishArgs) -> Result<()> {
     let policy: FleetRuntimePolicy = serde_json::from_str(&raw)
         .with_context(|| format!("invalid executable fleet policy {}", path.display()))?;
     let artifact = FleetPolicyArtifact::new(revision, policy)?;
-    let (_, _, mut transport) = open_fleet_transport(Path::new("."))?;
+    let (timeout_seconds, _, mut transport) = open_fleet_transport(Path::new("."))?;
     let kind = transport.kind();
-    let actions = transport.list_actions()?;
+    // Retain the initial participants and the complete ordered action log.
+    // Only the durable publication transaction may decide that this snapshot
+    // is still eligible; a separate readiness read cannot authorize a write.
+    let initial = if args.hold.is_some() {
+        Some(transport.read_shared_state()?)
+    } else {
+        None
+    };
+    let actions = match &initial {
+        Some(state) => state.actions.clone(),
+        None => transport.list_actions()?,
+    };
     let retained = actions.iter().find(|record| {
         matches!(&record.action,
             PersistedFleetAction::PolicyUpdate { zone_id, artifact: Some(existing), .. }
@@ -29309,11 +29337,45 @@ fn run_fleet_policy_publish(args: &cli::FleetPolicyPublishArgs) -> Result<()> {
             },
         }
     };
-    // The durable transport repeats revision/conflict validation inside its
-    // publication transaction, including calls arriving through HTTP.
-    transport.publish_action(&action)?;
-    let report = serde_json::json!({
-        "schema_version": "franken-node/fleet-policy-publish-cli/v1",
+    let guarded_publication = if let (Some(hold), Some(initial)) = (&args.hold, initial) {
+        let request = GuardedFleetPolicyPublication {
+            action: action.clone(),
+            guard: FleetPolicyMaintenanceGuard {
+                hold_action_id: hold.clone(),
+                expected_action_log: fleet_action_log_checkpoint(&initial.actions)?,
+                required_nodes: initial
+                    .nodes
+                    .iter()
+                    .filter(|node| node_matches_filter(node, &args.zone))
+                    .map(|node| (node.zone_id.clone(), node.node_id.clone()))
+                    .collect(),
+                stale_after: Duration::from_secs(timeout_seconds)
+                    .min(MAX_GUARDED_POLICY_STALE_AFTER),
+            },
+        };
+        Some(
+            transport
+                .publish_policy_with_maintenance_guard(&request)
+                .with_context(|| {
+                    format!(
+                        "guarded policy publication for hold `{hold}` was not acknowledged; retry the same policy, revision, zone and hold to recover a committed receipt"
+                    )
+                })?,
+        )
+    } else {
+        // Revision/conflict validation also runs inside ordinary publication.
+        transport.publish_action(&action)?;
+        None
+    };
+    let already_published = guarded_publication
+        .as_ref()
+        .map_or(already_published, |receipt| receipt.already_published);
+    let mut report = serde_json::json!({
+        "schema_version": if guarded_publication.is_some() {
+            "franken-node/fleet-policy-publish-cli/v2"
+        } else {
+            "franken-node/fleet-policy-publish-cli/v1"
+        },
         "transport": kind.label(),
         "live_control_plane": kind.live(),
         "published": true,
@@ -29322,6 +29384,11 @@ fn run_fleet_policy_publish(args: &cli::FleetPolicyPublishArgs) -> Result<()> {
         "enforcement_scope": "new_run_admission",
         "action": action,
     });
+    if let Some(receipt) = guarded_publication {
+        // A retry carries the original publication evidence, not a new claim
+        // about present readiness or about policy application on each node.
+        report["guarded_publication"] = serde_json::to_value(receipt)?;
+    }
     if args.json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
@@ -29332,6 +29399,11 @@ fn run_fleet_policy_publish(args: &cli::FleetPolicyPublishArgs) -> Result<()> {
             action.action_id,
             kind.label()
         );
+        if let Some(hold) = &args.hold {
+            println!(
+                "  publication committed under maintenance owner {hold}; observe policy application with `fleet hold --wait` before explicitly resuming"
+            );
+        }
     }
     Ok(())
 }

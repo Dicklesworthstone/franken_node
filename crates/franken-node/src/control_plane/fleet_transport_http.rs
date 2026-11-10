@@ -32,8 +32,10 @@ use serde::{Deserialize, Serialize};
 use crate::capacity_defaults::aliases::{MAX_ACTION_LOG_ENTRIES, MAX_NODES_CAP};
 
 use super::fleet_transport::{
-    FLEET_SHARED_STATE_SCHEMA, FleetActionRecord, FleetSharedState, FleetTransport,
-    FleetTransportError, NodeStatus, validate_action_record, validate_node_status,
+    FLEET_SHARED_STATE_SCHEMA, FleetActionRecord, FleetGuardedPolicyObservationScope,
+    FleetGuardedPolicyReceipt, FleetSharedState, FleetTransport, FleetTransportError,
+    GuardedFleetPolicyPublication, MAX_GUARDED_POLICY_RECEIPT_BYTES,
+    MAX_GUARDED_POLICY_REQUEST_BYTES, NodeStatus, validate_action_record, validate_node_status,
 };
 
 /// Schema tag carried by every response; v2 binds coordinator append order.
@@ -46,7 +48,10 @@ pub const FLEET_HTTP_ACTIONS_PATH: &str = "/v2/fleet/actions";
 pub const FLEET_HTTP_NODES_PATH: &str = "/v2/fleet/nodes";
 /// `GET` returns the consolidated shared state (actions + nodes).
 pub const FLEET_HTTP_STATE_PATH: &str = "/v2/fleet/state";
-/// Upper bound on any request body the coordinator accepts.
+/// `POST` atomically checks enrolled maintenance observations and publishes a policy.
+pub const FLEET_HTTP_GUARDED_POLICY_PATH: &str = "/v2/fleet/policies/guarded";
+/// Request body bound for ordinary fleet routes. Guarded publication has its
+/// own larger bound because it retains the complete participant identities.
 pub const FLEET_HTTP_MAX_REQUEST_BYTES: usize = 64 * 1024;
 /// Upper bound on any response body the client reads.
 pub const FLEET_HTTP_MAX_RESPONSE_BYTES: u64 = 32 * 1024 * 1024;
@@ -354,12 +359,27 @@ impl HttpFleetTransport {
         path: &str,
         body: &B,
     ) -> Result<T, FleetTransportError> {
+        self.post_json_with_limits(
+            path,
+            body,
+            FLEET_HTTP_MAX_REQUEST_BYTES,
+            FLEET_HTTP_MAX_RESPONSE_BYTES,
+        )
+    }
+
+    fn post_json_with_limits<B: Serialize, T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+        request_limit: usize,
+        response_limit: u64,
+    ) -> Result<T, FleetTransportError> {
         let endpoint = self.url.endpoint(path);
         let payload = serde_json::to_vec(body)
             .map_err(|err| FleetTransportError::serialization(err.to_string()))?;
-        if payload.len() > FLEET_HTTP_MAX_REQUEST_BYTES {
+        if payload.len() > request_limit {
             return Err(FleetTransportError::serialization(format!(
-                "fleet request body is {} bytes; the coordinator accepts at most {FLEET_HTTP_MAX_REQUEST_BYTES}",
+                "fleet request body is {} bytes; the route accepts at most {request_limit}",
                 payload.len()
             )));
         }
@@ -371,7 +391,7 @@ impl HttpFleetTransport {
             .header("Authorization", &self.authorization())
             .send(&payload[..])
             .map_err(|err| self.unreachable(&endpoint, &err))?;
-        self.decode(&endpoint, response)
+        self.decode_with_limit(&endpoint, response, response_limit)
     }
 
     fn unreachable(&self, endpoint: &str, err: &ureq::Error) -> FleetTransportError {
@@ -383,7 +403,16 @@ impl HttpFleetTransport {
     fn decode<T: serde::de::DeserializeOwned>(
         &self,
         endpoint: &str,
+        response: ureq::http::Response<ureq::Body>,
+    ) -> Result<T, FleetTransportError> {
+        self.decode_with_limit(endpoint, response, FLEET_HTTP_MAX_RESPONSE_BYTES)
+    }
+
+    fn decode_with_limit<T: serde::de::DeserializeOwned>(
+        &self,
+        endpoint: &str,
         mut response: ureq::http::Response<ureq::Body>,
+        response_limit: u64,
     ) -> Result<T, FleetTransportError> {
         let status = response.status().as_u16();
         if (300..400).contains(&status) {
@@ -396,7 +425,7 @@ impl HttpFleetTransport {
         let body = response
             .body_mut()
             .with_config()
-            .limit(FLEET_HTTP_MAX_RESPONSE_BYTES)
+            .limit(response_limit)
             .read_to_vec()
             .map_err(|err| {
                 FleetTransportError::io(format!("failed reading response from {endpoint}: {err}"))
@@ -535,6 +564,31 @@ impl FleetTransport for HttpFleetTransport {
             )));
         }
         Ok(())
+    }
+
+    fn publish_policy_with_maintenance_guard(
+        &mut self,
+        request: &GuardedFleetPolicyPublication,
+    ) -> Result<FleetGuardedPolicyReceipt, FleetTransportError> {
+        request.validate()?;
+        let receipt: FleetGuardedPolicyReceipt = self.post_json_with_limits(
+            FLEET_HTTP_GUARDED_POLICY_PATH,
+            request,
+            MAX_GUARDED_POLICY_REQUEST_BYTES,
+            MAX_GUARDED_POLICY_RECEIPT_BYTES as u64,
+        )?;
+        receipt.validate()?;
+        if receipt.action != request.action
+            || receipt.guard.hold_action_id != request.guard.hold_action_id
+            || receipt.observation_scope
+                != FleetGuardedPolicyObservationScope::EnrolledNodeObservations
+            || (!receipt.already_published && receipt.guard != request.guard)
+        {
+            return Err(FleetTransportError::stale_state(
+                "fleet coordinator returned a guarded publication receipt for a different action, owner, observation scope or initial request",
+            ));
+        }
+        Ok(receipt)
     }
 
     /// Refuse histories exceeding the checkpoint/file transport bound, even if
