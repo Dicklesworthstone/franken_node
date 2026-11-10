@@ -558,13 +558,38 @@ pub(crate) fn supervise_with_observer(
     .map(|(completion, _)| completion)
 }
 
+/// Supervise a caller-bounded redirected input with the same child ownership,
+/// nonblocking output and cleanup as migration smoke execution. The absolute
+/// deadline is the caller's original budget, including request preparation.
+/// The caller owns framing and input limits; existing migration caps remain
+/// unchanged. No writer thread or inherited terminal is introduced.
+pub(crate) fn supervise_with_redirected_input(
+    command: &mut Command,
+    deadline: Instant,
+    drain_timeout: Duration,
+    input: Stdio,
+    after_spawn: impl FnOnce(u32) -> Result<()>,
+    observe: impl FnMut(Stream, &[u8]) -> io::Result<()>,
+) -> Result<Completion> {
+    supervise_with_input_until(
+        command,
+        deadline,
+        drain_timeout,
+        InputTransport::Redirected(input),
+        after_spawn,
+        observe,
+        None,
+    )
+    .map(|(completion, _)| completion)
+}
+
 fn supervise_with_input(
     command: &mut Command,
     timeout: Duration,
     drain_timeout: Duration,
     input: InputTransport<'_>,
     after_spawn: impl FnOnce(u32) -> Result<()>,
-    mut observe: impl FnMut(Stream, &[u8]) -> io::Result<()>,
+    observe: impl FnMut(Stream, &[u8]) -> io::Result<()>,
     cancellation: Option<&CancellationToken>,
 ) -> Result<(Completion, usize)> {
     check_cancellation(cancellation)?;
@@ -574,6 +599,30 @@ fn supervise_with_input(
     let deadline = Instant::now()
         .checked_add(timeout)
         .context("runtime smoke deadline overflow")?;
+    supervise_with_input_until(
+        command,
+        deadline,
+        drain_timeout,
+        input,
+        after_spawn,
+        observe,
+        cancellation,
+    )
+}
+
+fn supervise_with_input_until(
+    command: &mut Command,
+    deadline: Instant,
+    drain_timeout: Duration,
+    input: InputTransport<'_>,
+    after_spawn: impl FnOnce(u32) -> Result<()>,
+    mut observe: impl FnMut(Stream, &[u8]) -> io::Result<()>,
+    cancellation: Option<&CancellationToken>,
+) -> Result<(Completion, usize)> {
+    check_cancellation(cancellation)?;
+    if drain_timeout.is_zero() {
+        bail!("runtime smoke requires positive bounded time and output limits");
+    }
     let (stdin, pipe_bytes) = match input {
         InputTransport::Null => (Stdio::null(), None),
         InputTransport::Redirected(stdin) => (stdin, None),
@@ -585,6 +634,9 @@ fn supervise_with_input(
         }
     };
     check_cancellation(cancellation)?;
+    if Instant::now() >= deadline {
+        bail!("runtime smoke timed out before spawn");
+    }
     let mut owned = OwnedSmokeChild::spawn(command, stdin)?;
     let mut queued = 0;
     let result = (|| -> Result<StopReason> {

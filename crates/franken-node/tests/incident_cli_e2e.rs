@@ -2152,6 +2152,155 @@ fn execute_native_replay_with(bundle_name: &str, invoke: impl FnOnce(&[&str]) ->
     ])
 }
 
+#[cfg(all(feature = "engine", target_os = "linux"))]
+#[test]
+fn native_incident_replay_deadline_refuses_a_verdict_and_does_not_repeat_effects() {
+    let (workspace, run) = native_replay_workspace_with_arguments(
+        "const {writeFileSync}=require('fs');\
+         writeFileSync('original-effect.txt','original-only');\
+         let total=0; for(let i=0;i<2500;i++){total+=i;}\
+         console.log('replay-budget:'+total);\n",
+        "legacy-risky",
+        true,
+        false,
+        &[],
+    );
+    let (bundle_name, _) = capture_native_run_bundle(
+        workspace.path(),
+        run["receipt"]["receipt_id"]
+            .as_str()
+            .expect("native receipt"),
+    );
+    fs::rename(
+        workspace.path().join("original-effect.txt"),
+        workspace.path().join("preserved-original-effect.txt"),
+    )
+    .expect("retain the original effect outside its replayed path");
+
+    let started = std::time::Instant::now();
+    let timed_out = run_cli_in_workspace(
+        workspace.path(),
+        &[
+            "incident",
+            "replay",
+            "--bundle",
+            &bundle_name,
+            "--execute",
+            "--timeout-ms",
+            "1",
+            "--trusted-public-key",
+            ".franken-node/keys/receipt-signing.pub",
+            "--json",
+        ],
+    );
+    assert_eq!(
+        timed_out.status.code(),
+        Some(1),
+        "deadline must be a contained failure: {timed_out:?}"
+    );
+    let refused: serde_json::Value =
+        serde_json::from_slice(&timed_out.stdout).expect("one structured deadline refusal");
+    assert_eq!(
+        refused["schema_version"],
+        "franken-node/incident-error-cli/v1"
+    );
+    assert_eq!(refused["command"], "incident.replay");
+    assert_eq!(refused["ok"], false);
+    assert!(
+        refused["error"].as_str().unwrap().contains("timed out"),
+        "{refused}"
+    );
+    assert!(refused.get("execution_result").is_none());
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "timed replay must return after bounded cleanup"
+    );
+    assert!(
+        !workspace.path().join("original-effect.txt").exists(),
+        "a timed replay must not dispatch the captured write"
+    );
+
+    // The same authenticated capture still succeeds with the normal budget.
+    // A timeout is not a new capture and cannot poison or certify the incident.
+    let replay = execute_native_replay(workspace.path(), &bundle_name);
+    assert!(replay.status.success(), "{replay:?}");
+    let replay: serde_json::Value =
+        serde_json::from_slice(&replay.stdout).expect("completed supervised replay");
+    assert_eq!(replay["execution_result"]["matched"], true);
+    assert_eq!(replay["execution_result"]["host_effects_match"], true);
+    assert!(!workspace.path().join("original-effect.txt").exists());
+    assert_eq!(
+        fs::read(workspace.path().join("preserved-original-effect.txt")).unwrap(),
+        b"original-only"
+    );
+}
+
+#[cfg(all(feature = "engine", target_os = "linux"))]
+#[test]
+fn native_replay_private_worker_rejects_unbound_or_incomplete_requests() {
+    use sha2::{Digest as _, Sha256};
+    use std::io::{Seek as _, Write as _};
+
+    let (_workspace, run) = native_replay_workspace("console.log('framed-replay');\n");
+    let request_id = uuid::Uuid::now_v7().to_string();
+    let request = serde_json::json!({
+        "schema_version": "franken-node/native-replay-worker-request/v1",
+        "request_id": request_id,
+        "capture": run["dispatch"]["native_replay"],
+    });
+    // Construct the wire format independently of the private worker codec.
+    let frame = |value: &serde_json::Value| {
+        let body = serde_json::to_vec(value).unwrap();
+        let mut bytes = b"FNRPLY1\0".to_vec();
+        bytes.extend_from_slice(&(body.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&Sha256::digest(&body));
+        bytes.extend_from_slice(&body);
+        bytes
+    };
+    let valid = frame(&request);
+    let mut digest_mismatch = valid.clone();
+    digest_mismatch[16] ^= 1;
+    let mut trailing = valid.clone();
+    trailing.push(0);
+    let mut wrong_request = request.clone();
+    wrong_request["request_id"] = serde_json::json!(uuid::Uuid::now_v7().to_string());
+    let mut wrong_schema = request.clone();
+    wrong_schema["schema_version"] = serde_json::json!("unrecognized-replay-worker");
+    let mut unknown_field = request.clone();
+    unknown_field["skip_verification"] = serde_json::json!(true);
+    let parent_pid = std::process::id().to_string();
+    for (bytes, expected) in [
+        (valid[..20].to_vec(), "protocol header"),
+        (digest_mismatch, "digest mismatch"),
+        (trailing, "trailing bytes"),
+        (frame(&wrong_request), "does not match its launch"),
+        (frame(&wrong_schema), "does not match its launch"),
+        (frame(&unknown_field), "invalid native replay protocol JSON"),
+    ] {
+        let mut input = tempfile::tempfile().expect("create private malformed request");
+        input.write_all(&bytes).unwrap();
+        input.rewind().unwrap();
+        let output = Command::new(resolve_binary_path())
+            .args([
+                "__franken-native-replay-worker-v1",
+                &request_id,
+                &parent_pid,
+            ])
+            .stdin(std::process::Stdio::from(input))
+            .output()
+            .expect("launch the real private replay worker");
+        assert!(!output.status.success(), "{expected}: {output:?}");
+        assert!(
+            output.stdout.is_empty(),
+            "invalid request must not emit a verdict"
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(expected),
+            "{expected}: {output:?}"
+        );
+    }
+}
+
 #[cfg(feature = "engine")]
 #[test]
 fn native_incident_run_origin_survives_exporter_change_and_rejects_wrong_authority() {

@@ -145,6 +145,533 @@ pub fn reexecute(capture: &NativeReplayCapture) -> Result<NativeReplayOutcome, S
     engine::reexecute(capture)
 }
 
+/// Default and maximum operator budgets for isolated native incident replay.
+pub const DEFAULT_NATIVE_REPLAY_TIMEOUT_MS: u64 = 30_000;
+pub const MAX_NATIVE_REPLAY_TIMEOUT_MS: u64 = 300_000;
+
+/// Re-execute authenticated captured inputs in an owned process with bounded
+/// startup, execution and protocol draining. The caller must first verify the
+/// enclosing incident's independent authority, exactly as for reexecute.
+/// Linux launches the currently mapped image through /proc/self/exe; other
+/// platforms refuse this supervised scope rather than run without its bounds.
+#[cfg(feature = "engine")]
+pub fn reexecute_supervised(
+    capture: &NativeReplayCapture,
+    timeout: std::time::Duration,
+) -> Result<NativeReplayOutcome, String> {
+    #[cfg(target_os = "linux")]
+    {
+        supervised::reexecute(capture, timeout)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (capture, timeout);
+        Err("supervised native incident replay currently requires Linux".to_string())
+    }
+}
+
+/// Select the private replay child before parsing public CLI commands. This
+/// worker never verifies or signs an incident: the parent authenticates the
+/// bundle, and the child only executes the existing captured-input replay.
+#[doc(hidden)]
+pub fn maybe_run_internal_native_replay_worker() -> Result<bool, String> {
+    #[cfg(all(feature = "engine", target_os = "linux"))]
+    {
+        supervised::maybe_run_worker()
+    }
+    #[cfg(not(all(feature = "engine", target_os = "linux")))]
+    {
+        Ok(false)
+    }
+}
+
+#[cfg(all(feature = "engine", target_os = "linux"))]
+mod supervised {
+    use super::{
+        MAX_NATIVE_REPLAY_PAYLOAD_BYTES, MAX_NATIVE_REPLAY_TIMEOUT_MS,
+        NATIVE_REPLAY_OUTCOME_SCHEMA, NativeReplayCapture, NativeReplayOutcome,
+    };
+    use crate::migration::smoke_supervisor::{StopReason, Stream, supervise_with_redirected_input};
+    use serde::{Deserialize, Serialize, de::DeserializeOwned};
+    use sha2::{Digest, Sha256};
+    use std::io::{self, Read, Seek, Write};
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    const WORKER_ARG: &str = "__franken-native-replay-worker-v1";
+    const REQUEST_SCHEMA: &str = "franken-node/native-replay-worker-request/v1";
+    const RESPONSE_SCHEMA: &str = "franken-node/native-replay-worker-response/v1";
+    const FRAME_MAGIC: &[u8; 8] = b"FNRPLY1\0";
+    const HEADER_BYTES: usize = 8 + 8 + 32;
+    // The outer JSON escapes the already serialized capture once more.
+    const BODY_LIMIT: usize = 2 * MAX_NATIVE_REPLAY_PAYLOAD_BYTES + 4096;
+    const DIAGNOSTIC_LIMIT: usize = 64 * 1024;
+    const DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
+
+    #[derive(Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Request {
+        schema_version: String,
+        request_id: String,
+        capture: NativeReplayCapture,
+    }
+
+    #[derive(Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Response {
+        schema_version: String,
+        request_id: String,
+        request_sha256: String,
+        outcome: Result<NativeReplayOutcome, String>,
+    }
+
+    struct FrameWriter {
+        bytes: Vec<u8>,
+    }
+
+    impl Write for FrameWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if bytes.len() > (BODY_LIMIT + HEADER_BYTES).saturating_sub(self.bytes.len()) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "native replay protocol frame exceeds its byte limit",
+                ));
+            }
+            self.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn encode_frame(value: &impl Serialize) -> Result<Vec<u8>, String> {
+        let mut writer = FrameWriter {
+            bytes: vec![0; HEADER_BYTES],
+        };
+        serde_json::to_writer(&mut writer, value)
+            .map_err(|error| format!("encode native replay protocol frame: {error}"))?;
+        let length = writer.bytes.len() - HEADER_BYTES;
+        let digest = Sha256::digest(&writer.bytes[HEADER_BYTES..]);
+        writer.bytes[..8].copy_from_slice(FRAME_MAGIC);
+        writer.bytes[8..16].copy_from_slice(&(length as u64).to_le_bytes());
+        writer.bytes[16..HEADER_BYTES].copy_from_slice(&digest);
+        Ok(writer.bytes)
+    }
+
+    fn body_length(header: &[u8]) -> Result<usize, String> {
+        if header.len() < HEADER_BYTES || &header[..8] != FRAME_MAGIC {
+            return Err(
+                "native replay protocol frame has an invalid version or header".to_string(),
+            );
+        }
+        let length = u64::from_le_bytes(
+            header[8..16]
+                .try_into()
+                .map_err(|_| "native replay protocol length is invalid".to_string())?,
+        );
+        let length = usize::try_from(length)
+            .map_err(|_| "native replay protocol length is not representable".to_string())?;
+        if length == 0 || length > BODY_LIMIT {
+            return Err("native replay protocol frame exceeds its byte limit".to_string());
+        }
+        Ok(length)
+    }
+
+    fn decode_frame<T: DeserializeOwned>(frame: &[u8]) -> Result<T, String> {
+        let length = body_length(frame)?;
+        if frame.len() != HEADER_BYTES + length {
+            return Err(
+                "native replay protocol frame is truncated or has trailing bytes".to_string(),
+            );
+        }
+        let body = &frame[HEADER_BYTES..];
+        if frame[16..HEADER_BYTES] != Sha256::digest(body)[..] {
+            return Err("native replay protocol frame digest mismatch".to_string());
+        }
+        serde_json::from_slice(body)
+            .map_err(|error| format!("invalid native replay protocol JSON: {error}"))
+    }
+
+    fn read_frame(reader: &mut impl Read) -> Result<Vec<u8>, String> {
+        let mut header = [0_u8; HEADER_BYTES];
+        reader
+            .read_exact(&mut header)
+            .map_err(|error| format!("read native replay protocol header: {error}"))?;
+        let length = body_length(&header)?;
+        let mut frame = vec![0_u8; HEADER_BYTES + length];
+        frame[..HEADER_BYTES].copy_from_slice(&header);
+        reader
+            .read_exact(&mut frame[HEADER_BYTES..])
+            .map_err(|error| format!("read native replay protocol body: {error}"))?;
+        let mut trailing = [0_u8; 1];
+        loop {
+            match reader.read(&mut trailing) {
+                Ok(0) => return Ok(frame),
+                Ok(_) => {
+                    return Err("native replay protocol request has trailing bytes".to_string());
+                }
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) => {
+                    return Err(format!("read native replay protocol request end: {error}"));
+                }
+            }
+        }
+    }
+
+    fn remaining(deadline: Instant) -> Result<Duration, String> {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            Err("native replay timed out before verification completed".to_string())
+        } else {
+            Ok(remaining)
+        }
+    }
+
+    pub(super) fn reexecute(
+        capture: &NativeReplayCapture,
+        timeout: Duration,
+    ) -> Result<NativeReplayOutcome, String> {
+        if timeout < Duration::from_millis(1)
+            || timeout > Duration::from_millis(MAX_NATIVE_REPLAY_TIMEOUT_MS)
+        {
+            return Err(format!(
+                "native replay timeout must be 1..={MAX_NATIVE_REPLAY_TIMEOUT_MS} milliseconds"
+            ));
+        }
+        let deadline = Instant::now()
+            .checked_add(timeout)
+            .ok_or_else(|| "native replay deadline overflow".to_string())?;
+        capture.validate()?;
+        let request_id = uuid::Uuid::now_v7().to_string();
+        let request = Request {
+            schema_version: REQUEST_SCHEMA.to_string(),
+            request_id: request_id.clone(),
+            capture: capture.clone(),
+        };
+        let frame = encode_frame(&request)?;
+        let request_sha256 = hex::encode(Sha256::digest(&frame));
+        // A fresh anonymous regular file avoids a blocking pipe writer and
+        // leaves no private captured source in a named temporary artifact.
+        let mut input = tempfile::tempfile()
+            .map_err(|error| format!("stage native replay request: {error}"))?;
+        input
+            .write_all(&frame)
+            .and_then(|()| input.rewind())
+            .map_err(|error| format!("write native replay request: {error}"))?;
+        drop(frame);
+        drop(request);
+        remaining(deadline)?;
+        let mut command = Command::new("/proc/self/exe");
+        command.args([WORKER_ARG, &request_id, &std::process::id().to_string()]);
+        supervise(
+            &mut command,
+            Stdio::from(input),
+            &request_id,
+            &request_sha256,
+            deadline,
+        )
+    }
+
+    fn supervise(
+        command: &mut Command,
+        input: Stdio,
+        request_id: &str,
+        request_sha256: &str,
+        deadline: Instant,
+    ) -> Result<NativeReplayOutcome, String> {
+        let mut stdout = Vec::new();
+        let mut diagnostics = 0_usize;
+        let completion = supervise_with_redirected_input(
+            command,
+            deadline,
+            DRAIN_TIMEOUT,
+            input,
+            |_| Ok(()),
+            |stream, bytes| match stream {
+                Stream::Stdout => {
+                    if bytes.len() > (BODY_LIMIT + HEADER_BYTES).saturating_sub(stdout.len()) {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "native replay worker stdout exceeds the protocol frame limit",
+                        ));
+                    }
+                    stdout.extend_from_slice(bytes);
+                    Ok(())
+                }
+                Stream::Stderr => {
+                    if bytes.len() > DIAGNOSTIC_LIMIT.saturating_sub(diagnostics) {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "native replay worker diagnostics exceed the byte limit",
+                        ));
+                    }
+                    diagnostics += bytes.len();
+                    Ok(())
+                }
+            },
+        )
+        .map_err(|error| format!("native replay supervision failed: {error:#}"))?;
+        match completion.reason {
+            StopReason::RuntimeTimeout => {
+                return Err("native replay timed out; worker was killed and reaped".to_string());
+            }
+            StopReason::PipeTimeout => {
+                return Err(
+                    "native replay worker did not close its protocol streams; verification refused"
+                        .to_string(),
+                );
+            }
+            StopReason::Exited => {}
+        }
+        if !completion.status.success() {
+            return Err(format!(
+                "native replay worker exited without completing verification: {}",
+                completion.status
+            ));
+        }
+        // The shared supervisor has proved exit, drained both pipes, and
+        // completed cleanup. Never accept a prefix emitted by a live child.
+        let response: Response = decode_frame(&stdout)?;
+        if response.schema_version != RESPONSE_SCHEMA
+            || response.request_id != request_id
+            || response.request_sha256 != request_sha256
+        {
+            return Err("native replay worker response does not match this request".to_string());
+        }
+        remaining(deadline)?;
+        let outcome = response.outcome?;
+        if outcome.schema_version != NATIVE_REPLAY_OUTCOME_SCHEMA
+            || outcome.matched != outcome.divergences.is_empty()
+        {
+            return Err(
+                "native replay worker returned an invalid verification outcome".to_string(),
+            );
+        }
+        Ok(outcome)
+    }
+
+    pub(super) fn maybe_run_worker() -> Result<bool, String> {
+        use rustix::process::{Signal, getppid, set_parent_process_death_signal};
+
+        let mut args = std::env::args_os();
+        let _ = args.next();
+        if args.next().as_deref() != Some(std::ffi::OsStr::new(WORKER_ARG)) {
+            return Ok(false);
+        }
+        let request_id = args
+            .next()
+            .and_then(|value| value.into_string().ok())
+            .ok_or_else(|| "native replay worker requires a request identity".to_string())?;
+        uuid::Uuid::parse_str(&request_id)
+            .map_err(|_| "native replay worker request identity is invalid".to_string())?;
+        let parent_pid = args
+            .next()
+            .and_then(|value| value.into_string().ok())
+            .and_then(|value| value.parse::<i32>().ok())
+            .filter(|pid| *pid > 0)
+            .ok_or_else(|| "native replay worker requires its supervisor PID".to_string())?;
+        if args.next().is_some() {
+            return Err("native replay worker received unexpected arguments".to_string());
+        }
+        // Configure this before any replay thread exists, then recheck PPid
+        // to close the race where the supervisor died before PR_SET_PDEATHSIG.
+        set_parent_process_death_signal(Some(Signal::KILL))
+            .map_err(|error| format!("bind native replay worker lifetime: {error}"))?;
+        if getppid().map(|pid| pid.as_raw()) != Some(parent_pid) {
+            return Err("native replay supervisor exited before worker startup".to_string());
+        }
+        let frame = read_frame(&mut io::stdin().lock())?;
+        let request_sha256 = hex::encode(Sha256::digest(&frame));
+        let request: Request = decode_frame(&frame)?;
+        if request.schema_version != REQUEST_SCHEMA || request.request_id != request_id {
+            return Err("native replay worker request does not match its launch".to_string());
+        }
+        request.capture.validate()?;
+        let response = Response {
+            schema_version: RESPONSE_SCHEMA.to_string(),
+            request_id,
+            request_sha256,
+            // This is the existing in-process engine path. It validates the
+            // complete canonical capture and installs only replay providers.
+            outcome: super::reexecute(&request.capture),
+        };
+        let response = encode_frame(&response)?;
+        let stdout = io::stdout();
+        let mut output = stdout.lock();
+        output
+            .write_all(&response)
+            .and_then(|()| output.flush())
+            .map_err(|error| format!("write native replay worker response: {error}"))?;
+        Ok(true)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        const REQUEST_ID: &str = "019a0000-0000-7000-8000-000000000001";
+        const REQUEST_DIGEST: &str =
+            "1111111111111111111111111111111111111111111111111111111111111111";
+
+        fn refusal_response() -> Response {
+            Response {
+                schema_version: RESPONSE_SCHEMA.to_string(),
+                request_id: REQUEST_ID.to_string(),
+                request_sha256: REQUEST_DIGEST.to_string(),
+                outcome: Err("captured transcript verification refused".to_string()),
+            }
+        }
+
+        fn shell_fixture(
+            script: &str,
+            frame: &[u8],
+            timeout: Duration,
+        ) -> (Result<NativeReplayOutcome, String>, u32) {
+            let work = tempfile::tempdir().expect("create replay process fixture");
+            let response = work.path().join("response.bin");
+            let pid_path = work.path().join("worker.pid");
+            std::fs::write(&response, frame).expect("write bounded response fixture");
+            let mut command = Command::new("/bin/sh");
+            command
+                .args(["-c", script, "replay-supervision-fixture"])
+                .arg(response)
+                .arg(&pid_path);
+            let outcome = supervise(
+                &mut command,
+                Stdio::null(),
+                REQUEST_ID,
+                REQUEST_DIGEST,
+                Instant::now() + timeout,
+            );
+            let pid = std::fs::read_to_string(pid_path)
+                .expect("the actual fixture process must have started")
+                .parse()
+                .expect("fixture wrote its process ID");
+            (outcome, pid)
+        }
+
+        #[test]
+        fn replay_protocol_rejects_tampering_truncation_trailing_and_unknown_fields() {
+            let frame = encode_frame(&refusal_response()).unwrap();
+            let response: Response = decode_frame(&frame).unwrap();
+            assert_eq!(
+                response.outcome.unwrap_err(),
+                "captured transcript verification refused"
+            );
+
+            let mut bad_magic = frame.clone();
+            bad_magic[0] ^= 1;
+            let mut bad_length = frame.clone();
+            bad_length[8..16].copy_from_slice(&u64::MAX.to_le_bytes());
+            let mut bad_digest = frame.clone();
+            bad_digest[16] ^= 1;
+            let mut trailing = frame.clone();
+            trailing.push(0);
+            for invalid in [
+                bad_magic,
+                bad_length,
+                bad_digest,
+                trailing,
+                frame[..HEADER_BYTES - 1].to_vec(),
+                frame[..frame.len() - 1].to_vec(),
+            ] {
+                assert!(decode_frame::<Response>(&invalid).is_err());
+            }
+            let mut unknown = serde_json::to_value(refusal_response()).unwrap();
+            unknown["unexpected_authority"] = serde_json::json!(true);
+            assert!(decode_frame::<Response>(&encode_frame(&unknown).unwrap()).is_err());
+
+            let mut encoded = encode_frame(&refusal_response()).unwrap();
+            encoded.push(0);
+            assert!(read_frame(&mut encoded.as_slice()).is_err());
+        }
+
+        #[test]
+        fn replay_supervisor_binds_response_and_preserves_engine_refusal() {
+            let script = "printf '%s' \"$$\" > \"$2\"; /bin/cat \"$1\"";
+            let frame = encode_frame(&refusal_response()).unwrap();
+            let (outcome, pid) = shell_fixture(script, &frame, Duration::from_secs(2));
+            assert_eq!(
+                outcome.unwrap_err(),
+                "captured transcript verification refused"
+            );
+            assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists());
+
+            for field in ["schema", "request", "digest"] {
+                let mut response = refusal_response();
+                match field {
+                    "schema" => response.schema_version.push_str("-other"),
+                    "request" => response.request_id.push_str("-other"),
+                    "digest" => response.request_sha256 = "0".repeat(64),
+                    _ => unreachable!(),
+                }
+                let frame = encode_frame(&response).unwrap();
+                let (outcome, pid) = shell_fixture(script, &frame, Duration::from_secs(2));
+                assert!(outcome.unwrap_err().contains("does not match this request"));
+                assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists());
+            }
+        }
+
+        #[test]
+        fn replay_supervisor_reaps_timeout_abort_and_invalid_output() {
+            let frame = encode_frame(&refusal_response()).unwrap();
+            for (script, timeout, expected) in [
+                (
+                    "printf '%s' \"$$\" > \"$2\"; /bin/cat \"$1\"; while :; do :; done",
+                    Duration::from_millis(100),
+                    "timed out",
+                ),
+                (
+                    "printf '%s' \"$$\" > \"$2\"; ulimit -c 0; kill -ABRT \"$$\"",
+                    Duration::from_secs(2),
+                    "exited without completing verification",
+                ),
+                (
+                    "printf '%s' \"$$\" > \"$2\"; /bin/cat \"$1\"; exit 7",
+                    Duration::from_secs(2),
+                    "exited without completing verification",
+                ),
+                (
+                    "printf '%s' \"$$\" > \"$2\"; /bin/cat \"$1\"; printf trailing",
+                    Duration::from_secs(2),
+                    "truncated or has trailing bytes",
+                ),
+                (
+                    "printf '%s' \"$$\" > \"$2\"; printf short",
+                    Duration::from_secs(2),
+                    "invalid version or header",
+                ),
+                (
+                    "printf '%s' \"$$\" > \"$2\"; /bin/cat /dev/zero",
+                    Duration::from_secs(2),
+                    "stdout exceeds the protocol frame limit",
+                ),
+                (
+                    "printf '%s' \"$$\" > \"$2\"; /bin/cat /dev/zero >&2",
+                    Duration::from_secs(2),
+                    "diagnostics exceed the byte limit",
+                ),
+            ] {
+                let started = Instant::now();
+                let (outcome, pid) = shell_fixture(script, &frame, timeout);
+                let error =
+                    outcome.expect_err("incomplete verification must never yield a verdict");
+                assert!(error.contains(expected), "{expected}: {error}");
+                assert!(
+                    started.elapsed() < Duration::from_secs(6),
+                    "deadline and cleanup must remain bounded"
+                );
+                assert!(
+                    !std::path::Path::new(&format!("/proc/{pid}")).exists(),
+                    "replay fixture leader must have been reaped"
+                );
+            }
+        }
+    }
+}
+
 #[cfg(feature = "engine")]
 pub use engine::{CapturedModuleSources, CapturingProcessSpawnProvider};
 

@@ -2853,6 +2853,11 @@ pub struct IncidentReplayArgs {
     #[arg(long)]
     pub execute: bool,
 
+    /// Maximum native re-execution time in milliseconds, including worker
+    /// startup and protocol draining (1..=300000).
+    #[arg(long, default_value_t = 30_000)]
+    pub timeout_ms: u64,
+
     /// Emit the structured replay result as JSON on stdout. Required for
     /// compatibility with the README's "All commands accept `--json`" contract.
     #[arg(long)]

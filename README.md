@@ -652,7 +652,15 @@ engine failures remain outside this replay scope. For completed runs,
 `decisions_match` remains informational. Without frozen sources, withholding
 module authority changes the capability population used by Bayesian policy
 evaluation; neither path's guest verdict certifies original policy decisions.
-`--execute` requires a build with the `engine` feature.
+`--execute` requires a Linux build with the `engine` feature. Native replay runs
+in a supervised child of the currently running executable, with a default
+30-second deadline. Set `--timeout-ms 60000` to allow a minute; accepted budgets
+are 1 through 300,000 milliseconds. The budget includes worker startup,
+execution, and protocol draining. A timeout, abort, excess output, incomplete
+response, or failed child exit refuses verification and cannot produce a
+successful replay verdict. Cleanup kills and reaps the owned worker process
+group. The worker still consumes only captured inputs and recorded host effects;
+it does not repeat the original filesystem writes or process launches.
 
 ### Day 22 — Release
 

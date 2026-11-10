@@ -20174,8 +20174,14 @@ mod incident_list_tests {
         write_fixture_bundle(&bundle_path, "INC-REPLAY-001", "high");
 
         let trusted_key_ids = incident_test_trusted_key_ids();
-        let summary = incident_replay_cli_summary(&bundle_path, &trusted_key_ids, false, None)
-            .expect("replay summary");
+        let summary = incident_replay_cli_summary(
+            &bundle_path,
+            &trusted_key_ids,
+            false,
+            None,
+            std::time::Duration::from_millis(ops::native_replay::DEFAULT_NATIVE_REPLAY_TIMEOUT_MS),
+        )
+        .expect("replay summary");
 
         assert_eq!(summary.incident_id, "INC-REPLAY-001");
         assert!(summary.matched);
@@ -20192,8 +20198,14 @@ mod incident_list_tests {
         let missing = temp.path().join("missing.fnbundle");
 
         let trusted_key_ids = incident_test_trusted_key_ids();
-        let err = incident_replay_cli_summary(&missing, &trusted_key_ids, false, None)
-            .expect_err("missing bundle must fail");
+        let err = incident_replay_cli_summary(
+            &missing,
+            &trusted_key_ids,
+            false,
+            None,
+            std::time::Duration::from_millis(ops::native_replay::DEFAULT_NATIVE_REPLAY_TIMEOUT_MS),
+        )
+        .expect_err("missing bundle must fail");
 
         assert!(
             format!("{err:#}").contains("failed reading replay bundle"),
@@ -20209,8 +20221,14 @@ mod incident_list_tests {
         corrupt_bundle_integrity_hash(&bundle_path);
 
         let trusted_key_ids = incident_test_trusted_key_ids();
-        let err = incident_replay_cli_summary(&bundle_path, &trusted_key_ids, false, None)
-            .expect_err("corrupt bundle must fail");
+        let err = incident_replay_cli_summary(
+            &bundle_path,
+            &trusted_key_ids,
+            false,
+            None,
+            std::time::Duration::from_millis(ops::native_replay::DEFAULT_NATIVE_REPLAY_TIMEOUT_MS),
+        )
+        .expect_err("corrupt bundle must fail");
 
         assert!(
             format!("{err:#}").contains("bundle integrity mismatch"),
@@ -23799,7 +23817,10 @@ fn incident_replay_cli_summary(
     trusted_key_ids: &[String],
     execute: bool,
     trusted_run_key: Option<&ed25519_dalek::VerifyingKey>,
+    timeout: std::time::Duration,
 ) -> Result<IncidentReplayCliSummary> {
+    #[cfg(not(feature = "engine"))]
+    let _ = timeout;
     // bd-rjc2m: carry the full cause chain (e.g. "bundle integrity mismatch")
     // so fail-closed replays name the refusal instead of a bare context line.
     let bytes = bounded_read(bundle_path, MAX_CAPTURED_INCIDENT_BYTES)
@@ -23860,7 +23881,7 @@ fn incident_replay_cli_summary(
         #[cfg(feature = "engine")]
         {
             Some(
-                ops::native_replay::reexecute(&capture)
+                ops::native_replay::reexecute_supervised(&capture, timeout)
                     .map_err(|error| anyhow::anyhow!("native re-execution failed: {error}"))?,
             )
         }
@@ -23929,6 +23950,7 @@ fn handle_incident_replay_command(args: &cli::IncidentReplayArgs) -> Result<()> 
         &trusted_key_ids,
         args.execute,
         trusted_run_key.as_ref(),
+        std::time::Duration::from_millis(args.timeout_ms),
     ) {
         Ok(summary) => summary,
         Err(err) => return incident_fail("incident.replay", args.json, err),
@@ -36096,6 +36118,9 @@ fn main() -> Result<()> {
     if ops::engine_dispatcher::EngineDispatcher::maybe_run_internal_native_session_worker()? {
         return Ok(());
     }
+    if ops::native_replay::maybe_run_internal_native_replay_worker().map_err(anyhow::Error::msg)? {
+        return Ok(());
+    }
 
     let cli = parse_cli();
 
@@ -37313,7 +37338,9 @@ fn main() -> Result<()> {
                 let target_stage = args.stage.map(Into::into);
 
                 let report = match args.action {
-                    cli::MigrateRolloutAction::Status => manager.status().map_err(|e| e.to_string()),
+                    cli::MigrateRolloutAction::Status => {
+                        manager.status().map_err(|e| e.to_string())
+                    }
                     cli::MigrateRolloutAction::Rollback => {
                         manager.rollback("operator requested rollout rollback")
                     }
