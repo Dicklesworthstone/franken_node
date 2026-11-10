@@ -86,7 +86,8 @@ pub(super) fn select<'a>(
     Ok(selected.into_values().collect())
 }
 
-/// Captured root authority for globally selected scalar registry overrides.
+/// Captured root authority for scalar registry overrides, optionally selected
+/// by the original dependency's version range.
 /// npm and Bun retain their distinct selection contracts; both reuse the same
 /// immutable authority for metadata AND actual installed edges. npm registry
 /// aliases retain their replacement identity; contextual rules and nonregistry
@@ -96,7 +97,17 @@ pub(super) fn select<'a>(
 #[derive(Debug, Default, Clone, Serialize)]
 pub(super) struct Overrides {
     rules: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    qualified: BTreeMap<String, Vec<QualifiedOverride>>,
+    #[serde(skip)]
+    has_qualified_replacements: bool,
     bun: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct QualifiedOverride {
+    selector: String,
+    replacement: Option<String>,
 }
 
 fn plain_override_name(key: &str) -> bool {
@@ -109,6 +120,27 @@ fn plain_override_name(key: &str) -> bool {
                     .bytes()
                     .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
         })
+}
+
+fn override_selector(key: &str) -> Option<(&str, Option<&str>)> {
+    match key.rsplit_once('@') {
+        Some((package, range)) if !package.is_empty() => {
+            (plain_override_name(package) && !range.is_empty() && graph::supports_range(range))
+                .then_some((package, Some(range)))
+        }
+        _ => plain_override_name(key).then_some((key, None)),
+    }
+}
+
+fn selector_matches(package: &str, selector: &str, request: &str) -> Result<bool> {
+    if selector == "*" { return Ok(true); }
+    let (_, range) = alias(package, Some(request))?;
+    // Arborist tests the original request first. node-semver's comparator
+    // intersection is directional for exact prereleases versus ANY.
+    graph::ranges_intersect(
+        range.context("version-qualified override cannot verify an opaque dependency request")?,
+        selector,
+    ).context("version-qualified override requires bounded, verifiable registry ranges")
 }
 
 fn npm_registry_replacement(installed_as: &str, request: &str) -> bool {
@@ -148,6 +180,8 @@ impl Overrides {
             .map(|edge| (edge.installed_as, edge.request))
             .collect();
         let mut selected = BTreeMap::new();
+        let mut qualified: BTreeMap<String, Vec<QualifiedOverride>> = BTreeMap::new();
+        let mut selectors: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
         let mut supported = true;
         for (key, value) in rules {
             account(&mut count, MAX_PACKAGES, deadline)?;
@@ -156,13 +190,30 @@ impl Overrides {
                 "invalid or oversized npm override key"
             );
             let mut issue = None;
-            // A bounded conventional name accepts scoped packages, but not
-            // version selectors such as child@^1 or ancestor-scoped objects.
-            if !plain_override_name(key) {
+            let selector = override_selector(key);
+            if selector.is_none() {
                 issue = Some((
                     "unsupported_npm_override",
-                    "Only unversioned root package-name override keys are supported; version-qualified or scoped rules require explicit review",
+                    "Override keys must be package names with optional supported registry version ranges",
                 ));
+            }
+            if let Some((package, range)) = selector {
+                let range = range.unwrap_or("*");
+                let preceding = selectors.entry(package).or_default();
+                ensure!(preceding.len() < 64,
+                    "version-qualified override selectors per package exceed limit");
+                for previous in preceding.iter() {
+                    account(&mut count, MAX_PACKAGES, deadline)?;
+                    if graph::ranges_intersect(previous, range) != Some(false)
+                        || graph::ranges_intersect(range, previous) != Some(false)
+                    {
+                        // Canonical metadata does not retain object insertion
+                        // order. Never invent npm's first-rule precedence.
+                        issue = Some(("unsupported_npm_override",
+                            "Overlapping same-name override selectors require insertion-order-aware review"));
+                    }
+                }
+                preceding.push(range);
             }
             let mut effective = None;
             match value.as_str() {
@@ -186,7 +237,7 @@ impl Overrides {
                         Some(request)
                     };
                     if let Some(request) = request {
-                        if npm_registry_replacement(key, request) {
+                        if selector.is_some_and(|(package, _)| npm_registry_replacement(package, request)) {
                             effective = Some(request);
                         } else {
                             issue = Some((
@@ -203,17 +254,31 @@ impl Overrides {
                     ))
                 }
             }
-            if let Some(request) = effective {
+            if let (Some(request), Some((package, range))) = (effective, selector) {
                 // npm's EOVERRIDE contract compares exact effective text,
                 // not semantic range equivalence. Dev/optional precedence is
                 // the same selection used for root $reference resolution.
-                if direct.get(key.as_str()).is_some_and(|raw| *raw != request) {
-                    issue = Some((
-                        "conflicting_npm_override",
-                        "EOVERRIDE: root direct dependency and effective override must use exactly the same request",
-                    ));
+                if let Some(raw) = direct.get(package) {
+                    match range.map_or(Ok(true), |range| selector_matches(package, range, raw)) {
+                        Ok(true) if *raw != request => {
+                            issue = Some(("conflicting_npm_override",
+                                "EOVERRIDE: root direct dependency and selected override must use exactly the same request"));
+                        }
+                        Err(_) => {
+                            issue = Some(("unsupported_npm_override",
+                                "Version-qualified override selection requires a bounded registry dependency request"));
+                        }
+                        _ => {}
+                    }
                 }
-                selected.insert(key.clone(), request.to_owned());
+                if range.is_none() {
+                    selected.insert(package.to_owned(), request.to_owned());
+                }
+            }
+            if let Some((package, Some(range))) = selector {
+                qualified.entry(package.into()).or_default().push(QualifiedOverride {
+                    selector: range.into(), replacement: effective.map(str::to_owned),
+                });
             }
             if let Some((code, detail)) = issue {
                 supported = false;
@@ -232,6 +297,9 @@ impl Overrides {
         Ok(if supported {
             Self {
                 rules: selected,
+                has_qualified_replacements: qualified.values().flatten()
+                    .any(|rule| rule.replacement.is_some()),
+                qualified,
                 ..Self::default()
             }
         } else {
@@ -297,25 +365,38 @@ impl Overrides {
             );
         }
         time_remaining(deadline)?;
-        Ok(Self { rules, bun: true })
+        Ok(Self { rules, bun: true, ..Self::default() })
     }
 
-    pub(super) fn replacement(&self, installed_as: &str, request: &str) -> Option<&str> {
+    pub(super) fn replacement(&self, installed_as: &str, request: &str) -> Result<Option<&str>> {
         // Bun's plain-name rules do not replace versioned npm aliases. Alias
         // selectors and dist-tag alias rules remain outside this bounded set;
         // their original requests still undergo the ordinary range checks.
         if self.bun && request.starts_with("npm:") {
-            return None;
+            return Ok(None);
         }
-        self.rules.get(installed_as).map(String::as_str)
+        if let Some(replacement) = self.rules.get(installed_as) {
+            return Ok(Some(replacement));
+        }
+        let mut selected = None;
+        for rule in self.qualified.get(installed_as).into_iter().flatten() {
+            if selector_matches(installed_as, &rule.selector, request)? {
+                // Even disjoint selectors may intersect a broad declaration.
+                // Without original key order this is deliberately unresolved.
+                ensure!(selected.is_none(),
+                    "dependency request intersects multiple version-qualified override selectors; explicit review required");
+                selected = Some(rule);
+            }
+        }
+        Ok(selected.and_then(|rule| rule.replacement.as_deref()))
     }
 
-    pub(super) fn apply<'a>(&'a self, installed_as: &str, request: &'a str) -> &'a str {
-        self.replacement(installed_as, request).unwrap_or(request)
+    pub(super) fn apply<'a>(&'a self, installed_as: &str, request: &'a str) -> Result<&'a str> {
+        Ok(self.replacement(installed_as, request)?.unwrap_or(request))
     }
 
     pub(super) fn is_empty(&self) -> bool {
-        self.rules.is_empty()
+        self.rules.is_empty() && !self.has_qualified_replacements
     }
 
     pub(super) fn review_workspace(
@@ -333,6 +414,18 @@ impl Overrides {
             Some(directory),
             report,
         )?;
+        if !self.bun
+            && let Some(package) = record.get("name").and_then(Value::as_str)
+            && self.qualified.get(package)
+                .is_some_and(|rules| rules.iter().any(|rule| rule.replacement.is_some()))
+        {
+            report.finding(DependencyFinding {
+                code: "unsupported_npm_override_context".into(), source: "package.json#overrides".into(),
+                package: package.into(), installed_as: package.into(),
+                package_path: Some(directory.into()), version: None,
+                detail: "Version-qualified registry overrides cannot establish authority over a direct workspace file: edge".into(),
+            })?;
+        }
         if !self.bun
             && let Some(package) = record.get("name").and_then(Value::as_str)
             && let Some(request) = self.rules.get(package)

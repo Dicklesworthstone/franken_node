@@ -952,9 +952,17 @@ including when the ignored lockfile is stale or malformed. Root scalar
 aliased direct dependencies. The replacement's name and range are checked at the
 original dependency's installation location in both the lockfile and actual
 installed tree; raw declarations remain unchanged. Direct dependency conflicts
-retain npm's exact-spec `EOVERRIDE` behavior. Nested or version-qualified rules,
-nonregistry sources, omitted alias ranges, dist-tags, and bundled or
-nested-shrinkwrap contexts require review.
+retain npm's exact-spec `EOVERRIDE` behavior. Version-qualified root selectors
+such as `"vulnerable@^1": "npm:@maintained/fork@^2"` are also supported: a rule
+matches the original declared dependency range, then the selected replacement's
+identity and version are checked. This works across npm lockfile versions 1–3,
+including scoped packages, aliases, and hoisted or nested installation locations.
+Selectors for one package must be disjoint, and each original request must match
+at most one rule; ambiguous overlaps require review even when one rule is a
+literal no-op. At most 64 selectors per package are admitted. Nested
+ancestor-dependent rules, opaque requests requiring version comparison, nonregistry sources,
+omitted alias ranges, dist-tags, and bundled or nested-shrinkwrap contexts still
+require review.
 Workspace and installed-package manifests cannot redefine the root's overrides.
 
 On Linux, trust dependency queries use that same captured override authority,

@@ -131,10 +131,10 @@ fn upper(base: &Version, index: usize, prerelease_floor: bool) -> Checked<Versio
     Ok(result)
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Op { Eq, Lt, Le, Gt, Ge }
 
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct Comparator { op: Op, version: Version }
 
 impl Comparator {
@@ -280,9 +280,156 @@ pub(super) fn supports_range(request: &str) -> bool {
     parse_range(request).is_ok()
 }
 
+/// npm selects a version-qualified override from the ORIGINAL requested
+/// range, not the installed version that the replacement already changed.
+/// Preserve node-semver's comparator-intersection contract, including its
+/// prerelease and wildcard behavior. This is not a dependency solver or a
+/// proof that the two ranges share an installable registry release.
+pub(super) fn intersects(left: &str, right: &str) -> Option<bool> {
+    fn null(comparator: &Comparator) -> bool {
+        comparator.op == Op::Lt
+            && comparator.version.core == [0; 3]
+            && comparator.version.pre == ["0"]
+    }
+    fn canonical(text: &str) -> Option<Vec<Vec<Comparator>>> {
+        let mut arms = Vec::new();
+        for mut arm in parse_range(text).ok()? {
+            if arm.impossible {
+                arm.comparators.push(Comparator {
+                    op: Op::Lt,
+                    version: Version { core: [0; 3], pre: vec!["0".into()] },
+                });
+            }
+            if let Some(empty) = arm.comparators.iter().find(|entry| null(entry)) {
+                arms.push(vec![empty.clone()]);
+                continue;
+            }
+            let mut comparisons = Vec::new();
+            for entry in arm.comparators {
+                // npm normalizes the lowest stable inclusive bound to ANY.
+                if entry.op == Op::Ge && entry.version == Version::release([0; 3]) {
+                    continue;
+                }
+                if !comparisons.contains(&entry) { comparisons.push(entry); }
+            }
+            arms.push(comparisons);
+        }
+        if arms.iter().any(|arm| arm.first().is_none_or(|entry| !null(entry))) {
+            arms.retain(|arm| arm.first().is_none_or(|entry| !null(entry)));
+        }
+        if arms.iter().any(Vec::is_empty) { return Some(vec![Vec::new()]); }
+        Some(arms)
+    }
+    fn pair(left: &Comparator, right: &Comparator) -> bool {
+        if left.op == Op::Eq || right.op == Op::Eq {
+            let (candidate, comparison) = if left.op == Op::Eq {
+                (&left.version, right)
+            } else { (&right.version, left) };
+            return comparison.accepts(candidate)
+                && (candidate.pre.is_empty()
+                    || (!comparison.version.pre.is_empty()
+                        && comparison.version.core == candidate.core));
+        }
+        if [left, right].iter().any(|entry| {
+            entry.op == Op::Lt && entry.version.core == [0; 3]
+        }) { return false; }
+        let left_lower = matches!(left.op, Op::Gt | Op::Ge);
+        let right_lower = matches!(right.op, Op::Gt | Op::Ge);
+        if left_lower == right_lower { return true; }
+        let (lower, upper) = if left_lower { (left, right) } else { (right, left) };
+        match lower.version.cmp(&upper.version) {
+            Ordering::Less => true,
+            Ordering::Equal => lower.op == Op::Ge && upper.op == Op::Le,
+            Ordering::Greater => false,
+        }
+    }
+
+    let left = canonical(left)?;
+    let right = canonical(right)?;
+    let mut comparisons = 0_usize;
+    for left in &left {
+        for right in &right {
+            // npm's comparator contract is directional: exact prereleases
+            // do not intersect an ANY on their right, while ANY on the left
+            // accepts them. Canonical empty arms represent that ANY; do not
+            // lose its prerelease exclusion when joining comparator lists.
+            if right.is_empty() && left.iter().any(|entry| {
+                entry.op == Op::Eq && !entry.version.pre.is_empty()
+            }) {
+                continue;
+            }
+            let joined: Vec<_> = left.iter().chain(right).collect();
+            let mut compatible = true;
+            for (index, a) in joined.iter().enumerate() {
+                for b in &joined[index + 1..] {
+                    comparisons = comparisons.checked_add(1)?;
+                    if comparisons > 65_536 { return None; }
+                    if !pair(a, b) { compatible = false; break; }
+                }
+                if !compatible { break; }
+            }
+            if compatible { return Some(true); }
+        }
+    }
+    Some(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn override_range_intersections_match_npm_semver_reference() {
+        // Independently executed against npm's bundled node-semver 7.7.3.
+        // In particular, intersection is NOT testing the installed pin or
+        // looking for an actual release in the comparator interval.
+        let cases = [
+            ("^1", "^2", false),
+            ("^1", ">=1.5 <3", true),
+            ("1", "1.2.3", true),
+            ("1.2.x", "~1.3", false),
+            ("~1.2.3", "1.2.9", true),
+            ("^0.2.3", "0.3", false),
+            ("^0.0.3", "0.0.4", false),
+            ("1 - 3", ">=3.4.0", true),
+            ("1.0.0 - 2.0.0", ">2.0.0", false),
+            (">1.0.0", "<=1.0.0", false),
+            (">=1.0.0", "<=1.0.0", true),
+            ("1 || 3", "^3.2", true),
+            ("1 || 3", "2", false),
+            (">=3 <2", "*", false),
+            (">=1.0.0-alpha <2", "1.0.0-beta", false),
+            (">=1.0.0-alpha", "1.0.0-beta", true),
+            ("1.0.0+one", "1.0.0+two", true),
+            (">1.0.0 <1.0.1", "*", true),
+            ("<0.0.0", "*", true),
+            ("<0.0.0", "<1", false),
+            ("<0.0.0-0 || ^1", "^2", false),
+            ("<*", "*", true),
+            ("^1", "1.9.0-alpha", false),
+            ("^1.0.0-alpha", ">=1.0.0-beta <1.0.0", true),
+            (">=0.0.0", "*", true),
+            ("<1.2.3", "1.2.3-alpha", false),
+            ("^2", "v2.1.0", true),
+            ("1.x", "^1 || ^2", true),
+        ];
+        for (left, right, expected) in cases {
+            assert_eq!(intersects(left, right), Some(expected), "{left} / {right}");
+            assert_eq!(intersects(right, left), Some(expected), "{right} / {left}");
+        }
+        // The reference deliberately has distinct results for these operand
+        // orders. Override selection passes the original request FIRST.
+        for any in ["*", "", ">=0", ">=0.0.0", "* || ^1", ">=0 || ^9"] {
+            for exact in ["1.0.0-alpha", "1.0.0-alpha >=1.0.0-alpha"] {
+                assert_eq!(intersects(any, exact), Some(true), "{any} / {exact}");
+                assert_eq!(intersects(exact, any), Some(false), "{exact} / {any}");
+            }
+        }
+        for invalid in ["^1 || latest", "npm:alias@1", "workspace:*", "1.x.3", ">9007199254740991"] {
+            assert_eq!(intersects(invalid, "*"), None, "{invalid}");
+            assert_eq!(intersects("*", invalid), None, "{invalid}");
+        }
+    }
 
     // These independent truth values are also checked against npm's semver
     // reference. Do not obtain expected results from this implementation.

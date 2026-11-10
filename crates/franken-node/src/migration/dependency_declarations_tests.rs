@@ -798,7 +798,7 @@ fn root_override_reference_precedence_matches_independent_npm_v11_table() {
         let mut report = inspect(root.path(), deadline()).unwrap();
         let overrides = Overrides::capture(&manifest, &mut report, deadline()).unwrap();
         assert!(!report.requires_review(), "mask {mask}: {report:#?}");
-        assert_eq!(overrides.apply("child", "^9"), expected[mask - 1]);
+        assert_eq!(overrides.apply("child", "^9").unwrap(), expected[mask - 1]);
         assert_eq!(serde_json::to_vec(&manifest).unwrap(), bytes);
     }
 }
@@ -874,10 +874,186 @@ fn literal_override_wildcard_is_noop_but_referenced_wildcard_is_a_replacement() 
 }
 
 #[test]
+fn version_qualified_overrides_select_original_ranges_and_verify_installed_replacements() {
+    // npm Arborist 9.2.0 selects the ^1 rule for ^1 || ^3 and >=1 <4,
+    // despite the replacement being outside ^1. The locked version cannot
+    // be used as the selector. Each case exercises the actual manifest pass.
+    for (request, pin, allowed) in [
+        ("^1", "2.1.0", true),
+        ("^1 || ^3", "2.1.0", true),
+        (">=1 <4", "2.1.0", true),
+        ("npm:original@^1", "2.1.0", true),
+        ("^3", "3.1.0", true),
+        ("^3", "2.1.0", false),
+        ("^1", "1.8.0", false),
+    ] {
+        for version in [1, 2, 3] {
+            let root = overridden_tree(json!({"child@^1":"^2"}), request, pin);
+            let lock = if version == 1 {
+                json!({"lockfileVersion":1,"dependencies":{
+                    "parent":{"version":"1.0.0","requires":{"child":request}},
+                    "child":{"version":pin}
+                }})
+            } else {
+                json!({"lockfileVersion":version,"packages":{
+                    "node_modules/parent":{"version":"1.0.0","dependencies":{"child":request}},
+                    "node_modules/child":{"version":pin}
+                }})
+            };
+            put(root.path(), "package-lock.json", &lock);
+            let report = inspect_for_execution(root.path(), deadline()).unwrap();
+            assert_eq!(!report.requires_review(), allowed, "v{version} {request} / {pin}: {report:#?}");
+            assert_eq!(report.installation_checked, allowed, "v{version} {request}: {report:#?}");
+            if allowed {
+                assert_eq!(report.installed_packages_scanned, 2);
+                assert!(report.scope.contains("version-qualified selectors"));
+                put(root.path(), "node_modules/child/package.json", &json!({"name":"child","version":"9.0.0"}));
+                let changed = inspect_for_execution(root.path(), deadline()).unwrap();
+                assert!(changed.installation_checked && has(&changed, "installed_identity_mismatch"));
+            } else {
+                assert!(has(&report, "dependency_version_mismatch"));
+            }
+        }
+    }
+}
+
+#[test]
+fn version_qualified_overrides_preserve_npm_prerelease_selection_direction() {
+    // Independently checked with node-semver 7.7.3 and Arborist 9.2.0.
+    // >=0 canonicalizes to ANY, but only a literal * selector bypasses
+    // the request-first intersection check in Arborist's getEdgeRule.
+    for (selector, request, pin, allowed) in [
+        (">=0", "1.0.0-alpha", "1.0.0-alpha", true),
+        (">=0", "1.0.0-alpha", "2.0.0", false),
+        (">=0 || ^9", "1.0.0-alpha", "1.0.0-alpha", true),
+        ("1.0.0-alpha", "*", "2.0.0", true),
+        ("1.0.0-alpha", "*", "1.0.0", false),
+        ("1.0.0-alpha", "npm:original@*", "2.0.0", true),
+        ("*", "1.0.0-alpha", "2.0.0", true),
+        ("*", "1.0.0-alpha", "1.0.0-alpha", false),
+    ] {
+        let root = overridden_tree(json!({format!("child@{selector}"):"^2"}), request, pin);
+        let report = inspect_for_execution(root.path(), deadline()).unwrap();
+        assert_eq!(!report.requires_review(), allowed, "{selector} / {request} / {pin}: {report:#?}");
+        assert_eq!(report.installation_checked, allowed, "{selector} / {request}: {report:#?}");
+        if !allowed { assert!(has(&report, "dependency_version_mismatch")); }
+    }
+    for (selector, request, pin, conflict) in [
+        (">=0", "1.0.0-alpha", "1.0.0-alpha", false),
+        ("1.0.0-alpha", "*", "1.0.0", true),
+    ] {
+        let root = fixture(
+            json!({"dependencies":{"child":request},"overrides":{format!("child@{selector}"):"^2"}}),
+            json!({"node_modules/child":{"version":pin}}),
+        );
+        put(root.path(), "node_modules/child/package.json", &json!({"name":"child","version":pin}));
+        let report = inspect_for_execution(root.path(), deadline()).unwrap();
+        assert_eq!(has(&report, "conflicting_npm_override"), conflict, "{selector} / {request}: {report:#?}");
+        assert_eq!(report.installation_checked, !conflict);
+    }
+    // Capture cannot assume intersection symmetry when certifying that
+    // two rules are disjoint, even if canonical object ordering tests the
+    // exact prerelease before the wildcard-normalizing selector.
+    for rules in [
+        json!({"child@1.0.0-alpha":"2","child@>=0":"3"}),
+        json!({"child@1.0.0-alpha":"*","child@>=0":"3"}),
+    ] {
+        let root = overridden_tree(rules, "*", "2.0.0");
+        let report = inspect_for_execution(root.path(), deadline()).unwrap();
+        assert!(has(&report, "unsupported_npm_override"), "{report:#?}");
+        assert!(!report.installation_checked);
+    }
+}
+
+#[test]
+fn disjoint_version_overrides_follow_each_consumers_nearest_installation() {
+    let first = json!({"name":"first","version":"1.0.0","dependencies":{"@scope/child":"^1"}});
+    let second = json!({"name":"second","version":"1.0.0","dependencies":{"@scope/child":"^3"}});
+    let root = fixture(
+        json!({"dependencies":{"first":"1","second":"1"},"overrides":{
+            "@scope/child@^1":"npm:@patched/child@^2","@scope/child@^3":"^4"}}),
+        json!({"node_modules/first":first,"node_modules/second":second,
+            "node_modules/@scope/child":{"name":"@patched/child","version":"2.1.0"},
+            "node_modules/second/node_modules/@scope/child":{"version":"4.1.0"}}),
+    );
+    put(root.path(), "node_modules/first/package.json", &first);
+    put(root.path(), "node_modules/second/package.json", &second);
+    put(root.path(), "node_modules/@scope/child/package.json", &json!({"name":"@patched/child","version":"2.1.0"}));
+    put(root.path(), "node_modules/second/node_modules/@scope/child/package.json", &json!({"name":"@scope/child","version":"4.1.0"}));
+    let report = inspect_for_execution(root.path(), deadline()).unwrap();
+    assert!(!report.requires_review() && report.installation_checked, "{report:#?}");
+    assert_eq!(report.installed_packages_scanned, 4);
+    let mut changed = first;
+    changed["dependencies"]["@scope/child"] = json!("^3");
+    put(root.path(), "node_modules/first/package.json", &changed);
+    let report = inspect_for_execution(root.path(), deadline()).unwrap();
+    assert!(has(&report, "installed_dependency_metadata_mismatch"));
+    assert!(has(&report, "unresolved_transitive_dependency"), "{report:#?}");
+}
+
+#[test]
+fn version_qualified_direct_overrides_retain_exact_eoverride_and_reference_rules() {
+    for (selector, replacement, conflict) in [
+        ("^1", "^1", false), ("^1", "$child", false),
+        ("^1", "1", true), ("^1", "^2", true), ("^2", "^3", false),
+    ] {
+        let root = fixture(
+            json!({"dependencies":{"child":"^1"},"overrides":{format!("child@{selector}"):replacement}}),
+            json!({"node_modules/child":{"version":"1.2.0"}}),
+        );
+        put(root.path(), "node_modules/child/package.json", &json!({"name":"child","version":"1.2.0"}));
+        let report = inspect_for_execution(root.path(), deadline()).unwrap();
+        assert_eq!(has(&report, "conflicting_npm_override"), conflict, "{selector} / {replacement}: {report:#?}");
+        assert_eq!(report.installation_checked, !conflict);
+    }
+}
+
+#[test]
+fn version_qualified_override_ambiguity_and_opaque_requests_never_gain_authority() {
+    for rules in [
+        json!({"child":"2","child@^1":"2"}),
+        json!({"child@^1":"2","child@>=1 <3":"3"}),
+        json!({"child@^1":"*","child@1.2":"2"}),
+    ] {
+        let root = overridden_tree(rules, "^1", "2.0.0");
+        let report = inspect_for_execution(root.path(), deadline()).unwrap();
+        assert!(has(&report, "unsupported_npm_override"));
+        assert!(has(&report, "dependency_version_mismatch"));
+        assert!(!report.installation_checked);
+    }
+    for rules in [
+        json!({"child@1":"2","child@3":"4"}),
+        json!({"child@1":"*","child@3":"4"}),
+        json!({"child@1":"","child@3":"4"}),
+    ] {
+        let root = overridden_tree(rules, "1 || 3", "4.0.0");
+        let error = inspect_for_execution(root.path(), deadline()).unwrap_err();
+        assert!(format!("{error:#}").contains("multiple version-qualified"), "{error:#}");
+    }
+    for request in ["latest", "git+https://example.invalid/pkg", "file:../pkg", "workspace:*", "npm:fork@latest"] {
+        let root = overridden_tree(json!({"child@^1":"2"}), request, "2.0.0");
+        let error = inspect_for_execution(root.path(), deadline()).unwrap_err();
+        assert!(format!("{error:#}").contains("version-qualified override"), "{request}: {error:#}");
+    }
+}
+
+#[test]
+fn unused_version_qualified_rules_are_validated_and_selector_counts_are_bounded() {
+    let root = overridden_tree(json!({"child":"2","unused@^1":"2","@scope/unused@^1":"3"}), "^1", "2.0.0");
+    let report = inspect_for_execution(root.path(), deadline()).unwrap();
+    assert!(!report.requires_review() && report.installation_checked, "{report:#?}");
+    let mut rules = serde_json::Map::new();
+    for major in 0..65 { rules.insert(format!("unused@{major}"), json!("1")); }
+    let root = overridden_tree(Value::Object(rules), "^1", "1.0.0");
+    let error = inspect(root.path(), deadline()).unwrap_err();
+    assert!(format!("{error:#}").contains("selectors per package exceed limit"));
+}
+
+#[test]
 fn unsupported_override_rules_cannot_be_hidden_by_a_supported_prefix_or_unused_name() {
     for (key, value) in [
-        ("unused@^1", json!("2")),
-        ("@scope/unused@^1", json!("2")),
+        ("unused@latest", json!("2")),
+        ("@scope/unused@^1 || latest", json!("2")),
         ("unused", json!({"child":"2"})),
         ("unused", json!({".":"2"})),
         ("unused", json!(["2"])),

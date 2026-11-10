@@ -440,7 +440,7 @@ fn declarations(
     authority: &DeclarationAuthority<'_>,
 ) -> Result<()> {
     for edge in declaration_selection::select(manifest, true, deadline, count, MAX_PACKAGES)? {
-        let request = authority.overrides.apply(edge.installed_as, edge.request);
+        let request = authority.overrides.apply(edge.installed_as, edge.request)?;
         let (actual, requirement) = if request == edge.request { (edge.package, edge.requirement) }
             else { alias(edge.installed_as, Some(request))? };
         let selected = nearest_package(packages, source, edge.installed_as);
@@ -522,7 +522,7 @@ pub(crate) struct CapturedRootOverrides {
 }
 
 impl CapturedRootOverrides {
-    pub(crate) fn replacement(&self, installed_as: &str, request: &str) -> Option<&str> {
+    pub(crate) fn replacement(&self, installed_as: &str, request: &str) -> Result<Option<&str>> {
         self.effective.replacement(installed_as, request)
     }
 
@@ -534,7 +534,7 @@ impl CapturedRootOverrides {
         selected_version: Option<&str>,
         linked: bool,
     ) -> Result<()> {
-        let Some(replacement) = self.replacement(installed_as, request) else {
+        let Some(replacement) = self.replacement(installed_as, request)? else {
             return Ok(());
         };
         ensure!(
@@ -868,7 +868,7 @@ fn inspect_with_installation(
         report.scope.push_str(if source == "bun.lock" {
             "; captured root scalar Bun overrides/resolutions applied; contextual and source-replacement override rules require explicit review"
         } else {
-            "; captured root scalar npm overrides applied (including explicit registry aliases); contextual and nonregistry source-replacement override rules require explicit review"
+            "; captured root scalar npm overrides applied (including explicit registry aliases); version-qualified selectors use original dependency ranges; nested, overlapping and nonregistry source-replacement override rules require explicit review"
         });
     }
     time_remaining(deadline)?;

@@ -468,9 +468,11 @@ impl DependencyTopology {
             for &edge_index in &outgoing[index] {
                 let edge = &self.edges[edge_index];
                 #[cfg(target_os = "linux")]
-                let replacement = self.override_authority.as_ref().and_then(|authority| {
+                let replacement = self.override_authority.as_ref().map(|authority| {
                     authority.replacement(&edge.dependency_name, &edge.requested_range)
-                });
+                }).transpose().map_err(|error| ModuleResolutionGraphError::InvalidMetadata {
+                    detail: format!("dependency override selection: {error:#}"),
+                })?.flatten();
                 #[cfg(not(target_os = "linux"))]
                 let replacement: Option<&str> = None;
                 let package_name = requested_package_name(
@@ -952,6 +954,71 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn version_selected_trust_overrides_bind_original_ranges_and_frozen_pins() {
+        let root = fixture(json!({
+            "node_modules/first":{"version":"1.0.0","dependencies":{"child":"npm:original@^1"}},
+            "node_modules/second":{"version":"1.0.0","dependencies":{"child":"^3"}},
+            "node_modules/child":{"name":"@patched/child","version":"2.1.0"},
+            "node_modules/second/node_modules/child":{"version":"4.1.0"}
+        }));
+        let manifest = json!({"dependencies":{"first":"1","second":"1"},"overrides":{
+            "child@^1":"npm:@patched/child@^2","child@^3":"^4","unused@^1":"2"}});
+        put(root.path(), "package.json", manifest.clone());
+        let topology = build(root.path()).unwrap();
+        let dependencies = topology.trust_dependencies(".", false).unwrap();
+        let first = dependencies.iter().find(|entry| entry.package_name == "@patched/child").unwrap();
+        assert_eq!(first.requested_range, "npm:original@^1");
+        assert_eq!(first.override_request.as_deref(), Some("npm:@patched/child@^2"));
+        assert_eq!(first.target.as_deref(), Some("node_modules/child"));
+        let second = dependencies.iter().find(|entry| entry.package_name == "child").unwrap();
+        assert_eq!(second.requested_range, "^3");
+        assert_eq!(second.override_request.as_deref(), Some("^4"));
+        assert_eq!(second.target.as_deref(), Some("node_modules/second/node_modules/child"));
+
+        // Selection never reopens a workspace or derives its rule from the
+        // final replacement version. Unused qualified authority is still bound.
+        let mut changed = manifest;
+        changed["overrides"]["unused@^1"] = json!("3");
+        put(root.path(), "package.json", changed);
+        assert_ne!(topology.canonical_hash(), build(root.path()).unwrap().canonical_hash());
+        put(root.path(), "package-lock.json", json!({"lockfileVersion":3,"packages":{
+            "node_modules/first":{"version":"1.0.0","dependencies":{"child":"npm:original@^1"}},
+            "node_modules/second":{"version":"1.0.0","dependencies":{"child":"^3"}},
+            "node_modules/child":{"name":"@patched/child","version":"1.9.0"},
+            "node_modules/second/node_modules/child":{"version":"4.1.0"}
+        }}));
+        assert!(build(root.path()).unwrap().trust_dependencies(".", false).is_err());
+        assert_eq!(dependencies, topology.trust_dependencies(".", false).unwrap());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn version_selected_trust_overrides_reject_order_dependent_and_opaque_requests() {
+        for (rules, request) in [
+            (json!({"child@1":"2","child@3":"4"}), "1 || 3"),
+            (json!({"child@1":"*","child@3":"4"}), "1 || 3"),
+            (json!({"child@1":"2"}), "latest"),
+        ] {
+            let root = fixture(json!({
+                "node_modules/a":{"version":"1.0.0","dependencies":{"child":request}},
+                "node_modules/child":{"version":"2.0.0"}
+            }));
+            put(root.path(), "package.json", json!({"dependencies":{"a":"1"},"overrides":rules}));
+            let error = build(root.path()).unwrap().trust_dependencies(".", false).unwrap_err();
+            assert!(error.to_string().contains("override"), "{rules}: {error}");
+        }
+        for rules in [
+            json!({"child":"2","child@1":"2"}),
+            json!({"child@^1":"2","child@>=1 <3":"3"}),
+        ] {
+            let root = fixture(json!({}));
+            put(root.path(), "package.json", json!({"overrides":rules}));
+            assert!(build(root.path()).is_err(), "{rules}");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn topology_override_hash_binds_unused_rules_noops_and_reference_results() {
         let root = fixture(json!({
             "node_modules/a":{"version":"1.0.0","dependencies":{"child":"^1"}},
@@ -1067,7 +1134,7 @@ mod tests {
     fn trust_override_authority_rejects_partial_rules_conflicts_and_excluded_contexts() {
         for rules in [
             json!({"child":"npm:@patched/child@^2","unused":{"nested":"1"}}),
-            json!({"child":"npm:@patched/child@^2","unused@^1":"2"}),
+            json!({"child":"npm:@patched/child@^2","unused@latest":"2"}),
             json!({"child":"npm:@patched/child@^2","unused":"$missing"}),
             json!({"child":"npm:@patched/child@^2","unused":"npm:fork@latest"}),
             json!({"a":"npm:another-a@^1"}),

@@ -36,6 +36,10 @@ pub(super) fn supports_range(request: &str) -> bool {
     versions::supports_range(request)
 }
 
+pub(super) fn ranges_intersect(left: &str, right: &str) -> Option<bool> {
+    versions::intersects(left, right)
+}
+
 pub(super) fn version_review(
     request: Option<&str>,
     locked_version: Option<&str>,
@@ -81,7 +85,7 @@ impl Admission<'_> {
             "transitive dependency edge limit exceeded"
         );
         let declared = alias(edge.installed_as, Some(edge.request))?;
-        let request = self.overrides.apply(edge.installed_as, edge.request);
+        let request = self.overrides.apply(edge.installed_as, edge.request)?;
         let (actual, requirement) = if request == edge.request {
             declared
         } else {

@@ -16,6 +16,34 @@ metadata is not followed. A root or selected workspace `bun.lockb` is explicitly
 refused, including empty, linked and nonregular inputs; it is never silently
 ignored as though the project had no dependency authority.
 
+## npm root override admission
+
+Captured root scalar `overrides` can select registry versions or explicit
+registry forks, with `$dependency` references and npm's exact-spec `EOVERRIDE`
+check for direct dependencies. Version-qualified keys such as
+`"vulnerable@^1": "npm:@maintained/fork@^2"` select from the original declared
+range using bounded npm range-intersection semantics. The replacement pin does
+not decide whether its own override applies. npm lock versions 1, 2 and 3 share
+this interpretation, including scoped aliases and distinct hoisted or nested
+installation positions. Installed manifests must match both the recorded
+identity and the effective replacement. Linux trust dependency queries reuse
+the same captured authority and retain the original request in their reports.
+
+Same-name selectors must not overlap, and a broad original request cannot match
+multiple disjoint selectors. Literal empty/`*` no-op rules still participate in
+ambiguity detection. No more than 64 selectors per package are accepted, and
+range comparison work has a separate bound. Unsupported or unused malformed
+rules cannot leave a supported prefix active. Nested ancestor-dependent rules,
+opaque requests requiring version comparison, version-selected workspace file links,
+tags, nonregistry replacements, and bundled or nested-shrinkwrapped contexts
+remain explicit review cases. Only root rules supply authority; installed and
+workspace `overrides` fields do not replace it.
+
+The contract follows [npm's overrides documentation](https://docs.npmjs.com/cli/v11/configuring-npm/package-json/#overrides).
+Regression expectations were checked against actual npm Arborist 9.2.0
+installation graphs and node-semver 7.7.3. This admission does not establish
+registry archive authentication or native execution compatibility.
+
 ## Bun text-lock admission
 
 Bun text-lock versions 1 and 2 can supply the logical graph for registry packages
