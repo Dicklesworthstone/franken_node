@@ -417,7 +417,19 @@ expression: matrix
       "last_action_id": null,
       "node_health": "healthy",
       "quarantine_version": 0,
-      "poll_timestamp": "[poll_timestamp]"
+      "poll_timestamp": "[poll_timestamp]",
+      "native_session_drain": {
+        "applied_actions": {
+          "action_count": 0,
+          "actions_sha256": "[actions-sha256]"
+        },
+        "session_set_sha256": "c08b564628e366dbce9517c06ee043f37a9e14cc7c70b1a8925e1d063ce5c14a",
+        "admitted_sessions": 0,
+        "terminal_sessions": 0,
+        "pending_sessions": 0,
+        "indeterminate_sessions": 0,
+        "fence_held": false
+      }
     }
   ],
   "trust_card_export": {

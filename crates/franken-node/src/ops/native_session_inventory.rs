@@ -16,6 +16,11 @@ use fsqlite::{Connection, SqliteValue};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::control_plane::fleet_transport::{
+    FleetActionRecord, FleetApplicationCheckpoint, NativeSessionDrainCheckpoint,
+    fleet_action_snapshot_prefix, fleet_application_checkpoint, validate_node_id, validate_zone_id,
+};
+
 use super::engine_dispatcher::{
     HostEffectLedger, NATIVE_EFFECT_INTERRUPTION_EVIDENCE_SCHEMA,
     NATIVE_SESSION_MAX_DIAGNOSTIC_BYTES, NATIVE_SESSION_MAX_EFFECT_WAL_EVENTS,
@@ -24,7 +29,8 @@ use super::engine_dispatcher::{
     RUNTIME_EVIDENCE_CAPTURE_DIR_RELATIVE_PATH, RUNTIME_EVIDENCE_PRODUCT_STATE_DIRECTORY,
     RUNTIME_EVIDENCE_ROOT_KEY_RELATIVE_PATH, RUNTIME_EVIDENCE_STATE_DIRECTORY,
     RuntimeEvidenceIdentityCapture, create_new_runtime_evidence_private_file,
-    ensure_runtime_evidence_directory, load_runtime_evidence_product_root,
+    ensure_runtime_evidence_directory, load_or_create_runtime_evidence_product_root,
+    load_runtime_evidence_product_root, prepare_runtime_evidence_directories,
     read_runtime_evidence_private_file, runtime_evidence_user_state_home,
     validate_runtime_evidence_private_file_metadata,
 };
@@ -41,6 +47,11 @@ const MAX_OUTCOME_BYTES: usize =
 // Reserve the maximum outcome for every pending admission. Recording a
 // terminal/unknown outcome therefore remains possible at admission capacity.
 const MAX_RESERVED_BYTES: usize = crate::capacity_defaults::base::SMALL * 1024 * 1024;
+// Preserve the existing inventory population bound, including historical
+// captures whose project is unknown. UUID spelling is bounded below; allow
+// JSON punctuation and fixed identity/checkpoint metadata without truncation.
+const MAX_DRAIN_BYTES: usize = (MAX_STORED_SESSIONS + MAX_IDENTITY_CAPTURES) * 68 + 64 * 1024;
+const MAX_RETAINED_DRAINS: usize = crate::capacity_defaults::base::STANDARD;
 
 pub(crate) fn fleet_policy_observation_digest(
     policy: &crate::control_plane::fleet_transport::ActiveFleetPolicy,
@@ -70,6 +81,40 @@ pub struct NativeSessionAdmission {
     /// Digest of the exact admitted ActiveFleetPolicy, if one was present.
     /// It is an observation binding, not an action application acknowledgement.
     pub fleet_policy_sha256: Option<String>,
+    /// Parent-authenticated process admission, never inferred from a profile.
+    /// Historical records omit this and cannot establish descendant cleanup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_spawn_authority_granted: Option<bool>,
+}
+
+/// A retained local drain over one exact admitted population. The action
+/// checkpoint binds the validated ordered history; only the fleet agent's separate
+/// application checkpoint establishes that it applied those actions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeSessionDrainReport {
+    pub drain_id: String,
+    pub generation: u64,
+    pub project_root: PathBuf,
+    pub node_id: String,
+    pub zone_id: String,
+    pub session_nonces: Vec<String>,
+    pub checkpoint: NativeSessionDrainCheckpoint,
+    /// Local terminal accounting is not a distributed epoch/barrier proof.
+    pub fleet_quiescence_certified: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredNativeSessionDrain {
+    drain_id: String,
+    generation: u64,
+    project_root: PathBuf,
+    node_id: String,
+    zone_id: String,
+    session_nonces: Vec<String>,
+    actions: FleetApplicationCheckpoint,
+    fence_held: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -526,6 +571,21 @@ fn open_inventory(protected_root: &Path, create: bool) -> Result<Option<Connecti
                 outcome_json TEXT
             );",
         )?;
+        tx.execute(
+            "CREATE TABLE IF NOT EXISTS native_session_drains (
+                drain_id TEXT PRIMARY KEY NOT NULL,
+                project_root TEXT NOT NULL,
+                generation INTEGER NOT NULL,
+                state_json TEXT NOT NULL,
+                UNIQUE(project_root, generation)
+            );",
+        )?;
+        tx.execute(
+            "CREATE TABLE IF NOT EXISTS native_session_admission_serialization (
+                project_root TEXT PRIMARY KEY NOT NULL,
+                transaction_nonce TEXT NOT NULL
+            );",
+        )?;
         tx.commit()?;
     }
     protect_sidecars(protected_root)?;
@@ -563,28 +623,61 @@ pub(crate) struct NativeSessionInventoryGuard {
 }
 
 impl NativeSessionInventoryGuard {
-    pub(crate) fn admit(protected_root: &Path, admission: NativeSessionAdmission) -> Result<Self> {
+    pub(crate) fn admit(
+        protected_root: &Path,
+        admission: NativeSessionAdmission,
+        expected_generation: u64,
+    ) -> Result<Self> {
         ensure_runtime_evidence_directory(protected_root, true)?;
         validate_admission(&admission)?;
         verify_admission_capture(protected_root, &admission)?;
         let admission_json = bounded_json(&admission, MAX_ADMISSION_BYTES)?;
         let connection = retry_snapshot_conflict(|| open_inventory(protected_root, true))?
             .context("native-session inventory was not created")?;
-        retry_snapshot_conflict(|| {
+        let admitted = retry_snapshot_conflict(|| {
             let mut tx = connection.transaction()?;
+            serialize_project_admission(&mut tx, &admission.project_root)?;
+            let drain = latest_drain(&tx, &admission.project_root)?;
+            let admitted = drain.as_ref().is_none_or(|drain| !drain.fence_held)
+                && drain.as_ref().map_or(0, |drain| drain.generation) == expected_generation;
+            // A race after identity provisioning must leave a known unspawned
+            // outcome, rather than an untracked capture or an apparent worker.
+            let outcome = if admitted {
+                SqliteValue::Null
+            } else {
+                SqliteValue::Text(
+                    bounded_json(
+                        &NativeSessionOutcome {
+                            observed_at: Utc::now(),
+                            kind: NativeSessionOutcomeKind::SupervisionIncomplete,
+                            process: NativeSessionProcessObservation::NotSpawned,
+                            containment_empty_observed: false,
+                            effects: NativeSessionEffectObservation::NotStarted,
+                        },
+                        MAX_OUTCOME_BYTES,
+                    )?
+                    .into(),
+                )
+            };
             tx.execute_with_params(
                 "INSERT INTO native_sessions(session_nonce, admission_json, outcome_json)
-                 VALUES (?1, ?2, NULL);",
+                 VALUES (?1, ?2, ?3);",
                 &[
                     SqliteValue::Text(admission.session_nonce.clone().into()),
                     SqliteValue::Text(admission_json.clone().into()),
+                    outcome,
                 ],
             )?;
             check_bounds(&tx)?;
             tx.commit()?;
-            Ok(())
+            Ok(admitted)
         })
         .context("persist native-session admission before worker spawn")?;
+        if !admitted {
+            bail!(
+                "native-session admission crossed a fleet drain fence; no worker was started; retry under the current applied policy"
+            );
+        }
         Ok(Self {
             connection,
             session_nonce: admission.session_nonce,
@@ -686,7 +779,13 @@ impl Drop for NativeSessionInventoryGuard {
 
 fn read_records(connection: &Connection) -> Result<Vec<NativeSessionInventoryRecord>> {
     let mut tx = connection.transaction()?;
-    check_bounds(&tx)?;
+    let records = read_records_in_transaction(&tx)?;
+    tx.commit()?;
+    Ok(records)
+}
+
+fn read_records_in_transaction(tx: &Transaction<'_>) -> Result<Vec<NativeSessionInventoryRecord>> {
+    check_bounds(tx)?;
     let rows = tx.query(&format!(
         "SELECT session_nonce, admission_json, outcome_json FROM native_sessions
          ORDER BY session_nonce ASC LIMIT {};",
@@ -716,8 +815,533 @@ fn read_records(connection: &Connection) -> Result<Vec<NativeSessionInventoryRec
             Ok(NativeSessionInventoryRecord { admission, outcome })
         })
         .collect::<Result<Vec<_>>>()?;
-    tx.commit()?;
     Ok(records)
+}
+
+fn inventory_root() -> Result<PathBuf> {
+    let state_home = runtime_evidence_user_state_home()?;
+    let state_home = match state_home.canonicalize() {
+        Ok(path) => path,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => state_home,
+        Err(error) => return Err(error).context("resolve native-session user state home"),
+    };
+    Ok(state_home
+        .join(RUNTIME_EVIDENCE_PRODUCT_STATE_DIRECTORY)
+        .join(RUNTIME_EVIDENCE_STATE_DIRECTORY))
+}
+
+fn project_key(project_root: &Path) -> Result<&str> {
+    if !project_root.is_absolute()
+        || project_root.components().any(|part| {
+            matches!(
+                part,
+                std::path::Component::ParentDir | std::path::Component::CurDir
+            )
+        })
+    {
+        bail!("native-session drain requires an absolute project identity without traversal");
+    }
+    project_root
+        .to_str()
+        .context("native-session drain project must be UTF-8")
+}
+
+/// Force a write conflict between admission and fence transitions, even if the
+/// storage backend supplies snapshot rather than predicate serializability.
+/// Reading different tables then writing disjoint rows would permit write
+/// skew: a worker could otherwise be absent from a concurrently sealed census.
+fn serialize_project_admission(tx: &mut Transaction<'_>, project_root: &Path) -> Result<()> {
+    let key = SqliteValue::Text(project_key(project_root)?.to_owned().into());
+    tx.execute_with_params(
+        "INSERT OR IGNORE INTO native_session_admission_serialization(project_root, transaction_nonce)
+         VALUES (?1, ?2);",
+        &[key.clone(), SqliteValue::Text(uuid::Uuid::now_v7().to_string().into())],
+    )?;
+    tx.execute_with_params(
+        "UPDATE native_session_admission_serialization SET transaction_nonce = ?1
+         WHERE project_root = ?2;",
+        &[
+            SqliteValue::Text(uuid::Uuid::now_v7().to_string().into()),
+            key,
+        ],
+    )?;
+    Ok(())
+}
+
+fn latest_drain(
+    tx: &Transaction<'_>,
+    project_root: &Path,
+) -> Result<Option<StoredNativeSessionDrain>> {
+    let key = project_key(project_root)?;
+    if tx.query(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'native_session_drains';",
+    )?.is_empty() {
+        return Ok(None);
+    }
+    let rows = tx.query_with_params(
+        "SELECT drain_id, generation, state_json FROM native_session_drains
+         WHERE project_root = ?1 ORDER BY generation DESC LIMIT 1;",
+        &[SqliteValue::Text(key.to_owned().into())],
+    )?;
+    let Some(row) = rows.first() else {
+        return Ok(None);
+    };
+    let [
+        SqliteValue::Text(id),
+        SqliteValue::Integer(generation),
+        json,
+    ] = row.values()
+    else {
+        bail!("native-session drain row shape is invalid");
+    };
+    let drain: StoredNativeSessionDrain = parse_json(json, MAX_DRAIN_BYTES)?;
+    if drain.drain_id != id.as_ref()
+        || i64::try_from(drain.generation)? != *generation
+        || drain.project_root != project_root
+        || drain.generation == 0
+        || drain.session_nonces.len() > MAX_STORED_SESSIONS + MAX_IDENTITY_CAPTURES
+        || drain
+            .session_nonces
+            .windows(2)
+            .any(|pair| pair[0] >= pair[1])
+    {
+        bail!("native-session drain identity or population is inconsistent");
+    }
+    uuid::Uuid::parse_str(&drain.drain_id)?;
+    validate_node_id(&drain.node_id)?;
+    validate_zone_id(&drain.zone_id)?;
+    for nonce in &drain.session_nonces {
+        uuid::Uuid::parse_str(nonce)?;
+        if nonce.len() > 64 {
+            bail!("native-session drain nonce exceeds its identity bound");
+        }
+    }
+    drain.actions.validate()?;
+    Ok(Some(drain))
+}
+
+fn admission_ticket_at(protected_root: &Path, project_root: &Path) -> Result<u64> {
+    let Some(connection) = open_inventory(protected_root, false)? else {
+        return Ok(0);
+    };
+    let mut tx = connection.transaction()?;
+    let drain = latest_drain(&tx, project_root)?;
+    tx.commit()?;
+    if let Some(drain) = &drain
+        && drain.fence_held
+    {
+        bail!(
+            "native-session admission is fenced by local fleet drain {}",
+            drain.drain_id
+        );
+    }
+    Ok(drain.map_or(0, |drain| drain.generation))
+}
+
+/// Capture this before the final policy/trust recheck. Admission compares the
+/// generation in the same transaction that records the worker obligation.
+/// An active fence also makes the existing live observer cancel old workers.
+pub(crate) fn native_session_admission_ticket(project_root: &Path) -> Result<u64> {
+    let root = inventory_root()?;
+    match std::fs::symlink_metadata(&root) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error).context("inspect native-session admission fence"),
+        Ok(_) => {}
+    }
+    ensure_runtime_evidence_directory(root.parent().context("missing product state root")?, true)?;
+    ensure_runtime_evidence_directory(&root, true)?;
+    admission_ticket_at(&root, project_root)
+}
+
+fn drain_report(
+    drain: &StoredNativeSessionDrain,
+    records: &[NativeSessionInventoryRecord],
+) -> Result<NativeSessionDrainReport> {
+    let records: BTreeMap<_, _> = records
+        .iter()
+        .map(|record| (record.admission.session_nonce.as_str(), record))
+        .collect();
+    let mut terminal = 0_u64;
+    let mut pending = 0_u64;
+    let mut indeterminate = 0_u64;
+    let mut digest = Sha256::new();
+    digest.update(b"franken-node/local-native-drain-population/v1\0");
+    digest.update(u64::try_from(drain.session_nonces.len())?.to_be_bytes());
+    for nonce in &drain.session_nonces {
+        digest.update(u64::try_from(nonce.len())?.to_be_bytes());
+        digest.update(nonce.as_bytes());
+        let Some(record) = records.get(nonce.as_str()) else {
+            // An old signed identity with no supervisor admission is retained
+            // as unknown; absence of a PID or elapsed time cannot resolve it.
+            indeterminate += 1;
+            continue;
+        };
+        let Some(outcome) = &record.outcome else {
+            pending += 1;
+            continue;
+        };
+        let known_terminal = match (&outcome.process, &outcome.effects) {
+            (
+                NativeSessionProcessObservation::NotSpawned,
+                NativeSessionEffectObservation::NotStarted,
+            ) => true,
+            (
+                NativeSessionProcessObservation::WorkerReaped,
+                NativeSessionEffectObservation::FinalLedgerObserved {
+                    failed_count: 0, ..
+                },
+            ) => {
+                record.admission.process_spawn_authority_granted == Some(false)
+                    || (record.admission.process_spawn_authority_granted == Some(true)
+                        && outcome.containment_empty_observed)
+            }
+            _ => false,
+        };
+        if known_terminal {
+            terminal += 1
+        } else {
+            indeterminate += 1
+        }
+    }
+    let checkpoint = NativeSessionDrainCheckpoint {
+        applied_actions: drain.actions.clone(),
+        session_set_sha256: hex::encode(digest.finalize()),
+        admitted_sessions: u64::try_from(drain.session_nonces.len())?,
+        terminal_sessions: terminal,
+        pending_sessions: pending,
+        indeterminate_sessions: indeterminate,
+        fence_held: drain.fence_held,
+    };
+    checkpoint.validate()?;
+    Ok(NativeSessionDrainReport {
+        drain_id: drain.drain_id.clone(),
+        generation: drain.generation,
+        project_root: drain.project_root.clone(),
+        node_id: drain.node_id.clone(),
+        zone_id: drain.zone_id.clone(),
+        session_nonces: drain.session_nonces.clone(),
+        checkpoint,
+        fleet_quiescence_certified: false,
+    })
+}
+
+fn check_drain_owner(drain: &StoredNativeSessionDrain, node_id: &str, zone_id: &str) -> Result<()> {
+    if drain.node_id != node_id || drain.zone_id != zone_id {
+        bail!("retained native-session drain belongs to a different node/zone identity");
+    }
+    Ok(())
+}
+
+/// One fleet reconciliation owner per canonical local project. The OS releases
+/// this descriptor lock on process exit; retained lock files are never deleted.
+/// Guest admission uses the database fence, not this agent-lifetime lock.
+pub struct LocalNativeSessionAgentGuard {
+    _lock: std::fs::File,
+}
+
+/// Serialize the whole apply/drain/heartbeat loop, not just database updates.
+/// Without this ownership, a paused agent could apply an old release after a
+/// second agent had finished that drain and installed a newer restriction.
+pub fn acquire_local_native_session_agent(
+    project_root: &Path,
+) -> Result<LocalNativeSessionAgentGuard> {
+    let project = project_root
+        .canonicalize()
+        .context("resolve fleet agent project")?;
+    let (key_path, _, root) = prepare_runtime_evidence_directories(&project)?;
+    load_or_create_runtime_evidence_product_root(&key_path)?;
+    acquire_agent_at(&root, &project)
+}
+
+#[cfg(any(unix, windows))]
+fn agent_lock_path(protected_root: &Path, project_root: &Path) -> Result<PathBuf> {
+    let mut hash = Sha256::new();
+    hash.update(b"franken-node/local-native-session-agent/v1\0");
+    hash.update(project_key(project_root)?.as_bytes());
+    Ok(protected_root.join(format!("fleet-agent-{}.lock", hex::encode(hash.finalize()))))
+}
+
+#[cfg(unix)]
+fn acquire_agent_at(
+    protected_root: &Path,
+    project_root: &Path,
+) -> Result<LocalNativeSessionAgentGuard> {
+    let path = agent_lock_path(protected_root, project_root)?;
+    create_new_runtime_evidence_private_file(&path, &[])?;
+    validate_private_path_if_present(&path)?;
+    let observed = std::fs::symlink_metadata(&path)?;
+    let file = {
+        use rustix::fs::{Mode, OFlags, open};
+        use std::os::unix::fs::MetadataExt as _;
+        let file = std::fs::File::from(open(
+            &path,
+            OFlags::RDWR | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::empty(),
+        )?);
+        let opened = file.metadata()?;
+        if observed.dev() != opened.dev()
+            || observed.ino() != opened.ino()
+            || opened.nlink() != 1
+            || opened.uid() != rustix::process::geteuid().as_raw()
+        {
+            bail!("fleet agent ownership file identity changed");
+        }
+        file
+    };
+    validate_runtime_evidence_private_file_metadata(&path, &file.metadata()?)?;
+    file.try_lock().map_err(|error| anyhow::anyhow!(
+        "another fleet agent owns this local project, or its ownership lock is unavailable: {error}"
+    ))?;
+    Ok(LocalNativeSessionAgentGuard { _lock: file })
+}
+
+#[cfg(windows)]
+fn acquire_agent_at(
+    protected_root: &Path,
+    project_root: &Path,
+) -> Result<LocalNativeSessionAgentGuard> {
+    use std::os::windows::fs::{MetadataExt as _, OpenOptionsExt as _};
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    const FILE_SHARE_READ_WRITE: u32 = 0x0000_0003;
+    for directory in [Some(protected_root), protected_root.parent()]
+        .into_iter()
+        .flatten()
+    {
+        if std::fs::symlink_metadata(directory)?.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT
+            != 0
+        {
+            bail!("fleet agent ownership directory must not be a reparse point");
+        }
+    }
+    let path = agent_lock_path(protected_root, project_root)?;
+    create_new_runtime_evidence_private_file(&path, &[])?;
+    validate_private_path_if_present(&path)?;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        // Open the reparse object itself and refuse it below. Disallow delete
+        // sharing so another agent cannot replace this pathname while owned.
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .share_mode(FILE_SHARE_READ_WRITE)
+        .open(&path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        bail!("fleet agent ownership file must be a regular non-reparse file");
+    }
+    validate_runtime_evidence_private_file_metadata(&path, &metadata)?;
+    file.try_lock().map_err(|error| anyhow::anyhow!(
+        "another fleet agent owns this local project, or its ownership lock is unavailable: {error}"
+    ))?;
+    Ok(LocalNativeSessionAgentGuard { _lock: file })
+}
+
+#[cfg(not(any(unix, windows)))]
+fn acquire_agent_at(
+    _protected_root: &Path,
+    _project_root: &Path,
+) -> Result<LocalNativeSessionAgentGuard> {
+    bail!("local native-session agent ownership is unsupported on this platform")
+}
+
+/// Fence admission before applying a changed nonempty fleet snapshot. An
+/// initial empty snapshot records a completed checkpoint without cancellation. The
+/// population is captured atomically with that fence in the admission store.
+/// If a previous drain is still held, return that exact checkpoint unchanged:
+/// the caller must reconcile its matching action-log prefix first. Never apply
+/// a later release and silently discard an older unresolved population.
+pub fn begin_local_native_session_drain(
+    project_root: &Path,
+    node_id: &str,
+    zone_id: &str,
+    checkpoint: &FleetApplicationCheckpoint,
+    action_history: &[FleetActionRecord],
+) -> Result<NativeSessionDrainReport> {
+    let project_root = project_root
+        .canonicalize()
+        .context("resolve native drain project")?;
+    let (key_path, _, root) = prepare_runtime_evidence_directories(&project_root)?;
+    load_or_create_runtime_evidence_product_root(&key_path)?;
+    begin_drain_at(
+        &root,
+        &project_root,
+        node_id,
+        zone_id,
+        checkpoint,
+        action_history,
+    )
+}
+
+fn begin_drain_at(
+    protected_root: &Path,
+    project_root: &Path,
+    node_id: &str,
+    zone_id: &str,
+    checkpoint: &FleetApplicationCheckpoint,
+    action_history: &[FleetActionRecord],
+) -> Result<NativeSessionDrainReport> {
+    validate_node_id(node_id)?;
+    validate_zone_id(zone_id)?;
+    if zone_id == "all" || !valid_digest(&checkpoint.actions_sha256) {
+        bail!("native-session drain requires a concrete zone and a valid action checkpoint");
+    }
+    if fleet_application_checkpoint(action_history, zone_id)? != *checkpoint {
+        bail!("native-session drain checkpoint does not match the supplied action history");
+    }
+    let key = project_key(project_root)?;
+    // Includes old identity captures with unknown projects. The transaction
+    // below also includes every admission committed since this observation.
+    let inventory = retry_snapshot_conflict(|| read_inventory_at(protected_root, None))?;
+    let connection = retry_snapshot_conflict(|| open_inventory(protected_root, true))?
+        .context("native-session drain inventory was not created")?;
+    retry_snapshot_conflict(|| {
+        let mut tx = connection.transaction()?;
+        serialize_project_admission(&mut tx, project_root)?;
+        let previous = latest_drain(&tx, project_root)?;
+        let records = read_records_in_transaction(&tx)?;
+        if let Some(previous) = &previous {
+            check_drain_owner(previous, node_id, zone_id)?;
+            if previous.fence_held || previous.actions == *checkpoint {
+                let report = drain_report(previous, &records)?;
+                tx.commit()?;
+                return Ok(report);
+            }
+            if checkpoint.action_count <= previous.actions.action_count {
+                bail!(
+                    "native-session drain cannot replace completed action history with a stale or contradictory checkpoint"
+                );
+            }
+            fleet_action_snapshot_prefix(action_history, zone_id, &previous.actions).context(
+                "native-session drain history no longer extends the retained completed prefix",
+            )?;
+        }
+        let counts = tx.query("SELECT COUNT(*) FROM native_session_drains;")?;
+        let [row] = counts.as_slice() else {
+            bail!("invalid native drain count")
+        };
+        let [SqliteValue::Integer(count)] = row.values() else {
+            bail!("invalid native drain count")
+        };
+        if usize::try_from(*count)? >= MAX_RETAINED_DRAINS {
+            bail!(
+                "native-session drain history is full; retained obligations will not be discarded"
+            );
+        }
+        let nonces: BTreeSet<_> = records
+            .iter()
+            .filter(|record| record.admission.project_root == project_root)
+            .map(|record| record.admission.session_nonce.clone())
+            .chain(
+                inventory
+                    .untracked_identity_captures
+                    .iter()
+                    .map(|capture| capture.session_nonce.clone()),
+            )
+            .collect();
+        let generation = previous
+            .as_ref()
+            .map_or(0, |drain| drain.generation)
+            .checked_add(1)
+            .context("native-session drain generation exhausted")?;
+        let drain = StoredNativeSessionDrain {
+            drain_id: uuid::Uuid::now_v7().to_string(),
+            generation,
+            project_root: project_root.to_path_buf(),
+            node_id: node_id.to_owned(),
+            zone_id: zone_id.to_owned(),
+            session_nonces: if checkpoint.action_count == 0 {
+                Vec::new()
+            } else {
+                nonces.into_iter().collect()
+            },
+            actions: checkpoint.clone(),
+            fence_held: checkpoint.action_count != 0,
+        };
+        let report = drain_report(&drain, &records)?;
+        tx.execute_with_params(
+            "INSERT INTO native_session_drains(drain_id, project_root, generation, state_json)
+             VALUES (?1, ?2, ?3, ?4);",
+            &[
+                SqliteValue::Text(drain.drain_id.clone().into()),
+                SqliteValue::Text(key.to_owned().into()),
+                SqliteValue::Integer(i64::try_from(generation)?),
+                SqliteValue::Text(bounded_json(&drain, MAX_DRAIN_BYTES)?.into()),
+            ],
+        )?;
+        let sizes = tx.query(
+            "SELECT COALESCE(SUM(LENGTH(CAST(state_json AS BLOB))), 0) FROM native_session_drains;",
+        )?;
+        let [row] = sizes.as_slice() else {
+            bail!("invalid native drain byte count")
+        };
+        let [SqliteValue::Integer(bytes)] = row.values() else {
+            bail!("invalid native drain byte count")
+        };
+        if usize::try_from(*bytes)? > MAX_RESERVED_BYTES {
+            bail!("native-session drain history exceeds its retained byte budget");
+        }
+        tx.commit()?;
+        Ok(report)
+    })
+}
+
+/// Poll the exact retained population after successful action application.
+/// Pending/unknown effects keep the durable fence held across restarts. A
+/// completed report permits new admissions under freshly rechecked controls;
+/// it certifies neither a distributed barrier nor external rollback.
+pub fn finish_local_native_session_drain(
+    project_root: &Path,
+    node_id: &str,
+    zone_id: &str,
+    checkpoint: &FleetApplicationCheckpoint,
+) -> Result<NativeSessionDrainReport> {
+    let project_root = project_root
+        .canonicalize()
+        .context("resolve native drain project")?;
+    let root = inventory_root()?;
+    // Validate retained signed identities before consuming local outcomes.
+    retry_snapshot_conflict(|| read_inventory_at(&root, None))?;
+    finish_drain_at(&root, &project_root, node_id, zone_id, checkpoint)
+}
+
+fn finish_drain_at(
+    protected_root: &Path,
+    project_root: &Path,
+    node_id: &str,
+    zone_id: &str,
+    checkpoint: &FleetApplicationCheckpoint,
+) -> Result<NativeSessionDrainReport> {
+    let connection =
+        open_inventory(protected_root, false)?.context("native-session drain store is absent")?;
+    retry_snapshot_conflict(|| {
+        let mut tx = connection.transaction()?;
+        serialize_project_admission(&mut tx, project_root)?;
+        let mut drain =
+            latest_drain(&tx, project_root)?.context("no retained native-session drain")?;
+        check_drain_owner(&drain, node_id, zone_id)?;
+        if drain.actions != *checkpoint {
+            bail!("native-session drain completion requires its exact retained action checkpoint");
+        }
+        let records = read_records_in_transaction(&tx)?;
+        let report = drain_report(&drain, &records)?;
+        if drain.fence_held
+            && report.checkpoint.pending_sessions == 0
+            && report.checkpoint.indeterminate_sessions == 0
+        {
+            drain.fence_held = false;
+            tx.execute_with_params(
+                "UPDATE native_session_drains SET state_json = ?1 WHERE drain_id = ?2;",
+                &[
+                    SqliteValue::Text(bounded_json(&drain, MAX_DRAIN_BYTES)?.into()),
+                    SqliteValue::Text(drain.drain_id.clone().into()),
+                ],
+            )?;
+        }
+        let report = drain_report(&drain, &records)?;
+        tx.commit()?;
+        Ok(report)
+    })
 }
 
 /// Read this user's protected native-session population. This is a local,
@@ -941,6 +1565,7 @@ mod tests {
             configured_node_id: None,
             fleet_zone_id: None,
             fleet_policy_sha256: None,
+            process_spawn_authority_granted: Some(false),
         }
     }
 
@@ -1033,7 +1658,7 @@ mod tests {
         let root = temp.path().join("runtime-evidence");
         let admission = fixture(&root, 21);
         let nonce = admission.session_nonce.clone();
-        let mut guard = NativeSessionInventoryGuard::admit(&root, admission).unwrap();
+        let mut guard = NativeSessionInventoryGuard::admit(&root, admission, 0).unwrap();
         guard.worker_started();
         // Close the connection without recording an outcome. This exercises
         // reopening durable pending state, not a claim of SIGKILL coverage.
@@ -1052,7 +1677,7 @@ mod tests {
     fn reaped_worker_preserves_unknown_effects_and_outcome_cannot_be_rewritten() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("runtime-evidence");
-        let mut guard = NativeSessionInventoryGuard::admit(&root, fixture(&root, 22)).unwrap();
+        let mut guard = NativeSessionInventoryGuard::admit(&root, fixture(&root, 22), 0).unwrap();
         guard.worker_started();
         guard.worker_reaped();
         guard.finish(
@@ -1093,13 +1718,355 @@ mod tests {
         }
     }
 
+    fn actions(count: u64) -> FleetApplicationCheckpoint {
+        fleet_application_checkpoint(&action_history(count), "prod").unwrap()
+    }
+
+    #[test]
+    fn drain_serialization_preserves_the_entire_existing_inventory_capacity() {
+        let population = MAX_STORED_SESSIONS + MAX_IDENTITY_CAPTURES;
+        let drain = StoredNativeSessionDrain {
+            drain_id: uuid::Uuid::now_v7().to_string(),
+            generation: 1,
+            project_root: PathBuf::from("/retained-project"),
+            node_id: "node-a".to_owned(),
+            zone_id: "prod".to_owned(),
+            // The longest supported UUID spelling must fit too, without
+            // dropping historical identities to accommodate a smaller cap.
+            session_nonces: (0..population)
+                .map(|index| uuid::Uuid::from_u128(index as u128).urn().to_string())
+                .collect(),
+            actions: actions(1),
+            fence_held: true,
+        };
+        let bytes = bounded_json(&drain, MAX_DRAIN_BYTES).unwrap();
+        assert!(
+            bytes.len() > 128 * 1024,
+            "exercise the old accidental lower cap"
+        );
+        let decoded: StoredNativeSessionDrain = serde_json::from_str(&bytes).unwrap();
+        assert_eq!(decoded.session_nonces, drain.session_nonces);
+        let report = drain_report(&decoded, &[]).unwrap();
+        assert_eq!(report.checkpoint.admitted_sessions, population as u64);
+        assert_eq!(report.checkpoint.indeterminate_sessions, population as u64);
+        assert!(report.checkpoint.fence_held);
+    }
+
+    fn action_history(count: u64) -> Vec<FleetActionRecord> {
+        (0..count)
+            .map(|index| FleetActionRecord {
+                action_id: format!("action-{index}"),
+                emitted_at: DateTime::from_timestamp(
+                    1_700_000_000 + i64::try_from(index).unwrap(),
+                    0,
+                )
+                .unwrap(),
+                action: crate::control_plane::fleet_transport::FleetAction::Release {
+                    zone_id: "prod".to_owned(),
+                    incident_id: format!("incident-{index}"),
+                    reason: None,
+                },
+            })
+            .collect()
+    }
+
+    fn begin_drain_at(
+        root: &Path,
+        project: &Path,
+        node: &str,
+        zone: &str,
+        checkpoint: &FleetApplicationCheckpoint,
+    ) -> Result<NativeSessionDrainReport> {
+        super::begin_drain_at(
+            root,
+            project,
+            node,
+            zone,
+            checkpoint,
+            &action_history(checkpoint.action_count),
+        )
+    }
+
+    fn successful_ledger_observation() -> NativeSessionEffectObservation {
+        NativeSessionEffectObservation::FinalLedgerObserved {
+            effect_count: 3,
+            allowed_count: 2,
+            denied_count: 1,
+            failed_count: 0,
+            chain_head_hash: format!("sha256:{}", "a".repeat(64)),
+            ledger_sha256: "b".repeat(64),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn agent_ownership_spans_reconciliation_and_releases_without_removing_history() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("evidence");
+        let admission = fixture(&root, 39);
+        let project = admission.project_root;
+        let first = acquire_agent_at(&root, &project).unwrap();
+        assert!(acquire_agent_at(&root, &project).is_err());
+        let independent = acquire_agent_at(&root, &temp.path().join("another-project")).unwrap();
+        drop(independent);
+        let before = std::fs::read_dir(&root).unwrap().count();
+        drop(first);
+        let _resumed = acquire_agent_at(&root, &project).unwrap();
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), before);
+    }
+
+    #[test]
+    fn drain_fences_admission_and_reopens_only_after_verified_terminal_accounting() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("evidence");
+        let admission = fixture(&root, 31);
+        let project = admission.project_root.clone();
+        let nonce = admission.session_nonce.clone();
+        let mut guard = NativeSessionInventoryGuard::admit(&root, admission, 0).unwrap();
+        guard.worker_started();
+        let started = begin_drain_at(&root, &project, "node-a", "prod", &actions(1)).unwrap();
+        assert_eq!(started.session_nonces, vec![nonce]);
+        assert_eq!(started.checkpoint.pending_sessions, 1);
+        assert!(started.checkpoint.fence_held);
+        assert!(!started.fleet_quiescence_certified);
+        assert!(admission_ticket_at(&root, &project).is_err());
+        let still_pending =
+            finish_drain_at(&root, &project, "node-a", "prod", &actions(1)).unwrap();
+        assert_eq!(still_pending, started);
+
+        guard.worker_reaped();
+        guard.finish(
+            NativeSessionOutcomeKind::ControlStopped,
+            successful_ledger_observation(),
+        );
+        // A new connection sees the durable population and final observation.
+        let completed = finish_drain_at(&root, &project, "node-a", "prod", &actions(1)).unwrap();
+        assert!(completed.checkpoint.is_complete());
+        assert_eq!(completed.checkpoint.terminal_sessions, 1);
+        assert_eq!(
+            completed.checkpoint.session_set_sha256,
+            started.checkpoint.session_set_sha256
+        );
+        assert_eq!(
+            admission_ticket_at(&root, &project).unwrap(),
+            completed.generation
+        );
+        assert_eq!(
+            begin_drain_at(&root, &project, "node-a", "prod", &actions(1)).unwrap(),
+            completed
+        );
+        assert!(!completed.fleet_quiescence_certified);
+
+        // A preflight that began before the drain cannot sneak through after
+        // completion. Its identity is retained as positively never spawned.
+        let stale = fixture(&root, 32);
+        let stale_nonce = stale.session_nonce.clone();
+        assert!(NativeSessionInventoryGuard::admit(&root, stale, 0).is_err());
+        let inventory = read_inventory_at(&root, None).unwrap();
+        let refused = inventory
+            .records
+            .iter()
+            .find(|record| record.admission.session_nonce == stale_nonce)
+            .unwrap();
+        assert_eq!(
+            refused.outcome.as_ref().unwrap().process,
+            NativeSessionProcessObservation::NotSpawned
+        );
+        assert!(inventory.untracked_identity_captures.is_empty());
+        let fresh =
+            NativeSessionInventoryGuard::admit(&root, fixture(&root, 33), completed.generation)
+                .unwrap();
+        drop(fresh);
+        let next = begin_drain_at(&root, &project, "node-a", "prod", &actions(2)).unwrap();
+        assert_eq!(next.generation, completed.generation + 1);
+        assert_eq!(next.checkpoint.admitted_sessions, 3);
+        assert_eq!(next.checkpoint.terminal_sessions, 3);
+        assert!(
+            next.checkpoint.fence_held,
+            "terminal accounting alone must not bypass application"
+        );
+    }
+
+    #[test]
+    fn interrupted_or_failed_effects_hold_the_original_fence_across_newer_actions() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("evidence");
+        let admission = fixture(&root, 34);
+        let project = admission.project_root.clone();
+        let mut guard = NativeSessionInventoryGuard::admit(&root, admission, 0).unwrap();
+        guard.worker_started();
+        let started = begin_drain_at(&root, &project, "node-a", "prod", &actions(1)).unwrap();
+        guard.worker_reaped();
+        let mut ledger = successful_ledger_observation();
+        if let NativeSessionEffectObservation::FinalLedgerObserved {
+            allowed_count,
+            failed_count,
+            ..
+        } = &mut ledger
+        {
+            *failed_count = *allowed_count;
+            *allowed_count = 0;
+        }
+        guard.finish(NativeSessionOutcomeKind::ControlStopped, ledger);
+        let held = finish_drain_at(&root, &project, "node-a", "prod", &actions(1)).unwrap();
+        assert_eq!(held.checkpoint.indeterminate_sessions, 1);
+        assert!(held.checkpoint.fence_held);
+        assert_eq!(held.drain_id, started.drain_id);
+        assert_eq!(
+            begin_drain_at(&root, &project, "node-a", "prod", &actions(2)).unwrap(),
+            held
+        );
+        assert_eq!(
+            begin_drain_at(&root, &project, "node-a", "prod", &actions(0)).unwrap(),
+            held
+        );
+        assert!(finish_drain_at(&root, &project, "node-a", "prod", &actions(2)).is_err());
+        assert!(finish_drain_at(&root, &project, "other-node", "prod", &actions(1)).is_err());
+        assert!(begin_drain_at(&root, &project, "node-a", "other-zone", &actions(2)).is_err());
+        assert!(admission_ticket_at(&root, &project).is_err());
+    }
+
+    #[test]
+    fn historical_or_uncontained_process_authority_cannot_be_promoted_to_terminal() {
+        for (authority, empty, expected_terminal) in [
+            (None, false, false),
+            (None, true, false),
+            (Some(true), false, false),
+            (Some(true), true, true),
+            (Some(false), false, true),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("evidence");
+            let mut admission = fixture(&root, 35);
+            admission.process_spawn_authority_granted = authority;
+            let project = admission.project_root.clone();
+            let mut guard = NativeSessionInventoryGuard::admit(&root, admission, 0).unwrap();
+            guard.worker_started();
+            guard.worker_reaped();
+            if empty {
+                guard.containment_empty();
+            }
+            guard.finish(
+                NativeSessionOutcomeKind::Completed,
+                successful_ledger_observation(),
+            );
+            begin_drain_at(&root, &project, "node-a", "prod", &actions(1)).unwrap();
+            let result = finish_drain_at(&root, &project, "node-a", "prod", &actions(1)).unwrap();
+            assert_eq!(
+                result.checkpoint.is_complete(),
+                expected_terminal,
+                "authority={authority:?} empty={empty}"
+            );
+            assert_eq!(
+                result.checkpoint.indeterminate_sessions,
+                u64::from(!expected_terminal)
+            );
+        }
+    }
+
+    #[test]
+    fn untracked_identity_is_retained_even_when_its_project_is_unknown() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("evidence");
+        let old = fixture(&root, 36);
+        let other_project = temp.path().join("different-project");
+        let started = begin_drain_at(&root, &other_project, "node-a", "prod", &actions(1)).unwrap();
+        assert_eq!(started.session_nonces, vec![old.session_nonce]);
+        assert_eq!(started.checkpoint.indeterminate_sessions, 1);
+        assert_eq!(
+            finish_drain_at(&root, &other_project, "node-a", "prod", &actions(1)).unwrap(),
+            started
+        );
+    }
+
+    #[test]
+    fn initial_empty_snapshot_is_idempotent_but_cannot_erase_later_history() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("evidence");
+        let admission = fixture(&root, 37);
+        let project = admission.project_root.clone();
+        let mut guard = NativeSessionInventoryGuard::admit(&root, admission, 0).unwrap();
+        let empty = begin_drain_at(&root, &project, "node-a", "prod", &actions(0)).unwrap();
+        assert!(empty.checkpoint.is_complete());
+        assert_eq!(empty.checkpoint.admitted_sessions, 0);
+        assert_eq!(
+            begin_drain_at(&root, &project, "node-a", "prod", &actions(0)).unwrap(),
+            empty
+        );
+        guard.finish(
+            NativeSessionOutcomeKind::SupervisionIncomplete,
+            NativeSessionEffectObservation::NotStarted,
+        );
+        begin_drain_at(&root, &project, "node-a", "prod", &actions(1)).unwrap();
+        let completed = finish_drain_at(&root, &project, "node-a", "prod", &actions(1)).unwrap();
+        assert!(completed.checkpoint.is_complete());
+        assert!(begin_drain_at(&root, &project, "node-a", "prod", &actions(0)).is_err());
+        let mut contradictory = actions(1);
+        contradictory.actions_sha256 = "f".repeat(64);
+        assert!(begin_drain_at(&root, &project, "node-a", "prod", &contradictory).is_err());
+        let mut rewritten = action_history(2);
+        rewritten[0].action_id = "rewritten-predecessor".to_owned();
+        let rewritten_checkpoint = fleet_application_checkpoint(&rewritten, "prod").unwrap();
+        assert!(
+            super::begin_drain_at(
+                &root,
+                &project,
+                "node-a",
+                "prod",
+                &rewritten_checkpoint,
+                &rewritten,
+            )
+            .is_err()
+        );
+        assert_eq!(
+            begin_drain_at(&root, &project, "node-a", "prod", &actions(1)).unwrap(),
+            completed,
+            "contradictory longer history must not replace the retained completed checkpoint"
+        );
+    }
+
+    #[test]
+    fn simultaneous_admission_and_fence_never_lose_a_worker_obligation() {
+        for _ in 0..4 {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("evidence");
+            let admission = fixture(&root, 38);
+            let project = admission.project_root.clone();
+            let nonce = admission.session_nonce.clone();
+            // Establish the schema before racing independent connections.
+            open_inventory(&root, true).unwrap();
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+            let start = std::sync::Arc::clone(&barrier);
+            let worker_root = root.clone();
+            let worker = std::thread::spawn(move || {
+                start.wait();
+                match NativeSessionInventoryGuard::admit(&worker_root, admission, 0) {
+                    Ok(guard) => drop(guard),
+                    Err(error) => assert!(format!("{error:#}").contains("drain fence")),
+                }
+            });
+            barrier.wait();
+            let started = begin_drain_at(&root, &project, "node-a", "prod", &actions(1)).unwrap();
+            worker.join().unwrap();
+            assert!(started.session_nonces.contains(&nonce));
+            let finished = finish_drain_at(&root, &project, "node-a", "prod", &actions(1)).unwrap();
+            assert!(finished.checkpoint.is_complete());
+            assert_eq!(finished.checkpoint.admitted_sessions, 1);
+            assert_eq!(finished.checkpoint.terminal_sessions, 1);
+            assert_eq!(
+                finished.checkpoint.session_set_sha256,
+                started.checkpoint.session_set_sha256
+            );
+        }
+    }
+
     #[test]
     fn cooperative_stop_retains_final_ledger_after_reopening_without_certifying_quiescence() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("runtime-evidence");
         let admission = fixture(&root, 30);
         let nonce = admission.session_nonce.clone();
-        let mut guard = NativeSessionInventoryGuard::admit(&root, admission).unwrap();
+        let mut guard = NativeSessionInventoryGuard::admit(&root, admission, 0).unwrap();
         guard.worker_started();
         guard.worker_reaped();
         guard.finish(
@@ -1148,7 +2115,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("runtime-evidence");
         let admission = fixture(&root, 31);
-        let guard = NativeSessionInventoryGuard::admit(&root, admission).unwrap();
+        let guard = NativeSessionInventoryGuard::admit(&root, admission, 0).unwrap();
         let mut outcome = NativeSessionOutcome {
             observed_at: Utc::now(),
             kind: NativeSessionOutcomeKind::ControlStopped,
@@ -1178,7 +2145,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("runtime-evidence");
         let admission = fixture(&root, 32);
-        let guard = NativeSessionInventoryGuard::admit(&root, admission).unwrap();
+        let guard = NativeSessionInventoryGuard::admit(&root, admission, 0).unwrap();
         let outcome = NativeSessionOutcome {
             observed_at: Utc::now(),
             kind: NativeSessionOutcomeKind::Interrupted,
@@ -1230,7 +2197,7 @@ mod tests {
                 detail: "current fleet limits require interruption".to_string(),
             }),
         };
-        let mut guard = NativeSessionInventoryGuard::admit(&root, admission).unwrap();
+        let mut guard = NativeSessionInventoryGuard::admit(&root, admission, 0).unwrap();
         guard.worker_started();
         guard.worker_reaped();
         let mut foreign = evidence.clone();
@@ -1274,7 +2241,7 @@ mod tests {
         let root = temp.path().join("runtime-evidence");
         let tracked = fixture(&root, 23);
         let old_project = tracked.project_root.clone();
-        let _guard = NativeSessionInventoryGuard::admit(&root, tracked).unwrap();
+        let _guard = NativeSessionInventoryGuard::admit(&root, tracked, 0).unwrap();
         let untracked = fixture(&root, 24);
         let report =
             read_inventory_at(&root, Some(&temp.path().join("different-project"))).unwrap();
@@ -1299,7 +2266,7 @@ mod tests {
         let root = temp.path().join("runtime-evidence");
         let mut admission = fixture(&root, 25);
         admission.security_epoch += 1;
-        assert!(NativeSessionInventoryGuard::admit(&root, admission).is_err());
+        assert!(NativeSessionInventoryGuard::admit(&root, admission, 0).is_err());
         assert!(!root.join(INVENTORY_FILE).exists());
     }
 
@@ -1328,7 +2295,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("runtime-evidence");
         let admission = fixture(&root, 26);
-        let guard = NativeSessionInventoryGuard::admit(&root, admission.clone()).unwrap();
+        let guard = NativeSessionInventoryGuard::admit(&root, admission.clone(), 0).unwrap();
         let impossible = NativeSessionOutcome {
             observed_at: Utc::now(),
             kind: NativeSessionOutcomeKind::Completed,

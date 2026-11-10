@@ -1075,8 +1075,40 @@ appear in the same record. Interrupted effect entries retain request commitments
 and the existing incomplete-journal evidence; they do not claim rollback or a
 final host-effect receipt. Earlier identity captures without lifecycle records
 are listed separately, including when a project filter cannot attribute them.
-These records are the retained local population needed for later fleet drain
+These records supply the retained local population for fleet drain
 reconciliation; they do not replace node enrollment or certify a fleet epoch.
+
+With the native engine enabled, `fleet agent` fences new native admissions before
+applying a changed nonempty action snapshot and retains the exact session
+population that must drain. The live supervisor observes that fence through its
+existing cooperative stop path. Admission and fence transitions share a database
+transaction conflict boundary; a run whose final authority check predates the
+fence cannot launch after it. One agent owns reconciliation for each canonical
+local project. The initial empty action snapshot requires no cancellation.
+
+Agent polls and node heartbeats expose `native_session_drain`, including the
+action checkpoint, population digest, terminal/pending/indeterminate counts, and
+`fence_held`. The agent withholds a healthy application acknowledgement until
+the retained population is accounted for and the snapshot's actions have been
+applied. Reaped workers require a verified final effect ledger with no failed
+attempts and either an explicit absence of process-spawn authority or a proven
+empty containment boundary. Missing outcomes, historical identities with no
+lifecycle record, unknown process authority, and unresolved external effects
+keep admission fenced. A completed drain reopens admission under the applied
+policy; polling the same snapshot does not cancel newly admitted work.
+Indeterminate effects currently have no automatic reconciliation path; restarting
+the agent cannot clear those retained obligations.
+
+Agent restart resumes the retained snapshot and population. Later quarantine
+and revocation actions still apply while an older drain is unresolved; releases
+and subsequent policy transitions wait for their own snapshot. Lost, reordered,
+or rewritten action history is refused rather than resetting the fence. This
+also means a legacy file action log cannot be compacted past a retained
+checkpoint; the durable and HTTP action stores retain the required history.
+The checkpoint reports local observations, not a distributed epoch barrier or
+independent fleet-quiescence certificate. Enrolled HTTP nodes bind it to the
+authenticated heartbeat; file and shared-bearer modes retain their existing
+weaker authentication boundaries.
 
 A responsive worker can now finish a cooperative stop requested by live control.
 Its inventory outcome is `control_stopped` only after the supervisor observes

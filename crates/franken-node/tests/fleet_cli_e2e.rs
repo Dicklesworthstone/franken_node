@@ -55,6 +55,37 @@ fn run_cli_with_fleet_state(args: &[&str], fleet_state_dir: &std::path::Path) ->
     run_cli_in_dir_with_fleet_state(&repo_root(), args, fleet_state_dir)
 }
 
+fn runtime_state_home_for_fleet(
+    current_dir: &std::path::Path,
+    fleet_state_dir: &std::path::Path,
+) -> PathBuf {
+    // Keep protected state outside guest projects and alive for spawned agents.
+    // Release/restart scenarios can cross test threads, so key the shared roots
+    // by their unique fleet store rather than the repository or current thread.
+    static ROOTS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::BTreeMap<PathBuf, tempfile::TempDir>>,
+    > = std::sync::OnceLock::new();
+    let key = std::path::absolute(fleet_state_dir).expect("absolute fleet state path");
+    let project = current_dir.canonicalize().expect("guest project path");
+    let mut roots = ROOTS
+        .get_or_init(|| std::sync::Mutex::new(std::collections::BTreeMap::new()))
+        .lock()
+        .expect("fleet runtime state roots");
+    let home = roots
+        .entry(key)
+        .or_insert_with(|| {
+            tempfile::tempdir_in(project.parent().expect("guest project parent"))
+                .expect("external protected runtime state")
+        })
+        .path()
+        .to_path_buf();
+    assert!(
+        !home.starts_with(&project),
+        "protected runtime state must remain outside the guest project"
+    );
+    home
+}
+
 fn run_cli_in_dir_with_fleet_state(
     current_dir: &std::path::Path,
     args: &[&str],
@@ -74,6 +105,10 @@ fn run_cli_in_dir_with_fleet_state_and_env(
         .current_dir(current_dir)
         .args(args)
         .env("FRANKEN_NODE_FLEET_STATE_DIR", fleet_state_dir)
+        .env(
+            "XDG_STATE_HOME",
+            runtime_state_home_for_fleet(current_dir, fleet_state_dir),
+        )
         .env_remove("FRANKEN_NODE_PROFILE")
         .env_remove("FRANKEN_NODE_SECURITY_DECISION_RECEIPT_SIGNING_KEY_PATH")
         .envs(extra_env.iter().copied())
@@ -107,10 +142,32 @@ fn spawn_cli_in_dir_with_fleet_state(
         .current_dir(current_dir)
         .args(args)
         .env("FRANKEN_NODE_FLEET_STATE_DIR", fleet_state_dir)
+        .env(
+            "XDG_STATE_HOME",
+            runtime_state_home_for_fleet(current_dir, fleet_state_dir),
+        )
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .unwrap_or_else(|err| fail_command("failed spawning", args, err))
+}
+
+#[cfg(feature = "engine")]
+fn assert_completed_empty_native_drain(poll: &serde_json::Value, zone_id: &str) {
+    let checkpoint = fleet_application_checkpoint(&[], zone_id).expect("empty action checkpoint");
+    assert_eq!(
+        poll["native_session_drain"],
+        serde_json::json!({
+            "applied_actions": checkpoint,
+            "session_set_sha256": "c08b564628e366dbce9517c06ee043f37a9e14cc7c70b1a8925e1d063ce5c14a",
+            "admitted_sessions": 0,
+            "terminal_sessions": 0,
+            "pending_sessions": 0,
+            "indeterminate_sessions": 0,
+            "fence_held": false,
+        }),
+        "empty native drain must remain bound to the exact zone action checkpoint"
+    );
 }
 
 fn seed_durable_transport(
@@ -2654,6 +2711,26 @@ fn fleet_agent_once_processes_pending_actions_and_exits() {
     let poll: serde_json::Value = serde_json::from_str(lines[0]).expect("poll result");
     assert_eq!(poll["cycle"], 1);
     assert_eq!(poll["node_id"], "agent-node-once");
+    #[cfg(feature = "engine")]
+    {
+        assert_completed_empty_native_drain(&poll, "zone-1");
+        let nodes = seed_durable_transport(&fleet_state_dir)
+            .list_node_statuses()
+            .expect("persisted agent heartbeat");
+        let node = nodes
+            .iter()
+            .find(|node| node.node_id == "agent-node-once")
+            .expect("agent node");
+        let drain = node.native_session_drain.as_ref().expect("persisted drain");
+        assert!(drain.is_complete());
+        assert_eq!(node.applied_actions.as_ref(), Some(&drain.applied_actions));
+        assert_eq!(
+            serde_json::to_value(drain).expect("drain JSON"),
+            poll["native_session_drain"]
+        );
+    }
+    #[cfg(not(feature = "engine"))]
+    assert!(poll.get("native_session_drain").is_none());
 }
 
 #[test]
@@ -5554,6 +5631,11 @@ fn fleet_cli_json_output_matrix_matches_snapshots() {
         "fleet agent once json failed: {}",
         String::from_utf8_lossy(&agent_output.stderr)
     );
+    let agent_polls = jsonl_stdout(&agent_output, "fleet agent once");
+    #[cfg(feature = "engine")]
+    assert_completed_empty_native_drain(&agent_polls[0], "zone-golden-agent");
+    #[cfg(not(feature = "engine"))]
+    assert!(agent_polls[0].get("native_session_drain").is_none());
 
     let trust_card_workspace = tempdir().expect("trust-card tempdir");
     write_fail_closed_cli_config_for_fixture_trust_cards(trust_card_workspace.path());
@@ -5665,7 +5747,7 @@ fn fleet_cli_json_output_matrix_matches_snapshots() {
             "reason": "convergence_timed_out",
         }),
         "agent_once": canonicalize_fleet_reconcile_snapshot(
-            jsonl_stdout(&agent_output, "fleet agent once"),
+            agent_polls,
             &agent_state_dir,
         ),
         "trust_card_export": json_stdout(&trust_card_output, "trust-card export"),
@@ -5686,7 +5768,26 @@ fn fleet_cli_json_output_matrix_matches_snapshots() {
         &matrix["trust_card_show_verified"]
     );
     assert_json_snapshot!("remotecap_verify_json", &matrix["remotecap_verify"]);
+    #[cfg(feature = "engine")]
     assert_json_snapshot!("fleet_cli_json_output_matrix", matrix);
+    #[cfg(not(feature = "engine"))]
+    {
+        // Keep the same full golden contract in engine-free builds, whose
+        // agent intentionally cannot report native supervisor observations.
+        let (_, body) = include_str!("snapshots/fleet_cli_e2e__fleet_cli_json_output_matrix.snap")
+            .split_once("\n---\n")
+            .expect("matrix snapshot metadata boundary");
+        let mut expected: serde_json::Value =
+            serde_json::from_str(body).expect("matrix snapshot JSON");
+        assert!(
+            expected["agent_once"][0]
+                .as_object_mut()
+                .expect("golden agent poll")
+                .remove("native_session_drain")
+                .is_some()
+        );
+        assert_eq!(matrix, expected, "engine-free fleet CLI matrix");
+    }
 }
 
 #[test]

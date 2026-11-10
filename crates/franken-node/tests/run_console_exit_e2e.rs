@@ -1095,6 +1095,7 @@ mod live_native_containment {
         RevokeDependency,
         TightenFleet,
         EquivalentFleetRevision,
+        FleetDrain,
     }
 
     fn process_start_time(pid: u32) -> Option<String> {
@@ -1159,11 +1160,23 @@ mod live_native_containment {
         }
     }
 
-    fn cli(project: &Path, arguments: &[&str]) {
-        let output = Command::new(franken_node_bin())
-            .args(arguments)
+    fn command(project: &Path, state_home: Option<&Path>) -> Command {
+        let mut command = Command::new(franken_node_bin());
+        command
             .env_remove("FRANKEN_NODE_RUNTIME_ALLOW_PROCESS_SHAPE")
-            .current_dir(project)
+            .current_dir(project);
+        if let Some(state_home) = state_home {
+            assert!(!state_home.starts_with(project));
+            command
+                .env("XDG_STATE_HOME", state_home)
+                .env("FRANKEN_NODE_FLEET_STATE_DIR", state_home.join("fleet"));
+        }
+        command
+    }
+
+    fn cli(project: &Path, state_home: Option<&Path>, arguments: &[&str]) -> std::process::Output {
+        let output = command(project, state_home)
+            .args(arguments)
             .output()
             .expect("run operator command");
         assert!(
@@ -1172,6 +1185,54 @@ mod live_native_containment {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr),
         );
+        output
+    }
+
+    fn publish_drain_policy(project: &Path, state_home: &Path, revision: u64) {
+        std::fs::write(
+            project.join("fleet-policy.json"),
+            r#"{"max_instructions":1000000}"#,
+        )
+        .expect("write executable fleet restriction");
+        let output = cli(
+            project,
+            Some(state_home),
+            &[
+                "fleet",
+                "policy",
+                "publish",
+                "--zone",
+                "live-control",
+                "--revision",
+                &revision.to_string(),
+                "--file",
+                "fleet-policy.json",
+                "--json",
+            ],
+        );
+        let published: Value =
+            serde_json::from_slice(&output.stdout).expect("fleet publication JSON");
+        assert_eq!(published["published"], true);
+        assert_eq!(published["activated"], false);
+    }
+
+    fn drain_agent_poll(project: &Path, state_home: &Path) -> Value {
+        let output = cli(
+            project,
+            Some(state_home),
+            &[
+                "fleet",
+                "agent",
+                "--node-id",
+                "live-control-node",
+                "--zone",
+                "live-control",
+                "--once",
+                "--fallback-file-transport",
+                "--json",
+            ],
+        );
+        serde_json::from_slice(&output.stdout).expect("single fleet poll JSON")
     }
 
     fn activate_policy(project: &Path, revision: u64, block_private_network: bool) {
@@ -1207,6 +1268,9 @@ mod live_native_containment {
         const ADMISSION_DEADLINE: Duration = Duration::from_secs(30);
         const CONTROL_DEADLINE: Duration = Duration::from_secs(15);
         let project = tempfile::tempdir().expect("live containment project");
+        let isolated_state = matches!(change, ControlChange::FleetDrain)
+            .then(|| tempfile::tempdir().expect("external native-session state"));
+        let state_home = isolated_state.as_ref().map(tempfile::TempDir::path);
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind real HTTP sink");
         listener.set_nonblocking(true).expect("bounded accept");
         let address = listener.local_addr().expect("HTTP sink address");
@@ -1222,6 +1286,7 @@ mod live_native_containment {
         .expect("real guest with an admitted HTTP effect");
         cli(
             project.path(),
+            state_home,
             &["init", "--profile", "legacy-risky", "--out-dir", "."],
         );
         let config_path = project.path().join("franken_node.toml");
@@ -1246,7 +1311,11 @@ mod live_native_containment {
                 r#"{"name":"live-control-app","version":"1.0.0","dependencies":{"lodash":"4.17.21"}}"#,
             )
             .expect("write admitted dependency inventory");
-            cli(project.path(), &["trust", "scan", ".", "--json"]);
+            cli(
+                project.path(),
+                state_home,
+                &["trust", "scan", ".", "--json"],
+            );
         }
         if matches!(change, ControlChange::EquivalentFleetRevision) {
             activate_policy(project.path(), 1, false);
@@ -1288,7 +1357,7 @@ mod live_native_containment {
             stream.flush()
         });
         let mut child = ProductChild(
-            Command::new(franken_node_bin())
+            command(project.path(), state_home)
                 .args([
                     "run",
                     "app.js",
@@ -1301,8 +1370,6 @@ mod live_native_containment {
                     "--json",
                 ])
                 .env("FRANKEN_ENGINE_TIMEOUT_SECS", "60")
-                .env_remove("FRANKEN_NODE_RUNTIME_ALLOW_PROCESS_SHAPE")
-                .current_dir(project.path())
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
@@ -1360,10 +1427,12 @@ mod live_native_containment {
             }
         }
 
+        let mut first_fleet_drain = None;
         let expected_trigger = match change {
             ControlChange::SafeMode | ControlChange::SafeModeUnresponsiveWorker => {
                 cli(
                     project.path(),
+                    state_home,
                     &[
                         "safe-mode",
                         "enter",
@@ -1379,7 +1448,11 @@ mod live_native_containment {
                 "safe_mode"
             }
             ControlChange::RevokeDependency => {
-                cli(project.path(), &["trust", "revoke", "npm:lodash", "--json"]);
+                cli(
+                    project.path(),
+                    state_home,
+                    &["trust", "revoke", "npm:lodash", "--json"],
+                );
                 "execution_trust"
             }
             ControlChange::TightenFleet => {
@@ -1394,6 +1467,24 @@ mod live_native_containment {
                 std::thread::sleep(Duration::from_secs(1));
                 release_tx.send(()).expect("release allowed HTTP response");
                 ""
+            }
+            ControlChange::FleetDrain => {
+                let state_home = state_home.expect("isolated fleet drain state");
+                publish_drain_policy(project.path(), state_home, 1);
+                let poll = drain_agent_poll(project.path(), state_home);
+                assert_eq!(poll["node_health"], "degraded");
+                let drain = &poll["native_session_drain"];
+                assert_eq!(drain["fence_held"], true);
+                assert_eq!(drain["admitted_sessions"], 1);
+                assert_eq!(drain["terminal_sessions"], 0);
+                assert_eq!(
+                    drain["pending_sessions"].as_u64().unwrap()
+                        + drain["indeterminate_sessions"].as_u64().unwrap(),
+                    1,
+                    "the live request may still be pending or already have its failed ledger"
+                );
+                first_fleet_drain = Some(drain.clone());
+                "fleet_drain"
             }
         };
         let control_started = Instant::now();
@@ -1489,6 +1580,9 @@ mod live_native_containment {
                 ControlChange::TightenFleet => {
                     assert!(detail.contains("effective restrictions"), "{detail}");
                 }
+                ControlChange::FleetDrain => {
+                    assert!(detail.contains("fenced by local fleet drain"), "{detail}");
+                }
                 ControlChange::EquivalentFleetRevision => unreachable!(),
             }
             assert!(
@@ -1541,12 +1635,28 @@ mod live_native_containment {
                         .as_str()
                         .expect("independent product-signed session capture"),
                 );
-                frankenengine_node::ops::engine_dispatcher::verify_recorded_host_effect_ledger(
-                    project.path(),
-                    &ledger,
-                    capture_path,
-                )
-                .expect("retained ledger verifies independently against the product root");
+                if let Some(state_home) = state_home {
+                    // The direct verifier resolves the test process's ambient
+                    // state home. This isolated subprocess instead verifies the
+                    // ledger in its real supervisor; below we independently
+                    // verify the parent's signature binding that exact ledger.
+                    assert!(capture_path.starts_with(state_home));
+                    let retained_capture: Value = serde_json::from_slice(
+                        &std::fs::read(capture_path).expect("retained session identity capture"),
+                    )
+                    .expect("retained identity JSON");
+                    assert_eq!(
+                        retained_capture,
+                        evidence["dispatch"]["runtime_evidence_identity_capture"]
+                    );
+                } else {
+                    frankenengine_node::ops::engine_dispatcher::verify_recorded_host_effect_ledger(
+                        project.path(),
+                        &ledger,
+                        capture_path,
+                    )
+                    .expect("retained ledger verifies independently against the product root");
+                }
             }
             assert!(evidence["receipt"]["incident_capture"].is_null());
             assert_eq!(
@@ -1594,11 +1704,10 @@ mod live_native_containment {
                 assert!(verify_evidence_entry(&altered, &verifying_key).is_err());
             }
 
-            let inventory_output = Command::new(franken_node_bin())
+            let inventory_output = command(project.path(), state_home)
                 .args(["fleet", "sessions", "--project"])
                 .arg(project.path())
                 .arg("--json")
-                .current_dir(project.path())
                 .output()
                 .expect("reopen retained native-session inventory in a new process");
             assert!(inventory_output.status.success());
@@ -1633,6 +1742,55 @@ mod live_native_containment {
                 assert_eq!(
                     retained["outcome"]["effects"]["chain_head_hash"],
                     evidence["verified_final_host_effect_ledger"]["chain_head_hash"]
+                );
+            }
+            if let Some(first_drain) = first_fleet_drain {
+                let state_home = state_home.expect("isolated fleet drain state");
+                let restarted = drain_agent_poll(project.path(), state_home);
+                assert_eq!(restarted["node_health"], "degraded");
+                let drain = &restarted["native_session_drain"];
+                assert_eq!(drain["applied_actions"], first_drain["applied_actions"]);
+                assert_eq!(
+                    drain["session_set_sha256"],
+                    first_drain["session_set_sha256"]
+                );
+                assert_eq!(drain["fence_held"], true);
+                assert_eq!(drain["admitted_sessions"], 1);
+                assert_eq!(drain["terminal_sessions"], 0);
+                assert_eq!(drain["pending_sessions"], 0);
+                assert_eq!(drain["indeterminate_sessions"], 1);
+
+                std::fs::write(
+                    project.path().join("refused.js"),
+                    "require('fs').writeFileSync('refused.marker', 'unexpected');",
+                )
+                .expect("write admission refusal probe");
+                let refused = command(project.path(), Some(state_home))
+                    .args([
+                        "run",
+                        "refused.js",
+                        "--policy",
+                        "legacy-risky",
+                        "--runtime",
+                        "franken-engine",
+                        "--engine-bin",
+                        franken_node_bin(),
+                        "--json",
+                    ])
+                    .output()
+                    .expect("attempt admission after agent restart");
+                assert!(!refused.status.success());
+                assert!(!project.path().join("refused.marker").exists());
+                let refusal = format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&refused.stdout),
+                    String::from_utf8_lossy(&refused.stderr)
+                );
+                assert!(refusal.contains("fenced by local fleet drain"), "{refusal}");
+                assert_eq!(
+                    drain_agent_poll(project.path(), state_home)["native_session_drain"],
+                    *drain,
+                    "a refused new run cannot erase or enlarge the retained obligation"
                 );
             }
         }
@@ -1672,6 +1830,109 @@ mod live_native_containment {
     #[test]
     fn equivalent_fleet_revision_preserves_an_already_running_native_session() {
         assert_native_session_observes_control(ControlChange::EquivalentFleetRevision);
+    }
+
+    #[test]
+    fn fleet_drain_stops_native_io_and_retains_failed_effect_fence_across_restart() {
+        assert_native_session_observes_control(ControlChange::FleetDrain);
+    }
+
+    #[test]
+    fn completed_fleet_drain_reopens_native_admission_and_tracks_the_next_action_population() {
+        let project = tempfile::tempdir().expect("native drain project");
+        let state_home = tempfile::tempdir().expect("external persistent native-session state");
+        cli(
+            project.path(),
+            Some(state_home.path()),
+            &["init", "--profile", "legacy-risky", "--out-dir", "."],
+        );
+        let mut first_drain = None;
+        for (revision, marker) in [(1, "first.marker"), (2, "second.marker")] {
+            std::fs::write(
+                project.path().join("app.js"),
+                format!("require('fs').writeFileSync('{marker}', 'native-effect');"),
+            )
+            .expect("write real native filesystem guest");
+            let output = cli(
+                project.path(),
+                Some(state_home.path()),
+                &[
+                    "run",
+                    "app.js",
+                    "--policy",
+                    "legacy-risky",
+                    "--runtime",
+                    "franken-engine",
+                    "--engine-bin",
+                    franken_node_bin(),
+                    "--json",
+                ],
+            );
+            let report = last_json_document(&String::from_utf8_lossy(&output.stdout));
+            assert_eq!(report["success"], true);
+            assert_eq!(
+                std::fs::read(project.path().join(marker)).unwrap(),
+                b"native-effect"
+            );
+            let ledger = &report["dispatch"]["host_effect_ledger"];
+            assert!(ledger["allowed_count"].as_u64().unwrap() >= 1);
+            assert_eq!(ledger["failed_count"], 0);
+            assert_eq!(ledger["denied_count"], 0);
+            if let Some(first_drain) = &first_drain {
+                assert_eq!(
+                    &drain_agent_poll(project.path(), state_home.path())["native_session_drain"],
+                    first_drain,
+                    "the completed checkpoint must remain idempotent after a new admission"
+                );
+            }
+
+            publish_drain_policy(project.path(), state_home.path(), revision);
+            let poll = drain_agent_poll(project.path(), state_home.path());
+            assert_eq!(poll["node_health"], "healthy");
+            let drain = &poll["native_session_drain"];
+            assert_eq!(drain["applied_actions"]["action_count"], revision);
+            assert_eq!(drain["admitted_sessions"], revision);
+            assert_eq!(drain["terminal_sessions"], revision);
+            assert_eq!(drain["pending_sessions"], 0);
+            assert_eq!(drain["indeterminate_sessions"], 0);
+            assert_eq!(drain["fence_held"], false);
+            assert_eq!(
+                drain_agent_poll(project.path(), state_home.path())["native_session_drain"],
+                *drain,
+                "restarting the agent must preserve the completed checkpoint"
+            );
+            if let Some(first_drain) = first_drain.as_ref() {
+                assert_ne!(
+                    drain["session_set_sha256"],
+                    first_drain["session_set_sha256"]
+                );
+                assert_ne!(drain["applied_actions"], first_drain["applied_actions"]);
+            } else {
+                first_drain = Some(drain.clone());
+            }
+        }
+        let inventory_output = cli(
+            project.path(),
+            Some(state_home.path()),
+            &["fleet", "sessions", "--project", ".", "--json"],
+        );
+        let inventory: Value =
+            serde_json::from_slice(&inventory_output.stdout).expect("retained native census");
+        assert_eq!(inventory["quiescence_certified"], false);
+        assert_eq!(inventory["unknown_effect_sessions"], 0);
+        let records = inventory["records"].as_array().unwrap();
+        assert_eq!(records.len(), 2);
+        for record in records {
+            assert_eq!(record["outcome"]["process"], "worker_reaped");
+            assert_eq!(
+                record["admission"]["process_spawn_authority_granted"],
+                false
+            );
+            assert_eq!(
+                record["outcome"]["effects"]["kind"],
+                "final_ledger_observed"
+            );
+        }
     }
 }
 

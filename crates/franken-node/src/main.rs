@@ -28839,6 +28839,10 @@ pub struct FleetAgentPollResult {
     pub node_health: String,
     pub quarantine_version: u64,
     pub poll_timestamp: String,
+    /// Local admitted-session drain, separate from policy application and
+    /// distributed epoch/quiescence certification.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_session_drain: Option<control_plane::fleet_transport::NativeSessionDrainCheckpoint>,
 }
 
 #[derive(Debug, Clone)]
@@ -29332,6 +29336,10 @@ fn run_fleet_agent(args: &FleetAgentArgs) -> Result<()> {
     let shutdown_requested = install_fleet_agent_shutdown_flag()?;
     let resolved = resolve_fleet_agent_args(args)?;
     let poll_interval = std::time::Duration::from_secs(resolved.poll_interval_secs);
+    #[cfg(feature = "engine")]
+    let _native_agent_guard =
+        ops::native_session_inventory::acquire_local_native_session_agent(Path::new("."))
+            .context("another fleet agent owns this project's native reconciliation")?;
     let (_, _state_dir, mut transport) = open_fleet_transport(Path::new("."))?;
     let transport_kind = transport.kind();
 
@@ -29444,9 +29452,33 @@ fn run_fleet_agent(args: &FleetAgentArgs) -> Result<()> {
         let actions = transport
             .list_actions()
             .map_err(|err| anyhow::anyhow!("failed listing fleet actions: {err}"))?;
+        let latest_actions = actions.clone();
 
         let expected_checkpoint = fleet_application_checkpoint(&actions, &resolved.zone_id)
             .map_err(|err| anyhow::anyhow!("invalid fleet action snapshot: {err}"))?;
+        // The fence and its admitted population share the worker admission
+        // transaction. A restarted agent first finishes the retained snapshot;
+        // a newer release cannot erase an older unresolved drain.
+        #[cfg(feature = "engine")]
+        let mut native_drain = ops::native_session_inventory::begin_local_native_session_drain(
+            Path::new("."),
+            &resolved.node_id,
+            &resolved.zone_id,
+            &expected_checkpoint,
+            &actions,
+        )
+        .context("failed establishing native-session admission fence")?;
+        #[cfg(feature = "engine")]
+        let actions = control_plane::fleet_transport::fleet_action_snapshot_prefix(
+            &actions,
+            &resolved.zone_id,
+            &native_drain.checkpoint.applied_actions,
+        )
+        .context(
+            "the retained native-session drain requires its exact coordinator action prefix",
+        )?;
+        #[cfg(feature = "engine")]
+        let expected_checkpoint = native_drain.checkpoint.applied_actions.clone();
         let retained_ids: BTreeSet<&str> = actions
             .iter()
             .map(|action| action.action_id.as_str())
@@ -29559,7 +29591,7 @@ fn run_fleet_agent(args: &FleetAgentArgs) -> Result<()> {
                     &resolved.zone_id,
                     zone_id,
                     incident_id,
-                    &actions,
+                    &latest_actions,
                     now_secs,
                 ) {
                     Ok(released_extensions) => {
@@ -29652,6 +29684,92 @@ fn run_fleet_agent(args: &FleetAgentArgs) -> Result<()> {
             seen_action_ids.insert(action.action_id.clone());
         }
 
+        #[cfg(feature = "engine")]
+        for action in latest_actions
+            .iter()
+            .filter(|record| {
+                fleet_action_applies_to_zone(
+                    persisted_fleet_action_zone(&record.action),
+                    &resolved.zone_id,
+                )
+            })
+            .skip(usize::try_from(expected_checkpoint.action_count)?)
+        {
+            // A pending older drain must not defer newly received containment.
+            // Apply only additive restrictions here. Releases and policy
+            // transitions still wait for their own retained snapshot/fence.
+            let result = match &action.action {
+                PersistedFleetAction::Quarantine {
+                    zone_id,
+                    incident_id,
+                    target_id,
+                    quarantine_version: version,
+                    ..
+                } => apply_fleet_quarantine_action(
+                    Path::new("."),
+                    zone_id,
+                    incident_id,
+                    target_id,
+                    now_secs,
+                )
+                .map(|_| quarantine_version = quarantine_version.max(*version)),
+                #[cfg(feature = "control-plane")]
+                PersistedFleetAction::Revoke {
+                    extension_id,
+                    scope,
+                } => apply_fleet_revoke_action(Path::new("."), extension_id, scope, now_secs)
+                    .map(|_| ()),
+                _ => continue,
+            };
+            if let Err(error) = result {
+                node_health = NodeHealth::Degraded;
+                tracing::error!(node_id = resolved.node_id.as_str(),
+                    action_id = action.action_id.as_str(), %error,
+                    "fleet agent failed applying containment beyond retained native drain");
+                if !resolved.json {
+                    eprintln!(
+                        "fleet agent: pending-drain containment {} failed: {error}",
+                        action.action_id
+                    );
+                }
+            }
+        }
+
+        #[cfg(feature = "engine")]
+        let native_session_drain = {
+            // Do not open admission until every action in this exact snapshot
+            // applied successfully and all retained local obligations drained.
+            if node_health == NodeHealth::Healthy {
+                match ops::native_session_inventory::finish_local_native_session_drain(
+                    Path::new("."),
+                    &resolved.node_id,
+                    &resolved.zone_id,
+                    &expected_checkpoint,
+                ) {
+                    Ok(report) => native_drain = report,
+                    Err(error) => {
+                        node_health = NodeHealth::Degraded;
+                        tracing::error!(node_id = resolved.node_id.as_str(), %error,
+                            "fleet agent could not finalize native-session drain");
+                        if !resolved.json {
+                            eprintln!(
+                                "fleet agent: native-session admission remains fenced: {error}"
+                            );
+                        }
+                    }
+                }
+            }
+            if !native_drain.checkpoint.is_complete() {
+                node_health = NodeHealth::Degraded;
+            }
+            // A retained completed drain must not be republished as a fresh
+            // application acknowledgement when reconciliation now failed.
+            (node_health == NodeHealth::Healthy || native_drain.checkpoint.fence_held)
+                .then_some(native_drain.checkpoint)
+        };
+        #[cfg(not(feature = "engine"))]
+        let native_session_drain = None;
+
         // Update node status (heartbeat)
         let node_status = NodeStatus {
             zone_id: resolved.zone_id.clone(),
@@ -29661,9 +29779,11 @@ fn run_fleet_agent(args: &FleetAgentArgs) -> Result<()> {
             health: node_health,
             // Each effect persisted before this atomic heartbeat write. A
             // crash before publication causes idempotent reconciliation on
-            // restart. Failure replaces any earlier checkpoint with None.
+            // restart. Failure or an unresolved local drain replaces any
+            // earlier application checkpoint with None. The separate drain
+            // field does not certify a distributed epoch barrier.
             applied_actions: (node_health == NodeHealth::Healthy).then_some(expected_checkpoint),
-            native_session_drain: None,
+            native_session_drain,
         };
         transport
             .upsert_node_status(&node_status)
@@ -29689,6 +29809,7 @@ fn run_fleet_agent(args: &FleetAgentArgs) -> Result<()> {
             .to_string(),
             quarantine_version,
             poll_timestamp: poll_timestamp.to_rfc3339(),
+            native_session_drain: node_status.native_session_drain.clone(),
         };
 
         if resolved.json {
@@ -29702,6 +29823,17 @@ fn run_fleet_agent(args: &FleetAgentArgs) -> Result<()> {
                 result.transport,
                 result.live_control_plane
             );
+            if let Some(drain) = &result.native_session_drain {
+                eprintln!(
+                    "fleet agent: local native drain={:?} admitted={} terminal={} pending={} indeterminate={} admission_fenced={}",
+                    drain.state(),
+                    drain.admitted_sessions,
+                    drain.terminal_sessions,
+                    drain.pending_sessions,
+                    drain.indeterminate_sessions,
+                    drain.fence_held,
+                );
+            }
         }
 
         // Check max_cycles limit

@@ -858,7 +858,7 @@ pub(super) fn runtime_evidence_user_state_home() -> Result<PathBuf> {
 }
 
 #[cfg(feature = "engine")]
-fn prepare_runtime_evidence_directories(
+pub(super) fn prepare_runtime_evidence_directories(
     guest_project_root: &Path,
 ) -> Result<(PathBuf, PathBuf, PathBuf)> {
     let state_home = runtime_evidence_user_state_home()?;
@@ -1071,7 +1071,9 @@ pub(super) fn load_runtime_evidence_product_root(path: &Path) -> Result<ed25519_
 }
 
 #[cfg(feature = "engine")]
-fn load_or_create_runtime_evidence_product_root(path: &Path) -> Result<ed25519_dalek::SigningKey> {
+pub(super) fn load_or_create_runtime_evidence_product_root(
+    path: &Path,
+) -> Result<ed25519_dalek::SigningKey> {
     match std::fs::symlink_metadata(path) {
         Ok(_) => return load_runtime_evidence_product_root(path),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -3773,6 +3775,7 @@ pub enum NativeRunControlKind {
     ExecutionTrust,
     FleetPolicy,
     FleetPolicyChanged,
+    FleetDrain,
     MonitorUnavailable,
 }
 
@@ -3811,6 +3814,12 @@ fn recheck_native_run_controls(
     fleet_high_water: &mut Option<ActiveFleetPolicy>,
     cancelled: &AtomicBool,
 ) -> std::result::Result<(), NativeRunControlTrigger> {
+    crate::ops::native_session_inventory::native_session_admission_ticket(
+        project_paths.project_root(),
+    )
+    .map_err(|error| {
+        NativeRunControlTrigger::new(NativeRunControlKind::FleetDrain, format_args!("{error:#}"))
+    })?;
     crate::runtime::safe_mode::enforce_admitted_run_safe_mode(project_paths.entrypoint())
         .map_err(|error| NativeRunControlTrigger::new(NativeRunControlKind::SafeMode, error))?;
     if cancelled.load(Ordering::Acquire) {
@@ -8512,6 +8521,30 @@ impl EngineDispatcher {
         trust_requirements
             .verify_dependency_capture(project_paths.project_root())
             .context("dependency metadata changed before native-session launch")?;
+        // A drain generation is captured before rechecking live authority and
+        // compared atomically with the admission record. A completed fence
+        // cannot let an older preflight launch after its population was sealed.
+        let admission_generation =
+            crate::ops::native_session_inventory::native_session_admission_ticket(
+                project_paths.project_root(),
+            )?;
+        recheck_native_run_controls(
+            project_paths,
+            config,
+            trust_requirements,
+            &mut fleet_policy.cloned(),
+            &AtomicBool::new(false),
+        )
+        .map_err(|trigger| {
+            anyhow::anyhow!(
+                "native-session final authority check refused {:?}: {}",
+                trigger.kind,
+                trigger.detail
+            )
+        })?;
+        let fleet_policy_sha256 = fleet_policy
+            .map(crate::ops::native_session_inventory::fleet_policy_observation_digest)
+            .transpose()?;
         let ProvisionedRuntimeEvidenceSession {
             grant: runtime_evidence_grant,
             capture_path: evidence_capture_path,
@@ -8532,6 +8565,34 @@ impl EngineDispatcher {
             .to_actionable()
         })?;
         let expected_evidence_capture = runtime_evidence_grant.capture.clone();
+        // Own the captured nonce before any fallible protocol or containment
+        // setup. Ordinary startup failures now persist NotSpawned/NotStarted
+        // instead of leaving a historical capture with unknown supervision.
+        // Admission failure still refuses launch; an abrupt process loss or a
+        // store that cannot record admission remains conservatively unknown.
+        let mut session_inventory = NativeSessionInventoryGuard::admit(
+            &runtime_evidence_state_root,
+            NativeSessionAdmission {
+                session_nonce: nonce.clone(),
+                product_root_key_id: expected_evidence_capture.product_root_key_id.clone(),
+                identity_capture_path: evidence_capture_path.clone(),
+                security_epoch: expected_evidence_capture
+                    .evidence_verification_identity
+                    .key_provenance
+                    .activation_epoch
+                    .as_u64(),
+                admitted_at: Utc::now(),
+                project_root: project_paths.project_root().to_path_buf(),
+                entrypoint: project_paths.entrypoint().to_path_buf(),
+                dependency_ids: trust_requirements.dependency_ids.clone(),
+                configured_node_id: config.fleet.node_id.clone(),
+                fleet_zone_id: fleet_policy.map(|policy| policy.zone_id.clone()),
+                fleet_policy_sha256,
+                process_spawn_authority_granted: Some(process_spawn_admission.is_some()),
+            },
+            admission_generation,
+        )
+        .context("native-session inventory admission failed; worker was not started")?;
         let request = NativeSessionRequest {
             schema_version: NATIVE_SESSION_SCHEMA.to_string(),
             nonce: nonce.clone(),
@@ -8733,33 +8794,6 @@ impl EngineDispatcher {
             }
             .to_actionable()
         })?;
-
-        // Commit the actual nonce-bound population before a child can run.
-        // Failure here is an admission refusal; later persistence failures
-        // retain this unresolved admission without replacing execution errors.
-        let mut session_inventory = NativeSessionInventoryGuard::admit(
-            &runtime_evidence_state_root,
-            NativeSessionAdmission {
-                session_nonce: nonce.clone(),
-                product_root_key_id: expected_evidence_capture.product_root_key_id.clone(),
-                identity_capture_path: evidence_capture_path.clone(),
-                security_epoch: expected_evidence_capture
-                    .evidence_verification_identity
-                    .key_provenance
-                    .activation_epoch
-                    .as_u64(),
-                admitted_at: Utc::now(),
-                project_root: project_paths.project_root().to_path_buf(),
-                entrypoint: project_paths.entrypoint().to_path_buf(),
-                dependency_ids: trust_requirements.dependency_ids.clone(),
-                configured_node_id: config.fleet.node_id.clone(),
-                fleet_zone_id: fleet_policy.map(|policy| policy.zone_id.clone()),
-                fleet_policy_sha256: fleet_policy
-                    .map(crate::ops::native_session_inventory::fleet_policy_observation_digest)
-                    .transpose()?,
-            },
-        )
-        .context("native-session inventory admission failed; worker was not started")?;
 
         let mut child = command.spawn().map_err(|error| {
             EngineDispatchError::EngineExecutionError {
@@ -12853,6 +12887,7 @@ mod tests {
             NativeRunControlKind::ExecutionTrust,
             NativeRunControlKind::FleetPolicy,
             NativeRunControlKind::FleetPolicyChanged,
+            NativeRunControlKind::FleetDrain,
         ] {
             let mut child = Command::new("/bin/sh")
                 .args(["-c", "exit 0"])
@@ -22052,6 +22087,67 @@ mod tests {
             !temp_dir.path().join("setsid.survived").exists()
                 && !temp_dir.path().join("setpgid.survived").exists(),
             "setsid/setpgid descendants must not survive the returned timeout"
+        );
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn oversized_native_request_retains_verified_not_spawned_accounting() {
+        let project = tempfile::tempdir().expect("native request project");
+        let app_path = project.path().join("not-started.js");
+        std::fs::write(&app_path, "console.log('must not run');").expect("write unstarted guest");
+        let project_paths =
+            RunProjectPaths::resolve(&app_path, project.path()).expect("resolve guest authority");
+        let arguments = vec!["x".repeat(NATIVE_SESSION_MAX_REQUEST_BYTES)];
+        let result = EngineDispatcher::run_engine_native_with_timeout(
+            &app_path,
+            &project_paths,
+            &RunTrustRequirements::default(),
+            None,
+            &Config::for_profile(Profile::Balanced),
+            "balanced",
+            &project.path().join("unused-telemetry.sock"),
+            &std::env::current_exe().expect("resolve worker executable"),
+            None,
+            None,
+            &arguments,
+            false,
+            std::time::Duration::from_secs(1),
+        );
+        let error = result.expect_err("oversized request must fail before worker startup");
+        assert!(
+            error.to_string().contains("frame payload exceeded"),
+            "{error}"
+        );
+        let inventory = crate::ops::native_session_inventory::read_local_native_session_inventory(
+            Some(project_paths.project_root()),
+        )
+        .expect("reopen supervision accounting after an ordinary setup failure");
+        assert_eq!(inventory.records.len(), 1);
+        assert_eq!(inventory.unknown_effect_sessions, 0);
+        let record = &inventory.records[0];
+        assert_eq!(
+            record.admission.process_spawn_authority_granted,
+            Some(false)
+        );
+        let outcome = record
+            .outcome
+            .as_ref()
+            .expect("pre-spawn outcome persisted");
+        assert_eq!(
+            outcome.kind,
+            NativeSessionOutcomeKind::SupervisionIncomplete
+        );
+        assert_eq!(
+            outcome.process,
+            crate::ops::native_session_inventory::NativeSessionProcessObservation::NotSpawned
+        );
+        assert_eq!(outcome.effects, NativeSessionEffectObservation::NotStarted);
+        assert!(
+            inventory
+                .untracked_identity_captures
+                .iter()
+                .all(|capture| capture.session_nonce != record.admission.session_nonce)
         );
     }
 
