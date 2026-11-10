@@ -11,14 +11,16 @@
 //! exercised as reopen-after-drop plus the cross-process abort case in
 //! `crash_child_commits_survive_sigkill_style_abort`.
 
-use std::time::Duration;
+use std::{collections::BTreeSet, time::Duration};
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use frankenengine_node::capacity_defaults::aliases::{MAX_ACTION_LOG_ENTRIES, MAX_NODES_CAP};
 use frankenengine_node::control_plane::fleet_transport::{
-    FileFleetTransport, FleetAction, FleetActionRecord, FleetTargetKind, FleetTransport,
-    FleetTransportError, NativeSessionDrainCheckpoint, NativeSessionDrainState, NodeHealth,
-    NodeStatus, fleet_action_snapshot_prefix, fleet_application_checkpoint, validate_node_status,
+    FLEET_SHARED_STATE_SCHEMA, FileFleetTransport, FleetAction, FleetActionRecord,
+    FleetNativeDrainEvidence, FleetNativeDrainReadiness, FleetSharedState, FleetTargetKind,
+    FleetTransport, FleetTransportError, NativeSessionDrainCheckpoint, NativeSessionDrainState,
+    NodeHealth, NodeStatus, fleet_action_snapshot_prefix, fleet_application_checkpoint,
+    fleet_native_drain_evidence, validate_node_status,
 };
 use frankenengine_node::control_plane::fleet_transport_durable::{
     DurableFleetTransport, count_active_quarantine_actions,
@@ -78,6 +80,414 @@ fn completed_drain(node: &NodeStatus) -> NativeSessionDrainCheckpoint {
         indeterminate_sessions: 0,
         fence_held: false,
     }
+}
+
+fn complete_native_drain_state() -> (FleetSharedState, DateTime<Utc>) {
+    let now = DateTime::from_timestamp(1_800_000_000, 0).expect("fixed observation time");
+    let mut wildcard = sample_action("drain-all", "drain-all-incident");
+    wildcard.emitted_at = now - chrono::TimeDelta::seconds(10);
+    if let FleetAction::Quarantine { zone_id, .. } = &mut wildcard.action {
+        *zone_id = "all".to_string();
+    }
+    let mut scoped = sample_action("drain-scoped", "drain-scoped-incident");
+    scoped.emitted_at = now - chrono::TimeDelta::seconds(5);
+    let actions = vec![wildcard, scoped];
+    // The same node ID in two concrete zones is two distinct participants.
+    // Reverse input order so the report must establish canonical ordering.
+    let nodes = ["zone-b", "zone-a"]
+        .into_iter()
+        .map(|zone| {
+            let mut node = sample_node("shared-node");
+            node.zone_id = zone.to_string();
+            node.last_seen = now - chrono::TimeDelta::seconds(1);
+            node.applied_actions =
+                Some(fleet_application_checkpoint(&actions, zone).expect("checkpoint"));
+            node.native_session_drain = Some(completed_drain(&node));
+            node
+        })
+        .collect();
+    (
+        FleetSharedState {
+            schema_version: FLEET_SHARED_STATE_SCHEMA.to_string(),
+            actions,
+            nodes,
+        },
+        now,
+    )
+}
+
+#[test]
+fn native_drain_evidence_requires_current_populations_and_preserves_observation_scope() {
+    let (state, now) = complete_native_drain_state();
+    let original = state.clone();
+    let evidence =
+        fleet_native_drain_evidence(&state, &BTreeSet::new(), now, Duration::from_secs(30))
+            .expect("complete native drain observations");
+    assert!(evidence.complete);
+    assert!(!evidence.fleet_quiescence_certified);
+    assert_eq!(
+        evidence.schema_version,
+        "franken-node/fleet-native-drain-evidence/v1"
+    );
+    assert_eq!(evidence.scope, "local_supervisor_drain_observations");
+    assert_eq!(evidence.observed_at, now);
+    assert_eq!(evidence.action_count, 2);
+    assert!(evidence.uncovered_zones.is_empty());
+    assert_eq!(
+        evidence
+            .nodes
+            .iter()
+            .map(|node| (node.zone_id.as_str(), node.node_id.as_str()))
+            .collect::<Vec<_>>(),
+        vec![("zone-a", "shared-node"), ("zone-b", "shared-node")]
+    );
+    assert_eq!(evidence.nodes[0].expected_actions.action_count, 2);
+    assert_eq!(evidence.nodes[1].expected_actions.action_count, 1);
+    for node in &evidence.nodes {
+        assert!(node.ready);
+        assert_eq!(node.reason, FleetNativeDrainReadiness::Ready);
+        assert_eq!(node.applied_actions.as_ref(), Some(&node.expected_actions));
+        assert!(node.native_session_drain.as_ref().unwrap().is_complete());
+    }
+    let json = serde_json::to_value(&evidence).expect("serialize complete evidence");
+    assert_eq!(
+        json["stale_after"],
+        serde_json::json!({"secs": 30, "nanos": 0})
+    );
+    let restored: FleetNativeDrainEvidence =
+        serde_json::from_value(json).expect("restore the exact evidence");
+    assert_eq!(restored, evidence);
+    assert_eq!(
+        state, original,
+        "observing the gate never mutates fleet state"
+    );
+}
+
+#[test]
+fn native_drain_evidence_keeps_legacy_pending_and_indeterminate_nodes_unready() {
+    let (base, now) = complete_native_drain_state();
+    let mut cases = Vec::new();
+
+    let mut legacy = base.nodes[0].clone();
+    legacy.native_session_drain = None;
+    cases.push((
+        legacy.clone(),
+        FleetNativeDrainReadiness::MissingNativeDrain,
+    ));
+    legacy.applied_actions = None;
+    cases.push((
+        legacy.clone(),
+        FleetNativeDrainReadiness::MissingApplicationCheckpoint,
+    ));
+    legacy.health = NodeHealth::Degraded;
+    cases.push((legacy, FleetNativeDrainReadiness::NodeUnhealthy));
+
+    let mut pending = base.nodes[0].clone();
+    pending.health = NodeHealth::Degraded;
+    pending.applied_actions = None;
+    let drain = pending.native_session_drain.as_mut().unwrap();
+    drain.terminal_sessions = 1;
+    drain.pending_sessions = 1;
+    drain.fence_held = true;
+    cases.push((pending.clone(), FleetNativeDrainReadiness::PendingSessions));
+
+    let mut indeterminate = pending.clone();
+    let drain = indeterminate.native_session_drain.as_mut().unwrap();
+    drain.pending_sessions = 0;
+    drain.indeterminate_sessions = 1;
+    cases.push((
+        indeterminate,
+        FleetNativeDrainReadiness::IndeterminateSessions,
+    ));
+
+    let mut fenced = pending;
+    let drain = fenced.native_session_drain.as_mut().unwrap();
+    drain.terminal_sessions = 2;
+    drain.pending_sessions = 0;
+    cases.push((fenced, FleetNativeDrainReadiness::AdmissionFenced));
+
+    for (node, expected_reason) in cases {
+        let mut state = base.clone();
+        state.nodes[0] = node;
+        let evidence =
+            fleet_native_drain_evidence(&state, &BTreeSet::new(), now, Duration::from_secs(30))
+                .expect("valid incomplete local observations");
+        assert!(!evidence.complete, "{expected_reason:?}");
+        assert!(
+            evidence.nodes[0].ready,
+            "the independent node is still accounted for"
+        );
+        assert!(!evidence.nodes[1].ready);
+        assert_eq!(evidence.nodes[1].reason, expected_reason);
+        assert_eq!(
+            evidence.nodes[1].native_session_drain,
+            state.nodes[0].native_session_drain
+        );
+    }
+}
+
+#[test]
+fn native_drain_evidence_rejects_stale_and_future_heartbeats_at_exact_boundaries() {
+    let (base, now) = complete_native_drain_state();
+    for (last_seen, expected) in [
+        (now, FleetNativeDrainReadiness::Ready),
+        (
+            now - chrono::TimeDelta::milliseconds(29_999),
+            FleetNativeDrainReadiness::Ready,
+        ),
+        (
+            now - chrono::TimeDelta::seconds(30),
+            FleetNativeDrainReadiness::StaleHeartbeat,
+        ),
+        (
+            now + chrono::TimeDelta::nanoseconds(1),
+            FleetNativeDrainReadiness::FutureHeartbeat,
+        ),
+    ] {
+        let mut state = base.clone();
+        state.nodes[0].last_seen = last_seen;
+        let evidence =
+            fleet_native_drain_evidence(&state, &BTreeSet::new(), now, Duration::from_secs(30))
+                .expect("bounded heartbeat observation");
+        assert_eq!(evidence.nodes[1].reason, expected);
+        assert_eq!(
+            evidence.complete,
+            expected == FleetNativeDrainReadiness::Ready
+        );
+    }
+    for threshold in [Duration::ZERO, Duration::MAX] {
+        assert!(fleet_native_drain_evidence(&base, &BTreeSet::new(), now, threshold).is_err());
+    }
+}
+
+#[test]
+fn native_drain_evidence_requires_new_acknowledgements_after_action_changes() {
+    let (base, now) = complete_native_drain_state();
+    let mut appended = base.clone();
+    let mut next = sample_action("drain-new", "drain-new-incident");
+    next.emitted_at = now - chrono::TimeDelta::seconds(60);
+    if let FleetAction::Quarantine { zone_id, .. } = &mut next.action {
+        *zone_id = "all".to_string();
+    }
+    appended.actions.push(next);
+
+    let mut rewritten = base.clone();
+    if let FleetAction::Quarantine { reason, .. } = &mut rewritten.actions[0].action {
+        *reason = "different operator instruction".to_string();
+    }
+    let mut reordered = base.clone();
+    reordered.actions.swap(0, 1);
+    for state in [&appended, &rewritten, &reordered] {
+        let evidence =
+            fleet_native_drain_evidence(state, &BTreeSet::new(), now, Duration::from_secs(30))
+                .expect("old acknowledgements remain visible");
+        assert!(!evidence.complete);
+        assert!(
+            evidence
+                .nodes
+                .iter()
+                .any(|node| { node.reason == FleetNativeDrainReadiness::DrainSnapshotMismatch })
+        );
+    }
+
+    let mut application_only = appended.clone();
+    application_only.nodes[0].native_session_drain = None;
+    let evidence = fleet_native_drain_evidence(
+        &application_only,
+        &BTreeSet::new(),
+        now,
+        Duration::from_secs(30),
+    )
+    .expect("old application-only acknowledgement");
+    assert_eq!(
+        evidence.nodes[1].reason,
+        FleetNativeDrainReadiness::ApplicationSnapshotMismatch
+    );
+
+    for node in &mut appended.nodes {
+        node.applied_actions =
+            Some(fleet_application_checkpoint(&appended.actions, &node.zone_id).unwrap());
+        node.native_session_drain = Some(completed_drain(node));
+    }
+    assert!(
+        fleet_native_drain_evidence(&appended, &BTreeSet::new(), now, Duration::from_secs(30),)
+            .expect("fresh complete observations satisfy the new action snapshot")
+            .complete
+    );
+}
+
+#[test]
+fn native_drain_evidence_refuses_empty_history_and_uncovered_action_scopes() {
+    let (base, now) = complete_native_drain_state();
+    let mut no_actions = base.clone();
+    no_actions.actions.clear();
+    let mut no_nodes = base.clone();
+    no_nodes.nodes.clear();
+    for state in [&no_actions, &no_nodes] {
+        assert!(
+            !fleet_native_drain_evidence(state, &BTreeSet::new(), now, Duration::from_secs(30),)
+                .expect("empty population is a non-complete observation")
+                .complete
+        );
+    }
+
+    let mut uncovered = base;
+    let mut third_zone = sample_action("drain-third-zone", "drain-third-incident");
+    if let FleetAction::Quarantine { zone_id, .. } = &mut third_zone.action {
+        *zone_id = "zone-c".to_string();
+    }
+    uncovered.actions.push(third_zone);
+    let evidence =
+        fleet_native_drain_evidence(&uncovered, &BTreeSet::new(), now, Duration::from_secs(30))
+            .expect("uncovered scope");
+    assert!(!evidence.complete);
+    assert!(evidence.nodes.iter().all(|node| node.ready));
+    assert_eq!(evidence.uncovered_zones, vec!["zone-c"]);
+
+    let mut third = sample_node("new-node");
+    third.zone_id = "zone-c".to_string();
+    third.last_seen = now;
+    third.applied_actions =
+        Some(fleet_application_checkpoint(&uncovered.actions, "zone-c").unwrap());
+    third.native_session_drain = Some(completed_drain(&third));
+    uncovered.nodes.push(third);
+    assert!(
+        fleet_native_drain_evidence(&uncovered, &BTreeSet::new(), now, Duration::from_secs(30),)
+            .expect("all targeted scopes now have complete observations")
+            .complete
+    );
+}
+
+#[test]
+fn native_drain_evidence_retains_missing_and_renamed_required_identities() {
+    let (base, now) = complete_native_drain_state();
+    let required: BTreeSet<_> = base
+        .nodes
+        .iter()
+        .map(|node| (node.zone_id.clone(), node.node_id.clone()))
+        .collect();
+    let mut state = base.clone();
+    let original = state.nodes.remove(0);
+    let mut replacement = original.clone();
+    replacement.node_id = "replacement-node".to_string();
+    state.nodes.push(replacement);
+    let evidence = fleet_native_drain_evidence(&state, &required, now, Duration::from_secs(30))
+        .expect("missing original node remains an obligation");
+    assert!(!evidence.complete);
+    assert_eq!(evidence.nodes.len(), 3);
+    let missing = evidence
+        .nodes
+        .iter()
+        .find(|node| node.zone_id == original.zone_id && node.node_id == original.node_id)
+        .unwrap();
+    assert_eq!(missing.reason, FleetNativeDrainReadiness::MissingNode);
+    assert!(!missing.ready);
+    assert!(missing.last_seen.is_none());
+    assert!(missing.health.is_none());
+    assert!(missing.applied_actions.is_none());
+    assert!(missing.native_session_drain.is_none());
+
+    state.nodes.push(original);
+    assert!(
+        fleet_native_drain_evidence(&state, &required, now, Duration::from_secs(30))
+            .expect("the retained identity returns with its exact observation")
+            .complete
+    );
+
+    state.actions.remove(0);
+    for node in &mut state.nodes {
+        node.applied_actions =
+            Some(fleet_application_checkpoint(&state.actions, &node.zone_id).unwrap());
+        node.native_session_drain = Some(completed_drain(node));
+    }
+    let evidence = fleet_native_drain_evidence(&state, &required, now, Duration::from_secs(30))
+        .expect("retained participant must still have an applicable action");
+    assert!(!evidence.complete);
+    assert!(
+        evidence
+            .nodes
+            .iter()
+            .any(|node| { node.reason == FleetNativeDrainReadiness::NoApplicableActions })
+    );
+}
+
+#[test]
+fn native_drain_evidence_rejects_malformed_duplicate_and_oversized_snapshots() {
+    let (base, now) = complete_native_drain_state();
+    let mut candidates = Vec::new();
+    let mut duplicate_node = base.clone();
+    duplicate_node.nodes.push(duplicate_node.nodes[0].clone());
+    candidates.push(duplicate_node);
+    let mut duplicate_action = base.clone();
+    duplicate_action
+        .actions
+        .push(duplicate_action.actions[0].clone());
+    candidates.push(duplicate_action);
+    let mut wrong_schema = base.clone();
+    wrong_schema.schema_version = "unrecognized-state".to_string();
+    candidates.push(wrong_schema);
+    let mut unknown_session = base.clone();
+    unknown_session.nodes[0]
+        .native_session_drain
+        .as_mut()
+        .unwrap()
+        .admitted_sessions += 1;
+    candidates.push(unknown_session);
+    let mut bad_digest = base.clone();
+    bad_digest.nodes[0]
+        .native_session_drain
+        .as_mut()
+        .unwrap()
+        .session_set_sha256 = "INVALID".to_string();
+    candidates.push(bad_digest);
+    let mut ambiguous_zone = base.clone();
+    ambiguous_zone.nodes[0].zone_id = "all".to_string();
+    candidates.push(ambiguous_zone);
+    let mut unrelated_bad_status = base.clone();
+    unrelated_bad_status.actions.remove(0);
+    let mut outside_scope = sample_node("bad/node");
+    outside_scope.zone_id = "zone-outside".to_string();
+    unrelated_bad_status.nodes.push(outside_scope);
+    candidates.push(unrelated_bad_status);
+    let mut too_many_nodes = base.clone();
+    too_many_nodes
+        .nodes
+        .resize(MAX_NODES_CAP + 1, base.nodes[0].clone());
+    candidates.push(too_many_nodes);
+    let mut too_many_actions = base.clone();
+    too_many_actions
+        .actions
+        .resize(MAX_ACTION_LOG_ENTRIES + 1, base.actions[0].clone());
+    candidates.push(too_many_actions);
+    for state in candidates {
+        assert!(
+            fleet_native_drain_evidence(&state, &BTreeSet::new(), now, Duration::from_secs(30),)
+                .is_err(),
+            "invalid snapshot must fail before producing an aggregate"
+        );
+    }
+
+    for identity in [
+        ("all".to_string(), "node".to_string()),
+        ("zone-a".to_string(), "../node".to_string()),
+    ] {
+        assert!(
+            fleet_native_drain_evidence(
+                &base,
+                &BTreeSet::from([identity]),
+                now,
+                Duration::from_secs(30),
+            )
+            .is_err()
+        );
+    }
+    let full_required = (0..MAX_NODES_CAP)
+        .map(|index| ("zone-a".to_string(), format!("retained-{index}")))
+        .collect();
+    assert!(
+        fleet_native_drain_evidence(&base, &full_required, now, Duration::from_secs(30),).is_err(),
+        "the union of current and retained identities is bounded too"
+    );
 }
 
 #[test]

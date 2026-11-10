@@ -10,10 +10,10 @@ use frankenengine_node::control_plane::fleet_transport::{
 };
 use frankenengine_node::control_plane::fleet_transport::{
     FleetAction, FleetActionRecord, FleetPolicyArtifact, FleetRuntimePolicy, FleetTargetKind,
-    FleetTransport, NodeHealth, NodeStatus, activate_fleet_policy_snapshot,
-    canonical_fleet_convergence_receipt_payload, enforce_active_fleet_policy,
-    fleet_application_checkpoint, fleet_convergence_receipt_verdict, fleet_policy_snapshot,
-    load_active_fleet_policy,
+    FleetTransport, NativeSessionDrainCheckpoint, NodeHealth, NodeStatus,
+    activate_fleet_policy_snapshot, canonical_fleet_convergence_receipt_payload,
+    enforce_active_fleet_policy, fleet_application_checkpoint, fleet_convergence_receipt_verdict,
+    fleet_policy_snapshot, load_active_fleet_policy,
 };
 use frankenengine_node::supply_chain::trust_card::{
     QuarantineSource, SnapshotSourceContext, TrustCardInput, TrustCardMutation, TrustCardRegistry,
@@ -3873,6 +3873,249 @@ fn fleet_reconcile_requires_application_for_policy_only_and_revoke_only_snapshot
 }
 
 #[test]
+fn fleet_reconcile_native_drain_requires_observations_and_signs_exact_populations() {
+    let project = tempdir().expect("project");
+    write_fail_closed_cli_config_for_fixture_trust_cards(project.path());
+    write_fixture_registry_to(project.path());
+    let fleet_state_dir = project.path().join("fleet-state");
+    let mut transport = seed_durable_transport(&fleet_state_dir);
+    transport
+        .publish_action(&FleetActionRecord {
+            action_id: "native-drain-release".to_string(),
+            emitted_at: Utc::now(),
+            action: FleetAction::Release {
+                zone_id: "east".to_string(),
+                incident_id: "retired-native-drain-incident".to_string(),
+                reason: None,
+            },
+        })
+        .expect("retained action");
+    let checkpoint =
+        fleet_application_checkpoint(&transport.list_actions().expect("actions"), "east")
+            .expect("exact action checkpoint");
+    for node_id in ["east-a", "east-b"] {
+        transport
+            .upsert_node_status(&NodeStatus {
+                zone_id: "east".to_string(),
+                node_id: node_id.to_string(),
+                last_seen: Utc::now(),
+                quarantine_version: 0,
+                health: NodeHealth::Healthy,
+                applied_actions: Some(checkpoint.clone()),
+                native_session_drain: None,
+            })
+            .expect("legacy application acknowledgement");
+    }
+    let (key_path, key) = write_test_signing_key(project.path(), "keys/fleet.key", 65);
+    let key_path = key_path.display().to_string();
+    let reconcile = |require_native_drain: bool, timeout: &str| {
+        let args = if require_native_drain {
+            vec!["fleet", "reconcile", "--require-native-drain", "--json"]
+        } else {
+            vec!["fleet", "reconcile", "--json"]
+        };
+        run_cli_in_dir_with_fleet_state_and_env(
+            project.path(),
+            &args,
+            &fleet_state_dir,
+            &[
+                (
+                    "FRANKEN_NODE_SECURITY_DECISION_RECEIPT_SIGNING_KEY_PATH",
+                    key_path.as_str(),
+                ),
+                ("FRANKEN_NODE_FLEET_CONVERGENCE_TIMEOUT_SECONDS", timeout),
+            ],
+        )
+    };
+
+    let ordinary = reconcile(false, "30");
+    assert!(ordinary.status.success(), "{ordinary:?}");
+    let ordinary = json_stdout(&ordinary, "ordinary application convergence");
+    assert_eq!(
+        ordinary["convergence_receipt"]["schema_version"],
+        "franken-node/fleet-convergence-receipt/v1"
+    );
+    assert!(
+        ordinary["convergence_receipt"]
+            .get("native_session_drain")
+            .is_none()
+    );
+    assert_convergence_receipt_signature_round_trips(&ordinary["convergence_receipt"], &key);
+
+    let missing = reconcile(true, "1");
+    assert!(
+        !missing.status.success(),
+        "legacy acknowledgements cannot drain sessions"
+    );
+    let missing = json_stdout(&missing, "missing native drain");
+    assert!(
+        missing["error"]
+            .as_str()
+            .expect("native drain refusal")
+            .contains("fresh completed native-session drain observations are required")
+    );
+    assert!(missing.get("convergence_receipt").is_none());
+
+    // These file-transport heartbeats are claimed local observations. The
+    // receipt must preserve their exact populations without certifying remote
+    // quiescence or upgrading the file store's authentication boundary.
+    for indeterminate in [false, true] {
+        for (index, node_id) in ["east-a", "east-b"].into_iter().enumerate() {
+            let blocked = index == 1;
+            transport
+                .upsert_node_status(&NodeStatus {
+                    zone_id: "east".to_string(),
+                    node_id: node_id.to_string(),
+                    last_seen: Utc::now(),
+                    quarantine_version: 0,
+                    health: if blocked {
+                        NodeHealth::Degraded
+                    } else {
+                        NodeHealth::Healthy
+                    },
+                    applied_actions: (!blocked).then(|| checkpoint.clone()),
+                    native_session_drain: Some(NativeSessionDrainCheckpoint {
+                        applied_actions: checkpoint.clone(),
+                        session_set_sha256: if blocked {
+                            "b".repeat(64)
+                        } else {
+                            "a".repeat(64)
+                        },
+                        admitted_sessions: 2,
+                        terminal_sessions: if blocked { 1 } else { 2 },
+                        pending_sessions: u64::from(blocked && !indeterminate),
+                        indeterminate_sessions: u64::from(blocked && indeterminate),
+                        fence_held: blocked,
+                    }),
+                })
+                .expect("well-formed incomplete population");
+        }
+        let blocked = reconcile(true, "1");
+        assert!(
+            !blocked.status.success(),
+            "unresolved native population converged"
+        );
+        let blocked = json_stdout(&blocked, "unresolved native drain");
+        assert!(blocked.get("convergence_receipt").is_none());
+    }
+
+    for (index, node_id) in ["east-a", "east-b"].into_iter().enumerate() {
+        let population = 2 + index as u64;
+        transport
+            .upsert_node_status(&NodeStatus {
+                zone_id: "east".to_string(),
+                node_id: node_id.to_string(),
+                last_seen: Utc::now(),
+                quarantine_version: 0,
+                health: NodeHealth::Healthy,
+                applied_actions: Some(checkpoint.clone()),
+                native_session_drain: Some(NativeSessionDrainCheckpoint {
+                    applied_actions: checkpoint.clone(),
+                    session_set_sha256: if index == 0 {
+                        "a".repeat(64)
+                    } else {
+                        "b".repeat(64)
+                    },
+                    admitted_sessions: population,
+                    terminal_sessions: population,
+                    pending_sessions: 0,
+                    indeterminate_sessions: 0,
+                    fence_held: false,
+                }),
+            })
+            .expect("fresh completed population");
+    }
+    let complete = reconcile(true, "30");
+    assert!(complete.status.success(), "{complete:?}");
+    let complete = json_stdout(&complete, "completed native drain");
+    let receipt = &complete["convergence_receipt"];
+    assert_eq!(
+        receipt["schema_version"],
+        "franken-node/fleet-convergence-receipt/v2"
+    );
+    assert_eq!(receipt["verdict"], "converged");
+    let evidence = &receipt["native_session_drain"];
+    assert_eq!(evidence["scope"], "local_supervisor_drain_observations");
+    assert_eq!(evidence["transport"], "file");
+    assert_eq!(evidence["state_dir"], fleet_state_dir.display().to_string());
+    assert!(evidence.get("control_plane_url").is_none());
+    assert_eq!(evidence["complete"], true);
+    assert_eq!(evidence["fleet_quiescence_certified"], false);
+    assert_eq!(evidence["action_count"], 1);
+    assert_eq!(
+        evidence["stale_after"],
+        serde_json::json!({"secs": 30, "nanos": 0})
+    );
+    assert_eq!(evidence["uncovered_zones"], serde_json::json!([]));
+    let nodes = evidence["nodes"]
+        .as_array()
+        .expect("retained node evidence");
+    assert_eq!(nodes.len(), 2);
+    for (index, node) in nodes.iter().enumerate() {
+        assert_eq!(
+            node["node_id"],
+            if index == 0 { "east-a" } else { "east-b" }
+        );
+        assert_eq!(node["zone_id"], "east");
+        assert_eq!(node["ready"], true);
+        assert_eq!(node["reason"], "ready");
+        assert_eq!(
+            node["expected_actions"],
+            serde_json::to_value(&checkpoint).expect("checkpoint JSON")
+        );
+        assert_eq!(
+            node["native_session_drain"]["admitted_sessions"],
+            2 + index as u64
+        );
+        assert_eq!(
+            node["native_session_drain"]["terminal_sessions"],
+            2 + index as u64
+        );
+        assert_eq!(
+            node["native_session_drain"]["session_set_sha256"],
+            if index == 0 {
+                "a".repeat(64)
+            } else {
+                "b".repeat(64)
+            }
+        );
+    }
+    assert_convergence_receipt_signature_round_trips(receipt, &key);
+
+    let signature = hex::decode(
+        receipt["signature"]["signature_hex"]
+            .as_str()
+            .expect("signature"),
+    )
+    .expect("signature bytes");
+    for tamper_population in [true, false] {
+        let mut tampered = receipt.clone();
+        tampered
+            .as_object_mut()
+            .expect("receipt")
+            .remove("signature");
+        if tamper_population {
+            tampered["native_session_drain"]["nodes"][0]["native_session_drain"]["session_set_sha256"] =
+                serde_json::json!("c".repeat(64));
+        } else {
+            tampered["native_session_drain"]["state_dir"] =
+                serde_json::json!("/different/fleet-store");
+        }
+        let canonical = canonical_fleet_convergence_receipt_payload(&tampered)
+            .expect("canonical tampered receipt");
+        assert!(
+            frankenengine_verifier_sdk::bundle::verify_ed25519_signature(
+                &key.verifying_key(),
+                &canonical,
+                &signature,
+            )
+            .is_err(),
+            "changing a signed population or its store must invalidate the receipt"
+        );
+    }
+}
+
+#[test]
 fn fleet_reconcile_requires_target_zone_coverage_and_counts_relevant_nodes_once() {
     for include_global in [false, true] {
         let project = tempdir().expect("project");
@@ -4017,6 +4260,43 @@ fn fleet_reconcile_requires_target_zone_coverage_and_counts_relevant_nodes_once(
         assert_eq!(rollup, &payload["convergence_receipt"]["convergence"]);
         assert_eq!(rollup, &payload["status"]["pending_convergences"][0]);
         assert_convergence_receipt_signature_round_trips(&payload["convergence_receipt"], &key);
+
+        #[cfg(feature = "engine")]
+        {
+            let native = run_cli_in_dir_with_fleet_state_and_env(
+                project.path(),
+                &["fleet", "reconcile", "--require-native-drain", "--json"],
+                &fleet_state_dir,
+                &[
+                    (
+                        "FRANKEN_NODE_SECURITY_DECISION_RECEIPT_SIGNING_KEY_PATH",
+                        key_path.as_str(),
+                    ),
+                    ("FRANKEN_NODE_FLEET_CONVERGENCE_TIMEOUT_SECONDS", "30"),
+                ],
+            );
+            assert!(native.status.success(), "{native:?}");
+            let native = json_stdout(&native, "real agent native-drain reconciliation");
+            let receipt = &native["convergence_receipt"];
+            assert_eq!(
+                receipt["schema_version"],
+                "franken-node/fleet-convergence-receipt/v2"
+            );
+            let evidence = &receipt["native_session_drain"];
+            assert_eq!(evidence["complete"], true);
+            assert_eq!(evidence["fleet_quiescence_certified"], false);
+            assert_eq!(
+                evidence["nodes"].as_array().expect("nodes").len(),
+                expected_nodes
+            );
+            for node in evidence["nodes"].as_array().expect("nodes") {
+                assert_eq!(node["native_session_drain"]["admitted_sessions"], 0);
+                assert_eq!(node["native_session_drain"]["pending_sessions"], 0);
+                assert_eq!(node["native_session_drain"]["indeterminate_sessions"], 0);
+                assert_eq!(node["native_session_drain"]["fence_held"], false);
+            }
+            assert_convergence_receipt_signature_round_trips(receipt, &key);
+        }
     }
 }
 

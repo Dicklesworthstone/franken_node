@@ -1238,6 +1238,242 @@ impl FleetSharedState {
     }
 }
 
+/// Why one retained node does or does not satisfy the native-drain gate.
+/// These observations never attest a distributed epoch or remote-effect rollback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FleetNativeDrainReadiness {
+    Ready,
+    MissingNode,
+    NoApplicableActions,
+    FutureHeartbeat,
+    StaleHeartbeat,
+    DrainSnapshotMismatch,
+    IndeterminateSessions,
+    PendingSessions,
+    AdmissionFenced,
+    NodeUnhealthy,
+    MissingApplicationCheckpoint,
+    ApplicationSnapshotMismatch,
+    MissingNativeDrain,
+}
+
+/// One exact node/zone identity in a reconciliation's retained population.
+/// Missing nodes remain explicit rows; a new heartbeat cannot remove an older
+/// participant merely by changing its node ID or zone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FleetNativeDrainNodeEvidence {
+    pub zone_id: String,
+    pub node_id: String,
+    pub expected_actions: FleetApplicationCheckpoint,
+    pub last_seen: Option<DateTime<Utc>>,
+    pub health: Option<NodeHealth>,
+    pub applied_actions: Option<FleetApplicationCheckpoint>,
+    pub native_session_drain: Option<NativeSessionDrainCheckpoint>,
+    pub ready: bool,
+    pub reason: FleetNativeDrainReadiness,
+}
+
+/// Bounded observations for the opt-in native-drain reconciliation gate.
+/// Authentication is supplied by the enclosing transport/receipt, not by this
+/// aggregate. A complete report describes the retained local populations that
+/// the nodes reported drained under the exact current action snapshots. It
+/// does not mean admission fences are still held, a fleet epoch committed, or
+/// independently observed remote effects have quiesced.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FleetNativeDrainEvidence {
+    pub schema_version: String,
+    pub scope: String,
+    pub observed_at: DateTime<Utc>,
+    /// Preserve the exact freshness threshold in the signed payload.
+    pub stale_after: Duration,
+    pub action_count: u64,
+    pub complete: bool,
+    pub fleet_quiescence_certified: bool,
+    pub uncovered_zones: Vec<String>,
+    pub nodes: Vec<FleetNativeDrainNodeEvidence>,
+}
+
+/// Aggregate local native-drain observations for every retained action scope.
+///
+/// Callers retain the union of returned node identities across polling and
+/// pass it back as `required_nodes`. They must separately preserve action-log
+/// prefix continuity: this function validates one snapshot, not its history.
+/// Every input record is validated, even outside currently targeted zones.
+/// Future heartbeats, application-only acknowledgements, missing populations,
+/// and unresolved effects never satisfy the gate.
+pub fn fleet_native_drain_evidence(
+    state: &FleetSharedState,
+    required_nodes: &BTreeSet<(String, String)>,
+    now: DateTime<Utc>,
+    stale_after: Duration,
+) -> Result<FleetNativeDrainEvidence, FleetTransportError> {
+    if state.schema_version != FLEET_SHARED_STATE_SCHEMA {
+        return Err(FleetTransportError::serialization(
+            "native drain evidence requires the current fleet shared-state schema",
+        ));
+    }
+    if state.nodes.len() > MAX_NODES_CAP || required_nodes.len() > MAX_NODES_CAP {
+        return Err(FleetTransportError::serialization(format!(
+            "native drain node population exceeds {MAX_NODES_CAP} identities",
+        )));
+    }
+    if stale_after.is_zero() {
+        return Err(FleetTransportError::stale_state(
+            "native drain heartbeat threshold must be positive",
+        ));
+    }
+    let stale_threshold = chrono::TimeDelta::from_std(stale_after).map_err(|error| {
+        FleetTransportError::stale_state(format!(
+            "invalid native drain heartbeat threshold: {error}"
+        ))
+    })?;
+    // Validate the complete bounded history and reject duplicate action IDs
+    // before any per-zone checkpoint or empty-population result is produced.
+    fleet_application_checkpoint(&state.actions, "all")?;
+    let action_zones: BTreeSet<&str> = state
+        .actions
+        .iter()
+        .map(|record| fleet_action_zone(&record.action))
+        .collect();
+    let mut observed = BTreeMap::new();
+    let mut participants = required_nodes.clone();
+    for (zone_id, node_id) in required_nodes {
+        validate_zone_id(zone_id)?;
+        validate_node_id(node_id)?;
+        if zone_id == "all" {
+            return Err(FleetTransportError::serialization(
+                "native drain participants require a concrete zone",
+            ));
+        }
+    }
+    for node in &state.nodes {
+        validate_node_status(node)?;
+        if node.zone_id == "all" {
+            return Err(FleetTransportError::serialization(
+                "native drain participants require a concrete zone",
+            ));
+        }
+        let identity = (node.zone_id.clone(), node.node_id.clone());
+        if observed.insert(identity.clone(), node).is_some() {
+            return Err(FleetTransportError::serialization(
+                "native drain snapshot repeats a node/zone identity",
+            ));
+        }
+        if action_zones.contains("all") || action_zones.contains(node.zone_id.as_str()) {
+            participants.insert(identity);
+        }
+    }
+    if participants.len() > MAX_NODES_CAP {
+        return Err(FleetTransportError::serialization(format!(
+            "retained native drain population exceeds {MAX_NODES_CAP} identities",
+        )));
+    }
+    let present_zones: BTreeSet<&str> = observed
+        .keys()
+        .map(|(zone_id, _)| zone_id.as_str())
+        .collect();
+    let uncovered_zones = action_zones
+        .iter()
+        .filter(|zone| {
+            if **zone == "all" {
+                observed.is_empty()
+            } else {
+                !present_zones.contains(**zone)
+            }
+        })
+        .map(|zone| (*zone).to_string())
+        .collect::<Vec<_>>();
+    let mut expected_by_zone = BTreeMap::<String, FleetApplicationCheckpoint>::new();
+    let mut nodes = Vec::with_capacity(participants.len());
+    for (zone_id, node_id) in participants {
+        let expected_actions = match expected_by_zone.get(&zone_id) {
+            Some(checkpoint) => checkpoint.clone(),
+            None => {
+                let checkpoint = fleet_application_checkpoint(&state.actions, &zone_id)?;
+                expected_by_zone.insert(zone_id.clone(), checkpoint.clone());
+                checkpoint
+            }
+        };
+        let node = observed.get(&(zone_id.clone(), node_id.clone())).copied();
+        let reason = match node {
+            None => FleetNativeDrainReadiness::MissingNode,
+            Some(_) if expected_actions.action_count == 0 => {
+                FleetNativeDrainReadiness::NoApplicableActions
+            }
+            Some(node) if node.last_seen > now => FleetNativeDrainReadiness::FutureHeartbeat,
+            Some(node) if now.signed_duration_since(node.last_seen) >= stale_threshold => {
+                FleetNativeDrainReadiness::StaleHeartbeat
+            }
+            Some(node) => native_drain_readiness(node, &expected_actions),
+        };
+        nodes.push(FleetNativeDrainNodeEvidence {
+            zone_id,
+            node_id,
+            expected_actions,
+            last_seen: node.map(|node| node.last_seen),
+            health: node.map(|node| node.health),
+            applied_actions: node.and_then(|node| node.applied_actions.clone()),
+            native_session_drain: node.and_then(|node| node.native_session_drain.clone()),
+            ready: reason == FleetNativeDrainReadiness::Ready,
+            reason,
+        });
+    }
+    Ok(FleetNativeDrainEvidence {
+        schema_version: "franken-node/fleet-native-drain-evidence/v1".to_string(),
+        scope: "local_supervisor_drain_observations".to_string(),
+        observed_at: now,
+        stale_after,
+        action_count: state.actions.len() as u64,
+        complete: !state.actions.is_empty()
+            && !nodes.is_empty()
+            && uncovered_zones.is_empty()
+            && nodes.iter().all(|node| node.ready),
+        fleet_quiescence_certified: false,
+        uncovered_zones,
+        nodes,
+    })
+}
+
+fn native_drain_readiness(
+    node: &NodeStatus,
+    expected: &FleetApplicationCheckpoint,
+) -> FleetNativeDrainReadiness {
+    if let Some(drain) = &node.native_session_drain {
+        if &drain.applied_actions != expected {
+            return FleetNativeDrainReadiness::DrainSnapshotMismatch;
+        }
+        if drain.indeterminate_sessions > 0 {
+            return FleetNativeDrainReadiness::IndeterminateSessions;
+        }
+        if drain.pending_sessions > 0 {
+            return FleetNativeDrainReadiness::PendingSessions;
+        }
+        if drain.fence_held {
+            return FleetNativeDrainReadiness::AdmissionFenced;
+        }
+    }
+    if node.health != NodeHealth::Healthy {
+        return FleetNativeDrainReadiness::NodeUnhealthy;
+    }
+    match &node.applied_actions {
+        None => return FleetNativeDrainReadiness::MissingApplicationCheckpoint,
+        Some(applied) if applied != expected => {
+            return FleetNativeDrainReadiness::ApplicationSnapshotMismatch;
+        }
+        Some(_) => {}
+    }
+    match &node.native_session_drain {
+        None => FleetNativeDrainReadiness::MissingNativeDrain,
+        // The caller validated the checkpoint, including its population
+        // partition and application binding, before deriving readiness.
+        Some(drain) if drain.is_complete() => FleetNativeDrainReadiness::Ready,
+        Some(_) => FleetNativeDrainReadiness::AdmissionFenced,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FleetTransportError {

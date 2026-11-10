@@ -148,11 +148,11 @@ use frankenengine_node::api::fleet_quarantine::{
 use frankenengine_node::control_plane::fleet_transport::{
     FLEET_ACTION_LOG_FILE, FLEET_NODE_DIR, FleetAction as PersistedFleetAction,
     FleetActionRecord as PersistedFleetActionRecord, FleetConvergenceReceiptSignature,
-    FleetSharedState, FleetTargetKind as PersistedFleetTargetKind,
+    FleetNativeDrainEvidence, FleetSharedState, FleetTargetKind as PersistedFleetTargetKind,
     FleetTransport as PersistedFleetTransport, FleetTransportError,
     NodeHealth as PersistedNodeHealth, NodeStatus as PersistedNodeStatus,
-    fleet_convergence_receipt_verdict, sign_fleet_convergence_receipt_payload,
-    wait_until_fleet_converged_or_timeout,
+    fleet_convergence_receipt_verdict, fleet_native_drain_evidence,
+    sign_fleet_convergence_receipt_payload, wait_until_fleet_converged_or_timeout,
 };
 use frankenengine_node::control_plane::fleet_transport_durable;
 use frankenengine_node::ops::engine_dispatcher::RunProjectPaths;
@@ -27327,6 +27327,26 @@ struct FleetCliConvergenceReceiptPayload {
     timeout_ms: u64,
     timed_out: bool,
     convergence: Option<ConvergenceState>,
+    /// Present only in v2 receipts requested with --require-native-drain.
+    /// These are the observed local drain populations, not an epoch certificate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    native_session_drain: Option<FleetCliNativeDrainObservation>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct FleetCliNativeDrainObservation {
+    transport: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    control_plane_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    state_dir: Option<PathBuf>,
+    #[serde(flatten)]
+    evidence: FleetNativeDrainEvidence,
+}
+
+struct FleetCliConvergenceObservation {
+    convergence: Option<ConvergenceState>,
+    native_session_drain: Option<FleetCliNativeDrainObservation>,
 }
 
 fn resolve_fleet_state_dir(
@@ -28119,14 +28139,80 @@ fn fleet_snapshot_convergence(
     })
 }
 
-fn wait_for_fleet_cli_convergence(project_root: &Path) -> Result<(LoadedFleetState, bool, u64)> {
-    let mut loaded = load_fleet_state(project_root)?;
+fn wait_for_fleet_cli_convergence(
+    project_root: &Path,
+    mut loaded: LoadedFleetState,
+    require_native_drain: bool,
+) -> Result<(
+    LoadedFleetState,
+    bool,
+    u64,
+    Option<FleetNativeDrainEvidence>,
+)> {
+    // Start with the command's first observation, before any republish, so a
+    // disappearing node or truncated history cannot escape this attempt.
+    let initial_scope = (
+        loaded.transport_kind.label(),
+        loaded.control_plane_url.clone(),
+        loaded.state_dir.clone(),
+        loaded.convergence_timeout_seconds,
+    );
     let timeout = Duration::from_secs(loaded.convergence_timeout_seconds);
+    let mut retained_actions = if require_native_drain {
+        loaded.state.actions.clone()
+    } else {
+        Vec::new()
+    };
+    let mut required_nodes = BTreeSet::new();
+    let mut native_drain = if require_native_drain {
+        let evidence =
+            fleet_native_drain_evidence(&loaded.state, &required_nodes, Utc::now(), timeout)?;
+        required_nodes.extend(
+            evidence
+                .nodes
+                .iter()
+                .map(|node| (node.zone_id.clone(), node.node_id.clone())),
+        );
+        Some(evidence)
+    } else {
+        None
+    };
     let outcome = wait_until_fleet_converged_or_timeout(timeout, || {
         loaded = load_fleet_state(project_root)
             .map_err(|err| FleetTransportError::stale_state(err.to_string()))?;
+        if require_native_drain {
+            if loaded.transport_kind.label() != initial_scope.0
+                || loaded.control_plane_url != initial_scope.1
+                || loaded.state_dir != initial_scope.2
+                || loaded.convergence_timeout_seconds != initial_scope.3
+            {
+                return Err(FleetTransportError::stale_state(
+                    "fleet native drain reconciliation changed its transport, store, or convergence timeout",
+                ));
+            }
+            // A later release, compaction, or rewritten snapshot cannot erase
+            // an obligation observed by this reconciliation attempt.
+            if !loaded.state.actions.starts_with(&retained_actions) {
+                return Err(FleetTransportError::stale_state(
+                    "fleet native drain reconciliation lost or changed its retained action history",
+                ));
+            }
+            retained_actions.clone_from(&loaded.state.actions);
+            let evidence =
+                fleet_native_drain_evidence(&loaded.state, &required_nodes, Utc::now(), timeout)?;
+            required_nodes.extend(
+                evidence
+                    .nodes
+                    .iter()
+                    .map(|node| (node.zone_id.clone(), node.node_id.clone())),
+            );
+            native_drain = Some(evidence);
+        }
         Ok(fleet_snapshot_convergence(&loaded, "all")
-            .is_none_or(|convergence| convergence.phase == ConvergencePhase::Converged))
+            .is_none_or(|convergence| convergence.phase == ConvergencePhase::Converged)
+            && native_drain
+                .as_ref()
+                .is_none_or(|evidence| evidence.complete))
     })
     .map_err(|err| anyhow::anyhow!(err.to_string()))?;
 
@@ -28134,6 +28220,7 @@ fn wait_for_fleet_cli_convergence(project_root: &Path) -> Result<(LoadedFleetSta
         loaded,
         outcome.timed_out,
         duration_millis_u64(outcome.elapsed),
+        native_drain,
     ))
 }
 
@@ -28263,16 +28350,32 @@ fn build_fleet_convergence_receipt(
     timed_out: bool,
     elapsed_ms: u64,
     timeout_seconds: u64,
-    convergence: Option<ConvergenceState>,
+    observation: FleetCliConvergenceObservation,
     signing_material: &Ed25519SigningMaterial,
 ) -> Result<FleetCliConvergenceReceipt> {
+    let FleetCliConvergenceObservation {
+        convergence,
+        native_session_drain,
+    } = observation;
+    let schema_version = if native_session_drain.is_some() {
+        "franken-node/fleet-convergence-receipt/v2"
+    } else {
+        "franken-node/fleet-convergence-receipt/v1"
+    };
+    let verdict = if native_session_drain
+        .as_ref()
+        .is_some_and(|observation| !observation.evidence.complete)
+    {
+        "non_converged"
+    } else {
+        fleet_convergence_verdict(timed_out, elapsed_ms, timeout_seconds, &convergence)
+    };
     let payload = FleetCliConvergenceReceiptPayload {
-        schema_version: "franken-node/fleet-convergence-receipt/v1".to_string(),
+        schema_version: schema_version.to_string(),
         operation_id: operation_id.to_string(),
         event_code: event_code.to_string(),
         completed_at: Utc::now().to_rfc3339(),
-        verdict: fleet_convergence_verdict(timed_out, elapsed_ms, timeout_seconds, &convergence)
-            .to_string(),
+        verdict: verdict.to_string(),
         elapsed_ms,
         poll_interval_ms: duration_millis_u64(
             frankenengine_node::control_plane::fleet_transport::FLEET_CONVERGENCE_POLL_INTERVAL,
@@ -28280,6 +28383,7 @@ fn build_fleet_convergence_receipt(
         timeout_ms: timeout_seconds.saturating_mul(1_000),
         timed_out,
         convergence,
+        native_session_drain,
     };
     let signature = sign_fleet_convergence_receipt_payload(
         &payload,
@@ -28448,6 +28552,15 @@ fn emit_fleet_action_report(report: &FleetCliActionReport, json: bool) -> Result
                 "\n  convergence_receipt_elapsed_ms={} timed_out={}",
                 receipt.payload.elapsed_ms, receipt.payload.timed_out
             ));
+            if let Some(observation) = &receipt.payload.native_session_drain {
+                let evidence = &observation.evidence;
+                rendered.push_str(&format!(
+                    "\n  required_native_drains_complete={} observed_nodes={} fleet_quiescence_certified={}",
+                    evidence.complete,
+                    evidence.nodes.len(),
+                    evidence.fleet_quiescence_certified,
+                ));
+            }
         }
         for node in report
             .state
@@ -37899,7 +38012,10 @@ fn main() -> Result<()> {
                             timed_out,
                             elapsed_ms,
                             converged_state.convergence_timeout_seconds,
-                            Some(convergence),
+                            FleetCliConvergenceObservation {
+                                convergence: Some(convergence),
+                                native_session_drain: None,
+                            },
                             &fleet_signing_material,
                         ) {
                             Ok(receipt) => receipt,
@@ -37961,8 +38077,12 @@ fn main() -> Result<()> {
                 }
 
                 let operation_id = fleet_operation_id("reconcile");
-                let (converged_state, timed_out, elapsed_ms) =
-                    match wait_for_fleet_cli_convergence(Path::new(".")) {
+                let (converged_state, timed_out, elapsed_ms, native_drain) =
+                    match wait_for_fleet_cli_convergence(
+                        Path::new("."),
+                        loaded,
+                        args.require_native_drain,
+                    ) {
                         Ok(result) => result,
                         Err(err) => return fleet_fail("fleet.reconcile", args.json, err),
                     };
@@ -37977,8 +38097,13 @@ fn main() -> Result<()> {
                         "fleet.reconcile",
                         args.json,
                         format!(
-                            "fleet reconcile convergence timed out after {}s",
-                            converged_state.convergence_timeout_seconds
+                            "fleet reconcile convergence timed out after {}s{}",
+                            converged_state.convergence_timeout_seconds,
+                            if args.require_native_drain {
+                                "; fresh completed native-session drain observations are required; inspect fleet status --json for missing, pending, or indeterminate populations"
+                            } else {
+                                ""
+                            }
                         ),
                     );
                 }
@@ -37988,7 +38113,21 @@ fn main() -> Result<()> {
                     timed_out,
                     elapsed_ms,
                     converged_state.convergence_timeout_seconds,
-                    convergence.clone(),
+                    FleetCliConvergenceObservation {
+                        convergence: convergence.clone(),
+                        native_session_drain: native_drain.map(|evidence| {
+                            FleetCliNativeDrainObservation {
+                                transport: converged_state.transport_kind.label(),
+                                control_plane_url: converged_state.control_plane_url.clone(),
+                                state_dir: matches!(
+                                    converged_state.transport_kind,
+                                    FleetTransportKind::File
+                                )
+                                .then(|| converged_state.state_dir.clone()),
+                                evidence,
+                            }
+                        }),
+                    },
                     &fleet_signing_material,
                 ) {
                     Ok(receipt) => receipt,

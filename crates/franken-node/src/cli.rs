@@ -2409,6 +2409,13 @@ pub struct FleetReconcileArgs {
     #[arg(long, default_value_t = false)]
     pub fallback_file_transport: bool,
 
+    /// Require fresh, completed native-session drain observations from every
+    /// node in the affected scopes. Missing, pending, or indeterminate drains
+    /// keep reconciliation pending. The signed receipt binds the observed
+    /// session populations; it does not certify a distributed epoch barrier.
+    #[arg(long)]
+    pub require_native_drain: bool,
+
     /// Emit JSON instead of human-readable output.
     /// Includes `transport` (`file` or `http`) and `live_control_plane`.
     #[arg(long)]

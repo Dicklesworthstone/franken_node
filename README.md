@@ -1115,6 +1115,26 @@ independent fleet-quiescence certificate. Enrolled HTTP nodes bind it to the
 authenticated heartbeat; file and shared-bearer modes retain their existing
 weaker authentication boundaries.
 
+Require completed local drain observations before accepting reconciliation:
+
+```bash
+franken-node fleet reconcile --require-native-drain --json
+```
+
+The gate retains every affected node seen since the command's first snapshot
+and requires each node's complete population to match the current ordered
+action checkpoint. Heartbeats must be younger than the configured convergence
+timeout; future timestamps, missing or legacy observations, pending or
+indeterminate sessions, uncovered zones, and lost or rewritten history cannot
+pass. Empty action histories and snapshots with no affected nodes cannot
+produce success; an observed node may legitimately have zero native sessions.
+A successful v2 convergence receipt signs the per-node counts and population
+digests, action checkpoints, freshness threshold, and file-store path or HTTP
+coordinator URL. It explicitly keeps `fleet_quiescence_certified=false` because
+local admission fences may already have reopened. Ordinary reconciliation
+continues to emit v1 receipts. A timeout emits no success receipt; inspect
+`fleet status --json` for the outstanding node observations.
+
 A responsive worker can now finish a cooperative stop requested by live control.
 Its inventory outcome is `control_stopped` only after the supervisor observes
 worker exit and verifies a final signed effect ledger. The outcome retains the
