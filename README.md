@@ -1052,9 +1052,14 @@ Every fleet command, and `trust quarantine`, talks to one of two stores:
 Native supervisors durably record admission before starting a worker. The local
 inventory retains the product-signed session nonce and root identity, engine
 security epoch, project and entrypoint, dependency identities, and the digest of
-any active fleet policy. Worker completion and interruption add an immutable
-outcome; failure to persist that outcome leaves the admission unresolved. A
-supervisor crash never becomes an inferred success because a PID disappeared.
+any active fleet policy. Worker completion and interruption first retain an
+immutable signed outcome receipt bound to that exact admission, then update
+the inventory database. If the database update fails or the supervisor crashes
+after retaining the receipt, `fleet agent` reconciliation recovers the exact
+authenticated observation. `fleet sessions` remains read-only. A crash before
+a complete receipt is retained leaves the admission unresolved; a missing PID
+or elapsed deadline cannot resolve it. Recovery preserves unknown effects and
+unproven worker or descendant termination, which continue to hold the fence.
 
 ```bash
 franken-node fleet sessions --json
