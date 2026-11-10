@@ -2397,4 +2397,609 @@ mod external_release_live_control {
             "operator containment must not be misclassified as a release crash"
         );
     }
+
+
+    /// Hold a real approved external release inside an admitted HTTP effect.
+    /// The operator command can then change deployment authority while both
+    /// the run child and native worker still exist.
+    struct BlockedActivationRun {
+        process: DeploymentProcess,
+        stdout: Option<std::thread::JoinHandle<std::io::Result<Vec<u8>>>>,
+        stderr: Option<std::thread::JoinHandle<std::io::Result<Vec<u8>>>>,
+        release: tempfile::TempDir,
+        replacement: PathBuf,
+        release_response: mpsc::SyncSender<()>,
+        server: Option<std::thread::JoinHandle<std::io::Result<()>>>,
+        safe_mode_before: Option<Vec<u8>>,
+    }
+
+    fn drain_deployment_output(
+        mut pipe: impl Read + Send + 'static,
+    ) -> std::thread::JoinHandle<std::io::Result<Vec<u8>>> {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            pipe.read_to_end(&mut bytes)?;
+            Ok(bytes)
+        })
+    }
+
+    impl BlockedActivationRun {
+        fn start(drill: &Drill, retire_on_activation: bool) -> Self {
+            const ADMISSION_DEADLINE: Duration = Duration::from_secs(30);
+            let release = tempfile::tempdir().expect("external retiring release");
+            let listener = TcpListener::bind("127.0.0.1:0").expect("activation HTTP sink");
+            listener.set_nonblocking(true).expect("bounded accept");
+            let address = listener.local_addr().expect("activation sink address");
+            let source = format!(
+                "require('fs').writeFileSync('entered.marker', 'entered');\n\
+                 require('http').get('http://{address}/', (res) => {{\n\
+                   require('fs').writeFileSync('after.marker', res.body);\n\
+                   console.log('OLD_RELEASE_CALLBACK');\n\
+                 }});\n"
+            );
+            let config = format!(
+                "profile = \"legacy-risky\"\n\
+                 [[security.network_policy.allowlist]]\n\
+                 host = \"127.0.0.1\"\n\
+                 port = {}\n\
+                 reason = \"real activation retirement regression sink\"\n",
+                address.port()
+            );
+            let (old, manifest) = drill.publish_release_with_config(
+                "1.0.0",
+                &source,
+                release.path(),
+                Some(&config),
+            );
+            assert!(!old.starts_with(drill.root.path()));
+            drill.install_published("1.0.0", &old, &manifest);
+            let replacement = drill.root.path().join("releases/2.0.0");
+            let (_, manifest) = drill.publish_release_with_config(
+                "2.0.0",
+                "require('fs').writeFileSync('replacement.marker', 'started');\n\
+                 console.log('REPLACEMENT_RUNNING');\n",
+                &replacement,
+                Some("profile = \"legacy-risky\"\n"),
+            );
+            drill.install_published("2.0.0", &replacement, &manifest);
+            drill.activate("1.0.0");
+            drill.policy("rollback", "automatic");
+            let safe_mode_before = fs::read(old.join(".franken-node/safe-mode/state.json")).ok();
+
+            let (admitted_tx, admitted_rx) = mpsc::sync_channel(1);
+            let (release_response, release_rx) = mpsc::sync_channel(1);
+            let server = std::thread::spawn(move || -> std::io::Result<()> {
+                let started = Instant::now();
+                let (mut stream, _) = loop {
+                    match listener.accept() {
+                        Ok(connection) => break connection,
+                        Err(error)
+                            if error.kind() == std::io::ErrorKind::WouldBlock
+                                && started.elapsed() < ADMISSION_DEADLINE =>
+                        {
+                            if matches!(
+                                release_rx.try_recv(),
+                                Err(mpsc::TryRecvError::Disconnected)
+                            ) {
+                                return Ok(());
+                            }
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(error) => return Err(error),
+                    }
+                };
+                stream.set_nonblocking(false)?;
+                stream.set_read_timeout(Some(ADMISSION_DEADLINE))?;
+                stream.set_write_timeout(Some(Duration::from_secs(2)))?;
+                let mut request = Vec::new();
+                stream.read_to_end(&mut request)?;
+                if admitted_tx.send(request).is_err() {
+                    return Ok(());
+                }
+                if release_rx.recv_timeout(Duration::from_secs(45)).is_err() {
+                    return Ok(());
+                }
+                stream.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\ntoo-late",
+                )?;
+                stream.flush()
+            });
+            let mut args = vec!["deploy", "run", "app", "--json"];
+            if retire_on_activation {
+                args.push("--retire-on-activation");
+            }
+            let mut child = drill
+                .command(drill.root.path(), &args)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("real activation-observed native workload");
+            // Drain while the supervisor runs: a large retained interruption
+            // report must not fill its pipe and prevent the exit we observe.
+            let stdout = drain_deployment_output(child.stdout.take().expect("deployment stdout"));
+            let stderr = drain_deployment_output(child.stderr.take().expect("deployment stderr"));
+            let mut process = DeploymentProcess {
+                child,
+                descendants: BTreeMap::new(),
+            };
+            let request = admitted_rx
+                .recv_timeout(ADMISSION_DEADLINE)
+                .expect("admitted HTTP effect before changing activation");
+            assert!(request.starts_with(b"GET / HTTP/1.1\r\n"));
+            assert!(old.join("entered.marker").is_file());
+            assert!(!old.join("after.marker").exists());
+            process.remember_descendants();
+            assert!(
+                process.descendants.len() >= 2,
+                "the supervisor must own a run child and native worker"
+            );
+            Self {
+                process,
+                stdout: Some(stdout),
+                stderr: Some(stderr),
+                release,
+                replacement,
+                release_response,
+                server: Some(server),
+                safe_mode_before,
+            }
+        }
+
+        fn finish(&mut self) -> (Option<i32>, Value) {
+            let stopped_at = Instant::now();
+            let status = loop {
+                match self.process.child.try_wait().expect("poll deployment") {
+                    Some(status) => break status,
+                    None => {
+                        assert!(
+                            stopped_at.elapsed() < Duration::from_secs(15),
+                            "deployment did not finish within its live-control deadline"
+                        );
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                }
+            };
+            assert!(
+                self.process.descendants.iter().all(|(pid, start)| {
+                    process_start_time(*pid).as_deref() != Some(start.as_str())
+                }),
+                "the run child and native worker must be reaped before completion"
+            );
+            let stdout = self
+                .stdout
+                .take()
+                .expect("deployment stdout reader")
+                .join()
+                .expect("join deployment stdout reader")
+                .expect("deployment report");
+            let stderr = self
+                .stderr
+                .take()
+                .expect("deployment stderr reader")
+                .join()
+                .expect("join deployment stderr reader")
+                .expect("deployment diagnostics");
+            let report = serde_json::from_slice(&stdout).unwrap_or_else(|error| {
+                panic!(
+                    "invalid deployment report: {error}; {}; {}",
+                    String::from_utf8_lossy(&stdout),
+                    String::from_utf8_lossy(&stderr)
+                )
+            });
+            (status.code(), report)
+        }
+
+        fn release_http_response(&mut self) -> std::io::Result<()> {
+            self.release_response.send(()).expect("release HTTP response");
+            self.server
+                .take()
+                .expect("retained HTTP sink")
+                .join()
+                .expect("join HTTP sink")
+        }
+
+        fn assert_retired(&mut self) -> Value {
+            let (code, report) = self.finish();
+            assert_ne!(code, Some(0), "{report}");
+            assert_eq!(report["ok"], false);
+            assert_eq!(report["phase"], "activation_interrupted", "{report}");
+            assert_eq!(report["retire_on_activation"], true);
+            assert_eq!(report["release_id"], "1.0.0");
+            assert_eq!(report["activation_sequence"], 1);
+            assert!(report.get("recovery").is_none(), "{report}");
+            assert!(report.get("resumed").is_none(), "{report}");
+            let evidence = &report["run"];
+            assert_eq!(
+                evidence["schema_version"],
+                "franken-node/native-effect-interruption-evidence/v1"
+            );
+            assert_eq!(evidence["terminal_state"], "control_indeterminate");
+            assert_eq!(
+                evidence["control_trigger"]["kind"],
+                "activation_interrupted"
+            );
+            assert_eq!(evidence["journal_complete"], true);
+            assert_eq!(evidence["replay_certified"], false);
+            assert_eq!(evidence["interrupted_effect_count"], 1);
+            assert!(
+                evidence["entries"].as_array().unwrap().iter().any(|entry| {
+                    entry["effect_kind"] == "network_request"
+                        && entry["state"] == "interrupted_indeterminate"
+                        && entry.get("policy_outcome").is_none()
+                        && entry.get("allowed").is_none()
+                        && entry.get("denied").is_none()
+                }),
+                "the admitted network effect must remain indeterminate: {evidence}"
+            );
+            let receipt_path = self.release.path().join(
+                evidence["receipt_path"]
+                    .as_str()
+                    .expect("durable activation interruption receipt"),
+            );
+            let persisted: Value =
+                serde_json::from_slice(&fs::read(receipt_path).expect("retained receipt"))
+                    .expect("receipt JSON");
+            assert_eq!(persisted, evidence["receipt"]);
+            assert!(!self.release.path().join("after.marker").exists());
+            // A closed socket can refuse these bytes. Either outcome is fine:
+            // the stopped guest must never regain its callback.
+            let _ = self.release_http_response();
+            assert!(
+                !self.release.path().join("after.marker").exists(),
+                "late HTTP completion revived a retired guest"
+            );
+            assert!(
+                !self.replacement.join("replacement.marker").exists(),
+                "retirement must not automatically follow a new activation"
+            );
+            assert_eq!(
+                fs::read(self.release.path().join(".franken-node/safe-mode/state.json")).ok(),
+                self.safe_mode_before,
+                "activation retirement is not a native crash"
+            );
+            report
+        }
+    }
+
+    fn assert_no_health_or_recovery(drill: &Drill) {
+        let status = drill.status();
+        assert!(status["recoveries"].as_array().unwrap().is_empty());
+        for release in status["releases"].as_array().unwrap() {
+            assert_eq!(release["healthy_runs"], 0, "{status}");
+            assert_eq!(release["crash_looped"], false, "{status}");
+        }
+    }
+
+    fn run_replacement_explicitly(drill: &Drill, blocked: &BlockedActivationRun, sequence: u64) {
+        let report = drill.ok(
+            drill.root.path(),
+            &["deploy", "run", "app", "--retire-on-activation", "--json"],
+        );
+        assert_eq!(report["phase"], "healthy", "{report}");
+        assert_eq!(report["release_id"], "2.0.0");
+        assert_eq!(report["activation_sequence"], sequence);
+        assert_eq!(report["retire_on_activation"], true);
+        assert_eq!(guest_stdout(&report["run"]), "REPLACEMENT_RUNNING\n");
+        assert!(blocked.replacement.join("replacement.marker").is_file());
+    }
+
+    #[test]
+    fn deployment_retire_on_activation_stops_old_io_for_new_and_same_release_activations() {
+        for next in ["2.0.0", "1.0.0"] {
+            let drill = Drill::new();
+            let mut blocked = BlockedActivationRun::start(&drill, true);
+            let initial = fs::read(drill.state_path("active.json")).unwrap();
+            drill.activate(next);
+            blocked.assert_retired();
+            let status = drill.status();
+            assert_eq!(status["active"]["release_id"], next);
+            assert_eq!(status["active"]["sequence"], 2);
+            assert_ne!(fs::read(drill.state_path("active.json")).unwrap(), initial);
+            assert_no_health_or_recovery(&drill);
+            // Re-activating the same release also retires its old invocation.
+            // Only a subsequent explicit operator action starts another guest.
+            let sequence = if next == "1.0.0" {
+                drill.activate("2.0.0");
+                3
+            } else {
+                2
+            };
+            run_replacement_explicitly(&drill, &blocked, sequence);
+        }
+    }
+
+    #[test]
+    fn deployment_retire_on_activation_observes_unfinished_durable_intent_without_following_it() {
+        let drill = Drill::new();
+        let mut blocked = BlockedActivationRun::start(&drill, true);
+        let original = fs::read(drill.state_path("active.json")).unwrap();
+        drill.interrupt(
+            &[
+                "deploy",
+                "activate",
+                "app",
+                "--release",
+                "2.0.0",
+                "--operator-id",
+                "interrupted-rollout",
+                "--json",
+            ],
+            "intent",
+        );
+        assert_eq!(fs::read(drill.state_path("active.json")).unwrap(), original);
+        let pending = drill.status();
+        assert_eq!(pending["active"]["release_id"], "1.0.0");
+        assert_eq!(
+            pending["pending_activation"]["activation"]["release_id"],
+            "2.0.0"
+        );
+        assert_eq!(pending["pending_activation"]["activation"]["sequence"], 2);
+        blocked.assert_retired();
+        assert_eq!(
+            drill.status()["pending_activation"],
+            pending["pending_activation"],
+            "retirement must not complete an unfinished operator activation"
+        );
+        assert_no_health_or_recovery(&drill);
+        let reconciled = drill.reconcile();
+        assert_eq!(reconciled["activation"]["sequence"], 2);
+        assert!(!blocked.replacement.join("replacement.marker").exists());
+        run_replacement_explicitly(&drill, &blocked, 2);
+    }
+
+    #[test]
+    fn deployment_retire_on_activation_fails_closed_when_pointer_is_lost_corrupt_or_replaced() {
+        let foreign = Drill::new();
+        foreign.install("1.0.0", HEALTHY_V1);
+        foreign.activate("1.0.0");
+        let foreign_pointer = fs::read(foreign.state_path("active.json")).unwrap();
+        for mutation in ["missing", "malformed", "foreign"] {
+            let drill = Drill::new();
+            let mut blocked = BlockedActivationRun::start(&drill, true);
+            let pointer = drill.state_path("active.json");
+            let original = fs::read(&pointer).unwrap();
+            match mutation {
+                "missing" => fs::rename(
+                    &pointer,
+                    drill.root.path().join("retained-original-active.json"),
+                )
+                .expect("retain missing pointer evidence"),
+                "malformed" => fs::write(&pointer, b"{not an activation\n")
+                    .expect("malformed pointer"),
+                "foreign" => {
+                    let original_record: Value = serde_json::from_slice(&original).unwrap();
+                    let foreign_record: Value = serde_json::from_slice(&foreign_pointer).unwrap();
+                    assert_ne!(
+                        original_record["signer_public_key_hex"],
+                        foreign_record["signer_public_key_hex"],
+                        "replacement fixture must use another deployment authority"
+                    );
+                    fs::write(&pointer, &foreign_pointer)
+                        .expect("foreign signed activation pointer");
+                }
+                _ => unreachable!(),
+            }
+            blocked.assert_retired();
+            // A missing pointer can remain inspectable as a pending durable
+            // intent. Inspection must never invent a current replacement.
+            let inspected = drill.cli(
+                drill.root.path(),
+                &["deploy", "status", "app", "--json"],
+            );
+            if inspected.status.success() {
+                let status: Value = serde_json::from_slice(&inspected.stdout).unwrap();
+                assert!(status["active"].is_null(), "mutation {mutation}: {status}");
+            }
+            fs::write(&pointer, original).expect("restore retained authenticated pointer");
+            assert_no_health_or_recovery(&drill);
+            drill.activate("2.0.0");
+            run_replacement_explicitly(&drill, &blocked, 2);
+        }
+    }
+
+    #[test]
+    fn deployment_without_retirement_finishes_the_admitted_release_after_activation_changes() {
+        let drill = Drill::new();
+        let mut blocked = BlockedActivationRun::start(&drill, false);
+        drill.activate("2.0.0");
+        let changed_at = Instant::now();
+        while changed_at.elapsed() < Duration::from_secs(1) {
+            assert!(
+                blocked.process.child.try_wait().unwrap().is_none(),
+                "default deployment run must continue its admitted invocation"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        blocked
+            .release_http_response()
+            .expect("complete original HTTP effect");
+        let (code, report) = blocked.finish();
+        assert_eq!(code, Some(0), "{report}");
+        assert_eq!(report["phase"], "healthy");
+        assert_eq!(report["retire_on_activation"], false);
+        assert_eq!(report["release_id"], "1.0.0");
+        assert_eq!(report["activation_sequence"], 1);
+        assert_eq!(guest_stdout(&report["run"]), "OLD_RELEASE_CALLBACK\n");
+        assert_eq!(
+            fs::read_to_string(blocked.release.path().join("after.marker")).unwrap(),
+            "too-late"
+        );
+        assert!(!blocked.replacement.join("replacement.marker").exists());
+        let status = drill.status();
+        assert_eq!(status["active"]["release_id"], "2.0.0");
+        assert!(status["recoveries"].as_array().unwrap().is_empty());
+        let old = status["releases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|release| release["release_id"] == "1.0.0")
+            .unwrap();
+        assert_eq!(old["healthy_runs"], 1);
+        assert_eq!(old["crash_looped"], false);
+        run_replacement_explicitly(&drill, &blocked, 2);
+    }
+
+    #[test]
+    fn deployment_retirement_uses_a_fresh_admission_for_an_authorized_crash_loop_restart() {
+        let drill = Drill::new();
+        drill.install("1.0.0", HEALTHY_V1);
+        drill.install("2.0.0", &crashing_v2());
+        drill.policy("rollback", "automatic");
+        drill.activate("1.0.0");
+        let healthy = drill.ok(
+            drill.root.path(),
+            &["deploy", "run", "app", "--retire-on-activation", "--json"],
+        );
+        assert_eq!(healthy["phase"], "healthy");
+        assert_eq!(healthy["activation_sequence"], 1);
+        drill.activate("2.0.0");
+        drill.prime_crash_loop();
+
+        // The original invocation really crashed. The signed recovery policy
+        // grants one new start, whose restriction must name activation 3.
+        let resumed = drill.ok(
+            drill.root.path(),
+            &["deploy", "run", "app", "--retire-on-activation", "--json"],
+        );
+        assert_eq!(resumed["phase"], "resumed_healthy", "{resumed}");
+        assert_eq!(resumed["retire_on_activation"], true);
+        assert_eq!(resumed["activation_sequence"], 2);
+        assert_eq!(resumed["run"]["outcome"], "native_engine_panic");
+        assert_eq!(resumed["recovery"]["outcome"], "rolled_back");
+        assert_eq!(resumed["recovery"]["activation_sequence"], 3);
+        assert_eq!(resumed["resumed"]["release_id"], "1.0.0");
+        assert_eq!(resumed["resumed"]["activation_sequence"], 3);
+        assert_eq!(
+            guest_stdout(&resumed["resumed"]["run"]),
+            "RELEASE_ONE_HEALTHY\n"
+        );
+        let status = drill.status();
+        assert_eq!(status["active"]["sequence"], 3);
+        assert_eq!(status["active"]["release_id"], "1.0.0");
+        let good = status["releases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|release| release["release_id"] == "1.0.0")
+            .unwrap();
+        assert_eq!(good["healthy_runs"], 2);
+    }
+
+    #[test]
+    fn admitted_child_rejects_a_stale_activation_before_any_guest_execution() {
+        use frankenengine_node::runtime::deployment::{DeploymentAuthority, DeploymentStore};
+        use sha2::{Digest, Sha256};
+
+        let drill = Drill::new();
+        let directory = drill.root.path().join("releases/1.0.0");
+        let (_, manifest) = drill.publish_release_with_config(
+            "1.0.0",
+            "require('fs').writeFileSync('stale-guest.marker', 'must not run');\n",
+            &directory,
+            Some("profile = \"legacy-risky\"\n"),
+        );
+        drill.install_published("1.0.0", &directory, &manifest);
+        drill.install("2.0.0", HEALTHY_V1);
+        drill.activate("1.0.0");
+        let admitted = drill.admitted_release("1.0.0");
+        let key_hex =
+            fs::read_to_string(drill.root.path().join(".franken-node/keys/receipt-signing.key"))
+                .expect("deployment authority");
+        let secret: [u8; 32] = hex::decode(key_hex.trim())
+            .expect("hex signing key")
+            .try_into()
+            .expect("32-byte signing key");
+        let authority = DeploymentAuthority::new(ed25519_dalek::SigningKey::from_bytes(&secret));
+        let store = DeploymentStore::open(drill.root.path(), "app").expect("deployment store");
+        let restriction = {
+            let lock = store.lock().expect("deployment lock");
+            let active = store
+                .active(&authority)
+                .expect("verified activation")
+                .unwrap();
+            store
+                .capture_activation_restriction(&lock, &authority, &active)
+                .expect("capture actual activation restriction")
+        };
+        restriction.enforce().expect("initial restriction holds");
+        let pins = serde_json::to_value(&restriction).expect("restriction JSON");
+        assert_eq!(
+            pins["schema_version"],
+            "franken-node/deployment-activation-restriction/v1"
+        );
+        assert_eq!(
+            pins["store_root"],
+            fs::canonicalize(drill.state_path(""))
+                .unwrap()
+                .to_str()
+                .unwrap()
+        );
+        assert_eq!(pins["deployment"], "app");
+        assert_eq!(pins["activation_sequence"], 1);
+        assert_eq!(pins["release_id"], "1.0.0");
+        assert_eq!(pins["signer_public_key_hex"], authority.public_key_hex());
+        assert_eq!(
+            pins["pointer_sha256"],
+            format!(
+                "sha256:{}",
+                hex::encode(Sha256::digest(
+                    fs::read(drill.state_path("active.json")).unwrap()
+                ))
+            )
+        );
+        let serialized = serde_json::to_string(&restriction).expect("exact child restriction");
+        drill.activate("2.0.0");
+        let before = drill.status();
+        assert_eq!(before["active"]["sequence"], 2);
+        assert_eq!(
+            before["active"]["previous_activation_digest"],
+            pins["activation_digest"]
+        );
+        assert!(
+            restriction.enforce().is_err(),
+            "the retained admission is now stale"
+        );
+        let approval_pin = admitted.approval.admission_sha256().expect("approval pin");
+        let output = drill.cli(
+            &directory,
+            &[
+                "run",
+                "app.js",
+                "--config",
+                "franken_node.toml",
+                "--runtime",
+                "franken-engine",
+                "--frozen-modules",
+                "--json",
+                "--registry-artifact",
+                manifest.to_str().unwrap(),
+                "--publisher-public-key",
+                drill.public_key.to_str().unwrap(),
+                "--admitted-config-sha256",
+                &admitted.config_sha256,
+                "--admitted-approval-sha256",
+                &approval_pin,
+                "--admitted-deployment-activation",
+                &serialized,
+            ],
+        );
+        assert!(!output.status.success(), "stale activation admitted a child");
+        let refused: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+            panic!(
+                "stale admission must emit typed JSON: {error}; {}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            )
+        });
+        assert_eq!(refused["outcome"], "activation_interrupted", "{refused}");
+        assert_eq!(refused["admission_only"], true);
+        assert_eq!(refused["ok"], false);
+        assert!(!directory.join("stale-guest.marker").exists());
+        assert_eq!(
+            drill.status(),
+            before,
+            "denied admission must not record health or recovery"
+        );
+    }
 }

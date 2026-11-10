@@ -3476,7 +3476,36 @@ pub struct RunTrustRequirements {
     /// the live observer cannot forget the operator's safe-mode restriction.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     operator_safe_mode_scope: Option<crate::runtime::safe_mode::AdmittedSafeModeScope>,
+    /// Opt-in restriction to the supervisor's exact activation generation.
+    /// The private worker request retains it independently of the release's
+    /// location. It can only retire this attempt, never authorize a successor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    deployment_activation: Option<crate::runtime::deployment::ActivationRestriction>,
 }
+
+/// An activation restriction no longer permits this attempt.
+/// At dispatch admission this is distinct from an interrupted session: the CLI
+/// must not manufacture effect evidence or a completed-drain receipt for a
+/// refusal before guest startup.
+#[derive(Debug)]
+pub struct DeploymentActivationRefused {
+    detail: String,
+}
+
+impl DeploymentActivationRefused {
+    #[must_use]
+    pub fn detail(&self) -> &str {
+        &self.detail
+    }
+}
+
+impl std::fmt::Display for DeploymentActivationRefused {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "deployment activation restriction: {}", self.detail)
+    }
+}
+
+impl std::error::Error for DeploymentActivationRefused {}
 
 impl RunTrustRequirements {
     /// Retain every preflight identity, including the required cards supplied
@@ -3499,6 +3528,7 @@ impl RunTrustRequirements {
             dependency_capture: None,
             registry_artifact_approval: None,
             operator_safe_mode_scope: None,
+            deployment_activation: None,
             required_card_ids: required_card_ids
                 .iter()
                 .cloned()
@@ -3554,11 +3584,41 @@ impl RunTrustRequirements {
         Ok(())
     }
 
+    pub fn with_deployment_activation(
+        mut self,
+        restriction: crate::runtime::deployment::ActivationRestriction,
+    ) -> Result<Self> {
+        restriction.validate()?;
+        self.deployment_activation = Some(restriction);
+        self.validate()?;
+        Ok(self)
+    }
+
+    /// A retained activation only removes permission to continue this attempt.
+    /// A changed or unavailable store cannot select or admit another release.
+    pub fn enforce_deployment_activation(&self) -> Result<()> {
+        if let Some(restriction) = &self.deployment_activation {
+            restriction.enforce().map_err(|error| {
+                anyhow::Error::new(DeploymentActivationRefused {
+                    detail: format!("{error:#}"),
+                })
+            })?;
+        }
+        Ok(())
+    }
+
     /// Both the dispatcher and worker reauthenticate the retained artifact,
     /// including any signed execution ceiling, preserving the explicit
     /// operator pin and the current resolution policy.
     pub fn verify_registry_artifact(&self, paths: &RunProjectPaths, config: &Config) -> Result<()> {
         self.validate()?;
+        if let Some(restriction) = &self.deployment_activation {
+            let approval = self
+                .registry_artifact_approval
+                .as_ref()
+                .context("a watched deployment requires its admitted publisher approval")?;
+            restriction.validate_source(paths.project_root(), &approval.admission_sha256()?)?;
+        }
         if let Some(approval) = &self.registry_artifact_approval {
             anyhow::ensure!(
                 cfg!(feature = "engine"),
@@ -3627,6 +3687,9 @@ impl RunTrustRequirements {
         }
         if let Some(scope) = &self.operator_safe_mode_scope {
             scope.validate()?;
+        }
+        if let Some(restriction) = &self.deployment_activation {
+            restriction.validate()?;
         }
         for ids in [&self.dependency_ids, &self.required_card_ids] {
             if ids.windows(2).any(|pair| pair[0] >= pair[1]) {
@@ -3869,6 +3932,9 @@ pub struct NativeRunControlTrigger {
 #[serde(rename_all = "snake_case")]
 pub enum NativeRunControlKind {
     SafeMode,
+    /// The opted-in activation restriction no longer permits this attempt.
+    /// This does not authenticate or grant execution to any replacement.
+    ActivationInterrupted,
     ExecutionTrust,
     FleetPolicy,
     FleetPolicyChanged,
@@ -3925,6 +3991,16 @@ fn recheck_native_run_controls(
 
     requirements.enforce_operator_safe_mode().map_err(|error| {
         NativeRunControlTrigger::new(NativeRunControlKind::SafeMode, format_args!("{error:#}"))
+    })?;
+    if cancelled.load(Ordering::Acquire) {
+        return Ok(());
+    }
+
+    requirements.enforce_deployment_activation().map_err(|error| {
+        NativeRunControlTrigger::new(
+            NativeRunControlKind::ActivationInterrupted,
+            format_args!("{error:#}"),
+        )
     })?;
     if cancelled.load(Ordering::Acquire) {
         return Ok(());
@@ -4123,6 +4199,7 @@ pub struct EngineDispatcher {
     preflight_dependency_capture: Option<CapturedDependencyTrust>,
     registry_artifact_approval: Option<PublisherSourceGraphApproval>,
     operator_safe_mode_scope: Option<crate::runtime::safe_mode::AdmittedSafeModeScope>,
+    deployment_activation: Option<crate::runtime::deployment::ActivationRestriction>,
     /// Whether preflight relied on an available authoritative registry. Only
     /// legacy-risky's explicitly skipped preflight may start without one.
     preflight_registry_required: bool,
@@ -6847,6 +6924,7 @@ impl Default for EngineDispatcher {
             preflight_dependency_capture: None,
             registry_artifact_approval: None,
             operator_safe_mode_scope: None,
+            deployment_activation: None,
             preflight_registry_required: true,
             preflight_fleet_policy: None,
             app_args: Vec::new(),
@@ -7063,6 +7141,17 @@ impl EngineDispatcher {
         self
     }
 
+    /// Retire this native run when its explicitly watched deployment changes.
+    /// The ordinary run path carries no activation restriction by default.
+    #[must_use]
+    pub fn with_deployment_activation(
+        mut self,
+        restriction: Option<crate::runtime::deployment::ActivationRestriction>,
+    ) -> Self {
+        self.deployment_activation = restriction;
+        self
+    }
+
     /// Preserve whether preflight consulted an authoritative registry. A false
     /// value only retains legacy-risky's existing missing/corrupt-state policy;
     /// newly available valid cards are always examined before execution.
@@ -7229,9 +7318,16 @@ impl EngineDispatcher {
         if let Some(scope) = &self.operator_safe_mode_scope {
             trust_requirements = trust_requirements.with_operator_safe_mode_scope(scope.clone())?;
         }
+        if let Some(restriction) = &self.deployment_activation {
+            trust_requirements =
+                trust_requirements.with_deployment_activation(restriction.clone())?;
+        }
         trust_requirements
             .enforce_operator_safe_mode()
             .context("operator safe-mode admission failed at dispatch")?;
+        trust_requirements
+            .enforce_deployment_activation()
+            .context("deployment activation admission failed at dispatch")?;
         trust_requirements
             .verify_registry_artifact(&project_paths, config)
             .context("publisher source admission failed at dispatch")?;
@@ -8633,11 +8729,17 @@ impl EngineDispatcher {
             &AtomicBool::new(false),
         )
         .map_err(|trigger| {
-            anyhow::anyhow!(
-                "native-session final authority check refused {:?}: {}",
-                trigger.kind,
-                trigger.detail
-            )
+            if trigger.kind == NativeRunControlKind::ActivationInterrupted {
+                anyhow::Error::new(DeploymentActivationRefused {
+                    detail: trigger.detail,
+                })
+            } else {
+                anyhow::anyhow!(
+                    "native-session final authority check refused {:?}: {}",
+                    trigger.kind,
+                    trigger.detail
+                )
+            }
         })?;
         let fleet_policy_sha256 = fleet_policy
             .map(crate::ops::native_session_inventory::fleet_policy_observation_digest)
@@ -10551,6 +10653,14 @@ impl EngineDispatcher {
             .map_err(|error| {
                 native_engine_spawn_error_with_telemetry_cleanup(
                     format!("Native execution operator safe-mode admission failed: {error:#}"),
+                    &mut telemetry_guard,
+                )
+            })?;
+        trust_requirements
+            .enforce_deployment_activation()
+            .map_err(|error| {
+                native_engine_spawn_error_with_telemetry_cleanup(
+                    format!("Native execution deployment activation admission failed: {error:#}"),
                     &mut telemetry_guard,
                 )
             })?;
@@ -12999,6 +13109,7 @@ mod tests {
     fn live_control_queued_denial_survives_successful_worker_exit() {
         for kind in [
             NativeRunControlKind::SafeMode,
+            NativeRunControlKind::ActivationInterrupted,
             NativeRunControlKind::ExecutionTrust,
             NativeRunControlKind::FleetPolicy,
             NativeRunControlKind::FleetPolicyChanged,
@@ -14310,6 +14421,155 @@ mod tests {
                 trigger.detail.contains(state_path.to_str().unwrap()),
                 "{trigger:?}"
             );
+        }
+
+        #[test]
+        fn activation_restriction_survives_worker_wire_and_retires_only_opted_in_runs() {
+            use crate::runtime::deployment::{
+                ActivationReason, DeploymentAuthority, DeploymentStore, RELEASE_SCHEMA,
+                ReleaseRecord, file_sha256,
+            };
+
+            let fixture = PublisherFixture::new(42, "console.log(42);\n", true);
+            let operator = TempDir::new().expect("deployment operator");
+            let operator_root = operator.path().canonicalize().unwrap();
+            let release_root = fixture.directory.path().canonicalize().unwrap();
+            let config_path = release_root.join("franken_node.toml");
+            fs::write(&config_path, "profile = \"balanced\"\n").unwrap();
+            let publisher_key_path = operator_root.join("publisher.pub");
+            let publisher_key = ed25519_dalek::SigningKey::from_bytes(&[42; 32]);
+            fs::write(
+                &publisher_key_path,
+                hex::encode(publisher_key.verifying_key().as_bytes()),
+            )
+            .unwrap();
+            let authority = DeploymentAuthority::new(ed25519_dalek::SigningKey::from_bytes(
+                &[55; 32],
+            ));
+            let store = DeploymentStore::open(&operator_root, "app").unwrap();
+            let restriction = {
+                let lock = store.lock().unwrap();
+                store
+                    .install_release(
+                        &lock,
+                        &authority,
+                        ReleaseRecord {
+                            schema_version: RELEASE_SCHEMA.to_string(),
+                            deployment: "app".to_string(),
+                            release_id: "first".to_string(),
+                            release_dir: release_root.clone(),
+                            entrypoint: "app.cjs".to_string(),
+                            config_sha256: file_sha256(&config_path).unwrap(),
+                            registry_manifest: release_root.join("artifact.manifest.json"),
+                            publisher_public_key_path: publisher_key_path,
+                            approval: fixture.approval.clone(),
+                            engine_compatibility: "activation-restriction-unit-test".to_string(),
+                            installed_at_epoch_secs: 42,
+                        },
+                    )
+                    .unwrap();
+                let active = store
+                    .activate(
+                        &lock,
+                        &authority,
+                        "first",
+                        ActivationReason::Operator,
+                        Some("first-operator"),
+                        None,
+                        42,
+                    )
+                    .unwrap();
+                store
+                    .capture_activation_restriction(&lock, &authority, &active)
+                    .unwrap()
+            };
+            let unwatched = fixture.requirements();
+            let watched = unwatched
+                .clone()
+                .with_deployment_activation(restriction.clone())
+                .unwrap();
+            let frame = encode_native_session_frame(&watched, NATIVE_SESSION_MAX_REQUEST_BYTES)
+                .expect("encode retained worker requirements");
+            let watched: RunTrustRequirements =
+                decode_native_session_frame(&frame, NATIVE_SESSION_MAX_REQUEST_BYTES, false)
+                    .expect("decode retained worker requirements");
+            assert_eq!(watched.deployment_activation, Some(restriction));
+            watched.validate().unwrap();
+            watched.enforce_deployment_activation().unwrap();
+
+            let now = Utc::now().timestamp().max(0) as u64;
+            let mut config = seed_empty_registry(&release_root, now, true);
+            config.runtime.frozen_modules = Some(true);
+            let paths = RunProjectPaths::resolve(Path::new("app.cjs"), &release_root).unwrap();
+            watched.verify_registry_artifact(&paths, &config).unwrap();
+            let other_release = TempDir::new().unwrap();
+            fs::write(other_release.path().join("app.cjs"), "console.log(42);\n").unwrap();
+            let other_paths =
+                RunProjectPaths::resolve(Path::new("app.cjs"), other_release.path()).unwrap();
+            assert!(
+                watched.verify_registry_artifact(&other_paths, &config).is_err(),
+                "a direct library caller cannot attach another release's activation restriction"
+            );
+            let mut fleet_high_water = None;
+            let cancelled = AtomicBool::new(false);
+            recheck_native_run_controls(
+                &paths,
+                &config,
+                &watched,
+                &mut fleet_high_water,
+                &cancelled,
+            )
+            .expect("the admitted activation initially permits the opted-in run");
+
+            let replacement_restriction = {
+                let lock = store.lock().unwrap();
+                let next = store
+                    .activate(
+                        &lock,
+                        &authority,
+                        "first",
+                        ActivationReason::Operator,
+                        Some("replacement-operator"),
+                        None,
+                        43,
+                    )
+                    .unwrap();
+                assert_eq!(next.sequence, 2, "same-release activation changes generation");
+                store
+                    .capture_activation_restriction(&lock, &authority, &next)
+                    .unwrap()
+            };
+            let refusal = watched
+                .enforce_deployment_activation()
+                .expect_err("stale admission cannot start guest code")
+                .context("dispatch admission");
+            assert!(
+                refusal.downcast_ref::<DeploymentActivationRefused>().is_some(),
+                "the CLI must retain a typed admission-only refusal through context"
+            );
+            let trigger = recheck_native_run_controls(
+                &paths,
+                &config,
+                &watched,
+                &mut fleet_high_water,
+                &cancelled,
+            )
+            .expect_err("a new generation retires the opted-in run");
+            assert_eq!(trigger.kind, NativeRunControlKind::ActivationInterrupted);
+            assert_eq!(serde_json::to_value(&trigger).unwrap()["kind"], "activation_interrupted");
+            recheck_native_run_controls(
+                &paths,
+                &config,
+                &unwatched,
+                &mut fleet_high_water,
+                &cancelled,
+            )
+            .expect("an ordinary invocation remains unaffected by activation changes");
+            watched
+                .with_deployment_activation(replacement_restriction)
+                .unwrap()
+                .enforce_deployment_activation()
+                .expect("a separately admitted later invocation can use the new generation");
         }
 
         #[test]
@@ -21644,6 +21904,18 @@ exec "$2" pinned-worker-image"#,
             Some(&operator_scope)
         );
         decoded.trust_requirements.validate().unwrap();
+        assert!(decoded.trust_requirements.deployment_activation.is_none());
+        assert!(
+            serde_json::to_value(&decoded.trust_requirements)
+                .unwrap()
+                .get("deployment_activation")
+                .is_none(),
+            "ordinary native requests retain their existing wire representation"
+        );
+        decoded
+            .trust_requirements
+            .enforce_deployment_activation()
+            .expect("ordinary runs do not acquire an activation restriction");
         decoded
             .trust_requirements
             .enforce_operator_safe_mode()

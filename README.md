@@ -1284,7 +1284,7 @@ receipt signing key, and emit `franken-node/deploy-cli/v1` with `--json`
 | `franken-node deploy install <name>` | Admit an immutable release project through its publisher-signed source-graph approval. Required: `--release-dir`, `--entrypoint`, `--registry-artifact`, `--publisher-public-key` (outside the release). Optional `--release-id` (default: artifact version). |
 | `franken-node deploy activate <name>` | Re-verify an admitted release and append a signed, hash-chained activation (the pointer). Required: `--release`, `--operator-id`. |
 | `franken-node deploy policy <name>` | Set the signed crash-loop policy: `--on-crash-loop contain\|rollback`, `--restart operator\|automatic` (default `operator`), `--operator-id`. |
-| `franken-node deploy run <name>` | Verify and run the active release natively; record readiness on a healthy run; on a validated crash loop apply the policy (signed recovery record, pointer switch to the newest verified known-good release, optional single restart). Program args after `--`. |
+| `franken-node deploy run <name>` | Verify and run the active release natively; record readiness on a healthy run; on a validated crash loop apply the policy (signed recovery record, pointer switch to the newest verified known-good release, optional single restart). Optional `--retire-on-activation` interrupts this run when its admitted activation or retained transition history changes; it does not start the replacement. Program args after `--`. |
 | `franken-node deploy status <name>` | Show the policy, committed activations and recoveries, pending transaction digest, superseded attempts, and per-release readiness and crash-loop marks. |
 | `franken-node deploy reconcile <name>` | Finish a retained, signed activation transaction after an interrupted write. Required: `--operator-id`. Rechecks the release and, for rollback, the current recovery policy and readiness. Never starts a workload. |
 | `franken-node deploy supersede <name>` | Replace an exact pending transaction with a freshly verified admitted release. Required: `--expected-pending-digest` (from status), `--release`, `--operator-id`, `--reason`. Retains abandoned attempts and their evidence; never starts a workload. |
@@ -4809,6 +4809,44 @@ record and readiness remain intact.
   a stale request cannot move the pointer back. This is an operator activation
   and never grants an automatic restart. Inspect the outcome, then use
   `deploy run` explicitly.
+
+An operator can opt a long-running release into retirement on an activation
+change:
+
+```bash
+franken-node deploy run my-service --retire-on-activation --json
+```
+
+The supervisor captures the authenticated activation while holding the deployment
+lock and binds the child to the same release directory, configuration and
+publisher approval. The child and native worker recheck the restriction before
+guest execution, and the existing live-control observer checks it during the
+run. A newer activation, including reactivating the same release, retires this
+run. Publishing a new durable activation intent also retires it even if the
+transition stops before updating the pointer; restoring old pointer bytes
+cannot conceal the retained newer history. Missing or malformed state, replaced
+deployment directories, and changed history fail closed. The watcher receives
+no deployment signing key and cannot authorize a replacement.
+
+Retirement uses the normal native cancellation, termination and reap path.
+`phase: "activation_interrupted"` is nonzero, records no readiness and never
+triggers crash-loop recovery. Its run report retains the existing signed
+interruption evidence and any indeterminate external effects; it does not
+certify that every effect was rolled back or that worker quiescence was proven.
+A refusal before a native session is admitted instead reports
+`outcome: "activation_interrupted", admission_only: true`, without inventing
+effect evidence. A change first detected by the worker’s last startup gate
+can surface as an ordinary failed run; guest execution is still refused. This
+option requires Unix directory handles and is refused on other platforms.
+Each activation or transaction history is limited to 32 MiB of committed
+record bytes for these checks; exceeding the bound refuses continuation.
+The interruption phase means the admitted restriction became invalid, not
+that a replacement successfully activated. Inspect `deploy status`, reconcile
+an unfinished transition if appropriate, and explicitly run the selected
+release. An independently authorized single crash-loop restart captures a fresh
+restriction when this option is enabled. Without the flag, `deploy run` retains
+its ordinary run-once behavior. `deploy activate` does not wait for running
+workers to retire.
 
 Recovery switches only the activation pointer. Release directories, the
 failed release, its crash records and the activation/recovery history are

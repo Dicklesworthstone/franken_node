@@ -7,6 +7,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_REGISTRY_MAX_ACTIVE_ARTIFACTS_PER_LINEAGE: usize = 5;
+pub const MAX_ADMITTED_DEPLOYMENT_ACTIVATION_BYTES: usize = 64 * 1024;
 
 /// Validate user content path arguments against path traversal attacks.
 /// Strict validation for user-controlled content paths.
@@ -332,6 +333,11 @@ pub struct RunArgs {
     #[arg(long, hide = true)]
     pub admitted_operator_scope: Option<PathBuf>,
 
+    /// Exact activation restriction captured by the deployment supervisor.
+    /// Internal handoff: this can retire a run but grants no execution authority.
+    #[arg(long, hide = true)]
+    pub admitted_deployment_activation: Option<String>,
+
     /// Runtime selection. Profile-governed run accepts auto or franken-engine;
     /// node and bun fail closed because they cannot enforce engine capabilities.
     #[arg(long)]
@@ -450,6 +456,17 @@ impl RunArgs {
             anyhow::ensure!(
                 anchor.is_absolute(),
                 "an admitted operator scope requires an absolute anchor path"
+            );
+        }
+        if let Some(restriction) = &self.admitted_deployment_activation {
+            anyhow::ensure!(
+                self.admitted_config_sha256.is_some(),
+                "an admitted activation requires deployment configuration and publisher approval commitments"
+            );
+            anyhow::ensure!(
+                !restriction.is_empty()
+                    && restriction.len() <= MAX_ADMITTED_DEPLOYMENT_ACTIVATION_BYTES,
+                "an admitted activation must be nonempty and at most 64 KiB"
             );
         }
         if self.admitted_config_sha256.is_some() {
@@ -648,6 +665,11 @@ pub struct DeployRunArgs {
     /// Deployment name.
     #[arg(default_value = "")]
     pub name: String,
+
+    /// Retire this run when its admitted activation or retained transition
+    /// history changes. Does not start the replacement release.
+    #[arg(long)]
+    pub retire_on_activation: bool,
 
     /// Emit `franken-node/deploy-run-cli/v1` JSON.
     #[arg(long)]
@@ -4019,7 +4041,33 @@ mod parser_contract_extra_tests {
             args.admitted_operator_scope.as_deref(),
             Some(Path::new("/operator/deployment.lock"))
         );
+        let mut retiring = base.clone();
+        retiring.extend(["--admitted-deployment-activation", "{}"]);
+        let Command::Run(args) = parse(&retiring).map_err(|error| error.to_string())?.command
+        else {
+            return Err("expected activation-restricted admitted run".to_string());
+        };
+        // Shape and filesystem validation belong to the run handler and dispatcher.
+        args.validate_paths().map_err(|error| error.to_string())?;
+        assert_eq!(args.admitted_deployment_activation.as_deref(), Some("{}"));
+        let oversized = "x".repeat(MAX_ADMITTED_DEPLOYMENT_ACTIVATION_BYTES + 1);
+        let mut oversized_command = base.clone();
+        oversized_command.extend(["--admitted-deployment-activation", &oversized]);
+        let Command::Run(args) = parse(&oversized_command)
+            .map_err(|error| error.to_string())?
+            .command
+        else {
+            return Err("expected oversized activation-restricted run".to_string());
+        };
+        assert!(args.validate_paths().is_err());
         for command in [
+            vec![
+                "franken-node",
+                "run",
+                "app.js",
+                "--admitted-deployment-activation",
+                "{}",
+            ],
             vec![
                 "franken-node",
                 "run",
@@ -4070,6 +4118,38 @@ mod parser_contract_extra_tests {
                 .to_string()
                 .contains("supplied together")
         );
+        Ok(())
+    }
+
+    #[test]
+    fn deployment_activation_retirement_requires_an_explicit_flag() -> Result<(), String> {
+        for (command, expected) in [
+            (vec!["franken-node", "deploy", "run", "service", "--json"], false),
+            (
+                vec![
+                    "franken-node",
+                    "deploy",
+                    "run",
+                    "service",
+                    "--retire-on-activation",
+                    "--json",
+                    "--",
+                    "guest-arg",
+                ],
+                true,
+            ),
+        ] {
+            let Command::Deploy(DeployCommand::Run(args)) =
+                parse(&command).map_err(|error| error.to_string())?.command
+            else {
+                return Err("expected deployment run".to_string());
+            };
+            assert_eq!(args.retire_on_activation, expected);
+            assert!(args.json);
+            if expected {
+                assert_eq!(args.app_args, vec!["guest-arg".to_string()]);
+            }
+        }
         Ok(())
     }
 

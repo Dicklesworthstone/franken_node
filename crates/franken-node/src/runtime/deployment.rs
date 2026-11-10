@@ -458,6 +458,473 @@ pub struct DeploymentLock {
     store_root: PathBuf,
 }
 
+/// Read-only continuation restriction for one already admitted activation.
+/// This record adds no execution authority and contains no operator secret.
+/// Every field travels in the authenticated native-worker configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActivationRestriction {
+    schema_version: String,
+    store_root: PathBuf,
+    deployment: String,
+    activation_sequence: u64,
+    release_id: String,
+    release_dir: PathBuf,
+    config_sha256: String,
+    approval_sha256: String,
+    activation_digest: String,
+    pointer_sha256: String,
+    signer_public_key_hex: String,
+    directories: Vec<RestrictedDirectoryIdentity>,
+    activations: RestrictedHistory,
+    transactions: Option<RestrictedHistory>,
+}
+
+const ACTIVATION_RESTRICTION_SCHEMA: &str =
+    "franken-node/deployment-activation-restriction/v1";
+const MAX_RESTRICTION_PATH_BYTES: usize = 4096;
+const MAX_RESTRICTION_PATH_COMPONENTS: usize = 128;
+/// Maximum committed record bytes inspected in one history observation.
+#[cfg(unix)]
+const MAX_RESTRICTION_HISTORY_BYTES: u64 = 32 * 1024 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RestrictedDirectoryIdentity {
+    device: u64,
+    inode: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RestrictedDirectoryRevision {
+    modified_secs: i64,
+    modified_nanos: i64,
+    changed_secs: i64,
+    changed_nanos: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RestrictedHistory {
+    directory: RestrictedDirectoryIdentity,
+    revision: RestrictedDirectoryRevision,
+    entries_sha256: String,
+    record_count: u64,
+}
+
+impl ActivationRestriction {
+    #[must_use]
+    pub fn store_root(&self) -> &Path {
+        &self.store_root
+    }
+
+    #[must_use]
+    pub fn deployment(&self) -> &str {
+        &self.deployment
+    }
+
+    #[must_use]
+    pub fn activation_sequence(&self) -> u64 {
+        self.activation_sequence
+    }
+
+    #[must_use]
+    pub fn release_id(&self) -> &str {
+        &self.release_id
+    }
+
+    /// Validate the bounded restriction without opening state or granting
+    /// authority. Filesystem observations are checked separately by enforce.
+    pub fn validate(&self) -> Result<()> {
+        anyhow::ensure!(
+            self.schema_version == ACTIVATION_RESTRICTION_SCHEMA,
+            "unsupported deployment activation restriction"
+        );
+        validate_identifier("restricted deployment", &self.deployment)?;
+        validate_identifier("restricted release", &self.release_id)?;
+        let components = restriction_path_shape(&self.store_root)?;
+        restriction_path_shape(&self.release_dir)?;
+        anyhow::ensure!(
+            self.store_root
+                .ends_with(Path::new(DEPLOYMENTS_RELATIVE_DIR).join(&self.deployment))
+                && self.directories.len() == components
+                && (1..=MAX_ACTIVATIONS).contains(&self.activation_sequence),
+            "deployment activation restriction has an invalid path or sequence"
+        );
+        for digest in [
+            &self.config_sha256,
+            &self.approval_sha256,
+            &self.activation_digest,
+            &self.pointer_sha256,
+            &self.activations.entries_sha256,
+        ] {
+            anyhow::ensure!(
+                restriction_hash(digest),
+                "deployment activation restriction has an invalid commitment"
+            );
+        }
+        for history in std::iter::once(&self.activations).chain(self.transactions.as_ref()) {
+            anyhow::ensure!(
+                history.record_count <= self.activation_sequence
+                    && restriction_hash(&history.entries_sha256)
+                    && (0..1_000_000_000).contains(&history.revision.modified_nanos)
+                    && (0..1_000_000_000).contains(&history.revision.changed_nanos),
+                "deployment activation restriction has invalid history bounds"
+            );
+        }
+        anyhow::ensure!(
+            self.activations.record_count == self.activation_sequence,
+            "deployment activation restriction omits its admitted history"
+        );
+        self.verifying_key()?;
+        Ok(())
+    }
+
+    /// A caller-supplied restriction must describe this exact admitted release,
+    /// not another valid deployment. These are bindings, never new run grants.
+    pub fn validate_release(
+        &self,
+        release_root: &Path,
+        config_sha256: &str,
+        approval_sha256: &str,
+    ) -> Result<()> {
+        self.validate_source(release_root, approval_sha256)?;
+        anyhow::ensure!(
+            config_sha256 == self.config_sha256,
+            "deployment activation restriction does not match the admitted configuration"
+        );
+        Ok(())
+    }
+
+    /// Bind a direct library/worker dispatch to its admitted source without
+    /// consulting mutable activation state or claiming configuration admission.
+    pub fn validate_source(&self, release_root: &Path, approval_sha256: &str) -> Result<()> {
+        self.validate()?;
+        anyhow::ensure!(
+            release_root == self.release_dir.as_path()
+                && approval_sha256 == self.approval_sha256,
+            "deployment activation restriction does not match the admitted source"
+        );
+        Ok(())
+    }
+
+    fn verifying_key(&self) -> Result<VerifyingKey> {
+        anyhow::ensure!(
+            self.signer_public_key_hex.len() == 64
+                && self.signer_public_key_hex.bytes().all(|byte| {
+                    byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
+                }),
+            "deployment activation restriction has an invalid public key"
+        );
+        let bytes: [u8; 32] = hex::decode(&self.signer_public_key_hex)?
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("invalid deployment public key length"))?;
+        VerifyingKey::from_bytes(&bytes).context("invalid deployment public key")
+    }
+
+    #[cfg(unix)]
+    fn check_pointer(&self, bytes: &[u8]) -> Result<()> {
+        anyhow::ensure!(
+            restriction_bytes_hash(bytes) == self.pointer_sha256,
+            "deployment activation pointer changed after admission"
+        );
+        let record: SignedRecord<ActivationRecord> =
+            serde_json::from_slice(bytes).context("invalid deployment activation pointer")?;
+        validate_activation_shape(&record.payload)?;
+        anyhow::ensure!(
+            record.signer_public_key_hex == self.signer_public_key_hex
+                && record.payload.deployment == self.deployment
+                && record.payload.sequence == self.activation_sequence
+                && record.payload.release_id == self.release_id
+                && record_digest(&record)? == self.activation_digest,
+            "deployment activation pointer no longer matches its admission"
+        );
+        let signature: [u8; 64] = hex::decode(&record.signature_hex)?
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("invalid deployment activation signature length"))?;
+        self.verifying_key()?
+            .verify_strict(
+                &signing_message(&record.payload)?,
+                &Signature::from_bytes(&signature),
+            )
+            .context("deployment activation signature no longer verifies")
+    }
+
+    /// Require the exact admitted pointer and immutable history observation.
+    /// A new transaction intent retires this activation before its pointer
+    /// commits. Interrupted transitions and restored old pointer bytes cannot
+    /// erase the retained history obligation. No replacement state is trusted.
+    ///
+    /// Reads are bounded, descriptor-relative and do not follow symlinks. The
+    /// observer must latch any refusal and request native-session termination;
+    /// these polling observations do not constitute an atomic fleet barrier.
+    pub fn enforce(&self) -> Result<()> {
+        self.validate()?;
+        #[cfg(not(unix))]
+        anyhow::bail!("deployment activation retirement requires Unix directory handles");
+        #[cfg(unix)]
+        {
+            // Reopen from the filesystem root for each observation. An owned
+            // descriptor alone could continue watching a renamed, obsolete tree.
+            // Repeat the observation to detect retargeting during the read.
+            for _ in 0..2 {
+                let (directory, identities) = open_restricted_directory(&self.store_root)?;
+                anyhow::ensure!(
+                    identities == self.directories,
+                    "deployment state directory changed after admission"
+                );
+                let pointer = read_restricted_pointer(&directory)?;
+                self.check_pointer(&pointer)?;
+                anyhow::ensure!(
+                    inspect_restricted_history(
+                        &directory,
+                        "activations",
+                        self.activation_sequence,
+                    )?
+                    .as_ref()
+                        == Some(&self.activations)
+                        && inspect_restricted_history(
+                            &directory,
+                            "transactions",
+                            self.activation_sequence,
+                        )? == self.transactions,
+                    "deployment activation history or transaction intent changed after admission"
+                );
+            }
+            Ok(())
+        }
+    }
+}
+
+fn restriction_path_shape(path: &Path) -> Result<usize> {
+    let components = path.components().count();
+    let normalized: PathBuf = path.components().collect();
+    anyhow::ensure!(
+        path.is_absolute()
+            && path.as_os_str().len() <= MAX_RESTRICTION_PATH_BYTES
+            && (1..=MAX_RESTRICTION_PATH_COMPONENTS).contains(&components)
+            && path.components().all(|part| {
+                matches!(part, std::path::Component::RootDir | std::path::Component::Normal(_))
+            })
+            && normalized.as_os_str() == path.as_os_str(),
+        "deployment activation restriction requires a bounded normalized absolute path"
+    );
+    Ok(components)
+}
+
+fn restriction_hash(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|digest| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
+}
+
+#[cfg(unix)]
+fn restriction_bytes_hash(bytes: &[u8]) -> String {
+    format!("sha256:{}", hex::encode(Sha256::digest(bytes)))
+}
+
+#[cfg(unix)]
+fn restricted_directory_identity(metadata: &fs::Metadata) -> RestrictedDirectoryIdentity {
+    use std::os::unix::fs::MetadataExt as _;
+    RestrictedDirectoryIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    }
+}
+
+#[cfg(unix)]
+fn restricted_directory_revision(metadata: &fs::Metadata) -> RestrictedDirectoryRevision {
+    use std::os::unix::fs::MetadataExt as _;
+    RestrictedDirectoryRevision {
+        modified_secs: metadata.mtime(),
+        modified_nanos: metadata.mtime_nsec(),
+        changed_secs: metadata.ctime(),
+        changed_nanos: metadata.ctime_nsec(),
+    }
+}
+
+#[cfg(unix)]
+fn open_restricted_directory(path: &Path) -> Result<(File, Vec<RestrictedDirectoryIdentity>)> {
+    use rustix::fs::{Mode, OFlags, open, openat};
+    restriction_path_shape(path)?;
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let mut directory = File::from(open("/", flags, Mode::empty())?);
+    let mut identities = vec![restricted_directory_identity(&directory.metadata()?)];
+    for part in path.components() {
+        if let std::path::Component::Normal(name) = part {
+            directory = File::from(openat(&directory, name, flags, Mode::empty())?);
+            identities.push(restricted_directory_identity(&directory.metadata()?));
+        }
+    }
+    Ok((directory, identities))
+}
+
+#[cfg(unix)]
+fn read_restricted_pointer(directory: &File) -> Result<Vec<u8>> {
+    use rustix::fs::{Mode, OFlags, openat};
+    let file = File::from(openat(
+        directory,
+        "active.json",
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?);
+    let before = file.metadata()?;
+    anyhow::ensure!(
+        before.is_file() && before.len() <= MAX_RECORD_BYTES,
+        "deployment activation pointer is not a bounded regular file"
+    );
+    let mut bytes = Vec::new();
+    (&file).take(MAX_RECORD_BYTES + 1).read_to_end(&mut bytes)?;
+    let after = file.metadata()?;
+    anyhow::ensure!(
+        bytes.len() as u64 == before.len()
+            && before.len() == after.len()
+            && restricted_directory_identity(&before) == restricted_directory_identity(&after)
+            && restricted_directory_revision(&before) == restricted_directory_revision(&after),
+        "deployment activation pointer changed during inspection"
+    );
+    Ok(bytes)
+}
+
+#[cfg(unix)]
+fn inspect_restricted_history(
+    store: &File,
+    name: &str,
+    admitted_sequence: u64,
+) -> Result<Option<RestrictedHistory>> {
+    use rustix::fs::{Dir, Mode, OFlags, openat};
+    let directory = match openat(
+        store,
+        name,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(file) => File::from(file),
+        Err(rustix::io::Errno::NOENT) => return Ok(None),
+        Err(error) => return Err(error).context("cannot inspect deployment activation history"),
+    };
+    let before = directory.metadata()?;
+    let mut observations = BTreeMap::new();
+    let mut records = 0_u64;
+    let mut history_bytes = 0_u64;
+    for (index, entry) in Dir::read_from(&directory)?.enumerate() {
+        anyhow::ensure!(
+            (index as u64) < MAX_ACTIVATIONS * 4,
+            "deployment activation restriction history exceeds its entry bound"
+        );
+        let entry = entry?;
+        let name = entry.file_name().to_str().context("invalid deployment history filename")?;
+        anyhow::ensure!(name.len() <= 256, "deployment history filename exceeds its byte bound");
+        if matches!(name, "." | "..") {
+            continue;
+        }
+        let temporary = name.starts_with('.') && name.ends_with(".tmp");
+        if !temporary {
+            let sequence = name
+                .strip_suffix(".json")
+                .and_then(|sequence| sequence.parse::<u64>().ok())
+                .filter(|sequence| (1..=MAX_ACTIVATIONS).contains(sequence))
+                .context("invalid deployment activation history filename")?;
+            anyhow::ensure!(
+                name == format!("{sequence:010}.json") && sequence <= admitted_sequence,
+                "a newer deployment activation or transaction intent retires this run"
+            );
+        }
+        let file = File::from(openat(
+            &directory,
+            entry.file_name(),
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::empty(),
+        )?);
+        let metadata = file.metadata()?;
+        anyhow::ensure!(
+            metadata.is_file() && metadata.len() <= MAX_RECORD_BYTES,
+            "deployment history entry is not a bounded regular file"
+        );
+        // The capture authenticates complete signed history. Polling commits
+        // to its exact bytes without repeating every signature verification.
+        // Timestamps alone cannot notice same-size edits in one clock tick.
+        let content_sha256 = if temporary {
+            None
+        } else {
+            history_bytes = history_bytes
+                .checked_add(metadata.len())
+                .context("deployment history byte count overflow")?;
+            anyhow::ensure!(
+                history_bytes <= MAX_RESTRICTION_HISTORY_BYTES,
+                "deployment activation restriction history exceeds its byte bound"
+            );
+            let mut bytes = Vec::new();
+            (&file).take(metadata.len() + 1).read_to_end(&mut bytes)?;
+            anyhow::ensure!(
+                bytes.len() as u64 == metadata.len(),
+                "deployment history entry changed length during inspection"
+            );
+            records += 1;
+            let digest: [u8; 32] = Sha256::digest(&bytes).into();
+            Some(digest)
+        };
+        let after = file.metadata()?;
+        anyhow::ensure!(
+            metadata.len() == after.len()
+                && restricted_directory_identity(&metadata) == restricted_directory_identity(&after)
+                && restricted_directory_revision(&metadata) == restricted_directory_revision(&after),
+            "deployment history entry changed during inspection"
+        );
+        anyhow::ensure!(
+            observations.insert(
+                name.to_owned(),
+                (
+                    restricted_directory_identity(&metadata),
+                    restricted_directory_revision(&metadata),
+                    metadata.len(),
+                    content_sha256,
+                ),
+            ).is_none(),
+            "deployment activation history changed during enumeration"
+        );
+    }
+    let after = directory.metadata()?;
+    anyhow::ensure!(
+        restricted_directory_identity(&before) == restricted_directory_identity(&after)
+            && restricted_directory_revision(&before) == restricted_directory_revision(&after),
+        "deployment activation history changed during inspection"
+    );
+    let mut digest = Sha256::new();
+    digest.update(b"franken-node/deployment-restriction-history/v1\0");
+    digest.update((name.len() as u64).to_le_bytes());
+    digest.update(name.as_bytes());
+    for (entry, (identity, revision, length, content_sha256)) in observations {
+        digest.update((entry.len() as u64).to_le_bytes());
+        digest.update(entry.as_bytes());
+        digest.update(identity.device.to_le_bytes());
+        digest.update(identity.inode.to_le_bytes());
+        digest.update(length.to_le_bytes());
+        digest.update(revision.modified_secs.to_le_bytes());
+        digest.update(revision.modified_nanos.to_le_bytes());
+        digest.update(revision.changed_secs.to_le_bytes());
+        digest.update(revision.changed_nanos.to_le_bytes());
+        if let Some(content_sha256) = content_sha256 {
+            digest.update([1]);
+            digest.update(content_sha256);
+        } else {
+            // Temporary entry names and metadata restrict continuation, but
+            // incomplete staging payloads are not authenticated history.
+            digest.update([0]);
+        }
+    }
+    Ok(Some(RestrictedHistory {
+        directory: restricted_directory_identity(&before),
+        revision: restricted_directory_revision(&before),
+        entries_sha256: format!("sha256:{}", hex::encode(digest.finalize())),
+        record_count: records,
+    }))
+}
+
 /// Filesystem store for one deployment.
 pub struct DeploymentStore {
     name: String,
@@ -1052,6 +1519,96 @@ impl DeploymentStore {
     /// The release the pointer names, if any.
     pub fn active(&self, authority: &DeploymentAuthority) -> Result<Option<ActivationRecord>> {
         Ok(self.activations(authority)?.pop())
+    }
+
+    /// Capture a continuation restriction while this store's lock still
+    /// serializes the already authenticated activation and its child spawn.
+    /// The selected release is bound to the child's existing config/approval
+    /// pins; no private deployment signing material enters the restriction.
+    pub fn capture_activation_restriction(
+        &self,
+        lock: &DeploymentLock,
+        authority: &DeploymentAuthority,
+        activation: &ActivationRecord,
+    ) -> Result<ActivationRestriction> {
+        self.require_lock(lock)?;
+        anyhow::ensure!(
+            self.active(authority)?.as_ref() == Some(activation),
+            "deployment activation changed before its continuation restriction"
+        );
+        #[cfg(not(unix))]
+        anyhow::bail!("deployment activation retirement requires Unix directory handles");
+        #[cfg(unix)]
+        {
+            use rustix::fs::{Mode, OFlags, openat};
+            let release = self.release(authority, &activation.release_id)?;
+            let store_root = if self.root.is_absolute() {
+                self.root.clone()
+            } else {
+                std::env::current_dir()?.join(&self.root)
+            };
+            let (directory, directories) = open_restricted_directory(&store_root)?;
+            let held_identity = restricted_directory_identity(&lock._file.metadata()?);
+            let check_lock = || -> Result<()> {
+                let file = File::from(openat(
+                    &directory,
+                    "deployment.lock",
+                    OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+                    Mode::empty(),
+                )?);
+                let metadata = file.metadata()?;
+                anyhow::ensure!(
+                    metadata.is_file() && restricted_directory_identity(&metadata) == held_identity,
+                    "deployment restriction is not protected by the held store lock"
+                );
+                Ok(())
+            };
+            check_lock()?;
+            let bytes = read_restricted_pointer(&directory)?;
+            let record: SignedRecord<ActivationRecord> =
+                serde_json::from_slice(&bytes).context("invalid admitted deployment pointer")?;
+            authority.open(&record, "admitted deployment pointer")?;
+            anyhow::ensure!(
+                &record.payload == activation,
+                "deployment pointer differs from the authenticated activation"
+            );
+            let restriction = ActivationRestriction {
+                schema_version: ACTIVATION_RESTRICTION_SCHEMA.into(),
+                store_root,
+                deployment: self.name.clone(),
+                activation_sequence: activation.sequence,
+                release_id: activation.release_id.clone(),
+                release_dir: release.release_dir,
+                config_sha256: release.config_sha256,
+                approval_sha256: release.approval.admission_sha256()?,
+                activation_digest: record_digest(&record)?,
+                pointer_sha256: restriction_bytes_hash(&bytes),
+                signer_public_key_hex: authority.public_key_hex(),
+                directories,
+                activations: inspect_restricted_history(
+                    &directory,
+                    "activations",
+                    activation.sequence,
+                )?
+                .context("admitted activation has no retained history")?,
+                transactions: inspect_restricted_history(
+                    &directory,
+                    "transactions",
+                    activation.sequence,
+                )?,
+            };
+            restriction.enforce()?;
+            // Authenticate the complete chain again between two identical
+            // filesystem observations. A record modified after the first
+            // active() call must not become the new captured baseline.
+            anyhow::ensure!(
+                self.active(authority)?.as_ref() == Some(activation),
+                "deployment activation changed while its restriction was captured"
+            );
+            restriction.enforce()?;
+            check_lock()?;
+            Ok(restriction)
+        }
     }
 
     /// Append an activation and move the pointer to it.
@@ -2074,6 +2631,250 @@ mod tests {
             store,
             authority: authority(7),
         }
+    }
+
+    #[cfg(unix)]
+    fn restriction_fixture() -> (Fixture, ActivationRecord, ActivationRestriction) {
+        let mut f = fixture();
+        // The CLI admits an already canonical operator root. Preserve that
+        // contract on hosts whose temporary directory has a symlinked ancestor.
+        f.store = DeploymentStore::open(&f._dir.path().canonicalize().unwrap(), "app").unwrap();
+        let (active, restriction) = {
+            let lock = f.store.lock().unwrap();
+            f.store.install_release(&lock, &f.authority, test_release(&f.store, "v1")).unwrap();
+            let active = f.store.activate(
+                &lock, &f.authority, "v1", ActivationReason::Operator, Some("ops"), None, 20,
+            ).unwrap();
+            let restriction = f.store.capture_activation_restriction(&lock, &f.authority, &active).unwrap();
+            (active, restriction)
+        };
+        (f, active, restriction)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn activation_restriction_round_trip_preserves_unchanged_admission_without_secrets() {
+        let (f, active, restriction) = restriction_fixture();
+        restriction.enforce().unwrap();
+        let bytes = serde_json::to_vec(&restriction).unwrap();
+        assert!(bytes.len() < 64 * 1024);
+        assert!(!String::from_utf8_lossy(&bytes).contains(&"07".repeat(32)));
+        let decoded: ActivationRestriction = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(decoded, restriction);
+        assert_eq!(decoded.store_root(), f.store.root());
+        assert_eq!(decoded.deployment(), "app");
+        assert_eq!(decoded.activation_sequence(), active.sequence);
+        assert_eq!(decoded.release_id(), active.release_id);
+        let pointer_bytes = fs::read(f.store.pointer_path()).unwrap();
+        assert_eq!(decoded.pointer_sha256, restriction_bytes_hash(&pointer_bytes));
+        let pointer: SignedRecord<ActivationRecord> = serde_json::from_slice(&pointer_bytes).unwrap();
+        assert_eq!(decoded.activation_digest, record_digest(&pointer).unwrap());
+        assert_eq!(decoded.signer_public_key_hex, f.authority.public_key_hex());
+        // Replacement with the exact retained bytes does not change activation
+        // identity. Directory identity is pinned; active.json inode is not.
+        fs::rename(f.store.pointer_path(), f.store.root().join("retained-active.json")).unwrap();
+        fs::write(f.store.pointer_path(), &pointer_bytes).unwrap();
+        decoded.enforce().unwrap();
+        let lock = f.store.lock().unwrap();
+        f.store.record_health(&lock, &f.authority, "v1", healthy("healthy-run", 30)).unwrap();
+        f.store.set_policy(&lock, &f.authority, rollback_policy(&f.store)).unwrap();
+        decoded.enforce().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn activation_restriction_retires_same_release_reactivation_even_after_pointer_restore() {
+        let (f, active, restriction) = restriction_fixture();
+        let old_pointer = fs::read(f.store.pointer_path()).unwrap();
+        let lock = f.store.lock().unwrap();
+        let successor = f.store.activate(
+            &lock, &f.authority, "v1", ActivationReason::Operator, Some("ops"), None, 30,
+        ).unwrap();
+        assert_eq!(successor.release_id, active.release_id);
+        assert_eq!(successor.sequence, active.sequence + 1);
+        assert_eq!(successor.previous_activation_digest.as_deref(), Some(restriction.activation_digest.as_str()));
+        assert!(restriction.enforce().is_err());
+        let next = f.store.capture_activation_restriction(&lock, &f.authority, &successor).unwrap();
+        next.enforce().unwrap();
+        fs::write(f.store.pointer_path(), old_pointer).unwrap();
+        assert!(restriction.enforce().is_err(), "retained successor history cannot be hidden by old pointer bytes");
+        assert!(next.enforce().is_err(), "the successor cannot accept the restored predecessor");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn activation_restriction_retires_on_intent_before_pointer_commit() {
+        let (f, active, restriction) = restriction_fixture();
+        let old_pointer = fs::read(f.store.pointer_path()).unwrap();
+        let lock = f.store.lock().unwrap();
+        let pending = pending_operator(&f, &lock);
+        assert_eq!(pending.activation.sequence, active.sequence + 1);
+        retain_intent(&f, &pending);
+        assert_eq!(fs::read(f.store.pointer_path()).unwrap(), old_pointer);
+        assert!(restriction.enforce().is_err());
+        assert!(f.store.active(&f.authority).is_err());
+        assert!(f.store.capture_activation_restriction(&lock, &f.authority, &active).is_err());
+        // The live observer latches this first refusal. The restriction does
+        // not claim to detect an erased intent between periodic observations.
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn activation_restriction_refuses_missing_malformed_and_foreign_pointers() {
+        for change in 0..3 {
+            let (f, active, restriction) = restriction_fixture();
+            match change {
+                0 => fs::rename(f.store.pointer_path(), f.store.root().join("retained-pointer.json")).unwrap(),
+                1 => fs::write(f.store.pointer_path(), b"{ malformed").unwrap(),
+                _ => {
+                    let foreign = authority(9).seal(active).unwrap();
+                    fs::write(f.store.pointer_path(), serde_json::to_vec(&foreign).unwrap()).unwrap();
+                }
+            }
+            assert!(restriction.enforce().is_err(), "pointer mutation {change}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn activation_restriction_pins_directory_identity_and_never_follows_symlinks() {
+        use std::os::unix::fs::symlink;
+        for replacement_is_symlink in [false, true] {
+            let (f, _, restriction) = restriction_fixture();
+            let retained = f.store.root().with_file_name("retained-app");
+            fs::rename(f.store.root(), &retained).unwrap();
+            if replacement_is_symlink {
+                symlink(&retained, f.store.root()).unwrap();
+            } else {
+                fs::create_dir(f.store.root()).unwrap();
+                fs::copy(retained.join("active.json"), f.store.pointer_path()).unwrap();
+            }
+            assert!(restriction.enforce().is_err());
+        }
+        for component in ["active.json", "activations", "transactions"] {
+            let (f, _, restriction) = restriction_fixture();
+            let original = f.store.root().join(component);
+            let retained = f.store.root().join(format!("retained-{component}"));
+            fs::rename(&original, &retained).unwrap();
+            symlink(&retained, &original).unwrap();
+            assert!(restriction.enforce().is_err(), "must not follow {component}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn activation_restriction_refuses_retargeted_ancestor_and_unheld_lock() {
+        use std::os::unix::fs::symlink;
+        let (f, active, restriction) = restriction_fixture();
+        let ancestor = f._dir.path().canonicalize().unwrap().join(".franken-node");
+        let retained = f._dir.path().join("retained-state");
+        fs::rename(&ancestor, &retained).unwrap();
+        symlink(&retained, &ancestor).unwrap();
+        assert!(restriction.enforce().is_err());
+        // Capture cannot inherit a no-follow guarantee from canonicalize().
+        let lock = f.store.lock().unwrap();
+        assert!(f.store.capture_activation_restriction(&lock, &f.authority, &active).is_err());
+
+        let (f, active, _) = restriction_fixture();
+        let held = f.store.lock().unwrap();
+        fs::rename(f.store.root().join("deployment.lock"), f.store.root().join("retained-lock")).unwrap();
+        fs::write(f.store.root().join("deployment.lock"), b"").unwrap();
+        assert!(f.store.capture_activation_restriction(&held, &f.authority, &active).is_err());
+        let other = fixture();
+        let other_lock = other.store.lock().unwrap();
+        assert!(f.store.capture_activation_restriction(&other_lock, &f.authority, &active).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn activation_restriction_binds_release_without_using_freshness_as_authority() {
+        let (f, active, restriction) = restriction_fixture();
+        let release = f.store.release(&f.authority, &active.release_id).unwrap();
+        let approval = release.approval.admission_sha256().unwrap();
+        restriction.validate_release(&release.release_dir, &release.config_sha256, &approval).unwrap();
+        assert!(restriction.validate_source(Path::new("/different-release"), &approval).is_err());
+        assert!(restriction.validate_source(&release.release_dir, &format!("sha256:{}", "f".repeat(64))).is_err());
+        assert!(restriction.validate_release(&release.release_dir, &format!("sha256:{}", "e".repeat(64)), &approval).is_err());
+        let lock = f.store.lock().unwrap();
+        f.store.activate(
+            &lock, &f.authority, "v1", ActivationReason::Operator, Some("ops"), None, 30,
+        ).unwrap();
+        // Keep identity validation separate so a stale admitted child reaches
+        // the dispatcher's typed activation-interrupted admission boundary.
+        restriction.validate_release(&release.release_dir, &release.config_sha256, &approval).unwrap();
+        assert!(restriction.enforce().is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn activation_restriction_rejects_malformed_or_incomplete_serialized_pins() {
+        let (_, _, restriction) = restriction_fixture();
+        let valid = serde_json::to_value(&restriction).unwrap();
+        for (field, value) in [
+            ("schema_version", serde_json::json!("unsupported")),
+            ("activation_sequence", serde_json::json!(0)),
+            ("activation_sequence", serde_json::json!(MAX_ACTIVATIONS + 1)),
+            ("directories", serde_json::json!([])),
+            ("pointer_sha256", serde_json::json!("invalid")),
+            ("store_root", serde_json::json!("/other/state")),
+            ("release_dir", serde_json::json!("../release")),
+            ("signer_public_key_hex", serde_json::json!("ff")),
+        ] {
+            let mut changed = valid.clone();
+            changed[field] = value;
+            let decoded: ActivationRestriction = serde_json::from_value(changed).unwrap();
+            assert!(decoded.validate().is_err(), "{field}");
+        }
+        let mut unknown = valid;
+        unknown["operator_private_key"] = serde_json::json!("not-an-allowed-field");
+        assert!(serde_json::from_value::<ActivationRestriction>(unknown).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn activation_restriction_detects_same_size_in_place_history_corruption() {
+        use std::os::unix::fs::MetadataExt as _;
+        for history in ["activations", "transactions"] {
+            let (f, _, restriction) = restriction_fixture();
+            let pointer = fs::read(f.store.pointer_path()).unwrap();
+            let path = f.store.root().join(history).join("0000000001.json");
+            let before = fs::metadata(&path).unwrap();
+            let mut bytes = fs::read(&path).unwrap();
+            assert_eq!(bytes[0], b'{');
+            bytes[0] = b'[';
+            fs::write(&path, &bytes).unwrap();
+            let after = fs::metadata(&path).unwrap();
+            assert_eq!(before.ino(), after.ino(), "same record inode");
+            assert_eq!(before.len(), after.len(), "same record length");
+            assert_eq!(fs::read(f.store.pointer_path()).unwrap(), pointer);
+            assert!(restriction.enforce().is_err(), "{history}");
+            assert!(f.store.active(&f.authority).is_err(), "corrupt signed history is not an activation");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn activation_restriction_bounds_cumulative_history_bytes() {
+        let directory = tempfile::tempdir().unwrap();
+        let history = directory.path().join("activations");
+        fs::create_dir(&history).unwrap();
+        let first = history.join("0000000001.json");
+        // The reader hashes raw records; authentication belongs to capture.
+        // Sparse hard links keep this boundary test's disk footprint bounded.
+        File::create(&first).unwrap().set_len(MAX_RECORD_BYTES).unwrap();
+        let maximum_records = MAX_RESTRICTION_HISTORY_BYTES / MAX_RECORD_BYTES;
+        for sequence in 2..=maximum_records {
+            fs::hard_link(&first, history.join(format!("{sequence:010}.json"))).unwrap();
+        }
+        let store = File::open(directory.path()).unwrap();
+        let accepted = inspect_restricted_history(&store, "activations", maximum_records)
+            .unwrap().unwrap();
+        assert_eq!(accepted.record_count, maximum_records);
+        let excessive_sequence = maximum_records + 1;
+        fs::hard_link(&first, history.join(format!("{excessive_sequence:010}.json"))).unwrap();
+        let error = inspect_restricted_history(&store, "activations", excessive_sequence)
+            .unwrap_err();
+        assert!(error.to_string().contains("exceeds its byte bound"));
     }
 
     #[test]

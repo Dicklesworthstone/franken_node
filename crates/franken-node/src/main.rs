@@ -6720,6 +6720,7 @@ fn spawn_deploy_release_child(
     store: &runtime::deployment::DeploymentStore,
     release: &runtime::deployment::ReleaseRecord,
     app_args: &[String],
+    activation_restriction: Option<&runtime::deployment::ActivationRestriction>,
 ) -> Result<std::process::Child> {
     // Bind the complete approval, including its publisher and authority
     // envelope, rather than accepting a newly signed replacement at the same
@@ -6753,6 +6754,15 @@ fn spawn_deploy_release_child(
         .arg(approval_sha256)
         .arg("--admitted-operator-scope")
         .arg(store.root().join("deployment.lock"));
+    if let Some(restriction) = activation_restriction {
+        let encoded = serde_json::to_string(restriction)
+            .context("failed serializing the admitted deployment activation")?;
+        anyhow::ensure!(
+            encoded.len() <= cli::MAX_ADMITTED_DEPLOYMENT_ACTIVATION_BYTES,
+            "admitted deployment activation exceeds the child handoff limit"
+        );
+        command.arg("--admitted-deployment-activation").arg(encoded);
+    }
     // Preserve the ordinary guest environment, but do not let deployment
     // supervisor control variables reconfigure a release or select another
     // engine binary. Runtime policy is resolved from the committed bytes.
@@ -6796,6 +6806,7 @@ fn finish_deploy_release_child(
 /// How the supervisor reads one child run.
 enum DeployRunVerdict {
     Healthy { receipt_id: String },
+    ActivationInterrupted,
     CrashLoop(runtime::deployment::CrashLoopEvidence),
     Crashed,
     Failed,
@@ -6803,6 +6814,15 @@ enum DeployRunVerdict {
 
 fn classify_deploy_run(run: &DeployChildRun) -> DeployRunVerdict {
     let report = &run.report;
+    if run.exit_code != 0
+        && (report["control_trigger"]["kind"] == "activation_interrupted"
+            || (report["outcome"] == "activation_interrupted"
+                && report["admission_only"] == true))
+    {
+        // This reports invalidation of a restrictive admission, not proof of a
+        // successfully activated replacement or a completed external effect.
+        return DeployRunVerdict::ActivationInterrupted;
+    }
     if report["outcome"] == "native_engine_panic" {
         let observation = &report["crash_loop"];
         let counted_loop = observation["tracking_failure"].is_null()
@@ -6862,7 +6882,7 @@ fn handle_deploy_run(args: &cli::DeployRunArgs) -> Result<(serde_json::Value, i3
     // Serialize admission and spawn with operator transitions. Release the
     // lock before waiting, so a running workload cannot block containment.
     let (activation, release, child) = {
-        let _lock = store.lock()?;
+        let lock = store.lock()?;
         let activation = store.active(&authority)?.ok_or_else(|| {
             ActionableError::new(
                 format!("deployment `{}` has no active release", store.name()),
@@ -6877,7 +6897,12 @@ fn handle_deploy_run(args: &cli::DeployRunArgs) -> Result<(serde_json::Value, i3
                 release.release_id
             )
         })?;
-        let child = spawn_deploy_release_child(&store, &release, &args.app_args)?;
+        let restriction = args
+            .retire_on_activation
+            .then(|| store.capture_activation_restriction(&lock, &authority, &activation))
+            .transpose()?;
+        let child =
+            spawn_deploy_release_child(&store, &release, &args.app_args, restriction.as_ref())?;
         (activation, release, child)
     };
     let run = finish_deploy_release_child(child, &release)?;
@@ -6888,6 +6913,7 @@ fn handle_deploy_run(args: &cli::DeployRunArgs) -> Result<(serde_json::Value, i3
         "deployment": store.name(),
         "release_id": release.release_id,
         "activation_sequence": activation.sequence,
+        "retire_on_activation": args.retire_on_activation,
         "run": run.report,
     });
     let (phase, exit_code) = match verdict {
@@ -6903,6 +6929,9 @@ fn handle_deploy_run(args: &cli::DeployRunArgs) -> Result<(serde_json::Value, i3
                 },
             )?;
             ("healthy", 0)
+        }
+        DeployRunVerdict::ActivationInterrupted => {
+            ("activation_interrupted", run.exit_code.max(1))
         }
         DeployRunVerdict::Failed => ("failed", run.exit_code.max(1)),
         DeployRunVerdict::Crashed => ("crashed", run.exit_code.max(1)),
@@ -6947,7 +6976,7 @@ fn handle_deploy_run(args: &cli::DeployRunArgs) -> Result<(serde_json::Value, i3
             ) {
                 (RecoveryOutcome::RolledBack, RestartPolicy::Automatic, Some(selected)) => {
                     let restart = (|| -> Result<_> {
-                        let _lock = store.lock()?;
+                        let lock = store.lock()?;
                         let current = store.active(&authority)?;
                         anyhow::ensure!(
                             current.as_ref().is_some_and(|active| {
@@ -6967,10 +6996,24 @@ fn handle_deploy_run(args: &cli::DeployRunArgs) -> Result<(serde_json::Value, i3
                         let selected = store.release(&authority, selected)?;
                         verify_deploy_release(&selected)
                             .context("recovery release no longer passes current admission")?;
-                        let child = spawn_deploy_release_child(&store, &selected, &args.app_args)?;
-                        Ok((selected, child))
+                        let current = current
+                            .as_ref()
+                            .context("recovery restart lost its active release")?;
+                        let restriction = args
+                            .retire_on_activation
+                            .then(|| {
+                                store.capture_activation_restriction(&lock, &authority, current)
+                            })
+                            .transpose()?;
+                        let child = spawn_deploy_release_child(
+                            &store,
+                            &selected,
+                            &args.app_args,
+                            restriction.as_ref(),
+                        )?;
+                        Ok((selected, current.sequence, child))
                     })();
-                    let (selected, child) = match restart {
+                    let (selected, resumed_activation_sequence, child) = match restart {
                         Ok(admitted) => admitted,
                         Err(error) => {
                             report["phase"] = serde_json::json!("restart_refused");
@@ -6995,6 +7038,9 @@ fn handle_deploy_run(args: &cli::DeployRunArgs) -> Result<(serde_json::Value, i3
                             )?;
                             ("resumed_healthy", 0)
                         }
+                        DeployRunVerdict::ActivationInterrupted => {
+                            ("activation_interrupted", resumed.exit_code.max(1))
+                        }
                         DeployRunVerdict::CrashLoop(evidence) => {
                             let lock = store.lock()?;
                             store.record_health(
@@ -7010,6 +7056,7 @@ fn handle_deploy_run(args: &cli::DeployRunArgs) -> Result<(serde_json::Value, i3
                     };
                     report["resumed"] = serde_json::json!({
                         "release_id": selected.release_id,
+                        "activation_sequence": resumed_activation_sequence,
                         "run": resumed.report,
                     });
                     (resume_phase, resume_code)
@@ -36814,6 +36861,7 @@ fn main() -> Result<()> {
                 admitted_config_sha256,
                 admitted_approval_sha256,
                 admitted_operator_scope,
+                admitted_deployment_activation,
                 runtime,
                 engine_bin,
                 compat_preflight,
@@ -36827,6 +36875,22 @@ fn main() -> Result<()> {
                 app_args,
             } = args;
 
+            let deployment_activation = match admitted_deployment_activation
+                .as_deref()
+                .map(|encoded| -> Result<runtime::deployment::ActivationRestriction> {
+                    let restriction: runtime::deployment::ActivationRestriction =
+                        serde_json::from_str(encoded)
+                            .context("invalid admitted deployment activation")?;
+                    restriction.validate()?;
+                    Ok(restriction)
+                })
+                .transpose()
+            {
+                Ok(restriction) => restriction,
+                Err(error) => {
+                    return named_cli_fail("franken-node/run-error-cli/v1", "run", json, error);
+                }
+            };
             let profile_override = match parse_profile_override(policy.as_deref()) {
                 Ok(profile) => profile,
                 Err(err) => {
@@ -36951,6 +37015,22 @@ fn main() -> Result<()> {
                     return named_cli_fail("franken-node/run-error-cli/v1", "run", json, error);
                 }
             }
+            if let Some(restriction) = &deployment_activation {
+                let binding = (|| -> Result<()> {
+                    restriction.validate_release(
+                        project_paths.project_root(),
+                        admitted_config_sha256
+                            .as_deref()
+                            .context("admitted activation is missing its configuration pin")?,
+                        admitted_approval_sha256
+                            .as_deref()
+                            .context("admitted activation is missing its publisher approval pin")?,
+                    )
+                })();
+                if let Err(error) = binding {
+                    return named_cli_fail("franken-node/run-error-cli/v1", "run", json, error);
+                }
+            }
             let preflight = match evaluate_run_trust_preflight(
                 &app_path,
                 &project_paths,
@@ -37047,6 +37127,7 @@ fn main() -> Result<()> {
                     .with_preflight_dependency_capture(Some(preflight.dependency_capture.clone()))
                     .with_registry_artifact_approval(registry_artifact_approval)
                     .with_operator_safe_mode_scope(operator_safe_mode_scope)
+                    .with_deployment_activation(deployment_activation)
                     .with_preflight_registry_requirement(preflight_registry_required)
                     .with_replay_capture(capture_replay)
                     .with_app_args(app_args);
@@ -37078,6 +37159,25 @@ fn main() -> Result<()> {
                         // recording path before propagating the original error.
                         (dispatch, Some(err))
                     } else {
+                        if let Some(refusal) =
+                            err.downcast_ref::<ops::engine_dispatcher::DeploymentActivationRefused>()
+                        {
+                            if json {
+                                println!(
+                                    "{}",
+                                    serde_json::to_string_pretty(&serde_json::json!({
+                                        "schema_version": "franken-node/run-error-cli/v1",
+                                        "command": "run",
+                                        "ok": false,
+                                        "outcome": "activation_interrupted",
+                                        "admission_only": true,
+                                        "error": refusal.to_string(),
+                                    }))?
+                                );
+                                fail_closed_after_json();
+                            }
+                            return Err(err);
+                        }
                         // bd-muy9u: when the attempt aborted after the engine had
                         // already performed or been denied host effects, those
                         // receipts are recovered on the error. Emit them before
@@ -39462,6 +39562,56 @@ mod ops_metrics_tests {
 #[cfg(test)]
 mod run_trust_gate_tests {
     use super::*;
+
+    #[test]
+    fn deployment_activation_retirement_never_becomes_readiness_or_crash_recovery() {
+        for report in [
+            serde_json::json!({
+                "success": false,
+                "control_trigger": { "kind": "activation_interrupted" },
+                "terminal_state": "control_indeterminate",
+                "interrupted_effect_count": 1,
+                "replay_certified": false,
+            }),
+            serde_json::json!({
+                "schema_version": "franken-node/run-error-cli/v1",
+                "ok": false,
+                "outcome": "activation_interrupted",
+                "admission_only": true,
+            }),
+            serde_json::json!({
+                "control_trigger": { "kind": "activation_interrupted" },
+                "outcome": "native_engine_panic",
+                "crash_loop": {
+                    "counted": true,
+                    "safe_mode_active": true,
+                    "crashes_in_window": 3,
+                    "threshold": 3,
+                },
+            }),
+        ] {
+            assert!(matches!(
+                classify_deploy_run(&DeployChildRun { exit_code: 1, report }),
+                DeployRunVerdict::ActivationInterrupted
+            ));
+        }
+
+        for report in [
+            serde_json::json!({
+                "outcome": "activation_interrupted",
+                "admission_only": false,
+            }),
+            serde_json::json!({
+                "control_trigger": { "kind": "operator_safe_mode" },
+            }),
+        ] {
+            assert!(matches!(
+                classify_deploy_run(&DeployChildRun { exit_code: 1, report }),
+                DeployRunVerdict::Failed
+            ));
+        }
+    }
+
     use crate::ops::telemetry_bridge::{
         BridgeLifecycleState, RuntimeTelemetryEvent, TelemetryRuntimeReport,
     };
