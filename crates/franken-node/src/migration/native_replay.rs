@@ -4,7 +4,7 @@
 //! are evidence only: execution always uses locally selected invocations.
 
 use super::{
-    CapturedInputs, Entry, EntryData, Invocation, LEG_TIMEOUT, MAX_ENTRIES, MAX_PATH_BYTES,
+    CapturedInputs, Entry, EntryData, ExecutionControl, Invocation, LEG_TIMEOUT, MAX_ENTRIES, MAX_PATH_BYTES, Origin,
     RuntimeIdentity, Snapshot, SuiteReport, TOTAL_TIMEOUT, budget, execute_suite_pair,
     matched_tests, open_regular, runtime_invocations, same_file_version, workspace_effects,
 };
@@ -130,6 +130,8 @@ fn implementation_hash() -> String {
         include_str!("workspace_effects.rs"),
         include_str!("test_inventory.rs"),
         include_str!("test_execution.rs"),
+        include_str!("execution_control.rs"),
+        include_str!("../runtime/safe_mode.rs"),
     ] {
         hash.update((source.len() as u64).to_le_bytes());
         hash.update(source.as_bytes());
@@ -627,8 +629,25 @@ impl Loaded {
     }
 }
 
+/// Resolve the capsule once, retaining regular-leaf admission. Every caller
+/// must read and recheck the returned path, so a retargeted parent alias cannot
+/// move the bytes into a different operator scope after resolution.
+fn resolve_capsule_input(path: &Path, deadline: Instant) -> Result<PathBuf> {
+    budget(deadline)?;
+    let before = fs::symlink_metadata(path).context("inspect capsule input")?;
+    ensure!(before.file_type().is_file(),
+        "capsule input must be a regular file, not a symlink or directory");
+    let resolved = path.canonicalize().context("resolve capsule control scope")?;
+    ensure!(same_file_version(&before, &fs::symlink_metadata(&resolved)?),
+        "capsule input changed while resolving its operator scope");
+    Ok(resolved)
+}
+
 fn load(path: &Path, pin: Option<&str>, deadline: Instant) -> Result<Loaded> {
     budget(deadline)?;
+    let resolved = resolve_capsule_input(path, deadline)?;
+    let path = resolved.as_path();
+    let origin = Origin::Capsule(resolved.clone());
     if let Some(pin) = pin {
         ensure!(
             is_hash(pin),
@@ -719,7 +738,7 @@ fn load(path: &Path, pin: Option<&str>, deadline: Instant) -> Result<Loaded> {
     let mut used = BTreeSet::new();
     let mut expanded = 0;
     let mut metadata = 0;
-    let original = restore_snapshot(
+    let mut original = restore_snapshot(
         &capsule.payload.original,
         &blobs,
         &mut used,
@@ -727,7 +746,7 @@ fn load(path: &Path, pin: Option<&str>, deadline: Instant) -> Result<Loaded> {
         &mut metadata,
         deadline,
     )?;
-    let candidate = capsule
+    let mut candidate = capsule
         .payload
         .candidate
         .as_ref()
@@ -751,6 +770,10 @@ fn load(path: &Path, pin: Option<&str>, deadline: Instant) -> Result<Loaded> {
         &original,
         candidate.as_ref().unwrap_or(&original),
     )?;
+    original.origin = Some(origin.clone());
+    if let Some(candidate) = &mut candidate {
+        candidate.origin = Some(origin);
+    }
     budget(deadline)?;
     Ok(Loaded {
         capsule,
@@ -862,6 +885,7 @@ pub fn replay(
 ) -> Result<ReplayResult> {
     let deadline = Instant::now() + TOTAL_TIMEOUT;
     let loaded = load(path, Some(expected_sha256), deadline)?;
+    ExecutionControl::admit(&[&loaded.original, loaded.candidate()])?;
     let (reference, native) = runtime_invocations(native)?;
     reexecute(loaded, &reference, &native, verify_fix, deadline)
 }
@@ -873,6 +897,7 @@ fn reexecute(
     verify_fix: bool,
     deadline: Instant,
 ) -> Result<ReplayResult> {
+    ExecutionControl::admit(&[&loaded.original, loaded.candidate()])?;
     let expected = &loaded.capsule.payload.expected;
     ensure!(
         loaded.capsule.payload.implementation_sha256 == implementation_hash(),
@@ -1037,6 +1062,75 @@ mod tests {
         mutation(&mut capsule);
         capsule.content_sha256 = payload_hash(&capsule.payload).unwrap();
         fs::write(path, serde_json::to_vec(&capsule).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn safe_mode_capsule_resolution_retains_parent_scope_and_rejects_leaf_links() {
+        use super::super::execution_control_tests::{active_controller, persist};
+        let (_root, out, path, pin) = fixture("console.log(42);");
+        let alternate = tempfile::tempdir().unwrap();
+        let alias_root = tempfile::tempdir().unwrap();
+        let alternate_path = alternate.path().join("capsule.json");
+        fs::copy(&path, &alternate_path).unwrap();
+        let selected = alias_root.path().join("selected");
+        std::os::unix::fs::symlink(out.path(), &selected).unwrap();
+        let resolved = resolve_capsule_input(&selected.join("capsule.json"), deadline()).unwrap();
+        assert_eq!(resolved, path.canonicalize().unwrap());
+        fs::rename(&selected, alias_root.path().join("retired-alias")).unwrap();
+        std::os::unix::fs::symlink(alternate.path(), &selected).unwrap();
+        persist(out.path(), &active_controller());
+        // The resolved operation keeps its original scope. A separate load
+        // through the newly selected alias has its own independently checked
+        // scope; the first operation never reads through that alias again.
+        let error = reexecute(load(&resolved, Some(&pin), deadline()).unwrap(),
+            &node(&[]), &node(&["candidate"]), false, deadline()).unwrap_err();
+        assert!(format!("{error:#}").contains("active safe mode"), "{error:#}");
+        assert_eq!(execute(&selected.join("capsule.json"), &pin, false, node(&["candidate"])).verdict,
+            "REPRODUCED");
+        let leaf = alias_root.path().join("leaf.json");
+        std::os::unix::fs::symlink(alternate_path, &leaf).unwrap();
+        assert!(load(&leaf, Some(&pin), deadline()).is_err());
+    }
+
+    #[test]
+    fn safe_mode_capsule_scope_survives_source_move_and_keeps_inspection_available() {
+        use super::super::execution_control_tests::{active_controller, persist};
+        let (root, out, path, pin) =
+            fixture("console.log(process.argv.includes('candidate')?'wrong':'right');");
+        fs::rename(root.path(), out.path().join("retired-source")).unwrap();
+        assert_eq!(execute(&path, &pin, false, node(&["candidate"])).verdict, "REPRODUCED");
+        persist(out.path(), &active_controller());
+        assert_eq!(inspect(&path).unwrap().content_sha256, pin);
+        let loaded = load(&path, Some(&pin), deadline()).unwrap();
+        let error = reexecute(loaded, &node(&[]), &node(&["candidate"]), false, deadline())
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("active safe mode"), "{error:#}");
+        let export = tempfile::tempdir().unwrap();
+        export_inputs(&path, &pin, &export.path().join("reproducer")).unwrap();
+        assert!(export.path().join("reproducer/original/case.test.js").is_file());
+    }
+
+    #[test]
+    fn safe_mode_blocks_public_replay_and_reducer_before_another_guest() {
+        use super::super::execution_control_tests::{active_controller, persist};
+        let root = tempfile::tempdir().unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let marker = out.path().join("guest-count");
+        write(root.path(), "case.test.js", &format!(
+            "require('fs').appendFileSync({},'x');console.log('reference');",
+            serde_json::to_string(&marker).unwrap(),
+        ));
+        let captured = capture_project(root.path(), None, Path::new("/bin/false"), false).unwrap();
+        let path = out.path().join("failure.json");
+        let summary = captured.write_capsule(&path).unwrap();
+        let before = fs::read(&marker).unwrap();
+        persist(out.path(), &active_controller());
+        let error = replay(&path, &summary.content_sha256, Path::new("/bin/false"), false)
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("active safe mode"), "{error:#}");
+        assert!(minimizer::minimize(&path, &summary.content_sha256, Path::new("/bin/false"),
+            &minimizer::Options { max_executions: 4, seconds: 10, ..Default::default() }).is_err());
+        assert_eq!(fs::read(&marker).unwrap(), before);
     }
 
     #[test]

@@ -293,6 +293,7 @@ impl Prepared {
 
     fn execute_selected(self, native: &Path, bun: Option<&Path>, deadline: Instant) -> Result<SourceFixReport> {
         // Resolve executables only AFTER admitting the pinned seed and repair.
+        pair::ExecutionControl::admit(&[self.seed.original(), self.seed.candidate()])?;
         let (node, native) = runtime_invocations(native)?;
         if let Some(bun) = bun {
             let bun = Invocation { executable: bun.canonicalize().context("resolve Bun executable")?,
@@ -305,6 +306,7 @@ impl Prepared {
 
     fn execute(self, runtimes: &[&Invocation], deadline: Instant) -> Result<SourceFixReport> {
         budget(deadline)?;
+        pair::ExecutionControl::admit(&[self.seed.original(), self.seed.candidate()])?;
         for runtime in runtimes {
             let executable = runtime.executable.canonicalize().context("resolve repair runtime")?;
             ensure!(!executable.starts_with(&self.project),
@@ -447,6 +449,30 @@ mod tests {
             write(root, "stable.cjs", "module.exports='passing sibling';");
         }
         (original, broken, repaired, reports)
+    }
+
+    #[test]
+    fn safe_mode_source_fix_retains_repair_origin_before_resolving_or_running_runtimes() {
+        use super::super::super::super::super::execution_control_tests::{
+            active_controller, persist,
+        };
+        let (original, broken, repaired, reports) = projects();
+        let capsule = reports.path().join("failure.json");
+        let pin = pair_seed(original.path(), broken.path(), &capsule);
+        let repair_scope = tempfile::tempdir().unwrap();
+        let repair = repair_scope.path().join("project");
+        fs::rename(repaired.path(), &repair).unwrap();
+        let inspected = inspect(&capsule, &pin, &repair).unwrap();
+        let prepared = Prepared::capture(&capsule, &pin, &repair, false, deadline()).unwrap();
+        persist(repair_scope.path(), &active_controller());
+        assert_eq!(inspect(&capsule, &pin, &repair).unwrap().candidate_input_sha256,
+            inspected.candidate_input_sha256);
+        let error = prepared.execute(&[&node(), &node()], deadline()).unwrap_err();
+        assert!(format!("{error:#}").contains("active safe mode"), "{error:#}");
+        let error = verify_reviewed(&capsule, &pin, &repair, &inspected.candidate_input_sha256,
+            Path::new("/missing-native"), None).unwrap_err();
+        assert!(format!("{error:#}").contains("active safe mode"), "{error:#}");
+        assert!(!repair.join(".migrate-backup").exists());
     }
 
     #[test]

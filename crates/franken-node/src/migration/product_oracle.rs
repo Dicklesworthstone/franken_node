@@ -9,7 +9,7 @@
 //! process evidence, not proof of engine-level clean completion or release certification.
 
 use super::{
-    CapturedInputs, DRAIN_TIMEOUT, Invocation, LEG_TIMEOUT, RunObservation, RuntimeIdentity,
+    CapturedInputs, DRAIN_TIMEOUT, ExecutionControl, Invocation, LEG_TIMEOUT, RunObservation, RuntimeIdentity,
     Snapshot, TOTAL_TIMEOUT, budget, matched_tests, observe, runtime_invocations, test_inventory,
     workspace_effects,
 };
@@ -248,6 +248,7 @@ pub(super) fn run_captured_cancellable(
     check_cancellation(cancellation)?;
     budget(deadline)?;
     matched_tests(snapshots[0], snapshots[1])?;
+    ExecutionControl::admit(&snapshots)?;
     let roots = [projects[0].canonicalize()?, projects[1].canonicalize()?];
     let (node, native) = runtime_invocations(native_executable)?;
     let bun = Invocation {
@@ -300,6 +301,7 @@ struct Leg {
     error: Option<String>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn measure(
     snapshot: &Snapshot,
     invocation: &Invocation,
@@ -308,10 +310,12 @@ fn measure(
     environment: &BTreeMap<OsString, OsString>,
     timing: (Instant, Duration, Option<&CancellationToken>),
     filesystem: bool,
+    control: &ExecutionControl,
 ) -> Leg {
     let (deadline, leg_timeout, cancellation) = timing;
     let mut leg = Leg::default();
     let result = (|| -> Result<()> {
+        control.enforce()?;
         check_cancellation(cancellation)?;
         budget(deadline)?;
         snapshot.stage(workspace, deadline)?;
@@ -326,7 +330,7 @@ fn measure(
         budget(deadline)?;
         let timeout = leg_timeout.min(deadline.saturating_duration_since(Instant::now()));
         let (output, check_error) = test_inventory::retain_completed_output(
-            test_inventory::run_test_cancellable(
+            test_inventory::run_test_guarded(
                 snapshot,
                 invocation,
                 test,
@@ -334,6 +338,7 @@ fn measure(
                 environment,
                 (timeout, DRAIN_TIMEOUT),
                 cancellation,
+                control,
             ),
         )
         .context("execution failed")?;
@@ -473,6 +478,7 @@ fn execute_cancellable(
     check_cancellation(cancellation)?;
     let (deadline, leg_timeout) = timing;
     let tests = matched_tests(original, candidate)?;
+    let control = ExecutionControl::admit(&[original, candidate])?;
     let expected_exits = test_inventory::expected_exit_codes(original)?;
     let concurrency = test_inventory::concurrency(original)?;
     let [node_runtime, bun_runtime, native_runtime] = identities;
@@ -535,6 +541,7 @@ fn execute_cancellable(
                 &environment,
                 (deadline, leg_timeout, cancellation),
                 filesystem,
+                &control,
             );
         }
         Ok(classify(test, expected_exits[test], legs, filesystem))
@@ -578,6 +585,9 @@ fn execute_cancellable(
     // a native regression or use it to authorize source installation.
     if let Err(error) = check_cancellation(cancellation) {
         report.errors.push(error.to_string());
+    }
+    if let Err(error) = control.enforce() {
+        report.errors.push(format!("execution control recheck failed: {error:#}"));
     }
     report.verdict = if report.errored > 0 || report.skipped > 0 || !report.errors.is_empty() {
         "ERROR"

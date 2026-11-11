@@ -378,6 +378,49 @@ before invoking the ZIP parser, and never uses archive extraction helpers.
 Archive validation is not publisher authentication: obtain the expected digest
 from a source trusted independently of the bundle.
 
+## Native migration safe-mode containment
+
+The Linux native migration validator and the standalone Rust migration
+executables check the production safe-mode controller before starting any
+reference or candidate process. Admission includes the original project and
+each selected test's directory ancestry, plus the separately reviewed candidate.
+All roles share those retained scopes: activating containment for the candidate
+also stops an already running Node or Bun reference. Private staging does not
+replace the original operator scope.
+
+Both explicit native manifests and implicit native discovery require selected
+entrypoints to be regular captured files. A test-looking symlink refuses the
+whole inventory, including when another ordinary test exists; it cannot be
+silently skipped into a passing subset or followed into an unchecked scope.
+
+The existing native process supervisor rechecks these controls before spawn,
+while a child is silent or blocked on captured pipe input, and while inherited
+output pipes drain after the leader exits. An active controller or a malformed,
+unreadable, oversized or nonregular state causes refusal, process-group cleanup,
+and reaping of the owned leader. Completed peer observations remain diagnostic
+evidence; the comparison cannot pass and cannot authorize source installation.
+Reviewed apply and checked rewrite also check containment before opening their
+writer and again before a new installation. An already recorded request outcome
+and explicit rollback recovery remain inspectable without new guest execution.
+
+Replay and reduction retain the current capsule file's local ancestry rather
+than trusting historical project paths in an archive. Source-fix verification
+additionally retains the live repair project's ancestry. Archived controllers
+at selected entry scopes are decoded with the same production controller type
+and must also permit execution. Inspection and reproducer export remain
+available during safe mode. A controller that completed the normal verified
+exit procedure permits execution even when its historical operation flags
+still record that safe mode was requested.
+
+These controls are local operator interlocks. They do not authenticate controller
+files against a malicious peer with the same filesystem authority, undo guest
+effects that happened before a poll, or stop descendants that deliberately
+escape the existing process group. They do not change captured-input exclusions
+or make staging an OS sandbox. The non-Linux legacy smoke path checks admission
+and final state; live polling described here applies to the Linux supervisor.
+This section describes the native Rust execution paths; it does not extend the
+Python runner's separate cancellation contract below.
+
 ## Cancellation and partial evidence
 
 The standalone runner owns SIGINT/SIGTERM for the duration of a CLI invocation.

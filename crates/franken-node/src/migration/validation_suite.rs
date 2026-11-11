@@ -45,6 +45,14 @@ mod paired_tests;
 #[path = "rewrite_candidate.rs"]
 pub mod rewrite_candidate;
 
+#[path = "execution_control.rs"]
+mod execution_control;
+use execution_control::{ExecutionControl, Origin};
+
+#[cfg(test)]
+#[path = "execution_control_tests.rs"]
+mod execution_control_tests;
+
 const MAX_ENTRIES: usize = 50_000;
 const MAX_PROJECT_BYTES: usize = 256 * 1024 * 1024;
 const MAX_TESTS: usize = 1024;
@@ -132,6 +140,8 @@ struct Entry {
 struct Snapshot {
     entries: BTreeMap<PathBuf, Entry>,
     digest: String,
+    // Local control ancestry is not project content or archived authority.
+    origin: Option<Origin>,
 }
 
 fn budget(deadline: Instant) -> Result<()> {
@@ -339,7 +349,9 @@ impl Snapshot {
                 );
             }
         }
-        Ok(Self::from_entries(entries))
+        let mut snapshot = Self::from_entries(entries);
+        snapshot.origin = Some(Origin::Project(root));
+        Ok(snapshot)
     }
 
     // Shared identity contract for live capture and validated replay imports.
@@ -366,7 +378,14 @@ impl Snapshot {
         Self {
             entries,
             digest: hex::encode(hash.finalize()),
+            origin: None,
         }
+    }
+
+    fn with_entries(&self, entries: BTreeMap<PathBuf, Entry>) -> Self {
+        let mut snapshot = Self::from_entries(entries);
+        snapshot.origin = self.origin.clone();
+        snapshot
     }
 
     fn tests(&self) -> Result<Vec<PathBuf>> {
@@ -380,6 +399,7 @@ impl Snapshot {
         execute: impl FnOnce(&Path) -> Result<T>,
     ) -> Result<T> {
         budget(deadline)?;
+        let control = ExecutionControl::admit(&[self])?;
         // Reuse the authoritative workspace/lockfile inspector on immutable
         // captured bytes. Checking only the expected paths would miss a newly
         // added lockfile, glob-matched workspace or native-build marker.
@@ -421,6 +441,7 @@ impl Snapshot {
             "captured installation assessment did not complete; no runtime was resolved or executed"
         );
         budget(deadline)?;
+        control.enforce()?;
         execute(&staged)
     }
 
@@ -591,6 +612,7 @@ fn execute_suite_pair(
     compare_filesystem: bool,
 ) -> Result<SuiteReport> {
     let tests = matched_tests(reference_snapshot, candidate_snapshot)?;
+    let control = ExecutionControl::admit(&[reference_snapshot, candidate_snapshot])?;
     let expected_exits = test_inventory::expected_exit_codes(reference_snapshot)?;
     let concurrency = test_inventory::concurrency(reference_snapshot)?;
     let mut report = SuiteReport {
@@ -652,6 +674,7 @@ fn execute_suite_pair(
                 ("reference", reference_snapshot, reference),
                 ("native", candidate_snapshot, native),
             ] {
+                control.enforce()?;
                 let workspace = case.path().join(name);
                 snapshot.stage(&workspace, deadline)?;
                 ensure!(
@@ -670,13 +693,15 @@ fn execute_suite_pair(
                 budget(deadline)?;
                 let timeout = leg_timeout.min(deadline.saturating_duration_since(Instant::now()));
                 let (output, check_error) = test_inventory::retain_completed_output(
-                    test_inventory::run_test(
+                    test_inventory::run_test_guarded(
                         snapshot,
                         invocation,
                         test,
                         &workspace,
                         &environment,
                         (timeout, DRAIN_TIMEOUT),
+                        None,
+                        &control,
                     ),
                 )
                 .with_context(|| format!("{name} execution failed"))?;
@@ -755,6 +780,9 @@ fn execute_suite_pair(
                 .push(format!("runtime identity recheck failed: {error:#}")),
         }
     }
+    if let Err(error) = control.enforce() {
+        report.errors.push(format!("execution control recheck failed: {error:#}"));
+    }
     report.verdict = if report.errored > 0 || report.skipped > 0 || !report.errors.is_empty() {
         "ERROR"
     } else if report.failed > 0 {
@@ -830,6 +858,7 @@ fn run_if_present_with_bound_inputs(
 ) -> Result<Option<SuiteReport>> {
     let deadline = Instant::now() + TOTAL_TIMEOUT;
     let snapshot = Snapshot::capture(project, deadline)?;
+    ExecutionControl::admit(&[&snapshot])?;
     if let Some(expected) = expected {
         snapshot.with_dependency_inputs(expected, deadline, |_| Ok(()))?;
     }
@@ -1096,6 +1125,7 @@ fn run_captured(
     deadline: Instant,
     compare_filesystem: bool,
 ) -> Result<SuiteReport> {
+    ExecutionControl::admit(&[snapshots.0, snapshots.1])?;
     let (reference, native) = runtime_invocations(native_executable)?;
     for project in [projects.0, projects.1] {
         let project = project.canonicalize()?;

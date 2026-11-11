@@ -199,6 +199,8 @@ impl RewriteCandidate {
             anyhow::bail!("prepared migration differs from the complete reviewed candidate");
         }
         self.candidate_project = Some(project);
+        self.candidate.as_mut().expect("candidate was prepared").origin =
+            Some(super::Origin::Project(self.candidate_project.as_ref().unwrap().clone()));
         Ok(())
     }
 
@@ -450,10 +452,26 @@ impl RewriteCandidate {
             budget(self.deadline)?;
             fs::set_permissions(root.join(path), fs::Permissions::from_mode(*mode))?;
         }
-        let candidate = Snapshot::capture(&root, self.deadline)?;
+        let mut candidate = Snapshot::capture(&root, self.deadline)?;
+        candidate.origin = self.original.origin.clone();
         matched_tests(&self.original, &candidate)?;
         self.candidate = Some(candidate);
         Ok(())
+    }
+
+    /// Check original/candidate operator scopes before opening an installation
+    /// writer and again at its final boundary. Inspection remains read-only.
+    pub fn ensure_execution_allowed(&self) -> Result<()> {
+        budget(self.deadline)?;
+        let candidate = self.candidate.as_ref().context("checked rewrite candidate is not prepared")?;
+        super::ExecutionControl::admit(&[&self.original, candidate])?.enforce()
+    }
+
+    /// Preflight the original selected scopes before a checked transaction
+    /// opens its recovery writer. Preparing a candidate is not required.
+    pub(crate) fn ensure_source_execution_allowed(&self) -> Result<()> {
+        budget(self.deadline)?;
+        super::ExecutionControl::admit(&[&self.original])?.enforce()
     }
 
     /// Check a LIVE executor result before installing this exact candidate.

@@ -169,8 +169,12 @@ fn run_with_evidence(
         );
         // Own recovery/planning/validation/commit as one cooperative operation.
         // The lock is not inherited by the runtime processes (CLOEXEC).
-        let transaction = RewriteTransaction::open(&project)?;
+        let control = crate::runtime::safe_mode::AdmittedSafeModeProject::capture(&project)?;
         let deadline = Instant::now() + Duration::from_secs(300);
+        RewriteCandidate::capture(&project, deadline)?.ensure_source_execution_allowed()?;
+        let transaction = RewriteTransaction::open(&project)?;
+        // Recovery can change source inputs; capture again under the writer
+        // lock rather than reusing the read-only containment preflight.
         let mut candidate = RewriteCandidate::capture(&project, deadline)?;
         // This contains the complete captured source tree, even before any
         // runtime runs. Privacy cannot depend on a permissive caller umask.
@@ -295,6 +299,8 @@ fn run_with_evidence(
                 after: entry.rewritten_content.as_bytes(),
             })
             .collect();
+        control.enforce()?;
+        candidate.ensure_execution_allowed()?;
         transaction.apply(&edits)?;
         plan.apply_mode = true;
         plan.rewrites_applied = plan.rewrites_planned;
@@ -463,6 +469,27 @@ mod tests {
         let text = render(&report);
         assert!(text.contains(&format!("dependency_review={code}")));
         assert!(text.contains("no runtime or new rewrite installation attempted"));
+    }
+
+    #[test]
+    fn safe_mode_nested_checked_scope_refuses_before_writer_or_validator() {
+        use crate::runtime::safe_mode::{SafeModeController, SafeModeEntryReason};
+        let root = project();
+        let nested = root.path().join("nested");
+        fs::create_dir(&nested).unwrap();
+        fs::rename(root.path().join("case.test.mjs"), nested.join("case.test.mjs")).unwrap();
+        let mut controller = SafeModeController::with_default_config();
+        controller.enter_safe_mode(SafeModeEntryReason::ExplicitFlag,
+            "2026-11-11T00:00:00Z", "trusted", Vec::new());
+        let state = nested.join(".franken-node/safe-mode/state.json");
+        fs::create_dir_all(state.parent().unwrap()).unwrap();
+        fs::write(&state, serde_json::to_vec(&controller).unwrap()).unwrap();
+        let before = source(root.path());
+        let report = run_with_evidence(root.path(), |_| panic!("safe mode must prevent validation"));
+        assert_eq!(report.status, CheckedRewriteStatus::Error, "{report:#?}");
+        assert!(report.errors.iter().any(|message| message.contains("safe")), "{report:#?}");
+        assert_eq!(source(root.path()), before);
+        assert!(!root.path().join(".migrate-backup").exists());
     }
 
     #[test]

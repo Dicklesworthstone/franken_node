@@ -1323,8 +1323,16 @@ fn runtime_smoke_result_check(
     }
 }
 
+#[cfg(any(test, not(target_os = "linux")))]
 fn execute_migration_runtime_smoke(
     project_path: &Path,
+) -> anyhow::Result<MigrationRuntimeSmokeReceipt> {
+    execute_migration_runtime_smoke_guarded(project_path, None)
+}
+
+fn execute_migration_runtime_smoke_guarded(
+    project_path: &Path,
+    original_control: Option<&dyn Fn() -> anyhow::Result<()>>,
 ) -> anyhow::Result<MigrationRuntimeSmokeReceipt> {
     let smoke_target = select_migration_runtime_smoke_target(project_path)?;
     // Validate the implementation the operator invoked, including renamed
@@ -1333,7 +1341,9 @@ fn execute_migration_runtime_smoke(
     let native_executable = std::env::current_exe().map_err(|err| {
         anyhow::anyhow!("failed locating native migration smoke executable: {err}")
     })?;
-    execute_migration_runtime_smoke_with_target(&native_executable, &smoke_target)
+    execute_migration_runtime_smoke_with_target_guarded(
+        &native_executable, &smoke_target, original_control,
+    )
 }
 
 fn native_migration_smoke_command(
@@ -1378,12 +1388,40 @@ fn native_migration_smoke_command(
     Ok(command)
 }
 
+#[cfg(test)]
 fn execute_migration_runtime_smoke_with_target(
     native_executable: &Path,
     smoke_target: &MigrationRuntimeSmokeTarget,
 ) -> anyhow::Result<MigrationRuntimeSmokeReceipt> {
+    execute_migration_runtime_smoke_with_target_guarded(native_executable, smoke_target, None)
+}
+
+fn execute_migration_runtime_smoke_with_target_guarded(
+    native_executable: &Path,
+    smoke_target: &MigrationRuntimeSmokeTarget,
+    original_control: Option<&dyn Fn() -> anyhow::Result<()>>,
+) -> anyhow::Result<MigrationRuntimeSmokeReceipt> {
+    let scope = crate::runtime::safe_mode::AdmittedSafeModeScope::capture(&smoke_target.entry_path)?;
+    let control = || -> anyhow::Result<()> {
+        if let Some(original_control) = original_control {
+            original_control()?;
+        }
+        scope.enforce()
+    };
+    control()?;
     let mut command = native_migration_smoke_command(native_executable, smoke_target)?;
+    #[cfg(target_os = "linux")]
+    let output = smoke_supervisor::run_command_guarded(
+        &mut command,
+        (MIGRATION_VALIDATE_RUNTIME_TIMEOUT, MIGRATION_RUNTIME_PIPE_DRAIN_TIMEOUT),
+        None,
+        false,
+        None,
+        &control,
+    )?;
+    #[cfg(not(target_os = "linux"))]
     let output = run_command_with_timeout(&mut command, MIGRATION_VALIDATE_RUNTIME_TIMEOUT)?;
+    control()?;
     let exit_code = output
         .status
         .code()
@@ -1418,6 +1456,44 @@ fn execute_migration_runtime_smoke_with_target(
     };
     verify_runtime_smoke_receipt_round_trip(&receipt)?;
     Ok(receipt)
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod smoke_safe_mode_tests {
+    use super::*;
+    use crate::runtime::safe_mode::{
+        AdmittedSafeModeScope, SafeModeController, SafeModeEntryReason,
+    };
+
+    #[test]
+    fn safe_mode_smoke_retains_original_ancestry_after_private_staging() {
+        let original = tempfile::tempdir().unwrap();
+        let project = original.path().join("project");
+        let staged = tempfile::tempdir().unwrap();
+        for root in [project.as_path(), staged.path()] {
+            std::fs::create_dir_all(root.join("nested")).unwrap();
+            std::fs::write(root.join("package.json"), r#"{"name":"smoke","main":"nested/index.cjs"}"#).unwrap();
+            std::fs::write(root.join("nested/index.cjs"), "console.log(42);").unwrap();
+        }
+        let target = select_migration_runtime_smoke_target(&project).unwrap();
+        let original_control = AdmittedSafeModeScope::capture(&target.entry_path).unwrap();
+        let mut controller = SafeModeController::with_default_config();
+        controller.enter_safe_mode(SafeModeEntryReason::ExplicitFlag,
+            "2026-11-11T00:00:00Z", "trusted", Vec::new());
+        let state = original.path().join(".franken-node/safe-mode/state.json");
+        std::fs::create_dir_all(state.parent().unwrap()).unwrap();
+        std::fs::write(&state, serde_json::to_vec(&controller).unwrap()).unwrap();
+        let error = execute_migration_runtime_smoke_with_target(
+            Path::new("/must-not-be-launched"), &target,
+        ).unwrap_err();
+        assert!(format!("{error:#}").contains("active safe mode"), "{error:#}");
+        let staged_target = select_migration_runtime_smoke_target(staged.path()).unwrap();
+        let error = execute_migration_runtime_smoke_with_target_guarded(
+            Path::new("/must-not-be-launched"), &staged_target, Some(&|| original_control.enforce()),
+        ).unwrap_err();
+        assert!(format!("{error:#}").contains("active safe mode"), "{error:#}");
+        assert!(!staged.path().join(".franken-node").exists());
+    }
 }
 
 fn select_migration_runtime_smoke_target(
@@ -2797,13 +2873,20 @@ pub fn run_validate(
                     });
                     test_suite = Some(report);
                 }
-                Ok((root, inputs, None)) => checks.push(runtime_smoke_result_check(
-                    validation_suite::with_captured_dependency_inputs(
-                        &root,
-                        &inputs,
-                        execute_migration_runtime_smoke,
-                    ),
-                )),
+                Ok((root, inputs, None)) => checks.push(runtime_smoke_result_check((|| {
+                    // The private stage has different ancestors. Retain the
+                    // original selected entry's operator scope before staging,
+                    // and poll it throughout the Linux smoke subprocess.
+                    let target = select_migration_runtime_smoke_target(&root)?;
+                    let control = crate::runtime::safe_mode::AdmittedSafeModeScope::capture(
+                        &target.entry_path,
+                    )?;
+                    validation_suite::with_captured_dependency_inputs(&root, &inputs, |staged| {
+                        execute_migration_runtime_smoke_guarded(
+                            staged, Some(&|| control.enforce()),
+                        )
+                    })
+                })())),
                 Err(error) => checks.push(MigrationValidationCheck {
                     id: "mig-validate-005".into(),
                     passed: false,

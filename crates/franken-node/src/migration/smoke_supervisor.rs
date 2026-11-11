@@ -55,6 +55,13 @@ fn check_cancellation(cancellation: Option<&CancellationToken>) -> Result<()> {
     Ok(())
 }
 
+fn check_control(control: Option<&dyn Fn() -> Result<()>>) -> Result<()> {
+    if let Some(control) = control {
+        control().context("migration execution control refused")?;
+    }
+    Ok(())
+}
+
 fn checked_group(raw: u32) -> io::Result<Pid> {
     let pid = i32::try_from(raw)
         .ok()
@@ -411,6 +418,29 @@ pub(super) fn run_command_cancellable(
     }
 }
 
+/// Run under a trusted retained operator control. The same check runs before
+/// spawn and on every runtime/output-drain polling round, including silent
+/// guests. Refusal follows the existing owned-group stop/reap error path.
+pub(super) fn run_command_guarded(
+    command: &mut Command,
+    timing: (Duration, Duration),
+    input: Option<&[u8]>,
+    pipe_input: bool,
+    cancellation: Option<&CancellationToken>,
+    control: &dyn Fn() -> Result<()>,
+) -> Result<Output> {
+    check_cancellation(cancellation)?;
+    control()?;
+    if pipe_input {
+        capture_command_controlled(command, timing.0, timing.1, MAX_STREAM_BYTES,
+            InputTransport::Pipe(input.context("pipe stdin requires captured bytes")?),
+            cancellation, Some(control))
+    } else {
+        run_bounded_input_controlled(command, timing.0, timing.1, MAX_STREAM_BYTES,
+            input, cancellation, Some(control))
+    }
+}
+
 #[cfg(test)]
 fn run_bounded(
     command: &mut Command,
@@ -429,7 +459,20 @@ fn run_bounded_input(
     input: Option<&[u8]>,
     cancellation: Option<&CancellationToken>,
 ) -> Result<Output> {
+    run_bounded_input_controlled(command, timeout, drain_timeout, limit, input, cancellation, None)
+}
+
+fn run_bounded_input_controlled(
+    command: &mut Command,
+    timeout: Duration,
+    drain_timeout: Duration,
+    limit: usize,
+    input: Option<&[u8]>,
+    cancellation: Option<&CancellationToken>,
+    control: Option<&dyn Fn() -> Result<()>>,
+) -> Result<Output> {
     check_cancellation(cancellation)?;
+    check_control(control)?;
     if timeout.is_zero() || drain_timeout.is_zero() || limit == 0 || limit > MAX_STREAM_BYTES {
         bail!("runtime smoke requires positive bounded time and output limits");
     }
@@ -451,13 +494,14 @@ fn run_bounded_input(
     if remaining.is_zero() {
         bail!("runtime smoke timed out preparing captured stdin");
     }
-    capture_command(
+    capture_command_controlled(
         command,
         remaining,
         drain_timeout,
         limit,
         stdin,
         cancellation,
+        control,
     )
 }
 
@@ -469,6 +513,19 @@ fn capture_command(
     input: InputTransport<'_>,
     cancellation: Option<&CancellationToken>,
 ) -> Result<Output> {
+    capture_command_controlled(command, timeout, drain_timeout, limit, input, cancellation, None)
+}
+
+fn capture_command_controlled(
+    command: &mut Command,
+    timeout: Duration,
+    drain_timeout: Duration,
+    limit: usize,
+    input: InputTransport<'_>,
+    cancellation: Option<&CancellationToken>,
+    control: Option<&dyn Fn() -> Result<()>>,
+) -> Result<Output> {
+    check_control(control)?;
     if timeout.is_zero() || drain_timeout.is_zero() || limit == 0 || limit > MAX_STREAM_BYTES {
         bail!("runtime smoke requires positive bounded time and output limits");
     }
@@ -494,15 +551,16 @@ fn capture_command(
         // The null-input convenience path uses the same observer entrypoint
         // as compatibility capture, rather than leaving it unused in the
         // standalone operators. Input/cleanup semantics are unchanged.
-        InputTransport::Null if cancellation.is_none() => (
+        InputTransport::Null if cancellation.is_none() && control.is_none() => (
             supervise_with_observer(command, timeout, drain_timeout, |_| Ok(()), observer)?,
             0,
         ),
-        input => supervise_with_input(
-            command, timeout, drain_timeout, input, |_| Ok(()), observer, cancellation,
+        input => supervise_with_input_controlled(
+            command, timeout, drain_timeout, input, |_| Ok(()), observer, cancellation, control,
         )?,
     };
     check_cancellation(cancellation)?;
+    check_control(control)?;
     match completion.reason {
         StopReason::RuntimeTimeout => bail!(
             "runtime smoke command timed out after {}ms",
@@ -579,6 +637,7 @@ pub(crate) fn supervise_with_redirected_input(
         after_spawn,
         observe,
         None,
+        None,
     )
     .map(|(completion, _)| completion)
 }
@@ -592,7 +651,23 @@ fn supervise_with_input(
     observe: impl FnMut(Stream, &[u8]) -> io::Result<()>,
     cancellation: Option<&CancellationToken>,
 ) -> Result<(Completion, usize)> {
+    supervise_with_input_controlled(command, timeout, drain_timeout, input,
+        after_spawn, observe, cancellation, None)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn supervise_with_input_controlled(
+    command: &mut Command,
+    timeout: Duration,
+    drain_timeout: Duration,
+    input: InputTransport<'_>,
+    after_spawn: impl FnOnce(u32) -> Result<()>,
+    observe: impl FnMut(Stream, &[u8]) -> io::Result<()>,
+    cancellation: Option<&CancellationToken>,
+    control: Option<&dyn Fn() -> Result<()>>,
+) -> Result<(Completion, usize)> {
     check_cancellation(cancellation)?;
+    check_control(control)?;
     if timeout.is_zero() || drain_timeout.is_zero() {
         bail!("runtime smoke requires positive bounded time and output limits");
     }
@@ -607,9 +682,11 @@ fn supervise_with_input(
         after_spawn,
         observe,
         cancellation,
+        control,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn supervise_with_input_until(
     command: &mut Command,
     deadline: Instant,
@@ -618,8 +695,10 @@ fn supervise_with_input_until(
     after_spawn: impl FnOnce(u32) -> Result<()>,
     mut observe: impl FnMut(Stream, &[u8]) -> io::Result<()>,
     cancellation: Option<&CancellationToken>,
+    control: Option<&dyn Fn() -> Result<()>>,
 ) -> Result<(Completion, usize)> {
     check_cancellation(cancellation)?;
+    check_control(control)?;
     if drain_timeout.is_zero() {
         bail!("runtime smoke requires positive bounded time and output limits");
     }
@@ -634,6 +713,7 @@ fn supervise_with_input_until(
         }
     };
     check_cancellation(cancellation)?;
+    check_control(control)?;
     if Instant::now() >= deadline {
         bail!("runtime smoke timed out before spawn");
     }
@@ -674,6 +754,7 @@ fn supervise_with_input_until(
         let mut exited_at = None;
         loop {
             check_cancellation(cancellation)?;
+            check_control(control)?;
             let now = Instant::now();
             if now >= deadline {
                 return Ok(StopReason::RuntimeTimeout);
@@ -691,6 +772,7 @@ fn supervise_with_input_until(
                 .pump(&mut |bytes| observe(Stream::Stderr, bytes))
                 .context("failed reading runtime smoke stderr")?;
             check_cancellation(cancellation)?;
+            check_control(control)?;
             if exited {
                 if stdout.eof && stderr.eof {
                     return Ok(StopReason::Exited);
@@ -748,6 +830,35 @@ mod tests {
             Duration::from_secs(3),
             Duration::from_millis(100),
         )
+    }
+
+    #[test]
+    fn safe_mode_trusted_control_is_polled_after_exit_while_pipes_remain_open() {
+        let leader = std::cell::Cell::new(None::<Pid>);
+        let observed_exit = std::cell::Cell::new(false);
+        let started = Instant::now();
+        let error = supervise_with_input_controlled(
+            &mut shell("/bin/sleep 60 & exit 0"), Duration::from_secs(10),
+            Duration::from_secs(5), InputTransport::Null,
+            |raw| { leader.set(Pid::from_raw(i32::try_from(raw).unwrap())); Ok(()) },
+            |_, _| Ok(()), None, Some(&|| {
+                // NOWAIT observes the pinned leader without taking its wait
+                // ownership. The background child still holds both pipes.
+                if let Some(pid) = leader.get()
+                    && waitid(WaitId::Pid(pid),
+                        WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT)?
+                        .is_some() {
+                            observed_exit.set(true);
+                            bail!("trusted control revoked during drain");
+                        }
+                Ok(())
+            }),
+        ).unwrap_err();
+        assert!(observed_exit.get());
+        assert!(format!("{error:#}").contains("trusted control revoked"), "{error:#}");
+        assert!(started.elapsed() < Duration::from_secs(3));
+        assert!(matches!(waitid(WaitId::Pid(leader.get().unwrap()),
+            WaitIdOptions::EXITED | WaitIdOptions::NOHANG), Err(Errno::CHILD)));
     }
 
     #[test]

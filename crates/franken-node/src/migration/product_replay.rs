@@ -6,10 +6,10 @@
 
 use super::super::super::product_oracle::{self, CaseOutcome, ProductReport};
 use super::super::{
-    Blob, CapsuleSummary, CapturedInputs, ExportedInputs, HashWriter, Invocation, LEG_TIMEOUT,
-    MAX_CAPSULE_BYTES, MAX_ENTRIES, MAX_EXPANDED_BYTES, Snapshot, StoredSnapshot, TOTAL_TIMEOUT,
+    Blob, CapsuleSummary, CapturedInputs, ExecutionControl, ExportedInputs, HashWriter, Invocation, LEG_TIMEOUT,
+    MAX_CAPSULE_BYTES, MAX_ENTRIES, MAX_EXPANDED_BYTES, Origin, Snapshot, StoredSnapshot, TOTAL_TIMEOUT,
     budget, implementation_hash, is_hash, matched_tests, open_regular, output_destination,
-    restore_snapshot, runtime_invocations, same_file_version, same_runtime, store_snapshot,
+    resolve_capsule_input, restore_snapshot, runtime_invocations, same_file_version, same_runtime, store_snapshot,
     workspace_effects,
 };
 use anyhow::{Context, Result, ensure};
@@ -488,6 +488,9 @@ impl Loaded {
 }
 
 fn load(path: &Path, pin: Option<&str>, deadline: Instant) -> Result<Loaded> {
+    let resolved = resolve_capsule_input(path, deadline)?;
+    let path = resolved.as_path();
+    let origin = Origin::Capsule(resolved.clone());
     if let Some(pin) = pin {
         ensure!(
             is_hash(pin),
@@ -552,7 +555,7 @@ fn load(path: &Path, pin: Option<&str>, deadline: Instant) -> Result<Loaded> {
     let mut used = BTreeSet::new();
     let mut expanded = 0;
     let mut metadata = 0;
-    let original = restore_snapshot(
+    let mut original = restore_snapshot(
         &capsule.payload.original,
         &blobs,
         &mut used,
@@ -560,7 +563,7 @@ fn load(path: &Path, pin: Option<&str>, deadline: Instant) -> Result<Loaded> {
         &mut metadata,
         deadline,
     )?;
-    let candidate = capsule
+    let mut candidate = capsule
         .payload
         .candidate
         .as_ref()
@@ -575,6 +578,10 @@ fn load(path: &Path, pin: Option<&str>, deadline: Instant) -> Result<Loaded> {
         &original,
         candidate.as_ref().unwrap_or(&original),
     )?;
+    original.origin = Some(origin.clone());
+    if let Some(candidate) = &mut candidate {
+        candidate.origin = Some(origin);
+    }
     budget(deadline)?;
     Ok(Loaded {
         capsule,
@@ -696,6 +703,7 @@ fn reexecute(
     verify_fix: bool,
     deadline: Instant,
 ) -> Result<ReplayResult> {
+    ExecutionControl::admit(&[&loaded.original, loaded.candidate()])?;
     let expected = &loaded.capsule.payload.expected;
     ensure!(
         loaded.capsule.payload.implementation_sha256 == implementation(),

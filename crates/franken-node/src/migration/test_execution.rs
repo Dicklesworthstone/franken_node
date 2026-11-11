@@ -22,6 +22,7 @@ use super::super::{
     smoke_supervisor,
 };
 use anyhow::{Context, Result, ensure};
+use super::super::execution_control::ExecutionControl;
 use serde::{
     Deserialize, Deserializer,
     de::{MapAccess, Visitor},
@@ -351,6 +352,22 @@ pub(super) fn run(
     environment: &BTreeMap<OsString, OsString>,
     timing: (Instant, Duration, Option<&smoke_supervisor::CancellationToken>),
 ) -> Result<Output> {
+    let control = ExecutionControl::admit(&[snapshot])?;
+    run_guarded(snapshot, settings, test, invocation, workspace, environment, timing, &control)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn run_guarded(
+    snapshot: &Snapshot,
+    settings: &Settings,
+    test: &Path,
+    invocation: &Invocation,
+    workspace: &Path,
+    environment: &BTreeMap<OsString, OsString>,
+    timing: (Instant, Duration, Option<&smoke_supervisor::CancellationToken>),
+    control: &ExecutionControl,
+) -> Result<Output> {
+    control.enforce()?;
     let mut command = configured_command(settings, test, invocation, workspace, environment)?;
     let bytes = input(settings, snapshot)?;
     let remaining = timing.0.saturating_duration_since(Instant::now());
@@ -358,29 +375,17 @@ pub(super) fn run(
         !remaining.is_zero(),
         "test execution setup exhausted the runtime budget"
     );
-    if let Some(cancellation) = timing.2 {
-        return smoke_supervisor::run_command_cancellable(
-            &mut command, remaining, timing.1, bytes,
-            settings.stdin_mode == StdinMode::Pipe, cancellation,
-        ).context("execute cancellable captured test settings");
-    }
     // Mode participates in Settings equality, so paired validation, checked
     // rewrites and capsule replay cannot substitute file input for pipe input.
     // Both transports use the same exclusive child owner and output checks.
-    match (settings.stdin_mode, bytes) {
-        (StdinMode::File, Some(bytes)) => {
-            smoke_supervisor::run_command_with_input(&mut command, remaining, timing.1, Some(bytes))
-        }
-        (StdinMode::File, None) => {
-            smoke_supervisor::run_command_with_timeout(&mut command, remaining, timing.1)
-        }
-        (StdinMode::Pipe, Some(bytes)) => {
-            smoke_supervisor::run_command_with_pipe_input(&mut command, remaining, timing.1, bytes)
-        }
-        (StdinMode::Pipe, None) => {
-            anyhow::bail!("pipe stdin mode requires an explicit captured stdin file")
-        }
-    }
+    smoke_supervisor::run_command_guarded(
+        &mut command,
+        (remaining, timing.1),
+        bytes,
+        settings.stdin_mode == StdinMode::Pipe,
+        timing.2,
+        &|| control.enforce(),
+    )
     .context("execute captured test settings")
 }
 

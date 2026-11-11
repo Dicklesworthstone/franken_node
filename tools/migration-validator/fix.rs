@@ -11,6 +11,8 @@ use std::process::ExitCode;
 #[cfg(target_os = "linux")]
 use franken_migration_schema as schema_versions;
 #[cfg(target_os = "linux")]
+use franken_migration_schema::runtime;
+#[cfg(target_os = "linux")]
 #[allow(dead_code)]
 #[path = "../../crates/franken-node/src/supply_chain/module_resolution_graph.rs"]
 pub(crate) mod module_resolution_graph;

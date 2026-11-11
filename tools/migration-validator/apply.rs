@@ -11,6 +11,8 @@ use std::process::ExitCode;
 #[cfg(target_os = "linux")]
 use franken_migration_schema as schema_versions;
 #[cfg(target_os = "linux")]
+use franken_migration_schema::runtime;
+#[cfg(target_os = "linux")]
 #[allow(dead_code)]
 #[path = "../../crates/franken-node/src/supply_chain/module_resolution_graph.rs"]
 pub(crate) mod module_resolution_graph;
@@ -305,6 +307,7 @@ mod linux {
         let Prepared { capture, mut report, deadline } = prepare(&project, candidate, Some(pins))?;
         report.request = request;
         cancellation.check()?;
+        capture.ensure_execution_allowed()?;
         let (writer, initialized) = initialize_writer(&capture, &report.project, deadline)?;
         capture.ensure_candidate_source_unchanged()?;
         report.status = "ERROR";
@@ -380,6 +383,7 @@ mod linux {
         writer: &RewriteTransaction, capture: &RewriteCandidate,
         report: &mut Report, cancellation: &CancellationToken,
     ) -> Result<()> {
+        capture.ensure_execution_allowed()?;
         let changes = capture.changes()?;
         let edits: Vec<_> = changes.replacements.iter().map(|edit| Edit {
             path: edit.path, before: edit.before, after: edit.after,
@@ -461,6 +465,34 @@ mod linux {
             }
             fs::write(candidate.join("case.test.cjs"), "globalThis.answer = 42;\n").unwrap();
             (root, original, candidate)
+        }
+
+        #[test]
+        fn safe_mode_refuses_reviewed_apply_before_writer_initialization_but_allows_inspection() {
+            use crate::runtime::safe_mode::{SafeModeController, SafeModeEntryReason};
+            for malformed in [false, true] {
+                let (root, original, candidate) = pair();
+                let before = fs::read(original.join("case.test.cjs")).unwrap();
+                let inspected = prepare(&original, &candidate, None).unwrap().report;
+                let state = root.path().join(".franken-node/safe-mode/state.json");
+                fs::create_dir_all(state.parent().unwrap()).unwrap();
+                if malformed {
+                    fs::write(&state, "{}").unwrap();
+                } else {
+                    let mut controller = SafeModeController::with_default_config();
+                    controller.enter_safe_mode(SafeModeEntryReason::ExplicitFlag,
+                        "2026-11-11T00:00:00Z", "trusted", Vec::new());
+                    fs::write(&state, serde_json::to_vec(&controller).unwrap()).unwrap();
+                }
+                assert_eq!(prepare(&original, &candidate, None).unwrap().report.status, "INSPECTED");
+                let error = apply(&original, &candidate,
+                    (&inspected.input_sha256, &inspected.candidate_input_sha256),
+                    Path::new("/missing-native"), Path::new("/missing-bun"), true).unwrap_err();
+                assert!(format!("{error:#}").contains("safe"), "{error:#}");
+                assert_eq!(fs::read(original.join("case.test.cjs")).unwrap(), before);
+                assert!(!original.join(".migrate-backup").exists());
+                assert!(!candidate.join(".migrate-backup").exists());
+            }
         }
 
         #[test]

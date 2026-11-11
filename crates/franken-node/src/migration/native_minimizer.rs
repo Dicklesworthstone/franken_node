@@ -313,8 +313,9 @@ impl Inputs {
         );
         entry.data = EntryData::File(bytes);
         Ok(Self {
-            original: Snapshot::from_entries(original),
-            candidate: candidate.map(Snapshot::from_entries),
+            original: self.original.with_entries(original),
+            candidate: self.candidate.as_ref().zip(candidate)
+                .map(|(snapshot, entries)| snapshot.with_entries(entries)),
         })
     }
     fn key(&self) -> (String, String) {

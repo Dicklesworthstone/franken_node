@@ -5,6 +5,7 @@ use super::{
     Entry, EntryData, Invocation, MAX_PATH_BYTES, MAX_TESTS, Snapshot, excluded_from_discovery,
     is_declaration, is_test, is_test_source,
 };
+use super::execution_control::ExecutionControl;
 use anyhow::{Context, Result, bail, ensure};
 use rustix::fs::{Mode, OFlags, open, openat};
 use serde::Deserialize;
@@ -339,8 +340,16 @@ fn inventory(entries: &BTreeMap<PathBuf, Entry>) -> Result<Inventory> {
         let tests: BTreeMap<_, _> = entries
             .iter()
             .filter(|(path, entry)| !matches!(entry.data, EntryData::Directory) && is_test(path))
-            .map(|(path, _)| (path.clone(), TestSettings::default()))
-            .collect();
+            .map(|(path, entry)| {
+                // Match explicit manifest admission. Silently dropping a
+                // test-looking link could turn an incomplete suite into PASS;
+                // following it could escape the selected entry's control scope.
+                ensure!(matches!(entry.data, EntryData::File(_)),
+                    "discovered migration test entrypoint must be a regular captured file: {}",
+                    path.display());
+                Ok((path.clone(), TestSettings::default()))
+            })
+            .collect::<Result<_>>()?;
         ensure!(
             tests.len() <= MAX_TESTS,
             "native validation test limit exceeded"
@@ -546,6 +555,23 @@ pub(super) fn run_test_cancellable(
     timing: (Duration, Duration),
     cancellation: Option<&super::smoke_supervisor::CancellationToken>,
 ) -> Result<Output> {
+    let control = ExecutionControl::admit(&[snapshot])?;
+    run_test_guarded(
+        snapshot, invocation, test, workspace, environment, timing, cancellation, &control,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn run_test_guarded(
+    snapshot: &Snapshot,
+    invocation: &Invocation,
+    test: &Path,
+    workspace: &Path,
+    environment: &BTreeMap<OsString, OsString>,
+    timing: (Duration, Duration),
+    cancellation: Option<&super::smoke_supervisor::CancellationToken>,
+    control: &ExecutionControl,
+) -> Result<Output> {
     if let Some(cancellation) = cancellation {
         cancellation.check()?;
     }
@@ -557,7 +583,7 @@ pub(super) fn run_test_cancellable(
         .get(test)
         .context("test is not present in the captured execution inventory")?;
     let output_workspace = settings.expectations.pin_workspace(workspace)?;
-    let output = execution::run(
+    let output = execution::run_guarded(
         snapshot,
         &settings.execution,
         test,
@@ -565,6 +591,7 @@ pub(super) fn run_test_cancellable(
         workspace,
         environment,
         (deadline, timing.1, cancellation),
+        control,
     )?;
     let checks = (|| -> Result<()> {
         settings.expectations.check(snapshot, &output)?;
@@ -572,6 +599,7 @@ pub(super) fn run_test_cancellable(
         if let Some(cancellation) = cancellation {
             cancellation.check()?;
         }
+        control.enforce()?;
         Ok(())
     })();
     if let Err(cause) = checks {
