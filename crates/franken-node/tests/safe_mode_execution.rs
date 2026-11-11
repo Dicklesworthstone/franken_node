@@ -3,10 +3,11 @@
 //! processes; native success after recovery is exercised with the engine feature.
 
 use frankenengine_node::runtime::safe_mode::{
-    ExitVerification, MAX_SAFE_MODE_STATE_BYTES, OperationFlags, SafeModeAction, SafeModeController,
+    AdmittedSafeModeProject, ExitVerification, MAX_SAFE_MODE_STATE_BYTES, OperationFlags, SafeModeAction, SafeModeController,
     SafeModeEntryReason, enforce_run_safe_mode, read_persisted_safe_mode, record_native_crash,
-    update_persisted_safe_mode,
+    update_persisted_safe_mode, enforce_project_safe_mode,
 };
+use frankenengine_node::runtime::lockstep_harness::LockstepHarness;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -223,6 +224,106 @@ fn cli_safe_mode_blocks_every_profile_before_guest_output() {
         assert!(value.to_string().contains("run blocked by active safe mode"));
         assert!(!String::from_utf8_lossy(&output.stdout).contains("SAFE_MODE_GUEST_RAN"));
     }
+}
+
+#[test]
+fn retained_project_scopes_recheck_original_ancestry_without_guest_files() {
+    let directory = tempfile::tempdir().unwrap();
+    let project = directory.path().join("nested/project");
+    fs::create_dir_all(&project).unwrap();
+    let admitted = AdmittedSafeModeProject::capture(&project).unwrap();
+    assert_eq!(admitted.root(), project.canonicalize().unwrap().as_path());
+    enforce_project_safe_mode(&project).unwrap();
+
+    persist(&project, &SafeModeController::with_default_config());
+    let mut parent = active_controller();
+    persist(directory.path(), &parent);
+    assert!(admitted.enforce().unwrap_err().to_string().contains("active safe mode"));
+    assert!(enforce_project_safe_mode(&project).is_err());
+    parent.exit_safe_mode(&exit_checks(), "operator", "2026-10-10T00:01:00Z").unwrap();
+    persist(directory.path(), &parent);
+    admitted.enforce().unwrap();
+
+    fs::write(state_path(directory.path()), b"{").unwrap();
+    assert!(admitted.enforce().unwrap_err().to_string().contains("invalid safe-mode state"));
+}
+
+#[test]
+fn lockstep_refuses_files_directories_and_corpora_before_starting_runtimes() {
+    let directory = tempfile::tempdir().unwrap();
+    let project = directory.path().join("nested");
+    let app = entry(&project);
+    let manifest = project.join("manifest.json");
+    fs::write(&manifest, br#"{"cases":[{"id":"guest","file":"app.js"}]}"#).unwrap();
+    persist(directory.path(), &active_controller());
+    persist(&project, &SafeModeController::with_default_config());
+    let before = fs::read(state_path(directory.path())).unwrap();
+    let harness = LockstepHarness::new(vec![
+        "/missing/reference-runtime".into(), "/missing/candidate-runtime".into(),
+    ]);
+    for input in [&app, &project, &manifest] {
+        let error = harness.verify_lockstep(input, true).unwrap_err();
+        assert!(error.to_string().contains("run blocked by active safe mode"), "{error:#}");
+    }
+    assert_eq!(fs::read(state_path(directory.path())).unwrap(), before);
+    assert!(!project.join("fixtures").exists());
+}
+
+#[test]
+fn lockstep_refuses_malformed_control_state_before_runtime_resolution() {
+    let directory = tempfile::tempdir().unwrap();
+    let app = entry(directory.path());
+    fs::write(state_path(directory.path()), b"{").unwrap();
+    let harness = LockstepHarness::new(vec!["node".into(), "bun".into()]);
+    let error = harness.verify_lockstep(&app, false).unwrap_err();
+    assert!(error.to_string().contains("invalid safe-mode state"), "{error:#}");
+}
+
+#[test]
+fn cli_lockstep_obeys_the_same_operator_interlock_as_run() {
+    let directory = initialized_project();
+    enter_from_cli(directory.path());
+    let output = cli(directory.path(), &[
+        "verify", "lockstep", "app.js", "--runtimes", "node,bun", "--json",
+    ]);
+    assert!(!output.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["schema_version"], "franken-node/verify-lockstep-error-cli/v1");
+    assert!(report.to_string().contains("run blocked by active safe mode"), "{report}");
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("SAFE_MODE_GUEST_RAN"));
+}
+
+#[cfg(unix)]
+#[test]
+fn lockstep_stops_reference_process_groups_when_safe_mode_activates() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    if Command::new("strace").arg("-V")
+        .stdout(Stdio::null()).stderr(Stdio::null()).status().is_err()
+    {
+        eprintln!("skipping live lockstep containment test because strace is unavailable");
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let app = entry(directory.path());
+    let control = state_path(directory.path());
+    assert!(!control.exists());
+    fs::write(directory.path().join("activate.json"), serde_json::to_vec(&active_controller()).unwrap()).unwrap();
+    let mut runtimes = Vec::new();
+    for name in ["reference.sh", "candidate.sh"] {
+        let runtime = directory.path().join(name);
+        fs::write(&runtime, "#!/bin/sh\nset -eu\nroot=$(dirname \"$1\")\nstate=\"$root/.franken-node/safe-mode/state.json\"\ncp \"$root/activate.json\" \"$state.$$.tmp\"\nmv \"$state.$$.tmp\" \"$state\"\nsleep 30\nprintf escaped > \"$root/late-guest-effect\"\n").unwrap();
+        fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
+        runtimes.push(runtime.to_str().unwrap().to_owned());
+    }
+    let started = Instant::now();
+    let error = LockstepHarness::new(runtimes).verify_lockstep(&app, false).unwrap_err();
+    assert!(format!("{error:#}").contains("safe mode"), "{error:#}");
+    assert!(started.elapsed() < Duration::from_secs(15), "containment must not wait for the guest sleep");
+    assert!(!directory.path().join("late-guest-effect").exists());
+    assert!(enforce_project_safe_mode(directory.path()).is_err());
 }
 
 #[cfg(feature = "engine")]

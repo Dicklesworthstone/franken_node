@@ -375,6 +375,42 @@ pub fn enforce_run_safe_mode(entrypoint: &std::path::Path) -> anyhow::Result<()>
     enforce_admitted_run_safe_mode(&entrypoint)
 }
 
+/// Retain the original project scope when validation executes a private copy.
+/// The copied guest workspace must not replace the operator's control ancestry.
+#[derive(Debug, Clone)]
+pub struct AdmittedSafeModeProject {
+    root: std::path::PathBuf,
+}
+
+impl AdmittedSafeModeProject {
+    pub fn capture(project_root: &std::path::Path) -> anyhow::Result<Self> {
+        use anyhow::Context;
+
+        let root = project_root.canonicalize().with_context(|| {
+            format!("resolve safe-mode project scope {}", project_root.display())
+        })?;
+        anyhow::ensure!(root.is_dir(), "safe-mode project scope must be a directory");
+        let scope = Self { root };
+        scope.enforce()?;
+        Ok(scope)
+    }
+
+    pub fn root(&self) -> &std::path::Path {
+        &self.root
+    }
+
+    /// Consult the captured ancestry again, without resolving a guest-modified
+    /// entrypoint or substituting the temporary execution directory.
+    pub fn enforce(&self) -> anyhow::Result<()> {
+        enforce_safe_mode_ancestors(&self.root)
+    }
+}
+
+/// Check a whole project, including empty projects and ancestor restrictions.
+pub fn enforce_project_safe_mode(project_root: &std::path::Path) -> anyhow::Result<()> {
+    AdmittedSafeModeProject::capture(project_root).map(|_| ())
+}
+
 /// An additional operator scope retained by a native run. Deployment releases
 /// may live outside their supervisor's project, so the release entrypoint alone
 /// cannot identify every scope that must remain in force. This restriction is
@@ -482,7 +518,11 @@ pub(crate) fn enforce_admitted_run_safe_mode(entrypoint: &std::path::Path) -> an
     let parent = entrypoint
         .parent()
         .context("safe-mode run entrypoint has no parent directory")?;
-    for scope in parent.ancestors() {
+    enforce_safe_mode_ancestors(parent)
+}
+
+fn enforce_safe_mode_ancestors(root: &std::path::Path) -> anyhow::Result<()> {
+    for scope in root.ancestors() {
         let state_path = scope.join(".franken-node/safe-mode/state.json");
         if let Some(controller) = read_persisted_safe_mode(&state_path)?
             && controller.is_active()

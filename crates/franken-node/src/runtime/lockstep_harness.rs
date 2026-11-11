@@ -375,9 +375,11 @@ impl LockstepHarness {
     /// and feeds the results to the Oracle.
     pub fn verify_lockstep(&self, app_path: &Path, emit_fixtures: bool) -> Result<()> {
         self.validate_runtimes()?;
+        let input_scope = Self::capture_input_scope(app_path)?;
         if let Some(corpus_entries) = Self::resolve_lockstep_corpus_entries(app_path)? {
             for entry in corpus_entries {
-                self.verify_lockstep_entry(&entry, emit_fixtures)
+                input_scope.enforce()?;
+                self.verify_lockstep_entry(&entry, emit_fixtures, &input_scope)
                     .with_context(|| {
                         format!("lockstep corpus fixture failed: {}", entry.display())
                     })?;
@@ -385,7 +387,20 @@ impl LockstepHarness {
             return Ok(());
         }
 
-        self.verify_lockstep_entry(app_path, emit_fixtures)
+        self.verify_lockstep_entry(app_path, emit_fixtures, &input_scope)
+    }
+
+    fn capture_input_scope(app_path: &Path) -> Result<crate::runtime::safe_mode::AdmittedSafeModeProject> {
+        let resolved = app_path.canonicalize().with_context(|| {
+            format!("resolve lockstep safe-mode input {}", app_path.display())
+        })?;
+        let root = if resolved.is_dir() {
+            resolved.as_path()
+        } else {
+            anyhow::ensure!(resolved.is_file(), "lockstep input must be a regular file or directory");
+            resolved.parent().context("lockstep input has no parent directory")?
+        };
+        crate::runtime::safe_mode::AdmittedSafeModeProject::capture(root)
     }
 
     fn resolve_lockstep_corpus_entries(app_path: &Path) -> Result<Option<Vec<PathBuf>>> {
@@ -485,7 +500,13 @@ impl LockstepHarness {
         Ok(relative_path)
     }
 
-    fn verify_lockstep_entry(&self, app_path: &Path, emit_fixtures: bool) -> Result<()> {
+    fn verify_lockstep_entry(
+        &self,
+        app_path: &Path,
+        emit_fixtures: bool,
+        original_scope: &crate::runtime::safe_mode::AdmittedSafeModeProject,
+    ) -> Result<()> {
+        let input_scope = Self::capture_input_scope(app_path)?;
         let mut oracle = RuntimeOracle::new("lockstep-harness-trace", 100);
 
         for rt in &self.runtimes {
@@ -501,10 +522,13 @@ impl LockstepHarness {
 
         // Spawn parallel execution threads for each runtime
         let mut handles = Vec::new();
+        input_scope.enforce()?;
+        original_scope.enforce()?;
         for rt in self.runtimes.clone() {
             let app_path_buf = app_path.to_path_buf();
+            let scopes = [original_scope.clone(), input_scope.clone()];
             let handle = thread::spawn(move || -> Result<(String, RuntimeLegOutput)> {
-                let output = Self::execute_runtime(&rt, &app_path_buf)?;
+                let output = Self::execute_runtime_admitted(&rt, &app_path_buf, &scopes)?;
                 Ok((rt, output))
             });
             push_bounded(&mut handles, handle, MAX_THREAD_HANDLES);
@@ -512,15 +536,25 @@ impl LockstepHarness {
 
         let mut outputs = BTreeMap::new();
         let mut syscall_audits: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        let mut execution_error = None;
         for handle in handles {
             match handle.join() {
                 Ok(Ok((rt, leg))) => {
                     syscall_audits.insert(rt.clone(), leg.syscall_audit);
                     outputs.insert(rt, leg.comparison);
                 }
-                Ok(Err(e)) => anyhow::bail!("Runtime execution error: {}", e),
-                Err(_) => anyhow::bail!("Runtime execution panicked"),
+                Ok(Err(error)) => {
+                    execution_error.get_or_insert_with(|| anyhow::anyhow!("Runtime execution error: {error:#}"));
+                }
+                Err(_) => {
+                    execution_error.get_or_insert_with(|| anyhow::anyhow!("Runtime execution panicked"));
+                }
             }
+        }
+        // Every runtime owns a process group. Join all supervisors even when
+        // one refuses, so a failed comparison never abandons a reference leg.
+        if let Some(error) = execution_error {
+            return Err(error);
         }
 
         // Run the cross-runtime check
@@ -861,9 +895,31 @@ impl LockstepHarness {
         }
     }
 
+    #[cfg(test)]
     fn execute_runtime(runtime: &str, app_path: &Path) -> Result<RuntimeLegOutput> {
+        let input_scope = Self::capture_input_scope(app_path)?;
+        Self::execute_runtime_admitted(runtime, app_path, &[input_scope])
+    }
+
+    fn execute_runtime_admitted(
+        runtime: &str,
+        app_path: &Path,
+        scopes: &[crate::runtime::safe_mode::AdmittedSafeModeProject],
+    ) -> Result<RuntimeLegOutput> {
+        anyhow::ensure!(!scopes.is_empty(), "lockstep execution requires an admitted input scope");
+        for scope in scopes {
+            scope.enforce()?;
+        }
         let bin_path = Self::resolve_runtime_binary(runtime);
-        let runtime_target = Self::resolve_runtime_target(runtime, app_path)?;
+        let runtime_target = Self::resolve_runtime_target(runtime, app_path)?
+            .canonicalize().context("resolve admitted lockstep runtime target")?;
+        let target_scope = Self::capture_input_scope(&runtime_target)?;
+        let enforce_scopes = || -> Result<()> {
+            for scope in scopes {
+                scope.enforce()?;
+            }
+            target_scope.enforce()
+        };
 
         let mut cmd = Command::new("strace");
 
@@ -893,7 +949,7 @@ impl LockstepHarness {
             .arg(&bin_path);
 
         if Self::is_franken_runtime(runtime) {
-            cmd.arg("run").arg(app_path);
+            cmd.arg("run").arg(&runtime_target);
             // bd-zi9hj: when the franken leg is this very binary (the
             // default — no external engine CLI ships), run output-pure:
             // only the guest program's console output and exit code, so the
@@ -921,6 +977,10 @@ impl LockstepHarness {
         }
         Self::isolate_child_process_group(&mut cmd);
 
+        // Both the caller's project and the resolved per-runtime entrypoint
+        // remain authoritative. Temporary files and reference runtimes do not
+        // exempt guest execution from persisted operator containment.
+        enforce_scopes()?;
         let mut child = cmd
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -970,8 +1030,14 @@ impl LockstepHarness {
 
         let mut is_timeout = false;
         let mut is_output_cap_reached = false;
+        let mut containment_error = None;
         let mut exit_code = -1;
         loop {
+            if let Err(error) = enforce_scopes() {
+                Self::terminate_runtime_tree(&mut child);
+                containment_error = Some(error);
+                break;
+            }
             if output_cap_reached.load(Ordering::Acquire) {
                 Self::terminate_runtime_tree(&mut child);
                 is_output_cap_reached = true;
@@ -992,6 +1058,10 @@ impl LockstepHarness {
         let drain_timeout = crate::config::timeouts::LOCKSTEP_PIPE_DRAIN_JOIN_TIMEOUT;
         let stdout_result = Self::join_pipe_drain(stdout_thread, "stdout", drain_timeout);
         let stderr_result = Self::join_pipe_drain(stderr_thread, "stderr", drain_timeout);
+
+        if let Some(error) = containment_error {
+            return Err(error).context("lockstep runtime stopped by operator safe mode");
+        }
 
         if is_output_cap_reached
             || stdout_result.cap_reached
@@ -1479,6 +1549,42 @@ mod tests {
             MAX_COMBINED_OUTPUT_BYTES
         );
         assert_eq!(output.bytes.len(), MAX_COMBINED_OUTPUT_BYTES);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn admitted_runtime_keeps_original_scope_when_entrypoint_is_retargeted() {
+        use crate::runtime::safe_mode::{SafeModeController, SafeModeEntryReason};
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let original = root.path().join("original");
+        let replacement = root.path().join("replacement");
+        for project in [&original, &replacement] {
+            std::fs::create_dir(project).unwrap();
+            std::fs::write(project.join("app.js"), "console.log('guest');").unwrap();
+        }
+        let alias = root.path().join("selected.js");
+        symlink(original.join("app.js"), &alias).unwrap();
+        let scope = LockstepHarness::capture_input_scope(&alias).unwrap();
+        std::fs::rename(&alias, root.path().join("retained-selection")).unwrap();
+        symlink(replacement.join("app.js"), &alias).unwrap();
+
+        let state = original.join(".franken-node/safe-mode/state.json");
+        std::fs::create_dir_all(state.parent().unwrap()).unwrap();
+        let mut controller = SafeModeController::with_default_config();
+        controller.enter_safe_mode(
+            SafeModeEntryReason::ExplicitFlag,
+            "2026-11-11T00:00:00Z",
+            "operator:lockstep-regression",
+            Vec::new(),
+        );
+        std::fs::write(&state, serde_json::to_vec(&controller).unwrap()).unwrap();
+        let error = LockstepHarness::execute_runtime_admitted(
+            "/missing/runtime", &alias, &[scope],
+        ).err().expect("the retained original scope must refuse");
+        assert!(error.to_string().contains("run blocked by active safe mode"), "{error:#}");
+        assert!(error.to_string().contains(state.to_str().unwrap()), "{error:#}");
     }
 
     #[cfg(unix)]

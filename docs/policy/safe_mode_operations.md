@@ -113,6 +113,29 @@ with `--state-dir`. Exit requests fail closed unless `--operator-id`,
 `--confirm`, and the three operator attestation flags are present; the CLI
 does not independently re-verify trust state, incidents, or the evidence ledger.
 
+### Lockstep execution interlock
+
+`verify lockstep` checks the persisted controller at the original input's
+canonical directory and every ancestor before starting reference or native
+runtimes. This applies to individual files, project directories, and corpus
+manifests. A nested inactive controller cannot override an active parent, and
+malformed, oversized, unreadable, or non-regular state refuses execution.
+
+Each runtime also retains the scope of its resolved entrypoint. The supervisor
+rechecks both original and resolved scopes immediately before spawning and in
+its existing process polling loop. If a scope becomes active or unreadable,
+the supervisor stops and reaps that runtime's process group and returns an
+error. The comparison joins every started runtime supervisor before returning
+a runtime failure. A containment stop never becomes matching guest output or
+a successful oracle verdict.
+
+The reusable `AdmittedSafeModeProject` guard captures an existing project
+directory and rechecks its original ancestry without reopening a guest file.
+It supports empty project directories and validation copies whose temporary
+location must not replace the source project's operator scope. This is the
+existing unsigned local operator interlock; it does not attest fleet-wide
+quiescence or protect against a principal that can rewrite control state.
+
 ## Recovery Procedures
 
 ### Pre-Exit Checklist
