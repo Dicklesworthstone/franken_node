@@ -5,7 +5,8 @@
 //! the optional rewritten candidate. Every leg runs once in its own workspace.
 //! Two-reference disagreement is INCONCLUSIVE, never a majority-vote PASS.
 //! This shares capture, inventory, runtime invocation, process supervision and
-//! filesystem observation with native validation; it is not release certification.
+//! filesystem observation with native validation. Normal exit assertions are
+//! process evidence, not proof of engine-level clean completion or release certification.
 
 use super::{
     CapturedInputs, DRAIN_TIMEOUT, Invocation, LEG_TIMEOUT, RunObservation, RuntimeIdentity,
@@ -46,6 +47,9 @@ pub enum CaseOutcome {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProductCase {
     pub test: String,
+    /// Descriptive only: admission binds this to the immutable manifest.
+    #[serde(default)]
+    pub expected_exit_code: u8,
     pub outcome: CaseOutcome,
     pub node: Option<RunObservation>,
     pub bun: Option<RunObservation>,
@@ -87,7 +91,8 @@ pub struct ProductReport {
 
 impl ProductReport {
     /// Check a LIVE measurement against the caller's exact captured inputs and
-    /// sorted test inventory before allowing a checked installation. This is
+    /// sorted test inventory and independently captured normal exit assertions
+    /// before allowing a checked installation. This is
     /// consistency checking, not authentication: an unsigned imported report
     /// must never authorize source changes, even when all these checks pass.
     /// No pairwise projection, majority vote or summary-only PASS is sufficient.
@@ -95,7 +100,7 @@ impl ProductReport {
         &self,
         original_sha256: &str,
         candidate_sha256: &str,
-        tests: &[PathBuf],
+        tests: &BTreeMap<PathBuf, u8>,
     ) -> Result<()> {
         let digest = |value: &str| {
             value.len() == 64
@@ -135,7 +140,6 @@ impl ProductReport {
         }
         ensure!(
             !tests.is_empty()
-                && tests.windows(2).all(|pair| pair[0] < pair[1])
                 && self.verdict == "PASS"
                 && self.total_tests == tests.len()
                 && self.cases.len() == tests.len()
@@ -149,9 +153,10 @@ impl ProductReport {
                 && self.errors.is_empty(),
             "three-runtime evidence is not a complete passing test suite"
         );
-        for (test, row) in tests.iter().zip(&self.cases) {
+        for ((test, expected_exit), row) in tests.iter().zip(&self.cases) {
             ensure!(
-                test.to_str() == Some(row.test.as_str()),
+                test.to_str() == Some(row.test.as_str())
+                    && row.expected_exit_code == *expected_exit,
                 "three-runtime evidence test inventory differs from the captured inventory"
             );
             ensure!(
@@ -169,7 +174,7 @@ impl ProductReport {
                 .context("missing native process evidence")?;
             for observation in [node, bun, native] {
                 ensure!(
-                    observation.exit_code == Some(0)
+                    observation.exit_code == Some(i32::from(*expected_exit))
                         && observation.signal.is_none()
                         && digest(&observation.stdout.sha256)
                         && digest(&observation.stderr.sha256)
@@ -384,7 +389,7 @@ fn differences(left: &Leg, right: &Leg, filesystem: bool) -> Vec<&'static str> {
     differences
 }
 
-fn classify(test: &Path, legs: [Leg; 3], filesystem: bool) -> ProductCase {
+fn classify(test: &Path, expected_exit_code: u8, legs: [Leg; 3], filesystem: bool) -> ProductCase {
     let mut errors = Vec::new();
     let mut divergences = Vec::new();
     for (role, leg) in ROLES.into_iter().zip(&legs) {
@@ -398,7 +403,7 @@ fn classify(test: &Path, legs: [Leg; 3], filesystem: bool) -> ProductCase {
         if leg
             .output
             .as_ref()
-            .is_some_and(|output| !output.status.success())
+            .is_some_and(|output| output.status.code() != Some(i32::from(expected_exit_code)))
         {
             divergences.push(format!("{role}:unsuccessful_exit"));
         }
@@ -415,7 +420,7 @@ fn classify(test: &Path, legs: [Leg; 3], filesystem: bool) -> ProductCase {
         legs[index]
             .output
             .as_ref()
-            .is_some_and(|output| output.status.success())
+            .is_some_and(|output| output.status.code() == Some(i32::from(expected_exit_code)))
     };
     let outcome = if !errors.is_empty() {
         CaseOutcome::Error
@@ -431,6 +436,7 @@ fn classify(test: &Path, legs: [Leg; 3], filesystem: bool) -> ProductCase {
     let [node, bun, native] = legs;
     ProductCase {
         test: test.to_string_lossy().into_owned(),
+        expected_exit_code,
         outcome,
         node: node.observation,
         bun: bun.observation,
@@ -467,6 +473,7 @@ fn execute_cancellable(
     check_cancellation(cancellation)?;
     let (deadline, leg_timeout) = timing;
     let tests = matched_tests(original, candidate)?;
+    let expected_exits = test_inventory::expected_exit_codes(original)?;
     let concurrency = test_inventory::concurrency(original)?;
     let [node_runtime, bun_runtime, native_runtime] = identities;
     let distinct_reference_binaries = node_runtime.sha256 != bun_runtime.sha256;
@@ -530,7 +537,7 @@ fn execute_cancellable(
                 filesystem,
             );
         }
-        Ok(classify(test, legs, filesystem))
+        Ok(classify(test, expected_exits[test], legs, filesystem))
     })?;
     report.errors.extend(completed.errors);
     for row in completed.rows {
@@ -635,6 +642,38 @@ mod tests {
         .unwrap()
     }
 
+    #[test]
+    fn expected_error_exit_compares_all_three_real_process_roles_and_preserves_regressions() {
+        // Actual Node processes in all three roles test process orchestration,
+        // not independent Bun/Franken compatibility or engine completion.
+        let root = tempfile::tempdir().unwrap();
+        write(root.path(), ".franken-node/migration-tests.json", &serde_json::json!({
+            "schema_version": "franken-node/migration-tests/v1",
+            "tests": ["case.test.js"],
+            "expectations": {"case.test.js": {"exit_code": 7}}
+        }).to_string());
+        write(root.path(), "case.test.js", "console.error('usage'); process.exit(7);");
+        let report = measured(root.path(), None, true);
+        assert_eq!(report.verdict, "PASS", "{report:#?}");
+        let row = &report.cases[0];
+        assert_eq!(row.expected_exit_code, 7);
+        for observed in [&row.node, &row.bun, &row.native] {
+            assert_eq!(observed.as_ref().unwrap().exit_code, Some(7));
+            assert_eq!(observed.as_ref().unwrap().signal, None);
+        }
+        for (role, verdict, native_divergences, reference_failures) in [
+            ("native", "FAIL", 1, 0), ("bun", "INCONCLUSIVE", 0, 1),
+        ] {
+            write(root.path(), "case.test.js", &format!(
+                "console.error('usage'); process.exit(process.argv[2] === '{role}' ? 8 : 7);"
+            ));
+            let report = measured(root.path(), None, true);
+            assert_eq!(report.verdict, verdict, "{report:#?}");
+            assert_eq!(report.native_divergences, native_divergences);
+            assert_eq!(report.reference_failures, reference_failures);
+        }
+    }
+
     fn concurrent_manifest(root: &Path, tests: &[&str], limit: usize) {
         write(root, ".franken-node/migration-tests.json", &serde_json::json!({
             "schema_version": "franken-node/migration-tests/v1",
@@ -714,7 +753,7 @@ if (process.argv[2] === 'bun') {{
             assert!(report.cases.iter().all(|row| row.native.is_none()));
             assert!(!later.exists(), "a later test launched after cancellation");
             assert!(report.check_admission(&report.input_sha256, &report.candidate_input_sha256,
-                &inputs.reference.tests().unwrap()).is_err());
+                &test_inventory::expected_exit_codes(&inputs.reference).unwrap()).is_err());
         }
     }
 
@@ -1169,7 +1208,7 @@ const marker = {} + '/' + role;
         let root = tempfile::tempdir().unwrap();
         write(root.path(), "a.test.js", "console.log(42);");
         let report = measured(root.path(), None, true);
-        let tests = [PathBuf::from("a.test.js")];
+        let tests = BTreeMap::from([(PathBuf::from("a.test.js"), 0)]);
         assert_eq!(report.verdict, "PASS");
         assert!(
             report

@@ -60,11 +60,14 @@ struct Inventory {
 
 /// An independent, captured oracle. Agreement between two runtimes alone can
 /// otherwise accept two implementations that produce the same wrong output.
-/// Missing fields preserve comparison-only behavior; an explicit expectation
-/// must name at least one regular, bounded fixture. Null is not an assertion.
+/// Missing exit assertions require normal exit zero. Explicit expectations
+/// may name regular bounded fixtures or a normal exit code; null is invalid.
+/// This process contract does not certify engine-level clean completion.
 #[derive(Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct Expectations {
+    #[serde(default, deserialize_with = "exit_code_field")]
+    exit_code: Option<u8>,
     #[serde(default, deserialize_with = "expectation_field")]
     stdout: Option<String>,
     #[serde(default, deserialize_with = "expectation_field")]
@@ -78,6 +81,15 @@ where
     D: serde::Deserializer<'de>,
 {
     String::deserialize(deserializer).map(Some)
+}
+
+fn exit_code_field<'de, D>(deserializer: D) -> std::result::Result<Option<u8>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    u8::deserialize(deserializer)
+        .map(Some)
+        .map_err(|_| serde::de::Error::custom("expected exit_code must be an integer from 0 to 255"))
 }
 
 const MAX_EXPECTATION_BYTES: usize = 1024 * 1024;
@@ -154,7 +166,10 @@ impl Expectations {
 
     fn validate(&self, entries: &BTreeMap<PathBuf, Entry>) -> Result<()> {
         ensure!(
-            self.stdout.is_some() || self.stderr.is_some() || !self.files.is_empty(),
+            self.exit_code.is_some()
+                || self.stdout.is_some()
+                || self.stderr.is_some()
+                || !self.files.is_empty(),
             "explicit output expectations must not be empty"
         );
         ensure!(
@@ -197,8 +212,9 @@ impl Expectations {
                 );
             }
         }
-        // Do not normalize exit status or streams. The existing paired oracle
-        // must still reject failed processes and any cross-runtime divergence.
+        // Do not normalize exit status or streams. The paired/product oracle
+        // compares normal status against the captured exit expectation and
+        // still rejects signals, incomplete execution and any divergence.
         Ok(())
     }
 
@@ -460,6 +476,14 @@ pub(super) fn matched_execution(original: &Snapshot, candidate: &Snapshot) -> Re
         settings.expectations.matched(original, candidate)?;
     }
     Ok(())
+}
+
+/// Expected normal exits are derived only from the immutable test manifest.
+/// Callers must bind imported report fields to this independently captured map.
+pub(super) fn expected_exit_codes(snapshot: &Snapshot) -> Result<BTreeMap<PathBuf, u8>> {
+    Ok(inventory(&snapshot.entries)?.tests.into_iter().map(|(path, settings)| {
+        (path, settings.expectations.exit_code.unwrap_or(0))
+    }).collect())
 }
 
 /// A check failed after completed execution. Output is private and is moved,

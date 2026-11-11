@@ -165,8 +165,8 @@ validation checks that evidence against the captured test request; file-mode
 captures cannot omit it or claim they used another transport. Historical pipe
 and null-device records remain readable without the newer field. Captured bytes
 and mode are restored for re-execution without reading the original project.
-Timeouts, output limits, nonzero exits and cancellation retain their existing
-failure semantics in both transports. The 1 MiB stdin bound remains unchanged.
+Timeouts, output limits, unexpected exits and cancellation retain their failure
+semantics in both transports. The 1 MiB stdin bound remains unchanged.
 
 ## Independent output expectations
 
@@ -177,6 +177,13 @@ bytes must match that stream exactly on **each** runtime. Empty fixtures assert
 empty output; binary bytes and line endings are not normalized. `files` maps
 workspace-relative output paths to captured fixture paths. Output files may be
 created during execution and are checked even without `--compare-filesystem`.
+
+An optional `exit_code` asserts a normal process status, for example
+`"expectations": {"scripts/reject.cjs": {"exit_code": 7}}` for a CLI rejection.
+It must be a JSON integer from 0 through 255; omission requires zero. Null,
+booleans, strings, fractions and out-of-range values are rejected. An exit-only
+assertion is valid. Expected status and actual status remain separate report
+fields; the runner never normalizes an observed nonzero code into zero.
 
 Each fixture is limited to 1 MiB and a test may assert at most 64 output files.
 Explicit null assertions, empty per-test expectation objects, unselected test
@@ -196,13 +203,20 @@ attacker modifying files outside the supervised process group.
 
 Mismatches are attributed to the baseline or migration leg with
 `expected_output_mismatch` or `expected_file_mismatch`; reports omit raw expected
-and actual bytes. Assertions only add requirements: both exits must still be
-zero, both streams must agree exactly, and requested workspace deltas must match.
-Matching crashes, timeouts, incomplete streams or nonzero exits remain failures.
-There is no `exit_code` expectation that excuses a failed process. Standalone
-error-path test harnesses should assert the intended application error and return
-success only when that assertion holds. Omitted expectations preserve the
-existing comparison-only behavior rather than inventing a baseline-derived oracle.
+and actual bytes. Every runtime must return the captured expected normal exit
+code, both streams must agree exactly, and requested workspace deltas must match.
+A different normal code, including zero when a nonzero code was expected, remains
+a failure. Signal termination, timeouts, incomplete streams, cancellation and
+supervision errors cannot satisfy an exit assertion. The original and candidate
+cannot redefine or omit each other's expected status. Admission, signed cohorts,
+replay, reduction and fix verification bind report fields to that captured
+manifest; a report cannot select its own expected status. Omitted expectations
+still require zero exits and preserve comparison-only output behavior.
+
+The oracle observes process termination and complete output. It does not prove
+engine-level clean completion or certify an engine failure prefix for incident
+replay. Independent stdout/stderr assertions can help distinguish the intended
+application rejection from another error that returns the same process status.
 
 ## Input and evidence boundaries
 
@@ -249,9 +263,9 @@ an executable descriptor at launch or detect a replacement restored between the
 two measurements. Two roles with the same executable hash are not independent
 runtime implementations.
 
-A pass still requires successful exits and exact output bytes, plus declared
-expectations and equal persistent workspace deltas when requested. Matching
-crashes, timeouts, or truncated output do not pass. This remains a trusted-project
+A pass requires the captured expected normal exits and exact output bytes, plus
+declared expectations and equal persistent workspace deltas when requested.
+Signals, timeouts, or truncated output do not pass. This remains a trusted-project
 process comparison, not an OS sandbox, release certificate, deterministic
 ambient-environment replay, or proof that network and other external effects
 were equivalent.
@@ -341,7 +355,7 @@ Results separate reproduction from compatibility:
 | `ERROR` | 2 | Verification, identity/environment admission, or execution infrastructure failed. |
 
 The original `PASS`/`FAIL` compatibility result and the new
-`execution.summary.verdict` remain separate. Reproducing a nonzero exit or an
+`execution.summary.verdict` remain separate. Reproducing an unexpected exit or an
 independent-oracle mismatch does **not** convert a compatibility failure into
 success. Timing measurements and relocated temporary paths in report metadata
 are excluded from comparison; paths printed by a guest remain literal output

@@ -226,6 +226,11 @@ class OutputExpectations:
     stdout: str | None = None
     stderr: str | None = None
     files: tuple[tuple[str, str], ...] = ()
+    exit_code: int | None = None
+
+    @property
+    def expected_exit_code(self) -> int:
+        return 0 if self.exit_code is None else self.exit_code
 
     def fixtures(self):
         for stream in (self.stdout, self.stderr):
@@ -406,11 +411,13 @@ def _expectation_bytes(entries: dict[str, SnapshotEntry], name: object) -> bytes
 
 
 def _output_expectations(raw: object, entries: dict[str, SnapshotEntry]) -> OutputExpectations:
-    # Same manifest surface as the native validator: stdout/stderr fixture
-    # paths and a target->fixture map, never golden regeneration or exit-code
-    # normalization. Explicit null and empty assertions fail closed.
-    if not isinstance(raw, dict) or set(raw) - {"stdout", "stderr", "files"}:
+    # The assertion selects a normal process status; raw observations remain
+    # unchanged. It does not certify clean completion inside the engine.
+    # Explicit null and empty assertions fail closed.
+    if not isinstance(raw, dict) or set(raw) - {"stdout", "stderr", "files", "exit_code"}:
         raise ValueError("invalid or unknown output expectation fields")
+    if "exit_code" in raw and (type(raw["exit_code"]) is not int or not 0 <= raw["exit_code"] <= 255):
+        raise ValueError("expected exit_code must be an integer from 0 to 255")
     for stream in ("stdout", "stderr"):
         if stream in raw:
             _expectation_bytes(entries, raw[stream])
@@ -420,9 +427,10 @@ def _output_expectations(raw: object, entries: dict[str, SnapshotEntry]) -> Outp
     for target, fixture in files.items():
         _canonical_test_path(target, EXECUTION_EXCLUSIONS)
         _expectation_bytes(entries, fixture)
-    if not any(stream in raw for stream in ("stdout", "stderr")) and not files:
+    if "exit_code" not in raw and not any(stream in raw for stream in ("stdout", "stderr")) and not files:
         raise ValueError("explicit output expectations must not be empty")
-    return OutputExpectations(raw.get("stdout"), raw.get("stderr"), tuple(sorted(files.items())))
+    return OutputExpectations(raw.get("stdout"), raw.get("stderr"), tuple(sorted(files.items())),
+                              raw.get("exit_code"))
 
 
 def captured_test_inventory(capture: list[SnapshotEntry]) -> TestInventory:
@@ -830,6 +838,9 @@ def _validate_bundle_manifest(manifest: dict, objects: dict[str, bytes]) -> dict
                 or row.get("status") not in {"PASS", "FAIL", "ERROR"}
                 or row.get("band") not in {"core", "high-value", "edge"}):
             raise ValueError("duplicate or unselected replay test row")
+        expected_exit = inventories["baseline"][name].expectations.expected_exit_code
+        if type(row.get("expected_exit_code", 0)) is not int or row.get("expected_exit_code", 0) != expected_exit:
+            raise ValueError("replay exit expectation disagrees with captured manifest")
         seen_tests.add(name)
         rows_by_test[name] = row
         for role in ("baseline", "migration"):
@@ -856,6 +867,10 @@ def _validate_bundle_manifest(manifest: dict, objects: dict[str, bytes]) -> dict
                 or capture.get("termination") not in {"exited", "signal", "timeout", "output_limit", "cancelled"}):
             raise ValueError("invalid replay process outcome")
         settings = inventories[key[1]][key[0]]
+        if rows_by_test[key[0]]["status"] == "PASS" and (
+                capture["termination"] != "exited"
+                or capture["exit_code"] != settings.expectations.expected_exit_code):
+            raise ValueError("passing replay row violates its captured exit expectation")
         transport = "none" if settings.stdin is None else settings.stdin_mode
         if "stdin_transport" not in capture:
             if transport == "file":
@@ -879,6 +894,8 @@ def _validate_bundle_manifest(manifest: dict, objects: dict[str, bytes]) -> dict
                     or stream["retained_bytes"] != len(objects[digest])
                     or len(objects[digest]) > MAX_OUTPUT_BYTES):
                 raise ValueError("invalid replay stream accounting")
+            if rows_by_test[key[0]]["status"] == "PASS" and not stream["complete"]:
+                raise ValueError("passing replay row contains incomplete output")
             if stream["complete"] and (stream["sha256"] != digest
                                         or stream["bytes_observed"] != len(objects[digest])):
                 raise ValueError("complete replay stream digest mismatch")
@@ -989,6 +1006,7 @@ def _observation_projection(report: dict) -> dict:
     rows = []
     for row in report["validation_results"]:
         value = {name: row[name] for name in ("test", "band", "status", "divergences")}
+        value["expected_exit_code"] = row.get("expected_exit_code", 0)
         for role in ("baseline", "migration"):
             capture = row[role]
             value[role] = {name: capture[name] for name in ("exit_code", "termination", "streams")}
@@ -1011,11 +1029,12 @@ def _require_fix_reference(report: dict, snapshots: dict) -> None:
     entries = {entry.path: entry for entry in snapshots["baseline"]}
     for row in report["validation_results"]:
         reference = row["baseline"]
-        if (row["status"] not in {"PASS", "FAIL"} or reference["exit_code"] != 0
+        expectations = inventory[row["test"]].expectations
+        if (row["status"] not in {"PASS", "FAIL"}
+                or reference["exit_code"] != expectations.expected_exit_code
                 or reference["termination"] != "exited"
                 or any(stream["complete"] is not True for stream in reference["streams"].values())):
             raise ValueError("fix verification requires successful complete reference runs")
-        expectations = inventory[row["test"]].expectations
         for stream, fixture in (("stdout", expectations.stdout), ("stderr", expectations.stderr)):
             if fixture is not None:
                 expected = _expectation_bytes(entries, fixture)
@@ -1767,7 +1786,8 @@ def _execute_test_pair(index: int, test: str, *, root: Path,
     completed leg survives a later staging, execution or collection failure.
     The caller joins all workers before publishing anything or closing inputs.
     """
-    row = {"test": test, "band": band, "status": "ERROR", "divergences": []}
+    row = {"test": test, "band": band, "status": "ERROR", "divergences": [],
+           "expected_exit_code": inventory[test].expectations.expected_exit_code}
     result = TestPairResult(row, {})
     deltas = {}
     try:
@@ -1807,7 +1827,8 @@ def _execute_test_pair(index: int, test: str, *, root: Path,
                     deltas[leg] = workspace_delta(entries, final_entries)
                     row[leg]["workspace_delta"] = summarize_delta(deltas[leg])
             for leg, capture in result.captures.items():
-                if capture["termination"] != "exited" or capture["exit_code"] != 0:
+                if (capture["termination"] != "exited"
+                        or capture["exit_code"] != settings.expectations.expected_exit_code):
                     row["divergences"].append({"channel": leg, "reason": capture["termination"],
                                                "exit_code": capture["exit_code"]})
             for channel in ("stdout", "stderr"):

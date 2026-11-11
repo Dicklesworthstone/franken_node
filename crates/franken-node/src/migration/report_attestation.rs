@@ -231,7 +231,7 @@ pub mod execution {
         original_pin: &str,
         candidate_pin: &str,
         deadline: Instant,
-    ) -> Result<Vec<PathBuf>> {
+    ) -> Result<std::collections::BTreeMap<PathBuf, u8>> {
         let original_now = RewriteCandidate::capture(original, deadline)?;
         ensure!(original_now.input_sha256() == original_pin,
             "original project changed during attested validation");
@@ -243,7 +243,7 @@ pub mod execution {
         let current = candidate_now.as_ref().unwrap_or(&original_now);
         ensure!(current.input_sha256() == candidate_pin,
             "candidate project changed during attested validation");
-        let tests = current.test_inventory()?;
+        let tests = current.expected_test_exits()?;
         original_now.ensure_source_unchanged()?;
         if let Some(candidate_now) = candidate_now {
             candidate_now.ensure_source_unchanged()?;

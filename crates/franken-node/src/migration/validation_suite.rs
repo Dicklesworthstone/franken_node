@@ -1,9 +1,10 @@
 //! Execution-backed project test validation for the native migration command.
 //!
 //! Each runtime receives fresh copies of its own bounded input capture for
-//! every case. Successful exits and exact output bytes are required. Optional
-//! filesystem comparison also checks persistent workspace deltas, with explicit
-//! exclusions. This is not release certification, deterministic replay, or an
+//! every case. Captured normal exit assertions (zero by default) and exact
+//! output bytes are required. Optional filesystem comparison also checks
+//! persistent workspace deltas, with explicit exclusions. This does not certify
+//! engine-level clean completion, release certification, deterministic replay, or an
 //! OS sandbox. Trusted code retains access to ambient/external authority.
 
 use super::dependency_admission::{self, MetadataInput};
@@ -72,6 +73,10 @@ pub struct RunObservation {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TestCaseResult {
     pub test: String,
+    /// Captured normal exit assertion; legacy reports require zero. This does
+    /// not certify clean completion inside the engine.
+    #[serde(default)]
+    pub expected_exit_code: u8,
     pub status: String,
     pub reference: Option<RunObservation>,
     pub native: Option<RunObservation>,
@@ -586,6 +591,7 @@ fn execute_suite_pair(
     compare_filesystem: bool,
 ) -> Result<SuiteReport> {
     let tests = matched_tests(reference_snapshot, candidate_snapshot)?;
+    let expected_exits = test_inventory::expected_exit_codes(reference_snapshot)?;
     let concurrency = test_inventory::concurrency(reference_snapshot)?;
     let mut report = SuiteReport {
         schema_version: "franken-node/native-validation-suite/v1".into(),
@@ -628,6 +634,7 @@ fn execute_suite_pair(
         budget(deadline)?;
         let mut row = TestCaseResult {
             test: test.to_string_lossy().into_owned(),
+            expected_exit_code: expected_exits[test],
             status: "ERROR".into(),
             reference: None,
             native: None,
@@ -684,7 +691,7 @@ fn execute_suite_pair(
                 if let Some(error) = check_error {
                     row.errors.push(format!("{name} test checks failed: {error:#}"));
                 }
-                if !output.status.success() {
+                if output.status.code() != Some(i32::from(row.expected_exit_code)) {
                     row.divergences.push(format!("{name}:unsuccessful_exit"));
                 }
                 if let Some(before) = before {

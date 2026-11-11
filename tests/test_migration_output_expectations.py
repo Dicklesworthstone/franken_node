@@ -157,7 +157,10 @@ class OutputExpectationsTests(unittest.TestCase):
                    {"probe.cjs": {}}, {"probe.cjs": {"files": {}}},
                    {"probe.cjs": {"stdout": None}}, {"probe.cjs": {"stderr": 7}},
                    {"probe.cjs": {"stdout": "missing.bin"}}, {"probe.cjs": {"stdout": "fixtures"}},
-                   {"probe.cjs": {"exit_code": 1}}, {"probe.cjs": {"stdout": "../secret"}},
+                   {"probe.cjs": {"exit_code": None}}, {"probe.cjs": {"exit_code": -1}},
+                   {"probe.cjs": {"exit_code": 256}}, {"probe.cjs": {"exit_code": True}},
+                   {"probe.cjs": {"exit_code": "7"}}, {"probe.cjs": {"exit_code": 1.5}},
+                   {"probe.cjs": {"stdout": "../secret"}},
                    {"probe.cjs": {"stdout": ".franken-node/migration-tests.json"}},
                    {"probe.cjs": {"stdout": "fixtures/./stdout.bin"}},
                    {"probe.cjs": {"files": []}}, {"probe.cjs": {"files": {"out": None}}},
@@ -234,6 +237,80 @@ class OutputExpectationsTests(unittest.TestCase):
         result = self.validate()
         self.assertEqual(result["summary"]["verdict"], "FAIL", result)
         self.assertEqual([item["exit_code"] for item in self.reasons(result)], [1, 1])
+
+    def test_explicit_normal_exit_assertions_support_cli_error_paths(self):
+        for code in (0, 1, 7, 255):
+            with self.subTest(code=code):
+                self.configure(self.project, source=f"import sys\nprint('expected')\nsys.exit({code})\n",
+                    expectations={"probe.cjs": {"exit_code": code,
+                        "stdout": "fixtures/stdout.bin", "stderr": "fixtures/stderr.bin"}})
+                result = self.validate(compare_filesystem=True)
+                self.assertEqual(result["summary"]["verdict"], "PASS", result)
+                row = result["validation_results"][0]
+                self.assertEqual(row["expected_exit_code"], code)
+                self.assertEqual([row[role]["exit_code"] for role in ("baseline", "migration")], [code, code])
+                self.assertEqual(self.reasons(result), [])
+
+    def test_unexpected_zero_or_different_nonzero_remains_a_failure(self):
+        for code in (0, 8):
+            with self.subTest(code=code):
+                self.configure(self.project, source=f"import sys\nsys.exit({code})\n",
+                    expectations={"probe.cjs": {"exit_code": 7}})
+                result = self.validate()
+                self.assertEqual(result["summary"]["verdict"], "FAIL", result)
+                self.assertEqual([item["exit_code"] for item in self.reasons(result)], [code, code])
+
+    def test_candidate_cannot_redefine_or_drop_the_expected_exit(self):
+        self.configure(self.project, source="import sys\nsys.exit(7)\n",
+            expectations={"probe.cjs": {"exit_code": 7}})
+        candidate = self.root / "candidate"
+        candidate.mkdir()
+        for expectations in ({"probe.cjs": {"exit_code": 8}}, {}):
+            with self.subTest(expectations=expectations):
+                self.configure(candidate, source="import sys\nsys.exit(7)\n", expectations=expectations)
+                with mock.patch.object(runner, "run_command") as launch:
+                    result = self.validate(migrated_project=candidate)
+                launch.assert_not_called()
+                self.assertEqual(result["summary"]["verdict"], "ERROR", result)
+
+    def test_expected_exit_never_excuses_signal_timeout_or_incomplete_output(self):
+        cases = [
+            ("import os, signal\nos.kill(os.getpid(), signal.SIGTERM)\n", 143, {}, "signal"),
+            ("import time\ntime.sleep(10)\n", 7, {"timeout_seconds": 0.1}, "timeout"),
+            ("import sys\nsys.stdout.write('x' * 100)\nsys.exit(7)\n", 7,
+             {"max_output_bytes": 16}, "output_limit"),
+        ]
+        for source, expected, options, termination in cases:
+            with self.subTest(termination=termination):
+                self.configure(self.project, source=source,
+                    expectations={"probe.cjs": {"exit_code": expected}})
+                result = self.validate(**options)
+                self.assertNotEqual(result["summary"]["verdict"], "PASS", result)
+                row = result["validation_results"][0]
+                self.assertEqual([row[role]["termination"] for role in ("baseline", "migration")],
+                                 [termination, termination])
+
+    def test_error_path_exit_replays_after_source_moves_and_rejects_forged_expectation(self):
+        self.configure(self.project, source="import sys\nprint('expected')\nsys.exit(7)\n",
+            expectations={"probe.cjs": {"exit_code": 7, "stdout": "fixtures/stdout.bin"}})
+        bundle_path = self.root / "expected-error.fnmigration"
+        result = self.validate(bundle_path=bundle_path)
+        self.assertEqual(result["summary"]["verdict"], "PASS", result)
+        digest = result["replay_bundle"]["sha256"]
+        self.project.rename(self.root / "original-unavailable")
+        replay = runner.replay_captured_bundle(bundle_path, expected_sha256=digest,
+                    baseline_command=COMMAND, migration_command=COMMAND)
+        self.assertEqual(replay["replay_outcome"], "REPRODUCED", replay)
+        self.assertEqual(replay["execution"]["summary"]["verdict"], "PASS")
+        bundle = runner.read_replay_bundle(bundle_path, expected_sha256=digest)
+        row = bundle.manifest["report"]["validation_results"][0]
+        row["expected_exit_code"] = 0
+        with self.assertRaisesRegex(ValueError, "exit expectation"):
+            runner._validate_bundle_manifest(bundle.manifest, bundle.objects)
+        row["expected_exit_code"] = 7
+        row["baseline"]["exit_code"] = 0
+        with self.assertRaisesRegex(ValueError, "exit expectation"):
+            runner._validate_bundle_manifest(bundle.manifest, bundle.objects)
 
     def test_matching_retained_prefix_does_not_excuse_output_limit(self):
         (self.project / "fixtures/stdout.bin").write_bytes(b"x" * 16)

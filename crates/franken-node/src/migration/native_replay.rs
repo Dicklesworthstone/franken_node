@@ -506,6 +506,7 @@ fn check_link(
 
 fn complete_report(report: &SuiteReport, original: &Snapshot, candidate: &Snapshot) -> Result<()> {
     let tests = matched_tests(original, candidate)?;
+    let expected_exits = super::test_inventory::expected_exit_codes(original)?;
     ensure!(
         report.schema_version == "franken-node/native-validation-suite/v1"
             && !report.release_certification
@@ -547,7 +548,9 @@ fn complete_report(report: &SuiteReport, original: &Snapshot, candidate: &Snapsh
     let mut failed = 0;
     for (test, row) in tests.iter().zip(&report.cases) {
         ensure!(
-            test.to_str() == Some(row.test.as_str()) && row.errors.is_empty(),
+            test.to_str() == Some(row.test.as_str())
+                && row.expected_exit_code == expected_exits[test]
+                && row.errors.is_empty(),
             "capsule test inventory mismatch"
         );
         let reference = row
@@ -580,7 +583,7 @@ fn complete_report(report: &SuiteReport, original: &Snapshot, candidate: &Snapsh
                     "invalid workspace delta summary"
                 );
             }
-            if run.exit_code != Some(0) || run.signal.is_some() {
+            if run.exit_code != Some(i32::from(expected_exits[test])) || run.signal.is_some() {
                 divergences.push(format!("{name}:unsuccessful_exit"));
             }
         }
@@ -890,7 +893,7 @@ fn reexecute(
                 && expected.cases.iter().all(|row| row
                     .reference
                     .as_ref()
-                    .is_some_and(|run| run.exit_code == Some(0) && run.signal.is_none())),
+                    .is_some_and(|run| run.exit_code == Some(i32::from(row.expected_exit_code)) && run.signal.is_none())),
             "fix verification requires a captured failure with a successful reference for every case"
         );
     }
@@ -981,8 +984,11 @@ mod tests {
     // Explicit real Node/Node invocations exercise replay, not native parity.
     fn fixture(source: &str) -> (tempfile::TempDir, tempfile::TempDir, PathBuf, String) {
         let root = tempfile::tempdir().unwrap();
-        let out = tempfile::tempdir().unwrap();
         write(root.path(), "case.test.js", source);
+        fixture_project(root)
+    }
+    fn fixture_project(root: tempfile::TempDir) -> (tempfile::TempDir, tempfile::TempDir, PathBuf, String) {
+        let out = tempfile::tempdir().unwrap();
         let original = Snapshot::capture(root.path(), deadline()).unwrap();
         let expected = execute_suite_pair(
             &original,
@@ -1031,6 +1037,28 @@ mod tests {
         mutation(&mut capsule);
         capsule.content_sha256 = payload_hash(&capsule.payload).unwrap();
         fs::write(path, serde_json::to_vec(&capsule).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn expected_error_exit_replays_from_captured_manifest_after_the_project_moves() {
+        let root = tempfile::tempdir().unwrap();
+        write(root.path(), "case.test.js", "console.error('usage'); process.exit(7);");
+        write(root.path(), ".franken-node/migration-tests.json",
+            &serde_json::json!({
+                "schema_version": "franken-node/migration-tests/v1",
+                "tests": ["case.test.js"],
+                "expectations": {"case.test.js": {"exit_code": 7}}
+            }).to_string());
+        let (root, out, path, pin) = fixture_project(root);
+        fs::rename(root.path(), out.path().join("original-unavailable")).unwrap();
+        let report = execute(&path, &pin, false, node(&["candidate"]));
+        assert_eq!(report.verdict, "REPRODUCED");
+        assert_eq!(report.validation.verdict, "PASS");
+        assert_eq!(report.validation.cases[0].expected_exit_code, 7);
+        assert_eq!(report.validation.cases[0].native.as_ref().unwrap().exit_code, Some(7));
+        edit(&path, |capsule| capsule.payload.expected.cases[0].expected_exit_code = 0);
+        let error = load(&path, None, deadline()).err().unwrap();
+        assert!(error.to_string().contains("inventory mismatch"), "{error:#}");
     }
 
     #[test]

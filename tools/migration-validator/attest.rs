@@ -450,7 +450,7 @@ mod linux {
             assert_eq!(report.reference_divergences, 0);
             assert!(report.check_admission(inputs.expected_input_sha256.as_ref().unwrap(),
                 inputs.expected_candidate_input_sha256.as_ref().unwrap(),
-                &[PathBuf::from("case.test.js")]).is_err());
+                &std::collections::BTreeMap::from([(PathBuf::from("case.test.js"), 0)])).is_err());
             assert_eq!(pin(&inputs.project), inputs.expected_input_sha256.as_ref().unwrap().as_str());
             assert_eq!(pin(&candidate), inputs.expected_candidate_input_sha256.as_ref().unwrap().as_str());
             assert!(invoke(&inputs).unwrap_err().to_string().contains("already exists"));

@@ -158,7 +158,7 @@ pub(super) fn assess_for_rollout(project: &Path, raw: &[u8]) -> Result<super::Lo
     let deadline = Instant::now() + Duration::from_secs(30);
     let captured = RewriteCandidate::capture(project, deadline)
         .map_err(|error| format!("cannot capture current rollout project: {error:#}"))?;
-    let tests = captured.test_inventory().map_err(|error| format!("{error:#}"))?;
+    let tests = captured.expected_test_exits().map_err(|error| format!("{error:#}"))?;
     let regression = if report.verdict == "FAIL" {
         Some(check_native_regression(&report, &report.input_sha256, captured.input_sha256(), &tests)
             .map_err(|error| format!("cohort regression evidence refused: {error:#}"))?)
@@ -310,7 +310,7 @@ mod admission_tests {
     /// The controller/recovery tests below use actual filesystem transactions.
     fn fixture(root: &Path) -> ProductReport {
         let captured = RewriteCandidate::capture(root, Instant::now() + Duration::from_secs(30)).unwrap();
-        let tests = captured.test_inventory().unwrap();
+        let tests = captured.expected_test_exits().unwrap();
         let runtime = |name: &str, marker: &str| RuntimeIdentity {
             executable: PathBuf::from(format!("/trusted/{name}")),
             sha256: marker.repeat(64),
@@ -339,10 +339,15 @@ mod admission_tests {
             total_tests: tests.len(), passed: tests.len(), failed: 0,
             reference_failures: 0, reference_divergences: 0, native_divergences: 0,
             errored: 0, skipped: 0, verdict: "PASS".into(),
-            cases: tests.into_iter().map(|path| ProductCase {
-                test: path.to_str().unwrap().into(), outcome: CaseOutcome::Match,
-                node: Some(observation.clone()), bun: Some(observation.clone()),
-                native: Some(observation.clone()), divergences: Vec::new(), errors: Vec::new(),
+            cases: tests.into_iter().map(|(path, expected_exit_code)| {
+                let mut observation = observation.clone();
+                observation.exit_code = Some(i32::from(expected_exit_code));
+                ProductCase {
+                    test: path.to_str().unwrap().into(), expected_exit_code,
+                    outcome: CaseOutcome::Match,
+                    node: Some(observation.clone()), bun: Some(observation.clone()),
+                    native: Some(observation), divergences: Vec::new(), errors: Vec::new(),
+                }
             }).collect(), errors: Vec::new(), failure_capture: None,
         }
     }
@@ -351,6 +356,47 @@ mod admission_tests {
         let path = out.join("cohort.json");
         fs::write(&path, signed(&serde_json::to_vec(report).unwrap())).unwrap();
         path
+    }
+
+    #[test]
+    fn signed_cohort_binds_nonzero_exit_expectations_and_reconstructs_native_regressions() {
+        // Constructed signed wire evidence tests admission, not live runtimes.
+        let root = project(1);
+        fs::write(root.path().join(".franken-node/migration-tests.json"),
+            serde_json::json!({
+                "schema_version": "franken-node/migration-tests/v1",
+                "tests": ["case-0000.test.js"],
+                "expectations": {"case-0000.test.js": {"exit_code": 7}}
+            }).to_string()).unwrap();
+        let report = fixture(root.path());
+        let raw = signed(&serde_json::to_vec(&report).unwrap());
+        assert_eq!(assess(root.path(), &raw).unwrap().matched_tests, 1);
+        for mutation in 0..2 {
+            let mut forged = report.clone();
+            if mutation == 0 {
+                forged.cases[0].expected_exit_code = 0;
+            } else {
+                let row = &mut forged.cases[0];
+                row.node.as_mut().unwrap().exit_code = Some(0);
+                row.bun.as_mut().unwrap().exit_code = Some(0);
+                row.native.as_mut().unwrap().exit_code = Some(0);
+            }
+            assert!(assess(root.path(), &signed(&serde_json::to_vec(&forged).unwrap())).is_err());
+        }
+        let mut regression = report;
+        regression.verdict = "FAIL".into();
+        regression.passed = 0;
+        regression.failed = 1;
+        regression.native_divergences = 1;
+        regression.cases[0].outcome = CaseOutcome::NativeDivergence;
+        regression.cases[0].native.as_mut().unwrap().exit_code = Some(8);
+        regression.cases[0].divergences = vec!["native:unsuccessful_exit".into()];
+        let raw = signed(&serde_json::to_vec(&regression).unwrap());
+        assert!(matches!(assess_for_rollout(root.path(), &raw).unwrap(),
+            super::super::LockstepEvidence::AuthenticatedRegression(_)));
+        regression.cases[0].expected_exit_code = 8;
+        assert!(assess_for_rollout(root.path(),
+            &signed(&serde_json::to_vec(&regression).unwrap())).is_err());
     }
 
     #[test]

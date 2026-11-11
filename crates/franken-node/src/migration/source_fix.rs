@@ -131,7 +131,7 @@ impl Seed {
                 let expected = &seed.capsule.payload.expected;
                 ensure!(expected.verdict == "FAIL" && expected.cases.iter().all(|row|
                     row.reference.as_ref().is_some_and(|run|
-                        run.exit_code == Some(0) && run.signal.is_none())),
+                        run.exit_code == Some(i32::from(row.expected_exit_code)) && run.signal.is_none())),
                     "source fix requires a captured failure with successful references");
             }
             Self::Product(seed) => {

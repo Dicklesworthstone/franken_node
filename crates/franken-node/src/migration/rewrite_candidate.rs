@@ -10,7 +10,7 @@ use super::{
     run_captured_with_archive,
 };
 use anyhow::{Context, Result, ensure};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
@@ -99,6 +99,13 @@ impl RewriteCandidate {
     pub fn test_inventory(&self) -> Result<Vec<PathBuf>> {
         budget(self.deadline)?;
         self.original.tests()
+    }
+
+    /// Independently captured exit assertions for admission of measured reports.
+    /// A report cannot choose the status that is accepted for its own rows.
+    pub fn expected_test_exits(&self) -> Result<BTreeMap<PathBuf, u8>> {
+        budget(self.deadline)?;
+        super::test_inventory::expected_exit_codes(&self.original)
     }
 
     /// Destination must not exist. The owner keeps its private parent alive.
@@ -360,6 +367,7 @@ impl RewriteCandidate {
             .as_ref()
             .context("checked rewrite candidate is not prepared")?;
         let tests = matched_tests(&self.original, candidate)?;
+        let expected_exits = super::test_inventory::expected_exit_codes(&self.original)?;
         ensure!(
             report.input_sha256 == self.original.digest
                 && report.candidate_input_sha256 == candidate.digest,
@@ -390,7 +398,8 @@ impl RewriteCandidate {
         );
         for (test, row) in tests.iter().zip(&report.cases) {
             ensure!(
-                test.to_str() == Some(row.test.as_str()),
+                test.to_str() == Some(row.test.as_str())
+                    && row.expected_exit_code == expected_exits[test],
                 "validation evidence test inventory differs from the captured inventory"
             );
             ensure!(
@@ -407,8 +416,8 @@ impl RewriteCandidate {
                 .as_ref()
                 .context("missing candidate process evidence")?;
             ensure!(
-                reference.exit_code == Some(0)
-                    && native.exit_code == Some(0)
+                reference.exit_code == Some(i32::from(expected_exits[test]))
+                    && native.exit_code == Some(i32::from(expected_exits[test]))
                     && reference.signal.is_none()
                     && native.signal.is_none(),
                 "validation evidence contains an unsuccessful process: {}",
@@ -546,7 +555,8 @@ impl RewriteCandidate {
             .candidate
             .as_ref()
             .context("checked rewrite candidate is not prepared")?;
-        let tests = matched_tests(&self.original, candidate)?;
+        matched_tests(&self.original, candidate)?;
+        let tests = super::test_inventory::expected_exit_codes(&self.original)?;
         report.check_admission(&self.original.digest, &candidate.digest, &tests)
     }
 
@@ -626,6 +636,43 @@ mod tests {
     }
     fn capture(root: &Path) -> RewriteCandidate {
         RewriteCandidate::capture(root, Instant::now() + Duration::from_secs(90)).unwrap()
+    }
+
+    #[test]
+    fn checked_error_path_rewrite_binds_expected_exit_to_the_captured_manifest() {
+        // Live Node/Node execution checks the installation boundary only.
+        let root = project();
+        fs::write(root.path().join("case.test.js"), "console.log(42); process.exit(7);").unwrap();
+        fs::create_dir(root.path().join(".franken-node")).unwrap();
+        fs::write(root.path().join(".franken-node/migration-tests.json"),
+            serde_json::json!({
+                "schema_version": "franken-node/migration-tests/v1",
+                "tests": ["case.test.js"],
+                "expectations": {"case.test.js": {"exit_code": 7}}
+            }).to_string()).unwrap();
+        let mut candidate = capture(root.path());
+        candidate.prepare(&[Replacement {
+            path: "case.test.js",
+            before: b"console.log(42); process.exit(7);",
+            after: b"console.log(6*7); process.exit(3+4);",
+        }]).unwrap();
+        let report = candidate.validate_node_pair().unwrap();
+        assert_eq!(report.verdict, "PASS", "{report:#?}");
+        candidate.check_validation(&report).unwrap();
+        assert_eq!(report.cases[0].expected_exit_code, 7);
+        for mutation in 0..3 {
+            let mut forged = report.clone();
+            match mutation {
+                0 => forged.cases[0].expected_exit_code = 0,
+                1 => forged.cases[0].native.as_mut().unwrap().exit_code = Some(0),
+                2 => {
+                    forged.cases[0].reference.as_mut().unwrap().exit_code = Some(0);
+                    forged.cases[0].native.as_mut().unwrap().exit_code = Some(0);
+                }
+                _ => unreachable!(),
+            }
+            assert!(candidate.check_validation(&forged).is_err(), "{mutation}");
+        }
     }
 
     #[test]

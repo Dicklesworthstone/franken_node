@@ -113,7 +113,8 @@ fn summary(capsule: &Capsule) -> CapsuleSummary {
 // Reconstruct every classification from observations instead of trusting the
 // summary, including reference disagreement and native differences together.
 fn complete(report: &ProductReport, original: &Snapshot, candidate: &Snapshot) -> Result<()> {
-    let tests = matched_tests(original, candidate)?;
+    matched_tests(original, candidate)?;
+    let tests = super::super::super::test_inventory::expected_exit_codes(original)?;
     check_complete_evidence(report, &original.digest, &candidate.digest, &tests)
 }
 
@@ -126,14 +127,13 @@ pub fn check_complete_evidence(
     report: &ProductReport,
     original_sha256: &str,
     candidate_sha256: &str,
-    tests: &[PathBuf],
+    tests: &BTreeMap<PathBuf, u8>,
 ) -> Result<()> {
     ensure!(
         is_hash(original_sha256)
             && is_hash(candidate_sha256)
             && !tests.is_empty()
-            && tests.len() <= super::super::super::MAX_TESTS
-            && tests.windows(2).all(|pair| pair[0] < pair[1]),
+            && tests.len() <= super::super::super::MAX_TESTS,
         "product evidence requires valid input pins and a bounded, unique sorted inventory"
     );
     ensure!(
@@ -187,9 +187,11 @@ pub fn check_complete_evidence(
     }
     let (mut passed, mut reference_failures, mut reference_divergences, mut native_divergences) =
         (0, 0, 0, 0);
-    for (test, row) in tests.iter().zip(&report.cases) {
+    for ((test, expected_exit), row) in tests.iter().zip(&report.cases) {
         ensure!(
-            test.to_str() == Some(row.test.as_str()) && row.errors.is_empty(),
+            test.to_str() == Some(row.test.as_str())
+                && row.expected_exit_code == *expected_exit
+                && row.errors.is_empty(),
             "product capsule test inventory or execution mismatch"
         );
         let node = row.node.as_ref().context("missing Node observation")?;
@@ -222,7 +224,7 @@ pub fn check_complete_evidence(
                     "invalid product workspace summary"
                 );
             }
-            if run.exit_code != Some(0) {
+            if run.exit_code != Some(i32::from(*expected_exit)) || run.signal.is_some() {
                 divergences.push(format!("{role}:unsuccessful_exit"));
             }
         }
@@ -246,13 +248,14 @@ pub fn check_complete_evidence(
                 }
             }
         }
-        let outcome = if node.exit_code != Some(0) || bun.exit_code != Some(0) {
+        let outcome = if node.exit_code != Some(i32::from(*expected_exit))
+            || bun.exit_code != Some(i32::from(*expected_exit)) {
             reference_failures += 1;
             CaseOutcome::ReferenceFailure
         } else if reference_mismatch {
             reference_divergences += 1;
             CaseOutcome::ReferenceDivergence
-        } else if native.exit_code != Some(0) || native_mismatch {
+        } else if native.exit_code != Some(i32::from(*expected_exit)) || native_mismatch {
             native_divergences += 1;
             CaseOutcome::NativeDivergence
         } else {
@@ -292,7 +295,7 @@ pub fn check_native_regression(
     report: &ProductReport,
     original_sha256: &str,
     candidate_sha256: &str,
-    tests: &[PathBuf],
+    tests: &BTreeMap<PathBuf, u8>,
 ) -> Result<usize> {
     check_complete_evidence(report, original_sha256, candidate_sha256, tests)?;
     ensure!(
@@ -1080,7 +1083,7 @@ mod tests {
         let (_root, _out, path, _) = fixture("globalThis.answer = 42;", true);
         let capsule: Capsule = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
         let original = capsule.payload.expected;
-        let tests = [PathBuf::from("case.test.js")];
+        let tests = BTreeMap::from([(PathBuf::from("case.test.js"), 0)]);
         let check = |report: &ProductReport| check_native_regression(report,
             &original.input_sha256, &original.candidate_input_sha256, &tests);
         assert_eq!(check(&original).unwrap(), 1);
@@ -1107,9 +1110,10 @@ mod tests {
         assert!(check_native_regression(&original, &"0".repeat(64),
             &original.candidate_input_sha256, &tests).is_err());
         assert!(check_native_regression(&original, &original.input_sha256,
-            &original.candidate_input_sha256, &[]).is_err());
+            &original.candidate_input_sha256, &BTreeMap::new()).is_err());
         assert!(check_native_regression(&original, &original.input_sha256,
-            &original.candidate_input_sha256, &[tests[0].clone(), tests[0].clone()]).is_err());
+            &original.candidate_input_sha256,
+            &BTreeMap::from([(PathBuf::from("case.test.js"), 7)])).is_err());
     }
 
     #[test]
@@ -1122,7 +1126,7 @@ mod tests {
             let (_root, _out, path, _) = fixture(source, filesystem);
             let capsule: Capsule = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
             let report = capsule.payload.expected;
-            let tests = [PathBuf::from("case.test.js")];
+            let tests = BTreeMap::from([(PathBuf::from("case.test.js"), 0)]);
             check_complete_evidence(&report, &report.input_sha256,
                 &report.candidate_input_sha256, &tests).unwrap();
             assert!(check_native_regression(&report, &report.input_sha256,
