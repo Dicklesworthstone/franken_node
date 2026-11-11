@@ -2988,11 +2988,19 @@ pub struct IncidentReplayArgs {
 
     /// Re-execute captured JavaScript with recorded host-I/O results and
     /// verify guest completion or a certified uncaught-exception prefix.
-    /// Runtime module loading is disabled; policy decisions are compared
-    /// separately when available under that restricted authority.
+    /// Frozen module sources are resolved from the authenticated capture;
+    /// otherwise runtime module loading is disabled. Policy decisions are
+    /// informational unless --require-policy-equivalence is supplied.
     /// Requires a signed bundle from `run --capture-replay`.
     #[arg(long)]
     pub execute: bool,
+
+    /// Require a completed guest replay with matching captured control-policy
+    /// decisions and frozen module sources. Requires --execute plus independent
+    /// --trusted-run-public-key and --trusted-runtime-public-key anchors.
+    /// Does not certify unrecorded scheduler state or stepwise time travel.
+    #[arg(long)]
+    pub require_policy_equivalence: bool,
 
     /// Maximum native re-execution time in milliseconds, including worker
     /// startup and protocol draining (1..=300000).
@@ -4366,7 +4374,47 @@ mod parser_contract_extra_tests {
             return Err("expected native incident replay command".to_string());
         };
         assert!(args.execute);
+        assert!(!args.require_policy_equivalence);
         assert!(args.json);
+
+        let cli = parse(&[
+            "franken-node",
+            "incident",
+            "replay",
+            "--bundle",
+            "incident.fnbundle",
+            "--execute",
+            "--require-policy-equivalence",
+            "--trusted-run-public-key",
+            "run.pub",
+            "--trusted-runtime-public-key",
+            "runtime.pub",
+            "--json",
+        ])
+        .map_err(|error| error.to_string())?;
+        let Command::Incident(IncidentCommand::Replay(args)) = cli.command else {
+            return Err("expected policy-equivalent incident replay command".to_string());
+        };
+        assert!(args.execute && args.require_policy_equivalence);
+        assert_eq!(args.trusted_run_public_key, Some(PathBuf::from("run.pub")));
+        assert_eq!(
+            args.trusted_runtime_public_key,
+            Some(PathBuf::from("runtime.pub"))
+        );
+
+        // The handler validates dependencies to preserve structured JSON errors.
+        let cli = parse(&[
+            "franken-node",
+            "incident",
+            "replay",
+            "--require-policy-equivalence",
+            "--json",
+        ])
+        .map_err(|error| error.to_string())?;
+        let Command::Incident(IncidentCommand::Replay(args)) = cli.command else {
+            return Err("expected incomplete policy-equivalent replay request".to_string());
+        };
+        assert!(args.require_policy_equivalence && !args.execute);
         Ok(())
     }
 

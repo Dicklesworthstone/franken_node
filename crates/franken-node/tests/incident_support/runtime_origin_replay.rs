@@ -5,6 +5,46 @@ use super::{config_only_workspace, run_cli_in_workspace};
 use serde_json::Value;
 
 #[test]
+fn policy_equivalence_requires_execution_and_both_origin_anchors_before_reading_inputs() {
+    let workspace = config_only_workspace();
+    for extra in [
+        &[][..],
+        &["--execute"][..],
+        &["--execute", "--trusted-run-public-key", "absent-run.pub"][..],
+        &["--execute", "--trusted-runtime-public-key", "absent-root.pub"][..],
+        &[
+            "--trusted-run-public-key",
+            "absent-run.pub",
+            "--trusted-runtime-public-key",
+            "absent-root.pub",
+        ][..],
+    ] {
+        let mut args = vec![
+            "incident",
+            "replay",
+            "--bundle",
+            "absent.fnbundle",
+            "--require-policy-equivalence",
+            "--json",
+        ];
+        args.extend_from_slice(extra);
+        let output = run_cli_in_workspace(workspace.path(), &args);
+        assert!(!output.status.success(), "{output:?}");
+        let report: Value = serde_json::from_slice(&output.stdout)
+            .expect("one structured policy-scope dependency error");
+        assert_eq!(report["ok"], false);
+        assert_eq!(report["command"], "incident.replay");
+        assert!(
+            report["error"].as_str().unwrap().contains(
+                "--require-policy-equivalence requires --execute, --trusted-run-public-key and --trusted-runtime-public-key"
+            ),
+            "{report}"
+        );
+        assert!(report.get("execution_result").is_none());
+    }
+}
+
+#[test]
 fn runtime_origin_replay_requires_an_explicit_run_anchor_before_reading_inputs() {
     let workspace = config_only_workspace();
     let output = run_cli_in_workspace(
@@ -75,6 +115,10 @@ mod native {
 
     impl Fixture {
         fn new(guest_exception: bool) -> Self {
+            Self::new_with_frozen_modules(guest_exception, false)
+        }
+
+        fn new_with_frozen_modules(guest_exception: bool, frozen_modules: bool) -> Self {
             let producer_state = tempfile::tempdir().expect("independent producer authority");
             let source_text = format!(
                 "{PROGRAM} {}",
@@ -84,14 +128,43 @@ mod native {
                     ""
                 },
             );
-            let (producer, run) = native_replay_workspace_with_arguments_in_state_home(
-                &source_text,
-                "legacy-risky",
-                !guest_exception,
-                false,
-                &[],
-                Some(producer_state.path()),
-            );
+            let (producer, run) = if frozen_modules {
+                let producer = tempfile::tempdir().expect("frozen native producer");
+                fs::write(
+                    producer.path().join("app.js"),
+                    format!("console.log(require('./replay-dependency.cjs')); {source_text}"),
+                )
+                .unwrap();
+                fs::write(
+                    producer.path().join("replay-dependency.cjs"),
+                    "module.exports = 'captured-dependency';",
+                )
+                .unwrap();
+                fs::write(producer.path().join("input.txt"), "ORIGINAL").unwrap();
+                let initialized = run_cli_in_workspace_with_state_home(
+                    producer.path(),
+                    &["init", "--profile", "legacy-risky", "--out-dir", ".", "--json"],
+                    Some(producer_state.path()),
+                );
+                assert!(initialized.status.success(), "{initialized:?}");
+                let recorded = run_cli_in_workspace_with_state_home(
+                    producer.path(),
+                    &["run", "app.js", "--frozen-modules", "--capture-replay", "--json"],
+                    Some(producer_state.path()),
+                );
+                assert_eq!(recorded.status.success(), !guest_exception, "{recorded:?}");
+                let run: Value = serde_json::from_slice(&recorded.stdout).unwrap();
+                (producer, run)
+            } else {
+                native_replay_workspace_with_arguments_in_state_home(
+                    &source_text,
+                    "legacy-risky",
+                    !guest_exception,
+                    false,
+                    &[],
+                    Some(producer_state.path()),
+                )
+            };
             let receipt_id = run["receipt"]["receipt_id"].as_str().unwrap().to_string();
             let (bundle_name, captured) =
                 capture_native_run_bundle_with(producer.path(), &receipt_id, |args| {
@@ -265,6 +338,11 @@ mod native {
                 )
                 .unwrap();
             }
+            let dependency = self.producer.path().join("replay-dependency.cjs");
+            if dependency.exists() {
+                fs::rename(dependency, self.archive.path().join("replay-dependency.cjs"))
+                    .unwrap();
+            }
             fs::rename(
                 self.producer_state.path().join("franken-node"),
                 self.archive.path().join("producer-state"),
@@ -330,6 +408,65 @@ mod native {
     }
 
     #[test]
+    fn policy_equivalence_replays_frozen_modules_offline_and_refuses_failure_prefixes() {
+        for guest_exception in [false, true] {
+            let fixture = Fixture::new_with_frozen_modules(guest_exception, true);
+            fixture.archive_original_authority_and_inputs();
+            assert!(!fixture.producer.path().join("replay-dependency.cjs").exists());
+            let output = run_cli_in_workspace_with_state_home(
+                fixture.operator.path(),
+                &[
+                    "incident",
+                    "replay",
+                    "--bundle",
+                    &fixture.bundle_name,
+                    "--trusted-public-key",
+                    "exporter.pub",
+                    "--trusted-run-public-key",
+                    "run.pub",
+                    "--trusted-runtime-public-key",
+                    "runtime.pub",
+                    "--execute",
+                    "--require-policy-equivalence",
+                    "--json",
+                ],
+                Some(fixture.operator_state.path()),
+            );
+            assert_eq!(output.status.success(), !guest_exception, "{output:?}");
+            let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(report["run_origin_verified"], true);
+            assert_eq!(report["runtime_origin_verified"], true);
+            assert_eq!(report["replay_result"]["matched"], !guest_exception);
+            let execution = &report["execution_result"];
+            assert_eq!(execution["verification_scope"], "guest_execution_and_policy");
+            assert_eq!(execution["module_load_disabled"], false);
+            assert_eq!(execution["matched"], !guest_exception);
+            assert_eq!(execution["console_match"], true);
+            assert_eq!(execution["host_effects_match"], true);
+            if guest_exception {
+                assert!(execution["decisions_match"].is_null());
+                assert!(!execution["divergences"].as_array().unwrap().is_empty());
+            } else {
+                for comparison in [
+                    "terminal_state_match",
+                    "ir3_hash_match",
+                    "ir4_witness_match",
+                    "execution_value_match",
+                    "instruction_count_match",
+                    "nondeterminism_trace_match",
+                    "lane_match",
+                    "exit_code_match",
+                    "decisions_match",
+                ] {
+                    assert_eq!(execution[comparison], true, "{comparison}: {report}");
+                }
+                assert!(execution["divergences"].as_array().unwrap().is_empty());
+            }
+            fixture.assert_no_repeated_effects();
+        }
+    }
+
+    #[test]
     fn runtime_origin_replay_authenticates_real_completed_and_failed_runs_offline() {
         for guest_exception in [false, true] {
             let fixture = Fixture::new(guest_exception);
@@ -373,6 +510,52 @@ mod native {
                 }
                 fixture.assert_no_repeated_effects();
             }
+        }
+    }
+
+    #[test]
+    fn policy_equivalence_does_not_upgrade_an_authenticated_unfrozen_guest_match() {
+        for guest_exception in [false, true] {
+            let fixture = Fixture::new(guest_exception);
+            fixture.archive_original_authority_and_inputs();
+            let ordinary = fixture.replay(&fixture.bundle_name, Some("runtime.pub"), true);
+            assert!(ordinary.status.success(), "{ordinary:?}");
+            let output = run_cli_in_workspace_with_state_home(
+                fixture.operator.path(),
+                &[
+                    "incident",
+                    "replay",
+                    "--bundle",
+                    &fixture.bundle_name,
+                    "--trusted-public-key",
+                    "exporter.pub",
+                    "--trusted-run-public-key",
+                    "run.pub",
+                    "--trusted-runtime-public-key",
+                    "runtime.pub",
+                    "--execute",
+                    "--require-policy-equivalence",
+                    "--json",
+                ],
+                Some(fixture.operator_state.path()),
+            );
+            assert!(!output.status.success(), "{output:?}");
+            let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(report["runtime_origin_verified"], true);
+            assert_eq!(report["replay_result"]["matched"], false);
+            assert_eq!(report["execution_result"]["matched"], false);
+            assert_eq!(report["execution_result"]["module_load_disabled"], true);
+            assert_eq!(
+                report["execution_result"]["verification_scope"],
+                "guest_execution_and_policy"
+            );
+            assert!(
+                !report["execution_result"]["divergences"]
+                    .as_array()
+                    .unwrap()
+                    .is_empty()
+            );
+            fixture.assert_no_repeated_effects();
         }
     }
 

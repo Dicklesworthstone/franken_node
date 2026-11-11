@@ -20457,6 +20457,7 @@ mod incident_list_tests {
             &bundle_path,
             &trusted_key_ids,
             false,
+            false,
             None,
             None,
             std::time::Duration::from_millis(ops::native_replay::DEFAULT_NATIVE_REPLAY_TIMEOUT_MS),
@@ -20482,6 +20483,7 @@ mod incident_list_tests {
             &missing,
             &trusted_key_ids,
             false,
+            false,
             None,
             None,
             std::time::Duration::from_millis(ops::native_replay::DEFAULT_NATIVE_REPLAY_TIMEOUT_MS),
@@ -20505,6 +20507,7 @@ mod incident_list_tests {
         let err = incident_replay_cli_summary(
             &bundle_path,
             &trusted_key_ids,
+            false,
             false,
             None,
             None,
@@ -24128,12 +24131,18 @@ fn incident_replay_cli_summary(
     bundle_path: &Path,
     trusted_key_ids: &[String],
     execute: bool,
+    require_policy_equivalence: bool,
     trusted_run_key: Option<&ed25519_dalek::VerifyingKey>,
     trusted_runtime_key: Option<&ed25519_dalek::VerifyingKey>,
     timeout: std::time::Duration,
 ) -> Result<IncidentReplayCliSummary> {
     #[cfg(not(feature = "engine"))]
     let _ = timeout;
+    anyhow::ensure!(
+        !require_policy_equivalence
+            || (execute && trusted_run_key.is_some() && trusted_runtime_key.is_some()),
+        "--require-policy-equivalence requires --execute, --trusted-run-public-key and --trusted-runtime-public-key"
+    );
     anyhow::ensure!(
         trusted_runtime_key.is_none() || trusted_run_key.is_some(),
         "--trusted-runtime-public-key requires --trusted-run-public-key"
@@ -24208,9 +24217,13 @@ fn incident_replay_cli_summary(
             .map_err(|error| anyhow::anyhow!("native replay capture is invalid: {error}"))?;
         #[cfg(feature = "engine")]
         {
-            Some(
+            let execution = if require_policy_equivalence {
+                ops::native_replay::reexecute_supervised_with_policy_equivalence(&capture, timeout)
+            } else {
                 ops::native_replay::reexecute_supervised(&capture, timeout)
-                    .map_err(|error| anyhow::anyhow!("native re-execution failed: {error}"))?,
+            };
+            Some(
+                execution.map_err(|error| anyhow::anyhow!("native re-execution failed: {error}"))?,
             )
         }
         #[cfg(not(feature = "engine"))]
@@ -24244,6 +24257,17 @@ fn incident_replay_cli_summary(
 }
 
 fn handle_incident_replay_command(args: &cli::IncidentReplayArgs) -> Result<()> {
+    if args.require_policy_equivalence
+        && (!args.execute
+            || args.trusted_run_public_key.is_none()
+            || args.trusted_runtime_public_key.is_none())
+    {
+        return incident_fail(
+            "incident.replay",
+            args.json,
+            "--require-policy-equivalence requires --execute, --trusted-run-public-key and --trusted-runtime-public-key",
+        );
+    }
     if args.trusted_runtime_public_key.is_some() && args.trusted_run_public_key.is_none() {
         return incident_fail(
             "incident.replay",
@@ -24295,6 +24319,7 @@ fn handle_incident_replay_command(args: &cli::IncidentReplayArgs) -> Result<()> 
         &args.bundle,
         &trusted_key_ids,
         args.execute,
+        args.require_policy_equivalence,
         trusted_run_key.as_ref(),
         trusted_runtime_key.as_ref(),
         std::time::Duration::from_millis(args.timeout_ms),

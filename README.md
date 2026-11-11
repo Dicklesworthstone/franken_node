@@ -609,10 +609,30 @@ statement; independent engine-session certification and guest re-execution
 remain separate checks. Historical managed captures require their original
 authenticated run record when first exported with this proof.
 
+For a completed run recorded with `--frozen-modules --capture-replay`, require
+both guest execution and its captured control-policy decisions to match:
+
+```bash
+franken-node incident replay --bundle INCIDENT_ID.fnbundle \
+    --execute --require-policy-equivalence \
+    --trusted-public-key keys/bundle-exporter.pub \
+    --trusted-run-public-key keys/original-run-authority.pub \
+    --trusted-runtime-public-key keys/product-runtime-root.pub --json
+```
+
+Supply all three trust anchors independently. This mode authenticates the
+original runtime session and effect ledger before execution, then reports
+`verification_scope: guest_execution_and_policy`. Missing frozen sources,
+unavailable or different policy decisions, and any failed or incomplete guest
+comparison produce a nonmatching verdict and a nonzero exit. It compares the
+captured control decisions; it does not certify unrecorded scheduler state or
+provide stepwise time travel. Ordinary `--execute` retains its guest-only scope.
+
 | Replay mode | Verified result |
 |---|---|
 | Default, `replay_kind: recorded_trace` | Signature, bundle integrity, and the recorded decision sequence. |
 | `--execute`, `verification_scope: guest_execution` | Fresh guest output, value, IR3/IR4 witness, instruction count, nondeterminism trace, lane, exit code, host-I/O transcript, and the global effect journal when process authority was admitted. |
+| `--execute --require-policy-equivalence`, `verification_scope: guest_execution_and_policy` | All completed guest comparisons plus matching captured control-policy decisions and frozen module sources, after independent run and runtime-origin authentication. Failure prefixes cannot satisfy this scope. |
 | `--execute`, `verification_scope: guest_failure_prefix` | The same uncaught exception, console output, execution trace identity, finalized host-I/O prefix, and any captured global process/I/O journal. Completed-witness, instruction-count, nondeterminism, lane, exit-code, and policy comparisons remain `null`. |
 
 A captured exception leaves the original `run` failed with exit status 1 and
@@ -648,7 +668,7 @@ this new multi-file path is still pending; see the
 The capture envelope is now `franken-node/native-replay-capture/v3`; historical v2 captures
 are refused rather than treated as authenticating newly added fields.
 Ambient environment authority, timeouts, interrupted sessions, and uncertified
-engine failures remain outside this replay scope. For completed runs,
+engine failures remain outside this replay scope. In the default guest-only scope,
 `decisions_match` remains informational. Without frozen sources, withholding
 module authority changes the capability population used by Bayesian policy
 evaluation; neither path's guest verdict certifies original policy decisions.

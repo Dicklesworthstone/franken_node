@@ -155,13 +155,43 @@ pub const POLICY_DECISION_DIVERGENCE: &str =
 /// withheld runtime module loading or ended before policy decisions were sealed.
 pub const POLICY_EQUIVALENCE_UNAVAILABLE_DIVERGENCE: &str = "original-policy equivalence unavailable: runtime module loading was disabled or policy decisions were not captured";
 
+/// A stricter scope can never repair a failed, incomplete, or contradictory
+/// guest verdict, even if its caller omitted the explanatory divergence list.
+pub const POLICY_GUEST_EXECUTION_DIVERGENCE: &str =
+    "original-policy equivalence requires a fully matched completed native execution";
+
 impl NativeReplayOutcome {
+    fn completed_guest_execution_matches(&self) -> bool {
+        self.schema_version == NATIVE_REPLAY_OUTCOME_SCHEMA
+            && self.replay_kind == "native_reexecution"
+            && matches!(
+                self.verification_scope.as_str(),
+                "guest_execution" | POLICY_EQUIVALENCE_SCOPE
+            )
+            && self.matched
+            && self.divergences.is_empty()
+            && !self.captured_trace_id.is_empty()
+            && self.captured_trace_id == self.replay_trace_id
+            && self.captured_terminal_state == NativeReplayTerminalState::Completed
+            && self.replay_terminal_state == NativeReplayTerminalState::Completed
+            && self.terminal_state_match
+            && self.ir3_hash_match == Some(true)
+            && self.ir4_witness_match == Some(true)
+            && self.execution_value_match == Some(true)
+            && self.instruction_count_match == Some(true)
+            && self.console_match
+            && self.host_effects_match
+            && self.nondeterminism_trace_match == Some(true)
+            && self.lane_match == Some(true)
+            && self.exit_code_match == Some(true)
+            && self.exception_value_match.is_none()
+    }
+
     /// Returns `true` iff guest execution matched AND original policy decisions
     /// were re-derived under an intact frozen-module capability population.
     #[must_use]
     pub fn satisfies_policy_equivalence(&self) -> bool {
-        self.matched
-            && self.divergences.is_empty()
+        self.completed_guest_execution_matches()
             && !self.module_load_disabled
             && self.decisions_match == Some(true)
     }
@@ -172,7 +202,20 @@ impl NativeReplayOutcome {
     /// `module_load_disabled`.
     #[must_use]
     pub fn into_policy_equivalence_outcome(mut self) -> Self {
+        // Inspect the original verdict before changing its scope. The fields
+        // are public and deserializable, so matched=true alone is insufficient;
+        // a missing comparison or failure-prefix label must stay a refusal.
+        let guest_matches = self.completed_guest_execution_matches();
         self.verification_scope = POLICY_EQUIVALENCE_SCOPE.to_string();
+        if !guest_matches
+            && !self
+                .divergences
+                .iter()
+                .any(|d| d == POLICY_GUEST_EXECUTION_DIVERGENCE)
+        {
+            self.divergences
+                .push(POLICY_GUEST_EXECUTION_DIVERGENCE.to_string());
+        }
         if self.module_load_disabled || self.decisions_match.is_none() {
             if !self
                 .divergences
@@ -193,10 +236,13 @@ impl NativeReplayOutcome {
                     .push(POLICY_DECISION_DIVERGENCE.to_string());
             }
             self.policy_comparison_note = "Original-policy equivalence enforced fail-closed: re-executed policy decisions diverged from the captured run.".to_string();
+        } else if !guest_matches {
+            self.policy_comparison_note = "Original-policy equivalence refused: guest execution is failed, incomplete, or internally inconsistent; matching policy decisions cannot override that verdict.".to_string();
         } else {
-            self.policy_comparison_note = "Original-policy equivalence verified: guest execution and policy decisions matched under authenticated frozen module sources.".to_string();
+            self.policy_comparison_note = "Captured control-policy decisions and completed guest execution matched under authenticated frozen module sources. This scope does not certify unrecorded scheduler state or provide stepwise time travel.".to_string();
         }
-        self.matched = self.divergences.is_empty()
+        self.matched = guest_matches
+            && self.divergences.is_empty()
             && !self.module_load_disabled
             && self.decisions_match == Some(true);
         self
@@ -4633,6 +4679,137 @@ mod tests {
             schema_version: NATIVE_REPLAY_CAPTURE_SCHEMA.to_string(),
             payload_json: payload.to_string(),
             payload_sha256: hex::encode(Sha256::digest(payload.as_bytes())),
+        }
+    }
+
+    fn completed_policy_candidate() -> NativeReplayOutcome {
+        NativeReplayOutcome {
+            schema_version: NATIVE_REPLAY_OUTCOME_SCHEMA.to_string(),
+            replay_kind: "native_reexecution".to_string(),
+            verification_scope: "guest_execution".to_string(),
+            module_load_disabled: false,
+            matched: true,
+            divergences: Vec::new(),
+            captured_trace_id: "policy-scope-test".to_string(),
+            replay_trace_id: "policy-scope-test".to_string(),
+            captured_terminal_state: NativeReplayTerminalState::Completed,
+            replay_terminal_state: NativeReplayTerminalState::Completed,
+            terminal_state_match: true,
+            ir3_hash_match: Some(true),
+            ir4_witness_match: Some(true),
+            execution_value_match: Some(true),
+            instruction_count_match: Some(true),
+            console_match: true,
+            host_effects_match: true,
+            nondeterminism_trace_match: Some(true),
+            lane_match: Some(true),
+            exit_code_match: Some(true),
+            exception_value_match: None,
+            decisions_match: Some(true),
+            policy_comparison_note: "captured control decisions".to_string(),
+        }
+    }
+
+    fn assert_policy_refusal(candidate: NativeReplayOutcome, label: &str) {
+        assert!(!candidate.satisfies_policy_equivalence(), "{label}");
+        let error = candidate.enforce_policy_equivalence().unwrap_err();
+        assert!(!error.is_empty(), "refusal must explain {label}");
+        let refused = candidate.into_policy_equivalence_outcome();
+        assert_eq!(refused.verification_scope, POLICY_EQUIVALENCE_SCOPE);
+        assert!(!refused.matched, "scope promotion must preserve {label}");
+        assert!(!refused.divergences.is_empty(), "{label}");
+    }
+
+    #[test]
+    fn policy_scope_accepts_a_complete_matching_native_verdict() {
+        let candidate = completed_policy_candidate();
+        assert!(candidate.satisfies_policy_equivalence());
+        candidate.enforce_policy_equivalence().unwrap();
+        let accepted = candidate.into_policy_equivalence_outcome();
+        assert!(accepted.matched);
+        assert!(accepted.satisfies_policy_equivalence());
+        assert_eq!(accepted.verification_scope, POLICY_EQUIVALENCE_SCOPE);
+        assert_eq!(accepted.clone().into_policy_equivalence_outcome(), accepted);
+    }
+
+    #[test]
+    fn policy_scope_never_repairs_a_failed_guest_verdict() {
+        let mut failed_without_diagnostic = completed_policy_candidate();
+        failed_without_diagnostic.matched = false;
+        assert_policy_refusal(failed_without_diagnostic, "failed guest without diagnostics");
+
+        let mut failed_with_diagnostic = completed_policy_candidate();
+        failed_with_diagnostic.matched = false;
+        failed_with_diagnostic
+            .divergences
+            .push("original guest mismatch".to_string());
+        let refused = failed_with_diagnostic.into_policy_equivalence_outcome();
+        assert!(!refused.matched);
+        assert!(
+            refused
+                .divergences
+                .iter()
+                .any(|d| d == "original guest mismatch")
+        );
+        assert!(
+            refused
+                .divergences
+                .iter()
+                .any(|d| d == POLICY_GUEST_EXECUTION_DIVERGENCE)
+        );
+    }
+
+    #[test]
+    fn policy_scope_rejects_missing_or_contradictory_guest_comparisons() {
+        let original = serde_json::to_value(completed_policy_candidate()).unwrap();
+        for field in [
+            "ir3_hash_match",
+            "ir4_witness_match",
+            "execution_value_match",
+            "instruction_count_match",
+            "nondeterminism_trace_match",
+            "lane_match",
+            "exit_code_match",
+        ] {
+            for value in [serde_json::json!(false), serde_json::Value::Null] {
+                let mut changed = original.clone();
+                changed[field] = value;
+                let candidate: NativeReplayOutcome = serde_json::from_value(changed).unwrap();
+                assert!(candidate.matched && candidate.divergences.is_empty());
+                assert_policy_refusal(candidate, field);
+            }
+        }
+        for (field, value) in [
+            ("schema_version", serde_json::json!("unknown-outcome")),
+            ("replay_kind", serde_json::json!("recorded_trace")),
+            ("verification_scope", serde_json::json!("guest_failure_prefix")),
+            ("captured_trace_id", serde_json::json!("")),
+            ("replay_trace_id", serde_json::json!("different-trace")),
+            ("captured_terminal_state", serde_json::json!("uncaught_exception")),
+            ("replay_terminal_state", serde_json::json!("engine_failure")),
+            ("terminal_state_match", serde_json::json!(false)),
+            ("console_match", serde_json::json!(false)),
+            ("host_effects_match", serde_json::json!(false)),
+            ("exception_value_match", serde_json::json!(true)),
+            ("exception_value_match", serde_json::json!(false)),
+        ] {
+            let mut changed = original.clone();
+            changed[field] = value;
+            assert_policy_refusal(serde_json::from_value(changed).unwrap(), field);
+        }
+    }
+
+    #[test]
+    fn policy_scope_requires_frozen_modules_and_available_matching_decisions() {
+        for (module_load_disabled, decisions_match) in [
+            (true, Some(true)),
+            (false, None),
+            (false, Some(false)),
+        ] {
+            let mut candidate = completed_policy_candidate();
+            candidate.module_load_disabled = module_load_disabled;
+            candidate.decisions_match = decisions_match;
+            assert_policy_refusal(candidate, "module or policy context");
         }
     }
 
