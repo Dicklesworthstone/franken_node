@@ -2937,6 +2937,12 @@ pub struct IncidentReplayArgs {
     #[arg(long)]
     pub trusted_run_public_key: Option<PathBuf>,
 
+    /// Independently trusted product-root Ed25519 public key. Verify the
+    /// original runtime session and its signed host-effect ledger before
+    /// replay. Requires --trusted-run-public-key; no embedded key is trusted.
+    #[arg(long)]
+    pub trusted_runtime_public_key: Option<PathBuf>,
+
     /// Re-execute captured JavaScript with recorded host-I/O results and
     /// verify guest completion or a certified uncaught-exception prefix.
     /// Runtime module loading is disabled; policy decisions are compared
@@ -4019,6 +4025,60 @@ mod parser_contract_extra_tests {
             Some(PathBuf::from("runtime.pub"))
         );
         assert!(args.execute && args.json);
+        assert!(args.trusted_runtime_public_key.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn incident_replay_accepts_independent_runtime_authority() -> Result<(), String> {
+        let cli = parse(&[
+            "franken-node",
+            "incident",
+            "replay",
+            "--bundle",
+            "incident.fnbundle",
+            "--trusted-public-key",
+            "exporter.pub",
+            "--trusted-run-public-key",
+            "run.pub",
+            "--trusted-runtime-public-key",
+            "product-root.pub",
+            "--execute",
+            "--json",
+        ])
+        .map_err(|error| error.to_string())?;
+        let Command::Incident(IncidentCommand::Replay(args)) = cli.command else {
+            return Err("expected incident replay".to_string());
+        };
+        assert_eq!(args.trusted_public_key, Some(PathBuf::from("exporter.pub")));
+        assert_eq!(args.trusted_run_public_key, Some(PathBuf::from("run.pub")));
+        assert_eq!(
+            args.trusted_runtime_public_key,
+            Some(PathBuf::from("product-root.pub"))
+        );
+        assert!(args.execute && args.json);
+        Ok(())
+    }
+
+    #[test]
+    fn incident_replay_runtime_authority_dependency_reaches_json_handler() -> Result<(), String> {
+        let cli = parse(&[
+            "franken-node",
+            "incident",
+            "replay",
+            "--bundle",
+            "incident.fnbundle",
+            "--trusted-runtime-public-key",
+            "product-root.pub",
+            "--json",
+        ])
+        .map_err(|error| error.to_string())?;
+        let Command::Incident(IncidentCommand::Replay(args)) = cli.command else {
+            return Err("expected incident replay".to_string());
+        };
+        assert!(args.json);
+        assert!(args.trusted_run_public_key.is_none());
+        assert!(args.trusted_runtime_public_key.is_some());
         Ok(())
     }
 

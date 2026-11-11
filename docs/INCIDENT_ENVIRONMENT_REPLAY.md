@@ -66,6 +66,82 @@ not reinterpreted as having authenticated newly added module-source fields.
 Canonical-payload checks remain mandatory. SDK inspection authenticates and
 checks metadata; it does not decode, resolve or execute the module capsule.
 
+## Authenticate the original runtime before replay
+
+The product can require three independently supplied public anchors on the
+same bounded bundle snapshot: the exporter that signed the bundle, the receipt
+authority that signed the original run record, and the product root that
+certified the engine's session identity. The engine's detached signature must
+then verify the original host-effect ledger under that exact session identity.
+
+```bash
+franken-node incident replay \
+  --bundle incident.fnbundle \
+  --trusted-public-key exporter.pub \
+  --trusted-run-public-key run.pub \
+  --trusted-runtime-public-key product-root.pub \
+  --execute --json
+```
+
+Obtain and pin these public keys through the producer's trusted provisioning
+or administration channel. A public key included in the candidate bundle is
+evidence to check, not an independent trust anchor. The runtime anchor is the
+persistent product root; the exporter and receipt keys cannot substitute for it.
+Only public identity material is exported. Private root and session signing
+seeds remain outside the bundle.
+
+`--trusted-runtime-public-key` requires `--trusted-run-public-key`. Invalid
+argument combinations produce the normal JSON error envelope when `--json`
+is selected. Missing runtime captures, foreign roots, invalid root signatures,
+mismatched session identity and invalid engine-ledger signatures refuse before
+native re-execution. The replay command does not reopen the original worker's
+capture path, receipt store, source tree or private key files to fill missing
+evidence.
+
+Both automatic run incidents and `incident capture --from-run` retain the
+public runtime identity from the same authenticated read used to verify the
+original ledger. Capture after the run requires the original trusted producer
+state to remain available. Exported replay needs only the bundle and independent
+public anchors.
+
+Historical bundles without the public runtime capture retain their narrower
+verification scope when the stronger anchor is not requested. To enrich a
+historical incident on its original producer, run `incident capture --from-run
+<receipt-id> --json` again. After authenticating the original run record, session
+and ledger, the command adds only the absent public identity to the already
+authenticated source, preserves its timeline and metadata, signs the updated
+source and reports `status: "upgraded"`. A repeated capture is idempotent.
+A present null, malformed or contradictory identity is refused; it is never
+silently replaced. Existing exported bundles are unchanged by capture. Export
+the enriched incident again to make a bundle with the additional public proof.
+
+Successful JSON output reports `authentication_scope` separately from native
+execution comparison:
+
+| Scope | Established authority |
+| --- | --- |
+| `authenticated_recorded_incident` | Trusted exporter and bundle integrity |
+| `authenticated_run_incident` | Exporter plus original signed run statement |
+| `authenticated_runtime_incident` | Exporter, original run, product root and signed engine ledger |
+
+The strongest scope also sets `runtime_origin_verified: true` and includes
+the product-root ID, session nonce, evidence-key ID, producer ID and signed epoch
+in `runtime_origin`. Epochs serialize as decimal strings. Without that proof
+the flag is false and the metadata is null.
+
+This authenticates historical ledger origin. It does not establish current
+revocation status, external-effect commit status or full original-policy
+equivalence. `--execute` independently performs the existing supported native
+comparison, preserving its completed-execution or certified-failure scope.
+Without `--execute`, successful authentication does not claim guest execution.
+
+The dedicated `runtime_origin_replay` CLI regressions use actual native completed
+and failed runs, separate exporter/run/root anchors, and an operator project
+without the original source or runtime authority state. They cover offline SDK
+verification, no repeated effects, missing and tampered captures, foreign roots,
+a forged engine signature re-signed by the receipt authority, and historical
+source enrichment with idempotency and contradiction refusal.
+
 ## Focused regression coverage
 
 The inline `native_environment_` tests execute the native orchestrator against

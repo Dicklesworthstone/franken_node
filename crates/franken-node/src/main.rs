@@ -11896,6 +11896,8 @@ struct RunIncidentSource<'a> {
     native_replay: Option<&'a ops::native_replay::NativeReplayCapture>,
     /// Original authenticated record bytes, including future signed fields.
     run_origin_record_json: &'a str,
+    /// Public capture from the same read that authenticated the engine ledger.
+    runtime_evidence_identity_capture: &'a serde_json::Value,
     ended_at: &'a str,
     execution_failure: Option<&'a str>,
     severity: tools::replay_bundle::IncidentSeverity,
@@ -11993,6 +11995,7 @@ fn build_run_incident_evidence(
             "schema_version": INCIDENT_RUN_ORIGIN_SCHEMA,
             "record_json": source.run_origin_record_json,
         },
+        "runtime_evidence_identity_capture": source.runtime_evidence_identity_capture,
     });
     if let Some(failure) = source.execution_failure {
         initial_state_snapshot["execution_failure"] =
@@ -12061,6 +12064,7 @@ fn maybe_capture_run_incident(
         ledger: &record.host_effect_ledger,
         native_replay: record.native_replay.as_ref(),
         run_origin_record_json: &authenticated.record_json,
+        runtime_evidence_identity_capture: &authenticated.runtime_evidence_identity_capture,
         ended_at: &receipt.core.end_time_utc,
         execution_failure: receipt.core.execution_failure.as_deref(),
         severity: tools::replay_bundle::IncidentSeverity::High,
@@ -12110,6 +12114,7 @@ struct AuthenticatedRunLedgerRecord {
     record: RunHostEffectLedgerRecord,
     record_path: PathBuf,
     product_root_key_id: String,
+    runtime_evidence_identity_capture: serde_json::Value,
     /// Keep the exact authenticated input: narrowing to the typed record would
     /// discard signed extensions, and embedding a JSON string preserves the
     /// finite floating-point telemetry excluded from bundle event JSON.
@@ -12310,11 +12315,13 @@ fn load_authenticated_run_ledger_record(
     let record: RunHostEffectLedgerRecord = serde_json::from_value(authenticated)
         .with_context(|| format!("{} is not a run ledger record", record_path.display()))?;
     verify_native_replay_receipt_binding(record.native_replay.as_ref(), receipt)?;
-    let product_root_key_id = verify_run_ledger_record(project_root, &record)?;
+    let (product_root_key_id, runtime_evidence_identity_capture) =
+        verify_run_ledger_record(project_root, &record)?;
     Ok(AuthenticatedRunLedgerRecord {
         record,
         record_path,
         product_root_key_id,
+        runtime_evidence_identity_capture,
         record_json: String::from_utf8(bytes).context("authenticated run record is not UTF-8")?,
     })
 }
@@ -12372,6 +12379,7 @@ fn handle_incident_capture_command(args: &cli::IncidentCaptureArgs) -> Result<()
         record,
         record_path,
         product_root_key_id,
+        runtime_evidence_identity_capture,
         record_json,
     } = load_authenticated_run_ledger_record(&project_root, &receipt)?;
 
@@ -12398,11 +12406,16 @@ fn handle_incident_capture_command(args: &cli::IncidentCaptureArgs) -> Result<()
     let evidence_relative = run_incident_evidence_relative_path(&incident_id);
     let evidence_path = project_root.join(&evidence_relative);
     let status = if evidence_path.is_file() {
-        let existing = read_captured_incident_evidence(&evidence_path)?;
+        let mut existing = read_captured_incident_evidence(&evidence_path)?;
         if existing.incident_id != incident_id
             || existing.initial_state_snapshot["run_receipt_id"] != receipt_id
             || existing.initial_state_snapshot["run_receipt_hash"] != receipt_hash
             || existing.initial_state_snapshot["host_effect_chain_head"] != ledger.chain_head_hash
+            || existing.initial_state_snapshot["run_origin"]
+                != serde_json::json!({
+                    "schema_version": INCIDENT_RUN_ORIGIN_SCHEMA,
+                    "record_json": &record_json,
+                })
             || existing.initial_state_snapshot.get("native_replay")
                 != record
                     .native_replay
@@ -12415,7 +12428,25 @@ fn handle_incident_capture_command(args: &cli::IncidentCaptureArgs) -> Result<()
                 "existing captured incident does not belong to authenticated run {receipt_id}"
             );
         }
-        "already_captured"
+        match existing.initial_state_snapshot.get("runtime_evidence_identity_capture") {
+            Some(capture) => {
+                anyhow::ensure!(
+                    capture == &runtime_evidence_identity_capture,
+                    "existing captured runtime identity differs from the authenticated run"
+                );
+                "already_captured"
+            }
+            None => {
+                // Older signed sources did not export the public session
+                // capture. Enrich only after re-verifying the original record
+                // and ledger, then sign the changed source afresh. Previously
+                // exported bundles retain their original narrower scope.
+                existing.initial_state_snapshot["runtime_evidence_identity_capture"] =
+                    runtime_evidence_identity_capture.clone();
+                write_captured_incident_evidence(&evidence_path, &existing)?;
+                "upgraded"
+            }
+        }
     } else {
         let package = build_run_incident_evidence(&RunIncidentSource {
             incident_id: &incident_id,
@@ -12430,6 +12461,7 @@ fn handle_incident_capture_command(args: &cli::IncidentCaptureArgs) -> Result<()
             ledger,
             native_replay: record.native_replay.as_ref(),
             run_origin_record_json: &record_json,
+            runtime_evidence_identity_capture: &runtime_evidence_identity_capture,
             ended_at: receipt["end_time_utc"]
                 .as_str()
                 .ok_or_else(|| anyhow::anyhow!("run receipt has no end_time_utc"))?,
@@ -12480,7 +12512,7 @@ fn handle_incident_capture_command(args: &cli::IncidentCaptureArgs) -> Result<()
 fn verify_run_ledger_record(
     project_root: &Path,
     record: &RunHostEffectLedgerRecord,
-) -> Result<String> {
+) -> Result<(String, serde_json::Value)> {
     let capture_path = record
         .runtime_evidence_identity_capture_path
         .as_deref()
@@ -12491,7 +12523,7 @@ fn verify_run_ledger_record(
                 record.receipt_id
             )
         })?;
-    ops::engine_dispatcher::verify_recorded_host_effect_ledger(
+    let capture = ops::engine_dispatcher::load_verified_recorded_host_effect_identity(
         project_root,
         &record.host_effect_ledger,
         Path::new(capture_path),
@@ -12501,14 +12533,19 @@ fn verify_run_ledger_record(
             "host-effect ledger of run {} failed verification",
             record.receipt_id
         )
-    })
+    })?;
+    Ok((
+        capture.product_root_key_id.clone(),
+        serde_json::to_value(capture)
+            .context("failed serializing the authenticated public runtime identity")?,
+    ))
 }
 
 #[cfg(not(feature = "engine"))]
 fn verify_run_ledger_record(
     _project_root: &Path,
     record: &RunHostEffectLedgerRecord,
-) -> Result<String> {
+) -> Result<(String, serde_json::Value)> {
     anyhow::bail!(
         "verifying the host-effect ledger of run {} needs the `engine` feature",
         record.receipt_id
@@ -20251,6 +20288,7 @@ mod incident_list_tests {
             &trusted_key_ids,
             false,
             None,
+            None,
             std::time::Duration::from_millis(ops::native_replay::DEFAULT_NATIVE_REPLAY_TIMEOUT_MS),
         )
         .expect("replay summary");
@@ -20275,6 +20313,7 @@ mod incident_list_tests {
             &trusted_key_ids,
             false,
             None,
+            None,
             std::time::Duration::from_millis(ops::native_replay::DEFAULT_NATIVE_REPLAY_TIMEOUT_MS),
         )
         .expect_err("missing bundle must fail");
@@ -20297,6 +20336,7 @@ mod incident_list_tests {
             &bundle_path,
             &trusted_key_ids,
             false,
+            None,
             None,
             std::time::Duration::from_millis(ops::native_replay::DEFAULT_NATIVE_REPLAY_TIMEOUT_MS),
         )
@@ -23882,6 +23922,19 @@ struct IncidentReplayCliSummary {
     timeline: Vec<tools::replay_bundle::TimelineEvent>,
     execution_result: Option<ops::native_replay::NativeReplayOutcome>,
     run_origin: Option<frankenengine_verifier_sdk::incident_bundle::VerifiedRunOrigin>,
+    runtime_origin: Option<frankenengine_verifier_sdk::incident_bundle::VerifiedRuntimeOrigin>,
+}
+
+impl IncidentReplayCliSummary {
+    fn authentication_scope(&self) -> &'static str {
+        if self.runtime_origin.is_some() {
+            "authenticated_runtime_incident"
+        } else if self.run_origin.is_some() {
+            "authenticated_run_incident"
+        } else {
+            "authenticated_recorded_incident"
+        }
+    }
 }
 
 fn incident_replay_cli_summary(
@@ -23889,10 +23942,15 @@ fn incident_replay_cli_summary(
     trusted_key_ids: &[String],
     execute: bool,
     trusted_run_key: Option<&ed25519_dalek::VerifyingKey>,
+    trusted_runtime_key: Option<&ed25519_dalek::VerifyingKey>,
     timeout: std::time::Duration,
 ) -> Result<IncidentReplayCliSummary> {
     #[cfg(not(feature = "engine"))]
     let _ = timeout;
+    anyhow::ensure!(
+        trusted_runtime_key.is_none() || trusted_run_key.is_some(),
+        "--trusted-runtime-public-key requires --trusted-run-public-key"
+    );
     // bd-rjc2m: carry the full cause chain (e.g. "bundle integrity mismatch")
     // so fail-closed replays name the refusal instead of a bare context line.
     let bytes = bounded_read(bundle_path, MAX_CAPTURED_INCIDENT_BYTES)
@@ -23905,7 +23963,7 @@ fn incident_replay_cli_summary(
                     bundle_path.display()
                 )
             })?;
-    let run_origin = if let Some(run_key) = trusted_run_key {
+    let (run_origin, runtime_origin) = if let Some(run_key) = trusted_run_key {
         // The first verifier has already bound this embedded public key to an
         // externally supplied trusted key ID. Reuse that authenticated key and
         // the exact same immutable bytes for the independent origin verifier.
@@ -23917,17 +23975,27 @@ fn incident_replay_cli_summary(
         hex::decode_to_slice(&signature.public_key_hex, &mut key_bytes)
             .context("invalid authenticated bundle public key")?;
         let bundle_key = ed25519_dalek::VerifyingKey::from_bytes(&key_bytes)?;
-        Some(
-            frankenengine_verifier_sdk::incident_bundle::verify_incident_bundle_with_run_key(
+        if let Some(runtime_key) = trusted_runtime_key {
+            let verified =
+                frankenengine_verifier_sdk::incident_bundle::verify_incident_bundle_with_runtime_keys(
+                    &bytes,
+                    &bundle_key,
+                    run_key,
+                    runtime_key,
+                )
+                .context("original runtime proof verification failed before replay")?;
+            (Some(verified.run_origin), Some(verified.runtime_origin))
+        } else {
+            let verified = frankenengine_verifier_sdk::incident_bundle::verify_incident_bundle_with_run_key(
                 &bytes,
                 &bundle_key,
                 run_key,
             )
-            .context("original run proof verification failed before replay")?
-            .run_origin,
-        )
+            .context("original run proof verification failed before replay")?;
+            (Some(verified.run_origin), None)
+        }
     } else {
-        None
+        (None, None)
     };
     let outcome = replay_bundle_with_trusted_keys(&bundle, trusted_key_ids).map_err(|err| {
         anyhow::anyhow!("failed replaying bundle {}: {err:#}", bundle_path.display())
@@ -23983,10 +24051,18 @@ fn incident_replay_cli_summary(
         timeline: bundle.timeline,
         execution_result,
         run_origin,
+        runtime_origin,
     })
 }
 
 fn handle_incident_replay_command(args: &cli::IncidentReplayArgs) -> Result<()> {
+    if args.trusted_runtime_public_key.is_some() && args.trusted_run_public_key.is_none() {
+        return incident_fail(
+            "incident.replay",
+            args.json,
+            "--trusted-runtime-public-key requires --trusted-run-public-key",
+        );
+    }
     if args.bundle.as_os_str().is_empty() {
         return incident_fail(
             "incident.replay",
@@ -24017,11 +24093,22 @@ fn handle_incident_replay_command(args: &cli::IncidentReplayArgs) -> Result<()> 
         Ok(key) => key,
         Err(err) => return incident_fail("incident.replay", args.json, err),
     };
+    let trusted_runtime_key = match args
+        .trusted_runtime_public_key
+        .as_deref()
+        .map(load_replay_trust_anchor)
+        .transpose()
+        .context("failed loading --trusted-runtime-public-key")
+    {
+        Ok(key) => key,
+        Err(err) => return incident_fail("incident.replay", args.json, err),
+    };
     let summary = match incident_replay_cli_summary(
         &args.bundle,
         &trusted_key_ids,
         args.execute,
         trusted_run_key.as_ref(),
+        trusted_runtime_key.as_ref(),
         std::time::Duration::from_millis(args.timeout_ms),
     ) {
         Ok(summary) => summary,
@@ -24062,6 +24149,8 @@ fn handle_incident_replay_command(args: &cli::IncidentReplayArgs) -> Result<()> 
                 "bundle": args.bundle.display().to_string(),
                 "timeline_events": summary.timeline.len(),
                 "replay_kind": &summary.replay_kind,
+                "authentication_scope": summary.authentication_scope(),
+                "runtime_origin_verified": summary.runtime_origin.is_some(),
             }),
         );
         eprintln!("{}", serde_json::to_string(&loaded)?);
@@ -24077,6 +24166,8 @@ fn handle_incident_replay_command(args: &cli::IncidentReplayArgs) -> Result<()> 
                 "event_count": summary.event_count,
                 "replay_kind": &summary.replay_kind,
                 "execution_result": &summary.execution_result,
+                "authentication_scope": summary.authentication_scope(),
+                "runtime_origin_verified": summary.runtime_origin.is_some(),
                 "expected_sequence_hash": &summary.expected_sequence_hash,
                 "replayed_sequence_hash": &summary.replayed_sequence_hash,
             }),
@@ -24133,6 +24224,9 @@ fn handle_incident_replay_command(args: &cli::IncidentReplayArgs) -> Result<()> 
             "execution_result": &summary.execution_result,
             "run_origin_verified": summary.run_origin.is_some(),
             "run_origin": &summary.run_origin,
+            "runtime_origin_verified": summary.runtime_origin.is_some(),
+            "runtime_origin": &summary.runtime_origin,
+            "authentication_scope": summary.authentication_scope(),
         });
         println!("{}", serde_json::to_string_pretty(&payload)?);
         if !summary.matched {
@@ -24159,6 +24253,15 @@ fn handle_incident_replay_command(args: &cli::IncidentReplayArgs) -> Result<()> 
             println!(
                 "original run signature verified: receipt_id={} signer={}",
                 origin.receipt_id, origin.signer_public_key_hex
+            );
+        }
+        if let Some(origin) = &summary.runtime_origin {
+            println!(
+                "runtime ledger origin verified: product_root={} session={} evidence_key={} epoch={}",
+                origin.product_root_key_id,
+                origin.session_nonce,
+                origin.evidence_key_id,
+                origin.signed_epoch
             );
         }
         if !summary.matched {

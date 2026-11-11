@@ -2,6 +2,9 @@
 #[path = "incident_support/engine_stop_replay.rs"]
 mod engine_stop_replay;
 
+#[path = "incident_support/runtime_origin_replay.rs"]
+mod runtime_origin_replay;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};

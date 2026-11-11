@@ -4965,6 +4965,19 @@ pub fn verify_recorded_host_effect_ledger(
     ledger: &HostEffectLedger,
     capture_path: &Path,
 ) -> Result<String> {
+    load_verified_recorded_host_effect_identity(project_root, ledger, capture_path)
+        .map(|capture| capture.product_root_key_id)
+}
+
+/// Read and authenticate the public session capture together with its recorded
+/// ledger. Incident export carries this exact verified value, without reopening
+/// a mutable path after authentication or exporting any signing seed.
+#[cfg(feature = "engine")]
+pub fn load_verified_recorded_host_effect_identity(
+    project_root: &Path,
+    ledger: &HostEffectLedger,
+    capture_path: &Path,
+) -> Result<RuntimeEvidenceIdentityCapture> {
     let (product_root_path, capture_directory, _) =
         prepare_runtime_evidence_directories(project_root)?;
     let capture_directory = capture_directory.canonicalize().with_context(|| {
@@ -4994,7 +5007,7 @@ pub fn verify_recorded_host_effect_ledger(
     capture.verify_with_product_root(&trusted_root)?;
     validate_host_effect_ledger(ledger, &capture.evidence_verification_identity)
         .map_err(|error| anyhow::anyhow!(error))?;
-    Ok(product_root_key_id(&trusted_root))
+    Ok(capture)
 }
 
 /// Parent-observed state of one provider call in a native-session write-ahead
