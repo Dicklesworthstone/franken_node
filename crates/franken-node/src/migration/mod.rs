@@ -19,9 +19,7 @@ use std::process::{Command, Output};
 use std::sync::mpsc::{self, Receiver};
 #[cfg(not(target_os = "linux"))]
 use std::thread;
-use std::time::Duration;
-#[cfg(not(target_os = "linux"))]
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 mod module_specifiers;
 
@@ -95,6 +93,9 @@ const MAX_FINDINGS_PER_CATEGORY: usize = 16;
 const MAX_PROJECT_FILES: usize = 100_000;
 const MAX_PENDING_DIRS: usize = 10_000;
 const MAX_TOTAL_FINDINGS: usize = 1_000;
+const MODULE_GRAPH_TIMEOUT: Duration = Duration::from_secs(2);
+const MIGRATION_SOURCE_EXTENSIONS: &[&str] =
+    &["js", "mjs", "cjs", "jsx", "ts", "mts", "cts", "tsx"];
 const MIGRATION_BACKUP_DIR: &str = ".migrate-backup";
 const MIGRATION_VALIDATE_RUNTIME_TIMEOUT: Duration =
     crate::config::timeouts::MIGRATION_VALIDATE_RUNTIME_TIMEOUT;
@@ -979,6 +980,9 @@ pub fn run_rewrite(project_path: &Path, apply: bool) -> anyhow::Result<Migration
                 if let Some(graph_entry) =
                     build_module_graph_entry(project_path, &path, &relative_path, script_rewrite)
                 {
+                    if graph_entry.action == MigrationRewriteAction::ManualModuleReview {
+                        manual_review_items = manual_review_items.saturating_add(1);
+                    }
                     push_bounded(&mut entries, graph_entry, MAX_TOTAL_FINDINGS);
                 }
             }
@@ -1471,6 +1475,21 @@ fn select_migration_runtime_smoke_target(
         "dist/index.js",
         "dist/index.mjs",
         "dist/index.cjs",
+        "index.ts",
+        "index.mts",
+        "index.cts",
+        "index.tsx",
+        "index.jsx",
+        "src/index.ts",
+        "src/index.mts",
+        "src/index.cts",
+        "src/index.tsx",
+        "src/index.jsx",
+        "dist/index.ts",
+        "dist/index.mts",
+        "dist/index.cts",
+        "dist/index.tsx",
+        "dist/index.jsx",
     ] {
         if let Some(target) = build_runtime_smoke_target(
             &project_root,
@@ -1484,7 +1503,7 @@ fn select_migration_runtime_smoke_target(
     }
 
     anyhow::bail!(
-        "no runnable JS/CJS/MJS target app entrypoint found for transformed-runtime smoke validation under {}",
+        "no runnable JavaScript/TypeScript target app entrypoint found for transformed-runtime smoke validation under {}",
         project_path.display()
     )
 }
@@ -1600,24 +1619,7 @@ fn resolve_runtime_smoke_entry_path(
     }
 
     let candidate = manifest_dir.join(entry);
-    if let Some(path) = resolve_existing_graph_file(project_root, &candidate) {
-        return Some(path);
-    }
-
-    for candidate in [
-        candidate.with_extension("js"),
-        candidate.with_extension("mjs"),
-        candidate.with_extension("cjs"),
-        candidate.join("index.js"),
-        candidate.join("index.mjs"),
-        candidate.join("index.cjs"),
-    ] {
-        if let Some(path) = resolve_existing_graph_file(project_root, &candidate) {
-            return Some(path);
-        }
-    }
-
-    None
+    resolve_migration_source_path(project_root, &candidate)
 }
 
 fn canonicalize_project_package_manifest_path(
@@ -1762,6 +1764,108 @@ mod native_migration_smoke_command_tests {
             };
             assert!(native_migration_smoke_command(Path::new("/trusted/native"), &target).is_err());
         }
+    }
+
+    #[test]
+    fn typed_smoke_selection_covers_manifest_scripts_and_fallbacks() {
+        for extension in ["ts", "mts", "cts", "tsx", "jsx"] {
+            for selector in [
+                "main",
+                "module",
+                "exports",
+                "bin",
+                "script",
+                "fallback",
+                "directory",
+            ] {
+                let root = tempfile::tempdir().expect("typed project");
+                std::fs::create_dir(root.path().join("src")).unwrap();
+                let entry = format!("src/index.{extension}");
+                std::fs::write(root.path().join(&entry), "console.log(42);\n").unwrap();
+                let mut manifest = serde_json::json!({"name":"typed-smoke"});
+                match selector {
+                    "script" => {
+                        manifest["scripts"] = serde_json::json!({"smoke":format!("bun {entry}")})
+                    }
+                    "fallback" => {}
+                    "directory" => manifest["main"] = "src".into(),
+                    field => manifest[field] = entry.clone().into(),
+                }
+                std::fs::write(root.path().join("package.json"), manifest.to_string()).unwrap();
+                let target = select_migration_runtime_smoke_target(root.path())
+                    .unwrap_or_else(|error| panic!("{extension}/{selector}: {error}"));
+                assert_eq!(
+                    target.entry_path,
+                    root.path().join(&entry).canonicalize().unwrap()
+                );
+                let command =
+                    native_migration_smoke_command(Path::new("/trusted/native"), &target).unwrap();
+                assert_eq!(
+                    command.get_args().nth(1),
+                    Some(std::ffi::OsStr::new(&format!("./{entry}")))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn typed_smoke_selection_preserves_explicit_extensions_and_js_fallback_order() {
+        let root = tempfile::tempdir().unwrap();
+        for name in ["index.js", "index.ts", "app.custom.ts", "other.ts"] {
+            std::fs::write(root.path().join(name), "console.log(42);\n").unwrap();
+        }
+        std::fs::write(root.path().join("package.json"), "{}").unwrap();
+        let selected = select_migration_runtime_smoke_target(root.path()).unwrap();
+        assert_eq!(
+            selected.entry_path,
+            root.path().join("index.js").canonicalize().unwrap()
+        );
+        let canonical = root.path().canonicalize().unwrap();
+        assert_eq!(
+            resolve_runtime_smoke_entry_path(&canonical, &canonical, "app.custom"),
+            Some(canonical.join("app.custom.ts"))
+        );
+        assert_eq!(
+            resolve_runtime_smoke_entry_path(&canonical, &canonical, "other.mts"),
+            None
+        );
+    }
+
+    #[test]
+    fn declaration_files_are_not_smoke_or_package_script_entrypoints() {
+        for extension in ["d.ts", "d.mts", "d.cts"] {
+            let root = tempfile::tempdir().unwrap();
+            let name = format!("index.{extension}");
+            std::fs::write(root.path().join(&name), "declare const answer: number;\n").unwrap();
+            std::fs::write(
+                root.path().join("package.json"),
+                serde_json::json!({"main":name,"scripts":{"smoke":format!("bun {name}")}})
+                    .to_string(),
+            )
+            .unwrap();
+            assert!(
+                select_migration_runtime_smoke_target(root.path()).is_err(),
+                "{name}"
+            );
+            assert!(classify_package_script_command("smoke", &format!("bun {name}")).is_err());
+            assert!(!is_graph_source_file(Path::new(&name)));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn typed_smoke_and_graph_refuse_external_symlink_targets() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("index.ts"), "console.log('outside');\n").unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("index.ts"),
+            root.path().join("index.ts"),
+        )
+        .unwrap();
+        std::fs::write(root.path().join("package.json"), r#"{"main":"index.ts"}"#).unwrap();
+        assert!(select_migration_runtime_smoke_target(root.path()).is_err());
+        assert!(collect_module_graph_files(root.path(), &root.path().join("index.ts")).is_err());
     }
 }
 
@@ -3170,12 +3274,6 @@ fn rewrite_esm_imports(source: &str, path: &Path) -> EsmImportRewrite {
     }
 }
 
-fn is_ignorable_js_line(trimmed_line: &str) -> bool {
-    trimmed_line.starts_with("//")
-        || trimmed_line.starts_with("/*")
-        || trimmed_line.starts_with('*')
-}
-
 fn is_lockfile(name: &str) -> bool {
     matches!(
         name,
@@ -3682,7 +3780,7 @@ fn classify_package_script_segment(
         || entry_path.contains('\0')
         || entry_path.split('/').any(|part| part == "..")
     {
-        return Err("runtime entry must be a static project-relative JavaScript path; no partial script rewrite applied".into());
+        return Err("runtime entry must be a static project-relative JavaScript/TypeScript path; no partial script rewrite applied".into());
     }
 
     let mut replacement = format!("franken-node run --console-only {}", entry_token.raw);
@@ -3925,14 +4023,7 @@ fn is_package_script_entry_path(token: &str) -> bool {
     {
         return false;
     }
-    matches!(
-        Path::new(token)
-            .extension()
-            .and_then(std::ffi::OsStr::to_str)
-            .map(str::to_ascii_lowercase)
-            .as_deref(),
-        Some("js" | "mjs" | "cjs")
-    )
+    is_graph_source_file(Path::new(token))
 }
 
 fn unquote_script_token(token: &str) -> &str {
@@ -3956,7 +4047,21 @@ fn build_module_graph_entry(
     let manifest_dir = manifest_path.parent().unwrap_or(project_path);
     let entry_path =
         resolve_script_entry_path(project_path, manifest_dir, &script_rewrite.entry_path)?;
-    let graph_files = collect_module_graph_files(project_path, &entry_path);
+    let graph_files = match collect_module_graph_files(project_path, &entry_path) {
+        Ok(files) => files,
+        Err(reason) => {
+            return Some(MigrationRewriteEntry {
+                id: String::new(),
+                path: Some(manifest_relative_path.to_string()),
+                action: MigrationRewriteAction::ManualModuleReview,
+                detail: format!(
+                    "script `{}` entry `{}` requires manual module graph review: {reason}",
+                    script_rewrite.script_name, script_rewrite.entry_path
+                ),
+                applied: false,
+            });
+        }
+    };
     if graph_files.is_empty() {
         return None;
     }
@@ -3973,13 +4078,23 @@ fn build_module_graph_entry(
     } else {
         String::new()
     };
+    let source_kinds = if graph_files.iter().any(|path| {
+        is_typescript_source_file(Path::new(path))
+            || Path::new(path)
+                .extension()
+                .is_some_and(|extension| extension == "jsx")
+    }) {
+        "JavaScript/TypeScript/JSX"
+    } else {
+        "JS/MJS/CJS"
+    };
 
     Some(MigrationRewriteEntry {
         id: String::new(),
         path: Some(manifest_relative_path.to_string()),
         action: MigrationRewriteAction::ModuleGraphDiscovery,
         detail: format!(
-            "script `{}` uses `{}` entry `{}`; module graph discovered {} JS/MJS/CJS file(s): {}{}",
+            "script `{}` uses `{}` entry `{}`; module graph discovered {} {source_kinds} file(s): {}{}",
             script_rewrite.script_name,
             script_rewrite.runtime.as_str(),
             script_rewrite.entry_path,
@@ -4004,46 +4119,50 @@ fn resolve_script_entry_path(
     resolve_existing_graph_file(project_path, &candidate)
 }
 
-fn collect_module_graph_files(project_path: &Path, entry_path: &Path) -> Vec<String> {
-    let Ok(project_root) = std::fs::canonicalize(project_path) else {
-        return Vec::new();
-    };
-    let Some(entry_path) = resolve_existing_graph_file(&project_root, entry_path) else {
-        return Vec::new();
-    };
+fn collect_module_graph_files(
+    project_path: &Path,
+    entry_path: &Path,
+) -> Result<Vec<String>, String> {
+    let project_root = std::fs::canonicalize(project_path).map_err(|error| error.to_string())?;
+    let entry_path = resolve_existing_graph_file(&project_root, entry_path)
+        .ok_or_else(|| "module graph entry is not a contained runnable source file".to_owned())?;
 
     let mut discovered = BTreeSet::new();
     let mut pending = vec![entry_path];
+    let deadline = Instant::now() + MODULE_GRAPH_TIMEOUT;
 
     while let Some(path) = pending.pop() {
-        if discovered.len() >= MAX_PROJECT_FILES {
-            break;
+        if Instant::now() >= deadline {
+            return Err("module graph discovery deadline exceeded".into());
         }
-        let Some(path) = resolve_existing_graph_file(&project_root, &path) else {
-            continue;
-        };
+        let path = resolve_existing_graph_file(&project_root, &path)
+            .ok_or_else(|| "module graph source is no longer contained or readable".to_owned())?;
         if !discovered.insert(path.clone()) {
             continue;
         }
+        if discovered.len() > MAX_PROJECT_FILES {
+            return Err("module graph source count limit exceeded".into());
+        }
 
-        let Ok(source) = read_file_bounded(&path) else {
-            continue;
-        };
+        let source = read_file_bounded(&path).map_err(|error| error.to_string())?;
         let base_dir = path.parent().unwrap_or(&project_root);
-        for specifier in extract_relative_module_specifiers(&source) {
+        for specifier in module_specifiers::relative_module_specifiers(&source, &path, deadline)? {
             if let Some(next_path) =
                 resolve_relative_module_specifier(&project_root, base_dir, &specifier)
                 && !discovered.contains(&next_path)
             {
-                push_bounded(&mut pending, next_path, MAX_PENDING_DIRS);
+                if pending.len() == MAX_PENDING_DIRS {
+                    return Err("module graph pending source limit exceeded".into());
+                }
+                pending.push(next_path);
             }
         }
     }
 
-    discovered
+    Ok(discovered
         .into_iter()
         .map(|path| relative_display(&project_root, &path))
-        .collect()
+        .collect())
 }
 
 fn resolve_relative_module_specifier(
@@ -4057,19 +4176,30 @@ fn resolve_relative_module_specifier(
         .split_once('#')
         .map_or(specifier, |(path, _fragment)| path);
     let candidate = base_dir.join(specifier);
-    if is_graph_source_file(&candidate) {
-        return resolve_existing_graph_file(project_root, &candidate);
-    }
+    resolve_migration_source_path(project_root, &candidate)
+}
 
-    for candidate in [
-        candidate.with_extension("js"),
-        candidate.with_extension("mjs"),
-        candidate.with_extension("cjs"),
-        candidate.join("index.js"),
-        candidate.join("index.mjs"),
-        candidate.join("index.cjs"),
-    ] {
-        if let Some(path) = resolve_existing_graph_file(project_root, &candidate) {
+/// Discovery is informational; it never rewrites an import or substitutes
+/// emitted JavaScript for a typed file. Explicit source extensions must resolve
+/// exactly, and declaration-only inputs are never executable candidates.
+fn resolve_migration_source_path(project_root: &Path, candidate: &Path) -> Option<PathBuf> {
+    if is_declaration_source_file(candidate) {
+        return None;
+    }
+    if is_graph_source_file(candidate) && !candidate.is_dir() {
+        return resolve_existing_graph_file(project_root, candidate);
+    }
+    for extension in MIGRATION_SOURCE_EXTENSIONS {
+        let mut name = candidate.as_os_str().to_os_string();
+        name.push(format!(".{extension}"));
+        if let Some(path) = resolve_existing_graph_file(project_root, Path::new(&name)) {
+            return Some(path);
+        }
+    }
+    for extension in MIGRATION_SOURCE_EXTENSIONS {
+        if let Some(path) =
+            resolve_existing_graph_file(project_root, &candidate.join(format!("index.{extension}")))
+        {
             return Some(path);
         }
     }
@@ -4086,74 +4216,18 @@ fn resolve_existing_graph_file(project_root: &Path, path: &Path) -> Option<PathB
 }
 
 fn is_graph_source_file(path: &Path) -> bool {
-    path.extension()
+    is_migration_source_file(path) && !is_declaration_source_file(path)
+}
+
+fn is_declaration_source_file(path: &Path) -> bool {
+    path.file_name()
         .and_then(std::ffi::OsStr::to_str)
-        .is_some_and(|extension| {
-            matches!(
-                extension.to_ascii_lowercase().as_str(),
-                "js" | "mjs" | "cjs"
-            )
+        .is_some_and(|name| {
+            let name = name.to_ascii_lowercase();
+            [".d.ts", ".d.mts", ".d.cts"]
+                .iter()
+                .any(|extension| name.ends_with(extension))
         })
-}
-
-fn extract_relative_module_specifiers(source: &str) -> Vec<String> {
-    let mut specifiers = BTreeSet::new();
-    for line in source.lines() {
-        let trimmed = line.trim_start();
-        if is_ignorable_js_line(trimmed) {
-            continue;
-        }
-        let module_like = trimmed.starts_with("import ")
-            || trimmed.starts_with("export ")
-            || trimmed.contains(" require(")
-            || trimmed.contains("require(");
-        if !module_like {
-            continue;
-        }
-        for literal in quoted_relative_literals(trimmed) {
-            specifiers.insert(literal);
-        }
-    }
-    specifiers.into_iter().collect()
-}
-
-fn quoted_relative_literals(line: &str) -> Vec<String> {
-    let bytes = line.as_bytes();
-    let mut literals = BTreeSet::new();
-    let mut index = 0_usize;
-    while index < bytes.len() {
-        let quote = bytes[index];
-        if quote != b'\'' && quote != b'"' {
-            index = index.saturating_add(1);
-            continue;
-        }
-
-        let literal_start = index.saturating_add(1);
-        index = literal_start;
-        let mut escaped = false;
-        while index < bytes.len() {
-            let byte = bytes[index];
-            if escaped {
-                escaped = false;
-            } else if byte == b'\\' {
-                escaped = true;
-            } else if byte == quote {
-                if let Some(literal) = line.get(literal_start..index)
-                    && is_relative_module_specifier(literal)
-                {
-                    literals.insert(literal.to_string());
-                }
-                break;
-            }
-            index = index.saturating_add(1);
-        }
-        index = index.saturating_add(1);
-    }
-    literals.into_iter().collect()
-}
-
-fn is_relative_module_specifier(specifier: &str) -> bool {
-    specifier.starts_with("./") || specifier.starts_with("../")
 }
 
 fn collect_risky_script_names(manifest: &serde_json::Value) -> Vec<String> {

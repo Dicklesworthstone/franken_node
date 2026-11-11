@@ -5,6 +5,7 @@
 
 use std::collections::BTreeSet;
 use std::ops::Range;
+use std::path::Path;
 use std::time::{Duration, Instant};
 use tree_sitter::Node;
 
@@ -225,6 +226,182 @@ pub(super) fn rewrite_typescript(source: &str, tsx: bool) -> Rewrite {
     rewrite(source, if tsx { Syntax::Tsx } else { Syntax::TypeScript })
 }
 
+/// Discover literal relative load sites using the same complete-program
+/// grammar as rewriting. This is a source inventory, not proof that a branch
+/// executes or that a local `require` binding is Node's loader. Type-only
+/// imports, declarations, comments and string/JSX contents are not load sites.
+pub(super) fn relative_module_specifiers(
+    source: &str,
+    path: &Path,
+    deadline: Instant,
+) -> Result<Vec<String>, String> {
+    let syntax = match path.extension().and_then(|extension| extension.to_str()) {
+        Some(extension) if extension.eq_ignore_ascii_case("tsx") => Syntax::Tsx,
+        Some(extension)
+            if ["ts", "mts", "cts"]
+                .iter()
+                .any(|candidate| extension.eq_ignore_ascii_case(candidate)) =>
+        {
+            Syntax::TypeScript
+        }
+        _ => Syntax::JavaScript,
+    };
+    let tree = source_syntax::parse(source, syntax, deadline)?;
+    let mut cursor = tree.walk();
+    let mut visited = 0;
+    let mut specifiers = BTreeSet::new();
+    loop {
+        visited += 1;
+        if visited > MAX_NODES || Instant::now() >= deadline {
+            return Err("module graph syntax traversal budget exhausted".into());
+        }
+        let node = cursor.node();
+        let skip_children = pure_type_context(node)
+            || matches!(node.kind(), "import_statement" | "export_statement")
+                && type_only_module_statement(node);
+        if !skip_children
+            && !matches!(syntax, Syntax::JavaScript)
+            && node.kind() == "call_expression"
+            && node
+                .child_by_field_name("function")
+                .is_some_and(|function| function.kind() == "import")
+            && ambiguous_import_type_argument(source, node, deadline, &mut visited)?
+        {
+            return Err("TypeScript import-type argument is ambiguous to the migration grammar; no partial module graph reported".into());
+        }
+        let literal = if skip_children {
+            None
+        } else {
+            match node.kind() {
+                "import_statement" | "export_statement" | "import_require_clause" => {
+                    node.child_by_field_name("source")
+                }
+                "call_expression" => node
+                    .child_by_field_name("function")
+                    .filter(|function| {
+                        function.kind() == "import"
+                            || function.kind() == "identifier"
+                                && text(source, *function) == "require"
+                    })
+                    .and_then(|_| node.child_by_field_name("arguments"))
+                    .and_then(|arguments| {
+                        let mut argument_cursor = arguments.walk();
+                        arguments
+                            .named_children(&mut argument_cursor)
+                            .find(|argument| argument.kind() != "comment")
+                    }),
+                _ => None,
+            }
+        };
+        if let Some(literal) = literal {
+            let raw = text(source, literal);
+            if matches!(literal.kind(), "string" | "template_string")
+                && raw.len() >= 2
+                && !raw.contains('\\')
+                && !(literal.kind() == "template_string" && raw.contains("${"))
+            {
+                let specifier = &raw[1..raw.len() - 1];
+                if specifier.starts_with("./") || specifier.starts_with("../") {
+                    specifiers.insert(specifier.to_owned());
+                    if specifiers.len() > MAX_EDITS {
+                        return Err("module graph request count limit exceeded".into());
+                    }
+                }
+            }
+        }
+        if !skip_children && cursor.goto_first_child() {
+            continue;
+        }
+        loop {
+            if cursor.goto_next_sibling() {
+                break;
+            }
+            if !cursor.goto_parent() {
+                return Ok(specifiers.into_iter().collect());
+            }
+        }
+    }
+}
+
+fn ambiguous_import_type_argument(
+    source: &str,
+    mut node: Node<'_>,
+    deadline: Instant,
+    visited: &mut usize,
+) -> Result<bool, String> {
+    // This grammar can parse `fn<import('./types').T>(value)` as two
+    // comparisons. Do not turn its erased type into a runtime dependency, or
+    // guess that an actual comparison should erase its import. Refuse this
+    // informational graph when the syntax cannot establish that distinction.
+    while let Some(parent) = node.parent() {
+        *visited += 1;
+        if *visited > MAX_NODES || Instant::now() >= deadline {
+            return Err("module graph syntax traversal budget exhausted".into());
+        }
+        if parent.kind() == "binary_expression"
+            && parent
+                .child_by_field_name("right")
+                .is_some_and(|right| right.id() == node.id())
+            && parent
+                .child_by_field_name("operator")
+                .is_some_and(|operator| text(source, operator) == "<")
+            && parent.parent().is_some_and(|outer| {
+                outer.kind() == "binary_expression"
+                    && outer
+                        .child_by_field_name("left")
+                        .is_some_and(|left| left.id() == parent.id())
+                    && outer
+                        .child_by_field_name("operator")
+                        .is_some_and(|operator| text(source, operator) == ">")
+            })
+        {
+            return Ok(true);
+        }
+        node = parent;
+    }
+    Ok(false)
+}
+
+fn type_only_module_statement(statement: Node<'_>) -> bool {
+    // Only a statement-level modifier always removes the load. Inline-only
+    // clauses such as `import { type Shape }` may retain an empty side-effect
+    // import under verbatimModuleSyntax; keep those potential graph edges.
+    let mut cursor = statement.walk();
+    statement
+        .children(&mut cursor)
+        .any(|child| child.kind() == "type")
+}
+
+fn pure_type_context(node: Node<'_>) -> bool {
+    if matches!(
+        node.kind(),
+        "type_alias_declaration"
+            | "interface_declaration"
+            | "ambient_declaration"
+            | "type_annotation"
+            | "type_arguments"
+            | "type_parameters"
+            | "type_query"
+            | "implements_clause"
+    ) {
+        return true;
+    }
+    // The assertion/satisfies wrappers contain both a live expression and a
+    // type subtree. Inspect only the former; blanket-skipping the wrapper
+    // would lose real import() calls in the expression being annotated.
+    let Some(parent) = node.parent() else {
+        return false;
+    };
+    if !matches!(parent.kind(), "as_expression" | "satisfies_expression") {
+        return false;
+    }
+    let mut cursor = parent.walk();
+    parent
+        .named_children(&mut cursor)
+        .find(|child| child.kind() != "comment")
+        .is_some_and(|expression| expression.id() != node.id())
+}
+
 fn rewrite(source: &str, syntax: Syntax) -> Rewrite {
     match plan(source, syntax, Instant::now() + REWRITE_TIMEOUT) {
         Ok(edits) => {
@@ -424,6 +601,164 @@ mod tests {
     use super::*;
     use std::fs;
     use std::process::{Command, Output};
+
+    #[test]
+    fn typed_graph_extracts_multiline_loads_without_type_or_text_decoys() {
+        let source = r#"
+            import type { Shape } from './types.ts';
+            import { type Other } from './inline-types.ts';
+            export type { Shape } from './export-types.ts';
+            export { type Other } from './inline-exports.ts';
+            type Lazy = import('./type-query.ts').Lazy;
+            interface Model { value: import('./interface-type.ts').Value }
+            declare module 'ambient' { import value from './ambient.ts'; }
+            import {
+                type Shape as MixedShape,
+                value
+            } from './value.mts';
+            export { value } from './reexport.ts';
+            import './effect.ts';
+            import {} from './empty-import.ts';
+            const dynamic = import(
+                './dynamic.mts'
+            );
+            const common = require /* comment */ ('./common.cts');
+            const decoy = "require('./string.ts')";
+            // import './comment.ts';
+        "#;
+        let found = relative_module_specifiers(
+            source,
+            Path::new("entry.ts"),
+            Instant::now() + Duration::from_secs(5),
+        )
+        .unwrap();
+        assert_eq!(
+            found,
+            [
+                "./common.cts",
+                "./dynamic.mts",
+                "./effect.ts",
+                "./empty-import.ts",
+                "./inline-exports.ts",
+                "./inline-types.ts",
+                "./reexport.ts",
+                "./value.mts",
+            ]
+        );
+    }
+
+    #[test]
+    fn tsx_graph_uses_the_tsx_grammar_and_preserves_runtime_imports() {
+        let source = r#"
+            import { View } from './view.tsx';
+            type Props = { name: string };
+            const element = <View title="require('./attribute.ts')">
+                import './text.ts';{import('./inside-expression.ts')}
+            </View>;
+        "#;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        assert_eq!(
+            relative_module_specifiers(source, Path::new("view.tsx"), deadline).unwrap(),
+            ["./inside-expression.ts", "./view.tsx"]
+        );
+        assert!(relative_module_specifiers(source, Path::new("view.ts"), deadline).is_err());
+    }
+
+    #[test]
+    fn graph_import_equals_preserves_runtime_and_ignores_type_only_requests() {
+        let source =
+            "import value = require('./value.cts'); import type Shape = require('./shape.cts');";
+        assert_eq!(
+            relative_module_specifiers(
+                source,
+                Path::new("entry.cts"),
+                Instant::now() + Duration::from_secs(5)
+            )
+            .unwrap(),
+            ["./value.cts"]
+        );
+    }
+
+    #[test]
+    fn graph_ignores_import_types_in_annotations_assertions_and_generic_arguments() {
+        let source = r#"
+            let value: import('./annotation-types.ts').Value;
+            const identity = <T extends import('./constraint-types.ts').Constraint>(
+                input: import('./parameter-types.ts').Value
+            ): import('./return-types.ts').Value => input;
+            const cast = import('./cast-live.ts') as import('./cast-types.ts').Value;
+            const checked = import('./satisfies-live.ts') satisfies import('./satisfies-types.ts').Value;
+            const asserted = <import('./assertion-types.ts').Value>import('./assertion-live.ts');
+            type Imported = import('./generic-types.ts').Value;
+            const generic = identity<Imported>(import('./generic-live.ts'));
+        "#;
+        assert_eq!(
+            relative_module_specifiers(
+                source,
+                Path::new("entry.ts"),
+                Instant::now() + Duration::from_secs(5)
+            )
+            .unwrap(),
+            [
+                "./assertion-live.ts",
+                "./cast-live.ts",
+                "./generic-live.ts",
+                "./satisfies-live.ts",
+            ]
+        );
+    }
+
+    #[test]
+    fn graph_refuses_ambiguous_typed_import_arguments_without_erasing_js_loads() {
+        for source in [
+            "const value = identity<import('./types.ts').Value>(import('./live.ts'));",
+            "const value = identity<typeof import('./types.ts')>(import('./live.ts'));",
+        ] {
+            for extension in ["ts", "tsx"] {
+                let error = relative_module_specifiers(
+                    source,
+                    &Path::new("entry").with_extension(extension),
+                    Instant::now() + Duration::from_secs(5),
+                )
+                .unwrap_err();
+                assert!(error.contains("ambiguous"), "{extension}: {error}");
+            }
+            assert_eq!(
+                relative_module_specifiers(
+                    source,
+                    Path::new("entry.js"),
+                    Instant::now() + Duration::from_secs(5),
+                )
+                .unwrap(),
+                ["./live.ts", "./types.ts"]
+            );
+        }
+    }
+
+    #[test]
+    fn graph_parse_errors_and_expired_budgets_never_report_partial_requests() {
+        for (source, path) in [
+            ("import './first.ts'; const value: = ;", "entry.ts"),
+            ("import './first.ts'; const value: number = 42;", "entry.js"),
+        ] {
+            assert!(
+                relative_module_specifiers(
+                    source,
+                    Path::new(path),
+                    Instant::now() + Duration::from_secs(5)
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            relative_module_specifiers(
+                "import './first.ts';",
+                Path::new("entry.ts"),
+                Instant::now()
+            )
+            .is_err()
+        );
+    }
 
     fn changed(source: &str, expected: &str, count: usize) {
         changed_with(source, expected, count, Syntax::JavaScript);

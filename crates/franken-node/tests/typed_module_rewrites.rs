@@ -62,6 +62,157 @@ fn all_typed_extensions_use_specifier_only_migration_under_commonjs_package() {
 }
 
 #[test]
+fn typed_package_scripts_migrate_without_losing_guest_arguments_or_policy_barriers() {
+    let root = project("module");
+    let mut scripts = serde_json::Map::new();
+    for extension in ["ts", "mts", "cts", "tsx"] {
+        let entry = format!("entry.{extension}");
+        fs::write(
+            root.path().join(&entry),
+            "const answer: number = 42; console.log(answer);\n",
+        )
+        .unwrap();
+        scripts.insert(
+            extension.into(),
+            format!("bun {entry} --mode 'test value'").into(),
+        );
+    }
+    scripts.insert("loader".into(), "node --loader ts-node/esm entry.ts".into());
+    scripts.insert(
+        "environment".into(),
+        "NODE_OPTIONS='--require ./hook.cjs' node entry.ts".into(),
+    );
+    scripts.insert("declaration".into(), "bun types.d.ts".into());
+    fs::write(
+        root.path().join("types.d.ts"),
+        "declare const answer: number;\n",
+    )
+    .unwrap();
+    let manifest =
+        serde_json::json!({"name":"typed-scripts","engines":{"node":">=22"},"scripts":scripts});
+    fs::write(root.path().join("package.json"), manifest.to_string()).unwrap();
+    let report = run_rewrite(root.path(), true).unwrap();
+    let actual: serde_json::Value =
+        serde_json::from_slice(&fs::read(root.path().join("package.json")).unwrap()).unwrap();
+    for extension in ["ts", "mts", "cts", "tsx"] {
+        assert_eq!(
+            actual["scripts"][extension],
+            format!("franken-node run --console-only entry.{extension} -- --mode 'test value'")
+        );
+    }
+    for name in ["loader", "environment", "declaration"] {
+        assert_eq!(actual["scripts"][name], manifest["scripts"][name]);
+    }
+    assert_eq!(report.manual_review_items, 3, "{report:#?}");
+    assert_eq!(
+        report
+            .entries
+            .iter()
+            .filter(|entry| entry.action == migration::MigrationRewriteAction::RewritePackageScript)
+            .count(),
+        4
+    );
+}
+
+#[test]
+fn typed_package_graph_discovers_runtime_sources_and_ignores_types_and_text() {
+    let root = project("module");
+    fs::create_dir(root.path().join("nested")).unwrap();
+    fs::write(
+        root.path().join("package.json"),
+        serde_json::json!({
+            "name":"typed-graph", "type":"module", "engines":{"node":">=22"},
+            "scripts":{"start":"bun entry.ts"}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    for (name, source) in [
+        (
+            "entry.ts",
+            "import type { Shape } from './types.ts';\nimport {\n value\n} from './value.mts';\nexport { other } from './other.cts';\nimport './nested';\nconst later = import('./dynamic.ts');\nconst text = \"require('./text.ts')\";\n",
+        ),
+        ("value.mts", "export const value: number = 42;\n"),
+        ("other.cts", "export const other: number = 1;\n"),
+        (
+            "nested/index.tsx",
+            "export const view = <span title=\"require('../attribute.ts')\"/>;\n",
+        ),
+        ("dynamic.ts", "export const later: boolean = true;\n"),
+        ("types.ts", "export interface Shape { name: string }\n"),
+        ("text.ts", "throw new Error('text-is-not-a-module');\n"),
+        (
+            "attribute.ts",
+            "throw new Error('attribute-is-not-a-module');\n",
+        ),
+    ] {
+        fs::write(root.path().join(name), source).unwrap();
+    }
+    let report = run_rewrite(root.path(), false).unwrap();
+    let graph = report
+        .entries
+        .iter()
+        .find(|entry| entry.action == migration::MigrationRewriteAction::ModuleGraphDiscovery)
+        .expect("typed source graph");
+    for name in [
+        "entry.ts",
+        "value.mts",
+        "other.cts",
+        "nested/index.tsx",
+        "dynamic.ts",
+    ] {
+        assert!(graph.detail.contains(name), "{graph:#?}");
+    }
+    for name in ["types.ts", "text.ts", "attribute.ts"] {
+        assert!(!graph.detail.contains(name), "{graph:#?}");
+    }
+    assert!(
+        graph.detail.contains("5 JavaScript/TypeScript/JSX file(s)"),
+        "{graph:#?}"
+    );
+    assert_eq!(report.rewrites_applied, 0);
+}
+
+#[test]
+fn ambiguous_typed_graph_reports_manual_review_without_partial_discovery() {
+    let root = project("module");
+    fs::write(
+        root.path().join("package.json"),
+        serde_json::json!({
+            "name":"ambiguous-typed-graph", "type":"module", "engines":{"node":">=22"},
+            "scripts":{"start":"bun entry.ts"}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let source = "const value = identity<import('./types.ts').Value>(import('./live.ts'));\n";
+    for (name, content) in [
+        ("entry.ts", source),
+        ("types.ts", "export type Value = string;\n"),
+        ("live.ts", "export const live: boolean = true;\n"),
+    ] {
+        fs::write(root.path().join(name), content).unwrap();
+    }
+    let report = run_rewrite(root.path(), false).unwrap();
+    assert!(report.manual_review_items > 0, "{report:#?}");
+    assert!(report.entries.iter().any(|entry| {
+        entry.action == migration::MigrationRewriteAction::ManualModuleReview
+            && entry.detail.contains("manual module graph review")
+            && entry.detail.contains("ambiguous")
+    }));
+    assert!(
+        !report.entries.iter().any(|entry| {
+            entry.action == migration::MigrationRewriteAction::ModuleGraphDiscovery
+        })
+    );
+    assert_eq!(
+        fs::read_to_string(root.path().join("entry.ts")).unwrap(),
+        source
+    );
+    assert_eq!(report.rewrites_applied, 0);
+}
+
+#[test]
 fn tsx_components_keep_jsx_text_type_annotations_and_attributes() {
     let root = project("module");
     let source = "import { basename } from 'path';\ntype Props = { name: string };\nexport const View = (p: Props) => <p title=\"import('fs')\">import f from 'fs';{basename(p.name)}</p>;\n";

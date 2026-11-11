@@ -91,6 +91,145 @@ fn initialize_native_project(project: &Path, with_state: bool) {
     assert_eq!(project.join(".franken-node").exists(), with_state);
 }
 
+#[cfg(all(target_os = "linux", feature = "engine"))]
+#[test]
+fn typed_project_smoke_validation_runs_native_manifest_script_and_fallback_entries() {
+    for (extension, selector) in [
+        ("ts", "main"),
+        ("mts", "bin"),
+        ("cts", "script"),
+        ("tsx", "fallback"),
+    ] {
+        let project = TempDir::new().expect("typed native project");
+        let entry = format!("index.{extension}");
+        let source = "const answer: number = 6 * 7; console.log(answer);\n";
+        std::fs::write(project.path().join(&entry), source).unwrap();
+        let mut manifest = serde_json::json!({
+            "name":"typed-native-smoke", "version":"1.0.0", "engines":{"node":">=22"}
+        });
+        match selector {
+            "script" => manifest["scripts"] = serde_json::json!({"smoke":format!("bun {entry}")}),
+            "fallback" => {}
+            field => manifest[field] = entry.clone().into(),
+        }
+        std::fs::write(project.path().join("package.json"), manifest.to_string()).unwrap();
+        std::fs::write(
+            project.path().join("package-lock.json"),
+            r#"{"lockfileVersion":3,"packages":{"":{}}}"#,
+        )
+        .unwrap();
+        initialize_native_project(project.path(), false);
+        let mut command = franken_node_command();
+        command
+            .current_dir(repo_root())
+            .args(["migrate", "validate"])
+            .arg(project.path())
+            .arg("--json")
+            .env_remove("FRANKEN_NODE_ALLOW_DEGRADED_RUNTIME_FALLBACK");
+        let output = native_smoke_supervisor::run_command_with_timeout(
+            &mut command,
+            Duration::from_secs(120),
+            Duration::from_secs(1),
+        )
+        .expect("bounded typed native validation");
+        let report = parse_json_stdout(&output, "typed native smoke");
+        assert!(
+            output.status.success(),
+            "{extension}/{selector}: {report}; stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(report["status"], "pass", "{report}");
+        assert!(
+            report.get("test_suite").is_none(),
+            "must exercise smoke selection: {report}"
+        );
+        let smoke = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["id"] == "mig-validate-005")
+            .expect("runtime check");
+        assert_eq!(smoke["passed"], true);
+        let message = smoke["message"].as_str().unwrap();
+        assert!(
+            message.contains("runtime=franken-node") && message.contains(&entry),
+            "{message}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(project.path().join(&entry)).unwrap(),
+            source
+        );
+        assert!(
+            !project.path().join(".franken-node").exists(),
+            "smoke must run in the captured copy"
+        );
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "engine"))]
+#[test]
+fn typed_native_smoke_failure_and_declaration_only_projects_cannot_pass_validation() {
+    for declaration in [false, true] {
+        let project = TempDir::new().unwrap();
+        let entry = if declaration {
+            "index.d.ts"
+        } else {
+            "index.mts"
+        };
+        std::fs::write(
+            project.path().join(entry),
+            "const message: string = 'typed-native-failure'; throw new Error(message);\n",
+        )
+        .unwrap();
+        std::fs::write(
+            project.path().join("package.json"),
+            serde_json::json!({
+                "name":"typed-refusal", "main":entry, "engines":{"node":">=22"}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            project.path().join("package-lock.json"),
+            r#"{"lockfileVersion":3,"packages":{"":{}}}"#,
+        )
+        .unwrap();
+        initialize_native_project(project.path(), false);
+        let mut command = franken_node_command();
+        command
+            .current_dir(repo_root())
+            .args(["migrate", "validate"])
+            .arg(project.path())
+            .arg("--json");
+        let output = native_smoke_supervisor::run_command_with_timeout(
+            &mut command,
+            Duration::from_secs(120),
+            Duration::from_secs(1),
+        )
+        .expect("bounded typed refusal");
+        let report = parse_json_stdout(&output, "typed refusal");
+        assert!(!output.status.success(), "{report}");
+        assert_eq!(report["status"], "fail");
+        let smoke = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["id"] == "mig-validate-005")
+            .unwrap();
+        assert_eq!(smoke["passed"], false);
+        let message = smoke["message"].as_str().unwrap();
+        assert!(
+            message.contains(if declaration {
+                "no runnable JavaScript/TypeScript"
+            } else {
+                "native runtime"
+            }),
+            "{message}"
+        );
+        assert!(!project.path().join(".franken-node").exists());
+    }
+}
+
 #[cfg(unix)]
 mod native_smoke_admission_regressions {
     use super::*;
