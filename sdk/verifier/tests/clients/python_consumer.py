@@ -53,6 +53,11 @@ for case in cases:
             assert result["scope"] == "authenticated_publisher_source_content"
             assert result["facts"] == case["publisher_facts"]
             assert result["facts"]["capsule"]["graph_hash_recomputed"] is False
+        if case["format"] == "counterfactual-receipt":
+            assert result["scope"] == "authenticated_counterfactual_receipt"
+            assert result["facts"]["mode"] == case["cf_mode"]
+            assert result["facts"]["result_count"] == case["cf_count"]
+            assert result["facts"]["baseline_integrity_hash"] == case["cf_baseline"]
         assert "PRIVATE-" not in json.dumps(result)
         print(json.dumps({"case": case["name"], "result": "verified", "scope": result["scope"]}), flush=True)
 
@@ -151,6 +156,30 @@ for mode in publisher_controls:
         print(json.dumps({"case": f"protocol_{mode}", "result": error.code}), flush=True)
     else:
         raise AssertionError(f"protocol_{mode}")
+counterfactual_controls = ["counterfactual_wrong_scope", "counterfactual_invalid_mode",
+                           "counterfactual_single_count_mismatch", "counterfactual_zero_count",
+                           "counterfactual_unknown_field"]
+for mode in counterfactual_controls:
+    try:
+        verify_artifact(json.dumps({"protocol_control": mode}).encode(), cases[0]["anchor"],
+                        verifier=str(root / "fake_verifier"), format="counterfactual-receipt", signature_hex="00" * 64)
+    except VerifierError as error:
+        assert error.code == "PROTOCOL_INVALID", (mode, error.code)
+        print(json.dumps({"case": f"protocol_{mode}", "result": error.code}), flush=True)
+    else:
+        raise AssertionError(f"protocol_{mode}")
+ltv_controls = ["ltv_wrong_scope", "ltv_rounded_timestamp", "ltv_overflow_timestamp",
+                "ltv_bad_artifact_hash", "ltv_unknown_field"]
+for mode in ltv_controls:
+    try:
+        verify_artifact(json.dumps({"protocol_control": mode}).encode(), cases[0]["anchor"],
+                        verifier=str(root / "fake_verifier"), format="ltv-evidence")
+    except VerifierError as error:
+        assert error.code == "PROTOCOL_INVALID", (mode, error.code)
+        print(json.dumps({"case": f"protocol_{mode}", "result": error.code}), flush=True)
+    else:
+        raise AssertionError(f"protocol_{mode}")
 print(json.dumps({"consumer": "python", "matrix_cases": len(cases), "client_cases": len(client_controls),
                   "protocol_cases": len(controls) + len(run_controls) + len(runtime_controls)
-                  + len(resolution_controls) + len(publisher_controls) + 1, "passed": True}), flush=True)
+                  + len(resolution_controls) + len(publisher_controls)
+                  + len(counterfactual_controls) + len(ltv_controls) + 1, "passed": True}), flush=True)

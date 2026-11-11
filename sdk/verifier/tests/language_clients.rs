@@ -197,11 +197,53 @@ fn external_python_and_javascript_consumers_verify_signed_evidence() {
     let engine = source_root.parent().unwrap().join("franken_engine");
     let absent = serde_json::to_string(&[source_root, &engine]).unwrap();
     let sandbox = cfg!(target_os = "linux");
+    let ts_probe = root.join("_ts_probe.mts");
+    fs::write(&ts_probe, "const probe: number = 1;\nvoid probe;\n").unwrap();
+    let node_mts_mode: Option<Option<&'static str>> = if Command::new("node")
+        .arg(&ts_probe)
+        .output()
+        .is_ok_and(|out| out.status.success())
+    {
+        Some(None)
+    } else if Command::new("node")
+        .args(["--experimental-strip-types"])
+        .arg(&ts_probe)
+        .output()
+        .is_ok_and(|out| out.status.success())
+    {
+        Some(Some("--experimental-strip-types"))
+    } else {
+        let mts_src = root.join("typescript_consumer.mts");
+        let mjs_out = root.join("typescript_consumer.compiled.mjs");
+        checked(&mut command(
+            "bun",
+            &[
+                "-e",
+                "import { readFileSync, writeFileSync } from 'node:fs'; \
+                 const t = new Bun.Transpiler({ loader: 'ts' }); \
+                 writeFileSync(process.argv[2], t.transformSync(readFileSync(process.argv[1], 'utf8')));",
+                mts_src.to_str().unwrap(),
+                mjs_out.to_str().unwrap(),
+            ],
+        ));
+        None
+    };
+
     for (program, script) in [
         ("python3", "python_consumer.py"),
         ("node", "javascript_consumer.mjs"),
         ("node", "typescript_consumer.mts"),
     ] {
+        let effective_script = if script.ends_with(".mts") && node_mts_mode.is_none() {
+            "typescript_consumer.compiled.mjs"
+        } else {
+            script
+        };
+        let node_flag = if script.ends_with(".mts") {
+            node_mts_mode.flatten()
+        } else {
+            None
+        };
         let mut consumer = if sandbox {
             let mut boxed = Command::new("bwrap");
             boxed.args([
@@ -225,20 +267,26 @@ fn external_python_and_javascript_consumers_verify_signed_evidence() {
                 .arg("/work")
                 .args(["--chdir", "/work"]);
             if program == "node" {
-                let executable = checked(&mut command("node", &["-p", "process.execPath"]));
+                let executable = checked(&mut command(
+                    "node",
+                    &["-e", "process.stdout.write(process.execPath)"],
+                ));
                 let executable = String::from_utf8(executable.stdout).unwrap();
-                boxed
-                    .arg("--ro-bind")
-                    .arg(executable.trim())
-                    .arg("/node")
-                    .args(["--", "/node", script]);
+                boxed.arg("--ro-bind").arg(executable.trim()).arg("/node");
+                if let Some(flag) = node_flag {
+                    boxed.args(["--", "/node", flag, effective_script]);
+                } else {
+                    boxed.args(["--", "/node", effective_script]);
+                }
             } else {
-                boxed.args(["--", "/usr/bin/python3", script]);
+                boxed.args(["--", "/usr/bin/python3", effective_script]);
             }
             boxed.env("ABSENT_CHECKOUTS", &absent);
             boxed
+        } else if let Some(flag) = node_flag {
+            command(program, &[flag, effective_script])
         } else {
-            command(program, &[script])
+            command(program, &[effective_script])
         };
         consumer
             .current_dir(&root)

@@ -30,6 +30,14 @@ pub const PUBLISHER_SOURCE_INPUT_SCHEMA: &str = "franken-verifier/publisher-sour
 pub const REGISTRATION_SCHEMA_V1: &str = "franken-node/extension-registration-manifest/v1";
 pub const REGISTRATION_SCHEMA_V2: &str = "franken-node/extension-registration-manifest/v2";
 pub const RUNTIME_AUTHORITY_SCHEMA: &str = "franken-node/artifact-runtime-authority/v1";
+pub const PUBLISHER_REVOCATION_LIST_SCHEMA: &str = "franken-node/publisher-revocation-list/v1";
+pub const PUBLISHER_PROVENANCE_CHAIN_SCHEMA: &str = "franken-node/publisher-provenance-chain/v1";
+const PUBLISHER_REVOCATION_DOMAIN: &[u8] = b"franken-node/publisher-revocation-list/v1:";
+const PUBLISHER_PROVENANCE_DOMAIN: &[u8] = b"franken-node/publisher-provenance-chain/v1:";
+const MAX_REVOCATION_LIST_BYTES: usize = 512 * 1024;
+const MAX_PROVENANCE_CHAIN_BYTES: usize = 512 * 1024;
+const MAX_REVOCATION_ENTRIES: usize = 1024;
+const MAX_PROVENANCE_LINKS: usize = 256;
 
 const CAPABILITIES: &[&str] = &[
     "builtin",
@@ -59,6 +67,11 @@ pub enum PublisherSourceError {
     ArtifactHashMismatch,
     RuntimeAuthorityInvalid,
     CapsuleInvalid,
+    RevocationSignatureInvalid,
+    RevocationListInvalid,
+    PublisherRevoked,
+    ProvenanceSignatureInvalid,
+    ProvenanceChainInvalid,
 }
 
 impl std::fmt::Display for PublisherSourceError {
@@ -73,6 +86,19 @@ impl std::fmt::Display for PublisherSourceError {
             Self::ArtifactHashMismatch => "source artifact differs from the signed content hash",
             Self::RuntimeAuthorityInvalid => "invalid signed publisher runtime authority",
             Self::CapsuleInvalid => "invalid publisher source capsule",
+            Self::RevocationSignatureInvalid => {
+                "revocation list signature does not verify under the trusted revocation authority"
+            }
+            Self::RevocationListInvalid => "invalid signed publisher revocation list",
+            Self::PublisherRevoked => {
+                "publisher, signing key, or package version is revoked by the signed revocation list"
+            }
+            Self::ProvenanceSignatureInvalid => {
+                "provenance chain signature does not verify under the trusted provenance authority"
+            }
+            Self::ProvenanceChainInvalid => {
+                "provenance chain is malformed or does not bind the verified manifest and artifact"
+            }
         })
     }
 }
@@ -433,6 +459,265 @@ pub fn verify_publisher_source_input(
         &capsule_bytes,
         trusted_publisher,
     )
+}
+
+/// Offline Ed25519-authenticated revocation list for publisher source verification.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PublisherRevocationList {
+    pub schema_version: String,
+    pub issued_at: String,
+    pub revoked_publisher_ids: Vec<String>,
+    pub revoked_signer_key_ids: Vec<String>,
+    /// Entries formatted as `<package_name>@<version>`.
+    pub revoked_package_versions: Vec<String>,
+}
+
+/// Single link in a hash-linked publisher version provenance chain.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PublisherProvenanceLink {
+    pub version: String,
+    pub parent_version: Option<String>,
+    pub content_hash: String,
+    pub manifest_sha256: String,
+    pub previous_link_sha256: Option<String>,
+}
+
+/// Offline Ed25519-authenticated provenance lineage for a publisher package.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PublisherProvenanceChain {
+    pub schema_version: String,
+    pub package_name: String,
+    pub publisher_id: String,
+    pub links: Vec<PublisherProvenanceLink>,
+}
+
+/// Independently anchored trust inputs for offline revocation + provenance verification.
+pub struct PublisherTrustPolicy<'a> {
+    pub revocation_authority: &'a VerifyingKey,
+    pub revocation_list_bytes: &'a [u8],
+    pub revocation_signature: &'a [u8; 64],
+    pub provenance: Option<(&'a VerifyingKey, &'a [u8], &'a [u8; 64])>,
+}
+
+/// Authenticated publisher source combined with verified revocation and optional provenance facts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct VerifiedPublisherSourceWithTrust {
+    pub source: VerifiedPublisherSource,
+    pub revocation_list_sha256: String,
+    pub revocation_authority_public_key_hex: String,
+    pub provenance_chain_sha256: Option<String>,
+    pub provenance_authority_public_key_hex: Option<String>,
+    pub provenance_link_count: Option<usize>,
+}
+
+/// Compute the domain-separated signing payload for a [`PublisherRevocationList`].
+#[must_use]
+pub fn revocation_list_signing_payload(raw_bytes: &[u8]) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(PUBLISHER_REVOCATION_DOMAIN.len() + 8 + raw_bytes.len());
+    payload.extend_from_slice(PUBLISHER_REVOCATION_DOMAIN);
+    payload.extend_from_slice(&(raw_bytes.len() as u64).to_le_bytes());
+    payload.extend_from_slice(raw_bytes);
+    payload
+}
+
+/// Compute the domain-separated signing payload for a [`PublisherProvenanceChain`].
+#[must_use]
+pub fn provenance_chain_signing_payload(raw_bytes: &[u8]) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(PUBLISHER_PROVENANCE_DOMAIN.len() + 8 + raw_bytes.len());
+    payload.extend_from_slice(PUBLISHER_PROVENANCE_DOMAIN);
+    payload.extend_from_slice(&(raw_bytes.len() as u64).to_le_bytes());
+    payload.extend_from_slice(raw_bytes);
+    payload
+}
+
+/// Compute the canonical SHA-256 link digest (`sha256:<hex>`) for a [`PublisherProvenanceLink`].
+#[must_use]
+pub fn provenance_link_digest(link: &PublisherProvenanceLink) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"franken-node/publisher-provenance-link/v1:");
+    hasher.update((link.version.len() as u64).to_le_bytes());
+    hasher.update(link.version.as_bytes());
+    match &link.parent_version {
+        Some(parent) => {
+            hasher.update([1_u8]);
+            hasher.update((parent.len() as u64).to_le_bytes());
+            hasher.update(parent.as_bytes());
+        }
+        None => hasher.update([0_u8]),
+    }
+    hasher.update((link.content_hash.len() as u64).to_le_bytes());
+    hasher.update(link.content_hash.as_bytes());
+    hasher.update((link.manifest_sha256.len() as u64).to_le_bytes());
+    hasher.update(link.manifest_sha256.as_bytes());
+    match &link.previous_link_sha256 {
+        Some(prev) => {
+            hasher.update([1_u8]);
+            hasher.update((prev.len() as u64).to_le_bytes());
+            hasher.update(prev.as_bytes());
+        }
+        None => hasher.update([0_u8]),
+    }
+    format!("sha256:{}", hex::encode(hasher.finalize()))
+}
+
+/// Verify publisher-signed source bytes together with a signed revocation list
+/// and optional hash-linked provenance lineage.
+pub fn verify_publisher_source_with_trust_policy(
+    manifest_bytes: &[u8],
+    signature: &[u8; 64],
+    capsule_bytes: &[u8],
+    trusted_publisher: &VerifyingKey,
+    policy: &PublisherTrustPolicy<'_>,
+) -> Result<VerifiedPublisherSourceWithTrust> {
+    if policy.revocation_list_bytes.len() > MAX_REVOCATION_LIST_BYTES {
+        return Err(PublisherSourceError::InputTooLarge);
+    }
+    let revocation_payload = revocation_list_signing_payload(policy.revocation_list_bytes);
+    policy
+        .revocation_authority
+        .verify_strict(
+            &revocation_payload,
+            &Signature::from_bytes(policy.revocation_signature),
+        )
+        .map_err(|_| PublisherSourceError::RevocationSignatureInvalid)?;
+
+    let revocation_value = decode_evidence_json(policy.revocation_list_bytes)
+        .map_err(|_| PublisherSourceError::RevocationListInvalid)?;
+    let revocation_list: PublisherRevocationList = serde_json::from_value(revocation_value)
+        .map_err(|_| PublisherSourceError::RevocationListInvalid)?;
+    if revocation_list.schema_version != PUBLISHER_REVOCATION_LIST_SCHEMA
+        || !text_is_bounded(&revocation_list.issued_at, 64)
+        || revocation_list.revoked_publisher_ids.len() > MAX_REVOCATION_ENTRIES
+        || revocation_list.revoked_signer_key_ids.len() > MAX_REVOCATION_ENTRIES
+        || revocation_list.revoked_package_versions.len() > MAX_REVOCATION_ENTRIES
+        || revocation_list
+            .revoked_publisher_ids
+            .iter()
+            .any(|id| !text_is_bounded(id, 256))
+        || revocation_list.revoked_signer_key_ids.iter().any(|id| {
+            id.len() != 16
+                || !id
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        })
+        || revocation_list
+            .revoked_package_versions
+            .iter()
+            .any(|entry| !text_is_bounded(entry, 385))
+    {
+        return Err(PublisherSourceError::RevocationListInvalid);
+    }
+
+    let source =
+        verify_publisher_source(manifest_bytes, signature, capsule_bytes, trusted_publisher)?;
+    let (parsed_manifest, _) = parse_manifest(manifest_bytes)?;
+    let package_version_key = format!("{}@{}", source.package_name, source.version);
+    if revocation_list
+        .revoked_publisher_ids
+        .iter()
+        .any(|id| bool::from(id.as_bytes().ct_eq(source.publisher_id.as_bytes())))
+        || revocation_list
+            .revoked_signer_key_ids
+            .iter()
+            .any(|id| bool::from(id.as_bytes().ct_eq(source.signer_key_id.as_bytes())))
+        || revocation_list
+            .revoked_package_versions
+            .iter()
+            .any(|entry| bool::from(entry.as_bytes().ct_eq(package_version_key.as_bytes())))
+    {
+        return Err(PublisherSourceError::PublisherRevoked);
+    }
+
+    let (provenance_chain_sha256, provenance_authority_public_key_hex, provenance_link_count) =
+        if let Some((prov_authority, prov_bytes, prov_sig)) = policy.provenance {
+            if prov_bytes.len() > MAX_PROVENANCE_CHAIN_BYTES {
+                return Err(PublisherSourceError::InputTooLarge);
+            }
+            let prov_payload = provenance_chain_signing_payload(prov_bytes);
+            prov_authority
+                .verify_strict(&prov_payload, &Signature::from_bytes(prov_sig))
+                .map_err(|_| PublisherSourceError::ProvenanceSignatureInvalid)?;
+            let prov_value = decode_evidence_json(prov_bytes)
+                .map_err(|_| PublisherSourceError::ProvenanceChainInvalid)?;
+            let chain: PublisherProvenanceChain = serde_json::from_value(prov_value)
+                .map_err(|_| PublisherSourceError::ProvenanceChainInvalid)?;
+            if chain.schema_version != PUBLISHER_PROVENANCE_CHAIN_SCHEMA
+                || chain.package_name != source.package_name
+                || chain.publisher_id != source.publisher_id
+                || chain.links.is_empty()
+                || chain.links.len() > MAX_PROVENANCE_LINKS
+            {
+                return Err(PublisherSourceError::ProvenanceChainInvalid);
+            }
+            let mut prev_version: Option<&str> = None;
+            let mut prev_digest: Option<String> = None;
+            for (idx, link) in chain.links.iter().enumerate() {
+                if !valid_version(&link.version)
+                    || !valid_digest(&link.content_hash)
+                    || !link
+                        .manifest_sha256
+                        .strip_prefix("sha256:")
+                        .is_some_and(valid_digest)
+                {
+                    return Err(PublisherSourceError::ProvenanceChainInvalid);
+                }
+                if idx == 0 {
+                    if link.parent_version.is_some() || link.previous_link_sha256.is_some() {
+                        return Err(PublisherSourceError::ProvenanceChainInvalid);
+                    }
+                } else if link.parent_version.as_deref() != prev_version
+                    || link.previous_link_sha256.as_deref() != prev_digest.as_deref()
+                {
+                    return Err(PublisherSourceError::ProvenanceChainInvalid);
+                }
+                prev_version = Some(&link.version);
+                prev_digest = Some(provenance_link_digest(link));
+            }
+            let tip = chain
+                .links
+                .last()
+                .ok_or(PublisherSourceError::ProvenanceChainInvalid)?;
+            if tip.version != source.version
+                || tip.parent_version != parsed_manifest.initial_version.parent_version
+                || !bool::from(
+                    tip.content_hash
+                        .as_bytes()
+                        .ct_eq(parsed_manifest.initial_version.content_hash.as_bytes()),
+                )
+                || !bool::from(
+                    tip.manifest_sha256
+                        .as_bytes()
+                        .ct_eq(source.manifest_sha256.as_bytes()),
+                )
+            {
+                return Err(PublisherSourceError::ProvenanceChainInvalid);
+            }
+            (
+                Some(format!(
+                    "sha256:{}",
+                    hex::encode(Sha256::digest(prov_bytes))
+                )),
+                Some(hex::encode(prov_authority.as_bytes())),
+                Some(chain.links.len()),
+            )
+        } else {
+            (None, None, None)
+        };
+
+    Ok(VerifiedPublisherSourceWithTrust {
+        source,
+        revocation_list_sha256: format!(
+            "sha256:{}",
+            hex::encode(Sha256::digest(policy.revocation_list_bytes))
+        ),
+        revocation_authority_public_key_hex: hex::encode(policy.revocation_authority.as_bytes()),
+        provenance_chain_sha256,
+        provenance_authority_public_key_hex,
+        provenance_link_count,
+    })
 }
 
 #[cfg(test)]
@@ -980,6 +1265,153 @@ mod tests {
         assert_eq!(
             verify_publisher_source_input(&input, &[0; 64], &key().verifying_key()),
             Err(PublisherSourceError::InputTooLarge)
+        );
+    }
+
+    #[test]
+    fn trust_policy_enforces_signed_revocation_lists_and_hash_linked_provenance() {
+        let rev_signer = SigningKey::from_bytes(&[0x71; 32]);
+        let prov_signer = SigningKey::from_bytes(&[0x72; 32]);
+        let capsule_bytes = capsule();
+        let v1_manifest = manifest(&capsule_bytes, false);
+        let v1_raw = serde_json::to_vec(&v1_manifest).unwrap();
+        let v1_manifest_sha256 = format!("sha256:{}", hex::encode(Sha256::digest(&v1_raw)));
+
+        let mut v2_manifest = manifest(&capsule_bytes, true);
+        v2_manifest["initial_version"]["version"] = json!("1.2.4");
+        v2_manifest["initial_version"]["parent_version"] = json!("1.2.3");
+        let v2_raw = serde_json::to_vec(&v2_manifest).unwrap();
+        let v2_sig = key().sign(&v2_raw).to_bytes();
+        let v2_manifest_sha256 = format!("sha256:{}", hex::encode(Sha256::digest(&v2_raw)));
+        let content_hash = hex::encode(Sha256::digest(&capsule_bytes));
+
+        let clean_revocations = PublisherRevocationList {
+            schema_version: PUBLISHER_REVOCATION_LIST_SCHEMA.into(),
+            issued_at: "2026-11-11T00:00:00Z".into(),
+            revoked_publisher_ids: vec!["other-publisher".into()],
+            revoked_signer_key_ids: vec!["0000000000000000".into()],
+            revoked_package_versions: vec!["publisher-package@0.0.1".into()],
+        };
+        let rev_raw = serde_json::to_vec(&clean_revocations).unwrap();
+        let rev_sig = rev_signer
+            .sign(&revocation_list_signing_payload(&rev_raw))
+            .to_bytes();
+
+        let genesis_link = PublisherProvenanceLink {
+            version: "1.2.3".into(),
+            parent_version: None,
+            content_hash: content_hash.clone(),
+            manifest_sha256: v1_manifest_sha256,
+            previous_link_sha256: None,
+        };
+        let tip_link = PublisherProvenanceLink {
+            version: "1.2.4".into(),
+            parent_version: Some("1.2.3".into()),
+            content_hash,
+            manifest_sha256: v2_manifest_sha256,
+            previous_link_sha256: Some(provenance_link_digest(&genesis_link)),
+        };
+        let chain = PublisherProvenanceChain {
+            schema_version: PUBLISHER_PROVENANCE_CHAIN_SCHEMA.into(),
+            package_name: "publisher-package".into(),
+            publisher_id: "publisher-1".into(),
+            links: vec![genesis_link, tip_link],
+        };
+        let prov_raw = serde_json::to_vec(&chain).unwrap();
+        let prov_sig = prov_signer
+            .sign(&provenance_chain_signing_payload(&prov_raw))
+            .to_bytes();
+
+        let verified = verify_publisher_source_with_trust_policy(
+            &v2_raw,
+            &v2_sig,
+            &capsule_bytes,
+            &key().verifying_key(),
+            &PublisherTrustPolicy {
+                revocation_authority: &rev_signer.verifying_key(),
+                revocation_list_bytes: &rev_raw,
+                revocation_signature: &rev_sig,
+                provenance: Some((&prov_signer.verifying_key(), &prov_raw, &prov_sig)),
+            },
+        )
+        .unwrap();
+        assert_eq!(verified.provenance_link_count, Some(2));
+        let signer_key_id = verified.source.signer_key_id.clone();
+
+        // Wrong revocation authority must be rejected.
+        assert_eq!(
+            verify_publisher_source_with_trust_policy(
+                &v2_raw,
+                &v2_sig,
+                &capsule_bytes,
+                &key().verifying_key(),
+                &PublisherTrustPolicy {
+                    revocation_authority: &prov_signer.verifying_key(),
+                    revocation_list_bytes: &rev_raw,
+                    revocation_signature: &rev_sig,
+                    provenance: None,
+                },
+            ),
+            Err(PublisherSourceError::RevocationSignatureInvalid)
+        );
+
+        // Revoking publisher_id, signer_key_id, or package@version must each fail closed.
+        for revoked in [
+            PublisherRevocationList {
+                revoked_publisher_ids: vec!["publisher-1".into()],
+                ..clean_revocations.clone()
+            },
+            PublisherRevocationList {
+                revoked_signer_key_ids: vec![signer_key_id],
+                ..clean_revocations.clone()
+            },
+            PublisherRevocationList {
+                revoked_package_versions: vec!["publisher-package@1.2.4".into()],
+                ..clean_revocations.clone()
+            },
+        ] {
+            let bytes = serde_json::to_vec(&revoked).unwrap();
+            let sig = rev_signer
+                .sign(&revocation_list_signing_payload(&bytes))
+                .to_bytes();
+            assert_eq!(
+                verify_publisher_source_with_trust_policy(
+                    &v2_raw,
+                    &v2_sig,
+                    &capsule_bytes,
+                    &key().verifying_key(),
+                    &PublisherTrustPolicy {
+                        revocation_authority: &rev_signer.verifying_key(),
+                        revocation_list_bytes: &bytes,
+                        revocation_signature: &sig,
+                        provenance: None,
+                    },
+                ),
+                Err(PublisherSourceError::PublisherRevoked)
+            );
+        }
+
+        // Broken previous_link_sha256 in provenance chain must fail closed.
+        let mut broken_chain = chain;
+        broken_chain.links[1].previous_link_sha256 = Some(format!("sha256:{}", "0".repeat(64)));
+        let broken_bytes = serde_json::to_vec(&broken_chain).unwrap();
+        let broken_sig = prov_signer
+            .sign(&provenance_chain_signing_payload(&broken_bytes))
+            .to_bytes();
+        assert_eq!(
+            verify_publisher_source_with_trust_policy(
+                &v2_raw,
+                &v2_sig,
+                &capsule_bytes,
+                &key().verifying_key(),
+                &PublisherTrustPolicy {
+                    revocation_authority: &rev_signer.verifying_key(),
+                    revocation_list_bytes: &rev_raw,
+                    revocation_signature: &rev_sig,
+                    provenance: Some((&prov_signer.verifying_key(), &broken_bytes, &broken_sig)),
+                },
+            ),
+            Err(PublisherSourceError::ProvenanceChainInvalid)
         );
     }
 }

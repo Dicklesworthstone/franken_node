@@ -84,6 +84,30 @@ if mode.startswith("publisher_"):
             "symlink_policy": "reject", "condition_count": None, "additional_condition_count": 0,
         },
     }
+if mode.startswith("counterfactual_"):
+    response["format"] = "counterfactual-receipt"
+    response["scope"] = "authenticated_counterfactual_receipt"
+    response["facts"] = {
+        "baseline_integrity_hash": "a" * 64,
+        "mode": "sweep",
+        "result_count": 2,
+        "signer_public_key_hex": anchor,
+    }
+if mode.startswith("ltv_"):
+    response["format"] = "ltv-evidence"
+    response["scope"] = "authenticated_ltv_anteriority"
+    response["facts"] = {
+        "artifact_id": "ltv-control",
+        "artifact_hash": "a" * 64,
+        "crypto_suite": "ed25519-v1",
+        "as_of_unix_seconds": "1700000500",
+        "claimed_at_unix_seconds": "1700000100",
+        "witness_group_id": "witness-quorum",
+        "witness_policy_id": "policy-2of2",
+        "reattestation_count": 1,
+        "hybrid_survived_algo_death": False,
+        "signer_public_key_hex": anchor,
+    }
 exit_code = 0
 if mode == "timeout":
     time.sleep(5)
@@ -203,6 +227,27 @@ elif mode == "publisher_bad_digest":
     response["facts"]["capsule_digest"] = "sha256:claimed"
 elif mode == "publisher_capsule_not_object":
     response["facts"]["capsule"] = []
+elif mode == "counterfactual_wrong_scope":
+    response["scope"] = "guest_executed"
+elif mode == "counterfactual_invalid_mode":
+    response["facts"]["mode"] = "parallel"
+elif mode == "counterfactual_single_count_mismatch":
+    response["facts"]["mode"] = "single"
+    response["facts"]["result_count"] = 2
+elif mode == "counterfactual_zero_count":
+    response["facts"]["result_count"] = 0
+elif mode == "counterfactual_unknown_field":
+    response["facts"]["execution_authorized"] = True
+elif mode == "ltv_wrong_scope":
+    response["scope"] = "guest_executed"
+elif mode == "ltv_rounded_timestamp":
+    response["facts"]["as_of_unix_seconds"] = 1700000500
+elif mode == "ltv_overflow_timestamp":
+    response["facts"]["as_of_unix_seconds"] = str(2**64)
+elif mode == "ltv_bad_artifact_hash":
+    response["facts"]["artifact_hash"] = "sha256:invalid"
+elif mode == "ltv_unknown_field":
+    response["facts"]["execution_authorized"] = True
 encoded = json.dumps(response, separators=(",", ":"), sort_keys=True)
 if mode == "duplicate":
     encoded = encoded[:-1] + ',"verdict":"verified"}'

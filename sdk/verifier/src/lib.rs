@@ -96,6 +96,9 @@ pub const MIGRATION_EQUIVALENCE_SCHEMA_VERSION: &str = "vsdk-migration-equivalen
 /// Schema marker for SDK-side long-term verification evidence.
 pub const LONG_TERM_VERIFICATION_SCHEMA_VERSION: &str = "vsdk-ltv-evidence-v1.0";
 
+/// Schema marker for portable Ed25519-signed session transcripts.
+pub const SIGNED_SESSION_TRANSCRIPT_SCHEMA_VERSION: &str = "vsdk-signed-session-v1.0";
+
 /// Stable statement emitted on successful LTV verification.
 pub const LONG_TERM_VERIFICATION_PASS_DETAIL: &str =
     "valid and provably anterior to any key compromise on record";
@@ -571,13 +574,28 @@ pub struct SessionStep {
     pub verdict: VerificationVerdict,
     pub artifact_binding_hash: String,
     pub timestamp: String,
-    /// Domain-separated SHA-256 digest binding this step to its session
-    /// (`session_step_signature`). NOTE: this is an UNKEYED digest, not an
-    /// Ed25519 signature — it detects tampering by anyone who does not know the
-    /// session's per-instance nonce, but is not a portable attestation. The
-    /// name is retained for wire compatibility; renaming it to `step_digest`
-    /// is a format change deferred to an owner-approved schema bump (bd-ejuxa).
+    /// Domain-separated RFC-2104 HMAC-SHA256 hash-chain tag (`[0-9a-f]{64}`)
+    /// keyed by a secret derived from [`VerifierSdk`]'s per-instance
+    /// [`SigningKey`] and chained over `previous_step_signature`. Even a caller
+    /// who observes `VerificationSession` fields (`session_nonce`) in memory
+    /// cannot forge, splice, or reorder steps without the secret signing key.
+    /// For cross-process public-key verification without shared secrets, export
+    /// a [`SignedSessionTranscript`] via [`VerifierSdk::export_signed_session`].
     pub step_signature: String,
+}
+
+/// Portable Ed25519-signed attestation of a sealed [`VerificationSession`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SignedSessionTranscript {
+    pub schema_version: String,
+    pub session_id: String,
+    pub verifier_identity: String,
+    pub created_at: String,
+    pub final_verdict: VerificationVerdict,
+    pub steps: Vec<SessionStep>,
+    pub transcript_hash: String,
+    pub signer_public_key_hex: String,
+    pub ed25519_signature_hex: String,
 }
 
 /// Stateful multi-step verification workflow.
@@ -814,6 +832,8 @@ impl From<resolution::ResolutionReceiptError> for VerifierSdkError {
 
 const RESULT_ORIGIN_DOMAIN: &[u8] = b"frankenengine-verifier-sdk:result-origin:v1:";
 const SESSION_STEP_SIGNATURE_DOMAIN: &[u8] = b"frankenengine-verifier-sdk:session-step:v1:";
+const SESSION_STEP_HMAC_KEY_DOMAIN: &[u8] = b"frankenengine-verifier-sdk:session-hmac-key:v1:";
+const SIGNED_SESSION_TRANSCRIPT_DOMAIN: &[u8] = b"frankenengine-verifier-sdk:signed-session:v1:";
 const SESSION_NONCE_DOMAIN: &[u8] = b"frankenengine-verifier-sdk:session-nonce:v1:";
 const TRANSPARENCY_LOG_LEAF_DOMAIN: &[u8] = b"frankenengine-verifier-sdk:transparency-leaf:v1:";
 const TRANSPARENCY_MERKLE_PARENT_DOMAIN: &[u8] =
@@ -1709,6 +1729,10 @@ impl VerifierSdk {
             MAX_VERIFICATION_SESSION_STEPS,
             "verification_session_steps",
         )?;
+        let previous_step_signature = session
+            .steps
+            .last()
+            .map_or("", |prev| prev.step_signature.as_str());
         let step = SessionStep {
             step_index: session.steps.len(),
             operation: result.operation.clone(),
@@ -1718,7 +1742,12 @@ impl VerifierSdk {
             step_signature: String::new(),
         };
         let step = SessionStep {
-            step_signature: session_step_signature(session, &step)?,
+            step_signature: session_step_signature(
+                &self.signing_key,
+                session,
+                &step,
+                previous_step_signature,
+            )?,
             ..step
         };
         push_bounded(
@@ -1766,7 +1795,13 @@ impl VerifierSdk {
                     actual: step.step_index,
                 });
             }
-            let expected_signature = session_step_signature(session, step)?;
+            let previous_step_signature = if expected_index == 0 {
+                ""
+            } else {
+                session.steps[expected_index - 1].step_signature.as_str()
+            };
+            let expected_signature =
+                session_step_signature(&self.signing_key, session, step, previous_step_signature)?;
             if !constant_time_eq(&step.step_signature, &expected_signature) {
                 return Err(VerifierSdkError::SessionStepSignatureMismatch {
                     step_index: step.step_index,
@@ -1788,6 +1823,171 @@ impl VerifierSdk {
         session.sealed = true;
         session.final_verdict = Some(verdict.clone());
         Ok(verdict)
+    }
+
+    /// Export a sealed [`VerificationSession`] as a portable Ed25519-signed
+    /// [`SignedSessionTranscript`] that external auditors can verify under
+    /// [`Self::verifying_key`] without instance-local secrets.
+    pub fn export_signed_session(
+        &self,
+        session: &VerificationSession,
+    ) -> VerifierSdkResult<SignedSessionTranscript> {
+        self.validate_current_verifier_identity()?;
+        validate_session_provenance(session)?;
+        if !constant_time_eq(&session.origin_verifier_identity, &self.verifier_identity) {
+            return Err(VerifierSdkError::SessionVerifierMismatch {
+                expected: self.verifier_identity.clone(),
+                actual: session.origin_verifier_identity.clone(),
+            });
+        }
+        let Some(final_verdict) = session.final_verdict.clone().filter(|_| session.sealed) else {
+            return Err(VerifierSdkError::SessionProvenanceMismatch {
+                field: "sealed",
+                expected: "true".to_string(),
+                actual: "false".to_string(),
+            });
+        };
+        if session.steps.len() > MAX_VERIFICATION_SESSION_STEPS {
+            return Err(VerifierSdkError::BoundedStateExceeded {
+                surface: "verification_session_steps",
+                max: MAX_VERIFICATION_SESSION_STEPS,
+            });
+        }
+        for (expected_index, step) in session.steps.iter().enumerate() {
+            if step.step_index != expected_index {
+                return Err(VerifierSdkError::SessionStepSequenceMismatch {
+                    expected: expected_index,
+                    actual: step.step_index,
+                });
+            }
+            let previous_step_signature = if expected_index == 0 {
+                ""
+            } else {
+                session.steps[expected_index - 1].step_signature.as_str()
+            };
+            let expected_signature =
+                session_step_signature(&self.signing_key, session, step, previous_step_signature)?;
+            if !constant_time_eq(&step.step_signature, &expected_signature) {
+                return Err(VerifierSdkError::SessionStepSignatureMismatch {
+                    step_index: step.step_index,
+                    actual: step.step_signature.clone(),
+                });
+            }
+        }
+        let expected_verdict = compute_session_verdict(&session.steps);
+        if final_verdict != expected_verdict {
+            return Err(VerifierSdkError::SessionProvenanceMismatch {
+                field: "final_verdict",
+                expected: format!("{expected_verdict:?}"),
+                actual: format!("{final_verdict:?}"),
+            });
+        }
+        let signer_public_key_hex = hex::encode(self.verifying_key().as_bytes());
+        let transcript_hash = compute_signed_session_transcript_hash(
+            SIGNED_SESSION_TRANSCRIPT_SCHEMA_VERSION,
+            &session.session_id,
+            &session.verifier_identity,
+            &session.created_at,
+            &final_verdict,
+            &session.steps,
+            &signer_public_key_hex,
+        )?;
+        let signing_payload = signed_session_signing_message(&transcript_hash);
+        let signature = self.signing_key.sign(&signing_payload);
+        Ok(SignedSessionTranscript {
+            schema_version: SIGNED_SESSION_TRANSCRIPT_SCHEMA_VERSION.to_string(),
+            session_id: session.session_id.clone(),
+            verifier_identity: session.verifier_identity.clone(),
+            created_at: session.created_at.clone(),
+            final_verdict,
+            steps: session.steps.clone(),
+            transcript_hash,
+            signer_public_key_hex,
+            ed25519_signature_hex: hex::encode(signature.to_bytes()),
+        })
+    }
+
+    /// Verify a [`SignedSessionTranscript`] offline against an explicit
+    /// trusted [`VerifyingKey`].
+    pub fn verify_signed_session(
+        verifying_key: &VerifyingKey,
+        transcript: &SignedSessionTranscript,
+    ) -> VerifierSdkResult<()> {
+        if transcript.schema_version != SIGNED_SESSION_TRANSCRIPT_SCHEMA_VERSION {
+            return Err(VerifierSdkError::UnsupportedSdk(format!(
+                "{ERR_CAPSULE_SCHEMA_MISMATCH}: expected={SIGNED_SESSION_TRANSCRIPT_SCHEMA_VERSION}, actual={}",
+                transcript.schema_version
+            )));
+        }
+        validate_verifier_identity(&transcript.verifier_identity)?;
+        validate_session_id(&transcript.session_id)?;
+        if transcript.steps.len() > MAX_VERIFICATION_SESSION_STEPS {
+            return Err(VerifierSdkError::BoundedStateExceeded {
+                surface: "verification_session_steps",
+                max: MAX_VERIFICATION_SESSION_STEPS,
+            });
+        }
+        let expected_signer_hex = hex::encode(verifying_key.as_bytes());
+        if !constant_time_eq(&transcript.signer_public_key_hex, &expected_signer_hex) {
+            return Err(VerifierSdkError::ResultSignatureMismatch {
+                expected: expected_signer_hex,
+                actual: transcript.signer_public_key_hex.clone(),
+            });
+        }
+        for (expected_index, step) in transcript.steps.iter().enumerate() {
+            if step.step_index != expected_index {
+                return Err(VerifierSdkError::SessionStepSequenceMismatch {
+                    expected: expected_index,
+                    actual: step.step_index,
+                });
+            }
+            if !is_canonical_sha256_hex(&step.step_signature) {
+                return Err(VerifierSdkError::SessionStepSignatureMismatch {
+                    step_index: expected_index,
+                    actual: step.step_signature.clone(),
+                });
+            }
+        }
+        let expected_verdict = compute_session_verdict(&transcript.steps);
+        if transcript.final_verdict != expected_verdict {
+            return Err(VerifierSdkError::SessionProvenanceMismatch {
+                field: "final_verdict",
+                expected: format!("{expected_verdict:?}"),
+                actual: format!("{:?}", transcript.final_verdict),
+            });
+        }
+        let expected_hash = compute_signed_session_transcript_hash(
+            &transcript.schema_version,
+            &transcript.session_id,
+            &transcript.verifier_identity,
+            &transcript.created_at,
+            &transcript.final_verdict,
+            &transcript.steps,
+            &transcript.signer_public_key_hex,
+        )?;
+        if !constant_time_eq(&transcript.transcript_hash, &expected_hash) {
+            return Err(VerifierSdkError::ResultSignatureMismatch {
+                expected: expected_hash,
+                actual: transcript.transcript_hash.clone(),
+            });
+        }
+        if transcript.ed25519_signature_hex.len() != 128
+            || transcript
+                .ed25519_signature_hex
+                .bytes()
+                .any(|b| !b.is_ascii_hexdigit() || b.is_ascii_uppercase())
+        {
+            return Err(VerifierSdkError::Bundle(
+                bundle::BundleError::Ed25519SignatureInvalid,
+            ));
+        }
+        let sig_bytes = <[u8; 64]>::from_hex(&transcript.ed25519_signature_hex)
+            .map_err(|_| VerifierSdkError::Bundle(bundle::BundleError::Ed25519SignatureInvalid))?;
+        let signature = ed25519_dalek::Signature::from_bytes(&sig_bytes);
+        let signing_payload = signed_session_signing_message(&expected_hash);
+        verifying_key
+            .verify_strict(&signing_payload, &signature)
+            .map_err(|_| VerifierSdkError::Bundle(bundle::BundleError::Ed25519SignatureInvalid))
     }
 
     fn verify_result_signature(&self, result: &VerificationResult) -> Result<(), VerifierSdkError> {
@@ -2305,9 +2505,99 @@ fn transparency_log_leaf_hash(result: &VerificationResult) -> Result<String, Ver
     Ok(bundle::hash(&payload))
 }
 
+fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
+    const BLOCK_SIZE: usize = 64;
+    let mut key_block = [0_u8; BLOCK_SIZE];
+    if key.len() > BLOCK_SIZE {
+        let hashed = Sha256::digest(key);
+        key_block[..32].copy_from_slice(&hashed);
+    } else {
+        key_block[..key.len()].copy_from_slice(key);
+    }
+    let mut ipad = [0x36_u8; BLOCK_SIZE];
+    let mut opad = [0x5c_u8; BLOCK_SIZE];
+    for i in 0..BLOCK_SIZE {
+        ipad[i] ^= key_block[i];
+        opad[i] ^= key_block[i];
+    }
+    let mut inner = Sha256::new();
+    inner.update(ipad);
+    inner.update(message);
+    let inner_digest = inner.finalize();
+
+    let mut outer = Sha256::new();
+    outer.update(opad);
+    outer.update(inner_digest);
+    outer.finalize().into()
+}
+
+fn derive_session_hmac_key(signing_key: &SigningKey) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(SESSION_STEP_HMAC_KEY_DOMAIN);
+    hasher.update(signing_key.to_bytes());
+    hasher.finalize().into()
+}
+
+fn compute_session_verdict(steps: &[SessionStep]) -> VerificationVerdict {
+    if steps.is_empty() {
+        VerificationVerdict::Inconclusive
+    } else if steps
+        .iter()
+        .all(|step| step.verdict == VerificationVerdict::Pass)
+    {
+        VerificationVerdict::Pass
+    } else {
+        VerificationVerdict::Fail
+    }
+}
+
+fn compute_signed_session_transcript_hash(
+    schema_version: &str,
+    session_id: &str,
+    verifier_identity: &str,
+    created_at: &str,
+    final_verdict: &VerificationVerdict,
+    steps: &[SessionStep],
+    signer_public_key_hex: &str,
+) -> Result<String, VerifierSdkError> {
+    #[derive(Serialize)]
+    struct TranscriptHashView<'a> {
+        schema_version: &'a str,
+        session_id: &'a str,
+        verifier_identity: &'a str,
+        created_at: &'a str,
+        final_verdict: &'a VerificationVerdict,
+        steps: &'a [SessionStep],
+        signer_public_key_hex: &'a str,
+    }
+    let payload = serde_json::to_vec(&TranscriptHashView {
+        schema_version,
+        session_id,
+        verifier_identity,
+        created_at,
+        final_verdict,
+        steps,
+        signer_public_key_hex,
+    })
+    .map_err(|source| VerifierSdkError::Json(source.to_string()))?;
+    let mut envelope = Vec::new();
+    push_length_prefixed(&mut envelope, SIGNED_SESSION_TRANSCRIPT_DOMAIN);
+    push_length_prefixed(&mut envelope, &payload);
+    Ok(bundle::hash(&envelope))
+}
+
+fn signed_session_signing_message(transcript_hash: &str) -> Vec<u8> {
+    let mut message = Vec::new();
+    push_length_prefixed(&mut message, SIGNED_SESSION_TRANSCRIPT_DOMAIN);
+    push_length_prefixed(&mut message, transcript_hash.as_bytes());
+    message
+}
+
 fn session_step_signature(
+    signing_key: &SigningKey,
     session: &VerificationSession,
     step: &SessionStep,
+    previous_step_signature: &str,
 ) -> Result<String, VerifierSdkError> {
     #[derive(Serialize)]
     struct SessionStepSignatureView<'a> {
@@ -2316,6 +2606,7 @@ fn session_step_signature(
         created_at: &'a str,
         session_nonce: &'a str,
         step_index: usize,
+        previous_step_signature: &'a str,
         operation: &'a VerificationOperation,
         verdict: &'a VerificationVerdict,
         artifact_binding_hash: &'a str,
@@ -2328,6 +2619,7 @@ fn session_step_signature(
         created_at: &session.created_at,
         session_nonce: &session.session_nonce,
         step_index: step.step_index,
+        previous_step_signature,
         operation: &step.operation,
         verdict: &step.verdict,
         artifact_binding_hash: &step.artifact_binding_hash,
@@ -2338,7 +2630,8 @@ fn session_step_signature(
     let mut envelope = Vec::new();
     push_length_prefixed(&mut envelope, SESSION_STEP_SIGNATURE_DOMAIN);
     envelope.extend_from_slice(&payload);
-    Ok(bundle::hash(&envelope))
+    let mac_key = derive_session_hmac_key(signing_key);
+    Ok(hex::encode(hmac_sha256(&mac_key, &envelope)))
 }
 
 fn push_length_prefixed(buffer: &mut Vec<u8>, bytes: &[u8]) {
@@ -8406,6 +8699,106 @@ mod tests {
             fn message(&self) -> &str {
                 &self.message
             }
+        }
+
+        #[test]
+        fn hmac_sha256_matches_rfc4231_test_case_2_and_long_key_case_6() {
+            let mac = super::super::hmac_sha256(b"Jefe", b"what do ya want for nothing?");
+            assert_eq!(
+                hex::encode(mac),
+                "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+            );
+            let long_key = [0xaa_u8; 131];
+            let mac6 = super::super::hmac_sha256(
+                &long_key,
+                b"Test Using Larger Than Block-Size Key - Hash Key First",
+            );
+            assert_eq!(
+                hex::encode(mac6),
+                "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54"
+            );
+        }
+
+        #[test]
+        fn session_step_keyed_hmac_prevents_nonce_oracle_forgery_and_exports_signed_transcript() {
+            let sdk = VerifierSdk::new("verifier://keyed-session");
+            let sibling_sdk = VerifierSdk::new("verifier://keyed-session");
+            let mut session = sdk.create_session("session-keyed-hmac").unwrap();
+
+            let r1 = sdk
+                .build_result(
+                    VerificationOperation::Claim,
+                    VerificationVerdict::Pass,
+                    vec![AssertionResult {
+                        assertion: "step_one".into(),
+                        passed: true,
+                        detail: "ok".into(),
+                    }],
+                    "a".repeat(64),
+                )
+                .unwrap();
+            let r2 = sdk
+                .build_result(
+                    VerificationOperation::Claim,
+                    VerificationVerdict::Pass,
+                    vec![AssertionResult {
+                        assertion: "step_two".into(),
+                        passed: true,
+                        detail: "ok".into(),
+                    }],
+                    "b".repeat(64),
+                )
+                .unwrap();
+            sdk.record_session_step(&mut session, &r1).unwrap();
+            sdk.record_session_step(&mut session, &r2).unwrap();
+
+            // Even with full knowledge of `session` (including `session_nonce`), a sibling
+            // SDK instance without `sdk.signing_key` cannot compute a valid step tag.
+            let mut forged_session = session.clone();
+            let forged_candidate = SessionStep {
+                step_index: 2,
+                operation: VerificationOperation::Claim,
+                verdict: VerificationVerdict::Pass,
+                artifact_binding_hash: "c".repeat(64),
+                timestamp: "2026-11-11T00:00:00Z".into(),
+                step_signature: String::new(),
+            };
+            let forged_tag = super::super::session_step_signature(
+                &sibling_sdk.signing_key,
+                &forged_session,
+                &forged_candidate,
+                &forged_session.steps[1].step_signature,
+            )
+            .unwrap();
+            forged_session.steps.push(SessionStep {
+                step_signature: forged_tag,
+                ..forged_candidate
+            });
+            assert!(matches!(
+                sdk.seal_session(&mut forged_session),
+                Err(VerifierSdkError::SessionStepSignatureMismatch { step_index: 2, .. })
+            ));
+
+            // Unsealed session cannot be exported.
+            assert!(sdk.export_signed_session(&session).is_err());
+
+            // Seal genuine session and export portable Ed25519 transcript.
+            let verdict = sdk.seal_session(&mut session).unwrap();
+            assert_eq!(verdict, VerificationVerdict::Pass);
+            let transcript = sdk.export_signed_session(&session).unwrap();
+            VerifierSdk::verify_signed_session(&sdk.verifying_key(), &transcript).unwrap();
+
+            // Foreign public key must fail verification.
+            assert!(
+                VerifierSdk::verify_signed_session(&sibling_sdk.verifying_key(), &transcript)
+                    .is_err()
+            );
+
+            // Tampering with a step verdict or reordering steps must fail verification.
+            let mut tampered = transcript.clone();
+            tampered.steps[1].verdict = VerificationVerdict::Fail;
+            tampered.final_verdict = VerificationVerdict::Fail;
+            assert!(VerifierSdk::verify_signed_session(&sdk.verifying_key(), &tampered).is_err());
         }
     }
 }

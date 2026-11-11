@@ -44,6 +44,12 @@ for (const test of cases) {
       assert.deepEqual(result.facts, test.publisher_facts);
       assert.equal(result.facts.capsule.graph_hash_recomputed, false);
     }
+    if (test.format === "counterfactual-receipt") {
+      assert.equal(result.scope, "authenticated_counterfactual_receipt");
+      assert.equal(result.facts.mode, test.cf_mode);
+      assert.equal(result.facts.result_count, test.cf_count);
+      assert.equal(result.facts.baseline_integrity_hash, test.cf_baseline);
+    }
     assert.equal(JSON.stringify(result).includes("PRIVATE-"), false);
     console.log(JSON.stringify({ case: test.name, result: "verified", scope: result.scope }));
   } catch (error) {
@@ -118,5 +124,22 @@ for (const mode of publisherControls) {
   (error) => error instanceof VerifierError && error.code === "PROTOCOL_INVALID", `protocol_${mode}`);
   console.log(JSON.stringify({ case: `protocol_${mode}`, result: "PROTOCOL_INVALID" }));
 }
+const counterfactualControls = ["counterfactual_wrong_scope", "counterfactual_invalid_mode",
+  "counterfactual_single_count_mismatch", "counterfactual_zero_count", "counterfactual_unknown_field"];
+for (const mode of counterfactualControls) {
+  await assert.rejects(verifyArtifact(Buffer.from(JSON.stringify({ protocol_control: mode })), cases[0].anchor,
+    { verifier: resolve("fake_verifier"), format: "counterfactual-receipt", signatureHex: "00".repeat(64) }),
+  (error) => error instanceof VerifierError && error.code === "PROTOCOL_INVALID", `protocol_${mode}`);
+  console.log(JSON.stringify({ case: `protocol_${mode}`, result: "PROTOCOL_INVALID" }));
+}
+const ltvControls = ["ltv_wrong_scope", "ltv_rounded_timestamp", "ltv_overflow_timestamp",
+  "ltv_bad_artifact_hash", "ltv_unknown_field"];
+for (const mode of ltvControls) {
+  await assert.rejects(verifyArtifact(Buffer.from(JSON.stringify({ protocol_control: mode })), cases[0].anchor,
+    { verifier: resolve("fake_verifier"), format: "ltv-evidence" }),
+  (error) => error instanceof VerifierError && error.code === "PROTOCOL_INVALID", `protocol_${mode}`);
+  console.log(JSON.stringify({ case: `protocol_${mode}`, result: "PROTOCOL_INVALID" }));
+}
 console.log(JSON.stringify({ consumer: "javascript", matrix_cases: cases.length, client_cases: clientControls.length,
-  protocol_cases: controls.length + runControls.length + runtimeControls.length + resolutionControls.length + publisherControls.length + 1, passed: true }));
+  protocol_cases: controls.length + runControls.length + runtimeControls.length + resolutionControls.length
+    + publisherControls.length + counterfactualControls.length + ltvControls.length + 1, passed: true }));

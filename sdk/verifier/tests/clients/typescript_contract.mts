@@ -9,6 +9,8 @@ export async function audit(data: Uint8Array, anchor: string, executable: string
     if (verified.format === "capsule") return verified.facts.capsule_id;
     if (verified.format === "resolution-receipt") return verified.facts.receipt_id;
     if (verified.format === "publisher-source") return verified.facts.package_name;
+    if (verified.format === "counterfactual-receipt") return verified.facts.baseline_integrity_hash;
+    if (verified.format === "ltv-evidence") return verified.facts.artifact_id;
     return verified.facts.bundle_id;
   } catch (error: unknown) {
     if (error instanceof VerifierError) return error.code;

@@ -18,13 +18,18 @@ from typing import Any, Literal, TypedDict
 PROTOCOL = "franken-verifier-cli/v1"
 MAX_INPUT_BYTES = 64 * 1024 * 1024
 MAX_RESPONSE_BYTES = 64 * 1024 + 1
-EvidenceFormat = Literal["incident-bundle", "capsule", "signed-bundle", "resolution-receipt", "publisher-source"]
+EvidenceFormat = Literal[
+    "incident-bundle", "capsule", "signed-bundle", "resolution-receipt",
+    "publisher-source", "counterfactual-receipt", "ltv-evidence",
+]
 _SCOPES = {
     "incident-bundle": "authenticated_recorded_incident",
     "capsule": "authenticated_capsule_content",
     "signed-bundle": "authenticated_sdk_replay_bundle",
     "resolution-receipt": "authenticated_resolution_decision",
     "publisher-source": "authenticated_publisher_source_content",
+    "counterfactual-receipt": "authenticated_counterfactual_receipt",
+    "ltv-evidence": "authenticated_ltv_anteriority",
 }
 
 
@@ -35,7 +40,8 @@ class Verification(TypedDict):
     scope: Literal["authenticated_recorded_incident", "authenticated_run_incident",
                    "authenticated_runtime_incident",
                    "authenticated_capsule_content", "authenticated_sdk_replay_bundle",
-                   "authenticated_resolution_decision", "authenticated_publisher_source_content"]
+                   "authenticated_resolution_decision", "authenticated_publisher_source_content",
+                   "authenticated_counterfactual_receipt", "authenticated_ltv_anteriority"]
     artifact_sha256: str
     facts: dict[str, Any]
 
@@ -223,6 +229,10 @@ def _facts_valid(facts: Any, format: str, anchor: str, run_anchor: str | None,
         "publisher-source": {"registration_schema", "package_name", "publisher_id", "version",
                              "manifest_sha256", "artifact_sha256", "capsule_digest", "signer_key_id",
                              "signer_public_key_hex", "runtime_authority", "capsule"},
+        "counterfactual-receipt": {"baseline_integrity_hash", "mode", "result_count", "signer_public_key_hex"},
+        "ltv-evidence": {"artifact_id", "artifact_hash", "crypto_suite", "as_of_unix_seconds",
+                         "claimed_at_unix_seconds", "witness_group_id", "witness_policy_id",
+                         "reattestation_count", "hybrid_survived_algo_death", "signer_public_key_hex"},
     }[format]
     if run_anchor is not None:
         expected.add("run_origin")
@@ -232,6 +242,28 @@ def _facts_valid(facts: Any, format: str, anchor: str, run_anchor: str | None,
         return False
     if format == "publisher-source":
         return _publisher_source_valid(facts, anchor)
+    if format == "counterfactual-receipt":
+        return (
+            isinstance(facts["baseline_integrity_hash"], str)
+            and re.fullmatch(r"[0-9a-f]{64}", facts["baseline_integrity_hash"]) is not None
+            and facts["mode"] in ("single", "sweep")
+            and type(facts["result_count"]) is int and 1 <= facts["result_count"] <= 1024
+            and (facts["mode"] == "sweep" or facts["result_count"] == 1)
+        )
+    if format == "ltv-evidence":
+        artifact_hash = facts["artifact_hash"]
+        hex_body = artifact_hash[7:] if isinstance(artifact_hash, str) and artifact_hash.startswith("sha256:") else artifact_hash
+        return (
+            _publisher_text(facts["artifact_id"], 256)
+            and isinstance(hex_body, str) and re.fullmatch(r"[0-9a-f]{64}", hex_body) is not None
+            and _publisher_text(facts["crypto_suite"], 128)
+            and all(isinstance(facts[k], str) and re.fullmatch(r"0|[1-9][0-9]{0,19}", facts[k]) is not None
+                    and int(facts[k]) <= 2**64 - 1 for k in ("as_of_unix_seconds", "claimed_at_unix_seconds"))
+            and _publisher_text(facts["witness_group_id"], 256)
+            and _publisher_text(facts["witness_policy_id"], 256)
+            and type(facts["reattestation_count"]) is int and 0 <= facts["reattestation_count"] <= 64
+            and type(facts["hybrid_survived_algo_death"]) is bool
+        )
     if format == "resolution-receipt":
         selected = facts["selected_version"]
         return (
@@ -343,12 +375,12 @@ def verify_artifact(
         args.extend(["--trusted-run-key-hex", run_anchor])
     if runtime_anchor is not None:
         args.extend(["--trusted-runtime-key-hex", runtime_anchor])
-    if format in ("signed-bundle", "publisher-source"):
+    if format in ("signed-bundle", "publisher-source", "counterfactual-receipt"):
         if not _hex(signature_hex, 128):
             raise VerifierError("SIGNATURE_MALFORMED", "a detached 64-byte signature is required")
         args.extend(["--signature-hex", signature_hex])
     elif signature_hex is not None:
-        raise VerifierError("INPUT_INVALID", "detached signatures apply only to signed-bundle or publisher-source")
+        raise VerifierError("INPUT_INVALID", "detached signatures apply only to signed-bundle, publisher-source, or counterfactual-receipt")
     try:
         process = subprocess.run(args, input=data, capture_output=True, timeout=timeout,
                                  check=False, shell=False)

@@ -2610,7 +2610,10 @@ pub(crate) mod tests {
     fn environment_read_receipt_identity_is_distinct_and_committed() {
         assert_eq!(EffectKind::EnvRead.tag(), 8);
         assert_eq!(EffectKind::EnvRead.label(), "env_read");
-        assert_eq!(serde_json::to_string(&EffectKind::EnvRead).unwrap(), "\"env_read\"");
+        assert_eq!(
+            serde_json::to_string(&EffectKind::EnvRead).unwrap(),
+            "\"env_read\""
+        );
         let mut receipt = run_effect_chain_fixture()[0].receipt.clone();
         let original = effect_receipt_hash(&receipt);
         receipt.effect_kind = EffectKind::EnvRead;

@@ -11,6 +11,8 @@ const SCOPES = Object.freeze({
   "signed-bundle": "authenticated_sdk_replay_bundle",
   "resolution-receipt": "authenticated_resolution_decision",
   "publisher-source": "authenticated_publisher_source_content",
+  "counterfactual-receipt": "authenticated_counterfactual_receipt",
+  "ltv-evidence": "authenticated_ltv_anteriority",
 });
 
 export class VerifierError extends Error {
@@ -108,11 +110,31 @@ function factsValid(facts, format, anchor, runAnchor, runtimeAnchor) {
     "signed-bundle": ["bundle_id", "incident_id", "event_count", "integrity_hash", "signer_public_key_hex"],
     "resolution-receipt": ["receipt_id", "crypto_suite", "module_graph_hash", "package_name", "requested_range", "policy_profile", "capability_budget_mode", "decision", "selected_version", "rejected_alternative_count", "canonical_hash", "signer_key_id", "signer_public_key_hex"],
     "publisher-source": ["registration_schema", "package_name", "publisher_id", "version", "manifest_sha256", "artifact_sha256", "capsule_digest", "signer_key_id", "signer_public_key_hex", "runtime_authority", "capsule"],
+    "counterfactual-receipt": ["baseline_integrity_hash", "mode", "result_count", "signer_public_key_hex"],
+    "ltv-evidence": ["artifact_id", "artifact_hash", "crypto_suite", "as_of_unix_seconds", "claimed_at_unix_seconds", "witness_group_id", "witness_policy_id", "reattestation_count", "hybrid_survived_algo_death", "signer_public_key_hex"],
   }[format];
   if (runAnchor !== undefined) expected.push("run_origin");
   if (runtimeAnchor !== undefined) expected.push("runtime_origin");
   if (!keys(facts, expected) || facts.signer_public_key_hex !== anchor) return false;
   if (format === "publisher-source") return publisherSourceValid(facts, anchor);
+  if (format === "counterfactual-receipt") {
+    return typeof facts.baseline_integrity_hash === "string" && /^[0-9a-f]{64}$/u.test(facts.baseline_integrity_hash)
+      && ["single", "sweep"].includes(facts.mode)
+      && count(facts.result_count) && facts.result_count >= 1 && facts.result_count <= 1024
+      && (facts.mode === "sweep" || facts.result_count === 1);
+  }
+  if (format === "ltv-evidence") {
+    const hashBody = typeof facts.artifact_hash === "string" && facts.artifact_hash.startsWith("sha256:")
+      ? facts.artifact_hash.slice(7) : facts.artifact_hash;
+    return publisherText(facts.artifact_id, 256)
+      && typeof hashBody === "string" && /^[0-9a-f]{64}$/u.test(hashBody)
+      && publisherText(facts.crypto_suite, 128)
+      && ["as_of_unix_seconds", "claimed_at_unix_seconds"].every((k) => typeof facts[k] === "string"
+        && /^(0|[1-9][0-9]{0,19})$/u.test(facts[k]) && BigInt(facts[k]) <= 18_446_744_073_709_551_615n)
+      && publisherText(facts.witness_group_id, 256) && publisherText(facts.witness_policy_id, 256)
+      && count(facts.reattestation_count) && facts.reattestation_count <= 64
+      && typeof facts.hybrid_survived_algo_death === "boolean";
+  }
   if (format === "resolution-receipt") {
     return ["receipt_id", "package_name", "requested_range"].every((key) => boundedText(facts[key]))
       && ["module_graph_hash", "canonical_hash", "signer_key_id"].every((key) => typeof facts[key] === "string" && /^sha256:[0-9a-f]{64}$/u.test(facts[key]))
@@ -172,10 +194,10 @@ export async function verifyArtifact(data, trustedPublicKeyHex, options) {
   const args = ["verify", "--format", format, "--trusted-key-hex", anchor];
   if (runAnchor !== undefined) args.push("--trusted-run-key-hex", runAnchor);
   if (runtimeAnchor !== undefined) args.push("--trusted-runtime-key-hex", runtimeAnchor);
-  if (format === "signed-bundle" || format === "publisher-source") {
+  if (format === "signed-bundle" || format === "publisher-source" || format === "counterfactual-receipt") {
     if (!hex(signatureHex, 128)) throw new VerifierError("SIGNATURE_MALFORMED", "a detached 64-byte signature is required");
     args.push("--signature-hex", signatureHex);
-  } else if (signatureHex !== undefined) throw new VerifierError("INPUT_INVALID", "detached signatures apply only to signed-bundle or publisher-source");
+  } else if (signatureHex !== undefined) throw new VerifierError("INPUT_INVALID", "detached signatures apply only to signed-bundle, publisher-source, or counterfactual-receipt");
   return new Promise((resolve, reject) => {
     const child = execFile(verifier, args, {
       encoding: "buffer", shell: false, timeout: Math.ceil(timeoutMs),

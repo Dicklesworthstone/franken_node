@@ -26,18 +26,38 @@ const MAX_NATIVE_CONSOLE_BYTES: u64 = 8 * 1024 * 1024;
 const DEFAULT_NATIVE_CONSOLE_ENTRIES: [u64; 2] = [100_000, 1_000_000];
 const ENVELOPE_FIELDS: &[&str] = &["schema_version", "payload_json", "payload_sha256"];
 const PAYLOAD_FIELDS: &[&str] = &[
-    "package", "orchestrator", "runtime", "ambient_authority",
-    "host_io_exception_provenance", "process_argv", "host_effect_transcript", "expected",
+    "package",
+    "orchestrator",
+    "runtime",
+    "ambient_authority",
+    "host_io_exception_provenance",
+    "process_argv",
+    "host_effect_transcript",
+    "expected",
 ];
 const COMPLETED_FIELDS: &[&str] = &[
-    "terminal_state", "trace_id", "ir4_witness", "execution_value",
-    "instructions_executed", "console_output", "nondeterminism_trace", "lane", "decisions",
+    "terminal_state",
+    "trace_id",
+    "ir4_witness",
+    "execution_value",
+    "instructions_executed",
+    "console_output",
+    "nondeterminism_trace",
+    "lane",
+    "decisions",
 ];
 const EXCEPTION_FIELDS: &[&str] = &[
-    "terminal_state", "trace_id", "exception_value", "console_output",
+    "terminal_state",
+    "trace_id",
+    "exception_value",
+    "console_output",
 ];
 const ENGINE_FAILURE_FIELDS: &[&str] = &[
-    "terminal_state", "trace_id", "reason", "diagnostic", "console_output",
+    "terminal_state",
+    "trace_id",
+    "reason",
+    "diagnostic",
+    "console_output",
 ];
 
 type Result<T> = std::result::Result<T, IncidentBundleError>;
@@ -84,15 +104,21 @@ fn invalid(field: &str, reason: &'static str) -> IncidentBundleError {
 }
 
 fn object<'a>(value: &'a Value, field: &str) -> Result<&'a Map<String, Value>> {
-    value.as_object().ok_or_else(|| invalid(field, "expected object"))
+    value
+        .as_object()
+        .ok_or_else(|| invalid(field, "expected object"))
 }
 
 fn text<'a>(value: &'a Value, field: &str) -> Result<&'a str> {
-    value.as_str().ok_or_else(|| invalid(field, "expected string"))
+    value
+        .as_str()
+        .ok_or_else(|| invalid(field, "expected string"))
 }
 
 fn array<'a>(value: &'a Value, field: &str) -> Result<&'a [Value]> {
-    value.as_array().map(Vec::as_slice)
+    value
+        .as_array()
+        .map(Vec::as_slice)
         .ok_or_else(|| invalid(field, "expected array"))
 }
 
@@ -104,7 +130,9 @@ fn exact<'a>(
 ) -> Result<&'a Map<String, Value>> {
     let map = object(value, field)?;
     if required.iter().any(|key| !map.contains_key(*key))
-        || map.keys().any(|key| !required.contains(&key.as_str()) && !optional.contains(&key.as_str()))
+        || map
+            .keys()
+            .any(|key| !required.contains(&key.as_str()) && !optional.contains(&key.as_str()))
     {
         return Err(invalid(field, "missing or unknown native capture field"));
     }
@@ -170,15 +198,32 @@ fn console_budget_reason(payload: &Value, reason: &Value) -> Result<()> {
 fn terminal(payload: &Value) -> Result<CapturedNativeTerminalState> {
     let expected = &payload["expected"];
     object(expected, ".payload.expected")?;
-    let state = match text(&expected["terminal_state"], ".payload.expected.terminal_state")? {
+    let state = match text(
+        &expected["terminal_state"],
+        ".payload.expected.terminal_state",
+    )? {
         "completed" => {
-            exact(expected, ".payload.expected", COMPLETED_FIELDS, &["exit_code"])?;
+            exact(
+                expected,
+                ".payload.expected",
+                COMPLETED_FIELDS,
+                &["exit_code"],
+            )?;
             object(&expected["ir4_witness"], ".payload.expected.ir4_witness")?;
-            object(&expected["nondeterminism_trace"], ".payload.expected.nondeterminism_trace")?;
-            text(&expected["execution_value"], ".payload.expected.execution_value")?;
+            object(
+                &expected["nondeterminism_trace"],
+                ".payload.expected.nondeterminism_trace",
+            )?;
+            text(
+                &expected["execution_value"],
+                ".payload.expected.execution_value",
+            )?;
             text(&expected["lane"], ".payload.expected.lane")?;
             if expected["instructions_executed"].as_u64().is_none() {
-                return Err(invalid(".payload.expected.instructions_executed", "expected unsigned integer"));
+                return Err(invalid(
+                    ".payload.expected.instructions_executed",
+                    "expected unsigned integer",
+                ));
             }
             if let Some(exit) = expected.get("exit_code")
                 && !exit.is_null()
@@ -196,44 +241,78 @@ fn terminal(payload: &Value) -> Result<CapturedNativeTerminalState> {
         "uncaught_exception" => {
             exact(expected, ".payload.expected", EXCEPTION_FIELDS, &[])?;
             // Throwing an empty string is a legitimate guest exception.
-            text(&expected["exception_value"], ".payload.expected.exception_value")?;
+            text(
+                &expected["exception_value"],
+                ".payload.expected.exception_value",
+            )?;
             CapturedNativeTerminalState::UncaughtException
         }
         "engine_failure" => {
             exact(expected, ".payload.expected", ENGINE_FAILURE_FIELDS, &[])?;
             let diagnostic = text(&expected["diagnostic"], ".payload.expected.diagnostic")?;
             if diagnostic.is_empty() || diagnostic.len() > 4096 {
-                return Err(invalid(".payload.expected.diagnostic", "expected bounded native diagnostic"));
+                return Err(invalid(
+                    ".payload.expected.diagnostic",
+                    "expected bounded native diagnostic",
+                ));
             }
             let reason = &expected["reason"];
             object(reason, ".payload.expected.reason")?;
             match text(&reason["kind"], ".payload.expected.reason.kind")? {
                 "capability_denied" => {
-                    exact(reason, ".payload.expected.reason", &["kind", "capability"], &[])?;
+                    exact(
+                        reason,
+                        ".payload.expected.reason",
+                        &["kind", "capability"],
+                        &[],
+                    )?;
                     nonblank(&reason["capability"], ".payload.expected.reason.capability")?;
                 }
                 "instruction_budget_exhausted" => {
                     exact(reason, ".payload.expected.reason", &["kind", "budget"], &[])?;
-                    let budget = reason["budget"].as_u64()
-                        .ok_or_else(|| invalid(".payload.expected.reason.budget", "expected unsigned integer"))?;
+                    let budget = reason["budget"].as_u64().ok_or_else(|| {
+                        invalid(
+                            ".payload.expected.reason.budget",
+                            "expected unsigned integer",
+                        )
+                    })?;
                     let execution = &payload["runtime"]["execution"];
                     if execution["deterministic_budget"].as_u64() != Some(budget)
                         && execution["throughput_budget"].as_u64() != Some(budget)
                     {
-                        return Err(invalid(".payload.expected.reason.budget", "instruction limit is not bound to captured runtime settings"));
+                        return Err(invalid(
+                            ".payload.expected.reason.budget",
+                            "instruction limit is not bound to captured runtime settings",
+                        ));
                     }
                 }
                 "console_budget_exceeded" => console_budget_reason(payload, reason)?,
-                _ => return Err(invalid(".payload.expected.reason.kind", "unsupported native stopping reason")),
+                _ => {
+                    return Err(invalid(
+                        ".payload.expected.reason.kind",
+                        "unsupported native stopping reason",
+                    ));
+                }
             }
             CapturedNativeTerminalState::EngineFailure
         }
-        _ => return Err(invalid(".payload.expected.terminal_state", "unsupported native terminal state")),
+        _ => {
+            return Err(invalid(
+                ".payload.expected.terminal_state",
+                "unsupported native terminal state",
+            ));
+        }
     };
     nonblank(&expected["trace_id"], ".payload.expected.trace_id")?;
-    for entry in array(&expected["console_output"], ".payload.expected.console_output")? {
+    for entry in array(
+        &expected["console_output"],
+        ".payload.expected.console_output",
+    )? {
         object(entry, ".payload.expected.console_output[]")?;
-        text(&entry["message"], ".payload.expected.console_output[].message")?;
+        text(
+            &entry["message"],
+            ".payload.expected.console_output[].message",
+        )?;
     }
     Ok(state)
 }
@@ -248,12 +327,17 @@ fn run_context(initial: &Value) -> Result<Option<(&str, &str)>> {
 }
 
 fn run_failure(initial: &Value) -> Result<Option<&str>> {
-    initial.get("execution_failure")
+    initial
+        .get("execution_failure")
         .map(|value| nonblank(value, ".binding.execution_failure"))
         .transpose()
 }
 
-fn bind_run_context(initial: &Value, payload: &Value, state: CapturedNativeTerminalState) -> Result<()> {
+fn bind_run_context(
+    initial: &Value,
+    payload: &Value,
+    state: CapturedNativeTerminalState,
+) -> Result<()> {
     let context = run_context(initial)?;
     let failure = run_failure(initial)?;
     // Operator-authored captures need not claim a run receipt. Once a run is
@@ -263,7 +347,10 @@ fn bind_run_context(initial: &Value, payload: &Value, state: CapturedNativeTermi
     if (context.is_some() && state.is_failure() != failure.is_some())
         || (failure.is_some() && !state.is_failure())
     {
-        return Err(invalid(".binding.execution_failure", "run context disagrees with captured terminal state"));
+        return Err(invalid(
+            ".binding.execution_failure",
+            "run context disagrees with captured terminal state",
+        ));
     }
     if let Some(trace) = initial.get("trace_id")
         && nonblank(trace, ".binding.trace_id")?
@@ -285,31 +372,79 @@ pub(super) fn verify_terminal_events(
     let mut terminals = 0_usize;
     for event in timeline {
         let payload = &event["payload"];
-        for (field, failed) in [("native_execution_completed", false), ("native_execution_failed", true)] {
-            let Some(marker) = payload.get(field) else { continue; };
+        for (field, failed) in [
+            ("native_execution_completed", false),
+            ("native_execution_failed", true),
+        ] {
+            let Some(marker) = payload.get(field) else {
+                continue;
+            };
             terminals += 1;
             if terminals > 1 {
-                return Err(invalid(".binding.terminal_event", "multiple native terminal events"));
+                return Err(invalid(
+                    ".binding.terminal_event",
+                    "multiple native terminal events",
+                ));
             }
-            let capture = capture.ok_or_else(|| invalid(".binding.terminal_event", "native terminal event has no capture"))?;
-            let (id, hash) = run_context(initial)?
-                .ok_or_else(|| invalid(".binding.terminal_event", "native terminal event has no run context"))?;
+            let capture = capture.ok_or_else(|| {
+                invalid(
+                    ".binding.terminal_event",
+                    "native terminal event has no capture",
+                )
+            })?;
+            let (id, hash) = run_context(initial)?.ok_or_else(|| {
+                invalid(
+                    ".binding.terminal_event",
+                    "native terminal event has no run context",
+                )
+            })?;
             let fields: &[&str] = if failed {
-                &["run_receipt_id", "run_receipt_hash", "payload_sha256", "execution_failure"]
+                &[
+                    "run_receipt_id",
+                    "run_receipt_hash",
+                    "payload_sha256",
+                    "execution_failure",
+                ]
             } else {
                 &["run_receipt_id", "run_receipt_hash", "payload_sha256"]
             };
             let marker = exact(marker, ".binding.terminal_event", fields, &[])?;
             if event["event_type"].as_str() != Some("state_change")
                 || failed != capture.captured_terminal_state.is_failure()
-                || text(&marker["run_receipt_id"], ".binding.terminal_event.run_receipt_id")? != id
-                || !ct_str_eq(text(&marker["run_receipt_hash"], ".binding.terminal_event.run_receipt_hash")?, hash)
-                || !ct_str_eq(text(&marker["payload_sha256"], ".binding.terminal_event.payload_sha256")?, &capture.payload_sha256)
+                || text(
+                    &marker["run_receipt_id"],
+                    ".binding.terminal_event.run_receipt_id",
+                )? != id
+                || !ct_str_eq(
+                    text(
+                        &marker["run_receipt_hash"],
+                        ".binding.terminal_event.run_receipt_hash",
+                    )?,
+                    hash,
+                )
+                || !ct_str_eq(
+                    text(
+                        &marker["payload_sha256"],
+                        ".binding.terminal_event.payload_sha256",
+                    )?,
+                    &capture.payload_sha256,
+                )
             {
-                return Err(invalid(".binding.terminal_event", "terminal event disagrees with captured run"));
+                return Err(invalid(
+                    ".binding.terminal_event",
+                    "terminal event disagrees with captured run",
+                ));
             }
-            if failed && Some(text(&marker["execution_failure"], ".binding.terminal_event.execution_failure")?) != run_failure(initial)? {
-                return Err(invalid(".binding.terminal_event.execution_failure", "terminal event reports a different run failure"));
+            if failed
+                && Some(text(
+                    &marker["execution_failure"],
+                    ".binding.terminal_event.execution_failure",
+                )?) != run_failure(initial)?
+            {
+                return Err(invalid(
+                    ".binding.terminal_event.execution_failure",
+                    "terminal event reports a different run failure",
+                ));
             }
         }
     }
@@ -333,18 +468,32 @@ pub(super) fn verify_terminal_events(
 }
 
 pub(super) fn verify(initial: &Value) -> Result<Option<VerifiedNativeCaptureMetadata>> {
-    let Some(capture) = initial.get("native_replay") else { return Ok(None); };
+    let Some(capture) = initial.get("native_replay") else {
+        return Ok(None);
+    };
     let envelope = exact(capture, "", ENVELOPE_FIELDS, &[])?;
     if text(&envelope["schema_version"], ".schema_version")? != CAPTURE_SCHEMA {
-        return Err(invalid(".schema_version", "unsupported native capture schema"));
+        return Err(invalid(
+            ".schema_version",
+            "unsupported native capture schema",
+        ));
     }
     let raw = text(&envelope["payload_json"], ".payload_json")?;
     if raw.is_empty() || raw.len() > MAX_PAYLOAD_BYTES {
-        return Err(invalid(".payload_json", "native payload must contain 1..=4194304 bytes"));
+        return Err(invalid(
+            ".payload_json",
+            "native payload must contain 1..=4194304 bytes",
+        ));
     }
     let digest = hex::encode(Sha256::digest(raw.as_bytes()));
-    if !ct_str_eq(text(&envelope["payload_sha256"], ".payload_sha256")?, &digest) {
-        return Err(invalid(".payload_sha256", "does not match the exact captured payload bytes"));
+    if !ct_str_eq(
+        text(&envelope["payload_sha256"], ".payload_sha256")?,
+        &digest,
+    ) {
+        return Err(invalid(
+            ".payload_sha256",
+            "does not match the exact captured payload bytes",
+        ));
     }
     // Do not canonicalize or regenerate raw: even whitespace is part of its
     // authenticated digest. The inner parser rejects ambiguity independently.
@@ -362,9 +511,15 @@ pub(super) fn verify(initial: &Value) -> Result<Option<VerifiedNativeCaptureMeta
     for field in ["package", "orchestrator", "runtime"] {
         object(&payload[field], ".payload.settings")?;
     }
-    nonblank(&payload["package"]["extension_id"], ".payload.package.extension_id")?;
+    nonblank(
+        &payload["package"]["extension_id"],
+        ".payload.package.extension_id",
+    )?;
     nonblank(&payload["package"]["source"], ".payload.package.source")?;
-    for capability in array(&payload["package"]["capabilities"], ".payload.package.capabilities")? {
+    for capability in array(
+        &payload["package"]["capabilities"],
+        ".payload.package.capabilities",
+    )? {
         nonblank(capability, ".payload.package.capabilities[]")?;
     }
     for arg in array(&payload["process_argv"], ".payload.process_argv")? {
@@ -372,22 +527,39 @@ pub(super) fn verify(initial: &Value) -> Result<Option<VerifiedNativeCaptureMeta
     }
     match text(&payload["ambient_authority"], ".payload.ambient_authority")? {
         "deny_all" | "trusted_process_shape" => {}
-        _ => return Err(invalid(".payload.ambient_authority", "unsupported captured ambient grant")),
+        _ => {
+            return Err(invalid(
+                ".payload.ambient_authority",
+                "unsupported captured ambient grant",
+            ));
+        }
     }
-    text(&payload["host_io_exception_provenance"], ".payload.host_io_exception_provenance")?;
+    text(
+        &payload["host_io_exception_provenance"],
+        ".payload.host_io_exception_provenance",
+    )?;
     if let Some(process) = payload.get("process").filter(|value| !value.is_null()) {
         object(process, ".payload.process")?;
     }
-    let exchanges = array(&payload["host_effect_transcript"], ".payload.host_effect_transcript")?;
+    let exchanges = array(
+        &payload["host_effect_transcript"],
+        ".payload.host_effect_transcript",
+    )?;
     for exchange in exchanges {
         let pair = array(exchange, ".payload.host_effect_transcript[]")?;
         if pair.len() != 2 {
-            return Err(invalid(".payload.host_effect_transcript[]", "expected request/outcome pair"));
+            return Err(invalid(
+                ".payload.host_effect_transcript[]",
+                "expected request/outcome pair",
+            ));
         }
         object(&pair[0], ".payload.host_effect_transcript[].request")?;
         let outcome = object(&pair[1], ".payload.host_effect_transcript[].outcome")?;
         if outcome.len() != 1 || !(outcome.contains_key("Ok") || outcome.contains_key("Err")) {
-            return Err(invalid(".payload.host_effect_transcript[].outcome", "expected one result outcome"));
+            return Err(invalid(
+                ".payload.host_effect_transcript[].outcome",
+                "expected one result outcome",
+            ));
         }
     }
     let captured_terminal_state = terminal(&payload)?;
@@ -442,20 +614,29 @@ pub(in crate::incident_bundle) mod tests {
         }})
     }
 
-    fn captured(payload: &Value) -> Value { captured_raw(serde_json::to_string(payload).unwrap()) }
+    fn captured(payload: &Value) -> Value {
+        captured_raw(serde_json::to_string(payload).unwrap())
+    }
 
     #[test]
-    fn captures_keep_distinct_terminal_declarations_and_absent_capture_is_not_successful_execution() {
+    fn captures_keep_distinct_terminal_declarations_and_absent_capture_is_not_successful_execution()
+    {
         assert_eq!(verify(&json!({})).unwrap(), None);
         for (state, expected) in [
             ("completed", CapturedNativeTerminalState::Completed),
-            ("uncaught_exception", CapturedNativeTerminalState::UncaughtException),
+            (
+                "uncaught_exception",
+                CapturedNativeTerminalState::UncaughtException,
+            ),
             ("engine_failure", CapturedNativeTerminalState::EngineFailure),
         ] {
             let capture = captured(&payload(state));
             let metadata = verify(&capture).unwrap().unwrap();
             assert_eq!(metadata.captured_terminal_state, expected);
-            assert_eq!(metadata.payload_sha256, capture["native_replay"]["payload_sha256"]);
+            assert_eq!(
+                metadata.payload_sha256,
+                capture["native_replay"]["payload_sha256"]
+            );
             assert_eq!(metadata.host_io_exchange_count, 0);
         }
     }
@@ -468,7 +649,10 @@ pub(in crate::incident_bundle) mod tests {
         value["module_sources"] = module_capsule::tests::producer_sources();
         let original = captured(&value);
         let metadata = verify(&original).unwrap().unwrap();
-        assert!(!format!("{metadata:?}").contains(value["module_sources"]["capsule_base64"].as_str().unwrap()));
+        assert!(
+            !format!("{metadata:?}")
+                .contains(value["module_sources"]["capsule_base64"].as_str().unwrap())
+        );
         let mut changed = original.clone();
         let mut altered = value.clone();
         altered["module_sources"]["capsule_base64"] = json!("changed");
@@ -504,14 +688,26 @@ pub(in crate::incident_bundle) mod tests {
         let raw = serde_json::to_string(&payload("uncaught_exception")).unwrap();
         for (needle, replacement) in [
             ("\"trace_id\":", "\"trace_id\":\"other\",\"trace_id\":"),
-            ("\"trace_id\":", "\"trace\\u005fid\":\"other\",\"trace_id\":"),
+            (
+                "\"trace_id\":",
+                "\"trace\\u005fid\":\"other\",\"trace_id\":",
+            ),
             ("\"runtime\":", "\"runtime\":{},\"runtime\":"),
         ] {
             assert!(raw.contains(needle));
             let duplicate = raw.replacen(needle, replacement, 1);
-            assert_eq!(serde_json::from_str::<Value>(&duplicate).unwrap(), serde_json::from_str::<Value>(&raw).unwrap());
+            assert_eq!(
+                serde_json::from_str::<Value>(&duplicate).unwrap(),
+                serde_json::from_str::<Value>(&raw).unwrap()
+            );
             let error = verify(&captured_raw(duplicate)).unwrap_err();
-            assert!(matches!(error, IncidentBundleError::Structure { reason: "native payload must be unambiguous JSON", .. }));
+            assert!(matches!(
+                error,
+                IncidentBundleError::Structure {
+                    reason: "native payload must be unambiguous JSON",
+                    ..
+                }
+            ));
         }
     }
 
@@ -519,20 +715,38 @@ pub(in crate::incident_bundle) mod tests {
     fn envelope_limits_exact_bytes_and_schema_are_enforced_before_payload_use() {
         let value = payload("completed");
         let mut capture = captured(&value);
-        capture["native_replay"]["payload_json"] = json!(format!("{} ", capture["native_replay"]["payload_json"].as_str().unwrap()));
+        capture["native_replay"]["payload_json"] = json!(format!(
+            "{} ",
+            capture["native_replay"]["payload_json"].as_str().unwrap()
+        ));
         assert!(verify(&capture).is_err());
         let raw = serde_json::to_string_pretty(&value).unwrap();
-        assert_eq!(verify(&captured_raw(raw.clone())).unwrap().unwrap().payload_bytes, raw.len());
-        for raw in [String::new(), " ".repeat(MAX_PAYLOAD_BYTES + 1), "{} {}".into(), "[1]".into()] {
+        assert_eq!(
+            verify(&captured_raw(raw.clone()))
+                .unwrap()
+                .unwrap()
+                .payload_bytes,
+            raw.len()
+        );
+        for raw in [
+            String::new(),
+            " ".repeat(MAX_PAYLOAD_BYTES + 1),
+            "{} {}".into(),
+            "[1]".into(),
+        ] {
             assert!(verify(&captured_raw(raw)).is_err());
         }
         for key in ENVELOPE_FIELDS {
             let mut capture = captured(&value);
-            capture["native_replay"].as_object_mut().unwrap().remove(*key);
+            capture["native_replay"]
+                .as_object_mut()
+                .unwrap()
+                .remove(*key);
             assert!(verify(&capture).is_err());
         }
         let mut capture = captured(&value);
-        capture["native_replay"]["schema_version"] = json!("franken-node/native-replay-capture/v99");
+        capture["native_replay"]["schema_version"] =
+            json!("franken-node/native-replay-capture/v99");
         assert!(verify(&capture).is_err());
         assert!(verify(&json!({"native_replay":null})).is_err());
     }
@@ -540,7 +754,13 @@ pub(in crate::incident_bundle) mod tests {
     #[test]
     fn failed_prefixes_cannot_manufacture_completed_witness_fields() {
         for state in ["uncaught_exception", "engine_failure"] {
-            for field in ["ir4_witness", "instructions_executed", "nondeterminism_trace", "exit_code", "decisions"] {
+            for field in [
+                "ir4_witness",
+                "instructions_executed",
+                "nondeterminism_trace",
+                "exit_code",
+                "decisions",
+            ] {
                 let mut value = payload(state);
                 value["expected"][field] = Value::Null;
                 assert!(verify(&captured(&value)).is_err(), "{state}: {field}");
@@ -568,8 +788,13 @@ pub(in crate::incident_bundle) mod tests {
         }
         let mut value = payload("uncaught_exception");
         value["expected"]["exception_value"] = json!("instruction budget exhausted");
-        assert_eq!(verify(&captured(&value)).unwrap().unwrap().captured_terminal_state,
-            CapturedNativeTerminalState::UncaughtException);
+        assert_eq!(
+            verify(&captured(&value))
+                .unwrap()
+                .unwrap()
+                .captured_terminal_state,
+            CapturedNativeTerminalState::UncaughtException
+        );
     }
 
     fn console_stop_payload(entries: u64, max_entries: u64, bytes: u64) -> Value {
@@ -611,11 +836,16 @@ pub(in crate::incident_bundle) mod tests {
         for max_entries in DEFAULT_NATIVE_CONSOLE_ENTRIES {
             let mut value = console_stop_payload(max_entries + 1, max_entries, 30);
             value["runtime"]["execution"]
-                .as_object_mut().unwrap().remove("max_console_entries");
+                .as_object_mut()
+                .unwrap()
+                .remove("max_console_entries");
             assert!(verify(&captured(&value)).is_ok());
             value["runtime"]["execution"]["max_console_entries"] = Value::Null;
             assert!(verify(&captured(&value)).is_ok());
-            value["runtime"].as_object_mut().unwrap().remove("execution");
+            value["runtime"]
+                .as_object_mut()
+                .unwrap()
+                .remove("execution");
             assert!(verify(&captured(&value)).is_ok());
             // Labels can exhaust budgets with no accepted console output.
             assert_eq!(value["expected"]["console_output"], json!([]));
@@ -632,7 +862,10 @@ pub(in crate::incident_bundle) mod tests {
                 assert!(verify(&captured(&value)).is_err(), "{field}");
             }
             let mut value = original.clone();
-            value["expected"]["reason"].as_object_mut().unwrap().remove(field);
+            value["expected"]["reason"]
+                .as_object_mut()
+                .unwrap()
+                .remove(field);
             assert!(verify(&captured(&value)).is_err(), "missing {field}");
         }
         for (field, replacement) in [
@@ -644,18 +877,34 @@ pub(in crate::incident_bundle) mod tests {
             value["expected"]["reason"][field] = replacement;
             assert!(verify(&captured(&value)).is_err(), "{field}");
         }
-        for invalid in [json!(1), json!(-1), json!(1.5), json!("2"), json!(true), Value::Null] {
+        for invalid in [
+            json!(1),
+            json!(-1),
+            json!(1.5),
+            json!("2"),
+            json!(true),
+            Value::Null,
+        ] {
             let mut value = original.clone();
             value["runtime"]["execution"]["max_console_entries"] = invalid;
             assert!(verify(&captured(&value)).is_err());
         }
-        for invalid in [Value::Null, json!(true), json!([]), json!("settings"), json!(1)] {
+        for invalid in [
+            Value::Null,
+            json!(true),
+            json!([]),
+            json!("settings"),
+            json!(1),
+        ] {
             let mut value = console_stop_payload(100_001, 100_000, 30);
             value["runtime"]["execution"] = invalid;
             assert!(verify(&captured(&value)).is_err());
         }
         let mut value = console_stop_payload(2, 2, MAX_NATIVE_CONSOLE_BYTES);
-        assert!(verify(&captured(&value)).is_err(), "equal limits are not exhaustion");
+        assert!(
+            verify(&captured(&value)).is_err(),
+            "equal limits are not exhaustion"
+        );
         value["expected"]["reason"]["bytes"] = json!(MAX_NATIVE_CONSOLE_BYTES + 1);
         assert!(verify(&captured(&value)).is_ok());
     }
@@ -679,7 +928,12 @@ pub(in crate::incident_bundle) mod tests {
         initial["run_receipt_hash"] = json!("a".repeat(64));
         initial["trace_id"] = json!("trace-1");
         initial["host_effect_chain_head"] = json!(crate::bundle::EFFECT_RECEIPT_CHAIN_GENESIS);
-        for field in ["effect_count", "allowed_count", "denied_count", "failed_count"] {
+        for field in [
+            "effect_count",
+            "allowed_count",
+            "denied_count",
+            "failed_count",
+        ] {
             initial[field] = json!(0);
         }
         if state != "completed" {
@@ -694,9 +948,15 @@ pub(in crate::incident_bundle) mod tests {
             "run_receipt_hash":initial["run_receipt_hash"],
             "payload_sha256":initial["native_replay"]["payload_sha256"]
         });
-        if failed { marker["execution_failure"] = initial["execution_failure"].clone(); }
+        if failed {
+            marker["execution_failure"] = initial["execution_failure"].clone();
+        }
         let mut payload = json!({});
-        payload[if failed { "native_execution_failed" } else { "native_execution_completed" }] = marker;
+        payload[if failed {
+            "native_execution_failed"
+        } else {
+            "native_execution_completed"
+        }] = marker;
         json!({"event_type":"state_change","payload":payload})
     }
 
@@ -706,8 +966,11 @@ pub(in crate::incident_bundle) mod tests {
             let initial = with_run_context(state);
             assert!(verify(&initial).is_ok());
             let mut wrong = initial.clone();
-            if state == "completed" { wrong["execution_failure"] = json!("failed"); }
-            else { wrong.as_object_mut().unwrap().remove("execution_failure"); }
+            if state == "completed" {
+                wrong["execution_failure"] = json!("failed");
+            } else {
+                wrong.as_object_mut().unwrap().remove("execution_failure");
+            }
             assert!(verify(&wrong).is_err());
             let mut wrong = initial.clone();
             wrong["trace_id"] = json!("different");
@@ -722,7 +985,10 @@ pub(in crate::incident_bundle) mod tests {
         completed["expected"]["exit_code"] = json!(1);
         let mut initial = with_run_context("completed");
         initial["native_replay"] = captured(&completed)["native_replay"].clone();
-        assert_eq!(verify(&initial).unwrap().unwrap().captured_terminal_state, CapturedNativeTerminalState::Completed);
+        assert_eq!(
+            verify(&initial).unwrap().unwrap().captured_terminal_state,
+            CapturedNativeTerminalState::Completed
+        );
     }
 
     #[test]
@@ -737,13 +1003,23 @@ pub(in crate::incident_bundle) mod tests {
                     .is_ok()
             );
             assert!(verify_terminal_events(&initial, &[], Some(&metadata)).is_err());
-            assert!(verify_terminal_events(&initial, &[event.clone(), event.clone()], Some(&metadata)).is_err());
+            assert!(
+                verify_terminal_events(&initial, &[event.clone(), event.clone()], Some(&metadata))
+                    .is_err()
+            );
             assert!(verify_terminal_events(&initial, std::slice::from_ref(&event), None).is_err());
-            let field = if state == "completed" { "native_execution_completed" } else { "native_execution_failed" };
+            let field = if state == "completed" {
+                "native_execution_completed"
+            } else {
+                "native_execution_failed"
+            };
             for key in ["run_receipt_id", "run_receipt_hash", "payload_sha256"] {
                 let mut wrong = event.clone();
                 wrong["payload"][field][key] = json!("different");
-                assert!(verify_terminal_events(&initial, &[wrong], Some(&metadata)).is_err(), "{key}");
+                assert!(
+                    verify_terminal_events(&initial, &[wrong], Some(&metadata)).is_err(),
+                    "{key}"
+                );
             }
             let mut wrong = event.clone();
             wrong["event_type"] = json!("external_signal");
@@ -768,7 +1044,11 @@ pub(in crate::incident_bundle) mod tests {
 
     fn signing_key() -> ed25519_dalek::SigningKey {
         let mut seed = [0_u8; 32];
-        hex::decode_to_slice("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60", &mut seed).unwrap();
+        hex::decode_to_slice(
+            "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+            &mut seed,
+        )
+        .unwrap();
         ed25519_dalek::SigningKey::from_bytes(&seed)
     }
 
@@ -779,7 +1059,8 @@ pub(in crate::incident_bundle) mod tests {
         // fixtures still make no claim about executing valid engine IR.
         let mut bundle: Value = serde_json::from_slice(include_bytes!(
             "../tests/fixtures/cli_incident_bundle/INC-SDK-FIXTURE-1.fnbundle"
-        )).unwrap();
+        ))
+        .unwrap();
         let mut event = terminal_event(&initial, initial.get("execution_failure").is_some());
         event["sequence_number"] = json!(1);
         event["timestamp"] = bundle["timeline"][0]["timestamp"].clone();
@@ -800,7 +1081,10 @@ pub(in crate::incident_bundle) mod tests {
             assert!(verified.native_capture.is_some());
             assert_eq!(verified.event_count, 1);
             let stranger = ed25519_dalek::SigningKey::from_bytes(&[0x12; 32]);
-            assert!(matches!(verify_incident_bundle(&raw, &stranger.verifying_key()), Err(IncidentBundleError::SignerNotTrusted)));
+            assert!(matches!(
+                verify_incident_bundle(&raw, &stranger.verifying_key()),
+                Err(IncidentBundleError::SignerNotTrusted)
+            ));
         }
     }
 
@@ -810,9 +1094,9 @@ pub(in crate::incident_bundle) mod tests {
 
         let with_sources = |sources: Value| {
             let mut initial = with_run_context("completed");
-            let mut payload: Value = serde_json::from_str(
-                initial["native_replay"]["payload_json"].as_str().unwrap()
-            ).unwrap();
+            let mut payload: Value =
+                serde_json::from_str(initial["native_replay"]["payload_json"].as_str().unwrap())
+                    .unwrap();
             payload["module_sources"] = sources;
             initial["native_replay"] = captured(&payload)["native_replay"].clone();
             initial
@@ -825,9 +1109,15 @@ pub(in crate::incident_bundle) mod tests {
             // internally inconsistent source record supplied by this producer.
             let bytes = signed_bundle(with_sources(sources));
             let error = verify_incident_bundle(&bytes, &signing_key().verifying_key()).unwrap_err();
-            assert!(matches!(error, IncidentBundleError::Structure { ref path, .. }
-                if path == "$.initial_state_snapshot.native_replay.payload.module_sources"), "{case}: {error:?}");
-            assert!(!format!("{error:?}").contains("PRIVATE-SOURCE-SENTINEL"), "{case}");
+            assert!(
+                matches!(error, IncidentBundleError::Structure { ref path, .. }
+                if path == "$.initial_state_snapshot.native_replay.payload.module_sources"),
+                "{case}: {error:?}"
+            );
+            assert!(
+                !format!("{error:?}").contains("PRIVATE-SOURCE-SENTINEL"),
+                "{case}"
+            );
         }
     }
 
@@ -839,11 +1129,15 @@ pub(in crate::incident_bundle) mod tests {
             let mut invalid = original.clone();
             match change {
                 0 => invalid["native_replay"]["payload_sha256"] = json!("0".repeat(64)),
-                1 => { invalid.as_object_mut().unwrap().remove("execution_failure"); }
+                1 => {
+                    invalid.as_object_mut().unwrap().remove("execution_failure");
+                }
                 2 => invalid["trace_id"] = json!("wrong-trace"),
                 3 => invalid["native_replay"]["schema_version"] = json!("unsupported"),
                 _ => {
-                    let raw = invalid["native_replay"]["payload_json"].as_str().unwrap()
+                    let raw = invalid["native_replay"]["payload_json"]
+                        .as_str()
+                        .unwrap()
                         .replacen("\"trace_id\":", "\"trace_id\":\"erased\",\"trace_id\":", 1);
                     invalid["native_replay"] = captured_raw(raw)["native_replay"].clone();
                 }
@@ -851,34 +1145,51 @@ pub(in crate::incident_bundle) mod tests {
             // Recompute both outer hashes and an actual Ed25519 signature for
             // the contradiction, so rejection is attributable to native checks.
             let raw = signed_bundle(invalid);
-            assert!(matches!(verify_incident_bundle(&raw, &signing_key().verifying_key()),
+            assert!(
+                matches!(verify_incident_bundle(&raw, &signing_key().verifying_key()),
                 Err(IncidentBundleError::Structure { ref path, .. })
-                    if path.starts_with("$.initial_state_snapshot.native_replay")), "mutation {change}");
+                    if path.starts_with("$.initial_state_snapshot.native_replay")),
+                "mutation {change}"
+            );
         }
     }
     #[test]
     fn zero_effect_native_run_cannot_claim_a_nonempty_ledger_or_drop_its_terminal() {
-        use super::super::verify_incident_bundle;
         use super::super::structure::tests::{refresh_timeline_metadata, resign, set_chunks};
+        use super::super::verify_incident_bundle;
         for state in ["completed", "uncaught_exception", "engine_failure"] {
             let bytes = signed_bundle(with_run_context(state));
             verify_incident_bundle(&bytes, &signing_key().verifying_key()).unwrap();
-            for field in ["effect_count", "allowed_count", "denied_count", "failed_count", "host_effect_chain_head"] {
+            for field in [
+                "effect_count",
+                "allowed_count",
+                "denied_count",
+                "failed_count",
+                "host_effect_chain_head",
+            ] {
                 let mut value: Value = serde_json::from_slice(&bytes).unwrap();
                 value["initial_state_snapshot"][field] = if field == "host_effect_chain_head" {
                     json!(format!("sha256:{}", "f".repeat(64)))
-                } else { json!(1) };
-                let error = verify_incident_bundle(&resign(&mut value), &signing_key().verifying_key()).unwrap_err();
-                assert!(matches!(error, IncidentBundleError::Structure { path, .. }
-                    if path == format!("$.initial_state_snapshot.{field}")), "{state}: {field}");
+                } else {
+                    json!(1)
+                };
+                let error =
+                    verify_incident_bundle(&resign(&mut value), &signing_key().verifying_key())
+                        .unwrap_err();
+                assert!(
+                    matches!(error, IncidentBundleError::Structure { path, .. }
+                    if path == format!("$.initial_state_snapshot.{field}")),
+                    "{state}: {field}"
+                );
             }
             let mut value: Value = serde_json::from_slice(&bytes).unwrap();
             value["timeline"] = json!([]);
             refresh_timeline_metadata(&mut value);
             set_chunks(&mut value, std::slice::from_ref(&(0..0)));
-            assert!(matches!(verify_incident_bundle(&resign(&mut value), &signing_key().verifying_key()),
-                Err(IncidentBundleError::Structure { path, .. }) if path == "$.timeline"));
+            assert!(
+                matches!(verify_incident_bundle(&resign(&mut value), &signing_key().verifying_key()),
+                Err(IncidentBundleError::Structure { path, .. }) if path == "$.timeline")
+            );
         }
     }
-
 }

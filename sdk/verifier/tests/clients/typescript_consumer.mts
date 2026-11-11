@@ -66,4 +66,13 @@ for (const name of ["publisher_source_v1_fixture_2", "publisher_source_v2_fixtur
     throw new Error("TypeScript publisher ceilings lost precision");
   }
 }
-console.log(JSON.stringify({ consumer: "typescript", positive: 7, negative: 2, passed: true }));
+const cfSweep = cases.find((item) => item.name === "counterfactual_signed_sweep")!;
+const cfVerified = await verifyArtifact(Buffer.from(cfSweep.input_hex, "hex"), cfSweep.anchor,
+  { verifier: resolve("verifier"), format: "counterfactual-receipt", signatureHex: cfSweep.signature_hex });
+if (cfVerified.format !== "counterfactual-receipt"
+    || cfVerified.scope !== "authenticated_counterfactual_receipt"
+    || cfVerified.facts.mode !== "sweep"
+    || cfVerified.facts.result_count !== 2) {
+  throw new Error("TypeScript counterfactual receipt mismatch");
+}
+console.log(JSON.stringify({ consumer: "typescript", positive: 8, negative: 2, passed: true }));

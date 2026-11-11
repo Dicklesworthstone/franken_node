@@ -431,5 +431,49 @@ const transportSchema = JSON.parse(sourceWire); transportSchema.schema_version =
 add("publisher_source_transport_schema", "publisher-source", JSON.stringify(transportSchema), "EVIDENCE_INVALID", { signature_hex: sourceSignature });
 const noncanonicalBase64 = JSON.parse(sourceWire); noncanonicalBase64.capsule_base64 += "\n";
 add("publisher_source_noncanonical_base64", "publisher-source", JSON.stringify(noncanonicalBase64), "EVIDENCE_INVALID", { signature_hex: sourceSignature });
+
+// Counterfactual receipts: detached Ed25519 signature over canonical output JSON,
+// bound to a caller-expected baseline_integrity_hash.
+const cfBundleHash = hash("counterfactual-baseline-bundle");
+const cfSingleOutput = {
+  metadata: { bundle_hash: cfBundleHash, policy_id: "strict-v1" },
+  summary: { changed_decisions: 1 },
+};
+const cfSweepOutput = {
+  metadata: { bundle_hash: cfBundleHash },
+  results: [
+    { metadata: { bundle_hash: cfBundleHash }, policy_id: "strict-v1" },
+    { metadata: { bundle_hash: cfBundleHash }, policy_id: "balanced-v1" },
+  ],
+};
+function cfWire(output, baselineHash = cfBundleHash, schema = "franken-verifier/counterfactual-receipt-input/v1") {
+  return JSON.stringify({
+    schema_version: schema,
+    baseline_integrity_hash: baselineHash,
+    counterfactual_output: output,
+  });
+}
+const cfSingleSig = sign(null, Buffer.from(canonical(cfSingleOutput)), key).toString("hex");
+const cfSweepSig = sign(null, Buffer.from(canonical(cfSweepOutput)), key).toString("hex");
+add("counterfactual_signed_single", "counterfactual-receipt", cfWire(cfSingleOutput), "verified", {
+  signature_hex: cfSingleSig, cf_mode: "single", cf_count: 1, cf_baseline: cfBundleHash,
+});
+add("counterfactual_signed_sweep", "counterfactual-receipt", cfWire(cfSweepOutput), "verified", {
+  signature_hex: cfSweepSig, cf_mode: "sweep", cf_count: 2, cf_baseline: cfBundleHash,
+});
+add("counterfactual_foreign_anchor", "counterfactual-receipt", cfWire(cfSweepOutput), "SIGNATURE_INVALID", {
+  anchor: foreign, signature_hex: cfSweepSig,
+});
+add("counterfactual_invalid_signature", "counterfactual-receipt", cfWire(cfSweepOutput), "SIGNATURE_INVALID", {
+  signature_hex: "00".repeat(64),
+});
+add("counterfactual_missing_signature", "counterfactual-receipt", cfWire(cfSweepOutput), "SIGNATURE_MALFORMED");
+add("counterfactual_wrong_baseline_hash", "counterfactual-receipt", cfWire(cfSweepOutput, hash("other-bundle")), "INTEGRITY_MISMATCH", {
+  signature_hex: cfSweepSig,
+});
+add("counterfactual_unknown_schema", "counterfactual-receipt", cfWire(cfSingleOutput, cfBundleHash, "franken-verifier/counterfactual-receipt-input/v99"), "EVIDENCE_INVALID", {
+  signature_hex: cfSingleSig,
+});
+
 writeFileSync(output, JSON.stringify(cases));
 console.log(JSON.stringify({ vectors: cases.length, incident_sha256: hash(incidentBytes), capsule_expected_hash: capsule.manifest.expected_output_hash, sdk_integrity: sdk.integrity_hash }));

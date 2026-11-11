@@ -25,47 +25,78 @@ const MAX_CHUNKS: usize = 1_000;
 const MAX_CHUNK_BYTES: usize = 10 * 1024 * 1024;
 const EMPTY_CREATED_AT: &str = "1970-01-01T00:00:00.000000Z";
 const EVENT_FIELDS: &[&str] = &[
-    "sequence_number", "timestamp", "event_type", "payload", "causal_parent",
+    "sequence_number",
+    "timestamp",
+    "event_type",
+    "payload",
+    "causal_parent",
 ];
 const MANIFEST_FIELDS: &[&str] = &[
-    "event_count", "first_timestamp", "last_timestamp", "time_span_micros",
-    "compressed_size_bytes", "chunk_count", "decision_sequence_hash",
+    "event_count",
+    "first_timestamp",
+    "last_timestamp",
+    "time_span_micros",
+    "compressed_size_bytes",
+    "chunk_count",
+    "decision_sequence_hash",
 ];
 const CHUNK_FIELDS: &[&str] = &[
-    "bundle_id", "chunk_index", "total_chunks", "event_count",
-    "first_sequence_number", "last_sequence_number", "compressed_size_bytes",
-    "chunk_hash", "events",
+    "bundle_id",
+    "chunk_index",
+    "total_chunks",
+    "event_count",
+    "first_sequence_number",
+    "last_sequence_number",
+    "compressed_size_bytes",
+    "chunk_hash",
+    "events",
 ];
 
 type Result<T> = std::result::Result<T, IncidentBundleError>;
 
 fn invalid(path: impl Into<String>, reason: &'static str) -> IncidentBundleError {
-    IncidentBundleError::Structure { path: path.into(), reason }
+    IncidentBundleError::Structure {
+        path: path.into(),
+        reason,
+    }
 }
 
 fn member<'a>(object: &'a Map<String, Value>, key: &str, path: &str) -> Result<&'a Value> {
-    object.get(key).ok_or_else(|| invalid(format!("{path}.{key}"), "missing field"))
+    object
+        .get(key)
+        .ok_or_else(|| invalid(format!("{path}.{key}"), "missing field"))
 }
 
 fn text<'a>(object: &'a Map<String, Value>, key: &str, path: &str) -> Result<&'a str> {
-    member(object, key, path)?.as_str()
+    member(object, key, path)?
+        .as_str()
         .ok_or_else(|| invalid(format!("{path}.{key}"), "expected string"))
 }
 
 fn uint(object: &Map<String, Value>, key: &str, path: &str) -> Result<u64> {
-    member(object, key, path)?.as_u64()
+    member(object, key, path)?
+        .as_u64()
         .ok_or_else(|| invalid(format!("{path}.{key}"), "expected unsigned integer"))
 }
 
 fn expect_uint(object: &Map<String, Value>, key: &str, path: &str, expected: u64) -> Result<()> {
     if uint(object, key, path)? != expected {
-        return Err(invalid(format!("{path}.{key}"), "does not match replay derivation"));
+        return Err(invalid(
+            format!("{path}.{key}"),
+            "does not match replay derivation",
+        ));
     }
     Ok(())
 }
 
-fn exact_object<'a>(value: &'a Value, path: &str, fields: &[&str]) -> Result<&'a Map<String, Value>> {
-    let object = value.as_object().ok_or_else(|| invalid(path, "expected object"))?;
+fn exact_object<'a>(
+    value: &'a Value,
+    path: &str,
+    fields: &[&str],
+) -> Result<&'a Map<String, Value>> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| invalid(path, "expected object"))?;
     for field in fields {
         member(object, field, path)?;
     }
@@ -76,7 +107,10 @@ fn exact_object<'a>(value: &'a Value, path: &str, fields: &[&str]) -> Result<&'a
 }
 
 fn array<'a>(value: &'a Value, path: &str) -> Result<&'a [Value]> {
-    value.as_array().map(Vec::as_slice).ok_or_else(|| invalid(path, "expected array"))
+    value
+        .as_array()
+        .map(Vec::as_slice)
+        .ok_or_else(|| invalid(path, "expected array"))
 }
 
 fn canonical_bytes(value: &Value, path: &str) -> Result<Vec<u8>> {
@@ -87,8 +121,15 @@ fn canonical_bytes(value: &Value, path: &str) -> Result<Vec<u8>> {
 fn timestamp_micros(timestamp: &str, path: &str) -> Result<i64> {
     let parsed = DateTime::parse_from_rfc3339(timestamp)
         .map_err(|_| invalid(path, "invalid RFC3339 timestamp"))?;
-    if parsed.with_timezone(&Utc).to_rfc3339_opts(SecondsFormat::Micros, true) != timestamp {
-        return Err(invalid(path, "expected canonical UTC microsecond timestamp"));
+    if parsed
+        .with_timezone(&Utc)
+        .to_rfc3339_opts(SecondsFormat::Micros, true)
+        != timestamp
+    {
+        return Err(invalid(
+            path,
+            "expected canonical UTC microsecond timestamp",
+        ));
     }
     Ok(parsed.timestamp_micros())
 }
@@ -104,19 +145,37 @@ fn verify_timeline(timeline: &[Value]) -> Result<u64> {
         let event = exact_object(value, &path, EVENT_FIELDS)?;
         let sequence = index as u64 + 1;
         expect_uint(event, "sequence_number", &path, sequence)?;
-        let micros = timestamp_micros(text(event, "timestamp", &path)?, &format!("{path}.timestamp"))?;
+        let micros = timestamp_micros(
+            text(event, "timestamp", &path)?,
+            &format!("{path}.timestamp"),
+        )?;
         if previous_micros.is_some_and(|previous| micros < previous) {
-            return Err(invalid(format!("{path}.timestamp"), "timeline timestamps decrease"));
+            return Err(invalid(
+                format!("{path}.timestamp"),
+                "timeline timestamps decrease",
+            ));
         }
         first_micros.get_or_insert(micros);
         previous_micros = Some(micros);
         match text(event, "event_type", &path)? {
             "state_change" | "policy_eval" | "external_signal" | "operator_action" => {}
-            _ => return Err(invalid(format!("{path}.event_type"), "unknown replay event type")),
+            _ => {
+                return Err(invalid(
+                    format!("{path}.event_type"),
+                    "unknown replay event type",
+                ));
+            }
         }
         let parent = member(event, "causal_parent", &path)?;
-        if !parent.is_null() && !parent.as_u64().is_some_and(|parent| parent > 0 && parent < sequence) {
-            return Err(invalid(format!("{path}.causal_parent"), "parent must name an earlier event"));
+        if !parent.is_null()
+            && !parent
+                .as_u64()
+                .is_some_and(|parent| parent > 0 && parent < sequence)
+        {
+            return Err(invalid(
+                format!("{path}.causal_parent"),
+                "parent must name an earlier event",
+            ));
         }
     }
     // Match the producer's saturating microsecond span at the chrono range edge.
@@ -141,7 +200,10 @@ fn chunk_hasher() -> Sha256 {
 
 fn finish_chunk(mut hash: Sha256, events: Range<usize>) -> ExpectedChunk {
     hash.update(b"]");
-    ExpectedChunk { events, hash: hex::encode(hash.finalize()) }
+    ExpectedChunk {
+        events,
+        hash: hex::encode(hash.finalize()),
+    }
 }
 
 /// Stream one event's canonical bytes at a time. Reconstructing chunk digests
@@ -154,7 +216,10 @@ fn expected_chunks(timeline: &[Value], max_bytes: usize) -> Result<Vec<ExpectedC
     for (index, event) in timeline.iter().enumerate() {
         let bytes = canonical_bytes(event, &format!("$.timeline[{index}]"))?;
         if bytes.len() >= max_bytes.saturating_sub(2) {
-            return Err(invalid(format!("$.timeline[{index}]"), "event exceeds chunk byte limit"));
+            return Err(invalid(
+                format!("$.timeline[{index}]"),
+                "event exceeds chunk byte limit",
+            ));
         }
         if index > start && size + 1 + bytes.len() > max_bytes {
             chunks.push(finish_chunk(hash, start..index));
@@ -189,7 +254,8 @@ fn expected_bundle_id(incident_id: &str, created_at: &str, timeline: &[Value]) -
     let entropy = hash.finalize();
     let millis = DateTime::parse_from_rfc3339(created_at)
         .map_err(|_| invalid("$.created_at", "invalid RFC3339 timestamp"))?
-        .timestamp_millis().max(0) as u64;
+        .timestamp_millis()
+        .max(0) as u64;
     let time = millis.to_be_bytes();
     let mut bytes = [0_u8; 16];
     bytes[..6].copy_from_slice(&time[2..]);
@@ -198,7 +264,14 @@ fn expected_bundle_id(incident_id: &str, created_at: &str, timeline: &[Value]) -
     bytes[8] = 0x80 | (entropy[2] & 0x3f);
     bytes[9..].copy_from_slice(&entropy[3..10]);
     let hex = hex::encode(bytes);
-    Ok(format!("{}-{}-{}-{}-{}", &hex[..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..]))
+    Ok(format!(
+        "{}-{}-{}-{}-{}",
+        &hex[..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..]
+    ))
 }
 
 /// Reuse the independent receipt verifier on the actual product timeline.
@@ -206,9 +279,13 @@ fn expected_bundle_id(incident_id: &str, created_at: &str, timeline: &[Value]) -
 /// checks establish their internal consistency, not the original run's
 /// detached ledger signature or the semantics of guest execution.
 fn verify_effect_receipts(initial: &Value, timeline: &[Value]) -> Result<()> {
-    let is_run = ["run_receipt_id", "run_receipt_hash", "host_effect_chain_head"]
-        .iter()
-        .any(|field| initial.get(field).is_some());
+    let is_run = [
+        "run_receipt_id",
+        "run_receipt_hash",
+        "host_effect_chain_head",
+    ]
+    .iter()
+    .any(|field| initial.get(field).is_some());
     let mut entries = Vec::new();
     for (index, event) in timeline.iter().enumerate() {
         let Some(value) = event["payload"].get("effect_receipt_chain_entry") else {
@@ -228,14 +305,23 @@ fn verify_effect_receipts(initial: &Value, timeline: &[Value]) -> Result<()> {
             if event["event_type"].as_str() != Some("policy_eval")
                 || event["payload"].as_object().map(Map::len) != Some(1)
             {
-                return Err(invalid(format!("$.timeline[{index}]"), "run effect must be one policy-evaluation receipt"));
+                return Err(invalid(
+                    format!("$.timeline[{index}]"),
+                    "run effect must be one policy-evaluation receipt",
+                ));
             }
-            if entry.receipt.seq != entry.index || entry.receipt.trace_id.trim().is_empty()
-                || entries.first().is_some_and(|first: &EffectReceiptChainEntry| {
-                    first.receipt.trace_id != entry.receipt.trace_id
-                })
+            if entry.receipt.seq != entry.index
+                || entry.receipt.trace_id.trim().is_empty()
+                || entries
+                    .first()
+                    .is_some_and(|first: &EffectReceiptChainEntry| {
+                        first.receipt.trace_id != entry.receipt.trace_id
+                    })
             {
-                return Err(invalid(&path, "effect sequence or trace disagrees with captured run"));
+                return Err(invalid(
+                    &path,
+                    "effect sequence or trace disagrees with captured run",
+                ));
             }
             let millis = i64::try_from(entry.receipt.recorded_at_millis)
                 .map_err(|_| invalid(&path, "effect timestamp is outside replay range"))?;
@@ -243,12 +329,20 @@ fn verify_effect_receipts(initial: &Value, timeline: &[Value]) -> Result<()> {
                 .ok_or_else(|| invalid(&path, "effect timestamp is outside replay range"))?
                 .to_rfc3339_opts(SecondsFormat::Micros, true);
             if event["timestamp"].as_str() != Some(timestamp.as_str()) {
-                return Err(invalid(format!("$.timeline[{index}].timestamp"), "timeline timestamp disagrees with effect receipt"));
+                return Err(invalid(
+                    format!("$.timeline[{index}].timestamp"),
+                    "timeline timestamp disagrees with effect receipt",
+                ));
             }
-            let expected_parent = index.checked_sub(1).map(|parent| Value::from(parent + 1))
+            let expected_parent = index
+                .checked_sub(1)
+                .map(|parent| Value::from(parent + 1))
                 .unwrap_or(Value::Null);
             if event["causal_parent"] != expected_parent {
-                return Err(invalid(format!("$.timeline[{index}].causal_parent"), "run effect must follow the previous receipt"));
+                return Err(invalid(
+                    format!("$.timeline[{index}].causal_parent"),
+                    "run effect must follow the previous receipt",
+                ));
             }
         }
         entries.push(entry);
@@ -260,31 +354,61 @@ fn verify_effect_receipts(initial: &Value, timeline: &[Value]) -> Result<()> {
         EFFECT_RECEIPT_CHAIN_GENESIS.to_string()
     } else {
         verify_effect_chain_entries(&entries)
-            .map_err(|_| invalid("$.timeline", "effect receipt chain failed independent verification"))?
+            .map_err(|_| {
+                invalid(
+                    "$.timeline",
+                    "effect receipt chain failed independent verification",
+                )
+            })?
             .head_chain_hash
     };
-    let initial = initial.as_object()
-        .ok_or_else(|| invalid("$.initial_state_snapshot", "effect chain requires an initial state object"))?;
+    let initial = initial.as_object().ok_or_else(|| {
+        invalid(
+            "$.initial_state_snapshot",
+            "effect chain requires an initial state object",
+        )
+    })?;
     if is_run {
         for field in ["run_receipt_id", "run_receipt_hash"] {
-            if text(initial, field, "$.initial_state_snapshot")?.trim().is_empty() {
-                return Err(invalid(format!("$.initial_state_snapshot.{field}"), "empty run binding"));
+            if text(initial, field, "$.initial_state_snapshot")?
+                .trim()
+                .is_empty()
+            {
+                return Err(invalid(
+                    format!("$.initial_state_snapshot.{field}"),
+                    "empty run binding",
+                ));
             }
         }
-        text(initial, "host_effect_chain_head", "$.initial_state_snapshot")?;
+        text(
+            initial,
+            "host_effect_chain_head",
+            "$.initial_state_snapshot",
+        )?;
         if entries.is_empty() {
             // Native runs without host effects carry one terminal state event.
             // Its capture digest and failure/completion binding are checked by
             // incident_native_capture after all replay structure has passed.
-            if !initial.contains_key("native_replay") || timeline.len() != 1
+            if !initial.contains_key("native_replay")
+                || timeline.len() != 1
                 || timeline[0]["payload"].as_object().map(Map::len) != Some(1)
-                || !(timeline[0]["payload"].get("native_execution_completed").is_some()
-                    || timeline[0]["payload"].get("native_execution_failed").is_some())
+                || !(timeline[0]["payload"]
+                    .get("native_execution_completed")
+                    .is_some()
+                    || timeline[0]["payload"]
+                        .get("native_execution_failed")
+                        .is_some())
             {
-                return Err(invalid("$.timeline", "zero-effect run requires its captured native terminal event"));
+                return Err(invalid(
+                    "$.timeline",
+                    "zero-effect run requires its captured native terminal event",
+                ));
             }
         } else if entries.len() != timeline.len() {
-            return Err(invalid("$.timeline", "run timeline contains events outside its effect chain"));
+            return Err(invalid(
+                "$.timeline",
+                "run timeline contains events outside its effect chain",
+            ));
         }
     }
     // Authored evidence may carry a partial summary under chain_head_hash;
@@ -293,7 +417,10 @@ fn verify_effect_receipts(initial: &Value, timeline: &[Value]) -> Result<()> {
         if initial.contains_key(field)
             && !ct_str_eq(text(initial, field, "$.initial_state_snapshot")?, &head)
         {
-            return Err(invalid(format!("$.initial_state_snapshot.{field}"), "does not match verified effect chain head"));
+            return Err(invalid(
+                format!("$.initial_state_snapshot.{field}"),
+                "does not match verified effect chain head",
+            ));
         }
     }
     let mut counts = [entries.len() as u64, 0, 0, 0];
@@ -305,8 +432,14 @@ fn verify_effect_receipts(initial: &Value, timeline: &[Value]) -> Result<()> {
         };
         counts[outcome] += 1;
     }
-    for (field, count) in ["effect_count", "allowed_count", "denied_count", "failed_count"]
-        .into_iter().zip(counts)
+    for (field, count) in [
+        "effect_count",
+        "allowed_count",
+        "denied_count",
+        "failed_count",
+    ]
+    .into_iter()
+    .zip(counts)
     {
         if is_run || initial.contains_key(field) {
             expect_uint(initial, field, "$.initial_state_snapshot", count)?;
@@ -319,9 +452,12 @@ pub(super) fn verify_structure(bundle: &Map<String, Value>) -> Result<()> {
     let timeline = array(member(bundle, "timeline", "$")?, "$.timeline")?;
     let span = verify_timeline(timeline)?;
     let incident_id = text(bundle, "incident_id", "$")?;
-    if incident_id.trim().is_empty() || incident_id.trim() != incident_id
+    if incident_id.trim().is_empty()
+        || incident_id.trim() != incident_id
         || incident_id.chars().any(char::is_control)
-        || incident_id.contains('/') || incident_id.contains('\\') || incident_id.contains("..")
+        || incident_id.contains('/')
+        || incident_id.contains('\\')
+        || incident_id.contains("..")
     {
         return Err(invalid("$.incident_id", "invalid incident identifier"));
     }
@@ -329,27 +465,48 @@ pub(super) fn verify_structure(bundle: &Map<String, Value>) -> Result<()> {
         return Err(invalid("$.policy_version", "empty policy version"));
     }
     let created_at = text(bundle, "created_at", "$")?;
-    let expected_created = timeline.last()
-        .and_then(|event| event["timestamp"].as_str()).unwrap_or(EMPTY_CREATED_AT);
+    let expected_created = timeline
+        .last()
+        .and_then(|event| event["timestamp"].as_str())
+        .unwrap_or(EMPTY_CREATED_AT);
     if created_at != expected_created {
-        return Err(invalid("$.created_at", "does not match final timeline timestamp"));
+        return Err(invalid(
+            "$.created_at",
+            "does not match final timeline timestamp",
+        ));
     }
     let bundle_id = text(bundle, "bundle_id", "$")?;
-    if !ct_str_eq(bundle_id, &expected_bundle_id(incident_id, created_at, timeline)?) {
-        return Err(invalid("$.bundle_id", "does not match deterministic replay identity"));
+    if !ct_str_eq(
+        bundle_id,
+        &expected_bundle_id(incident_id, created_at, timeline)?,
+    ) {
+        return Err(invalid(
+            "$.bundle_id",
+            "does not match deterministic replay identity",
+        ));
     }
 
-    let manifest = exact_object(member(bundle, "manifest", "$")?, "$.manifest", MANIFEST_FIELDS)?;
+    let manifest = exact_object(
+        member(bundle, "manifest", "$")?,
+        "$.manifest",
+        MANIFEST_FIELDS,
+    )?;
     expect_uint(manifest, "event_count", "$.manifest", timeline.len() as u64)?;
     expect_uint(manifest, "time_span_micros", "$.manifest", span)?;
-    for (field, event) in [("first_timestamp", timeline.first()), ("last_timestamp", timeline.last())] {
+    for (field, event) in [
+        ("first_timestamp", timeline.first()),
+        ("last_timestamp", timeline.last()),
+    ] {
         let recorded = member(manifest, field, "$.manifest")?;
         let matches = match event {
             Some(event) => recorded == &event["timestamp"],
             None => recorded.is_null(),
         };
         if !matches {
-            return Err(invalid(format!("$.manifest.{field}"), "does not match timeline endpoint"));
+            return Err(invalid(
+                format!("$.manifest.{field}"),
+                "does not match timeline endpoint",
+            ));
         }
     }
     uint(manifest, "compressed_size_bytes", "$.manifest")?;
@@ -359,31 +516,55 @@ pub(super) fn verify_structure(bundle: &Map<String, Value>) -> Result<()> {
     }
     let expected = expected_chunks(timeline, MAX_CHUNK_BYTES)?;
     if chunks.len() != expected.len() {
-        return Err(invalid("$.chunks", "does not match canonical byte-size partition"));
+        return Err(invalid(
+            "$.chunks",
+            "does not match canonical byte-size partition",
+        ));
     }
     expect_uint(manifest, "chunk_count", "$.manifest", expected.len() as u64)?;
     for (index, (value, expected)) in chunks.iter().zip(&expected).enumerate() {
         let path = format!("$.chunks[{index}]");
         let chunk = exact_object(value, &path, CHUNK_FIELDS)?;
         if text(chunk, "bundle_id", &path)? != bundle_id {
-            return Err(invalid(format!("{path}.bundle_id"), "chunk belongs to a different bundle"));
+            return Err(invalid(
+                format!("{path}.bundle_id"),
+                "chunk belongs to a different bundle",
+            ));
         }
         expect_uint(chunk, "chunk_index", &path, index as u64)?;
         expect_uint(chunk, "total_chunks", &path, chunks.len() as u64)?;
         expect_uint(chunk, "event_count", &path, expected.events.len() as u64)?;
-        let first = if expected.events.is_empty() { 0 } else { expected.events.start as u64 + 1 };
+        let first = if expected.events.is_empty() {
+            0
+        } else {
+            expected.events.start as u64 + 1
+        };
         expect_uint(chunk, "first_sequence_number", &path, first)?;
-        expect_uint(chunk, "last_sequence_number", &path, expected.events.end as u64)?;
+        expect_uint(
+            chunk,
+            "last_sequence_number",
+            &path,
+            expected.events.end as u64,
+        )?;
         let events = array(member(chunk, "events", &path)?, &format!("{path}.events"))?;
         if events != &timeline[expected.events.clone()] {
-            return Err(invalid(format!("{path}.events"), "chunk events differ from timeline partition"));
+            return Err(invalid(
+                format!("{path}.events"),
+                "chunk events differ from timeline partition",
+            ));
         }
         if !ct_str_eq(text(chunk, "chunk_hash", &path)?, &expected.hash) {
-            return Err(invalid(format!("{path}.chunk_hash"), "does not match canonical event digest"));
+            return Err(invalid(
+                format!("{path}.chunk_hash"),
+                "does not match canonical event digest",
+            ));
         }
         let compressed_size = uint(chunk, "compressed_size_bytes", &path)?;
         if expected.events.is_empty() && compressed_size != 0 {
-            return Err(invalid(format!("{path}.compressed_size_bytes"), "empty chunk must have zero size"));
+            return Err(invalid(
+                format!("{path}.compressed_size_bytes"),
+                "empty chunk must have zero size",
+            ));
         }
     }
     verify_effect_receipts(member(bundle, "initial_state_snapshot", "$")?, timeline)
@@ -395,8 +576,7 @@ pub(super) mod tests {
     use ed25519_dalek::{Signer, SigningKey};
 
     use crate::incident_bundle::{
-        incident_bundle_canonical_digest, incident_bundle_signature_payload,
-        verify_incident_bundle,
+        incident_bundle_canonical_digest, incident_bundle_signature_payload, verify_incident_bundle,
     };
 
     const FIXTURE: &[u8] =
@@ -412,7 +592,8 @@ pub(super) mod tests {
         hex::decode_to_slice(
             "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
             &mut seed,
-        ).unwrap();
+        )
+        .unwrap();
         SigningKey::from_bytes(&seed)
     }
 
@@ -425,7 +606,9 @@ pub(super) mod tests {
             "policy_version": bundle["policy_version"],
         });
         bundle["manifest"]["decision_sequence_hash"] =
-            incident_bundle_canonical_digest(&sequence, "$").unwrap().into();
+            incident_bundle_canonical_digest(&sequence, "$")
+                .unwrap()
+                .into();
         let mut view = bundle.as_object().unwrap().clone();
         view.remove("signature");
         view.remove("integrity_hash");
@@ -434,7 +617,9 @@ pub(super) mod tests {
         bundle["integrity_hash"] = integrity.into();
         let key = fixture_key();
         let signature = key.sign(&payload);
-        key.verifying_key().verify_strict(&payload, &signature).unwrap();
+        key.verifying_key()
+            .verify_strict(&payload, &signature)
+            .unwrap();
         bundle["signature"]["signed_payload_sha256"] = hex::encode(Sha256::digest(&payload)).into();
         bundle["signature"]["signature_hex"] = hex::encode(signature.to_bytes()).into();
         serde_json::to_vec(bundle).unwrap()
@@ -453,32 +638,47 @@ pub(super) mod tests {
     /// the verifier, this helper does NOT choose or validate chunk boundaries.
     pub(in crate::incident_bundle) fn set_chunks(bundle: &mut Value, ranges: &[Range<usize>]) {
         let timeline = bundle["timeline"].as_array().unwrap();
-        let chunks: Vec<Value> = ranges.iter().enumerate().map(|(index, range)| {
-            let events = Value::Array(timeline[range.clone()].to_vec());
-            let size = if range.is_empty() { 0 } else { canonical_bytes(&events, "$").unwrap().len() };
-            serde_json::json!({
-                "bundle_id": bundle["bundle_id"],
-                "chunk_index": index,
-                "total_chunks": ranges.len(),
-                "event_count": range.len(),
-                "first_sequence_number": if range.is_empty() { 0 } else { range.start + 1 },
-                "last_sequence_number": range.end,
-                // Matches the producer built without its optional compression feature.
-                "compressed_size_bytes": size,
-                "chunk_hash": incident_bundle_canonical_digest(&events, "$").unwrap(),
-                "events": events,
+        let chunks: Vec<Value> = ranges
+            .iter()
+            .enumerate()
+            .map(|(index, range)| {
+                let events = Value::Array(timeline[range.clone()].to_vec());
+                let size = if range.is_empty() {
+                    0
+                } else {
+                    canonical_bytes(&events, "$").unwrap().len()
+                };
+                serde_json::json!({
+                    "bundle_id": bundle["bundle_id"],
+                    "chunk_index": index,
+                    "total_chunks": ranges.len(),
+                    "event_count": range.len(),
+                    "first_sequence_number": if range.is_empty() { 0 } else { range.start + 1 },
+                    "last_sequence_number": range.end,
+                    // Matches the producer built without its optional compression feature.
+                    "compressed_size_bytes": size,
+                    "chunk_hash": incident_bundle_canonical_digest(&events, "$").unwrap(),
+                    "events": events,
+                })
             })
-        }).collect();
+            .collect();
         bundle["chunks"] = chunks.into();
         bundle["manifest"]["chunk_count"] = Value::from(ranges.len());
     }
 
     pub(in crate::incident_bundle) fn refresh_timeline_metadata(bundle: &mut Value) {
         let timeline = bundle["timeline"].as_array().unwrap();
-        let created = timeline.last().map_or(EMPTY_CREATED_AT, |event| event["timestamp"].as_str().unwrap());
-        let id = expected_bundle_id(bundle["incident_id"].as_str().unwrap(), created, timeline).unwrap();
-        let first = timeline.first().map_or(Value::Null, |event| event["timestamp"].clone());
-        let last = timeline.last().map_or(Value::Null, |event| event["timestamp"].clone());
+        let created = timeline.last().map_or(EMPTY_CREATED_AT, |event| {
+            event["timestamp"].as_str().unwrap()
+        });
+        let id =
+            expected_bundle_id(bundle["incident_id"].as_str().unwrap(), created, timeline).unwrap();
+        let first = timeline
+            .first()
+            .map_or(Value::Null, |event| event["timestamp"].clone());
+        let last = timeline
+            .last()
+            .map_or(Value::Null, |event| event["timestamp"].clone());
         let span = verify_timeline(timeline).unwrap();
         let count = timeline.len();
         let size = canonical_bytes(&bundle["timeline"], "$").unwrap().len();
@@ -496,12 +696,21 @@ pub(super) mod tests {
     fn real_producer_fixture_has_the_independently_derived_structure() {
         let bundle = fixture();
         verify_structure(bundle.as_object().unwrap()).unwrap();
-        assert_eq!(expected_bundle_id(
-            "INC-SDK-FIXTURE-1", "2026-02-20T10:00:00.000300Z",
-            bundle["timeline"].as_array().unwrap(),
-        ).unwrap(), "019c7a7d-f100-7213-b85f-5f6d5f1eda0a");
-        let chunks = expected_chunks(bundle["timeline"].as_array().unwrap(), MAX_CHUNK_BYTES).unwrap();
-        assert_eq!(chunks[0].hash, "16ca84c76463b7ad73d12656da12230a3c4d594000204dbc0f36a8dcdd00ca9d");
+        assert_eq!(
+            expected_bundle_id(
+                "INC-SDK-FIXTURE-1",
+                "2026-02-20T10:00:00.000300Z",
+                bundle["timeline"].as_array().unwrap(),
+            )
+            .unwrap(),
+            "019c7a7d-f100-7213-b85f-5f6d5f1eda0a"
+        );
+        let chunks =
+            expected_chunks(bundle["timeline"].as_array().unwrap(), MAX_CHUNK_BYTES).unwrap();
+        assert_eq!(
+            chunks[0].hash,
+            "16ca84c76463b7ad73d12656da12230a3c4d594000204dbc0f36a8dcdd00ca9d"
+        );
     }
 
     #[test]
@@ -528,7 +737,9 @@ pub(super) mod tests {
         let mut bundle = fixture();
         bundle["chunks"][0]["events"][1]["payload"]["decision"] = "release".into();
         bundle["chunks"][0]["chunk_hash"] =
-            incident_bundle_canonical_digest(&bundle["chunks"][0]["events"], "$").unwrap().into();
+            incident_bundle_canonical_digest(&bundle["chunks"][0]["events"], "$")
+                .unwrap()
+                .into();
         assert_structure_rejected(bundle, "$.chunks[0].events");
     }
 
@@ -538,8 +749,12 @@ pub(super) mod tests {
             let mut bundle = fixture();
             let events = bundle["chunks"][0]["events"].as_array_mut().unwrap();
             match mode {
-                0 => { events.pop(); }
-                1 => { events.push(events[0].clone()); }
+                0 => {
+                    events.pop();
+                }
+                1 => {
+                    events.push(events[0].clone());
+                }
                 _ => events.swap(0, 1),
             }
             assert_structure_rejected(bundle, "$.chunks[0].events");
@@ -596,7 +811,12 @@ pub(super) mod tests {
 
     #[test]
     fn timeline_sequence_gaps_duplicates_and_integer_overflow_are_rejected() {
-        for number in [Value::from(0), Value::from(1), Value::from(u64::MAX), Value::from(-1)] {
+        for number in [
+            Value::from(0),
+            Value::from(1),
+            Value::from(u64::MAX),
+            Value::from(-1),
+        ] {
             let mut bundle = fixture();
             bundle["timeline"][1]["sequence_number"] = number;
             assert_structure_rejected(bundle, "$.timeline[1].sequence_number");
@@ -605,7 +825,12 @@ pub(super) mod tests {
 
     #[test]
     fn causal_parents_must_be_existing_earlier_events() {
-        for parent in [Value::from(0), Value::from(2), Value::from(3), Value::from("1")] {
+        for parent in [
+            Value::from(0),
+            Value::from(2),
+            Value::from(3),
+            Value::from("1"),
+        ] {
             let mut bundle = fixture();
             bundle["timeline"][1]["causal_parent"] = parent;
             assert_structure_rejected(bundle, "$.timeline[1].causal_parent");
@@ -638,7 +863,10 @@ pub(super) mod tests {
             assert_structure_rejected(bundle, path);
         }
         let mut missing = fixture();
-        missing["timeline"][0].as_object_mut().unwrap().remove("payload");
+        missing["timeline"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("payload");
         assert_structure_rejected(missing, "$.timeline[0].payload");
         let mut unknown_type = fixture();
         unknown_type["timeline"][0]["event_type"] = "made-up-event".into();
@@ -658,12 +886,27 @@ pub(super) mod tests {
         let event_len = canonical_bytes(&events[0], "$").unwrap().len();
         let exactly_two = event_len * 2 + 3; // brackets plus one comma
         let chunks = expected_chunks(&events, exactly_two).unwrap();
-        assert_eq!(chunks.iter().map(|chunk| chunk.events.clone()).collect::<Vec<_>>(), vec![0..2, 2..3]);
+        assert_eq!(
+            chunks
+                .iter()
+                .map(|chunk| chunk.events.clone())
+                .collect::<Vec<_>>(),
+            vec![0..2, 2..3]
+        );
         let smaller = expected_chunks(&events, exactly_two - 1).unwrap();
-        assert_eq!(smaller.iter().map(|chunk| chunk.events.clone()).collect::<Vec<_>>(), vec![0..1, 1..2, 2..3]);
+        assert_eq!(
+            smaller
+                .iter()
+                .map(|chunk| chunk.events.clone())
+                .collect::<Vec<_>>(),
+            vec![0..1, 1..2, 2..3]
+        );
         for chunk in chunks {
             let value = Value::Array(events[chunk.events].to_vec());
-            assert_eq!(chunk.hash, incident_bundle_canonical_digest(&value, "$").unwrap());
+            assert_eq!(
+                chunk.hash,
+                incident_bundle_canonical_digest(&value, "$").unwrap()
+            );
         }
     }
 
@@ -716,12 +959,14 @@ pub(super) mod tests {
         let mut bundle = fixture();
         for (index, entry) in entries.iter().enumerate() {
             bundle["timeline"][index]["event_type"] = "policy_eval".into();
-            bundle["timeline"][index]["timestamp"] =
-                "2023-11-14T22:13:20.000000Z".into();
+            bundle["timeline"][index]["timestamp"] = "2023-11-14T22:13:20.000000Z".into();
             bundle["timeline"][index]["payload"] =
                 serde_json::json!({"effect_receipt_chain_entry":entry});
-            bundle["timeline"][index]["causal_parent"] =
-                if index == 0 { Value::Null } else { index.into() };
+            bundle["timeline"][index]["causal_parent"] = if index == 0 {
+                Value::Null
+            } else {
+                index.into()
+            };
         }
         bundle["initial_state_snapshot"] = serde_json::json!({
             "run_receipt_id":"run-sdk-chain-1",
@@ -760,7 +1005,10 @@ pub(super) mod tests {
     #[test]
     fn run_chain_head_and_each_outcome_count_are_independently_bound() {
         for (field, value) in [
-            ("host_effect_chain_head", Value::from(EFFECT_RECEIPT_CHAIN_GENESIS)),
+            (
+                "host_effect_chain_head",
+                Value::from(EFFECT_RECEIPT_CHAIN_GENESIS),
+            ),
             ("effect_count", Value::from(2)),
             ("allowed_count", Value::from(0)),
             ("denied_count", Value::from(2)),
@@ -775,11 +1023,20 @@ pub(super) mod tests {
         bundle["initial_state_snapshot"]["denied_count"] = 2.into();
         bundle["initial_state_snapshot"]["failed_count"] = 0.into();
         assert_structure_rejected(bundle, "$.initial_state_snapshot.denied_count");
-        for field in ["run_receipt_id", "run_receipt_hash", "host_effect_chain_head",
-            "effect_count", "allowed_count", "denied_count", "failed_count"]
-        {
+        for field in [
+            "run_receipt_id",
+            "run_receipt_hash",
+            "host_effect_chain_head",
+            "effect_count",
+            "allowed_count",
+            "denied_count",
+            "failed_count",
+        ] {
             let mut bundle = run_bundle();
-            bundle["initial_state_snapshot"].as_object_mut().unwrap().remove(field);
+            bundle["initial_state_snapshot"]
+                .as_object_mut()
+                .unwrap()
+                .remove(field);
             assert_structure_rejected(bundle, &format!("$.initial_state_snapshot.{field}"));
         }
     }
@@ -804,7 +1061,8 @@ pub(super) mod tests {
         assert_structure_rejected(duplicated, "$.timeline");
 
         let mut hidden = run_bundle();
-        hidden["timeline"][2]["payload"] = serde_json::json!({"operator_annotation":"nothing happened"});
+        hidden["timeline"][2]["payload"] =
+            serde_json::json!({"operator_annotation":"nothing happened"});
         refresh_single_chunk(&mut hidden);
         assert_structure_rejected(hidden, "$.timeline");
     }
@@ -812,12 +1070,26 @@ pub(super) mod tests {
     #[test]
     fn run_events_cannot_relabel_receipt_time_sequence_trace_or_causality() {
         for (pointer, value, path) in [
-            ("/timeline/1/event_type", Value::from("external_signal"), "$.timeline[1]"),
-            ("/timeline/1/causal_parent", Value::Null, "$.timeline[1].causal_parent"),
-            ("/timeline/1/payload/effect_receipt_chain_entry/receipt/seq", Value::from(9),
-                "$.timeline[1].payload.effect_receipt_chain_entry"),
-            ("/timeline/1/payload/effect_receipt_chain_entry/receipt/trace_id", Value::from("other-run"),
-                "$.timeline[1].payload.effect_receipt_chain_entry"),
+            (
+                "/timeline/1/event_type",
+                Value::from("external_signal"),
+                "$.timeline[1]",
+            ),
+            (
+                "/timeline/1/causal_parent",
+                Value::Null,
+                "$.timeline[1].causal_parent",
+            ),
+            (
+                "/timeline/1/payload/effect_receipt_chain_entry/receipt/seq",
+                Value::from(9),
+                "$.timeline[1].payload.effect_receipt_chain_entry",
+            ),
+            (
+                "/timeline/1/payload/effect_receipt_chain_entry/receipt/trace_id",
+                Value::from("other-run"),
+                "$.timeline[1].payload.effect_receipt_chain_entry",
+            ),
         ] {
             let mut bundle = run_bundle();
             *bundle.pointer_mut(pointer).unwrap() = value;
@@ -841,7 +1113,8 @@ pub(super) mod tests {
         let mut bundle = run_bundle();
         // serde would discard this nested enum member without changing the
         // receipt hash. It must not survive as apparently verified evidence.
-        bundle["timeline"][1]["payload"]["effect_receipt_chain_entry"]["receipt"]["policy_outcome"]["executed"] = true.into();
+        bundle["timeline"][1]["payload"]["effect_receipt_chain_entry"]["receipt"]["policy_outcome"]
+            ["executed"] = true.into();
         refresh_single_chunk(&mut bundle);
         assert_structure_rejected(bundle, "$.timeline[1].payload.effect_receipt_chain_entry");
     }

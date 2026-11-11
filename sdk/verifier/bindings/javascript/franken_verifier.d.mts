@@ -1,4 +1,4 @@
-export type EvidenceFormat = "incident-bundle" | "capsule" | "signed-bundle" | "resolution-receipt" | "publisher-source";
+export type EvidenceFormat = "incident-bundle" | "capsule" | "signed-bundle" | "resolution-receipt" | "publisher-source" | "counterfactual-receipt" | "ltv-evidence";
 export interface VerifierOptions {
   /** Trusted SDK executable, installed separately; never supplied by evidence. */
   verifier: string;
@@ -130,6 +130,24 @@ export type PublisherSourceFacts = {
   { registration_schema: "franken-node/extension-registration-manifest/v1"; runtime_authority: null }
   | { registration_schema: "franken-node/extension-registration-manifest/v2"; runtime_authority: PublisherRuntimeAuthority }
 );
+export interface CounterfactualReceiptFacts {
+  baseline_integrity_hash: string;
+  mode: "single" | "sweep";
+  result_count: number;
+  signer_public_key_hex: string;
+}
+export interface LtvEvidenceFacts {
+  artifact_id: string;
+  artifact_hash: string;
+  crypto_suite: string;
+  as_of_unix_seconds: string;
+  claimed_at_unix_seconds: string;
+  witness_group_id: string;
+  witness_policy_id: string;
+  reattestation_count: number;
+  hybrid_survived_algo_death: boolean;
+  signer_public_key_hex: string;
+}
 export type Verification = {
   schema_version: "franken-verifier-cli/v1";
   verdict: "verified";
@@ -142,6 +160,8 @@ export type Verification = {
   | { format: "signed-bundle"; scope: "authenticated_sdk_replay_bundle"; facts: SignedBundleFacts }
   | { format: "resolution-receipt"; scope: "authenticated_resolution_decision"; facts: ResolutionReceiptFacts }
   | { format: "publisher-source"; scope: "authenticated_publisher_source_content"; facts: PublisherSourceFacts }
+  | { format: "counterfactual-receipt"; scope: "authenticated_counterfactual_receipt"; facts: CounterfactualReceiptFacts }
+  | { format: "ltv-evidence"; scope: "authenticated_ltv_anteriority"; facts: LtvEvidenceFacts }
 );
 export class VerifierError extends Error {
   readonly code: string;

@@ -5,9 +5,13 @@
 use std::io::{self, Read, Write};
 use std::process::ExitCode;
 
-use ed25519_dalek::VerifyingKey;
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use ed25519_dalek::{Signature, VerifyingKey};
 use frankenengine_verifier_sdk::bundle::{self, BundleError};
 use frankenengine_verifier_sdk::capsule::{self, CapsuleError, CapsuleVerdict, ReplayCapsule};
+use frankenengine_verifier_sdk::counterfactual::{
+    CounterfactualReceiptError, verify_counterfactual_receipt,
+};
 use frankenengine_verifier_sdk::incident_bundle::{
     CapturedNativeTerminalState, IncidentBundleError, MAX_INCIDENT_BUNDLE_BYTES,
     decode_evidence_json, verify_incident_bundle, verify_incident_bundle_with_run_key,
@@ -19,12 +23,21 @@ use frankenengine_verifier_sdk::publisher_source::{
 use frankenengine_verifier_sdk::resolution::{
     ResolutionReceiptError, verify_signed_resolution_receipt,
 };
+use frankenengine_verifier_sdk::{
+    FN_LTV_HYBRID_SURVIVED_ALGO_DEATH, LongTermVerificationEvidence, LongTermWitnessTrustAnchor,
+    VerificationVerdict, VerifierSdk, long_term_verification_audit_events,
+};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 const PROTOCOL: &str = "franken-verifier-cli/v1";
 const MAX_RESPONSE_BYTES: usize = 64 * 1024;
-const USAGE: &str = "franken-verifier verify --format incident-bundle|capsule|signed-bundle|resolution-receipt|publisher-source --trusted-key-hex HEX [--trusted-run-key-hex HEX [--trusted-runtime-key-hex HEX]] [--signature-hex HEX] < artifact";
+const COUNTERFACTUAL_INPUT_SCHEMA: &str = "franken-verifier/counterfactual-receipt-input/v1";
+const LTV_INPUT_SCHEMA: &str = "franken-verifier/ltv-evidence-input/v1";
+const LTV_WITNESS_ANCHOR_DOMAIN: &[u8] = b"franken-verifier/ltv-witness-anchor/v1:";
+const MAX_LTV_WITNESS_ANCHOR_BYTES: usize = 64 * 1024;
+const USAGE: &str = "franken-verifier verify --format incident-bundle|capsule|signed-bundle|resolution-receipt|publisher-source|counterfactual-receipt|ltv-evidence --trusted-key-hex HEX [--trusted-run-key-hex HEX [--trusted-runtime-key-hex HEX]] [--signature-hex HEX] < artifact";
 
 #[derive(Debug)]
 struct Request {
@@ -81,7 +94,13 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
     let format = format.ok_or_else(usage)?;
     if !matches!(
         format.as_str(),
-        "incident-bundle" | "capsule" | "signed-bundle" | "resolution-receipt" | "publisher-source"
+        "incident-bundle"
+            | "capsule"
+            | "signed-bundle"
+            | "resolution-receipt"
+            | "publisher-source"
+            | "counterfactual-receipt"
+            | "ltv-evidence"
     ) {
         return Err(failure("UNSUPPORTED_FORMAT", "unsupported evidence format"));
     }
@@ -131,7 +150,7 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
         (_, _, None) => None,
     };
     let signature = match (format.as_str(), signature) {
-        ("signed-bundle" | "publisher-source", Some(text)) => {
+        ("signed-bundle" | "publisher-source" | "counterfactual-receipt", Some(text)) => {
             let mut bytes = [0_u8; 64];
             hex::decode_to_slice(text, &mut bytes).map_err(|_| {
                 failure(
@@ -141,7 +160,7 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
             })?;
             Some(bytes)
         }
-        ("signed-bundle" | "publisher-source", None) => {
+        ("signed-bundle" | "publisher-source" | "counterfactual-receipt", None) => {
             return Err(failure(
                 "SIGNATURE_MALFORMED",
                 "detached signature is required",
@@ -205,11 +224,54 @@ fn publisher_source_failure(error: &PublisherSourceError) -> Failure {
     let code = match error {
         PublisherSourceError::InputTooLarge => "INPUT_TOO_LARGE",
         PublisherSourceError::InputJsonInvalid => "JSON_INVALID",
-        PublisherSourceError::SignatureInvalid => "SIGNATURE_INVALID",
+        PublisherSourceError::SignatureInvalid
+        | PublisherSourceError::RevocationSignatureInvalid
+        | PublisherSourceError::ProvenanceSignatureInvalid => "SIGNATURE_INVALID",
         PublisherSourceError::ArtifactHashMismatch => "INTEGRITY_MISMATCH",
+        PublisherSourceError::PublisherRevoked => "PUBLISHER_REVOKED",
         _ => "EVIDENCE_INVALID",
     };
     failure(code, "publisher-signed source verification failed")
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CounterfactualInputEnvelope {
+    schema_version: String,
+    baseline_integrity_hash: String,
+    counterfactual_output: Value,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LtvInputEnvelope {
+    schema_version: String,
+    witness_anchor_base64: String,
+    witness_anchor_signature_hex: String,
+    evidence: Value,
+}
+
+fn ltv_anchor_signing_payload(anchor_bytes: &[u8]) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(LTV_WITNESS_ANCHOR_DOMAIN.len() + 8 + anchor_bytes.len());
+    payload.extend_from_slice(LTV_WITNESS_ANCHOR_DOMAIN);
+    payload.extend_from_slice(&(anchor_bytes.len() as u64).to_le_bytes());
+    payload.extend_from_slice(anchor_bytes);
+    payload
+}
+
+fn counterfactual_failure(error: &CounterfactualReceiptError) -> Failure {
+    let code = match error {
+        CounterfactualReceiptError::Json(_) => "JSON_INVALID",
+        CounterfactualReceiptError::CounterfactualBundleHashMismatch { .. } => "INTEGRITY_MISMATCH",
+        CounterfactualReceiptError::Signature(BundleError::Ed25519SignatureInvalid) => {
+            "SIGNATURE_INVALID"
+        }
+        CounterfactualReceiptError::Signature(BundleError::Ed25519SignatureMalformed {
+            ..
+        }) => "SIGNATURE_MALFORMED",
+        _ => "EVIDENCE_INVALID",
+    };
+    failure(code, "signed counterfactual receipt verification failed")
 }
 
 fn verify(request: &Request, bytes: &[u8]) -> Result<Value, Failure> {
@@ -359,6 +421,166 @@ fn verify(request: &Request, bytes: &[u8]) -> Result<Value, Failure> {
                 "event_count": evidence.timeline.len(), "integrity_hash": evidence.integrity_hash,
                 "signer_public_key_hex": hex::encode(request.anchor.as_bytes())}}),
             )
+        }
+        "counterfactual-receipt" => {
+            let signature = request
+                .signature
+                .as_ref()
+                .ok_or_else(|| failure("SIGNATURE_MALFORMED", "detached signature is required"))?;
+            let value = decode_evidence_json(bytes).map_err(|error| incident_failure(&error))?;
+            let envelope: CounterfactualInputEnvelope =
+                serde_json::from_value(value).map_err(|_| {
+                    failure("EVIDENCE_INVALID", "invalid counterfactual input transport")
+                })?;
+            if envelope.schema_version != COUNTERFACTUAL_INPUT_SCHEMA
+                || envelope.baseline_integrity_hash.len() != 64
+                || envelope
+                    .baseline_integrity_hash
+                    .bytes()
+                    .any(|b| !b.is_ascii_hexdigit() || b.is_ascii_uppercase())
+            {
+                return Err(failure(
+                    "EVIDENCE_INVALID",
+                    "invalid counterfactual input transport",
+                ));
+            }
+            verify_counterfactual_receipt(
+                &json!({ "integrity_hash": &envelope.baseline_integrity_hash }),
+                &envelope.counterfactual_output,
+                &request.anchor,
+                signature,
+            )
+            .map_err(|error| counterfactual_failure(&error))?;
+            let (mode, result_count) = match envelope.counterfactual_output.get("results") {
+                Some(Value::Array(items)) => ("sweep", items.len()),
+                _ => ("single", 1_usize),
+            };
+            if result_count == 0 || result_count > 1024 {
+                return Err(failure(
+                    "EVIDENCE_INVALID",
+                    "counterfactual result count out of bounds",
+                ));
+            }
+            Ok(json!({
+                "scope": "authenticated_counterfactual_receipt",
+                "facts": {
+                    "baseline_integrity_hash": envelope.baseline_integrity_hash,
+                    "mode": mode,
+                    "result_count": result_count,
+                    "signer_public_key_hex": hex::encode(request.anchor.as_bytes()),
+                }
+            }))
+        }
+        "ltv-evidence" => {
+            let value = decode_evidence_json(bytes).map_err(|error| incident_failure(&error))?;
+            let envelope: LtvInputEnvelope = serde_json::from_value(value)
+                .map_err(|_| failure("EVIDENCE_INVALID", "invalid LTV evidence transport"))?;
+            if envelope.schema_version != LTV_INPUT_SCHEMA {
+                return Err(failure(
+                    "EVIDENCE_INVALID",
+                    "invalid LTV evidence transport",
+                ));
+            }
+            if envelope.witness_anchor_base64.len() > MAX_LTV_WITNESS_ANCHOR_BYTES.div_ceil(3) * 4 {
+                return Err(failure(
+                    "INPUT_TOO_LARGE",
+                    "witness anchor exceeds its byte bound",
+                ));
+            }
+            let anchor_bytes = STANDARD
+                .decode(&envelope.witness_anchor_base64)
+                .map_err(|_| failure("EVIDENCE_INVALID", "invalid witness anchor base64"))?;
+            if anchor_bytes.len() > MAX_LTV_WITNESS_ANCHOR_BYTES
+                || STANDARD.encode(&anchor_bytes) != envelope.witness_anchor_base64
+            {
+                return Err(failure("EVIDENCE_INVALID", "invalid witness anchor base64"));
+            }
+            if envelope.witness_anchor_signature_hex.len() != 128
+                || envelope
+                    .witness_anchor_signature_hex
+                    .bytes()
+                    .any(|b| !b.is_ascii_hexdigit() || b.is_ascii_uppercase())
+            {
+                return Err(failure(
+                    "SIGNATURE_MALFORMED",
+                    "expected a lowercase 64-byte witness anchor signature",
+                ));
+            }
+            let mut anchor_sig = [0_u8; 64];
+            hex::decode_to_slice(&envelope.witness_anchor_signature_hex, &mut anchor_sig)
+                .map_err(|_| failure("SIGNATURE_MALFORMED", "invalid witness anchor signature"))?;
+            request
+                .anchor
+                .verify_strict(
+                    &ltv_anchor_signing_payload(&anchor_bytes),
+                    &Signature::from_bytes(&anchor_sig),
+                )
+                .map_err(|_| {
+                    failure(
+                        "SIGNATURE_INVALID",
+                        "witness anchor signature does not verify under the trusted key",
+                    )
+                })?;
+            let anchor_value = decode_evidence_json(&anchor_bytes)
+                .map_err(|_| failure("EVIDENCE_INVALID", "invalid signed witness anchor JSON"))?;
+            let witness_anchor: LongTermWitnessTrustAnchor = serde_json::from_value(anchor_value)
+                .map_err(|_| {
+                failure("EVIDENCE_INVALID", "invalid signed witness anchor schema")
+            })?;
+            let evidence: LongTermVerificationEvidence = serde_json::from_value(envelope.evidence)
+                .map_err(|_| failure("EVIDENCE_INVALID", "invalid LTV evidence schema"))?;
+            let bounded_text = |text: &str, max: usize| {
+                !text.is_empty()
+                    && text.len() <= max
+                    && text.trim() == text
+                    && !text.chars().any(char::is_control)
+            };
+            let canonical_hex64 = |text: &str| {
+                let hex_body = text.strip_prefix("sha256:").unwrap_or(text);
+                hex_body.len() == 64
+                    && hex_body
+                        .bytes()
+                        .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+            };
+            if !bounded_text(&evidence.artifact.artifact_id, 256)
+                || !canonical_hex64(&evidence.artifact.artifact_hash)
+                || !bounded_text(&evidence.artifact.crypto_suite, 128)
+                || !bounded_text(&witness_anchor.witness_group_id, 256)
+                || !bounded_text(&witness_anchor.witness_policy_id, 256)
+            {
+                return Err(failure(
+                    "EVIDENCE_INVALID",
+                    "LTV metadata violates identifier or hash bounds",
+                ));
+            }
+            let sdk = VerifierSdk::new("verifier://offline-sdk");
+            let verification = sdk
+                .verify_as_of_ltv(&evidence, &witness_anchor)
+                .map_err(|_| failure("EVIDENCE_INVALID", "LTV verification failed"))?;
+            if verification.verdict != VerificationVerdict::Pass {
+                return Err(failure(
+                    "LTV_ANTERIORITY_REJECTED",
+                    "long-term verification anteriority or witness checks failed",
+                ));
+            }
+            let hybrid_survived = long_term_verification_audit_events(&verification)
+                .iter()
+                .any(|event| event.event_code == FN_LTV_HYBRID_SURVIVED_ALGO_DEATH);
+            Ok(json!({
+                "scope": "authenticated_ltv_anteriority",
+                "facts": {
+                    "artifact_id": evidence.artifact.artifact_id,
+                    "artifact_hash": evidence.artifact.artifact_hash,
+                    "crypto_suite": evidence.artifact.crypto_suite,
+                    "as_of_unix_seconds": evidence.as_of_unix_seconds.to_string(),
+                    "claimed_at_unix_seconds": evidence.artifact.claimed_at_unix_seconds.to_string(),
+                    "witness_group_id": witness_anchor.witness_group_id,
+                    "witness_policy_id": witness_anchor.witness_policy_id,
+                    "reattestation_count": evidence.reattestation_chain.attestations.len(),
+                    "hybrid_survived_algo_death": hybrid_survived,
+                    "signer_public_key_hex": hex::encode(request.anchor.as_bytes()),
+                }
+            }))
         }
         _ => Err(failure("UNSUPPORTED_FORMAT", "unsupported evidence format")),
     }
@@ -745,5 +967,169 @@ mod tests {
     fn an_unbounded_input_stream_is_cut_off_before_verification() {
         let error = run(&args("incident-bundle", ANCHOR), &mut io::repeat(b' ')).unwrap_err();
         assert_eq!(error.code, "INPUT_TOO_LARGE");
+    }
+
+    #[test]
+    fn counterfactual_receipt_cli_verifies_signed_single_and_sweep_receipts_and_rejects_tampering()
+    {
+        use ed25519_dalek::{Signer, SigningKey};
+        let signer = SigningKey::from_bytes(&[0x33; 32]);
+        let anchor_hex = hex::encode(signer.verifying_key().as_bytes());
+        let bundle_hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let output = json!({
+            "metadata": { "bundle_hash": bundle_hash },
+            "results": [
+                { "metadata": { "bundle_hash": bundle_hash } },
+                { "metadata": { "bundle_hash": bundle_hash } }
+            ]
+        });
+        let canonical = serde_json::to_vec(&output).unwrap();
+        let sig_hex = hex::encode(signer.sign(&canonical).to_bytes());
+        let mut cli_args = args("counterfactual-receipt", &anchor_hex);
+        cli_args.extend(["--signature-hex".into(), sig_hex]);
+        let payload = serde_json::to_vec(&json!({
+            "schema_version": COUNTERFACTUAL_INPUT_SCHEMA,
+            "baseline_integrity_hash": bundle_hash,
+            "counterfactual_output": output,
+        }))
+        .unwrap();
+
+        let verified = run(&cli_args, &mut payload.as_slice()).unwrap();
+        assert_eq!(verified["scope"], "authenticated_counterfactual_receipt");
+        assert_eq!(verified["facts"]["mode"], "sweep");
+        assert_eq!(verified["facts"]["result_count"], 2);
+        assert_eq!(verified["facts"]["baseline_integrity_hash"], bundle_hash);
+
+        // Mismatched baseline hash must fail closed with INTEGRITY_MISMATCH.
+        let wrong_baseline = serde_json::to_vec(&json!({
+            "schema_version": COUNTERFACTUAL_INPUT_SCHEMA,
+            "baseline_integrity_hash": "f".repeat(64),
+            "counterfactual_output": output,
+        }))
+        .unwrap();
+        assert_eq!(
+            run(&cli_args, &mut wrong_baseline.as_slice())
+                .unwrap_err()
+                .code,
+            "INTEGRITY_MISMATCH"
+        );
+
+        // Foreign anchor must fail closed with SIGNATURE_INVALID.
+        let mut wrong_anchor = cli_args.clone();
+        wrong_anchor[4] = ANCHOR.to_string();
+        assert_eq!(
+            run(&wrong_anchor, &mut payload.as_slice())
+                .unwrap_err()
+                .code,
+            "SIGNATURE_INVALID"
+        );
+    }
+
+    #[test]
+    fn ltv_evidence_cli_verifies_anteriority_and_rejects_untrusted_or_backdated_witness() {
+        use ed25519_dalek::{Signer, SigningKey};
+        use frankenengine_verifier_sdk::{
+            LongTermEvidenceRequest, LongTermSignerKey, LongTermThresholdConfig,
+            LongTermWitnessSigner, build_long_term_verification_evidence,
+        };
+
+        let operator_root = SigningKey::from_bytes(&[0x44; 32]);
+        let witness_key_1 = SigningKey::from_bytes(&[0x45; 32]);
+        let witness_key_2 = SigningKey::from_bytes(&[0x46; 32]);
+        let witness_signers = [
+            LongTermWitnessSigner {
+                key_id: "wkey-1".into(),
+                signing_key: witness_key_1.clone(),
+            },
+            LongTermWitnessSigner {
+                key_id: "wkey-2".into(),
+                signing_key: witness_key_2.clone(),
+            },
+        ];
+        let evidence = build_long_term_verification_evidence(
+            &LongTermEvidenceRequest {
+                artifact_id: "release-capsule-1".into(),
+                artifact_hash: "a".repeat(64),
+                crypto_suite: "ed25519-v1".into(),
+                claimed_at_unix_seconds: 1_700_000_100,
+                co_marker_hashes: vec!["b".repeat(64)],
+                reattestation_appended_marker_hashes: vec!["c".repeat(64)],
+                reattested_at_unix_seconds: 1_700_000_200,
+                observed_at_unix_seconds: 1_700_000_300,
+                as_of_unix_seconds: 1_700_000_500,
+                suite_valid_from_unix_seconds: 1_700_000_000,
+                witness_group_id: "independent-witness-quorum".into(),
+                witness_policy_id: "policy-quorum-2of2".into(),
+                witness_threshold: 2,
+                trace_id: "trace-ltv-cli".into(),
+                timestamp: "2026-11-11T00:00:00Z".into(),
+            },
+            &witness_signers,
+        )
+        .unwrap();
+        let witness_anchor = LongTermWitnessTrustAnchor {
+            witness_group_id: "independent-witness-quorum".into(),
+            witness_policy_id: "policy-quorum-2of2".into(),
+            threshold_config: LongTermThresholdConfig {
+                threshold: 2,
+                total_signers: 2,
+                signer_keys: vec![
+                    LongTermSignerKey {
+                        key_id: "wkey-1".into(),
+                        public_key_hex: hex::encode(witness_key_1.verifying_key().as_bytes()),
+                    },
+                    LongTermSignerKey {
+                        key_id: "wkey-2".into(),
+                        public_key_hex: hex::encode(witness_key_2.verifying_key().as_bytes()),
+                    },
+                ],
+            },
+        };
+        let anchor_bytes = serde_json::to_vec(&witness_anchor).unwrap();
+        let anchor_sig = operator_root
+            .sign(&ltv_anchor_signing_payload(&anchor_bytes))
+            .to_bytes();
+        let cli_args = args(
+            "ltv-evidence",
+            &hex::encode(operator_root.verifying_key().as_bytes()),
+        );
+        let payload = serde_json::to_vec(&json!({
+            "schema_version": LTV_INPUT_SCHEMA,
+            "witness_anchor_base64": STANDARD.encode(&anchor_bytes),
+            "witness_anchor_signature_hex": hex::encode(anchor_sig),
+            "evidence": evidence,
+        }))
+        .unwrap();
+
+        let verified = run(&cli_args, &mut payload.as_slice()).unwrap();
+        assert_eq!(verified["scope"], "authenticated_ltv_anteriority");
+        assert_eq!(verified["facts"]["artifact_id"], "release-capsule-1");
+        assert_eq!(verified["facts"]["as_of_unix_seconds"], "1700000500");
+        assert_eq!(verified["facts"]["reattestation_count"], 1);
+
+        // Foreign operator root anchor must be rejected with SIGNATURE_INVALID.
+        assert_eq!(
+            run(&args("ltv-evidence", ANCHOR), &mut payload.as_slice())
+                .unwrap_err()
+                .code,
+            "SIGNATURE_INVALID"
+        );
+
+        // Backdated witness (observed_at > as_of) must fail closed with LTV_ANTERIORITY_REJECTED.
+        let mut backdated = evidence;
+        backdated.as_of_unix_seconds = 1_700_000_250;
+        let bad_payload = serde_json::to_vec(&json!({
+            "schema_version": LTV_INPUT_SCHEMA,
+            "witness_anchor_base64": STANDARD.encode(&anchor_bytes),
+            "witness_anchor_signature_hex": hex::encode(anchor_sig),
+            "evidence": backdated,
+        }))
+        .unwrap();
+        assert_eq!(
+            run(&cli_args, &mut bad_payload.as_slice())
+                .unwrap_err()
+                .code,
+            "LTV_ANTERIORITY_REJECTED"
+        );
     }
 }
