@@ -132,17 +132,101 @@ pub struct NativeReplayOutcome {
     pub lane_match: Option<bool>,
     pub exit_code_match: Option<bool>,
     pub exception_value_match: Option<bool>,
-    /// Informational: without frozen sources, withholding ModuleLoad changes the declared capability
-    /// population the engine uses for Bayesian evidence. This is not included
-    /// in the guest execution verdict.
+    /// Under `"guest_execution"` scope, withholding `ModuleLoad` without frozen
+    /// sources changes the declared capability population and `decisions_match`
+    /// is informational. Under [`POLICY_EQUIVALENCE_SCOPE`]
+    /// (`into_policy_equivalence_outcome` / `reexecute_with_policy_equivalence`),
+    /// `decisions_match == Some(true)` and `!module_load_disabled` are enforced
+    /// fail-closed as part of `matched`.
     pub decisions_match: Option<bool>,
     pub policy_comparison_note: String,
+}
+
+/// Verification scope that requires both guest execution parity AND original
+/// control/policy decision equivalence (`decisions_match == Some(true)` with
+/// authenticated frozen module sources).
+pub const POLICY_EQUIVALENCE_SCOPE: &str = "guest_execution_and_policy";
+
+/// Divergence recorded when guest execution matches but policy decisions differ.
+pub const POLICY_DECISION_DIVERGENCE: &str =
+    "re-executed policy decisions differ from the captured run";
+
+/// Divergence recorded when policy equivalence is requested on a capture that
+/// withheld runtime module loading or ended before policy decisions were sealed.
+pub const POLICY_EQUIVALENCE_UNAVAILABLE_DIVERGENCE: &str = "original-policy equivalence unavailable: runtime module loading was disabled or policy decisions were not captured";
+
+impl NativeReplayOutcome {
+    /// Returns `true` iff guest execution matched AND original policy decisions
+    /// were re-derived under an intact frozen-module capability population.
+    #[must_use]
+    pub fn satisfies_policy_equivalence(&self) -> bool {
+        self.matched
+            && self.divergences.is_empty()
+            && !self.module_load_disabled
+            && self.decisions_match == Some(true)
+    }
+
+    /// Upgrade a replay outcome to [`POLICY_EQUIVALENCE_SCOPE`], failing closed
+    /// (`matched = false`) whenever policy decisions diverged, were not
+    /// captured (e.g., interrupted/failure-prefix runs), or ran with
+    /// `module_load_disabled`.
+    #[must_use]
+    pub fn into_policy_equivalence_outcome(mut self) -> Self {
+        self.verification_scope = POLICY_EQUIVALENCE_SCOPE.to_string();
+        if self.module_load_disabled || self.decisions_match.is_none() {
+            if !self
+                .divergences
+                .iter()
+                .any(|d| d == POLICY_EQUIVALENCE_UNAVAILABLE_DIVERGENCE)
+            {
+                self.divergences
+                    .push(POLICY_EQUIVALENCE_UNAVAILABLE_DIVERGENCE.to_string());
+            }
+            self.policy_comparison_note = "Original-policy equivalence requires authenticated frozen module sources and completed decision capture; uncertified or interrupted runs fail closed.".to_string();
+        } else if self.decisions_match == Some(false) {
+            if !self
+                .divergences
+                .iter()
+                .any(|d| d == POLICY_DECISION_DIVERGENCE)
+            {
+                self.divergences
+                    .push(POLICY_DECISION_DIVERGENCE.to_string());
+            }
+            self.policy_comparison_note = "Original-policy equivalence enforced fail-closed: re-executed policy decisions diverged from the captured run.".to_string();
+        } else {
+            self.policy_comparison_note = "Original-policy equivalence verified: guest execution and policy decisions matched under authenticated frozen module sources.".to_string();
+        }
+        self.matched = self.divergences.is_empty()
+            && !self.module_load_disabled
+            && self.decisions_match == Some(true);
+        self
+    }
+
+    /// Fail-closed check requiring both guest execution match and policy-decision
+    /// equivalence.
+    pub fn enforce_policy_equivalence(&self) -> Result<(), String> {
+        let promoted = self.clone().into_policy_equivalence_outcome();
+        if promoted.matched {
+            Ok(())
+        } else {
+            Err(promoted.divergences.join("; "))
+        }
+    }
 }
 
 /// Execute only after authenticating the enclosing signed incident bundle.
 #[cfg(feature = "engine")]
 pub fn reexecute(capture: &NativeReplayCapture) -> Result<NativeReplayOutcome, String> {
     engine::reexecute(capture)
+}
+
+/// Re-execute under [`POLICY_EQUIVALENCE_SCOPE`], failing closed when policy
+/// decisions diverge or when original capability/module context is unavailable.
+#[cfg(feature = "engine")]
+pub fn reexecute_with_policy_equivalence(
+    capture: &NativeReplayCapture,
+) -> Result<NativeReplayOutcome, String> {
+    reexecute(capture).map(NativeReplayOutcome::into_policy_equivalence_outcome)
 }
 
 /// Default and maximum operator budgets for isolated native incident replay.
@@ -168,6 +252,15 @@ pub fn reexecute_supervised(
         let _ = (capture, timeout);
         Err("supervised native incident replay currently requires Linux".to_string())
     }
+}
+
+/// Supervised re-execution promoted to [`POLICY_EQUIVALENCE_SCOPE`].
+#[cfg(feature = "engine")]
+pub fn reexecute_supervised_with_policy_equivalence(
+    capture: &NativeReplayCapture,
+    timeout: std::time::Duration,
+) -> Result<NativeReplayOutcome, String> {
+    reexecute_supervised(capture, timeout).map(NativeReplayOutcome::into_policy_equivalence_outcome)
 }
 
 /// Select the private replay child before parsing public CLI commands. This
@@ -1421,12 +1514,16 @@ mod engine {
                 || self.diagnostic.is_empty()
                 || self.diagnostic.len() > 4096
             {
-                return Err("native engine-failure capture requires a trace and bounded diagnostic".to_string());
+                return Err(
+                    "native engine-failure capture requires a trace and bounded diagnostic"
+                        .to_string(),
+                );
             }
             match &self.reason {
                 EngineFailureReason::CapabilityDenied { capability } => {
                     let denied = RuntimeCapability::from_tag_str(capability).ok_or_else(|| {
-                        "native engine-failure capture has an unrecognized denied capability".to_string()
+                        "native engine-failure capture has an unrecognized denied capability"
+                            .to_string()
                     })?;
                     // Replay strips ModuleLoad. That artificial restriction
                     // cannot stand in for an original denial of a granted cap.
@@ -1467,7 +1564,7 @@ mod engine {
                     }
                     if entries <= max_entries && bytes <= max_bytes {
                         return Err(
-                            "captured console stop does not exceed an execution limit".to_string(),
+                            "captured console stop does not exceed an execution limit".to_string()
                         );
                     }
                 }
@@ -1815,12 +1912,15 @@ mod engine {
         error: &OrchestratorError,
     ) -> Result<ObservedFailure, String> {
         let primary = error.primary_error();
-        if !matches!(primary, OrchestratorError::Interpreter(
-            InterpreterError::UncaughtException { .. }
-                | InterpreterError::CapabilityDenied { .. }
-                | InterpreterError::BudgetExhausted { .. }
-                | InterpreterError::ConsoleBudgetExceeded { .. }
-        )) {
+        if !matches!(
+            primary,
+            OrchestratorError::Interpreter(
+                InterpreterError::UncaughtException { .. }
+                    | InterpreterError::CapabilityDenied { .. }
+                    | InterpreterError::BudgetExhausted { .. }
+                    | InterpreterError::ConsoleBudgetExceeded { .. }
+            )
+        ) {
             return Err(
                 "native failure replay requires a certified guest exception, capability denial, instruction-budget stop, or console-budget stop"
                     .to_string(),
@@ -1904,14 +2004,15 @@ mod engine {
                     console_output: orchestrator.last_failed_console_output(),
                 })
             }
-            OrchestratorError::Interpreter(error) => CapturedAttempt::EngineFailure(CapturedEngineFailure {
-                trace_id: trace_id.to_string(),
-                reason: engine_failure_reason(error).ok_or_else(|| {
-                    "unsupported native failure reason".to_string()
-                })?,
-                diagnostic: error.to_string(),
-                console_output: orchestrator.last_failed_console_output(),
-            }),
+            OrchestratorError::Interpreter(error) => {
+                CapturedAttempt::EngineFailure(CapturedEngineFailure {
+                    trace_id: trace_id.to_string(),
+                    reason: engine_failure_reason(error)
+                        .ok_or_else(|| "unsupported native failure reason".to_string())?,
+                    diagnostic: error.to_string(),
+                    console_output: orchestrator.last_failed_console_output(),
+                })
+            }
             _ => return Err("unsupported native failure boundary".to_string()),
         };
         Ok(ObservedFailure {
@@ -2013,8 +2114,15 @@ mod engine {
             // denials, instruction-budget exhaustion, or console-budget stops
             // after cleanup succeeds.
             Self::from_finalized_failure(
-                package, orchestrator_config, runtime_config, ambient_authority,
-                process_argv, process_preparation, module_sources, orchestrator, error,
+                package,
+                orchestrator_config,
+                runtime_config,
+                ambient_authority,
+                process_argv,
+                process_preparation,
+                module_sources,
+                orchestrator,
+                error,
             )
         }
 
@@ -2193,7 +2301,9 @@ mod engine {
                         failure.console_output,
                     ),
                     CapturedAttempt::Completed(_) => {
-                        return Err("failure observation cannot contain completed evidence".to_string());
+                        return Err(
+                            "failure observation cannot contain completed evidence".to_string()
+                        );
                     }
                 };
             Ok(Self {
@@ -2279,10 +2389,7 @@ mod engine {
             ),
             (outcome.console_match, "console output"),
             (outcome.host_effects_match, "host-effect prefix"),
-            (
-                *trace_id == replayed.trace_id,
-                "execution trace identity",
-            ),
+            (*trace_id == replayed.trace_id, "execution trace identity"),
         ] {
             if !matches {
                 outcome.divergences.push(format!(
@@ -2291,8 +2398,12 @@ mod engine {
             }
         }
         if let CapturedAttempt::EngineFailure(failure) = expected {
-            let (reason_match, diagnostic_match) = replayed.engine_failure.as_ref()
-                .map(|(reason, diagnostic)| (reason == &failure.reason, diagnostic == &failure.diagnostic))
+            let (reason_match, diagnostic_match) = replayed
+                .engine_failure
+                .as_ref()
+                .map(|(reason, diagnostic)| {
+                    (reason == &failure.reason, diagnostic == &failure.diagnostic)
+                })
                 .unwrap_or((false, false));
             for (matches, subject) in [
                 (reason_match, "engine failure reason"),
@@ -2513,10 +2624,16 @@ mod engine {
                 source: source.to_string(),
                 source_file: None,
                 module_root: None,
-                capabilities: ["vm_dispatch", "heap_allocate", "builtin", "console", "env_read"]
-                    .into_iter()
-                    .map(str::to_string)
-                    .collect(),
+                capabilities: [
+                    "vm_dispatch",
+                    "heap_allocate",
+                    "builtin",
+                    "console",
+                    "env_read",
+                ]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
                 version: "1.0.0".to_string(),
                 metadata: BTreeMap::new(),
             };
@@ -2576,7 +2693,10 @@ mod engine {
                 ("PATH".to_string(), "captured-not-the-host-path".to_string()),
                 ("EMPTY".to_string(), String::new()),
                 ("UNICODE".to_string(), "βeta\nsecond line".to_string()),
-                ("UNUSED_PRIVATE".to_string(), "not-read-not-captured".to_string()),
+                (
+                    "UNUSED_PRIVATE".to_string(),
+                    "not-read-not-captured".to_string(),
+                ),
             ])
         }
 
@@ -2584,14 +2704,29 @@ mod engine {
         fn native_environment_replay_preserves_values_absence_empty_and_presence() {
             on_native_stack(|| {
                 for (source, name, value, result_value) in [
-                    ("process.env.PATH;", "PATH", Some("captured-not-the-host-path"), "captured-not-the-host-path"),
-                    ("process.env['PATH'];", "PATH", Some("captured-not-the-host-path"), "captured-not-the-host-path"),
+                    (
+                        "process.env.PATH;",
+                        "PATH",
+                        Some("captured-not-the-host-path"),
+                        "captured-not-the-host-path",
+                    ),
+                    (
+                        "process.env['PATH'];",
+                        "PATH",
+                        Some("captured-not-the-host-path"),
+                        "captured-not-the-host-path",
+                    ),
                     ("process.env.EMPTY;", "EMPTY", Some(""), ""),
                     ("process.env.ABSENT;", "ABSENT", None, "undefined"),
                     ("process.env[''];", "", None, "undefined"),
                     ("'EMPTY' in process.env;", "EMPTY", Some(""), "true"),
                     ("'ABSENT' in process.env;", "ABSENT", None, "false"),
-                    ("process.env.UNICODE;", "UNICODE", Some("βeta\nsecond line"), "βeta\nsecond line"),
+                    (
+                        "process.env.UNICODE;",
+                        "UNICODE",
+                        Some("βeta\nsecond line"),
+                        "βeta\nsecond line",
+                    ),
                 ] {
                     let capture = record_environment(source, environment_values())
                         .expect("capture native environment expression");
@@ -2601,10 +2736,17 @@ mod engine {
                         panic!("environment expression must complete");
                     };
                     assert_eq!(expected.execution_value, result_value);
-                    assert_eq!(payload.host_effect_transcript, vec![(
-                        HostIoRequest::EnvRead { name: name.to_string() },
-                        Ok(HostIoResponse::EnvRead { value: value.map(str::to_string) }),
-                    )]);
+                    assert_eq!(
+                        payload.host_effect_transcript,
+                        vec![(
+                            HostIoRequest::EnvRead {
+                                name: name.to_string()
+                            },
+                            Ok(HostIoResponse::EnvRead {
+                                value: value.map(str::to_string)
+                            }),
+                        )]
+                    );
                     assert!(!capture.payload_json.contains("not-read-not-captured"));
                     let outcome = reexecute(&capture).expect("transcript-only environment replay");
                     assert!(outcome.matched, "{outcome:?}");
@@ -2621,7 +2763,11 @@ mod engine {
                 for throws in [false, true] {
                     let source = format!(
                         "process.env.EMPTY; process.env.PATH; process.env.EMPTY; {}",
-                        if throws { "throw 'environment-prefix-failure';" } else { "0;" },
+                        if throws {
+                            "throw 'environment-prefix-failure';"
+                        } else {
+                            "0;"
+                        },
                     );
                     let capture = record_environment(&source, environment_values()).unwrap();
                     let payload: NativeReplayPayload =
@@ -2630,21 +2776,32 @@ mod engine {
                     let outcome = reexecute(&capture).expect("replay completed or failed prefix");
                     assert!(outcome.matched, "{outcome:?}");
                     assert!(outcome.host_effects_match);
-                    assert_eq!(outcome.captured_terminal_state,
-                        if throws { NativeReplayTerminalState::UncaughtException }
-                        else { NativeReplayTerminalState::Completed });
+                    assert_eq!(
+                        outcome.captured_terminal_state,
+                        if throws {
+                            NativeReplayTerminalState::UncaughtException
+                        } else {
+                            NativeReplayTerminalState::Completed
+                        }
+                    );
                     for mutate in [
-                        (|p: &mut NativeReplayPayload| { p.host_effect_transcript.remove(0); })
-                            as fn(&mut NativeReplayPayload),
+                        (|p: &mut NativeReplayPayload| {
+                            p.host_effect_transcript.remove(0);
+                        }) as fn(&mut NativeReplayPayload),
                         |p| p.host_effect_transcript.swap(0, 1),
-                        |p| p.host_effect_transcript.push(p.host_effect_transcript[0].clone()),
+                        |p| {
+                            p.host_effect_transcript
+                                .push(p.host_effect_transcript[0].clone())
+                        },
                         |p| p.host_effect_transcript.clear(),
                     ] {
                         let mut changed = payload.clone();
                         mutate(&mut changed);
                         let changed = encode_capture(&changed).unwrap();
-                        assert!(reexecute(&changed).is_err(),
-                            "a matching terminal state cannot excuse an incomplete environment transcript");
+                        assert!(
+                            reexecute(&changed).is_err(),
+                            "a matching terminal state cannot excuse an incomplete environment transcript"
+                        );
                     }
                 }
             });
@@ -2659,13 +2816,19 @@ mod engine {
                     "const raw = process; raw.env.PATH;",
                     "process.env.PATH = 'replacement';",
                 ] {
-                    assert!(record_environment(source, environment_values()).is_err(),
-                        "environment replay must not grant raw process access, mutation, or declassification");
+                    assert!(
+                        record_environment(source, environment_values()).is_err(),
+                        "environment replay must not grant raw process access, mutation, or declassification"
+                    );
                 }
-                let capture = record_environment("process.env.PATH;", environment_values()).unwrap();
+                let capture =
+                    record_environment("process.env.PATH;", environment_values()).unwrap();
                 let mut payload: NativeReplayPayload =
                     serde_json::from_str(&capture.payload_json).unwrap();
-                payload.package.capabilities.retain(|capability| capability != "env_read");
+                payload
+                    .package
+                    .capabilities
+                    .retain(|capability| capability != "env_read");
                 assert!(payload.validate().unwrap_err().contains("explicit EnvRead"));
                 assert!(reexecute(&encode_capture(&payload).unwrap()).is_err());
             });
@@ -2677,46 +2840,82 @@ mod engine {
                 ENVIRONMENT_NAME_MAX_BYTES, ENVIRONMENT_VALUE_MAX_BYTES,
             };
             let granted = vec!["env_read".to_string()];
-            let request = HostIoRequest::EnvRead { name: "PRIVATE_NAME".to_string() };
+            let request = HostIoRequest::EnvRead {
+                name: "PRIVATE_NAME".to_string(),
+            };
             for value in [None, Some(String::new()), Some("βeta".to_string())] {
                 let entries = vec![(request.clone(), Ok(HostIoResponse::EnvRead { value }))];
                 validate_environment_transcript(&entries, &granted).unwrap();
                 assert!(validate_environment_transcript(&entries, &[]).is_err());
             }
             validate_environment_transcript(&[], &granted).unwrap();
-            for name in ["invalid=name".to_string(), "invalid\0name".to_string(),
-                "X".repeat(ENVIRONMENT_NAME_MAX_BYTES + 1)] {
-                let entries = vec![(HostIoRequest::EnvRead { name },
-                    Ok(HostIoResponse::EnvRead { value: None }))];
+            for name in [
+                "invalid=name".to_string(),
+                "invalid\0name".to_string(),
+                "X".repeat(ENVIRONMENT_NAME_MAX_BYTES + 1),
+            ] {
+                let entries = vec![(
+                    HostIoRequest::EnvRead { name },
+                    Ok(HostIoResponse::EnvRead { value: None }),
+                )];
                 assert!(validate_environment_transcript(&entries, &granted).is_err());
             }
             for response in [
-                HostIoResponse::EnvRead { value: Some("private\0value".to_string()) },
-                HostIoResponse::EnvRead { value: Some("X".repeat(ENVIRONMENT_VALUE_MAX_BYTES + 1)) },
-                HostIoResponse::FsRead { bytes: b"private-value".to_vec() },
+                HostIoResponse::EnvRead {
+                    value: Some("private\0value".to_string()),
+                },
+                HostIoResponse::EnvRead {
+                    value: Some("X".repeat(ENVIRONMENT_VALUE_MAX_BYTES + 1)),
+                },
+                HostIoResponse::FsRead {
+                    bytes: b"private-value".to_vec(),
+                },
             ] {
-                let error = validate_environment_transcript(&[(request.clone(), Ok(response))], &granted)
-                    .expect_err("invalid environment result");
+                let error =
+                    validate_environment_transcript(&[(request.clone(), Ok(response))], &granted)
+                        .expect_err("invalid environment result");
                 assert!(!error.contains("PRIVATE_NAME") && !error.contains("private-value"));
             }
-            let inverse = vec![(HostIoRequest::FsRead { path: "file".to_string() },
-                Ok(HostIoResponse::EnvRead { value: Some("private-value".to_string()) }))];
+            let inverse = vec![(
+                HostIoRequest::FsRead {
+                    path: "file".to_string(),
+                },
+                Ok(HostIoResponse::EnvRead {
+                    value: Some("private-value".to_string()),
+                }),
+            )];
             assert!(validate_environment_transcript(&inverse, &granted).is_err());
-            let denial = vec![(request, Err(HostIoError::Denied { reason: "policy".to_string() }))];
+            let denial = vec![(
+                request,
+                Err(HostIoError::Denied {
+                    reason: "policy".to_string(),
+                }),
+            )];
             validate_environment_transcript(&denial, &granted).unwrap();
         }
 
         #[test]
         fn malformed_environment_capture_is_rejected_before_native_execution() {
             on_native_stack(|| {
-                let capture = record_environment("process.env.PATH;", environment_values()).unwrap();
-                let original: NativeReplayPayload = serde_json::from_str(&capture.payload_json).unwrap();
+                let capture =
+                    record_environment("process.env.PATH;", environment_values()).unwrap();
+                let original: NativeReplayPayload =
+                    serde_json::from_str(&capture.payload_json).unwrap();
                 for mutate in [
                     (|p: &mut NativeReplayPayload| {
-                        p.host_effect_transcript[0].1 = Ok(HostIoResponse::FsRead { bytes: vec![] });
+                        p.host_effect_transcript[0].1 =
+                            Ok(HostIoResponse::FsRead { bytes: vec![] });
                     }) as fn(&mut NativeReplayPayload),
-                    |p| p.host_effect_transcript[0].0 = HostIoRequest::EnvRead { name: "bad=name".to_string() },
-                    |p| p.host_effect_transcript[0].1 = Ok(HostIoResponse::EnvRead { value: Some("bad\0value".to_string()) }),
+                    |p| {
+                        p.host_effect_transcript[0].0 = HostIoRequest::EnvRead {
+                            name: "bad=name".to_string(),
+                        }
+                    },
+                    |p| {
+                        p.host_effect_transcript[0].1 = Ok(HostIoResponse::EnvRead {
+                            value: Some("bad\0value".to_string()),
+                        })
+                    },
                 ] {
                     let mut payload = original.clone();
                     mutate(&mut payload);
@@ -2730,8 +2929,10 @@ mod engine {
         #[test]
         fn native_environment_replay_detects_changed_recorded_values() {
             on_native_stack(|| {
-                let capture = record_environment("process.env.PATH;", environment_values()).unwrap();
-                let mut payload: NativeReplayPayload = serde_json::from_str(&capture.payload_json).unwrap();
+                let capture =
+                    record_environment("process.env.PATH;", environment_values()).unwrap();
+                let mut payload: NativeReplayPayload =
+                    serde_json::from_str(&capture.payload_json).unwrap();
                 payload.host_effect_transcript[0].1 = Ok(HostIoResponse::EnvRead {
                     value: Some("different-captured-value".to_string()),
                 });
@@ -3224,21 +3425,36 @@ mod engine {
                 for budget_stop in [false, true] {
                     let root = tempfile::tempdir().unwrap();
                     let capture = capture_stop(root.path(), budget_stop);
-                    assert_eq!(capture.terminal_state().unwrap(), NativeReplayTerminalState::EngineFailure);
-                    let payload: NativeReplayPayload = serde_json::from_str(&capture.payload_json).unwrap();
+                    assert_eq!(
+                        capture.terminal_state().unwrap(),
+                        NativeReplayTerminalState::EngineFailure
+                    );
+                    let payload: NativeReplayPayload =
+                        serde_json::from_str(&capture.payload_json).unwrap();
                     assert_eq!(payload.host_effect_transcript.len(), 2);
                     let CapturedAttempt::EngineFailure(expected) = &payload.expected else {
                         panic!("engine stop must not be relabeled as a guest exception");
                     };
                     assert!(!expected.console_output.is_empty());
                     for name in ["stopped.cjs", "input.txt", "output.txt"] {
-                        std::fs::rename(root.path().join(name), root.path().join(format!("saved-{name}"))).unwrap();
+                        std::fs::rename(
+                            root.path().join(name),
+                            root.path().join(format!("saved-{name}")),
+                        )
+                        .unwrap();
                     }
                     let outcome = reexecute(&capture).expect("replay finalized native stop");
                     assert!(outcome.matched, "{outcome:?}");
                     assert_eq!(outcome.verification_scope, "engine_failure_prefix");
-                    assert!(outcome.terminal_state_match && outcome.console_match && outcome.host_effects_match);
-                    assert_eq!(outcome.replay_terminal_state, NativeReplayTerminalState::EngineFailure);
+                    assert!(
+                        outcome.terminal_state_match
+                            && outcome.console_match
+                            && outcome.host_effects_match
+                    );
+                    assert_eq!(
+                        outcome.replay_terminal_state,
+                        NativeReplayTerminalState::EngineFailure
+                    );
                     assert_eq!(outcome.ir4_witness_match, None);
                     assert_eq!(outcome.instruction_count_match, None);
                     assert_eq!(outcome.nondeterminism_trace_match, None);
@@ -3246,8 +3462,10 @@ mod engine {
                     assert_eq!(outcome.decisions_match, None);
                     assert!(outcome.module_load_disabled);
                     assert!(!root.path().join("output.txt").exists());
-                    assert_eq!(std::fs::read_to_string(root.path().join("saved-output.txt")).unwrap(),
-                        "captured-before-stop");
+                    assert_eq!(
+                        std::fs::read_to_string(root.path().join("saved-output.txt")).unwrap(),
+                        "captured-before-stop"
+                    );
                 }
             });
         }
@@ -3258,12 +3476,17 @@ mod engine {
                 for budget_stop in [false, true] {
                     let root = tempfile::tempdir().unwrap();
                     let capture = capture_stop(root.path(), budget_stop);
-                    let original: NativeReplayPayload = serde_json::from_str(&capture.payload_json).unwrap();
+                    let original: NativeReplayPayload =
+                        serde_json::from_str(&capture.payload_json).unwrap();
                     for change_reason in [false, true] {
                         let mut changed = original.clone();
-                        let CapturedAttempt::EngineFailure(expected) = &mut changed.expected else { panic!() };
+                        let CapturedAttempt::EngineFailure(expected) = &mut changed.expected else {
+                            panic!()
+                        };
                         if change_reason {
-                            expected.reason = EngineFailureReason::CapabilityDenied { capability: "fs_write".into() };
+                            expected.reason = EngineFailureReason::CapabilityDenied {
+                                capability: "fs_write".into(),
+                            };
                         } else {
                             expected.diagnostic.push_str(" altered");
                         }
@@ -3272,9 +3495,16 @@ mod engine {
                         let outcome = reexecute(&encode_capture(&changed).unwrap()).unwrap();
                         assert!(!outcome.matched);
                         assert!(outcome.terminal_state_match && outcome.host_effects_match);
-                        assert!(outcome.divergences.iter().any(|detail| detail.contains(
-                            if change_reason { "engine failure reason" } else { "diagnostic" }
-                        )), "{outcome:?}");
+                        assert!(
+                            outcome.divergences.iter().any(|detail| detail.contains(
+                                if change_reason {
+                                    "engine failure reason"
+                                } else {
+                                    "diagnostic"
+                                }
+                            )),
+                            "{outcome:?}"
+                        );
                     }
                 }
             });
@@ -3285,15 +3515,23 @@ mod engine {
             on_native_stack(|| {
                 let root = tempfile::tempdir().unwrap();
                 let capture = capture_stop(root.path(), true);
-                let original: NativeReplayPayload = serde_json::from_str(&capture.payload_json).unwrap();
-                for ending in ["42;", "throw 'instruction budget exhausted';", "process.env.MISSING;"] {
+                let original: NativeReplayPayload =
+                    serde_json::from_str(&capture.payload_json).unwrap();
+                for ending in [
+                    "42;",
+                    "throw 'instruction budget exhausted';",
+                    "process.env.MISSING;",
+                ] {
                     let mut changed = original.clone();
                     changed.package.source = format!("{STOP_PREFIX} {ending}");
                     let outcome = reexecute(&encode_capture(&changed).unwrap()).unwrap();
                     assert!(!outcome.matched, "{ending}: {outcome:?}");
                     assert!(outcome.console_match && outcome.host_effects_match);
                     assert_eq!(outcome.exception_value_match, None);
-                    assert_eq!(outcome.terminal_state_match, ending == "process.env.MISSING;");
+                    assert_eq!(
+                        outcome.terminal_state_match,
+                        ending == "process.env.MISSING;"
+                    );
                 }
             });
         }
@@ -3304,17 +3542,25 @@ mod engine {
                 for budget_stop in [false, true] {
                     let root = tempfile::tempdir().unwrap();
                     let capture = capture_stop(root.path(), budget_stop);
-                    let original: NativeReplayPayload = serde_json::from_str(&capture.payload_json).unwrap();
+                    let original: NativeReplayPayload =
+                        serde_json::from_str(&capture.payload_json).unwrap();
                     for mutate in [
-                        (|p: &mut NativeReplayPayload| { p.host_effect_transcript.remove(0); }) as fn(&mut NativeReplayPayload),
+                        (|p: &mut NativeReplayPayload| {
+                            p.host_effect_transcript.remove(0);
+                        }) as fn(&mut NativeReplayPayload),
                         |p| p.host_effect_transcript.swap(0, 1),
                         |p| p.host_effect_transcript.clear(),
-                        |p| p.host_effect_transcript.push(p.host_effect_transcript[0].clone()),
+                        |p| {
+                            p.host_effect_transcript
+                                .push(p.host_effect_transcript[0].clone())
+                        },
                     ] {
                         let mut changed = original.clone();
                         mutate(&mut changed);
-                        assert!(reexecute(&encode_capture(&changed).unwrap()).is_err(),
-                            "a matching stop cannot excuse an uncertified recorder boundary");
+                        assert!(
+                            reexecute(&encode_capture(&changed).unwrap()).is_err(),
+                            "a matching stop cannot excuse an uncertified recorder boundary"
+                        );
                     }
                 }
             });
@@ -3325,19 +3571,32 @@ mod engine {
             on_native_stack(|| {
                 for wrong_trace in [false, true] {
                     let root = tempfile::tempdir().unwrap();
-                    let (package, config, runtime, orchestrator, mut error) = stopped_run(root.path(), false);
+                    let (package, config, runtime, orchestrator, mut error) =
+                        stopped_run(root.path(), false);
                     let OrchestratorError::PostCellFailure(failure) = &mut error else {
                         panic!("native stop must carry finalized cell evidence");
                     };
                     if wrong_trace {
                         failure.cleanup.trace_id.push_str("-different");
                     } else {
-                        failure.additional_errors.push(OrchestratorError::Interpreter(InterpreterError::Cancelled));
+                        failure
+                            .additional_errors
+                            .push(OrchestratorError::Interpreter(InterpreterError::Cancelled));
                     }
-                    assert!(NativeReplayCapture::from_finalized_failure(
-                        &package, &config, &runtime, AmbientAuthorityGrant::DenyAll,
-                        &[], None, None, &orchestrator, &error,
-                    ).is_err());
+                    assert!(
+                        NativeReplayCapture::from_finalized_failure(
+                            &package,
+                            &config,
+                            &runtime,
+                            AmbientAuthorityGrant::DenyAll,
+                            &[],
+                            None,
+                            None,
+                            &orchestrator,
+                            &error,
+                        )
+                        .is_err()
+                    );
                 }
             });
         }
@@ -3345,23 +3604,53 @@ mod engine {
         #[test]
         fn engine_failure_capture_never_infers_certification_from_diagnostic_text() {
             assert!(engine_failure_reason(&InterpreterError::Cancelled).is_none());
-            for value in ["capability denied: env_read", "instruction budget exhausted", "wrapper_timeout"] {
-                assert!(engine_failure_reason(&InterpreterError::UncaughtException { value: value.into() }).is_none());
+            for value in [
+                "capability denied: env_read",
+                "instruction budget exhausted",
+                "wrapper_timeout",
+            ] {
+                assert!(
+                    engine_failure_reason(&InterpreterError::UncaughtException {
+                        value: value.into()
+                    })
+                    .is_none()
+                );
             }
-            assert_eq!(engine_failure_reason(&InterpreterError::CapabilityDenied { capability: "env_read".into() }),
-                Some(EngineFailureReason::CapabilityDenied { capability: "env_read".into() }));
+            assert_eq!(
+                engine_failure_reason(&InterpreterError::CapabilityDenied {
+                    capability: "env_read".into()
+                }),
+                Some(EngineFailureReason::CapabilityDenied {
+                    capability: "env_read".into()
+                })
+            );
             on_native_stack(|| {
                 let root = tempfile::tempdir().unwrap();
                 let (package, config, runtime, orchestrator, _) = stopped_run(root.path(), false);
                 for error in [
                     OrchestratorError::Interpreter(InterpreterError::Cancelled),
-                    OrchestratorError::Interpreter(InterpreterError::CapabilityDenied { capability: "env_read".into() }),
-                    OrchestratorError::Interpreter(InterpreterError::UncaughtException { value: "instruction budget exhausted".into() }),
+                    OrchestratorError::Interpreter(InterpreterError::CapabilityDenied {
+                        capability: "env_read".into(),
+                    }),
+                    OrchestratorError::Interpreter(InterpreterError::UncaughtException {
+                        value: "instruction budget exhausted".into(),
+                    }),
                 ] {
-                    assert!(NativeReplayCapture::from_finalized_failure(
-                        &package, &config, &runtime, AmbientAuthorityGrant::DenyAll,
-                        &[], None, None, &orchestrator, &error,
-                    ).is_err(), "a previous finalized attempt does not certify an unrelated error");
+                    assert!(
+                        NativeReplayCapture::from_finalized_failure(
+                            &package,
+                            &config,
+                            &runtime,
+                            AmbientAuthorityGrant::DenyAll,
+                            &[],
+                            None,
+                            None,
+                            &orchestrator,
+                            &error,
+                        )
+                        .is_err(),
+                        "a previous finalized attempt does not certify an unrelated error"
+                    );
                 }
             });
         }
@@ -3371,17 +3660,29 @@ mod engine {
             on_native_stack(|| {
                 let root = tempfile::tempdir().unwrap();
                 let capture = capture_stop(root.path(), true);
-                let original: NativeReplayPayload = serde_json::from_str(&capture.payload_json).unwrap();
+                let original: NativeReplayPayload =
+                    serde_json::from_str(&capture.payload_json).unwrap();
                 for mutate in [
-                    (|f: &mut CapturedEngineFailure| f.trace_id.clear()) as fn(&mut CapturedEngineFailure),
+                    (|f: &mut CapturedEngineFailure| f.trace_id.clear())
+                        as fn(&mut CapturedEngineFailure),
                     |f| f.diagnostic.clear(),
                     |f| f.diagnostic = "x".repeat(4097),
-                    |f| f.reason = EngineFailureReason::CapabilityDenied { capability: "unknown_capability".into() },
-                    |f| f.reason = EngineFailureReason::CapabilityDenied { capability: "module_load".into() },
+                    |f| {
+                        f.reason = EngineFailureReason::CapabilityDenied {
+                            capability: "unknown_capability".into(),
+                        }
+                    },
+                    |f| {
+                        f.reason = EngineFailureReason::CapabilityDenied {
+                            capability: "module_load".into(),
+                        }
+                    },
                     |f| f.reason = EngineFailureReason::InstructionBudgetExhausted { budget: 7 },
                 ] {
                     let mut changed = original.clone();
-                    let CapturedAttempt::EngineFailure(failure) = &mut changed.expected else { panic!() };
+                    let CapturedAttempt::EngineFailure(failure) = &mut changed.expected else {
+                        panic!()
+                    };
                     mutate(failure);
                     assert!(changed.validate().is_err());
                     assert!(reexecute(&encode_capture(&changed).unwrap()).is_err());
@@ -3784,8 +4085,8 @@ mod engine {
                         },
                     );
                     let capture = record_process(root.path(), &source);
-                    let original = reexecute(&capture)
-                        .expect("untampered process preparation must replay");
+                    let original =
+                        reexecute(&capture).expect("untampered process preparation must replay");
                     assert!(original.matched, "{original:?}");
                     assert!(original.host_effects_match);
                     assert!(original.console_match);
@@ -4337,12 +4638,31 @@ mod tests {
 
     #[test]
     fn engine_failure_terminal_metadata_is_distinct_and_integrity_bound() {
-        let capture = envelope(r#"{"expected":{"terminal_state":"engine_failure","reason":{"kind":"capability_denied","capability":"env_read"}}}"#);
-        assert_eq!(capture.terminal_state().unwrap(), NativeReplayTerminalState::EngineFailure);
-        assert_ne!(NativeReplayTerminalState::EngineFailure, NativeReplayTerminalState::UncaughtException);
-        assert_eq!(serde_json::to_string(&NativeReplayTerminalState::EngineFailure).unwrap(), "\"engine_failure\"");
-        for unrelated in ["cancelled", "wrapper_timeout", "panic", "timeout_indeterminate"] {
-            assert!(serde_json::from_value::<NativeReplayTerminalState>(serde_json::json!(unrelated)).is_err());
+        let capture = envelope(
+            r#"{"expected":{"terminal_state":"engine_failure","reason":{"kind":"capability_denied","capability":"env_read"}}}"#,
+        );
+        assert_eq!(
+            capture.terminal_state().unwrap(),
+            NativeReplayTerminalState::EngineFailure
+        );
+        assert_ne!(
+            NativeReplayTerminalState::EngineFailure,
+            NativeReplayTerminalState::UncaughtException
+        );
+        assert_eq!(
+            serde_json::to_string(&NativeReplayTerminalState::EngineFailure).unwrap(),
+            "\"engine_failure\""
+        );
+        for unrelated in [
+            "cancelled",
+            "wrapper_timeout",
+            "panic",
+            "timeout_indeterminate",
+        ] {
+            assert!(
+                serde_json::from_value::<NativeReplayTerminalState>(serde_json::json!(unrelated))
+                    .is_err()
+            );
         }
         let mut changed = capture;
         changed.payload_json.push(' ');

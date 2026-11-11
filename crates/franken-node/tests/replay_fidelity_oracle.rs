@@ -313,3 +313,96 @@ fn tampering_and_chunk_reorder_are_rejected_by_trusted_replay() -> TestResult {
     }
     Ok(())
 }
+
+#[test]
+fn native_replay_policy_equivalence_rejects_policy_divergence_and_unfrozen_modules() {
+    use frankenengine_node::ops::native_replay::{
+        NATIVE_REPLAY_OUTCOME_SCHEMA, NativeReplayOutcome, NativeReplayTerminalState,
+        POLICY_DECISION_DIVERGENCE, POLICY_EQUIVALENCE_SCOPE,
+        POLICY_EQUIVALENCE_UNAVAILABLE_DIVERGENCE,
+    };
+
+    let base_guest_match = NativeReplayOutcome {
+        schema_version: NATIVE_REPLAY_OUTCOME_SCHEMA.to_string(),
+        replay_kind: "native_reexecution".to_string(),
+        verification_scope: "guest_execution".to_string(),
+        module_load_disabled: false,
+        matched: true,
+        divergences: Vec::new(),
+        captured_trace_id: "trace-orig-001".to_string(),
+        replay_trace_id: "trace-orig-001".to_string(),
+        captured_terminal_state: NativeReplayTerminalState::Completed,
+        replay_terminal_state: NativeReplayTerminalState::Completed,
+        terminal_state_match: true,
+        ir3_hash_match: Some(true),
+        ir4_witness_match: Some(true),
+        execution_value_match: Some(true),
+        instruction_count_match: Some(true),
+        console_match: true,
+        host_effects_match: true,
+        nondeterminism_trace_match: Some(true),
+        lane_match: Some(true),
+        exit_code_match: Some(true),
+        exception_value_match: None,
+        decisions_match: Some(true),
+        policy_comparison_note: "frozen module replay".to_string(),
+    };
+
+    assert!(base_guest_match.satisfies_policy_equivalence());
+    base_guest_match
+        .enforce_policy_equivalence()
+        .expect("matching guest + policy decisions under frozen modules must pass");
+    let certified = base_guest_match.clone().into_policy_equivalence_outcome();
+    assert_eq!(certified.verification_scope, POLICY_EQUIVALENCE_SCOPE);
+    assert!(certified.matched);
+    assert!(certified.divergences.is_empty());
+
+    // Policy divergence with identical guest console/value/host-effect transcript:
+    // guest_execution remains distinct (`matched == true`), while policy-equivalence
+    // scope MUST fail closed (`matched == false`).
+    let mut policy_diverged = base_guest_match.clone();
+    policy_diverged.decisions_match = Some(false);
+    assert!(policy_diverged.matched);
+    assert!(!policy_diverged.satisfies_policy_equivalence());
+    let err = policy_diverged
+        .enforce_policy_equivalence()
+        .expect_err("policy decision mismatch must fail closed");
+    assert!(err.contains(POLICY_DECISION_DIVERGENCE), "{err}");
+    let promoted_diverged = policy_diverged.into_policy_equivalence_outcome();
+    assert_eq!(
+        promoted_diverged.verification_scope,
+        POLICY_EQUIVALENCE_SCOPE
+    );
+    assert!(!promoted_diverged.matched);
+    assert!(
+        promoted_diverged
+            .divergences
+            .iter()
+            .any(|d| d == POLICY_DECISION_DIVERGENCE)
+    );
+
+    // Unfrozen module loading or interrupted/failure-prefix runs (`decisions_match: None`)
+    // must never be upgraded into an original-policy equivalence proof.
+    let mut unfrozen = base_guest_match.clone();
+    unfrozen.module_load_disabled = true;
+    let promoted_unfrozen = unfrozen.into_policy_equivalence_outcome();
+    assert!(!promoted_unfrozen.matched);
+    assert!(
+        promoted_unfrozen
+            .divergences
+            .iter()
+            .any(|d| d == POLICY_EQUIVALENCE_UNAVAILABLE_DIVERGENCE)
+    );
+
+    let mut interrupted = base_guest_match;
+    interrupted.verification_scope = "engine_failure_prefix".to_string();
+    interrupted.decisions_match = None;
+    let promoted_interrupted = interrupted.into_policy_equivalence_outcome();
+    assert!(!promoted_interrupted.matched);
+    assert!(
+        promoted_interrupted
+            .divergences
+            .iter()
+            .any(|d| d == POLICY_EQUIVALENCE_UNAVAILABLE_DIVERGENCE)
+    );
+}

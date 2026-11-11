@@ -11,8 +11,14 @@ fn scanned_workspace_release(drill: &Drill) -> (PathBuf, PathBuf) {
 
 fn revoke_shared(drill: &Drill, directory: &Path) {
     let revoked = drill.ok(directory, &["trust", "revoke", "npm:shared", "--json"]);
-    assert_eq!(revoked["extension"]["extension_id"], "npm:shared", "{revoked}");
-    assert_eq!(revoked["revocation_status"]["status"], "revoked", "{revoked}");
+    assert_eq!(
+        revoked["extension"]["extension_id"], "npm:shared",
+        "{revoked}"
+    );
+    assert_eq!(
+        revoked["revocation_status"]["status"], "revoked",
+        "{revoked}"
+    );
 }
 
 fn assert_dependency_refusal(report: &Value) {
@@ -117,7 +123,11 @@ fn dependency_revocation_after_signed_intent_prevents_reconciliation() {
     assert!(!drill.state_path("active.json").exists());
     assert_eq!(fs::read(&intent_path).unwrap(), intent);
     assert_eq!(fs::read(&history_path).unwrap(), history);
-    assert_eq!(drill.status(), before, "refusal must retain pending authorization");
+    assert_eq!(
+        drill.status(),
+        before,
+        "refusal must retain pending authorization"
+    );
 }
 
 #[test]
@@ -151,6 +161,49 @@ fn dependency_revocation_disqualifies_a_previously_healthy_rollback_candidate() 
             && reason.contains("revoked"),
         "{report}"
     );
+    assert!(report.get("resumed").is_none(), "{report}");
+    assert_eq!(drill.status()["active"]["release_id"], "2.0.0");
+}
+
+#[test]
+fn safe_mode_on_release_disqualifies_a_previously_healthy_rollback_candidate() {
+    let drill = Drill::new();
+    let (directory, manifest) = scanned_workspace_release(&drill);
+    drill.install_published("1.0.0", &directory, &manifest);
+    drill.install("2.0.0", &crashing_v2());
+    drill.policy("rollback", "automatic");
+    drill.activate("1.0.0");
+    let (code, healthy) = drill.run();
+    assert_eq!(code, Some(0), "{healthy}");
+    assert_eq!(healthy["phase"], "healthy", "{healthy}");
+
+    drill.ok(
+        &directory,
+        &[
+            "safe-mode",
+            "enter",
+            "--reason",
+            "explicit-flag",
+            "--operator-id",
+            "ops-contain",
+            "--trust-state-hash",
+            "operator:contain-1.0.0",
+            "--json",
+        ],
+    );
+
+    drill.activate("2.0.0");
+    let (code, report) = drill.crash_until_loop();
+
+    assert_ne!(code, Some(0));
+    assert_eq!(report["phase"], "contained_no_known_good", "{report}");
+    let refusals = report["recovery"]["candidate_refusals"]
+        .as_array()
+        .expect("candidate refusals");
+    assert_eq!(refusals.len(), 1, "{report}");
+    assert_eq!(refusals[0]["release_id"], "1.0.0");
+    let reason = refusals[0]["reason"].as_str().expect("safe-mode refusal");
+    assert!(reason.contains("safe-mode containment"), "{report}");
     assert!(report.get("resumed").is_none(), "{report}");
     assert_eq!(drill.status()["active"]["release_id"], "2.0.0");
 }

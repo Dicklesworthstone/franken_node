@@ -724,12 +724,11 @@ pub fn run_audit(project_path: &Path) -> anyhow::Result<MigrationAuditReport> {
     summary.lockfiles = lockfiles.into_iter().collect();
     append_summary_findings(&summary, engine_gaps, &mut findings);
     #[cfg(target_os = "linux")]
-    let (dependency_admission, dependency_admission_error) =
-        if summary.package_manifests == 0 {
-            (None, None)
-        } else {
-            audit_project_dependencies(project_path, &mut findings)?
-        };
+    let (dependency_admission, dependency_admission_error) = if summary.package_manifests == 0 {
+        (None, None)
+    } else {
+        audit_project_dependencies(project_path, &mut findings)?
+    };
     sort_and_assign_ids(&mut findings);
 
     Ok(MigrationAuditReport {
@@ -765,7 +764,9 @@ fn audit_project_dependencies(
         let manifest = select_smoke_package_manifest(&project)?;
         let manifest =
             canonicalize_project_package_manifest_path(&project, &manifest, "dependency audit")?;
-        let package_root = manifest.parent().context("package manifest has no parent")?;
+        let package_root = manifest
+            .parent()
+            .context("package manifest has no parent")?;
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
         let mut report = dependency_admission::inspect(package_root, deadline)?;
         let prefix = relative_display(&project, package_root);
@@ -1342,7 +1343,9 @@ fn execute_migration_runtime_smoke_guarded(
         anyhow::anyhow!("failed locating native migration smoke executable: {err}")
     })?;
     execute_migration_runtime_smoke_with_target_guarded(
-        &native_executable, &smoke_target, original_control,
+        &native_executable,
+        &smoke_target,
+        original_control,
     )
 }
 
@@ -1401,7 +1404,8 @@ fn execute_migration_runtime_smoke_with_target_guarded(
     smoke_target: &MigrationRuntimeSmokeTarget,
     original_control: Option<&dyn Fn() -> anyhow::Result<()>>,
 ) -> anyhow::Result<MigrationRuntimeSmokeReceipt> {
-    let scope = crate::runtime::safe_mode::AdmittedSafeModeScope::capture(&smoke_target.entry_path)?;
+    let scope =
+        crate::runtime::safe_mode::AdmittedSafeModeScope::capture(&smoke_target.entry_path)?;
     let control = || -> anyhow::Result<()> {
         if let Some(original_control) = original_control {
             original_control()?;
@@ -1413,7 +1417,10 @@ fn execute_migration_runtime_smoke_with_target_guarded(
     #[cfg(target_os = "linux")]
     let output = smoke_supervisor::run_command_guarded(
         &mut command,
-        (MIGRATION_VALIDATE_RUNTIME_TIMEOUT, MIGRATION_RUNTIME_PIPE_DRAIN_TIMEOUT),
+        (
+            MIGRATION_VALIDATE_RUNTIME_TIMEOUT,
+            MIGRATION_RUNTIME_PIPE_DRAIN_TIMEOUT,
+        ),
         None,
         false,
         None,
@@ -1472,26 +1479,45 @@ mod smoke_safe_mode_tests {
         let staged = tempfile::tempdir().unwrap();
         for root in [project.as_path(), staged.path()] {
             std::fs::create_dir_all(root.join("nested")).unwrap();
-            std::fs::write(root.join("package.json"), r#"{"name":"smoke","main":"nested/index.cjs"}"#).unwrap();
+            std::fs::write(
+                root.join("package.json"),
+                r#"{"name":"smoke","main":"nested/index.cjs"}"#,
+            )
+            .unwrap();
             std::fs::write(root.join("nested/index.cjs"), "console.log(42);").unwrap();
         }
         let target = select_migration_runtime_smoke_target(&project).unwrap();
         let original_control = AdmittedSafeModeScope::capture(&target.entry_path).unwrap();
         let mut controller = SafeModeController::with_default_config();
-        controller.enter_safe_mode(SafeModeEntryReason::ExplicitFlag,
-            "2026-11-11T00:00:00Z", "trusted", Vec::new());
+        controller.enter_safe_mode(
+            SafeModeEntryReason::ExplicitFlag,
+            "2026-11-11T00:00:00Z",
+            "trusted",
+            Vec::new(),
+        );
         let state = original.path().join(".franken-node/safe-mode/state.json");
         std::fs::create_dir_all(state.parent().unwrap()).unwrap();
         std::fs::write(&state, serde_json::to_vec(&controller).unwrap()).unwrap();
         let error = execute_migration_runtime_smoke_with_target(
-            Path::new("/must-not-be-launched"), &target,
-        ).unwrap_err();
-        assert!(format!("{error:#}").contains("active safe mode"), "{error:#}");
+            Path::new("/must-not-be-launched"),
+            &target,
+        )
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("active safe mode"),
+            "{error:#}"
+        );
         let staged_target = select_migration_runtime_smoke_target(staged.path()).unwrap();
         let error = execute_migration_runtime_smoke_with_target_guarded(
-            Path::new("/must-not-be-launched"), &staged_target, Some(&|| original_control.enforce()),
-        ).unwrap_err();
-        assert!(format!("{error:#}").contains("active safe mode"), "{error:#}");
+            Path::new("/must-not-be-launched"),
+            &staged_target,
+            Some(&|| original_control.enforce()),
+        )
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("active safe mode"),
+            "{error:#}"
+        );
         assert!(!staged.path().join(".franken-node").exists());
     }
 }
@@ -1536,7 +1562,10 @@ fn select_migration_runtime_smoke_target(
         }
     }
 
-    for (script_name, command) in preferred_script_smoke_candidates(&manifest) {
+    if let Some((script_name, command)) = preferred_script_smoke_candidates(&manifest)
+        .into_iter()
+        .next()
+    {
         for hook in [format!("pre{script_name}"), format!("post{script_name}")] {
             if manifest
                 .get("scripts")
@@ -1866,14 +1895,21 @@ fn select_smoke_package_manifest(project_path: &Path) -> anyhow::Result<PathBuf>
                 .is_some_and(|name| name == "package.json")
         })
         .collect();
-    let directories: BTreeSet<_> = manifests.iter()
+    let directories: BTreeSet<_> = manifests
+        .iter()
         .filter_map(|manifest| manifest.parent().map(Path::to_path_buf))
         .collect();
-    let roots: Vec<_> = manifests.iter().filter(|manifest| {
-        manifest.parent().is_some_and(|directory| {
-            !directory.ancestors().skip(1).any(|ancestor| directories.contains(ancestor))
+    let roots: Vec<_> = manifests
+        .iter()
+        .filter(|manifest| {
+            manifest.parent().is_some_and(|directory| {
+                !directory
+                    .ancestors()
+                    .skip(1)
+                    .any(|ancestor| directories.contains(ancestor))
+            })
         })
-    }).collect();
+        .collect();
     match roots.as_slice() {
         [manifest] => Ok((*manifest).clone()),
         [] => {
@@ -2399,6 +2435,7 @@ mod native_migration_smoke_command_tests {
 }
 
 #[cfg(target_os = "linux")]
+#[allow(dead_code)]
 fn run_command_with_timeout(command: &mut Command, timeout: Duration) -> anyhow::Result<Output> {
     smoke_supervisor::run_command_with_timeout(
         command,
@@ -2760,26 +2797,27 @@ fn select_admitted_runtime_project(
         audit.dependency_admission_error.is_none() && !admission.requires_review(),
         "runtime validation dependency metadata requires review"
     );
-    let inputs = admission
-        .inputs
-        .iter()
-        .map(|input| {
-            let path = Path::new(&input.path).strip_prefix(prefix).map_err(|error| {
+    let inputs =
+        admission
+            .inputs
+            .iter()
+            .map(|input| {
+                let path = Path::new(&input.path).strip_prefix(prefix).map_err(|error| {
                 anyhow::anyhow!(
                     "selected runtime project differs from the dependency audit: {}: {error}",
                     input.path
                 )
             })?;
-            let path = path.to_str().ok_or_else(|| {
-                anyhow::anyhow!("audited dependency metadata path is not valid UTF-8")
-            })?;
-            Ok(dependency_admission::MetadataInput {
-                path: path.to_string(),
-                bytes: input.bytes,
-                sha256: input.sha256.clone(),
+                let path = path.to_str().ok_or_else(|| {
+                    anyhow::anyhow!("audited dependency metadata path is not valid UTF-8")
+                })?;
+                Ok(dependency_admission::MetadataInput {
+                    path: path.to_string(),
+                    bytes: input.bytes,
+                    sha256: input.sha256.clone(),
+                })
             })
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?;
+            .collect::<anyhow::Result<Vec<_>>>()?;
     Ok((package_root, inputs))
 }
 
@@ -4237,14 +4275,19 @@ fn classify_package_script_segment(
             .get(command_index)
             .is_some_and(|token| token.unquoted.starts_with('-'))
         {
-            return Err("env wrapper options require manual migration; no partial script rewrite applied".into());
+            return Err(
+                "env wrapper options require manual migration; no partial script rewrite applied"
+                    .into(),
+            );
         }
     }
     if tokens
         .get(command_index)
         .is_some_and(|token| token.unquoted == "cross-env-shell")
     {
-        return Err("cross-env-shell requires manual migration; no partial script rewrite applied".into());
+        return Err(
+            "cross-env-shell requires manual migration; no partial script rewrite applied".into(),
+        );
     }
     if tokens
         .get(command_index)
@@ -4303,7 +4346,9 @@ fn classify_package_script_segment(
         entry_index = entry_index.saturating_add(1);
     }
     let Some(entry_token) = tokens.get(entry_index) else {
-        return Err("runtime command has no supported entry point; manual migration required".into());
+        return Err(
+            "runtime command has no supported entry point; manual migration required".into(),
+        );
     };
     let entry_path = entry_token.unquoted.as_str();
     if entry_path.starts_with('-') {
@@ -4476,7 +4521,9 @@ fn package_script_entry_index(
     let mut index = runtime_index.saturating_add(1);
     if tokens.get(runtime_index).is_some_and(|token| {
         package_script_runtime_from_word(&token.unquoted) == Some(PackageScriptRuntime::FrankenNode)
-    }) && tokens.get(index).is_some_and(|token| token.unquoted == "run")
+    }) && tokens
+        .get(index)
+        .is_some_and(|token| token.unquoted == "run")
     {
         index = index.saturating_add(1);
     }
@@ -6191,9 +6238,12 @@ mod tests {
         let rewrite = rewrite_commonjs_requires(source);
         assert_eq!(rewrite.rewrite_count, 0);
         assert_eq!(rewrite.rewritten_content, source);
-        assert!(rewrite.manual_findings.iter().any(|finding| {
-            finding.contains("computed or unsupported require call")
-        }));
+        assert!(
+            rewrite
+                .manual_findings
+                .iter()
+                .any(|finding| { finding.contains("computed or unsupported require call") })
+        );
     }
 
     #[test]
@@ -6213,9 +6263,12 @@ mod tests {
         let rewrite = rewrite_commonjs_requires(source);
         assert_eq!(rewrite.rewrite_count, 0);
         assert_eq!(rewrite.rewritten_content, source);
-        assert!(rewrite.manual_findings.iter().any(|finding| {
-            finding.contains("dynamic loader construction or eval")
-        }));
+        assert!(
+            rewrite
+                .manual_findings
+                .iter()
+                .any(|finding| { finding.contains("dynamic loader construction or eval") })
+        );
     }
 
     #[test]
@@ -6223,7 +6276,10 @@ mod tests {
         let source = "const fs = require(\n  'fs'\n);\n";
         let rewrite = rewrite_commonjs_requires(source);
         assert_eq!(rewrite.rewrite_count, 1);
-        assert_eq!(rewrite.rewritten_content, "const fs = require(\n  'node:fs'\n);\n");
+        assert_eq!(
+            rewrite.rewritten_content,
+            "const fs = require(\n  'node:fs'\n);\n"
+        );
         assert!(rewrite.manual_findings.is_empty());
     }
 
@@ -6288,7 +6344,8 @@ mod tests {
         std::fs::write(
             project.join("package-lock.json"),
             "{\"lockfileVersion\":3,\"packages\":{\"\":{}}}\n",
-        ).expect("write lockfile");
+        )
+        .expect("write lockfile");
 
         let report = run_audit(project).expect("audit should succeed");
         let finding = report
@@ -6373,7 +6430,8 @@ mod tests {
         std::fs::write(
             project.join("package-lock.json"),
             "{\"lockfileVersion\":3,\"packages\":{\"\":{}}}\n",
-        ).expect("write lockfile");
+        )
+        .expect("write lockfile");
 
         let report = run_validate(project, false).expect("validate report");
         assert!(report.is_pass());
@@ -6443,11 +6501,12 @@ mod tests {
         assert!(report.checks.iter().any(|check| {
             check.id == "mig-validate-004"
                 && !check.passed
-                && check.message == if cfg!(target_os = "linux") {
-                    "high-severity audit findings: 2"
-                } else {
-                    "high-severity audit findings: 1"
-                }
+                && check.message
+                    == if cfg!(target_os = "linux") {
+                        "high-severity audit findings: 2"
+                    } else {
+                        "high-severity audit findings: 1"
+                    }
         }));
         assert!(report.blocking_findings.iter().any(|finding| {
             finding.category == MigrationCategory::Project

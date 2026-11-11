@@ -427,8 +427,10 @@ struct VerifyCorpusValidationReport {
 const OPS_HEALTH_CHECK_CLI_SCHEMA_VERSION: &str = "franken-node/ops-health-check-cli/v1";
 const OPS_METRICS_CLI_SCHEMA_VERSION: &str = "franken-node/ops-metrics-cli/v1";
 const OPS_CONFIG_AUDIT_CLI_SCHEMA_VERSION: &str = "franken-node/ops-config-audit-cli/v1";
+#[cfg(feature = "engine")]
 const OPS_PROOF_CARRYING_EVIDENCE_CLI_SCHEMA_VERSION: &str =
     "franken-node/ops-proof-carrying-evidence-cli/v1";
+#[cfg(feature = "engine")]
 const OPS_COMPAT_CORPUS_RUN_CLI_SCHEMA_VERSION: &str = "franken-node/ops-compat-corpus-run-cli/v1";
 
 const OPS_HEALTH_SESSION_COUNT_SOURCE: &str = "persisted_session_files";
@@ -6377,6 +6379,148 @@ fn deploy_context(
     ))
 }
 
+fn deploy_context_for_project(
+    project_path: &Path,
+    name: &str,
+) -> Result<(
+    runtime::deployment::DeploymentStore,
+    runtime::deployment::DeploymentAuthority,
+)> {
+    let root = project_path.canonicalize().with_context(|| {
+        format!(
+            "failed resolving project deployment root {}",
+            project_path.display()
+        )
+    })?;
+    let store = runtime::deployment::DeploymentStore::open(&root, name)?;
+    let project_default_key = root.join(".franken-node/keys/receipt-signing.key");
+    let material = if project_default_key.is_file() {
+        Some(load_ed25519_signing_material_from_path(
+            &project_default_key,
+            "receipt signing key",
+            "project",
+        )?)
+    } else {
+        load_receipt_signing_material(None)?
+    }
+    .ok_or_else(|| {
+        ActionableError::new(
+            "deployments are signed by the project's receipt signing key, and none is configured",
+            "franken-node init --profile balanced --out-dir .",
+        )
+    })?;
+    Ok((
+        store,
+        runtime::deployment::DeploymentAuthority::new(material.signing_key),
+    ))
+}
+
+fn sync_rollout_deployment(
+    args: &cli::MigrateRolloutArgs,
+    manager: &migration::rollout::RolloutManager,
+    report: &mut migration::rollout::RolloutReport,
+) -> Result<()> {
+    let Some(deployment_name) = args
+        .deployment
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    else {
+        return Ok(());
+    };
+    if args.action == cli::MigrateRolloutAction::Status {
+        return Ok(());
+    }
+    let operator_id = args
+        .operator_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("`migrate rollout --deployment` requires --operator-id"))?;
+
+    let (store, authority) = deploy_context_for_project(&args.project_path, deployment_name)?;
+    let lock = store.lock()?;
+    let now_secs = current_unix_secs();
+
+    if args.action == cli::MigrateRolloutAction::Promote
+        && report.stage == migration::rollout::RolloutStage::Default
+        && !report.rollback_triggered
+    {
+        let sync_res: Result<runtime::deployment::ActivationRecord> = (|| {
+            let release_id = args
+                .release
+                .as_deref()
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "promoting rollout to `default` with `--deployment {deployment_name}` requires `--release <ID>`"
+                    )
+                })?;
+            let release = store.release(&authority, release_id)?;
+            verify_deploy_release(&release)
+                .with_context(|| format!("release `{release_id}` cannot be activated"))?;
+            store.activate(
+                &lock,
+                &authority,
+                release_id,
+                runtime::deployment::ActivationReason::Operator,
+                Some(operator_id),
+                None,
+                now_secs,
+            )
+        })();
+        match sync_res {
+            Ok(activation) => {
+                report.deployment_sync = Some(migration::rollout::RolloutDeploymentSync {
+                    deployment: store.name().to_string(),
+                    action: "activated".to_string(),
+                    active_release_id: activation.release_id,
+                    activation_sequence: activation.sequence,
+                });
+            }
+            Err(err) => {
+                let _ = manager.rollback(&format!(
+                    "deployment `{deployment_name}` activation refused: {err:#}"
+                ));
+                return Err(err);
+            }
+        }
+    } else if (args.action == cli::MigrateRolloutAction::Rollback || report.rollback_triggered)
+        && let Some(active) = store.active(&authority)?
+    {
+        let selection = store.select_known_good(
+            &authority,
+            &active.release_id,
+            now_secs,
+            &verify_deploy_release,
+        )?;
+        let target = selection.selected.ok_or_else(|| {
+            anyhow::anyhow!(
+                "deployment `{deployment_name}` has no verified known-good release to roll back from `{}` ({} candidate(s) refused)",
+                active.release_id,
+                selection.refusals.len()
+            )
+        })?;
+        let activation = store.activate(
+            &lock,
+            &authority,
+            &target.release_id,
+            runtime::deployment::ActivationReason::Operator,
+            Some(operator_id),
+            None,
+            now_secs,
+        )?;
+        report.deployment_sync = Some(migration::rollout::RolloutDeploymentSync {
+            deployment: store.name().to_string(),
+            action: "rolled_back_to_known_good".to_string(),
+            active_release_id: activation.release_id,
+            activation_sequence: activation.sequence,
+        });
+    }
+    Ok(())
+}
+
 fn deploy_require<'a>(value: Option<&'a str>, flag: &str, command: &str) -> Result<&'a str> {
     value
         .filter(|value| !value.trim().is_empty())
@@ -6429,6 +6573,15 @@ fn verify_deploy_release(release: &runtime::deployment::ReleaseRecord) -> Result
             "release directory {} moved or is no longer a directory",
             release.release_dir.display()
         );
+        // Refuse installation, activation, reconciliation, and known-good
+        // rollback selection when the release directory (or any ancestor
+        // workspace) is in active or malformed operator safe mode.
+        let _containment_permit = runtime::safe_mode::ContainmentGate::acquire_deploy_release(
+            &directory,
+            &directory.join(&release.entrypoint),
+            None,
+        )
+        .context("release fails operator safe-mode containment")?;
         // Hash and parse the same bounded buffer. Deployment policy comes
         // only from the admitted file and its profile block, never from the
         // supervisor's ambient FRANKEN_NODE_* overrides.
@@ -6478,9 +6631,8 @@ fn verify_deploy_release(release: &runtime::deployment::ReleaseRecord) -> Result
         // as the release's own `run`, including aliases and transitive packages.
         // Healthy history cannot authorize a dependency revoked since that
         // run, or an untracked dependency under the release's strict policy.
-        let dependencies =
-            supply_chain::trust_card::CapturedDependencyTrust::capture(&directory)
-                .context("release dependency graph is unreadable")?;
+        let dependencies = supply_chain::trust_card::CapturedDependencyTrust::capture(&directory)
+            .context("release dependency graph is unreadable")?;
         let requirements = ops::engine_dispatcher::RunTrustRequirements::new(&[], &[], false)?
             .with_dependency_capture(dependencies)?
             .with_registry_artifact_approval(release.approval.clone())?;
@@ -6836,8 +6988,7 @@ fn classify_deploy_run(run: &DeployChildRun) -> DeployRunVerdict {
     let report = &run.report;
     if run.exit_code != 0
         && (report["control_trigger"]["kind"] == "activation_interrupted"
-            || (report["outcome"] == "activation_interrupted"
-                && report["admission_only"] == true))
+            || (report["outcome"] == "activation_interrupted" && report["admission_only"] == true))
     {
         // This reports invalidation of a restrictive admission, not proof of a
         // successfully activated replacement or a completed external effect.
@@ -6950,9 +7101,7 @@ fn handle_deploy_run(args: &cli::DeployRunArgs) -> Result<(serde_json::Value, i3
             )?;
             ("healthy", 0)
         }
-        DeployRunVerdict::ActivationInterrupted => {
-            ("activation_interrupted", run.exit_code.max(1))
-        }
+        DeployRunVerdict::ActivationInterrupted => ("activation_interrupted", run.exit_code.max(1)),
         DeployRunVerdict::Failed => ("failed", run.exit_code.max(1)),
         DeployRunVerdict::Crashed => ("crashed", run.exit_code.max(1)),
         DeployRunVerdict::CrashLoop(evidence) => {
@@ -12446,7 +12595,10 @@ fn handle_incident_capture_command(args: &cli::IncidentCaptureArgs) -> Result<()
                 "existing captured incident does not belong to authenticated run {receipt_id}"
             );
         }
-        match existing.initial_state_snapshot.get("runtime_evidence_identity_capture") {
+        match existing
+            .initial_state_snapshot
+            .get("runtime_evidence_identity_capture")
+        {
             Some(capture) => {
                 anyhow::ensure!(
                     capture == &runtime_evidence_identity_capture,
@@ -24021,12 +24173,13 @@ fn incident_replay_cli_summary(
                 .context("original runtime proof verification failed before replay")?;
             (Some(verified.run_origin), Some(verified.runtime_origin))
         } else {
-            let verified = frankenengine_verifier_sdk::incident_bundle::verify_incident_bundle_with_run_key(
-                &bytes,
-                &bundle_key,
-                run_key,
-            )
-            .context("original run proof verification failed before replay")?;
+            let verified =
+                frankenengine_verifier_sdk::incident_bundle::verify_incident_bundle_with_run_key(
+                    &bytes,
+                    &bundle_key,
+                    run_key,
+                )
+                .context("original run proof verification failed before replay")?;
             (Some(verified.run_origin), None)
         }
     } else {
@@ -30602,8 +30755,7 @@ fn run_fleet_agent(args: &FleetAgentArgs) -> Result<()> {
                         // receipts after finalization. Its current accounting
                         // also determines whether this heartbeat can acknowledge
                         // maintenance or completed application.
-                        if (node_health == NodeHealth::Healthy
-                            && !report.checkpoint.is_complete())
+                        if (node_health == NodeHealth::Healthy && !report.checkpoint.is_complete())
                             || (node_health == NodeHealth::Maintenance
                                 && (!report.checkpoint.fence_held
                                     || !report.checkpoint.population_is_terminal()))
@@ -37061,13 +37213,15 @@ fn main() -> Result<()> {
 
             let deployment_activation = match admitted_deployment_activation
                 .as_deref()
-                .map(|encoded| -> Result<runtime::deployment::ActivationRestriction> {
-                    let restriction: runtime::deployment::ActivationRestriction =
-                        serde_json::from_str(encoded)
-                            .context("invalid admitted deployment activation")?;
-                    restriction.validate()?;
-                    Ok(restriction)
-                })
+                .map(
+                    |encoded| -> Result<runtime::deployment::ActivationRestriction> {
+                        let restriction: runtime::deployment::ActivationRestriction =
+                            serde_json::from_str(encoded)
+                                .context("invalid admitted deployment activation")?;
+                        restriction.validate()?;
+                        Ok(restriction)
+                    },
+                )
                 .transpose()
             {
                 Ok(restriction) => restriction,
@@ -37142,7 +37296,8 @@ fn main() -> Result<()> {
             };
             if let Some(operator_project) = &admitted_operator_project {
                 let check = (|| -> Result<()> {
-                    let scope = operator_safe_mode_scope.as_ref()
+                    let scope = operator_safe_mode_scope
+                        .as_ref()
                         .context("admitted operator project has no control anchor")?;
                     scope.validate_project_root(operator_project)?;
                     anyhow::ensure!(
@@ -37168,8 +37323,7 @@ fn main() -> Result<()> {
                         &working_dir,
                         admitted_operator_project.as_deref(),
                     )
-                })
-            {
+                }) {
                 Ok(project_paths) => project_paths,
                 Err(err) => {
                     return named_cli_fail("franken-node/run-error-cli/v1", "run", json, err);
@@ -37191,13 +37345,17 @@ fn main() -> Result<()> {
                         return named_cli_fail("franken-node/run-error-cli/v1", "run", json, err);
                     }
                 };
-            let operator_fleet_policy = match admitted_operator_project.as_deref().map(|project| {
-                control_plane::fleet_transport::enforce_active_fleet_policy(
-                    project,
-                    &mut resolved.config,
-                    resolved.selected_profile,
-                )
-            }).transpose() {
+            let operator_fleet_policy = match admitted_operator_project
+                .as_deref()
+                .map(|project| {
+                    control_plane::fleet_transport::enforce_active_fleet_policy(
+                        project,
+                        &mut resolved.config,
+                        resolved.selected_profile,
+                    )
+                })
+                .transpose()
+            {
                 Ok(policy) => policy.flatten(),
                 Err(error) => {
                     return named_cli_fail("franken-node/run-error-cli/v1", "run", json, error);
@@ -37381,9 +37539,9 @@ fn main() -> Result<()> {
                         // recording path before propagating the original error.
                         (dispatch, Some(err))
                     } else {
-                        if let Some(refusal) =
-                            err.downcast_ref::<ops::engine_dispatcher::DeploymentActivationRefused>()
-                        {
+                        if let Some(refusal) = err
+                            .downcast_ref::<ops::engine_dispatcher::DeploymentActivationRefused>(
+                        ) {
                             if json {
                                 println!(
                                     "{}",
@@ -38129,7 +38287,8 @@ fn main() -> Result<()> {
                 let manager = migration::rollout::RolloutManager::new(
                     &args.project_path,
                     args.migration_id.as_deref(),
-                );
+                )
+                .with_signing_key(args.signing_key.clone());
 
                 let config = migration::rollout::RolloutConfig {
                     auto_rollback_on_failure: !args.no_auto_rollback,
@@ -38152,10 +38311,14 @@ fn main() -> Result<()> {
                     }
                 };
 
-                let report = match report {
+                let mut report = match report {
                     Ok(rep) => rep,
                     Err(err) => return migrate_fail("migrate.rollout", args.json, err),
                 };
+
+                if let Err(err) = sync_rollout_deployment(&args, &manager, &mut report) {
+                    return migrate_fail("migrate.rollout", args.json, err);
+                }
 
                 if args.json {
                     let rendered = match serde_json::to_string_pretty(&report) {
@@ -39813,7 +39976,10 @@ mod run_trust_gate_tests {
             }),
         ] {
             assert!(matches!(
-                classify_deploy_run(&DeployChildRun { exit_code: 1, report }),
+                classify_deploy_run(&DeployChildRun {
+                    exit_code: 1,
+                    report
+                }),
                 DeployRunVerdict::ActivationInterrupted
             ));
         }
@@ -39828,7 +39994,10 @@ mod run_trust_gate_tests {
             }),
         ] {
             assert!(matches!(
-                classify_deploy_run(&DeployChildRun { exit_code: 1, report }),
+                classify_deploy_run(&DeployChildRun {
+                    exit_code: 1,
+                    report
+                }),
                 DeployRunVerdict::Failed
             ));
         }

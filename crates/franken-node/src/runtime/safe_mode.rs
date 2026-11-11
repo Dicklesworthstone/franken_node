@@ -499,6 +499,191 @@ impl AdmittedSafeModeScope {
     }
 }
 
+/// Scope class evaluated when acquiring a [`GuestExecutionPermit`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContainmentScopeKind {
+    Project,
+    Entrypoint,
+    DeployRelease,
+}
+
+impl std::fmt::Display for ContainmentScopeKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Project => write!(f, "project"),
+            Self::Entrypoint => write!(f, "entrypoint"),
+            Self::DeployRelease => write!(f, "deploy_release"),
+        }
+    }
+}
+
+/// Structured refusal emitted by [`ContainmentGate`] when safe-mode containment
+/// blocks guest, validation, lockstep, or deployment execution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContainmentDenial {
+    pub scope_kind: ContainmentScopeKind,
+    pub target_path: String,
+    pub reason: String,
+}
+
+impl std::fmt::Display for ContainmentDenial {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "containment gate refused {} `{}`: {}",
+            self.scope_kind, self.target_path, self.reason
+        )
+    }
+}
+
+impl std::error::Error for ContainmentDenial {}
+
+/// Typestate-sealed proof that operator safe-mode containment was checked for
+/// a canonical project, entrypoint, and optional supervisor anchor.
+///
+/// Deliberately implements neither `Clone`, `Default`, nor `Deserialize`: a
+/// permit can only be minted by [`ContainmentGate`] after verifying persisted
+/// controller state across the full canonical ancestry.
+#[must_use = "retain the guest execution permit across staging/spawn and call recheck() at execution boundaries"]
+#[derive(Debug)]
+pub struct GuestExecutionPermit {
+    scope_kind: ContainmentScopeKind,
+    project_scope: AdmittedSafeModeProject,
+    entrypoint: Option<std::path::PathBuf>,
+    operator_scope: Option<AdmittedSafeModeScope>,
+    _sealed: (),
+}
+
+impl GuestExecutionPermit {
+    pub fn scope_kind(&self) -> ContainmentScopeKind {
+        self.scope_kind
+    }
+
+    pub fn project_root(&self) -> &std::path::Path {
+        self.project_scope.root()
+    }
+
+    pub fn entrypoint(&self) -> Option<&std::path::Path> {
+        self.entrypoint.as_deref()
+    }
+
+    pub fn admitted_project(&self) -> &AdmittedSafeModeProject {
+        &self.project_scope
+    }
+
+    /// Re-verify all retained scopes without re-resolving guest-modifiable symlinks.
+    pub fn recheck(&self) -> Result<(), ContainmentDenial> {
+        let scope_kind = self.scope_kind;
+        self.project_scope
+            .enforce()
+            .map_err(|err| ContainmentDenial {
+                scope_kind,
+                target_path: self.project_scope.root().display().to_string(),
+                reason: format!("{err:#}"),
+            })?;
+        if let Some(entrypoint) = &self.entrypoint {
+            enforce_admitted_run_safe_mode(entrypoint).map_err(|err| ContainmentDenial {
+                scope_kind,
+                target_path: entrypoint.display().to_string(),
+                reason: format!("{err:#}"),
+            })?;
+        }
+        if let Some(operator_scope) = &self.operator_scope {
+            operator_scope.enforce().map_err(|err| ContainmentDenial {
+                scope_kind,
+                target_path: operator_scope.anchor.display().to_string(),
+                reason: format!("{err:#}"),
+            })?;
+        }
+        Ok(())
+    }
+}
+
+/// Sealed constructor namespace for [`GuestExecutionPermit`].
+pub struct ContainmentGate;
+
+impl ContainmentGate {
+    pub fn acquire_project(
+        project_root: &std::path::Path,
+    ) -> Result<GuestExecutionPermit, ContainmentDenial> {
+        let project_scope =
+            AdmittedSafeModeProject::capture(project_root).map_err(|err| ContainmentDenial {
+                scope_kind: ContainmentScopeKind::Project,
+                target_path: project_root.display().to_string(),
+                reason: format!("{err:#}"),
+            })?;
+        Ok(GuestExecutionPermit {
+            scope_kind: ContainmentScopeKind::Project,
+            project_scope,
+            entrypoint: None,
+            operator_scope: None,
+            _sealed: (),
+        })
+    }
+
+    pub fn acquire_entrypoint(
+        project_root: &std::path::Path,
+        entrypoint: &std::path::Path,
+    ) -> Result<GuestExecutionPermit, ContainmentDenial> {
+        let project_scope =
+            AdmittedSafeModeProject::capture(project_root).map_err(|err| ContainmentDenial {
+                scope_kind: ContainmentScopeKind::Entrypoint,
+                target_path: project_root.display().to_string(),
+                reason: format!("{err:#}"),
+            })?;
+        let canonical_entry = entrypoint.canonicalize().map_err(|err| ContainmentDenial {
+            scope_kind: ContainmentScopeKind::Entrypoint,
+            target_path: entrypoint.display().to_string(),
+            reason: format!(
+                "resolve safe-mode run entrypoint {}: {err}",
+                entrypoint.display()
+            ),
+        })?;
+        if !canonical_entry.is_file() {
+            return Err(ContainmentDenial {
+                scope_kind: ContainmentScopeKind::Entrypoint,
+                target_path: canonical_entry.display().to_string(),
+                reason: "safe-mode run entrypoint must be a file".to_string(),
+            });
+        }
+        enforce_admitted_run_safe_mode(&canonical_entry).map_err(|err| ContainmentDenial {
+            scope_kind: ContainmentScopeKind::Entrypoint,
+            target_path: canonical_entry.display().to_string(),
+            reason: format!("{err:#}"),
+        })?;
+        Ok(GuestExecutionPermit {
+            scope_kind: ContainmentScopeKind::Entrypoint,
+            project_scope,
+            entrypoint: Some(canonical_entry),
+            operator_scope: None,
+            _sealed: (),
+        })
+    }
+
+    pub fn acquire_deploy_release(
+        release_dir: &std::path::Path,
+        entrypoint: &std::path::Path,
+        operator_anchor: Option<&std::path::Path>,
+    ) -> Result<GuestExecutionPermit, ContainmentDenial> {
+        let mut permit = Self::acquire_entrypoint(release_dir, entrypoint).map_err(|mut err| {
+            err.scope_kind = ContainmentScopeKind::DeployRelease;
+            err
+        })?;
+        permit.scope_kind = ContainmentScopeKind::DeployRelease;
+        if let Some(anchor) = operator_anchor {
+            let scope =
+                AdmittedSafeModeScope::capture(anchor).map_err(|err| ContainmentDenial {
+                    scope_kind: ContainmentScopeKind::DeployRelease,
+                    target_path: anchor.display().to_string(),
+                    reason: format!("{err:#}"),
+                })?;
+            permit.operator_scope = Some(scope);
+        }
+        Ok(permit)
+    }
+}
+
 /// Recheck the scopes retained at native admission without reopening the entry
 /// source. A guest may legitimately rename or remove its source after loading;
 /// that must neither bypass the original scope nor invent an admission failure.

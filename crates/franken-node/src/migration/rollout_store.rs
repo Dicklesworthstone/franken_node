@@ -47,7 +47,9 @@ pub(super) fn invalid(message: impl Into<String>) -> io::Error {
 fn validate_name(name: &str) -> io::Result<()> {
     if name.is_empty()
         || name.len() > 160
-        || !name.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+        || !name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
         || matches!(name, "." | "..")
     {
         return Err(invalid("invalid rollout metadata filename"));
@@ -71,21 +73,74 @@ fn child_directory(parent: &File, name: &str) -> io::Result<File> {
 }
 
 impl Store {
+    #[allow(dead_code)]
     pub(super) fn open(project: &Path) -> io::Result<Self> {
-        let selected = std::env::var_os(SIGNING_KEY_ENV).map(PathBuf::from);
+        Self::open_with_selected_key(project, None)
+    }
+
+    pub(super) fn open_with_selected_key(
+        project: &Path,
+        signing_key_override: Option<&Path>,
+    ) -> io::Result<Self> {
+        let env_selected = std::env::var_os(SIGNING_KEY_ENV).map(PathBuf::from);
+        let selected = signing_key_override.or(env_selected.as_deref());
         let expected = match std::env::var(EXPECTED_HEAD_ENV) {
             Ok(value) => Some(value),
             Err(std::env::VarError::NotPresent) => None,
             Err(error) => return Err(invalid(error.to_string())),
         };
-        Self::open_with_key(project, selected.as_deref(), expected.as_deref())
+        Self::open_with_key(project, selected, expected.as_deref())
     }
 
-    fn open_with_key(project: &Path, selected: Option<&Path>, expected: Option<&str>) -> io::Result<Self> {
+    pub(super) fn sign_transition(
+        &self,
+        migration_id: &str,
+        event: &mut super::RolloutTransitionEvent,
+    ) -> io::Result<()> {
         #[cfg(unix)]
-        let root = File::from(open(project,
+        if let Some(signing_key) = self.signing.signing_key() {
+            event
+                .sign_with_key(migration_id, signing_key)
+                .map_err(invalid)?;
+        }
+        #[cfg(not(unix))]
+        let _ = (migration_id, event);
+        Ok(())
+    }
+
+    pub(super) fn verify_signed_transitions(
+        &self,
+        migration_id: &str,
+        history: &[super::RolloutTransitionEvent],
+    ) -> io::Result<()> {
+        #[cfg(unix)]
+        if let Some(trusted_vk) = self.signing.trusted_verifying_key() {
+            for event in history {
+                if event.transition_ed25519_signature.is_some()
+                    || event.signer_public_key_hex.is_some()
+                {
+                    event
+                        .verify_transition_signature(migration_id, trusted_vk)
+                        .map_err(invalid)?;
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        let _ = (migration_id, history);
+        Ok(())
+    }
+
+    fn open_with_key(
+        project: &Path,
+        selected: Option<&Path>,
+        expected: Option<&str>,
+    ) -> io::Result<Self> {
+        #[cfg(unix)]
+        let root = File::from(open(
+            project,
             OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty())?);
+            Mode::empty(),
+        )?);
         #[cfg(unix)]
         let directory = {
             let config = child_directory(&root, ".franken-node")?;
@@ -121,15 +176,31 @@ impl Store {
             return Err(invalid("rollout lock must not have hardlink aliases"));
         }
         fs2::FileExt::try_lock_exclusive(&lock).map_err(|error| {
-            io::Error::new(error.kind(), format!("another rollout operation holds the project lock: {error}"))
+            io::Error::new(
+                error.kind(),
+                format!("another rollout operation holds the project lock: {error}"),
+            )
         })?;
         #[cfg(unix)]
         let signing = signing::Policy::open(&root, project, selected, expected)?;
         #[cfg(not(unix))]
-        if selected.is_some() || expected.is_some() || project.join(".franken-node/keys/migration-rollout.pub").symlink_metadata().is_ok() {
-            return Err(invalid("operator-signed rollout storage is supported on Unix only"));
+        if selected.is_some()
+            || expected.is_some()
+            || project
+                .join(".franken-node/keys/migration-rollout.pub")
+                .symlink_metadata()
+                .is_ok()
+        {
+            return Err(invalid(
+                "operator-signed rollout storage is supported on Unix only",
+            ));
         }
-        Ok(Self { directory, lock, #[cfg(unix)] signing })
+        Ok(Self {
+            directory,
+            lock,
+            #[cfg(unix)]
+            signing,
+        })
     }
 
     pub(super) fn read(&self, name: &str) -> io::Result<Option<Vec<u8>>> {
@@ -140,11 +211,18 @@ impl Store {
         self.signing.observe_head(name, raw.as_deref())?;
         raw.map(|raw| {
             #[cfg(unix)]
-            { self.signing.decode(name, &raw) }
+            {
+                self.signing.decode(name, &raw)
+            }
             #[cfg(not(unix))]
-            { if raw.len() > MAX_STATE_BYTES { return Err(invalid("rollout state exceeds metadata byte budget")); }
-              Ok(raw) }
-        }).transpose()
+            {
+                if raw.len() > MAX_STATE_BYTES {
+                    return Err(invalid("rollout state exceeds metadata byte budget"));
+                }
+                Ok(raw)
+            }
+        })
+        .transpose()
     }
 
     fn read_raw(&self, name: &str) -> io::Result<Option<Vec<u8>>> {
@@ -155,7 +233,9 @@ impl Store {
             name,
             OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
             Mode::empty(),
-        ).map(File::from).map_err(io::Error::from);
+        )
+        .map(File::from)
+        .map_err(io::Error::from);
         #[cfg(not(unix))]
         let opened = File::open(self.directory.join(name));
         let file = match opened {
@@ -172,7 +252,8 @@ impl Store {
             return Err(invalid("rollout state must not have hardlink aliases"));
         }
         let mut bytes = Vec::new();
-        file.take(receipt::MAX_RECEIPT_BYTES as u64 + 1).read_to_end(&mut bytes)?;
+        file.take(receipt::MAX_RECEIPT_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)?;
         if bytes.len() > receipt::MAX_RECEIPT_BYTES {
             return Err(invalid("rollout receipt exceeds metadata byte budget"));
         }
@@ -189,11 +270,16 @@ impl Store {
             let previous = self.read_raw(name)?;
             // Authenticate the predecessor even when the authority is absent:
             // removing a key must not silently turn a signed state into plain JSON.
-            let decoded = previous.as_deref().map(|raw| self.signing.decode(name, raw)).transpose()?;
+            let decoded = previous
+                .as_deref()
+                .map(|raw| self.signing.decode(name, raw))
+                .transpose()?;
             self.signing.recheck()?;
             self.signing.observe_head(name, previous.as_deref())?;
             if self.signing.required() {
-                if decoded.as_deref() == Some(bytes) { return Ok(()); }
+                if decoded.as_deref() == Some(bytes) {
+                    return Ok(());
+                }
                 let sealed = self.signing.seal(name, bytes, previous.as_deref())?;
                 // Archive before publishing the new head. A crash can leave an
                 // unused signed receipt, never an unsigned or fabricated head.
@@ -212,10 +298,14 @@ impl Store {
 
     #[cfg(unix)]
     fn archive(&self, bytes: &[u8]) -> io::Result<()> {
-        let name = receipt::receipt_name(&receipt::sha256(bytes)).map_err(|e| invalid(e.to_string()))?;
-        let opened = openat(&self.directory, name.as_str(),
+        let name =
+            receipt::receipt_name(&receipt::sha256(bytes)).map_err(|e| invalid(e.to_string()))?;
+        let opened = openat(
+            &self.directory,
+            name.as_str(),
             OFlags::CREATE | OFlags::EXCL | OFlags::WRONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::from_raw_mode(0o600));
+            Mode::from_raw_mode(0o600),
+        );
         match opened {
             Ok(fd) => {
                 let mut file = File::from(fd);
@@ -224,10 +314,16 @@ impl Store {
             }
             Err(Errno::EXIST) => {
                 if self.read_raw(&name)?.as_deref() != Some(bytes) {
-                    return Err(invalid("existing signed receipt differs; refusing to overwrite recovery evidence"));
+                    return Err(invalid(
+                        "existing signed receipt differs; refusing to overwrite recovery evidence",
+                    ));
                 }
-                let file = File::from(openat(&self.directory, name.as_str(),
-                    OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC, Mode::empty())?);
+                let file = File::from(openat(
+                    &self.directory,
+                    name.as_str(),
+                    OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+                    Mode::empty(),
+                )?);
                 file.sync_all()?;
             }
             Err(error) => return Err(error.into()),
@@ -244,8 +340,15 @@ impl Store {
         // Exclusive creation, not a shared truncating .tmp file. Failed writes
         // leave recovery material intact; no source or metadata cleanup occurs.
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        let clock = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
-        let temp = format!(".rollout-{}-{clock}-{}.tmp", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed));
+        let clock = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let temp = format!(
+            ".rollout-{}-{clock}-{}.tmp",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        );
         #[cfg(unix)]
         let mut file = File::from(openat(
             &self.directory,
@@ -254,7 +357,10 @@ impl Store {
             Mode::from_raw_mode(0o600),
         )?);
         #[cfg(not(unix))]
-        let mut file = OpenOptions::new().write(true).create_new(true).open(self.directory.join(&temp))?;
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(self.directory.join(&temp))?;
         file.write_all(bytes)?;
         file.sync_all()?;
         drop(file);
@@ -303,7 +409,11 @@ mod tests {
         store.write("mig-state.json", b"old").unwrap();
         store.write("mig-state.json", b"new").unwrap();
         assert_eq!(store.read("mig-state.json").unwrap().unwrap(), b"new");
-        assert!(store.write("mig-state.json", &vec![0; MAX_STATE_BYTES + 1]).is_err());
+        assert!(
+            store
+                .write("mig-state.json", &vec![0; MAX_STATE_BYTES + 1])
+                .is_err()
+        );
         assert_eq!(store.read("mig-state.json").unwrap().unwrap(), b"new");
         for name in ["../outside", "/absolute", "a/b", "..", "a\\b", "a\0b"] {
             assert!(store.write(name, b"bad").is_err());
@@ -323,7 +433,12 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let store = Store::open(root.path()).unwrap();
         let external = tempfile::NamedTempFile::new().unwrap();
-        symlink(external.path(), root.path().join(".franken-node/state/rollout/mig-link.json")).unwrap();
+        symlink(
+            external.path(),
+            root.path()
+                .join(".franken-node/state/rollout/mig-link.json"),
+        )
+        .unwrap();
         assert!(store.read("mig-link.json").is_err());
     }
 }

@@ -1467,6 +1467,24 @@ pub struct MigrateRolloutArgs {
     #[arg(long)]
     pub lockstep_report: Option<PathBuf>,
 
+    /// Operator Ed25519 signing-key seed (32-byte owner-only file outside the
+    /// project) matching `.franken-node/keys/migration-rollout.pub`.
+    #[arg(long)]
+    pub signing_key: Option<PathBuf>,
+
+    /// Optional deployment store name under `<project>/.franken-node/deployments/<name>`
+    /// to synchronize on `Default` promotion and rollback.
+    #[arg(long)]
+    pub deployment: Option<String>,
+
+    /// Release ID in `--deployment` to activate when promotion reaches `default`.
+    #[arg(long)]
+    pub release: Option<String>,
+
+    /// Operator identity recorded when `--deployment` updates activation state.
+    #[arg(long)]
+    pub operator_id: Option<String>,
+
     /// Emit structured JSON output.
     #[arg(long)]
     pub json: bool,
@@ -1484,12 +1502,37 @@ impl MigrateRolloutArgs {
                 ("--force", self.force),
                 ("--no-auto-rollback", self.no_auto_rollback),
                 ("--lockstep-report", self.lockstep_report.is_some()),
+                ("--release", self.release.is_some()),
             ] {
                 anyhow::ensure!(
                     !supplied,
                     "{flag} applies only to --action promote; the requested action was not performed"
                 );
             }
+        }
+        if self.release.is_some() {
+            anyhow::ensure!(
+                self.deployment
+                    .as_deref()
+                    .is_some_and(|name| !name.trim().is_empty()),
+                "--release requires --deployment <NAME>; the requested action was not performed"
+            );
+        }
+        if self
+            .deployment
+            .as_deref()
+            .is_some_and(|name| !name.trim().is_empty())
+            && matches!(
+                self.action,
+                MigrateRolloutAction::Promote | MigrateRolloutAction::Rollback
+            )
+        {
+            anyhow::ensure!(
+                self.operator_id
+                    .as_deref()
+                    .is_some_and(|id| !id.trim().is_empty()),
+                "--deployment on promote/rollback requires --operator-id <ID>"
+            );
         }
         if let Some(percentage) = self.ramp_pct {
             anyhow::ensure!(
@@ -4223,7 +4266,10 @@ mod parser_contract_extra_tests {
     #[test]
     fn deployment_activation_retirement_requires_an_explicit_flag() -> Result<(), String> {
         for (command, expected) in [
-            (vec!["franken-node", "deploy", "run", "service", "--json"], false),
+            (
+                vec!["franken-node", "deploy", "run", "service", "--json"],
+                false,
+            ),
             (
                 vec![
                     "franken-node",
