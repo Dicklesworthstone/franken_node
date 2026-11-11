@@ -168,6 +168,89 @@ fn typed_project_smoke_validation_runs_native_manifest_script_and_fallback_entri
 
 #[cfg(all(target_os = "linux", feature = "engine"))]
 #[test]
+fn native_migration_smoke_preserves_script_arguments_without_changing_process_read_policy() {
+    for (script, process_read_allowed) in [
+        (
+            "bun -- app.ts -- --mode 'test value' '' -- --runtime bun --policy legacy-risky",
+            true,
+        ),
+        (
+            "franken-node run --console-only app.ts -- --mode 'test value' '' -- --runtime bun --policy legacy-risky",
+            true,
+        ),
+        (
+            "bun app.ts --mode 'test value' '' -- --runtime bun --policy legacy-risky",
+            false,
+        ),
+    ] {
+        let project = TempDir::new().unwrap();
+        std::fs::write(project.path().join("app.ts"),
+            "const expected = ['--mode', 'test value', '', '--', '--runtime', 'bun', '--policy', 'legacy-risky'];\nconst actual = process.argv.slice(2);\nif (JSON.stringify(actual) !== JSON.stringify(expected)) throw new Error('smoke guest arguments changed');\nconsole.log('guest arguments preserved');\n"
+        ).unwrap();
+        std::fs::write(
+            project.path().join("package.json"),
+            serde_json::json!({
+                "name":"native-script-arguments", "version":"1.0.0", "engines":{"node":">=22"},
+                "scripts":{"smoke":script}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            project.path().join("package-lock.json"),
+            r#"{"lockfileVersion":3,"packages":{"":{}}}"#,
+        )
+        .unwrap();
+        initialize_native_project(project.path(), false);
+        let config_path = project.path().join("franken_node.toml");
+        let mut config: frankenengine_node::config::Config =
+            toml::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+        config.runtime.allow_process_shape = Some(process_read_allowed);
+        let config_bytes = toml::to_string(&config).unwrap();
+        std::fs::write(&config_path, &config_bytes).unwrap();
+        let mut command = franken_node_command();
+        command
+            .current_dir(repo_root())
+            .args(["migrate", "validate"])
+            .arg(project.path())
+            .arg("--json")
+            .env_remove("FRANKEN_NODE_ALLOW_DEGRADED_RUNTIME_FALLBACK")
+            .env_remove("FRANKEN_NODE_RUNTIME_ALLOW_PROCESS_SHAPE");
+        let output = native_smoke_supervisor::run_command_with_timeout(
+            &mut command,
+            Duration::from_secs(120),
+            Duration::from_secs(1),
+        )
+        .expect("bounded native argv validation");
+        let report = parse_json_stdout(&output, "native smoke argv");
+        assert_eq!(output.status.success(), process_read_allowed, "{report}");
+        assert!(
+            report.get("test_suite").is_none(),
+            "must exercise smoke: {report}"
+        );
+        let smoke = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["id"] == "mig-validate-005")
+            .unwrap();
+        assert_eq!(smoke["passed"], process_read_allowed, "{report}");
+        let message = smoke["message"].as_str().unwrap();
+        assert!(
+            message.contains(if process_read_allowed {
+                "scripts.smoke"
+            } else {
+                "native runtime"
+            }),
+            "{message}"
+        );
+        assert_eq!(std::fs::read_to_string(&config_path).unwrap(), config_bytes);
+        assert!(!project.path().join(".franken-node").exists());
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "engine"))]
+#[test]
 fn typed_native_smoke_failure_and_declaration_only_projects_cannot_pass_validation() {
     for declaration in [false, true] {
         let project = TempDir::new().unwrap();

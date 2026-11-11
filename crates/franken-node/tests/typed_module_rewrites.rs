@@ -213,6 +213,60 @@ fn ambiguous_typed_graph_reports_manual_review_without_partial_discovery() {
 }
 
 #[test]
+fn public_validation_refuses_stripped_script_semantics_before_any_runtime_launch() {
+    let root = project("module");
+    fs::write(
+        root.path().join("app.ts"),
+        "throw new Error('must not launch');\n",
+    )
+    .unwrap();
+    fs::write(
+        root.path().join("index.js"),
+        "throw new Error('must not fall back');\n",
+    )
+    .unwrap();
+    for (command, lifecycle) in [
+        ("NODE_ENV=production node app.ts", false),
+        ("node --loader ts-node/esm app.ts", false),
+        ("echo setup && node app.ts", false),
+        ("node missing.ts", false),
+        ("node app.ts", true),
+    ] {
+        let mut manifest = serde_json::json!({
+            "name":"literal-validation", "engines":{"node":">=22"}, "scripts":{"smoke":command}
+        });
+        if lifecycle {
+            manifest["scripts"]["presmoke"] = "node setup.js".into();
+        }
+        fs::write(root.path().join("package.json"), manifest.to_string()).unwrap();
+        let report = migration::run_validate(root.path(), false).unwrap();
+        assert!(!report.is_pass(), "{report:#?}");
+        assert!(report.test_suite.is_none());
+        assert!(
+            report
+                .checks
+                .iter()
+                .filter(|check| check.id != "mig-validate-005")
+                .all(|check| check.passed)
+        );
+        let smoke = report
+            .checks
+            .iter()
+            .find(|check| check.id == "mig-validate-005")
+            .unwrap();
+        assert!(!smoke.passed);
+        assert!(smoke.message.contains("scripts.smoke"), "{smoke:#?}");
+        assert!(
+            !smoke
+                .message
+                .contains("native runtime `franken-node` exited"),
+            "{smoke:#?}"
+        );
+        assert!(!root.path().join(".franken-node").exists());
+    }
+}
+
+#[test]
 fn tsx_components_keep_jsx_text_type_annotations_and_attributes() {
     let root = project("module");
     let source = "import { basename } from 'path';\ntype Props = { name: string };\nexport const View = (p: Props) => <p title=\"import('fs')\">import f from 'fs';{basename(p.name)}</p>;\n";

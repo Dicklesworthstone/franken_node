@@ -580,6 +580,7 @@ struct MigrationRuntimeSmokeReceipt {
 struct MigrationRuntimeSmokeTarget {
     working_dir: PathBuf,
     entry_path: PathBuf,
+    guest_args: Vec<String>,
     display: String,
 }
 
@@ -1368,6 +1369,12 @@ fn native_migration_smoke_command(
         .env_remove("FRANKEN_NODE_ALLOW_DEGRADED_RUNTIME_FALLBACK")
         // Do not override a project's strict policy with balanced defaults.
         .current_dir(&smoke_target.working_dir);
+    if !smoke_target.guest_args.is_empty() {
+        // The separator belongs to our native command. Any original guest
+        // separator remains an ordinary argument after it, as do option-like
+        // guest values that must never change the selected engine or policy.
+        command.arg("--").args(&smoke_target.guest_args);
+    }
     Ok(command)
 }
 
@@ -1453,16 +1460,34 @@ fn select_migration_runtime_smoke_target(
         }
     }
 
-    for (script_name, script_rewrite) in preferred_script_entry_candidates(&manifest) {
-        if let Some(target) = build_runtime_smoke_target(
+    for (script_name, command) in preferred_script_smoke_candidates(&manifest) {
+        for hook in [format!("pre{script_name}"), format!("post{script_name}")] {
+            if manifest
+                .get("scripts")
+                .and_then(|scripts| scripts.get(&hook))
+                .is_some_and(|value| value.as_str().is_none_or(|text| !text.trim().is_empty()))
+            {
+                anyhow::bail!(
+                    "runtime smoke cannot preserve scripts.{script_name} lifecycle hook scripts.{hook}; provide an explicit migration test inventory"
+                );
+            }
+        }
+        let (entry_path, guest_args) = parse_migration_smoke_invocation(&command).map_err(|reason| {
+            anyhow::anyhow!(
+                "runtime smoke cannot preserve scripts.{script_name}: {reason}; provide a direct native invocation or an explicit migration test inventory"
+            )
+        })?;
+        let mut target = build_runtime_smoke_target(
             &project_root,
             manifest_dir,
             &manifest_display,
             &format!("scripts.{script_name}"),
-            &script_rewrite.entry_path,
-        ) {
-            return Ok(target);
-        }
+            &entry_path,
+        ).ok_or_else(|| anyhow::anyhow!(
+            "runtime smoke scripts.{script_name} entry is missing or is not a contained runnable source file; refusing a different fallback entrypoint"
+        ))?;
+        target.guest_args = guest_args;
+        return Ok(target);
     }
 
     for fallback_entry in [
@@ -1540,6 +1565,9 @@ fn manifest_entry_candidates(manifest: &serde_json::Value) -> Vec<(String, Strin
         }
         Some(serde_json::Value::Object(entries)) => {
             for (name, value) in entries {
+                if candidates.len() == MAX_FINDINGS_PER_CATEGORY {
+                    break;
+                }
                 if let Some(entry_path) = value.as_str()
                     && !entry_path.trim().is_empty()
                 {
@@ -1556,20 +1584,21 @@ fn manifest_entry_candidates(manifest: &serde_json::Value) -> Vec<(String, Strin
     candidates
 }
 
-fn preferred_script_entry_candidates(
-    manifest: &serde_json::Value,
-) -> Vec<(String, PackageScriptRewrite)> {
+fn preferred_script_smoke_candidates(manifest: &serde_json::Value) -> Vec<(String, String)> {
     let (rewrites, _) = collect_package_script_rewrites(manifest);
     let mut candidates = Vec::new();
     for preferred in ["smoke", "validate", "test", "start"] {
-        if let Some(script_rewrite) = rewrites
-            .iter()
-            .find(|rewrite| rewrite.script_name == preferred)
-            .cloned()
+        if let Some(command) = manifest
+            .get("scripts")
+            .and_then(|scripts| scripts.get(preferred))
+            .and_then(serde_json::Value::as_str)
         {
+            // A designated validation invocation is not interchangeable with
+            // its first runtime segment or a default index file. Keep even an
+            // unsupported command so selection reports the fidelity problem.
             push_bounded(
                 &mut candidates,
-                (preferred.to_string(), script_rewrite),
+                (preferred.to_string(), command.to_string()),
                 MAX_FINDINGS_PER_CATEGORY,
             );
         }
@@ -1577,18 +1606,113 @@ fn preferred_script_entry_candidates(
     for script_rewrite in rewrites {
         if candidates
             .iter()
-            .any(|(_, existing)| existing.script_name == script_rewrite.script_name)
+            .any(|(name, _)| *name == script_rewrite.script_name)
         {
             continue;
         }
-        let script_name = script_rewrite.script_name.clone();
+        if candidates.len() == MAX_FINDINGS_PER_CATEGORY {
+            break;
+        }
         push_bounded(
             &mut candidates,
-            (script_name, script_rewrite),
+            (script_rewrite.script_name, script_rewrite.original_command),
             MAX_FINDINGS_PER_CATEGORY,
         );
     }
     candidates
+}
+
+/// Extract one shell-free invocation without weakening its semantics. Source
+/// rewriting may preserve arbitrary shell segments for later operator review;
+/// native smoke cannot pretend those setup commands or expansions ran.
+fn parse_migration_smoke_invocation(command: &str) -> Result<(String, Vec<String>), String> {
+    let tokens = tokenize_package_script_command(command)
+        .ok_or_else(|| "unsupported shell syntax or token limit".to_owned())?;
+    if tokens.is_empty()
+        || tokens
+            .iter()
+            .any(|token| token.kind != PackageScriptShellTokenKind::Word)
+    {
+        return Err(
+            "smoke requires one direct runtime command without shell control operators".into(),
+        );
+    }
+    if tokens
+        .iter()
+        .any(|token| token.expands || token.unquoted.contains('\0'))
+    {
+        return Err("smoke arguments must be literal words without expansion or null bytes".into());
+    }
+    let runtime = package_script_runtime_from_word(&tokens[0].unquoted).ok_or_else(|| {
+        "environment assignments, shell commands and package-executor wrappers require explicit migration tests".to_owned()
+    })?;
+    let mut index = 1;
+    let mut output_option = None;
+    if runtime == PackageScriptRuntime::FrankenNode {
+        if !tokens
+            .get(index)
+            .is_some_and(|token| token.unquoted == "run")
+        {
+            return Err("native smoke requires the franken-node run subcommand".into());
+        }
+        index += 1;
+        while let Some(token) = tokens.get(index)
+            && matches!(token.unquoted.as_str(), "--console-only" | "--json")
+        {
+            if output_option.replace(token.unquoted.as_str()).is_some() {
+                return Err("native output options are duplicated or conflict".into());
+            }
+            index += 1;
+        }
+    } else if tokens
+        .get(index)
+        .is_some_and(|token| token.unquoted == "--")
+    {
+        index += 1;
+    }
+    let entry = tokens
+        .get(index)
+        .ok_or_else(|| "runtime command has no application entrypoint".to_owned())?;
+    // This is already the shell-decoded word, including any literal quote
+    // characters. Never apply the rewrite planner's outer-quote convenience
+    // here: doing so could select a different filename from the invocation.
+    if entry.unquoted.starts_with('-')
+        || !is_graph_source_file(Path::new(&entry.unquoted))
+        || Path::new(&entry.unquoted).is_absolute()
+        || entry.unquoted.contains('\\')
+        || entry.unquoted.split('/').any(|part| part == "..")
+    {
+        return Err("entrypoint must be a static project-relative runnable source; loader and runtime options require explicit migration tests".into());
+    }
+    index += 1;
+    if runtime == PackageScriptRuntime::Bun
+        && tokens
+            .get(index)
+            .is_some_and(|token| token.unquoted == "--")
+    {
+        // Bun consumes one separator immediately after the entrypoint. Node
+        // preserves it, and both preserve any later separator after guest data.
+        index += 1;
+    } else if runtime == PackageScriptRuntime::FrankenNode {
+        while let Some(token) = tokens.get(index) {
+            if token.unquoted == "--" {
+                index += 1;
+                break;
+            }
+            if !matches!(token.unquoted.as_str(), "--console-only" | "--json") {
+                return Err("native runtime options cannot be discarded; guest arguments require the explicit -- separator".into());
+            }
+            if output_option.replace(token.unquoted.as_str()).is_some() {
+                return Err("native output options are duplicated or conflict".into());
+            }
+            index += 1;
+        }
+    }
+    let guest_args = tokens[index..]
+        .iter()
+        .map(|token| token.unquoted.clone())
+        .collect();
+    Ok((entry.unquoted.clone(), guest_args))
 }
 
 fn build_runtime_smoke_target(
@@ -1603,6 +1727,7 @@ fn build_runtime_smoke_target(
     Some(MigrationRuntimeSmokeTarget {
         working_dir: manifest_dir.to_path_buf(),
         entry_path,
+        guest_args: Vec::new(),
         display: format!("{manifest_display}:{label} -> {entry_display}"),
     })
 }
@@ -1612,9 +1737,8 @@ fn resolve_runtime_smoke_entry_path(
     manifest_dir: &Path,
     entry_path: &str,
 ) -> Option<PathBuf> {
-    let entry_path = entry_path.trim();
     let entry = Path::new(entry_path);
-    if entry_path.is_empty() || entry.is_absolute() {
+    if entry_path.trim().is_empty() || entry.is_absolute() {
         return None;
     }
 
@@ -1698,11 +1822,338 @@ mod native_migration_smoke_command_tests {
     use super::*;
 
     #[test]
+    fn literal_script_arguments_preserve_quotes_empty_values_and_guest_separators() {
+        let expected = ["--mode", "test value", "", "--", "--runtime", "bun"];
+        for command in [
+            "node app.ts --mode 'test value' '' -- --runtime bun",
+            "bun -- app.ts --mode \"test value\" '' -- --runtime bun",
+            "franken-node run --console-only app.ts -- --mode 'test value' '' -- --runtime bun",
+            "franken-node run app.ts --json -- --mode 'test value' '' -- --runtime bun",
+        ] {
+            let (entry, arguments) = parse_migration_smoke_invocation(command).unwrap();
+            assert_eq!(entry, "app.ts");
+            assert_eq!(arguments, expected, "{command}");
+        }
+        let (_, arguments) = parse_migration_smoke_invocation(
+            "node app.js 'literal;|&' '$(not-a-command)' '$HOME' escaped\\ value \"a\\\"b\"",
+        )
+        .unwrap();
+        assert_eq!(
+            arguments,
+            [
+                "literal;|&",
+                "$(not-a-command)",
+                "$HOME",
+                "escaped value",
+                "a\"b"
+            ]
+        );
+        let (entry, arguments) = parse_migration_smoke_invocation(
+            r#"node app""'.ts' pre'fix'" suffix" a\\b "a\qb" '\literal\path'"#,
+        )
+        .unwrap();
+        assert_eq!(entry, "app.ts");
+        assert_eq!(
+            arguments,
+            ["prefix suffix", "a\\b", "a\\qb", "\\literal\\path"]
+        );
+        assert_eq!(
+            parse_migration_smoke_invocation("franken-node run app.js -- --")
+                .unwrap()
+                .1,
+            ["--"]
+        );
+    }
+
+    #[test]
+    fn runtime_separator_semantics_match_real_node_and_bun_before_and_after_rewrite() {
+        let project = tempfile::tempdir().unwrap();
+        let entry = "./-arguments.js";
+        std::fs::write(
+            project.path().join("-arguments.js"),
+            "console.log(JSON.stringify(process.argv.slice(2)));\n",
+        )
+        .unwrap();
+        let cases: &[&[&str]] = &[
+            &[],
+            &["--"],
+            &["--", "alpha"],
+            &["--", "--"],
+            &["--", "--", "alpha"],
+            &["--", "--", "--", "alpha"],
+            &["alpha", "--", "beta"],
+            &["", "--", "alpha"],
+            &["--mode", "test value", "", "--"],
+        ];
+        for runtime in ["node", "bun"] {
+            for pre_entry_separator in [false, true] {
+                for guest in cases {
+                    let mut reference = Command::new(runtime);
+                    reference.current_dir(project.path());
+                    let mut script = runtime.to_owned();
+                    if pre_entry_separator {
+                        reference.arg("--");
+                        script.push_str(" --");
+                    }
+                    reference.arg(entry).args(*guest);
+                    script.push(' ');
+                    script.push_str(entry);
+                    for argument in *guest {
+                        script.push_str(" '");
+                        script.push_str(&argument.replace('\'', "'\\''"));
+                        script.push('\'');
+                    }
+                    let output = reference
+                        .output()
+                        .expect("real Node and Bun reference binaries required");
+                    assert!(
+                        output.status.success(),
+                        "{script}: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                    let observed: Vec<String> = serde_json::from_slice(&output.stdout).unwrap();
+                    let (selected_entry, selected_args) =
+                        parse_migration_smoke_invocation(&script).unwrap();
+                    assert_eq!(selected_entry, entry);
+                    assert_eq!(selected_args, observed, "original {script}");
+                    let rewrite = classify_package_script_command("smoke", &script)
+                        .unwrap()
+                        .unwrap();
+                    let rewritten = rewrite.rewritten_command.unwrap();
+                    let (_, migrated_args) = parse_migration_smoke_invocation(&rewritten).unwrap();
+                    assert_eq!(migrated_args, observed, "rewritten {rewritten}");
+                    let target = MigrationRuntimeSmokeTarget {
+                        working_dir: project.path().to_path_buf(),
+                        entry_path: project.path().join("-arguments.js"),
+                        guest_args: migrated_args,
+                        display: "reference argv".into(),
+                    };
+                    let native =
+                        native_migration_smoke_command(Path::new("/trusted/native"), &target)
+                            .unwrap();
+                    let arguments: Vec<_> = native
+                        .get_args()
+                        .map(|value| value.to_str().unwrap())
+                        .collect();
+                    let passed = arguments
+                        .iter()
+                        .position(|value| *value == "--")
+                        .map_or(&[][..], |index| &arguments[index + 1..]);
+                    assert_eq!(passed, observed, "native invocation for {script}");
+                }
+            }
+        }
+        for runtime in ["node", "bun"] {
+            assert!(
+                parse_migration_smoke_invocation(&format!("{runtime} -- -arguments.js")).is_err()
+            );
+        }
+        assert!(classify_package_script_command("smoke", "bun app.ts $FIRST remaining").is_err());
+    }
+
+    #[test]
+    fn smoke_invocation_refuses_unrepresented_shell_environment_and_runtime_controls() {
+        for command in [
+            "",
+            "NODE_ENV=production node app.js",
+            "env NODE_ENV=production node app.js",
+            "cross-env NODE_ENV=production node app.js",
+            "npx node app.js",
+            "npm exec -- node app.js",
+            "node --loader ts-node/esm app.ts",
+            "bun --preload hook.ts app.ts",
+            "node app.js $MODE",
+            "node app.js *.json",
+            "node app.js && echo done",
+            "echo setup && node app.js",
+            "node app.js | cat",
+            "node app.js; echo done",
+            "node app.js > output.txt",
+            "node app.js &",
+            "node app.js $(cat config.txt)",
+            "node app.js \"unterminated",
+            "node ../outside.js",
+            "node types.d.ts",
+            "node \"'app.ts'\"",
+            "franken-node app.js",
+            "franken-node run --policy strict app.js",
+            "franken-node run --runtime bun app.js",
+            "franken-node run app.js --config other.toml",
+            "franken-node run app.js guest-without-separator",
+            "franken-node run --json --console-only app.js",
+            "franken-node run --json app.js --json",
+        ] {
+            assert!(
+                parse_migration_smoke_invocation(command).is_err(),
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn smoke_command_keeps_guest_flags_after_its_pinned_native_arguments() {
+        let target = MigrationRuntimeSmokeTarget {
+            working_dir: PathBuf::from("/workspace/project"),
+            entry_path: PathBuf::from("/workspace/project/app.ts"),
+            guest_args: ["--runtime", "bun", "--engine-bin", "foreign", "", "--"]
+                .map(str::to_owned)
+                .to_vec(),
+            display: "fixture".into(),
+        };
+        let command =
+            native_migration_smoke_command(Path::new("/trusted/native"), &target).unwrap();
+        let arguments: Vec<_> = command
+            .get_args()
+            .map(|value| value.to_str().unwrap())
+            .collect();
+        assert_eq!(
+            arguments,
+            [
+                "run",
+                "./app.ts",
+                "--runtime",
+                "franken-engine",
+                "--engine-bin",
+                "/trusted/native",
+                "--json",
+                "--",
+                "--runtime",
+                "bun",
+                "--engine-bin",
+                "foreign",
+                "",
+                "--",
+            ]
+        );
+    }
+
+    #[test]
+    fn script_smoke_selection_keeps_arguments_before_and_after_rewriting() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("app.ts"), "console.log('ready');\n").unwrap();
+        for command in [
+            "bun app.ts --mode 'test value' '' --",
+            "franken-node run --console-only app.ts -- --mode 'test value' '' --",
+        ] {
+            std::fs::write(
+                root.path().join("package.json"),
+                serde_json::json!({
+                    "name":"literal-smoke", "scripts":{"smoke":command}
+                })
+                .to_string(),
+            )
+            .unwrap();
+            let selected = select_migration_runtime_smoke_target(root.path()).unwrap();
+            assert!(selected.display.contains("scripts.smoke"));
+            assert_eq!(selected.guest_args, ["--mode", "test value", "", "--"]);
+        }
+        std::fs::write(
+            root.path().join(" app.ts"),
+            "console.log('quoted entry');\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.path().join("package.json"),
+            serde_json::json!({
+                "name":"quoted-entry", "scripts":{"smoke":"bun ' app.ts' literal"}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let selected = select_migration_runtime_smoke_target(root.path()).unwrap();
+        assert_eq!(
+            selected.entry_path,
+            root.path().join(" app.ts").canonicalize().unwrap()
+        );
+        assert_eq!(selected.guest_args, ["literal"]);
+        let command =
+            native_migration_smoke_command(Path::new("/trusted/native"), &selected).unwrap();
+        assert_eq!(
+            command.get_args().nth(1),
+            Some(std::ffi::OsStr::new("./ app.ts"))
+        );
+    }
+
+    #[test]
+    fn explicit_script_semantics_cannot_be_silently_replaced_with_fallbacks() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("app.ts"), "console.log('ready');\n").unwrap();
+        std::fs::write(
+            root.path().join("index.js"),
+            "console.log('wrong fallback');\n",
+        )
+        .unwrap();
+        for name in ["smoke", "validate", "test", "start"] {
+            for command in [
+                "NODE_ENV=production node app.ts",
+                "node --loader ts-node/esm app.ts",
+                "echo setup && node app.ts",
+                "node missing.ts",
+                "external-test-runner",
+            ] {
+                std::fs::write(
+                    root.path().join("package.json"),
+                    serde_json::json!({
+                        "name":"explicit-smoke", "scripts":{name:command}
+                    })
+                    .to_string(),
+                )
+                .unwrap();
+                let error = select_migration_runtime_smoke_target(root.path())
+                    .unwrap_err()
+                    .to_string();
+                assert!(error.contains(&format!("scripts.{name}")), "{error}");
+            }
+        }
+        let mut scripts = serde_json::Map::new();
+        scripts.insert("smoke".into(), "node --loader custom app.ts".into());
+        for index in 0..MAX_FINDINGS_PER_CATEGORY + 1 {
+            scripts.insert(format!("extra-{index}"), "node app.ts".into());
+        }
+        std::fs::write(
+            root.path().join("package.json"),
+            serde_json::json!({
+                "name":"bounded-priority", "scripts":scripts
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let error = select_migration_runtime_smoke_target(root.path())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("scripts.smoke"), "{error}");
+    }
+
+    #[test]
+    fn selected_script_lifecycle_hooks_require_explicit_validation_coverage() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("app.js"), "console.log('ready');\n").unwrap();
+        for hook in ["presmoke", "postsmoke"] {
+            std::fs::write(
+                root.path().join("package.json"),
+                serde_json::json!({
+                    "name":"lifecycle-smoke", "scripts":{"smoke":"node app.js",hook:"node setup.js"}
+                })
+                .to_string(),
+            )
+            .unwrap();
+            let error = select_migration_runtime_smoke_target(root.path())
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains(&format!("lifecycle hook scripts.{hook}")),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
     fn command_pins_native_engine_and_preserves_project_policy() {
         let executable = Path::new("renamed runtime");
         let target = MigrationRuntimeSmokeTarget {
             working_dir: PathBuf::from("project with spaces"),
             entry_path: PathBuf::from("project with spaces/app.js"),
+            guest_args: Vec::new(),
             display: "fixture".to_string(),
         };
         let command = native_migration_smoke_command(executable, &target).expect("relative target");
@@ -1736,6 +2187,7 @@ mod native_migration_smoke_command_tests {
         let target = MigrationRuntimeSmokeTarget {
             working_dir: PathBuf::from("/workspace/project"),
             entry_path: PathBuf::from("/workspace/project/src/app.js"),
+            guest_args: Vec::new(),
             display: "fixture".into(),
         };
         let command = native_migration_smoke_command(Path::new("/trusted/native"), &target)
@@ -1760,6 +2212,7 @@ mod native_migration_smoke_command_tests {
             let target = MigrationRuntimeSmokeTarget {
                 working_dir: PathBuf::from("/workspace/project"),
                 entry_path: PathBuf::from(entry),
+                guest_args: Vec::new(),
                 display: "fixture".into(),
             };
             assert!(native_migration_smoke_command(Path::new("/trusted/native"), &target).is_err());
@@ -3783,15 +4236,30 @@ fn classify_package_script_segment(
         return Err("runtime entry must be a static project-relative JavaScript/TypeScript path; no partial script rewrite applied".into());
     }
 
+    let mut guest_start = entry_index.saturating_add(1);
+    let mut replacement_end = entry_token.end;
+    if runtime == PackageScriptRuntime::Bun {
+        if tokens.get(guest_start).is_some_and(|token| token.expands) {
+            return Err("Bun's leading guest argument may expand to a runtime separator; manual migration required without a literal invocation".into());
+        }
+        if let Some(separator) = tokens.get(guest_start)
+            && separator.unquoted == "--"
+        {
+            // Bun consumes exactly this first post-entry separator. Replace
+            // it together with the runtime prefix, retaining any later '--'
+            // as guest data. Node never consumes a post-entry separator.
+            replacement_end = separator.end;
+            guest_start += 1;
+        }
+    }
     let mut replacement = format!("franken-node run --console-only {}", entry_token.raw);
-    if entry_index.saturating_add(1) < tokens.len() {
-        // Consume only our separator: an original post-entry '--' is guest data.
+    if guest_start < tokens.len() {
         replacement.push_str(" --");
     }
     Ok(Some(PackageScriptCommandMatch {
         runtime,
         entry_path: entry_path.to_string(),
-        replacement: Some((runtime_token.start, entry_token.end, replacement)),
+        replacement: Some((runtime_token.start, replacement_end, replacement)),
     }))
 }
 
