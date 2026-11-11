@@ -1526,14 +1526,8 @@ fn latest_drain(
     Ok(Some(drain))
 }
 
-fn admission_ticket_at(protected_root: &Path, project_root: &Path) -> Result<u64> {
-    let Some(connection) = open_inventory(protected_root, false)? else {
-        return Ok(0);
-    };
-    let mut tx = connection.transaction()?;
-    let drain = latest_drain(&tx, project_root)?;
-    tx.commit()?;
-    if let Some(drain) = &drain
+fn require_open_admission(drain: Option<&StoredNativeSessionDrain>) -> Result<u64> {
+    if let Some(drain) = drain
         && drain.fence_held
     {
         bail!(
@@ -1544,19 +1538,63 @@ fn admission_ticket_at(protected_root: &Path, project_root: &Path) -> Result<u64
     Ok(drain.map_or(0, |drain| drain.generation))
 }
 
-/// Capture this before the final policy/trust recheck. Admission compares the
-/// generation in the same transaction that records the worker obligation.
-/// An active fence also makes the existing live observer cancel old workers.
-pub(crate) fn native_session_admission_ticket(project_root: &Path) -> Result<u64> {
+fn admission_ticket_at(protected_root: &Path, project_root: &Path) -> Result<u64> {
+    let Some(connection) = open_inventory(protected_root, false)? else {
+        return Ok(0);
+    };
+    let mut tx = connection.transaction()?;
+    let drain = latest_drain(&tx, project_root)?;
+    tx.commit()?;
+    require_open_admission(drain.as_ref())
+}
+
+fn existing_admission_root() -> Result<Option<PathBuf>> {
     let root = inventory_root()?;
     match std::fs::symlink_metadata(&root) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error).context("inspect native-session admission fence"),
         Ok(_) => {}
     }
     ensure_runtime_evidence_directory(root.parent().context("missing product state root")?, true)?;
     ensure_runtime_evidence_directory(&root, true)?;
+    Ok(Some(root))
+}
+
+/// Capture this before the final policy/trust recheck. Admission compares the
+/// generation in the same transaction that records the worker obligation.
+/// An active fence also makes the existing live observer cancel old workers.
+pub(crate) fn native_session_admission_ticket(project_root: &Path) -> Result<u64> {
+    let Some(root) = existing_admission_root()? else {
+        return Ok(0);
+    };
     admission_ticket_at(&root, project_root)
+}
+
+/// Reference runtimes execute outside the native worker inventory, but they
+/// must still honor its retained admission fences. Check every canonical
+/// ancestor in one snapshot so staging or choosing a nested test cannot detach
+/// a reference leg from its operator's maintenance hold. This is an admission
+/// refusal, not a native-session registration or quiescence certificate.
+pub(crate) fn enforce_reference_admission(project_root: &Path) -> Result<()> {
+    let Some(root) = existing_admission_root()? else {
+        return Ok(());
+    };
+    enforce_reference_admission_at(&root, project_root)
+}
+
+fn enforce_reference_admission_at(protected_root: &Path, project_root: &Path) -> Result<()> {
+    // Validate even when the inventory has not been initialized yet.
+    project_key(project_root)?;
+    let Some(connection) = open_inventory(protected_root, false)? else {
+        return Ok(());
+    };
+    let mut tx = connection.transaction()?;
+    for scope in project_root.ancestors() {
+        let drain = latest_drain(&tx, scope)?;
+        require_open_admission(drain.as_ref())?;
+    }
+    tx.commit()?;
+    Ok(())
 }
 
 fn terminal_outcome_observed(
@@ -2984,6 +3022,108 @@ mod tests {
                 },
             },
         }
+    }
+
+    #[test]
+    fn reference_admission_checks_ancestor_holds_until_every_owner_resumes() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("evidence");
+        let admission = fixture(&root, 91);
+        let project = admission.project_root.clone();
+        let nested = project.join("nested/tests");
+        let unrelated = temp.path().join("unrelated");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::create_dir_all(&unrelated).unwrap();
+        let mut guard = NativeSessionInventoryGuard::admit(&root, admission, 0).unwrap();
+        guard.worker_started();
+        guard.worker_reaped();
+        guard.finish(
+            NativeSessionOutcomeKind::ControlStopped,
+            successful_ledger_observation(),
+        );
+        enforce_reference_admission_at(&root, &nested).unwrap();
+        let mut history = vec![
+            maintenance_action("reference-hold-a", None),
+            maintenance_action("reference-hold-b", None),
+        ];
+        let checkpoint = fleet_application_checkpoint(&history, "prod").unwrap();
+        super::begin_drain_at(&root, &project, "node-a", "prod", &checkpoint, &history)
+            .unwrap();
+        let held = finish_drain_at(&root, &project, "node-a", "prod", &checkpoint).unwrap();
+        assert!(held.checkpoint.fence_held);
+        assert_eq!(held.maintenance_hold_ids.len(), 2);
+        // A nested input has no exact native-session row of its own. The
+        // reference guard must still retain the ancestor's operator fence.
+        assert_eq!(admission_ticket_at(&root, &nested).unwrap(), 0);
+        assert!(enforce_reference_admission_at(&root, &project).is_err());
+        assert!(enforce_reference_admission_at(&root, &nested).is_err());
+        enforce_reference_admission_at(&root, &unrelated).unwrap();
+
+        history.push(maintenance_action(
+            "reference-resume-a",
+            Some("reference-hold-a"),
+        ));
+        let checkpoint = fleet_application_checkpoint(&history, "prod").unwrap();
+        super::begin_drain_at(&root, &project, "node-a", "prod", &checkpoint, &history)
+            .unwrap();
+        let one_owner = finish_drain_at(&root, &project, "node-a", "prod", &checkpoint).unwrap();
+        assert_eq!(one_owner.maintenance_hold_ids, vec!["reference-hold-b"]);
+        assert!(enforce_reference_admission_at(&root, &nested).is_err());
+
+        history.push(maintenance_action(
+            "reference-resume-b",
+            Some("reference-hold-b"),
+        ));
+        let checkpoint = fleet_application_checkpoint(&history, "prod").unwrap();
+        super::begin_drain_at(&root, &project, "node-a", "prod", &checkpoint, &history)
+            .unwrap();
+        assert!(
+            enforce_reference_admission_at(&root, &nested).is_err(),
+            "publishing a resume cannot skip successful action application"
+        );
+        let resumed = finish_drain_at(&root, &project, "node-a", "prod", &checkpoint).unwrap();
+        assert!(resumed.checkpoint.is_complete());
+        enforce_reference_admission_at(&root, &project).unwrap();
+        enforce_reference_admission_at(&root, &nested).unwrap();
+        assert!(!resumed.fleet_quiescence_certified);
+    }
+
+    #[test]
+    fn reference_admission_refuses_malformed_ancestor_drain() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("evidence");
+        let admission = fixture(&root, 92);
+        let project = admission.project_root.clone();
+        let _guard = NativeSessionInventoryGuard::admit(&root, admission, 0).unwrap();
+        let history = vec![maintenance_action("malformed-reference-hold", None)];
+        let checkpoint = fleet_application_checkpoint(&history, "prod").unwrap();
+        let drain = super::begin_drain_at(
+            &root, &project, "node-a", "prod", &checkpoint, &history,
+        )
+        .unwrap();
+        let connection = open_inventory(&root, false).unwrap().unwrap();
+        let mut tx = connection.transaction().unwrap();
+        tx.execute_with_params(
+            "UPDATE native_session_drains SET state_json = ?1 WHERE drain_id = ?2;",
+            &[
+                SqliteValue::Text("{}".into()),
+                SqliteValue::Text(drain.drain_id.into()),
+            ],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        let error = enforce_reference_admission_at(&root, &project.join("nested"))
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("decode native-session inventory record"));
+    }
+
+    #[test]
+    fn reference_admission_does_not_initialize_an_absent_inventory() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("absent-evidence");
+        enforce_reference_admission_at(&root, &temp.path().join("project")).unwrap();
+        assert!(!root.exists());
+        assert!(enforce_reference_admission_at(&root, Path::new("relative/project")).is_err());
     }
 
     #[test]

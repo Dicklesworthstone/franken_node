@@ -404,6 +404,17 @@ impl AdmittedSafeModeProject {
     pub fn enforce(&self) -> anyhow::Result<()> {
         enforce_safe_mode_ancestors(&self.root)
     }
+
+    /// Retain operator containment when the project is executed by a reference
+    /// runtime or a private validation copy. Engine-enabled product builds also
+    /// consult the native fleet admission fences for the complete ancestry.
+    /// Standalone tools without the engine retain their safe-mode-only scope.
+    pub fn enforce_reference_execution(&self) -> anyhow::Result<()> {
+        self.enforce()?;
+        #[cfg(feature = "engine")]
+        crate::ops::native_session_inventory::enforce_reference_admission(&self.root)?;
+        Ok(())
+    }
 }
 
 /// Check a whole project, including empty projects and ancestor restrictions.
@@ -472,6 +483,20 @@ impl AdmittedSafeModeScope {
     pub fn enforce(&self) -> anyhow::Result<()> {
         self.validate()?;
         enforce_admitted_run_safe_mode(&self.anchor)
+    }
+
+    /// Apply reference-execution controls to this retained capsule/operator
+    /// anchor without reopening or resolving the original file. Native fleet
+    /// fences are available only in engine-enabled product builds.
+    pub fn enforce_reference_execution(&self) -> anyhow::Result<()> {
+        self.enforce()?;
+        #[cfg(feature = "engine")]
+        {
+            use anyhow::Context as _;
+            let root = self.anchor.parent().context("reference scope has no parent")?;
+            crate::ops::native_session_inventory::enforce_reference_admission(root)?;
+        }
+        Ok(())
     }
 
     /// Bind a deployment's additional fleet project to the same retained

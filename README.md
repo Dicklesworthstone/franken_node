@@ -1194,6 +1194,15 @@ report `health: maintenance`, distinct from ordinary healthy/open admission.
 Unknown effects and missing or stale nodes continue to block readiness. A held
 fence also keeps `fleet reconcile --require-native-drain` pending.
 
+In the default engine-enabled product, migration validation and lockstep
+reference processes also consult this protected admission fence. Private staging
+retains the original project's control ancestry; capsule execution uses its
+current storage scope. Linux supervision polls these controls while a leg runs
+and stops the leg when a refusal is observed. Static-only inspection remains
+available. Reference processes are not added to the native drain census by this
+check, so it does not establish certified fleet quiescence. Standalone tools
+built without the engine continue to enforce safe mode only.
+
 Hold ownership is the immutable action ID. Repeating `fleet hold` with the same
 `--id`, zone, and reason reuses the action. A resumed ID cannot be reactivated.
 Resuming one owner preserves all other active owners, including fleet-wide holds;

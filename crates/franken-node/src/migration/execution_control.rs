@@ -3,7 +3,9 @@
 //! Origins are local execution context, never serialized input authority. A
 //! capsule is governed by its current storage scope, not historical pathnames
 //! supplied by its payload. Controller decoding and live state reads use the
-//! same production safe-mode implementation as ordinary native runs.
+//! same production safe-mode implementation as ordinary native runs. In
+//! engine-enabled product builds, reference execution also checks the protected
+//! native fleet admission fences; engine-free tools retain safe-mode-only scope.
 
 use super::{EntryData, Snapshot};
 use crate::runtime::safe_mode::{
@@ -72,8 +74,8 @@ impl ExecutionControl {
     pub(super) fn enforce(&self) -> Result<()> {
         for scope in &self.scopes {
             match scope {
-                Scope::Project(scope) => scope.enforce()?,
-                Scope::Capsule(scope) => scope.enforce()?,
+                Scope::Project(scope) => scope.enforce_reference_execution()?,
+                Scope::Capsule(scope) => scope.enforce_reference_execution()?,
             }
         }
         Ok(())

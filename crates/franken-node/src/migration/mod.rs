@@ -1410,7 +1410,7 @@ fn execute_migration_runtime_smoke_with_target_guarded(
         if let Some(original_control) = original_control {
             original_control()?;
         }
-        scope.enforce()
+        scope.enforce_reference_execution()
     };
     control()?;
     let mut command = native_migration_smoke_command(native_executable, smoke_target)?;
@@ -1511,7 +1511,7 @@ mod smoke_safe_mode_tests {
         let error = execute_migration_runtime_smoke_with_target_guarded(
             Path::new("/must-not-be-launched"),
             &staged_target,
-            Some(&|| original_control.enforce()),
+            Some(&|| original_control.enforce_reference_execution()),
         )
         .unwrap_err();
         assert!(
@@ -2921,7 +2921,7 @@ pub fn run_validate(
                     )?;
                     validation_suite::with_captured_dependency_inputs(&root, &inputs, |staged| {
                         execute_migration_runtime_smoke_guarded(
-                            staged, Some(&|| control.enforce()),
+                            staged, Some(&|| control.enforce_reference_execution()),
                         )
                     })
                 })())),

@@ -1766,6 +1766,194 @@ impl MaintenanceCliFixture {
 }
 
 #[test]
+#[cfg(all(feature = "engine", target_os = "linux"))]
+fn fleet_hold_blocks_migration_and_lockstep_references_until_explicit_resume() {
+    let fixture = MaintenanceCliFixture::new();
+    let project = fixture.project.path();
+    let outside = tempdir().expect("reference sentinel outside captured source");
+    let sentinel = outside.path().join("reference-ran");
+    std::fs::write(
+        project.join("package.json"),
+        r#"{"name":"held-reference-project","version":"1.0.0","engines":{"node":">=20"}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("package-lock.json"),
+        r#"{"lockfileVersion":3,"packages":{"":{}}}"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(project.join("nested")).unwrap();
+    let test = project.join("nested/held.test.cjs");
+    std::fs::write(
+        &test,
+        format!(
+            "require('fs').writeFileSync({},'executed');\n",
+            serde_json::to_string(&sentinel).unwrap(),
+        ),
+    )
+    .unwrap();
+    fixture.success(&[
+        "fleet",
+        "hold",
+        "--zone",
+        "east",
+        "--reason",
+        "reference maintenance",
+        "--id",
+        "reference-maintenance",
+        "--json",
+    ]);
+    fixture.restart_agent("maintenance", true, 0);
+    for args in [
+        vec!["migrate", "validate", ".", "--json"],
+        vec![
+            "verify",
+            "lockstep",
+            "nested/held.test.cjs",
+            "--runtimes",
+            "node,bun",
+            "--json",
+        ],
+    ] {
+        let output = fixture.run(&args, "30");
+        assert!(
+            !output.status.success(),
+            "held reference execution was admitted: {output:?}"
+        );
+        let combined = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            combined.contains("native-session admission is fenced"),
+            "{combined}"
+        );
+        assert!(
+            !sentinel.exists(),
+            "reference guest executed while its ancestor was held"
+        );
+    }
+    // Source inspection remains available while execution is fenced.
+    let inspected = fixture.run(
+        &["migrate", "validate", ".", "--static-only", "--json"],
+        "30",
+    );
+    assert!(inspected.status.success(), "{inspected:?}");
+    assert!(!sentinel.exists());
+
+    fixture.success(&[
+        "fleet",
+        "resume",
+        "--hold",
+        "reference-maintenance",
+        "--json",
+    ]);
+    fixture.restart_agent("healthy", false, 0);
+    std::fs::write(&test, "console.log(42);\n").unwrap();
+    let resumed = fixture.success(&["migrate", "validate", ".", "--json"]);
+    let suite = &resumed["test_suite"];
+    assert_eq!(suite["verdict"], "PASS", "{resumed}");
+    assert_eq!(suite["passed"], 1);
+    assert_eq!(suite["skipped"], 0);
+    assert_eq!(suite["cases"][0]["reference"]["exit_code"], 0);
+    assert_eq!(suite["cases"][0]["native"]["exit_code"], 0);
+}
+
+#[test]
+#[cfg(all(feature = "engine", target_os = "linux"))]
+fn fleet_hold_stops_a_running_migration_reference_before_native_dispatch() {
+    let fixture = MaintenanceCliFixture::new();
+    let project = fixture.project.path();
+    let outside = tempdir().expect("reference rendezvous");
+    let ready = outside.path().join("reference-ready");
+    std::fs::write(
+        project.join("package.json"),
+        r#"{"name":"late-held-reference","version":"1.0.0","engines":{"node":">=20"}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("package-lock.json"),
+        r#"{"lockfileVersion":3,"packages":{"":{}}}"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(project.join("nested")).unwrap();
+    std::fs::write(
+        project.join("nested/held.test.cjs"),
+        format!(
+            "require('fs').writeFileSync({}, String(process.pid));setInterval(()=>{{}},1000);\n",
+            serde_json::to_string(&ready).unwrap(),
+        ),
+    )
+    .unwrap();
+    let (output, reference_pid) = std::thread::scope(|threads| {
+        let operator = threads.spawn(|| {
+            let deadline = Instant::now() + Duration::from_secs(20);
+            let pid = loop {
+                if let Ok(raw) = std::fs::read_to_string(&ready)
+                    && let Ok(pid) = raw.parse::<u32>()
+                {
+                    break pid;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "real Node reference never reached the supervised boundary"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            };
+            fixture.success(&[
+                "fleet",
+                "hold",
+                "--zone",
+                "east",
+                "--reason",
+                "late reference maintenance",
+                "--id",
+                "late-reference-hold",
+                "--json",
+            ]);
+            fixture.restart_agent("maintenance", true, 0);
+            pid
+        });
+        // The production suite bounds each runtime leg and owns its process group.
+        let output = fixture.run(&["migrate", "validate", ".", "--json"], "30");
+        (output, operator.join().expect("fleet operator"))
+    });
+    assert!(
+        !output.status.success(),
+        "running reference survived maintenance hold"
+    );
+    let report = json_stdout(&output, "live fleet reference containment");
+    assert_eq!(report["status"], "fail", "{report}");
+    let suite = &report["test_suite"];
+    assert_eq!(suite["verdict"], "ERROR", "{report}");
+    assert_eq!(suite["errored"], 1, "{report}");
+    assert_eq!(suite["skipped"], 0, "{report}");
+    assert!(
+        suite["cases"][0]["native"].is_null(),
+        "native leg must not start: {report}"
+    );
+    assert!(
+        suite["cases"][0]["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| {
+                error.as_str().is_some_and(|message| {
+                    message.contains("native-session admission is fenced")
+                })
+            }),
+        "{report}"
+    );
+    assert!(
+        !std::path::Path::new("/proc")
+            .join(reference_pid.to_string())
+            .exists(),
+        "reference leader was not reaped",
+    );
+}
+
+#[test]
 #[cfg(feature = "fleet-control-plane-server")]
 fn live_http_guarded_policy_requires_enrolled_fresh_hold_and_retains_original_retry() {
     use ed25519_dalek::Signer as _;

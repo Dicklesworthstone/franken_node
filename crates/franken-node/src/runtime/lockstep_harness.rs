@@ -378,7 +378,7 @@ impl LockstepHarness {
         let input_scope = Self::capture_input_scope(app_path)?;
         if let Some(corpus_entries) = Self::resolve_lockstep_corpus_entries(app_path)? {
             for entry in corpus_entries {
-                input_scope.enforce()?;
+                input_scope.enforce_reference_execution()?;
                 self.verify_lockstep_entry(&entry, emit_fixtures, &input_scope)
                     .with_context(|| {
                         format!("lockstep corpus fixture failed: {}", entry.display())
@@ -522,8 +522,8 @@ impl LockstepHarness {
 
         // Spawn parallel execution threads for each runtime
         let mut handles = Vec::new();
-        input_scope.enforce()?;
-        original_scope.enforce()?;
+        input_scope.enforce_reference_execution()?;
+        original_scope.enforce_reference_execution()?;
         for rt in self.runtimes.clone() {
             let app_path_buf = app_path.to_path_buf();
             let scopes = [original_scope.clone(), input_scope.clone()];
@@ -908,7 +908,7 @@ impl LockstepHarness {
     ) -> Result<RuntimeLegOutput> {
         anyhow::ensure!(!scopes.is_empty(), "lockstep execution requires an admitted input scope");
         for scope in scopes {
-            scope.enforce()?;
+            scope.enforce_reference_execution()?;
         }
         let bin_path = Self::resolve_runtime_binary(runtime);
         let runtime_target = Self::resolve_runtime_target(runtime, app_path)?
@@ -916,9 +916,9 @@ impl LockstepHarness {
         let target_scope = Self::capture_input_scope(&runtime_target)?;
         let enforce_scopes = || -> Result<()> {
             for scope in scopes {
-                scope.enforce()?;
+                scope.enforce_reference_execution()?;
             }
-            target_scope.enforce()
+            target_scope.enforce_reference_execution()
         };
 
         let mut cmd = Command::new("strace");
@@ -1060,7 +1060,7 @@ impl LockstepHarness {
         let stderr_result = Self::join_pipe_drain(stderr_thread, "stderr", drain_timeout);
 
         if let Some(error) = containment_error {
-            return Err(error).context("lockstep runtime stopped by operator safe mode");
+            return Err(error).context("lockstep runtime stopped by operator containment");
         }
 
         if is_output_cap_reached
