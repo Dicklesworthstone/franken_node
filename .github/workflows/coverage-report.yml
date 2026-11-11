@@ -6,17 +6,37 @@ on:
       - "crates/franken-node/**"
       - "sdk/verifier/**"
       - "fuzz/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "packaging/source-siblings.tsv"
+      - "scripts/bootstrap_source.sh"
+      - ".github/actions/franken-siblings/action.yml"
       - ".github/workflows/coverage-report.yml"
+  push:
+    branches: [main]
+    paths:
+      - "crates/franken-node/**"
+      - "sdk/verifier/**"
+      - "fuzz/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "packaging/source-siblings.tsv"
+      - "scripts/bootstrap_source.sh"
+      - ".github/actions/franken-siblings/action.yml"
+      - ".github/workflows/coverage-report.yml"
+  workflow_dispatch: {}
 
 jobs:
   coverage-report:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust nightly
-        uses: dtolnay/rust-toolchain@nightly
+      - name: Checkout sibling repositories and pinned toolchain
+        uses: ./.github/actions/franken-siblings
 
       - name: Install llvm-tools-preview
         run: rustup component add llvm-tools-preview
@@ -52,12 +72,14 @@ jobs:
             2>&1 | tee coverage-artifacts/coverage-report.log
           status=${PIPESTATUS[0]}
           printf '%s\n' "$status" > coverage-artifacts/coverage-exit-code.txt
-          if [ -f coverage.lcov ]; then
+          if [ -s coverage.lcov ]; then
             echo "coverage.lcov generated" | tee coverage-artifacts/coverage-status.txt
           else
             echo "coverage.lcov not generated; see coverage-report.log" | tee coverage-artifacts/coverage-status.txt
           fi
-          exit 0
+          if [ "$status" -ne 0 ] || [ ! -s coverage.lcov ]; then
+            exit "${status:-1}"
+          fi
 
       - name: Upload coverage artifact
         if: always()

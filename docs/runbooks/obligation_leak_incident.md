@@ -34,37 +34,40 @@
 
 **Goal:** Stop the leaked obligation from accumulating resources and prevent cascading leaks.
 
-1. **Identify leaked obligations:** List all obligations in `reserved` state past their TTL.
+> **CLI Reality Note:** Live `ObligationTracker` reservation tables live in-memory inside the Rust runtime (`crates/franken-node/src/connector/obligation_tracker.rs`), not behind an external `ctl` subcommand or standalone lab binary. Operator containment uses `safe-mode`, `fleet`, `incident`, `migrate rollout`, and `ops`.
+
+1. **Inspect current obligation metrics and health posture:**
+   ```bash
+   franken-node ops metrics --json > obligation_metrics.json
+   franken-node ops health-check --json
    ```
-   franken-node ctl obligation list --state reserved --past-ttl
+2. **Enter safe mode to halt new obligation-reserving workflows:**
+   ```bash
+   franken-node safe-mode enter --reason obligation-leak --operator-id <OPERATOR_ID> --trust-state-hash <CURRENT_TRUST_HASH> --json
    ```
-2. **Force-rollback associated flows:** Roll back any in-flight flows that hold the leaked obligation.
-   ```
-   franken-node ctl flow rollback --obligation-id <OBLIGATION_ID>
-   ```
-3. **Clear leaked obligations from tracker:**
-   ```
-   franken-node ctl obligation force-release --obligation-id <OBLIGATION_ID>
+3. **Hold affected fleet zone while draining/restarting the leaking worker:**
+   ```bash
+   franken-node fleet hold --zone <ZONE_ID> --reason "OBL-004 obligation leak <OBLIGATION_ID>" --json
    ```
 4. **Verify containment:** Confirm `fn_obligation_active_gauge` has returned to expected levels and no new `OBL-004` events are firing.
 
 ## Replay Procedure
 
-**Goal:** Reproduce the leak in a deterministic lab environment for root-cause analysis.
+**Goal:** Reproduce the leak in the deterministic lab environment (`bd-145n`) for root-cause analysis.
 
-1. **Capture obligation tracker state:**
+1. **Verify the captured incident bundle:**
+   ```bash
+   franken-node incident bundle --id <INCIDENT_ID> --verify --json
    ```
-   franken-node ctl obligation export-state --output obligation_state.json
+2. **Replay the incident bundle and inspect counterfactual policy behavior:**
+   ```bash
+   franken-node incident replay --bundle <INCIDENT_ID>.fnbundle --trusted-public-key <PUBKEY_HEX> --json
    ```
-2. **Export flow trace:** Extract the structured trace log for the leaking flow.
+3. **Replay in the deterministic lab runtime (`bd-145n`) with `--seed <ORIGINAL_SEED>`:**
+   ```bash
+   FRANKEN_LAB_SEED=<ORIGINAL_SEED> rch exec -- cargo test -p frankenengine-node --features extended-surfaces,test-support --test asupersync_control_lane_integration -- --nocapture
    ```
-   franken-node ctl trace export --trace-id <TRACE_ID> --output flow_trace.jsonl
-   ```
-3. **Replay in deterministic lab runtime (bd-145n):**
-   ```
-   franken-lab replay --state obligation_state.json --trace flow_trace.jsonl --seed <ORIGINAL_SEED>
-   ```
-4. **Verify reproduction:** The lab replay should reproduce the `OBL-004` event, showing the obligation transitions that led to the leak.
+4. **Verify reproduction:** The deterministic lab replay should reproduce the `OBL-004` event, showing the obligation transitions that led to the leak.
 5. **Identify root cause:** Common causes:
    - Flow was cancelled but obligation release handler was not invoked.
    - Exception in commit path left obligation in reserved state.
@@ -72,25 +75,24 @@
 
 ## Rollback Procedure
 
-**Goal:** Revert state mutations caused by the leaked obligation and confirm no side-effects persisted.
+**Goal:** Revert rollout/deployment mutations associated with the leaking connector and confirm no side-effects persisted.
 
-1. **Revert affected state mutations:** Identify all state changes made under the leaked obligation's scope.
+1. **Audit evidence entries emitted under the leaked obligation's trace:**
+   ```bash
+   franken-node debug evidence <EVIDENCE_JSONL> --json
    ```
-   franken-node ctl obligation audit --obligation-id <OBLIGATION_ID>
+2. **Roll back the active rollout (and bound deployment release if configured):**
+   ```bash
+   franken-node migrate rollout rollback --reason "OBL-004 obligation leak <OBLIGATION_ID>" --json
    ```
-2. **Revert each mutation:**
+3. **Verify no side-effects (`bd-1n5p`):** Run the obligation-tracking conformance tests via RCH.
+   ```bash
+   rch exec -- cargo test -p frankenengine-node --features extended-surfaces,test-support --test asupersync_control_lane_integration
    ```
-   franken-node ctl state revert --mutation-ids <ID1>,<ID2>,...
+4. **Confirm health and metrics are clean:**
+   ```bash
+   franken-node ops metrics --json
    ```
-3. **Verify no side-effects:** Run the integration test suite for obligation tracking (bd-1n5p) against the affected connector.
-   ```
-   franken-node test --suite obligation-tracking --connector-id <CONNECTOR_ID>
-   ```
-4. **Confirm obligation tracker is clean:**
-   ```
-   franken-node ctl obligation list --state reserved --past-ttl
-   ```
-   Expected: empty list.
 5. **Monitor:** Watch `fn_obligation_leaked_total` for 15 minutes to confirm no recurrence.
 
 ## Post-Incident

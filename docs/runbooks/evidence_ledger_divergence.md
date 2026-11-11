@@ -62,8 +62,10 @@ suspends writes, and the re-sync procedure restores consistency.
 
 ## Command References
 
-- `franken-node ledger hash --all-peers`
-- `franken-node ledger reconcile --source authoritative`
+- `franken-node debug evidence <evidence-ledger.jsonl> --json`
+- `franken-node verify transparency-log --receipt <inclusion-receipt.json> --json`
+- `franken-node ops health-check --json`
+- `crates/franken-node/src/observability/evidence_ledger.rs` (library-level hash-chain verification; no standalone `ledger` CLI subcommand is shipped)
 - `POST /api/v1/ledger/reconcile`
 
 ## Cross-References

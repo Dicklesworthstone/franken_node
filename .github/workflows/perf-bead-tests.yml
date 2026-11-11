@@ -34,6 +34,31 @@ on:
       - 'scripts/detect_affected_perf_beads.py'
       - 'tests/perf_beads/**'
       - 'docs/dev/perf_bead_testing.md'
+      - '.github/workflows/perf-bead-tests.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'crates/franken-node/src/security/threshold_sig.rs'
+      - 'crates/franken-node/src/security/decision_receipt.rs'
+      - 'crates/franken-node/src/crypto/schemes.rs'
+      - 'crates/franken-node/src/connector/canonical_serializer.rs'
+      - 'crates/franken-node/src/supply_chain/trust_card.rs'
+      - 'crates/franken-node/src/control_plane/fleet_transport.rs'
+      - 'crates/franken-node/src/dgis/contagion_graph.rs'
+      - 'crates/franken-node/src/dgis/contagion_simulator.rs'
+      - 'crates/franken-node/src/dgis/node_interner.rs'
+      - 'crates/franken-node/src/tools/replay_bundle.rs'
+      - 'crates/franken-node/src/vef/proof_generator.rs'
+      - 'crates/franken-node/src/vef/receipt_chain.rs'
+      - 'crates/franken-node/benches/crypto_scheme_bench.rs'
+      - 'crates/franken-node/benches/vef_proof_chain_bench.rs'
+      - 'scripts/run_perf_bead_test.sh'
+      - 'scripts/render_perf_test_summary.py'
+      - 'scripts/detect_affected_perf_beads.py'
+      - 'tests/perf_beads/**'
+      - 'docs/dev/perf_bead_testing.md'
+      - '.github/workflows/perf-bead-tests.yml'
+  workflow_dispatch: {}
 
 jobs:
   detect-affected:
@@ -51,10 +76,20 @@ jobs:
           python-version: '3.12'
       - id: map
         name: Map changed files to perf-bead test scripts
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
         run: |
           set -euo pipefail
+          if [ -n "${PR_BASE_SHA}" ]; then
+            BASE_SHA="${PR_BASE_SHA}"
+          elif [ -n "${PUSH_BEFORE_SHA}" ] && [ "${PUSH_BEFORE_SHA}" != "0000000000000000000000000000000000000000" ]; then
+            BASE_SHA="${PUSH_BEFORE_SHA}"
+          else
+            BASE_SHA="$(git rev-parse HEAD~1)"
+          fi
           python3 scripts/detect_affected_perf_beads.py \
-              --base "${{ github.event.pull_request.base.sha }}" \
+              --base "${BASE_SHA}" \
               --head "${{ github.sha }}" \
             > scripts.txt
           if [ ! -s scripts.txt ]; then

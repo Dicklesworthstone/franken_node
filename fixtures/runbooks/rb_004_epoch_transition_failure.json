@@ -52,8 +52,8 @@
   "cross_references": ["bd-k6o", "fencing.rs", "state_model.rs"],
   "drill_scenario": "Simulate epoch transition failure by withholding one signatory approval in staging. Verify that the timeout fires, containment activates, and the retry-with-re-signing path completes successfully.",
   "command_references": [
-    "franken-node epoch status",
-    "franken-node epoch retry --timeout 600",
+    "franken-node runtime epoch --local-epoch <current> --json",
+    "franken-node ops health-check --json",
     "POST /api/v1/control/epoch/retry"
   ],
   "coverage_tags": [

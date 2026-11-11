@@ -136,8 +136,8 @@ Each claim entry uses this structure:
   compromise_reduction_v2_measures_raw_runtime_baseline_against_strict_policy`
   (requires local `node` + `bun`; writes the measured artifact) then
   `python3 scripts/check_compromise_reduction_gate.py`
-- **Last verified**: 2026-09-29T00:00:00Z
-- **Status**: verified
+- **Last verified**: 2026-09-29T00:00:00Z (local measurement snapshot; release gate currently FAIL)
+- **Status**: pending (local 2026-09-29 snapshot measured 20.0×, 20/20 contained; `scripts/check_compromise_reduction_gate.py` fails closed with `CURRENT_MEASUREMENT_INPUTS_REQUIRED` / `release_qualified: false` until a fresh signed producer-distinct campaign passes `bd-reality-20260923-26n9r.20` / `.21`)
 - **Notes**: Re-measured honestly under bd-reality-20260923-26n9r.3. The
   rewritten harness registers each dependency as **Trusted** (not revoked),
   records a fresh signed revocation frontier so the run reaches execution, and
@@ -532,6 +532,24 @@ Each claim entry uses this structure:
 - **Notes**: Honest default is `production_operator_count=0`, `verdict=pending`.
   `bd-2hrg` closed the IBD index document, not production adoption. Do not
   mark this claim verified while count<3.
+
+### CLAIM-022: ≥2 independent external replications across core claims
+
+- **Category**: verification
+- **Source**: docs/PRODUCT_CHARTER.md §5 (table row 6); docs/specs/section_13/bd-whxp_contract.md
+- **Claim**: At least two independent external organizations reproduce the
+  compromise-reduction (`≥10×`), migration-velocity (`≥3×`), and replay-coverage
+  (`100%`) claims from published artifacts without conflict of interest.
+- **Evidence artifact**: `artifacts/13/independent_replication_report.json`
+- **Verification command**:
+  `python3 scripts/check_independent_replications_gate.py --json`
+- **Last verified**: 2026-11-11T00:00:00Z
+- **Status**: pending (`independent_replications_passing=0` of required `2`;
+  `scripts/check_independent_replications_gate.py` rejects RFC 2606/6761
+  `example.org` placeholder URIs in `artifacts/13/independent_replication_report.json`)
+- **Notes**: Tracked by `bd-whxp` and `bd-reality-20260923-26n9r.16`. Remains
+  `pending` until two real independent external replication campaigns publish
+  non-placeholder signed evidence URIs and pass the gate.
 
 ## Update Cadence
 

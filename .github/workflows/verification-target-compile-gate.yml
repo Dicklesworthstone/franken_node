@@ -17,24 +17,43 @@ on:
       - 'fuzz/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'packaging/source-siblings.tsv'
+      - 'scripts/bootstrap_source.sh'
+      - '.github/actions/franken-siblings/action.yml'
       - 'scripts/check_verification_targets_compile.py'
       - 'scripts/remediation_log.py'
+      - '.github/workflows/verification-target-compile-gate.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'crates/franken-node/**'
+      - 'tests/**'
+      - 'fuzz/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'packaging/source-siblings.tsv'
+      - 'scripts/bootstrap_source.sh'
+      - '.github/actions/franken-siblings/action.yml'
+      - 'scripts/check_verification_targets_compile.py'
+      - 'scripts/remediation_log.py'
+      - '.github/workflows/verification-target-compile-gate.yml'
   workflow_dispatch: {}
 
 env:
-  BLOCKING: "0"   # set to "1" after bd-rjc2m.E2E1 is green to make this gate blocking
+  BLOCKING: "1"
 
 jobs:
   compile-census:
     runs-on: ubuntu-latest
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-      - name: Install Rust toolchain
-        run: |
-          rustup toolchain install nightly --profile minimal
-          rustup default nightly
+      - name: Checkout sibling repositories and pinned toolchain
+        uses: ./.github/actions/franken-siblings
       - name: Gate unit tests (parser must be correct first)
         run: |
           python3 scripts/test_remediation_log.py
@@ -48,7 +67,7 @@ jobs:
       - name: Census — fuzz targets
         run: |
           set +e
-          cargo +nightly build --manifest-path fuzz/Cargo.toml --bins --keep-going \
+          cargo build --manifest-path fuzz/Cargo.toml --bins --keep-going \
             > fuzz_census.log 2>&1 || true
           echo "fuzz census exit: $?"
       - name: Evaluate gate (warn-only unless BLOCKING=1)

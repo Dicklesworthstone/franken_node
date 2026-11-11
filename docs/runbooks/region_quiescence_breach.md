@@ -34,55 +34,59 @@
 
 **Goal:** Stop the breach from propagating to other regions or connectors.
 
-1. **Isolate the region:** Mark the failing region as `Failed` in the lifecycle FSM.
+> **CLI Reality Note:** Direct region-tree isolation, child force-close, and `EpochFence` token release are library-level `asupersync` / `control_plane` operations (`crates/franken-node/src/control_plane/`), not an external `ctl` subcommand or standalone lab binary. Use `safe-mode`, `fleet`, `incident`, `migrate rollout`, and `ops` for operator containment.
+
+1. **Enter safe mode to block new region admissions:**
+   ```bash
+   franken-node safe-mode enter --reason region-quiescence-breach --operator-id <OPERATOR_ID> --trust-state-hash <CURRENT_TRUST_HASH> --json
    ```
-   franken-node ctl region isolate --region-id <REGION_ID>
+2. **Hold fleet scheduling in the affected zone while the supervisor terminates stuck region workers:**
+   ```bash
+   franken-node fleet hold --zone <ZONE_ID> --reason "RGN-004 region quiescence breach <REGION_ID>" --json
    ```
-2. **Force-close child tasks:** Escalate all child tasks in the stuck region to forced termination.
-   ```
-   franken-node ctl region force-close --region-id <REGION_ID> --escalate-children
-   ```
-3. **Release held fencing tokens:** Any fencing tokens held by the failing region must be released to prevent downstream stalls.
-   ```
-   franken-node ctl fencing release --holder-id <REGION_ID>
+3. **Snapshot local health and metrics:**
+   ```bash
+   franken-node ops health-check --json
+   franken-node ops metrics --json > region_metrics.json
    ```
 4. **Verify containment:** Confirm `fn_region_active_gauge` has decreased and no new `RGN-004` events are firing.
 
 ## Replay Procedure
 
-**Goal:** Reproduce the failure in a deterministic lab environment for root-cause analysis.
+**Goal:** Reproduce the failure in the deterministic lab environment (`bd-145n`) for root-cause analysis.
 
-1. **Capture region tree state:**
+1. **Verify and inspect the captured incident bundle:**
+   ```bash
+   franken-node incident bundle --id <INCIDENT_ID> --verify --json
    ```
-   franken-node ctl region export-state --region-id <REGION_ID> --output region_state.json
+2. **Replay the recorded incident trace:**
+   ```bash
+   franken-node incident replay --bundle <INCIDENT_ID>.fnbundle --trusted-public-key <PUBKEY_HEX> --json
    ```
-2. **Export trace log:** Extract the structured trace log covering the quiescence window.
+3. **Replay in the deterministic lab runtime (`bd-145n`) using `--seed <ORIGINAL_SEED>`:**
+   ```bash
+   FRANKEN_LAB_SEED=<ORIGINAL_SEED> rch exec -- cargo test -p frankenengine-node --features extended-surfaces,test-support --test asupersync_control_lane_integration -- --nocapture
    ```
-   franken-node ctl trace export --trace-id <TRACE_ID> --output trace_log.jsonl
-   ```
-3. **Replay in deterministic lab runtime (bd-145n):**
-   ```
-   franken-lab replay --state region_state.json --trace trace_log.jsonl --seed <ORIGINAL_SEED>
-   ```
-4. **Verify reproduction:** The lab replay should reproduce the `RGN-004` event with identical timing.
-5. **Bisect the cause:** Use `--inject-delay` and `--skip-task` flags to identify which child task or resource hold caused the quiescence timeout.
+4. **Verify reproduction:** The deterministic lab replay should reproduce the `RGN-004` event with identical logical timing.
+5. **Bisect the cause:** Inspect evidence entries via `franken-node debug evidence <EVIDENCE_JSONL> --json` to identify which child task or resource hold caused the quiescence timeout.
 
 ## Rollback Procedure
 
 **Goal:** Restore the connector and region to a known-good state.
 
-1. **Revert connector state:** Roll back the connector to its last persisted known-good `RolloutState`.
+1. **Revert rollout state:** Roll back the active rollout to its known-good state (and sync `--deployment <DEPLOYMENT_NAME>` if bound).
+   ```bash
+   franken-node migrate rollout rollback --reason "RGN-004 region quiescence breach <REGION_ID>" --json
    ```
-   franken-node ctl rollout revert --connector-id <CONNECTOR_ID> --to-version <LAST_GOOD_VERSION>
+2. **Release fencing tokens:** Confirm via host logs that fencing tokens from the affected epoch were dropped on worker restart.
+3. **Verify rollback:** Run the health check to confirm the node returns to healthy status.
+   ```bash
+   franken-node ops health-check --json
    ```
-2. **Release fencing tokens:** Confirm all fencing tokens from the affected epoch are released.
-3. **Verify rollback:** Run the health gate evaluation to confirm the connector returns to `Active` state.
-   ```
-   franken-node ctl health-gate evaluate --connector-id <CONNECTOR_ID>
-   ```
-4. **Re-enable region:** Once health gate passes, re-open the region.
-   ```
-   franken-node ctl region reopen --region-id <REGION_ID>
+4. **Resume fleet zone and exit safe mode once clean:**
+   ```bash
+   franken-node fleet resume --zone <ZONE_ID> --json
+   franken-node safe-mode exit --operator-id <OPERATOR_ID> --confirm --trust-state-consistent --no-unresolved-incidents --evidence-ledger-intact --json
    ```
 5. **Monitor:** Watch `fn_region_quiescence_failures` for 15 minutes to confirm no recurrence.
 

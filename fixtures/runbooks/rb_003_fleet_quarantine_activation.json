@@ -52,8 +52,8 @@
   "cross_references": ["bd-3o6", "quarantine_store.rs", "health_gate.rs", "rollout_state.rs"],
   "drill_scenario": "Trigger quarantine on a staging fleet subset (3 nodes) by injecting a health check failure. Verify quarantine activation, investigate root cause, repair the simulated failure, and re-admit nodes through the graduated process.",
   "command_references": [
-    "franken-node quarantine list --status active",
-    "franken-node quarantine promote --node <node-id>",
+    "franken-node fleet status --zone <zone> --json",
+    "franken-node fleet release --incident <incident-id>",
     "POST /api/v1/fleet/quarantine/activate"
   ],
   "coverage_tags": [

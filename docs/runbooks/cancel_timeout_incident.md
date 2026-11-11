@@ -36,64 +36,68 @@
 
 ## Immediate Containment
 
-**Goal:** Complete the stalled cancellation and release held resources.
+**Goal:** Complete the stalled cancellation, freeze further risky rollouts, and contain held resources.
 
-1. **Force-finalize the timed-out workflow:**
+> **CLI Reality Note:** In-process `CancellationProtocol`, `ObligationTracker`, and `EpochFence` state machines live in the Rust library (`crates/franken-node/src/control_plane/` and `crates/franken-node/src/connector/`); there is no external `ctl` subcommand or standalone lab binary. Operator CLI containment uses `safe-mode`, `fleet`, `incident`, `migrate rollout`, and `ops`.
+
+1. **Enter operator safe mode to halt new risky workflow admissions:**
+   ```bash
+   franken-node safe-mode enter --reason cancel-timeout --operator-id <OPERATOR_ID> --trust-state-hash <CURRENT_TRUST_HASH> --json
    ```
-   franken-node ctl cancel force-finalize --workflow-id <WORKFLOW_ID>
+2. **Place a fleet hold on the affected zone while in-flight cancellation drains or the host supervisor restarts the stuck worker:**
+   ```bash
+   franken-node fleet hold --zone <ZONE_ID> --reason "CAN-004 cancel timeout on <WORKFLOW_ID>" --json
    ```
-2. **Release held resources:** Any obligations, fencing tokens, or region locks held by the cancelled workflow must be freed.
-   ```
-   franken-node ctl obligation force-release --workflow-id <WORKFLOW_ID>
-   franken-node ctl fencing release --holder-id <WORKFLOW_ID>
-   ```
-3. **Log incomplete drain:** Record which tasks were not drained before force-finalize for post-incident audit.
-   ```
-   franken-node ctl cancel audit --workflow-id <WORKFLOW_ID> --output cancel_audit.json
+3. **Capture runtime metrics and health posture for post-incident audit:**
+   ```bash
+   franken-node ops metrics --json > cancel_audit.json
+   franken-node ops health-check --json
    ```
 4. **Verify containment:** Confirm `fn_cancel_total_duration_ms` p99 has returned below budget and no new `CAN-004` events are firing.
 
 ## Replay Procedure
 
-**Goal:** Reproduce the timeout in a deterministic lab environment for root-cause analysis.
+**Goal:** Reproduce the timeout in the deterministic lab environment (`bd-145n`) for root-cause analysis.
 
-1. **Capture cancel protocol state:**
+1. **Export and verify the recorded incident bundle:**
+   ```bash
+   franken-node incident bundle --id <INCIDENT_ID> --verify --json
    ```
-   franken-node ctl cancel export-state --workflow-id <WORKFLOW_ID> --output cancel_state.json
+2. **Replay the recorded incident bundle with signature verification:**
+   ```bash
+   franken-node incident replay --bundle <INCIDENT_ID>.fnbundle --trusted-public-key <PUBKEY_HEX> --json
    ```
-2. **Export phase timing log:** Extract the per-phase timing data.
+3. **Reproduce in the deterministic lab runtime (`bd-145n`) with `--seed <ORIGINAL_SEED>`:**
+   ```bash
+   FRANKEN_LAB_SEED=<ORIGINAL_SEED> rch exec -- cargo test -p frankenengine-node --features extended-surfaces,test-support --test asupersync_control_lane_integration -- --nocapture
    ```
-   franken-node ctl trace export --trace-id <TRACE_ID> --output phase_timing.jsonl
-   ```
-3. **Replay in deterministic lab runtime (bd-145n):**
-   ```
-   franken-lab replay --state cancel_state.json --trace phase_timing.jsonl --seed <ORIGINAL_SEED>
-   ```
-4. **Verify reproduction:** The lab replay should reproduce the `CAN-004` event with matching phase durations.
-5. **Identify bottleneck phase:** Use `--phase-breakdown` to see time spent in request/drain/finalize phases.
-   ```
-   franken-lab analyze --input phase_timing.jsonl --phase-breakdown
+   *(Pass `--seed <ORIGINAL_SEED>` when invoking deterministic lab harnesses directly in library tests.)*
+4. **Verify reproduction:** The deterministic lab replay and `franken-node debug trace` inspection should reproduce `CAN-004` with matching phase durations.
+5. **Inspect trace breakdown:**
+   ```bash
+   franken-node debug evidence <EVIDENCE_JSONL> --json
    ```
 
 ## Rollback Procedure
 
-**Goal:** Revert any partially-committed state from the timed-out cancellation and verify region quiescence.
+**Goal:** Revert any partially-rolled-out connector/release state from the timed-out cancellation and verify quiescence.
 
-1. **Revert partially-committed state:** Check if the cancel workflow made any partial commits before timing out.
+1. **Roll back active migration/connector rollout state:**
+   ```bash
+   franken-node migrate rollout rollback --reason "CAN-004 cancel timeout <WORKFLOW_ID>" --json
    ```
-   franken-node ctl cancel audit --workflow-id <WORKFLOW_ID> --show-commits
+2. **Inspect deployment and safe-mode status:**
+   ```bash
+   franken-node deploy status --deployment <DEPLOYMENT_NAME> --json
+   franken-node safe-mode status --json
    ```
-2. **Revert each partial commit:**
+3. **Release the fleet hold once region quiescence is restored:**
+   ```bash
+   franken-node fleet resume --zone <ZONE_ID> --json
    ```
-   franken-node ctl state revert --mutation-ids <ID1>,<ID2>,...
-   ```
-3. **Verify region quiescence:** The affected region must reach quiescent state after rollback.
-   ```
-   franken-node ctl region check-quiescence --region-id <REGION_ID>
-   ```
-4. **Run integration tests (bd-1cs7):** Verify the cancellation protocol is functional after rollback.
-   ```
-   franken-node test --suite cancel-protocol --connector-id <CONNECTOR_ID>
+4. **Run integration tests (`bd-1cs7`):** Verify the cancellation protocol is functional after rollback.
+   ```bash
+   rch exec -- cargo test -p frankenengine-node --features extended-surfaces,test-support --test asupersync_control_lane_integration
    ```
 5. **Monitor:** Watch `fn_cancel_total_duration_ms` p99 and `fn_region_quiescence_failures` for 15 minutes.
 

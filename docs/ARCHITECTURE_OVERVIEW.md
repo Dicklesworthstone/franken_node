@@ -4,10 +4,10 @@
 
 ## Executive Summary
 
-**FrankenNode** is the product layer over sibling `franken_engine`: migration, trust, fleet file-transport, replay, and verifier surfaces around a native JS/TS runtime. It is **not** a drop-in Node.js/Bun replacement (L1 corpus currently 86.43%; `child_process` native-eval aborts remain fail). The system implements a 3-kernel architecture for separation of concerns between execution, correctness control, and product surfaces.
+**FrankenNode** is the product layer over sibling `franken_engine`: migration, trust, fleet quarantine/control-plane coordination, replay, and verifier surfaces around a native JS/TS runtime. It is **not** a drop-in Node.js/Bun replacement (committed L1 corpus artifact is currently `69.82%` (`391/560`) in `artifacts/compat/corpus_pass.json`, with `78.93%` (`442/560`) under `balanced` in `CLAIM-001`; `child_process` and strict ambient capabilities remain gated). The system implements a 3-kernel architecture for separation of concerns between execution, correctness control, and product surfaces.
 
 **Key Stats:**
-- **Language:** Rust 2024 Edition (this checkout does not pin a `rust-toolchain.toml`; use a compatible stable toolchain unless a task proves otherwise)
+- **Language:** Rust 2024 Edition (`nightly-2026-09-21` pinned in `rust-toolchain.toml`, required by `fsqlite-pager` `core_intrinsics`)
 - **Architecture:** 3-kernel design (franken_engine + asupersync + franken_node)
 - **Test Coverage:** 500+ integration tests, 70+ conformance harnesses, fuzz testing
 - **Package:** `frankenengine-node` (binary: `franken-node`)
@@ -256,9 +256,10 @@ Supply Chain Input → Trust Card Validation → Policy Engine → Decision Rece
 ### Substrate Dependencies
 | Substrate | Repository | Purpose |
 |-----------|------------|---------|
-| **frankentui** | `../../../dp/frankentui/` | Buffer echo of preformatted doctor/fleet lines |
-| **frankensqlite** | Dev-dependency (published 0.1.19) | In-memory adapter / conformance model, not the live durable store |
-| **fastapi_rust** | Dev-dependency | In-process catalog; does not bind a socket |
+| **frankentui** | `../frankentui/` (`packaging/source-siblings.tsv`) | Terminal rendering and buffer formatting for doctor/fleet CLI surfaces |
+| **frankensqlite (`fsqlite`)** | Published `0.4.1` | Live WAL-backed durable SQLite store across 5 product stores (trust-card registry, deployment store, fleet transport, rollout store, replay/quarantine persistence) |
+| **fastapi_rust** | `../fastapi_rust/` (`packaging/source-siblings.tsv`) | Default-enabled (`fleet-control-plane-server`) live HTTP fleet coordinator (`franken-node fleet serve`) on `asupersync` |
+| **sqlmodel_rust** | `../sqlmodel_rust/` (`packaging/source-siblings.tsv`) | Dev-dependency for SQL schema/model conformance tests (not linked into the production binary) |
 
 ## Test Infrastructure
 

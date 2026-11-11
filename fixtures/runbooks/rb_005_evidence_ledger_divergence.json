@@ -52,8 +52,10 @@
   "cross_references": ["evidence_ledger", "transparency_log", "ledger_consistency"],
   "drill_scenario": "Introduce a simulated divergence by injecting a conflicting entry into one ledger replica in staging. Verify divergence detection fires, containment suspends writes, and the re-sync procedure restores consistency.",
   "command_references": [
-    "franken-node ledger hash --all-peers",
-    "franken-node ledger reconcile --source authoritative",
+    "franken-node debug evidence ./evidence_ledger.jsonl --json",
+    "franken-node verify transparency-log --receipt ./inclusion_receipt.json --json",
+    "franken-node ops health-check --json",
+    "crates/franken-node/src/observability/evidence_ledger.rs",
     "POST /api/v1/ledger/reconcile"
   ],
   "coverage_tags": [

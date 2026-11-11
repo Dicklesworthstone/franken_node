@@ -69,8 +69,10 @@ and selective rollback restores test delegations correctly.
 
 ## Command References
 
-- `franken-node trust revoke --batch fixtures/revocations/test_batch.json`
-- `franken-node trust sync --restore-from snapshots/pre_revocation.json` (restore trust state from snapshot)
+- `franken-node trust revoke --publisher-public-key <compromised-publisher.pub> --json`
+- `franken-node trust revoke <extension-id> --json`
+- `franken-node trust list --revoked true --json`
+- `franken-node trust sync --force --json`
 - `POST /api/v1/trust/revocations/pause`
 
 ## Cross-References

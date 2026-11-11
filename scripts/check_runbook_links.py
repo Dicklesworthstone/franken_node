@@ -89,11 +89,12 @@ SEVERITY = {
 
 
 def check_file(path, label):
-    ok = path.exists()
+    ok = path.is_file()
+    display = path.relative_to(ROOT) if path.is_relative_to(ROOT) else path
     return {
         "check": f"file: {label}",
         "pass": ok,
-        "detail": f"exists: {path.relative_to(ROOT)}" if ok else f"MISSING: {path}",
+        "detail": f"exists: {display}" if ok else f"MISSING: {path}",
     }
 
 

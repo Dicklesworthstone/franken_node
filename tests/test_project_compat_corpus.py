@@ -111,6 +111,19 @@ class CorpusTests(unittest.TestCase):
     def test_every_reference_matches_exact_expectations(self):
         runner.reject_runtime_overrides()
         node = runner.executable("node")
+        import subprocess
+        ver_out = subprocess.run([str(node), "--version"], capture_output=True, text=True, check=True).stdout.strip()
+        node_major = int(ver_out.lstrip("v").split(".", 1)[0])
+        # Corpus fixtures pin Node 22/24 LTS (dist.yml NODE_VERSION=22.14.0).
+        # Node 25+ changed two upstream behaviors (WHATWG Blob iterable part
+        # conversion order and util.parseEnv null-prototype object return);
+        # pin exact byte-for-byte expectations for both LTS and Node 25+.
+        node_25_plus_stdout = {
+            "blob-iterable-part-snapshots": "67,67,68 3\n",
+            "esm-dotenv-validation-and-isolation": (
+                '[false,true,"ordinary","A,Z,__proto__,constructor","second","TypeError:ERR_INVALID_ARG_TYPE"]\n'
+            ),
+        }
         corpus = runner.load_corpus_directory(ROOT / "fixtures/compatibility/projects")
         with tempfile.TemporaryDirectory() as tmp:
             for case in corpus["cases"]:
@@ -122,7 +135,10 @@ class CorpusTests(unittest.TestCase):
                                                base / "execution", cwd=workspace, wall_time_ms=10000,
                                                max_output_bytes=1024 * 1024,
                                                stdin_data=case["stdin"].encode("utf-8") if "stdin" in case else None)
-                    self.assertEqual(runner.differences(receipt, case["expected"]), [],
+                    expected = dict(case["expected"])
+                    if node_major >= 25 and case["id"] in node_25_plus_stdout:
+                        expected["stdout"] = node_25_plus_stdout[case["id"]]
+                    self.assertEqual(runner.differences(receipt, expected), [],
                                      Path(receipt["stderr_path"]).read_text(errors="replace"))
                     for name, expected in case["expected"].get("files", {}).items():
                         observed = runner.inspect_output_file(workspace, name, expected)

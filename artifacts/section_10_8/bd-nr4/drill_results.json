@@ -5,8 +5,8 @@
   "runbook_title": "Mass Revocation Event",
   "runbook_path": "fixtures/runbooks/rb_002_mass_revocation_event.json",
   "status": "PASS",
-  "started_at": "2026-06-18T16:23:37.999813+00:00",
-  "completed_at": "2026-06-18T16:23:37.999819+00:00",
+  "started_at": "2026-11-11T09:34:14.826034+00:00",
+  "completed_at": "2026-11-11T09:34:14.826052+00:00",
   "steps_executed": 24,
   "required_phases": [
     "containment",
@@ -106,7 +106,7 @@
       "trace_id": "trace-drill-rb-002",
       "phase": "repair",
       "step_index": 2,
-      "step": "If revocations are illegitimate, revert revocation batch from snapshot",
+      "step": "If revocations are illegitimate, restore the durable trust-card registry store from verified backup snapshot",
       "status": "PASS"
     },
     {
@@ -122,7 +122,7 @@
       "trace_id": "trace-drill-rb-002",
       "phase": "repair",
       "step_index": 4,
-      "step": "If a signing key is compromised, do not treat franken-node ops rotate-key as remediation; it is preview-only and leaves the old key active",
+      "step": "If a signing key is compromised, follow the governed signer-config and evidence-ledger rotation procedure; this release exposes no CLI key-rotation subcommand",
       "status": "PASS"
     },
     {
@@ -130,7 +130,7 @@
       "trace_id": "trace-drill-rb-002",
       "phase": "repair",
       "step_index": 5,
-      "step": "Use franken-node ops rotate-key --new-key <path> --json only to validate candidate key material before a supported signer-config and evidence-ledger rotation procedure",
+      "step": "Use franken-node trust revoke --publisher-public-key <pubkey-path> --json to revoke all artifacts signed by a compromised publisher key",
       "status": "PASS"
     },
     {
@@ -170,7 +170,7 @@
       "trace_id": "trace-drill-rb-002",
       "phase": "verification",
       "step_index": 4,
-      "step": "For any key-rotation emergency, confirm ops rotate-key output reports status=preview_only, actual_rotation_occurred=false, and a non-success exit before treating it as validation-only evidence",
+      "step": "For any key-rotation emergency, verify that the applied signer-config and evidence-ledger entries identify the old key, new key, approval trace, and rotation timestamp before considering remediation complete",
       "status": "PASS"
     },
     {
@@ -178,7 +178,7 @@
       "trace_id": "trace-drill-rb-002",
       "phase": "verification",
       "step_index": 5,
-      "step": "Run trust delegation audit",
+      "step": "Run trust delegation audit via franken-node trust scan --deep --audit --json",
       "status": "PASS"
     },
     {

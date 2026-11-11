@@ -32,18 +32,18 @@
     ],
     "repair": [
       "If revocations are legitimate, resume processing at controlled rate",
-      "If revocations are illegitimate, revert revocation batch from snapshot",
+      "If revocations are illegitimate, restore the durable trust-card registry store from verified backup snapshot",
       "Re-issue trust delegations for incorrectly revoked entities",
-      "If a signing key is compromised, do not treat franken-node ops rotate-key as remediation; it is preview-only and leaves the old key active",
-      "Use franken-node ops rotate-key --new-key <path> --json only to validate candidate key material before a supported signer-config and evidence-ledger rotation procedure",
+      "If a signing key is compromised, follow the governed signer-config and evidence-ledger rotation procedure; this release exposes no CLI key-rotation subcommand",
+      "Use franken-node trust revoke --publisher-public-key <pubkey-path> --json to revoke all artifacts signed by a compromised publisher key",
       "Update revocation policy to prevent recurrence"
     ],
     "verification": [
       "Confirm revocation list consistency across all fleet nodes",
       "Validate that legitimate revocations are honored fleet-wide",
       "Verify that incorrectly revoked entities have restored access",
-      "For any key-rotation emergency, confirm ops rotate-key output reports status=preview_only, actual_rotation_occurred=false, and a non-success exit before treating it as validation-only evidence",
-      "Run trust delegation audit"
+      "For any key-rotation emergency, verify that the applied signer-config and evidence-ledger entries identify the old key, new key, approval trace, and rotation timestamp before considering remediation complete",
+      "Run trust delegation audit via franken-node trust scan --deep --audit --json"
     ],
     "rollback": [
       "Restore pre-revocation trust state from snapshot",
@@ -55,9 +55,10 @@
   "cross_references": ["bd-f2y", "revocation.rs", "trust_delegation_policy"],
   "drill_scenario": "Simulate mass revocation by issuing 200 test revocations against a staging fleet. Verify that rate-limiting engages, containment procedures activate, and selective rollback restores test delegations correctly.",
   "command_references": [
-    "franken-node trust revoke --batch fixtures/revocations/test_batch.json",
-    "franken-node trust delegations restore --from-snapshot snapshots/pre_revocation.json",
-    "franken-node ops rotate-key --new-key ./keys/candidate.ed25519 --json (preview-only validation; not remediation)",
+    "franken-node trust revoke --publisher-public-key ./keys/compromised_publisher.pub --json",
+    "franken-node trust revoke npm:@example/ext --json",
+    "franken-node trust list --revoked true --json",
+    "franken-node trust sync --force --json",
     "POST /api/v1/trust/revocations/pause"
   ],
   "coverage_tags": [

@@ -28,6 +28,35 @@ on:
       - 'fuzz/fuzz_targets/fuzz_constant_time_comparison.rs'
       - 'fuzz/fuzz_targets/fuzz_evidence_ledger_entry_parse.rs'
       - 'fuzz/fuzz_targets/fuzz_evidence_ledger_jsonl_spill.rs'
+  push:
+    branches: [main]
+    paths:
+      - '.cargo-mutants.toml'
+      - '.github/workflows/mutants-gate.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'crates/franken-node/Cargo.toml'
+      - 'crates/franken-node/src/lib.rs'
+      - 'rust-toolchain.toml'
+      - 'packaging/source-siblings.tsv'
+      - 'scripts/bootstrap_source.sh'
+      - 'scripts/check_inline_lib_tests.py'
+      - 'crates/franken-node/src/security/constant_time.rs'
+      - 'crates/franken-node/src/observability/evidence_ledger.rs'
+      - 'crates/franken-node/src/connector/canonical_serializer.rs'
+      - 'crates/franken-node/src/encoding/canonical_serializer.rs'
+      - 'crates/franken-node/src/observability/evidence_ledger_conformance_tests.rs'
+      - 'crates/franken-node/tests/canonical_serializer_conformance.rs'
+      - 'crates/franken-node/tests/canonical_serializer_metamorphic.rs'
+      - 'crates/franken-node/tests/canonical_serializer_real_inputs.rs'
+      - 'crates/franken-node/tests/evidence_ledger_chain_order_metamorphic.rs'
+      - 'crates/franken-node/tests/observability_evidence_ledger_regressions.rs'
+      - 'fuzz/fuzz_targets/fuzz_canonical_serializer_deserialize.rs'
+      - 'fuzz/fuzz_targets/fuzz_canonical_serializer_roundtrip.rs'
+      - 'fuzz/fuzz_targets/fuzz_constant_time_comparison.rs'
+      - 'fuzz/fuzz_targets/fuzz_evidence_ledger_entry_parse.rs'
+      - 'fuzz/fuzz_targets/fuzz_evidence_ledger_jsonl_spill.rs'
+  workflow_dispatch: {}
 
 jobs:
   cargo-mutants:
