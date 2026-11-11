@@ -333,6 +333,11 @@ pub struct RunArgs {
     #[arg(long, hide = true)]
     pub admitted_operator_scope: Option<PathBuf>,
 
+    /// Operator project whose fleet holds also own this supervised session.
+    /// Internal deployment handoff; preserves the release's independent scope.
+    #[arg(long, hide = true)]
+    pub admitted_operator_project: Option<PathBuf>,
+
     /// Exact activation restriction captured by the deployment supervisor.
     /// Internal handoff: this can retire a run but grants no execution authority.
     #[arg(long, hide = true)]
@@ -456,6 +461,17 @@ impl RunArgs {
             anyhow::ensure!(
                 anchor.is_absolute(),
                 "an admitted operator scope requires an absolute anchor path"
+            );
+        }
+        if let Some(project) = &self.admitted_operator_project {
+            anyhow::ensure!(
+                self.admitted_operator_scope.is_some(),
+                "an admitted operator project requires its operator control anchor"
+            );
+            validate_system_binary_pathbuf(project)?;
+            anyhow::ensure!(
+                project.is_absolute(),
+                "an admitted operator project requires an absolute project path"
             );
         }
         if let Some(restriction) = &self.admitted_deployment_activation {
@@ -4032,7 +4048,12 @@ mod parser_contract_extra_tests {
         };
         args.validate_paths().map_err(|error| error.to_string())?;
         let mut scoped = base.clone();
-        scoped.extend(["--admitted-operator-scope", "/operator/deployment.lock"]);
+        scoped.extend([
+            "--admitted-operator-scope",
+            "/operator/deployment.lock",
+            "--admitted-operator-project",
+            "/operator",
+        ]);
         let Command::Run(args) = parse(&scoped).map_err(|error| error.to_string())?.command else {
             return Err("expected operator-scoped admitted run".to_string());
         };
@@ -4041,6 +4062,24 @@ mod parser_contract_extra_tests {
             args.admitted_operator_scope.as_deref(),
             Some(Path::new("/operator/deployment.lock"))
         );
+        assert_eq!(
+            args.admitted_operator_project.as_deref(),
+            Some(Path::new("/operator"))
+        );
+        for project in ["/operator", "relative/operator"] {
+            let mut unanchored = base.clone();
+            unanchored.extend(["--admitted-operator-project", project]);
+            let Command::Run(args) = parse(&unanchored)
+                .map_err(|error| error.to_string())?
+                .command
+            else {
+                return Err("expected operator project run".to_string());
+            };
+            assert!(
+                args.validate_paths().is_err(),
+                "unanchored operator project {project}"
+            );
+        }
         let mut retiring = base.clone();
         retiring.extend(["--admitted-deployment-activation", "{}"]);
         let Command::Run(args) = parse(&retiring).map_err(|error| error.to_string())?.command

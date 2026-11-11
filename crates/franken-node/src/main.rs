@@ -6753,7 +6753,9 @@ fn spawn_deploy_release_child(
         .arg("--admitted-approval-sha256")
         .arg(approval_sha256)
         .arg("--admitted-operator-scope")
-        .arg(store.root().join("deployment.lock"));
+        .arg(store.root().join("deployment.lock"))
+        .arg("--admitted-operator-project")
+        .arg(store.project_root());
     if let Some(restriction) = activation_restriction {
         let encoded = serde_json::to_string(restriction)
             .context("failed serializing the admitted deployment activation")?;
@@ -36904,6 +36906,7 @@ fn main() -> Result<()> {
                 admitted_config_sha256,
                 admitted_approval_sha256,
                 admitted_operator_scope,
+                admitted_operator_project,
                 admitted_deployment_activation,
                 runtime,
                 engine_bin,
@@ -37015,6 +37018,22 @@ fn main() -> Result<()> {
                     return named_cli_fail("franken-node/run-error-cli/v1", "run", json, error);
                 }
             };
+            if let Some(operator_project) = &admitted_operator_project {
+                let check = (|| -> Result<()> {
+                    let scope = operator_safe_mode_scope.as_ref()
+                        .context("admitted operator project has no control anchor")?;
+                    scope.validate_project_root(operator_project)?;
+                    anyhow::ensure!(
+                        operator_project.canonicalize()?.as_path() == operator_project
+                            && operator_project.is_dir(),
+                        "admitted operator project must be an existing canonical directory"
+                    );
+                    Ok(())
+                })();
+                if let Err(error) = check {
+                    return named_cli_fail("franken-node/run-error-cli/v1", "run", json, error);
+                }
+            }
             let active_fleet_policy =
                 match control_plane::fleet_transport::enforce_active_fleet_policy(
                     project_paths.project_root(),
@@ -37026,6 +37045,18 @@ fn main() -> Result<()> {
                         return named_cli_fail("franken-node/run-error-cli/v1", "run", json, err);
                     }
                 };
+            let operator_fleet_policy = match admitted_operator_project.as_deref().map(|project| {
+                control_plane::fleet_transport::enforce_active_fleet_policy(
+                    project,
+                    &mut resolved.config,
+                    resolved.selected_profile,
+                )
+            }).transpose() {
+                Ok(policy) => policy.flatten(),
+                Err(error) => {
+                    return named_cli_fail("franken-node/run-error-cli/v1", "run", json, error);
+                }
+            };
             let registry_artifact_approval = match (
                 registry_artifact.as_deref(),
                 publisher_public_key.as_deref(),
@@ -37170,6 +37201,8 @@ fn main() -> Result<()> {
                     .with_preflight_dependency_capture(Some(preflight.dependency_capture.clone()))
                     .with_registry_artifact_approval(registry_artifact_approval)
                     .with_operator_safe_mode_scope(operator_safe_mode_scope)
+                    .with_operator_fleet_project(admitted_operator_project)
+                    .with_preflight_operator_fleet_policy(operator_fleet_policy)
                     .with_deployment_activation(deployment_activation)
                     .with_preflight_registry_requirement(preflight_registry_required)
                     .with_replay_capture(capture_replay)

@@ -437,6 +437,30 @@ impl AdmittedSafeModeScope {
         self.validate()?;
         enforce_admitted_run_safe_mode(&self.anchor)
     }
+
+    /// Bind a deployment's additional fleet project to the same retained
+    /// operator anchor. Validate the captured spelling without reopening it:
+    /// moving the lock after launch must not detach the running worker.
+    pub fn validate_project_root(&self, project_root: &std::path::Path) -> anyhow::Result<()> {
+        self.validate()?;
+        let normalized: std::path::PathBuf = project_root.components().collect();
+        anyhow::ensure!(
+            project_root.is_absolute()
+                && project_root.as_os_str().len() <= 4096
+                && project_root.components().count() <= 128
+                && !project_root.as_os_str().as_encoded_bytes().contains(&0)
+                && project_root.to_str().is_some()
+                && project_root.components().all(|component| matches!(
+                    component,
+                    std::path::Component::RootDir | std::path::Component::Normal(_)
+                ))
+                && normalized.as_os_str() == project_root.as_os_str()
+                && self.anchor.starts_with(project_root)
+                && self.anchor != project_root,
+            "admitted operator project must be a bounded normalized absolute ancestor of its control anchor"
+        );
+        Ok(())
+    }
 }
 
 /// Recheck the scopes retained at native admission without reopening the entry
@@ -2304,8 +2328,22 @@ mod tests {
         let retained: AdmittedSafeModeScope =
             serde_json::from_slice(&serde_json::to_vec(&scope).unwrap()).unwrap();
         assert_eq!(retained, scope);
+        retained.validate_project_root(&operator).unwrap();
+        assert!(retained.validate_project_root(&release).is_err());
+        assert!(retained.validate_project_root(&anchor).is_err());
+        assert!(
+            retained
+                .validate_project_root(std::path::Path::new("relative"))
+                .is_err()
+        );
+        assert!(
+            retained
+                .validate_project_root(&operator.join(".."))
+                .is_err()
+        );
         std::fs::rename(&anchor, operator.join("retained.lock")).unwrap();
         retained.enforce().unwrap();
+        retained.validate_project_root(&operator).unwrap();
 
         let state_path = operator.join(".franken-node/safe-mode/state.json");
         update_persisted_safe_mode(&state_path, true, |controller| {

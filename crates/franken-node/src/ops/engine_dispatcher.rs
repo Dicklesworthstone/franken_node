@@ -3480,6 +3480,15 @@ pub struct RunTrustRequirements {
     /// the live observer cannot forget the operator's safe-mode restriction.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     operator_safe_mode_scope: Option<crate::runtime::safe_mode::AdmittedSafeModeScope>,
+    /// The operator project also owns this deployment's native session even
+    /// when its immutable release lives elsewhere. This is an additional
+    /// control scope, never a replacement for the source project's authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    operator_fleet_project_root: Option<PathBuf>,
+    /// Independently observed operator policy. A release's policy cannot
+    /// replace this scope's revision or erase its admitted restrictions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    operator_fleet_policy: Option<ActiveFleetPolicy>,
     /// Opt-in restriction to the supervisor's exact activation generation.
     /// The private worker request retains it independently of the release's
     /// location. It can only retire this attempt, never authorize a successor.
@@ -3536,6 +3545,8 @@ impl RunTrustRequirements {
             dependency_capture: None,
             registry_artifact_approval: None,
             operator_safe_mode_scope: None,
+            operator_fleet_project_root: None,
+            operator_fleet_policy: None,
             deployment_activation: None,
             required_card_ids: required_card_ids
                 .iter()
@@ -3577,6 +3588,17 @@ impl RunTrustRequirements {
     ) -> Result<Self> {
         scope.validate()?;
         self.operator_safe_mode_scope = Some(scope);
+        self.validate()?;
+        Ok(self)
+    }
+
+    pub fn with_operator_fleet_project(
+        mut self,
+        project_root: PathBuf,
+        policy: Option<ActiveFleetPolicy>,
+    ) -> Result<Self> {
+        self.operator_fleet_project_root = Some(project_root);
+        self.operator_fleet_policy = policy;
         self.validate()?;
         Ok(self)
     }
@@ -3695,6 +3717,19 @@ impl RunTrustRequirements {
         }
         if let Some(scope) = &self.operator_safe_mode_scope {
             scope.validate()?;
+        }
+        if let Some(project_root) = &self.operator_fleet_project_root {
+            self.operator_safe_mode_scope
+                .as_ref()
+                .context("operator fleet project requires its retained control anchor")?
+                .validate_project_root(project_root)?;
+        }
+        if let Some(policy) = &self.operator_fleet_policy {
+            anyhow::ensure!(
+                self.operator_fleet_project_root.is_some(),
+                "operator fleet policy has no retained operator project"
+            );
+            policy.validate()?;
         }
         if let Some(restriction) = &self.deployment_activation {
             restriction.validate()?;
@@ -3983,6 +4018,7 @@ fn recheck_native_run_controls(
     config: &Config,
     requirements: &RunTrustRequirements,
     fleet_high_water: &mut Option<ActiveFleetPolicy>,
+    operator_fleet_high_water: &mut Option<ActiveFleetPolicy>,
     cancelled: &AtomicBool,
 ) -> std::result::Result<(), NativeRunControlTrigger> {
     crate::ops::native_session_inventory::native_session_admission_ticket(
@@ -3991,6 +4027,15 @@ fn recheck_native_run_controls(
     .map_err(|error| {
         NativeRunControlTrigger::new(NativeRunControlKind::FleetDrain, format_args!("{error:#}"))
     })?;
+    if let Some(operator_project) = &requirements.operator_fleet_project_root {
+        crate::ops::native_session_inventory::native_session_admission_ticket(operator_project)
+            .map_err(|error| {
+                NativeRunControlTrigger::new(
+                    NativeRunControlKind::FleetDrain,
+                    format_args!("deployment operator scope: {error:#}"),
+                )
+            })?;
+    }
     crate::runtime::safe_mode::enforce_admitted_run_safe_mode(project_paths.entrypoint())
         .map_err(|error| NativeRunControlTrigger::new(NativeRunControlKind::SafeMode, error))?;
     if cancelled.load(Ordering::Acquire) {
@@ -4023,6 +4068,24 @@ fn recheck_native_run_controls(
         fleet_high_water.as_ref(),
     )
     .map_err(|error| NativeRunControlTrigger::new(NativeRunControlKind::FleetPolicy, error))?;
+    let current_operator_fleet = requirements
+        .operator_fleet_project_root
+        .as_deref()
+        .map(|project| {
+            enforce_execution_fleet_policy(
+                project,
+                &mut effective,
+                operator_fleet_high_water.as_ref(),
+            )
+        })
+        .transpose()
+        .map_err(|error| {
+            NativeRunControlTrigger::new(
+                NativeRunControlKind::FleetPolicy,
+                format_args!("deployment operator scope: {error:#}"),
+            )
+        })?
+        .flatten();
     if native_run_policy_changed(config, &effective) {
         return Err(NativeRunControlTrigger::new(
             NativeRunControlKind::FleetPolicyChanged,
@@ -4032,6 +4095,7 @@ fn recheck_native_run_controls(
     // Retain equivalent newer revisions too. A subsequent rollback must not
     // become acceptable just because this worker did not need new limits.
     *fleet_high_water = current_fleet;
+    *operator_fleet_high_water = current_operator_fleet;
     if cancelled.load(Ordering::Acquire) {
         return Ok(());
     }
@@ -4090,6 +4154,7 @@ impl NativeRunControlMonitor {
         requirements: RunTrustRequirements,
         mut fleet_high_water: Option<ActiveFleetPolicy>,
     ) -> io::Result<Self> {
+        let mut operator_fleet_high_water = requirements.operator_fleet_policy.clone();
         let (stop, stop_receiver) = std::sync::mpsc::channel();
         let (update_sender, updates) = std::sync::mpsc::sync_channel(1);
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -4104,6 +4169,7 @@ impl NativeRunControlMonitor {
                         &config,
                         &requirements,
                         &mut fleet_high_water,
+                        &mut operator_fleet_high_water,
                         &worker_cancelled,
                     );
                     let denied = result.is_err();
@@ -4119,8 +4185,7 @@ impl NativeRunControlMonitor {
                     ) {
                         return;
                     }
-                }
-            })?;
+                })?;
         Ok(Self {
             cancelled,
             stop,
@@ -4209,6 +4274,8 @@ pub struct EngineDispatcher {
     preflight_dependency_capture: Option<CapturedDependencyTrust>,
     registry_artifact_approval: Option<PublisherSourceGraphApproval>,
     operator_safe_mode_scope: Option<crate::runtime::safe_mode::AdmittedSafeModeScope>,
+    operator_fleet_project_root: Option<PathBuf>,
+    preflight_operator_fleet_policy: Option<ActiveFleetPolicy>,
     deployment_activation: Option<crate::runtime::deployment::ActivationRestriction>,
     /// Whether preflight relied on an available authoritative registry. Only
     /// legacy-risky's explicitly skipped preflight may start without one.
@@ -6993,6 +7060,8 @@ impl Default for EngineDispatcher {
             preflight_dependency_capture: None,
             registry_artifact_approval: None,
             operator_safe_mode_scope: None,
+            operator_fleet_project_root: None,
+            preflight_operator_fleet_policy: None,
             deployment_activation: None,
             preflight_registry_required: true,
             preflight_fleet_policy: None,
@@ -7210,6 +7279,23 @@ impl EngineDispatcher {
         self
     }
 
+    /// Include the deployment's operator project in native fleet accounting.
+    /// The matching control anchor is validated with the authenticated request.
+    #[must_use]
+    pub fn with_operator_fleet_project(mut self, project_root: Option<PathBuf>) -> Self {
+        self.operator_fleet_project_root = project_root;
+        self
+    }
+
+    #[must_use]
+    pub fn with_preflight_operator_fleet_policy(
+        mut self,
+        policy: Option<ActiveFleetPolicy>,
+    ) -> Self {
+        self.preflight_operator_fleet_policy = policy;
+        self
+    }
+
     /// Retire this native run when its explicitly watched deployment changes.
     /// The ordinary run path carries no activation restriction by default.
     #[must_use]
@@ -7324,6 +7410,24 @@ impl EngineDispatcher {
             &mut execution_config,
             self.preflight_fleet_policy.as_ref(),
         )?;
+        let operator_fleet_policy =
+            if let Some(operator_project) = &self.operator_fleet_project_root {
+                self.operator_safe_mode_scope
+                    .as_ref()
+                    .context("operator fleet project requires its retained control anchor")?
+                    .validate_project_root(operator_project)?;
+                enforce_execution_fleet_policy(
+                    operator_project,
+                    &mut execution_config,
+                    self.preflight_operator_fleet_policy.as_ref(),
+                )?
+            } else {
+                anyhow::ensure!(
+                    self.preflight_operator_fleet_policy.is_none(),
+                    "operator fleet policy has no retained operator project"
+                );
+                None
+            };
         #[cfg(not(feature = "engine"))]
         let _ = &active_fleet_policy;
         let config = &execution_config;
@@ -7386,6 +7490,10 @@ impl EngineDispatcher {
         }
         if let Some(scope) = &self.operator_safe_mode_scope {
             trust_requirements = trust_requirements.with_operator_safe_mode_scope(scope.clone())?;
+        }
+        if let Some(project_root) = &self.operator_fleet_project_root {
+            trust_requirements = trust_requirements
+                .with_operator_fleet_project(project_root.clone(), operator_fleet_policy)?;
         }
         if let Some(restriction) = &self.deployment_activation {
             trust_requirements =
@@ -8790,11 +8898,26 @@ impl EngineDispatcher {
             crate::ops::native_session_inventory::native_session_admission_ticket(
                 project_paths.project_root(),
             )?;
+        let operator_admission = trust_requirements
+            .operator_fleet_project_root
+            .as_ref()
+            .filter(|root| root.as_path() != project_paths.project_root())
+            .map(|project_root| -> Result<_> {
+                let admission_generation =
+                    crate::ops::native_session_inventory::native_session_admission_ticket(
+                        project_root,
+                    )?;
+                Ok((project_root.clone(), admission_generation))
+            })
+            .transpose()?;
+        let mut admitted_fleet_policy = fleet_policy.cloned();
+        let mut admitted_operator_policy = trust_requirements.operator_fleet_policy.clone();
         recheck_native_run_controls(
             project_paths,
             config,
             trust_requirements,
-            &mut fleet_policy.cloned(),
+            &mut admitted_fleet_policy,
+            &mut admitted_operator_policy,
             &AtomicBool::new(false),
         )
         .map_err(|trigger| {
@@ -8810,6 +8933,28 @@ impl EngineDispatcher {
                 )
             }
         })?;
+        // An equivalent newer policy still advances its owner's high-water
+        // mark. Carry the final observations through signed admission, the
+        // authenticated worker request and the live monitor without reverting
+        // either scope to its earlier preflight revision.
+        let fleet_policy = admitted_fleet_policy.as_ref();
+        let mut admitted_requirements = trust_requirements.clone();
+        admitted_requirements.operator_fleet_policy = admitted_operator_policy;
+        let trust_requirements = &admitted_requirements;
+        let control_scopes = operator_admission
+            .into_iter()
+            .map(|(project_root, admission_generation)| -> Result<_> {
+                Ok(crate::ops::native_session_inventory::NativeSessionControlScope {
+                    project_root,
+                    admission_generation,
+                    fleet_policy_sha256: trust_requirements
+                        .operator_fleet_policy
+                        .as_ref()
+                        .map(crate::ops::native_session_inventory::fleet_policy_observation_digest)
+                        .transpose()?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
         let fleet_policy_sha256 = fleet_policy
             .map(crate::ops::native_session_inventory::fleet_policy_observation_digest)
             .transpose()?;
@@ -8851,6 +8996,7 @@ impl EngineDispatcher {
                     .as_u64(),
                 admitted_at: Utc::now(),
                 project_root: project_paths.project_root().to_path_buf(),
+                control_scopes: Some(control_scopes),
                 entrypoint: project_paths.entrypoint().to_path_buf(),
                 dependency_ids: trust_requirements.dependency_ids.clone(),
                 configured_node_id: config.fleet.node_id.clone(),
@@ -10629,6 +10775,19 @@ impl EngineDispatcher {
                 &mut telemetry_guard,
             )
         })?;
+        if let Some(operator_project) = &trust_requirements.operator_fleet_project_root {
+            enforce_execution_fleet_policy(
+                operator_project,
+                &mut execution_config,
+                trust_requirements.operator_fleet_policy.as_ref(),
+            )
+            .map_err(|error| {
+                native_engine_spawn_error_with_telemetry_cleanup(
+                    format!("Native execution operator fleet policy admission failed: {error:#}"),
+                    &mut telemetry_guard,
+                )
+            })?;
+        }
         let config = &execution_config;
 
         let _span = tracing::info_span!(
@@ -14581,6 +14740,7 @@ mod tests {
                 &config,
                 &requirements,
                 &mut fleet_high_water,
+                &mut None,
                 &cancelled,
             )
             .expect("both admitted scopes initially permit the release");
@@ -14592,6 +14752,7 @@ mod tests {
                 &config,
                 &requirements,
                 &mut fleet_high_water,
+                &mut None,
                 &cancelled,
             )
             .expect("the observer does not reopen the renamed anchor");
@@ -14613,6 +14774,7 @@ mod tests {
                 &config,
                 &requirements,
                 &mut fleet_high_water,
+                &mut None,
                 &cancelled,
             )
             .expect_err("retained operator scope reaches the live interruption path");
@@ -14622,6 +14784,136 @@ mod tests {
                 trigger.detail.contains(state_path.to_str().unwrap()),
                 "{trigger:?}"
             );
+        }
+
+        #[test]
+        fn live_controls_keep_release_and_operator_policy_high_water_independent() {
+            use crate::control_plane::fleet_transport::{
+                FleetAction, FleetActionRecord, FleetPolicyArtifact, FleetRuntimePolicy,
+                activate_fleet_policy_snapshot,
+            };
+            use crate::runtime::safe_mode::AdmittedSafeModeScope;
+
+            let fixture = PublisherFixture::new(42, "console.log(42);\n", true);
+            let release = fixture.directory.path().canonicalize().unwrap();
+            let operator = TempDir::new().expect("independent deployment operator");
+            let operator_root = operator.path().canonicalize().unwrap();
+            let anchor = operator_root.join("deployment.lock");
+            fs::write(&anchor, "").unwrap();
+            let scope = AdmittedSafeModeScope::capture(&anchor).unwrap();
+            let action = |zone: &str, revision: u64, limit: u64| FleetActionRecord {
+                action_id: format!("{zone}-policy-{revision}"),
+                emitted_at: Utc::now(),
+                action: FleetAction::PolicyUpdate {
+                    zone_id: zone.to_string(),
+                    policy_version: format!("revision-{revision}"),
+                    changed_fields: vec!["max_instructions".to_string()],
+                    artifact: Some(
+                        FleetPolicyArtifact::new(
+                            revision,
+                            FleetRuntimePolicy {
+                                max_instructions: Some(limit),
+                                ..FleetRuntimePolicy::default()
+                            },
+                        )
+                        .unwrap(),
+                    ),
+                },
+            };
+            let release_policy = activate_fleet_policy_snapshot(
+                &release,
+                &[action("release-zone", 20, 10_000)],
+                "release-zone",
+            )
+            .unwrap()
+            .unwrap();
+            let operator_action = action("operator-zone", 2, 5_000);
+            let operator_policy = activate_fleet_policy_snapshot(
+                &operator_root,
+                std::slice::from_ref(&operator_action),
+                "operator-zone",
+            )
+            .unwrap()
+            .unwrap();
+            let retained_documents: Vec<_> = ["fleet-policy.json", "fleet-policy-required.json"]
+                .into_iter()
+                .map(|name| {
+                    let path = operator_root.join(".franken-node/state").join(name);
+                    let bytes = fs::read(&path).unwrap();
+                    (path, bytes)
+                })
+                .collect();
+            let requirements = fixture
+                .requirements()
+                .with_operator_safe_mode_scope(scope)
+                .unwrap()
+                .with_operator_fleet_project(operator_root.clone(), Some(operator_policy.clone()))
+                .unwrap();
+            let now = Utc::now().timestamp().max(0) as u64;
+            let mut config = seed_empty_registry(&release, now, true);
+            enforce_execution_fleet_policy(&release, &mut config, Some(&release_policy)).unwrap();
+            enforce_execution_fleet_policy(&operator_root, &mut config, Some(&operator_policy))
+                .unwrap();
+            assert_eq!(config.runtime.max_instructions, Some(5_000));
+            let paths = RunProjectPaths::resolve(Path::new("app.cjs"), &release).unwrap();
+            let mut release_high_water = Some(release_policy.clone());
+            let mut operator_high_water = Some(operator_policy);
+            let cancelled = AtomicBool::new(false);
+            recheck_native_run_controls(
+                &paths,
+                &config,
+                &requirements,
+                &mut release_high_water,
+                &mut operator_high_water,
+                &cancelled,
+            )
+            .expect("independent zones and revision sequences compose by restriction");
+
+            let next_operator_policy = activate_fleet_policy_snapshot(
+                &operator_root,
+                &[operator_action, action("operator-zone", 3, 5_000)],
+                "operator-zone",
+            )
+            .unwrap()
+            .unwrap();
+            recheck_native_run_controls(
+                &paths,
+                &config,
+                &requirements,
+                &mut release_high_water,
+                &mut operator_high_water,
+                &cancelled,
+            )
+            .expect("an equivalent operator revision advances only its own high-water mark");
+            assert_eq!(release_high_water.as_ref(), Some(&release_policy));
+            assert_eq!(operator_high_water.as_ref(), Some(&next_operator_policy));
+
+            // Replay the earlier valid activation documents together. Durable
+            // consistency alone accepts that pair; the running owner's retained
+            // observation must still reject revision 3 -> 2 independently of 20.
+            for (path, bytes) in retained_documents {
+                fs::write(path, bytes).unwrap();
+            }
+            let trigger = recheck_native_run_controls(
+                &paths,
+                &config,
+                &requirements,
+                &mut release_high_water,
+                &mut operator_high_water,
+                &cancelled,
+            )
+            .expect_err("restoring an older operator document cannot rewind a running session");
+            assert_eq!(trigger.kind, NativeRunControlKind::FleetPolicy);
+            assert!(
+                trigger.detail.contains("deployment operator scope"),
+                "{trigger:?}"
+            );
+            assert!(
+                trigger.detail.contains("rollback from revision 3 to 2"),
+                "{trigger:?}"
+            );
+            assert_eq!(release_high_water.as_ref(), Some(&release_policy));
+            assert_eq!(operator_high_water.as_ref(), Some(&next_operator_policy));
         }
 
         #[test]
@@ -14719,6 +15011,7 @@ mod tests {
                 &config,
                 &watched,
                 &mut fleet_high_water,
+                &mut None,
                 &cancelled,
             )
             .expect("the admitted activation initially permits the opted-in run");
@@ -14759,6 +15052,7 @@ mod tests {
                 &config,
                 &watched,
                 &mut fleet_high_water,
+                &mut None,
                 &cancelled,
             )
             .expect_err("a new generation retires the opted-in run");
@@ -14772,6 +15066,7 @@ mod tests {
                 &config,
                 &unwatched,
                 &mut fleet_high_water,
+                &mut None,
                 &cancelled,
             )
             .expect("an ordinary invocation remains unaffected by activation changes");
@@ -14797,6 +15092,7 @@ mod tests {
                 &config,
                 &requirements,
                 &mut fleet_high_water,
+                &mut None,
                 &cancelled,
             )
             .expect("current signed authority before revocation");
@@ -14814,6 +15110,7 @@ mod tests {
                 &config,
                 &requirements,
                 &mut fleet_high_water,
+                &mut None,
                 &cancelled,
             )
             .expect("live check consults retained identity without reopening source");
@@ -14831,6 +15128,7 @@ mod tests {
                 &config,
                 &requirements,
                 &mut fleet_high_water,
+                &mut None,
                 &cancelled,
             )
             .expect_err("revocation reaches the existing interruption path");
@@ -22295,6 +22593,10 @@ exec "$2" pinned-worker-image"#,
         fs::write(&anchor, "").expect("operator anchor");
         let operator_scope = crate::runtime::safe_mode::AdmittedSafeModeScope::capture(&anchor)
             .expect("capture nonempty operator restriction");
+        let operator_project = operator
+            .path()
+            .canonicalize()
+            .expect("canonical operator project");
         let request = NativeSessionRequest {
             schema_version: NATIVE_SESSION_SCHEMA.to_string(),
             nonce: nonce.clone(),
@@ -22314,7 +22616,9 @@ exec "$2" pinned-worker-image"#,
             )
             .expect("bounded trust requirements")
             .with_operator_safe_mode_scope(operator_scope.clone())
-            .expect("retain operator scope in authenticated request"),
+            .expect("retain operator scope in authenticated request")
+            .with_operator_fleet_project(operator_project.clone(), None)
+            .expect("retain operator fleet project in authenticated request"),
             fleet_policy: None,
             policy_mode: "balanced".to_string(),
             config: Config::for_profile(Profile::Balanced),
@@ -22339,6 +22643,13 @@ exec "$2" pinned-worker-image"#,
         assert_eq!(
             decoded.trust_requirements.operator_safe_mode_scope.as_ref(),
             Some(&operator_scope)
+        );
+        assert_eq!(
+            decoded
+                .trust_requirements
+                .operator_fleet_project_root
+                .as_ref(),
+            Some(&operator_project)
         );
         decoded.trust_requirements.validate().unwrap();
         assert!(decoded.trust_requirements.deployment_activation.is_none());

@@ -65,6 +65,9 @@ const MAX_DRAIN_BYTES: usize = (MAX_STORED_SESSIONS + MAX_IDENTITY_CAPTURES) * 6
     + MAX_NATIVE_SESSION_MAINTENANCE_HOLDS * 132
     + 64 * 1024;
 const MAX_RETAINED_DRAINS: usize = crate::capacity_defaults::base::STANDARD;
+// A supervised deployment adds its operator project to the release's own
+// authority. More aliases require an explicit bounded ownership protocol.
+const MAX_ADDITIONAL_CONTROL_SCOPES: usize = 1;
 
 pub(crate) fn fleet_policy_observation_digest(
     policy: &crate::control_plane::fleet_transport::ActiveFleetPolicy,
@@ -75,6 +78,18 @@ pub(crate) fn fleet_policy_observation_digest(
     digest.update(u64::try_from(bytes.len())?.to_be_bytes());
     digest.update(bytes);
     Ok(hex::encode(digest.finalize()))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeSessionControlScope {
+    /// A retained canonical operator project, not a guest filesystem grant.
+    pub project_root: PathBuf,
+    /// Fence generation captured before the final live authority recheck.
+    pub admission_generation: u64,
+    /// Exact additional owner's admitted policy, when one was present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fleet_policy_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -98,6 +113,23 @@ pub struct NativeSessionAdmission {
     /// Historical records omit this and cannot establish descendant cleanup.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub process_spawn_authority_granted: Option<bool>,
+    /// Additional authenticated control owners, normally the deployment's
+    /// operator project. `Some([])` explicitly means no additional owner.
+    /// Historical absence is unknown and must not hide a retained obligation
+    /// from any project's drain. Omission preserves old receipt preimages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_scopes: Option<Vec<NativeSessionControlScope>>,
+}
+
+impl NativeSessionAdmission {
+    fn belongs_to_control_scope(&self, project_root: &Path) -> bool {
+        self.project_root == project_root
+            || self.control_scopes.as_ref().is_none_or(|scopes| {
+                scopes
+                    .iter()
+                    .any(|scope| scope.project_root == project_root)
+            })
+    }
 }
 
 /// A retained local drain over one exact admitted population. The action
@@ -522,6 +554,27 @@ fn validate_admission(admission: &NativeSessionAdmission) -> Result<()> {
         || !admission.identity_capture_path.is_absolute()
     {
         bail!("native-session admission paths are not bound to an absolute project root");
+    }
+    if let Some(scopes) = &admission.control_scopes {
+        if scopes.len() > MAX_ADDITIONAL_CONTROL_SCOPES {
+            bail!("native-session admission exceeds its additional control-scope bound");
+        }
+        for scope in scopes {
+            let key = project_key(&scope.project_root)?;
+            if scope.project_root == admission.project_root
+                || key.len() > 4096
+                || key.as_bytes().contains(&0)
+                || scope.project_root.components().count() > 128
+                || scope
+                    .fleet_policy_sha256
+                    .as_deref()
+                    .is_some_and(|value| !valid_digest(value))
+            {
+                bail!(
+                    "native-session additional control scope is duplicate, unbounded or has an invalid policy digest"
+                );
+            }
+        }
     }
     if admission.fleet_zone_id.is_some() != admission.fleet_policy_sha256.is_some() {
         bail!("native-session fleet observation is incomplete");
@@ -1178,6 +1231,14 @@ impl NativeSessionInventoryGuard {
     ) -> Result<Self> {
         ensure_runtime_evidence_directory(protected_root, true)?;
         validate_admission(&admission)?;
+        let scopes = admission.control_scopes.as_ref().context(
+            "new native-session admission requires an explicit complete control-scope census",
+        )?;
+        let mut expected_scopes =
+            BTreeMap::from([(admission.project_root.as_path(), expected_generation)]);
+        for scope in scopes {
+            expected_scopes.insert(scope.project_root.as_path(), scope.admission_generation);
+        }
         verify_admission_capture(protected_root, &admission)?;
         let admission_json = bounded_json(&admission, MAX_ADMISSION_BYTES)?;
         let connection = retry_snapshot_conflict(|| open_inventory(protected_root, true))?
@@ -1190,11 +1251,16 @@ impl NativeSessionInventoryGuard {
         let mut refused_outcome = None;
         let admitted = retry_snapshot_conflict(|| {
             let mut tx = connection.transaction()?;
-            serialize_project_admission(&mut tx, &admission.project_root)?;
-            let drain = latest_drain(&tx, &admission.project_root)?;
-            let admitted = refused_outcome.is_none()
-                && drain.as_ref().is_none_or(|drain| !drain.fence_held)
-                && drain.as_ref().map_or(0, |drain| drain.generation) == expected_generation;
+            // Both the release and its independent operator participate in
+            // this same transaction conflict point. Neither can seal a
+            // zero-session census while a supervised worker is being admitted.
+            let mut admitted = refused_outcome.is_none();
+            for (project, expected_generation) in &expected_scopes {
+                serialize_project_admission(&mut tx, project)?;
+                let drain = latest_drain(&tx, project)?;
+                admitted &= drain.as_ref().is_none_or(|drain| !drain.fence_held)
+                    && drain.as_ref().map_or(0, |drain| drain.generation) == *expected_generation;
+            }
             // A race after identity provisioning must leave a known unspawned
             // outcome, rather than an untracked capture or an apparent worker.
             let outcome = if admitted {
@@ -1493,6 +1559,29 @@ pub(crate) fn native_session_admission_ticket(project_root: &Path) -> Result<u64
     admission_ticket_at(&root, project_root)
 }
 
+fn terminal_outcome_observed(
+    admission: &NativeSessionAdmission,
+    outcome: &NativeSessionOutcome,
+) -> bool {
+    match (&outcome.process, &outcome.effects) {
+        (
+            NativeSessionProcessObservation::NotSpawned,
+            NativeSessionEffectObservation::NotStarted,
+        ) => true,
+        (
+            NativeSessionProcessObservation::WorkerReaped,
+            NativeSessionEffectObservation::FinalLedgerObserved {
+                failed_count: 0, ..
+            },
+        ) => {
+            admission.process_spawn_authority_granted == Some(false)
+                || (admission.process_spawn_authority_granted == Some(true)
+                    && outcome.containment_empty_observed)
+        }
+        _ => false,
+    }
+}
+
 fn drain_report(
     drain: &StoredNativeSessionDrain,
     records: &[NativeSessionInventoryRecord],
@@ -1527,24 +1616,7 @@ fn drain_report(
             pending += 1;
             continue;
         };
-        let known_terminal = match (&outcome.process, &outcome.effects) {
-            (
-                NativeSessionProcessObservation::NotSpawned,
-                NativeSessionEffectObservation::NotStarted,
-            ) => true,
-            (
-                NativeSessionProcessObservation::WorkerReaped,
-                NativeSessionEffectObservation::FinalLedgerObserved {
-                    failed_count: 0, ..
-                },
-            ) => {
-                record.admission.process_spawn_authority_granted == Some(false)
-                    || (record.admission.process_spawn_authority_granted == Some(true)
-                        && outcome.containment_empty_observed)
-            }
-            _ => false,
-        };
-        if known_terminal {
+        if terminal_outcome_observed(&record.admission, outcome) {
             terminal += 1
         } else {
             indeterminate += 1
@@ -1577,6 +1649,68 @@ fn drain_report(
 fn check_drain_owner(drain: &StoredNativeSessionDrain, node_id: &str, zone_id: &str) -> Result<()> {
     if drain.node_id != node_id || drain.zone_id != zone_id {
         bail!("retained native-session drain belongs to a different node/zone identity");
+    }
+    Ok(())
+}
+
+/// A held census cannot become complete by omitting an older admission whose
+/// control owners were not captured. An independently authenticated terminal
+/// historical outcome can resolve that unknown obligation without rewriting
+/// an old census; an unspawned refusal adds no worker obligation either.
+fn ensure_held_population_covered(
+    drain: &StoredNativeSessionDrain,
+    records: &[NativeSessionInventoryRecord],
+    authority: &NativeSessionRecordAuthority,
+    untracked: &[UntrackedNativeIdentityCapture],
+) -> Result<()> {
+    if !drain.fence_held {
+        // A released census describes its historical cohort only. Later
+        // admissions do not retroactively extend or cancel that cohort.
+        return Ok(());
+    }
+    let resolved_outside_census: BTreeSet<_> = records
+        .iter()
+        .filter(|record| {
+            !authority
+                .unproven_admissions
+                .contains(&record.admission.session_nonce)
+                && !authority
+                    .unproven_outcomes
+                    .contains(&record.admission.session_nonce)
+                && record.outcome.as_ref().is_some_and(|outcome| {
+                    terminal_outcome_observed(&record.admission, outcome)
+                        && (record.admission.control_scopes.is_none()
+                            || outcome.process == NativeSessionProcessObservation::NotSpawned)
+                })
+        })
+        .map(|record| record.admission.session_nonce.as_str())
+        .collect();
+    let required: BTreeSet<_> = records
+        .iter()
+        .filter(|record| {
+            record
+                .admission
+                .belongs_to_control_scope(&drain.project_root)
+                && !resolved_outside_census.contains(record.admission.session_nonce.as_str())
+        })
+        .map(|record| record.admission.session_nonce.as_str())
+        .chain(authority.unproven_admissions.iter().map(String::as_str))
+        .chain(
+            untracked
+                .iter()
+                .filter(|capture| !resolved_outside_census.contains(capture.session_nonce.as_str()))
+                .map(|capture| capture.session_nonce.as_str()),
+        )
+        .collect();
+    if required.iter().any(|nonce| {
+        drain
+            .session_nonces
+            .binary_search_by(|item| item.as_str().cmp(nonce))
+            .is_err()
+    }) {
+        bail!(
+            "native-session drain population changed after the retained snapshot; refusing an older population with unaccounted control-scope obligations"
+        );
     }
     Ok(())
 }
@@ -1765,6 +1899,7 @@ fn begin_drain_at(
             if previous.census_signature_hex.is_some() {
                 previous.verify_census(&product_root.verifying_key())?;
             }
+            ensure_held_population_covered(previous, &records, &authority, &untracked)?;
             let report = drain_report(previous, &records, &authority)?;
             if previous.actions == *checkpoint {
                 if previous.maintenance_hold_ids != maintenance_hold_ids {
@@ -1806,7 +1941,7 @@ fn begin_drain_at(
         }
         let nonces: BTreeSet<_> = records
             .iter()
-            .filter(|record| record.admission.project_root == project_root)
+            .filter(|record| record.admission.belongs_to_control_scope(project_root))
             .map(|record| record.admission.session_nonce.clone())
             .chain(authority.unproven_admissions.iter().cloned())
             .chain(
@@ -1925,6 +2060,8 @@ fn finish_drain_at(
         }
         let records = read_records_in_transaction(&tx)?;
         let authority = authenticate_inventory_records(protected_root, &records)?;
+        let untracked = untracked_identity_captures_at(protected_root, &records)?;
+        ensure_held_population_covered(&drain, &records, &authority, &untracked)?;
         let report = drain_report(&drain, &records, &authority)?;
         let mut changed = !drain.actions_applied;
         drain.actions_applied = true;
@@ -2004,54 +2141,7 @@ fn attest_drain_at(
         let records = read_records_in_transaction(&tx)?;
         let authority = authenticate_inventory_records(protected_root, &records)?;
         let untracked = untracked_identity_captures_at(protected_root, &records)?;
-        let never_spawned: BTreeSet<_> = records
-            .iter()
-            .filter(|record| {
-                !authority
-                    .unproven_admissions
-                    .contains(&record.admission.session_nonce)
-                    && !authority
-                        .unproven_outcomes
-                        .contains(&record.admission.session_nonce)
-                    && record.outcome.as_ref().is_some_and(|outcome| {
-                        outcome.process == NativeSessionProcessObservation::NotSpawned
-                            && outcome.effects == NativeSessionEffectObservation::NotStarted
-                    })
-            })
-            .map(|record| record.admission.session_nonce.as_str())
-            .collect();
-        let required: BTreeSet<_> = records
-            .iter()
-            .filter(|record| {
-                record.admission.project_root == project_root
-                    && !never_spawned.contains(record.admission.session_nonce.as_str())
-            })
-            .map(|record| record.admission.session_nonce.as_str())
-            .chain(authority.unproven_admissions.iter().map(String::as_str))
-            .chain(
-                untracked
-                    .iter()
-                    .filter(|capture| !never_spawned.contains(capture.session_nonce.as_str()))
-                    .map(|capture| capture.session_nonce.as_str()),
-            )
-            .collect();
-        // An active fence claims the retained population is still held, so
-        // newly unknown obligations cannot be omitted. After release this is
-        // only a fresh verification of the historical sealed cohort: normal
-        // current-policy sessions may run, and must not be cancelled merely
-        // to refresh an old observation. Maintenance gates require fence_held.
-        if drain.fence_held
-            && required.iter().any(|nonce| {
-                drain
-                    .session_nonces
-                    .binary_search_by(|item| item.as_str().cmp(nonce))
-                    .is_err()
-            })
-        {
-            bail!(
-                "native-session drain population changed after the retained snapshot; refusing a fresh attestation for an older population"
-            );
-        }
+        ensure_held_population_covered(&drain, &records, &authority, &untracked)?;
         let mut report = drain_report(&drain, &records, &authority)?;
         let project = project_key(project_root)?;
         let mut digest = Sha256::new();
@@ -2226,7 +2316,7 @@ fn read_inventory_at(
         if report
             .project_root
             .as_ref()
-            .is_some_and(|project| project != &record.admission.project_root)
+            .is_some_and(|project| !record.admission.belongs_to_control_scope(project))
         {
             continue;
         }
@@ -2312,6 +2402,347 @@ mod tests {
             fleet_zone_id: None,
             fleet_policy_sha256: None,
             process_spawn_authority_granted: Some(false),
+            control_scopes: Some(Vec::new()),
+        }
+    }
+
+    fn operator_fixture(
+        root: &Path,
+        marker: u8,
+        operator: &Path,
+        generation: u64,
+    ) -> NativeSessionAdmission {
+        let mut admission = fixture(root, marker);
+        admission.control_scopes = Some(vec![NativeSessionControlScope {
+            project_root: operator.to_path_buf(),
+            admission_generation: generation,
+            fleet_policy_sha256: None,
+        }]);
+        admission
+    }
+
+    #[test]
+    fn operator_scope_retains_external_sessions_and_independent_hold_owners() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("evidence");
+        let operator = temp.path().join("operator-project");
+        let admission = operator_fixture(&root, 101, &operator, 0);
+        let project = admission.project_root.clone();
+        let nonce = admission.session_nonce.clone();
+        let mut guard = NativeSessionInventoryGuard::admit(&root, admission.clone(), 0).unwrap();
+        guard.worker_started();
+        for scope in [&operator, &project] {
+            let retained = read_inventory_at(&root, Some(scope)).unwrap();
+            assert_eq!(retained.pending_sessions, 1);
+            assert_eq!(retained.records[0].admission, admission);
+            assert!(!retained.quiescence_certified);
+        }
+        assert!(
+            read_inventory_at(&root, Some(&temp.path().join("unrelated")))
+                .unwrap()
+                .records
+                .is_empty()
+        );
+        let mut history = vec![maintenance_action("held", None)];
+        let checkpoint = fleet_application_checkpoint(&history, "prod").unwrap();
+        for (scope, node) in [(&operator, "operator-node"), (&project, "release-node")] {
+            let pending =
+                super::begin_drain_at(&root, scope, node, "prod", &checkpoint, &history).unwrap();
+            assert_eq!(pending.session_nonces, vec![nonce.clone()]);
+            assert_eq!(pending.checkpoint.pending_sessions, 1);
+            assert!(admission_ticket_at(&root, scope).is_err());
+        }
+        // Preserve the actual signed final observation but lose its database
+        // projection; either owner's reconciliation must recover the same nonce.
+        guard.worker_reaped();
+        abandon_after_receipt(&root, guard, &terminal_outcome());
+        for (scope, node) in [(&operator, "operator-node"), (&project, "release-node")] {
+            let held = finish_drain_at(&root, scope, node, "prod", &checkpoint).unwrap();
+            assert_eq!(held.checkpoint.terminal_sessions, 1);
+            assert_eq!(held.checkpoint.pending_sessions, 0);
+            assert!(held.checkpoint.fence_held);
+            let signed = attest_drain_at(&root, scope, node, "prod", &checkpoint).unwrap();
+            assert_eq!(signed.session_nonces, vec![nonce.clone()]);
+            assert!(signed.checkpoint.supervisor_attestation.is_some());
+        }
+        history.push(maintenance_action("resumed", Some("held")));
+        let resumed_checkpoint = fleet_application_checkpoint(&history, "prod").unwrap();
+        super::begin_drain_at(
+            &root,
+            &operator,
+            "operator-node",
+            "prod",
+            &resumed_checkpoint,
+            &history,
+        )
+        .unwrap();
+        let operator_resumed = finish_drain_at(
+            &root,
+            &operator,
+            "operator-node",
+            "prod",
+            &resumed_checkpoint,
+        )
+        .unwrap();
+        assert!(operator_resumed.checkpoint.is_complete());
+        assert!(admission_ticket_at(&root, &project).is_err());
+        let refused = operator_fixture(&root, 102, &operator, operator_resumed.generation);
+        assert!(NativeSessionInventoryGuard::admit(&root, refused, 1).is_err());
+        super::begin_drain_at(
+            &root,
+            &project,
+            "release-node",
+            "prod",
+            &resumed_checkpoint,
+            &history,
+        )
+        .unwrap();
+        let release_resumed =
+            finish_drain_at(&root, &project, "release-node", "prod", &resumed_checkpoint).unwrap();
+        assert!(release_resumed.checkpoint.is_complete());
+        let fresh = operator_fixture(&root, 103, &operator, operator_resumed.generation);
+        let admitted =
+            NativeSessionInventoryGuard::admit(&root, fresh, release_resumed.generation).unwrap();
+        drop(admitted);
+        assert_eq!(
+            read_inventory_at(&root, Some(&operator))
+                .unwrap()
+                .records
+                .len(),
+            3
+        );
+        assert_eq!(
+            read_inventory_at(&root, Some(&project))
+                .unwrap()
+                .records
+                .len(),
+            3
+        );
+    }
+
+    #[test]
+    fn operator_scope_generation_change_refuses_stale_preflight_after_release() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("evidence");
+        let operator = temp.path().join("operator-project");
+        // The ordinary session belongs only to its own release project.
+        drop(NativeSessionInventoryGuard::admit(&root, fixture(&root, 104), 0).unwrap());
+        let old_ticket = admission_ticket_at(&root, &operator).unwrap();
+        assert_eq!(old_ticket, 0);
+        let drain = begin_drain_at(&root, &operator, "node-a", "prod", &actions(1)).unwrap();
+        assert_eq!(drain.checkpoint.admitted_sessions, 0);
+        let drained = finish_drain_at(&root, &operator, "node-a", "prod", &actions(1)).unwrap();
+        assert!(drained.checkpoint.is_complete());
+        let stale = operator_fixture(&root, 105, &operator, old_ticket);
+        let error = NativeSessionInventoryGuard::admit(&root, stale.clone(), 0)
+            .err()
+            .expect("completed operator drain must invalidate the older ticket");
+        assert!(format!("{error:#}").contains("drain fence"));
+        let key = ed25519_dalek::SigningKey::from_bytes(&[17; 32]).verifying_key();
+        let outcome = read_outcome_receipt(&root, &stale, &key).unwrap().unwrap();
+        assert_eq!(
+            outcome.outcome.process,
+            NativeSessionProcessObservation::NotSpawned
+        );
+        assert_eq!(
+            outcome.outcome.effects,
+            NativeSessionEffectObservation::NotStarted
+        );
+        let fresh = operator_fixture(&root, 106, &operator, drained.generation);
+        let mut guard = NativeSessionInventoryGuard::admit(&root, fresh, 0).unwrap();
+        guard.worker_started();
+        let next = begin_drain_at(&root, &operator, "node-a", "prod", &actions(2)).unwrap();
+        assert_eq!(next.checkpoint.admitted_sessions, 2);
+        assert_eq!(next.checkpoint.terminal_sessions, 1);
+        assert_eq!(next.checkpoint.pending_sessions, 1);
+        guard.worker_reaped();
+        guard.finish(
+            NativeSessionOutcomeKind::ControlStopped,
+            successful_ledger_observation(),
+        );
+        assert!(
+            finish_drain_at(&root, &operator, "node-a", "prod", &actions(2))
+                .unwrap()
+                .checkpoint
+                .is_complete()
+        );
+    }
+
+    #[test]
+    fn operator_scope_tampering_cannot_reuse_the_signed_admission() {
+        for mutation in 0..5 {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("evidence");
+            let operator = temp.path().join("operator-project");
+            let mut admission = operator_fixture(&root, 107, &operator, 0);
+            let mut guard =
+                NativeSessionInventoryGuard::admit(&root, admission.clone(), 0).unwrap();
+            guard.worker_started();
+            guard.finished = true;
+            drop(guard);
+            begin_drain_at(&root, &operator, "node-a", "prod", &actions(1)).unwrap();
+            finish_drain_at(&root, &operator, "node-a", "prod", &actions(1)).unwrap();
+            match mutation {
+                0 => admission.control_scopes = None,
+                1 => admission.control_scopes = Some(Vec::new()),
+                2 => {
+                    admission.control_scopes.as_mut().unwrap()[0].project_root =
+                        temp.path().join("other-operator")
+                }
+                3 => admission.control_scopes.as_mut().unwrap()[0].admission_generation = 1,
+                _ => {
+                    admission.control_scopes.as_mut().unwrap()[0].fleet_policy_sha256 =
+                        Some("b".repeat(64))
+                }
+            }
+            let connection = open_inventory(&root, false).unwrap().unwrap();
+            let mut tx = connection.transaction().unwrap();
+            tx.execute_with_params(
+                "UPDATE native_sessions SET admission_json = ?1 WHERE session_nonce = ?2;",
+                &[
+                    SqliteValue::Text(serde_json::to_string(&admission).unwrap().into()),
+                    SqliteValue::Text(admission.session_nonce.into()),
+                ],
+            )
+            .unwrap();
+            tx.commit().unwrap();
+            assert!(finish_drain_at(&root, &operator, "node-a", "prod", &actions(1)).is_err());
+            assert!(attest_drain_at(&root, &operator, "node-a", "prod", &actions(1)).is_err());
+            assert!(admission_ticket_at(&root, &operator).is_err());
+        }
+    }
+
+    #[test]
+    fn historical_scope_absence_retains_obligations_and_cannot_release_an_older_census() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("evidence");
+        let operator = temp.path().join("operator-project");
+        drop(NativeSessionInventoryGuard::admit(&root, fixture(&root, 108), 0).unwrap());
+        let history = vec![maintenance_action("old-held-census", None)];
+        let checkpoint = fleet_application_checkpoint(&history, "prod").unwrap();
+        super::begin_drain_at(&root, &operator, "node-a", "prod", &checkpoint, &history).unwrap();
+        let original = finish_drain_at(&root, &operator, "node-a", "prod", &checkpoint).unwrap();
+        assert_eq!(original.checkpoint.admitted_sessions, 0);
+        let mut historical = fixture(&root, 109);
+        historical.control_scopes = None;
+        let bytes = serde_json::to_vec(&historical).unwrap();
+        assert!(
+            !serde_json::from_slice::<serde_json::Value>(&bytes)
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .contains_key("control_scopes")
+        );
+        retain_admission_receipt(&root, &historical).unwrap();
+        let connection = open_inventory(&root, false).unwrap().unwrap();
+        let mut tx = connection.transaction().unwrap();
+        tx.execute_with_params(
+            "INSERT INTO native_sessions(session_nonce, admission_json, outcome_json) VALUES (?1, ?2, NULL);",
+            &[
+                SqliteValue::Text(historical.session_nonce.clone().into()),
+                SqliteValue::Text(String::from_utf8(bytes).unwrap().into()),
+            ],
+        ).unwrap();
+        tx.commit().unwrap();
+        let pending = read_inventory_at(&root, Some(&operator)).unwrap();
+        assert_eq!(pending.pending_sessions, 1);
+        assert_eq!(
+            pending.records[0].admission.session_nonce,
+            historical.session_nonce
+        );
+        assert!(
+            super::begin_drain_at(&root, &operator, "node-a", "prod", &checkpoint, &history)
+                .is_err()
+        );
+        assert!(finish_drain_at(&root, &operator, "node-a", "prod", &checkpoint).is_err());
+        assert!(attest_drain_at(&root, &operator, "node-a", "prod", &checkpoint).is_err());
+        assert!(admission_ticket_at(&root, &operator).is_err());
+        // The old full-admission signature remains valid, but cannot be
+        // upgraded to an assertion that it had no additional operator owner.
+        let key = ed25519_dalek::SigningKey::from_bytes(&[17; 32]).verifying_key();
+        let receipt = read_admission_receipt(&root, &historical, &key)
+            .unwrap()
+            .unwrap();
+        let mut falsely_completed_census = historical.clone();
+        falsely_completed_census.control_scopes = Some(Vec::new());
+        assert!(receipt.verify(&falsely_completed_census, &key).is_err());
+        retain_outcome_receipt(&root, &historical, &terminal_outcome()).unwrap();
+        // A genuine terminal observation resolves the historical unknown;
+        // the old cohort and its explicit maintenance hold are preserved.
+        let recovered = finish_drain_at(&root, &operator, "node-a", "prod", &checkpoint).unwrap();
+        assert_eq!(recovered.session_nonces, original.session_nonces);
+        assert!(recovered.checkpoint.fence_held);
+        assert!(attest_drain_at(&root, &operator, "node-a", "prod", &checkpoint).is_ok());
+        assert!(!recovered.fleet_quiescence_certified);
+    }
+
+    #[test]
+    fn new_admissions_require_a_bounded_explicit_control_scope_census() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("evidence");
+        let operator = temp.path().join("operator");
+        let admission = operator_fixture(&root, 110, &operator, 0);
+        for invalid in [
+            PathBuf::from("relative"),
+            operator.join("../other"),
+            admission.project_root.clone(),
+            PathBuf::from(format!("/{}", "x".repeat(4096))),
+        ] {
+            let mut changed = admission.clone();
+            changed.control_scopes.as_mut().unwrap()[0].project_root = invalid;
+            assert!(validate_admission(&changed).is_err());
+        }
+        let mut repeated = admission.clone();
+        repeated
+            .control_scopes
+            .as_mut()
+            .unwrap()
+            .push(admission.control_scopes.as_ref().unwrap()[0].clone());
+        assert!(validate_admission(&repeated).is_err());
+        let mut bad_policy = admission.clone();
+        bad_policy.control_scopes.as_mut().unwrap()[0].fleet_policy_sha256 = Some("invalid".into());
+        assert!(validate_admission(&bad_policy).is_err());
+        let mut missing = admission;
+        missing.control_scopes = None;
+        validate_admission(&missing).unwrap(); // historical parsing remains possible
+        let error = NativeSessionInventoryGuard::admit(&root, missing, 0)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("complete control-scope census"));
+    }
+
+    #[test]
+    fn simultaneous_operator_scope_admission_and_fence_retain_the_external_worker() {
+        for _ in 0..4 {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("evidence");
+            let operator = temp.path().join("operator-project");
+            let admission = operator_fixture(&root, 111, &operator, 0);
+            let nonce = admission.session_nonce.clone();
+            open_inventory(&root, true).unwrap();
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+            let start = std::sync::Arc::clone(&barrier);
+            let worker_root = root.clone();
+            let worker = std::thread::spawn(move || {
+                start.wait();
+                match NativeSessionInventoryGuard::admit(&worker_root, admission, 0) {
+                    Ok(guard) => drop(guard),
+                    Err(error) => assert!(format!("{error:#}").contains("drain fence")),
+                }
+            });
+            barrier.wait();
+            let started = begin_drain_at(&root, &operator, "node-a", "prod", &actions(1)).unwrap();
+            worker.join().unwrap();
+            assert!(started.session_nonces.contains(&nonce));
+            let finished =
+                finish_drain_at(&root, &operator, "node-a", "prod", &actions(1)).unwrap();
+            assert!(finished.checkpoint.is_complete());
+            assert_eq!(finished.checkpoint.admitted_sessions, 1);
+            assert_eq!(finished.checkpoint.terminal_sessions, 1);
+            assert_eq!(
+                finished.checkpoint.session_set_sha256,
+                started.checkpoint.session_set_sha256
+            );
         }
     }
 

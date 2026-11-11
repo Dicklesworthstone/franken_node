@@ -928,6 +928,7 @@ fn inspect_restricted_history(
 /// Filesystem store for one deployment.
 pub struct DeploymentStore {
     name: String,
+    project_root: PathBuf,
     root: PathBuf,
 }
 
@@ -937,6 +938,7 @@ impl DeploymentStore {
         validate_identifier("deployment name", name)?;
         Ok(Self {
             name: name.to_string(),
+            project_root: deployment_root.to_path_buf(),
             root: deployment_root.join(DEPLOYMENTS_RELATIVE_DIR).join(name),
         })
     }
@@ -949,6 +951,13 @@ impl DeploymentStore {
     #[must_use]
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Operator project whose fleet controls govern every supervised release,
+    /// including releases stored outside this project's directory tree.
+    #[must_use]
+    pub fn project_root(&self) -> &Path {
+        &self.project_root
     }
 
     /// Serialize every read-modify-write of this deployment.

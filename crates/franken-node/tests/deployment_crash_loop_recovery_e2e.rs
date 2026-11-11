@@ -386,6 +386,89 @@ impl Drill {
         self.ok(self.root.path(), &["deploy", "status", "app", "--json"])
     }
 
+    #[cfg(target_os = "linux")]
+    fn fleet_ok(&self, project: &Path, fleet_state: &Path, args: &[&str]) -> Value {
+        let output = self
+            .command(project, args)
+            .env("FRANKEN_NODE_FLEET_STATE_DIR", fleet_state)
+            .env("FRANKEN_NODE_FLEET_CONVERGENCE_TIMEOUT_SECONDS", "2")
+            .output()
+            .expect("deployment fleet command");
+        assert!(
+            output.status.success(),
+            "{} failed: {}\n{}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).expect("deployment fleet JSON")
+    }
+
+    #[cfg(target_os = "linux")]
+    fn fleet_poll(&self, project: &Path, fleet_state: &Path, node: &str) -> Value {
+        self.fleet_ok(
+            project,
+            fleet_state,
+            &[
+                "fleet",
+                "agent",
+                "--node-id",
+                node,
+                "--zone",
+                "east",
+                "--fallback-file-transport",
+                "--once",
+                "--json",
+            ],
+        )
+    }
+
+    #[cfg(target_os = "linux")]
+    fn publish_fleet_policy(
+        &self,
+        project: &Path,
+        fleet_state: &Path,
+        policy_name: &str,
+        policy: &Value,
+    ) -> Value {
+        let input = self.state_home.path().join(format!("{policy_name}.json"));
+        fs::write(&input, serde_json::to_vec(policy).expect("policy JSON"))
+            .expect("fleet policy input");
+        let publication = self.fleet_ok(
+            project,
+            fleet_state,
+            &[
+                "fleet",
+                "policy",
+                "publish",
+                "--zone",
+                "east",
+                "--revision",
+                "1",
+                "--file",
+                input.to_str().expect("policy path"),
+                "--json",
+            ],
+        );
+        assert_eq!(publication["published"], true, "{publication}");
+        assert_eq!(publication["activated"], false, "{publication}");
+        publication
+    }
+
+    #[cfg(target_os = "linux")]
+    fn sessions(&self, project: &Path) -> Value {
+        self.ok(
+            self.root.path(),
+            &[
+                "fleet",
+                "sessions",
+                "--project",
+                project.to_str().expect("project path"),
+                "--json",
+            ],
+        )
+    }
+
     fn admitted_release(&self, version: &str) -> ReleaseRecord {
         let record: Value = serde_json::from_slice(
             &fs::read(self.root.path().join(format!(
@@ -1642,6 +1725,286 @@ fn deployment_root_safe_mode_blocks_a_release_outside_that_directory() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
+fn deployment_operator_and_release_fleet_holds_each_fence_their_own_admission_scope() {
+    let drill = Drill::new();
+    let external = tempfile::tempdir().expect("external release directory");
+    let (release, manifest) = drill.publish_release_at("1.0.0", HEALTHY_V1, external.path());
+    assert!(!release.starts_with(drill.root.path()));
+    drill.install_published("1.0.0", &release, &manifest);
+    drill.activate("1.0.0");
+    let (code, healthy) = drill.run();
+    assert_eq!(code, Some(0), "{healthy}");
+    assert_eq!(guest_stdout(&healthy["run"]), "RELEASE_ONE_HEALTHY\n");
+
+    let operator_sessions = drill.sessions(drill.root.path());
+    let release_sessions = drill.sessions(&release);
+    assert_eq!(operator_sessions["records"].as_array().unwrap().len(), 1);
+    assert_eq!(operator_sessions["records"], release_sessions["records"]);
+    let admission = &operator_sessions["records"][0]["admission"];
+    assert_eq!(
+        admission["project_root"],
+        release.canonicalize().unwrap().to_str().unwrap()
+    );
+    assert!(
+        admission["control_scopes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|scope| scope["project_root"]
+                == drill.root.path().canonicalize().unwrap().to_str().unwrap()),
+        "the signed admission must retain the operator root without replacing the release identity: {admission}"
+    );
+    assert_eq!(operator_sessions["quiescence_certified"], false);
+    let operator_fleet = drill.state_home.path().join("operator-fleet");
+    let release_fleet = drill.state_home.path().join("release-fleet");
+    let hold = |project: &Path, fleet: &Path, id: &str| {
+        drill.fleet_ok(
+            project,
+            fleet,
+            &[
+                "fleet",
+                "hold",
+                "--zone",
+                "east",
+                "--id",
+                id,
+                "--reason",
+                "independent deployment maintenance owner",
+                "--json",
+            ],
+        )
+    };
+    hold(drill.root.path(), &operator_fleet, "operator-owner");
+    let held = drill.fleet_poll(drill.root.path(), &operator_fleet, "operator-node");
+    assert_eq!(held["node_health"], "maintenance", "{held}");
+    assert_eq!(held["native_session_drain"]["admitted_sessions"], 1);
+    assert_eq!(held["native_session_drain"]["terminal_sessions"], 1);
+    assert_eq!(held["native_session_drain"]["fence_held"], true);
+    let (code, refused) = drill.run();
+    assert_ne!(code, Some(0), "{refused}");
+    assert!(
+        refused
+            .to_string()
+            .contains("native-session admission is fenced"),
+        "{refused}"
+    );
+    assert_eq!(drill.status()["releases"][0]["healthy_runs"], 1);
+
+    // The operator alias belongs to this supervised invocation. It must not
+    // silently attach itself to an independently admitted standalone run.
+    let standalone = drill.ok(
+        &release,
+        &[
+            "run",
+            "app.js",
+            "--runtime",
+            "franken-engine",
+            "--frozen-modules",
+            "--registry-artifact",
+            manifest.to_str().unwrap(),
+            "--publisher-public-key",
+            drill.public_key.to_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert_eq!(guest_stdout(&standalone), "RELEASE_ONE_HEALTHY\n");
+    assert_eq!(
+        drill.sessions(drill.root.path())["records"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        drill.sessions(&release)["records"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+
+    hold(&release, &release_fleet, "release-owner");
+    let held = drill.fleet_poll(&release, &release_fleet, "release-node");
+    assert_eq!(held["native_session_drain"]["admitted_sessions"], 2);
+    assert_eq!(held["native_session_drain"]["fence_held"], true);
+    drill.fleet_ok(
+        drill.root.path(),
+        &operator_fleet,
+        &["fleet", "resume", "--hold", "operator-owner", "--json"],
+    );
+    let resumed = drill.fleet_poll(drill.root.path(), &operator_fleet, "operator-node");
+    assert_eq!(resumed["node_health"], "healthy", "{resumed}");
+    assert_eq!(resumed["native_session_drain"]["fence_held"], false);
+    let (code, still_refused) = drill.run();
+    assert_ne!(code, Some(0), "{still_refused}");
+    assert!(
+        still_refused
+            .to_string()
+            .contains("native-session admission is fenced"),
+        "{still_refused}"
+    );
+    assert_eq!(drill.status()["releases"][0]["healthy_runs"], 1);
+
+    drill.fleet_ok(
+        &release,
+        &release_fleet,
+        &["fleet", "resume", "--hold", "release-owner", "--json"],
+    );
+    let resumed = drill.fleet_poll(&release, &release_fleet, "release-node");
+    assert_eq!(resumed["node_health"], "healthy", "{resumed}");
+    assert_eq!(resumed["native_session_drain"]["fence_held"], false);
+    let (code, resumed) = drill.run();
+    assert_eq!(code, Some(0), "{resumed}");
+    assert_eq!(guest_stdout(&resumed["run"]), "RELEASE_ONE_HEALTHY\n");
+    assert_eq!(drill.status()["releases"][0]["healthy_runs"], 2);
+    assert_eq!(
+        drill.sessions(drill.root.path())["records"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        drill.sessions(&release)["records"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn deployment_operator_fleet_policy_rejects_a_weaker_external_release_profile() {
+    let drill = Drill::new();
+    let external = tempfile::tempdir().expect("external release directory");
+    let (release, manifest) = drill.publish_release_with_config(
+        "1.0.0",
+        HEALTHY_V1,
+        external.path(),
+        Some("profile = \"legacy-risky\"\n"),
+    );
+    drill.install_published("1.0.0", &release, &manifest);
+    drill.activate("1.0.0");
+    let (code, baseline) = drill.run();
+    assert_eq!(code, Some(0), "{baseline}");
+    let operator_fleet = drill.state_home.path().join("operator-fleet");
+    drill.publish_fleet_policy(
+        drill.root.path(),
+        &operator_fleet,
+        "operator-profile-policy",
+        &serde_json::json!({"minimum_profile": "balanced"}),
+    );
+    let applied = drill.fleet_poll(drill.root.path(), &operator_fleet, "operator-node");
+    assert_eq!(applied["node_health"], "healthy", "{applied}");
+
+    let (code, refused) = drill.run();
+    assert_ne!(code, Some(0), "{refused}");
+    assert!(
+        refused
+            .to_string()
+            .contains("activated fleet policy requires profile `balanced`"),
+        "{refused}"
+    );
+    assert_eq!(drill.status()["releases"][0]["healthy_runs"], 1);
+    let standalone = drill.ok(
+        &release,
+        &[
+            "run",
+            "app.js",
+            "--runtime",
+            "franken-engine",
+            "--frozen-modules",
+            "--registry-artifact",
+            manifest.to_str().unwrap(),
+            "--publisher-public-key",
+            drill.public_key.to_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert_eq!(guest_stdout(&standalone), "RELEASE_ONE_HEALTHY\n");
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn deployment_intersects_operator_and_release_fleet_budgets_in_worker_and_receipt() {
+    let drill = Drill::new();
+    let external = tempfile::tempdir().expect("external release directory");
+    let (release, manifest) = drill.publish_release_at("1.0.0", HEALTHY_V1, external.path());
+    drill.install_published("1.0.0", &release, &manifest);
+    drill.activate("1.0.0");
+    for (project, name, policy) in [
+        (
+            drill.root.path(),
+            "operator",
+            serde_json::json!({
+                "max_instructions": 100_000,
+                "max_parse_source_bytes": 4096,
+                "max_parse_tokens": 128,
+            }),
+        ),
+        (
+            release.as_path(),
+            "release",
+            serde_json::json!({
+                "max_instructions": 400_000,
+                "max_parse_source_bytes": 2048,
+                "max_parse_tokens": 256,
+            }),
+        ),
+    ] {
+        let fleet_state = drill.state_home.path().join(format!("{name}-fleet"));
+        drill.publish_fleet_policy(project, &fleet_state, name, &policy);
+        let applied = drill.fleet_poll(project, &fleet_state, name);
+        assert_eq!(applied["node_health"], "healthy", "{applied}");
+    }
+    let (code, completed) = drill.run();
+    assert_eq!(code, Some(0), "{completed}");
+    let run = &completed["run"];
+    assert_eq!(guest_stdout(run), "RELEASE_ONE_HEALTHY\n");
+    let decision = &run["dispatch"]["engine_decision"];
+    for lane in ["deterministic", "throughput"] {
+        assert_eq!(
+            decision["execution_limits"][lane]["max_instructions"], 100_000,
+            "operator instruction ceiling: {decision}"
+        );
+    }
+    assert_eq!(decision["parser_budget"]["max_source_bytes"], 2048);
+    assert_eq!(decision["parser_budget"]["max_token_count"], 128);
+    assert_eq!(run["receipt"]["parser_budget"], decision["parser_budget"]);
+    assert_eq!(
+        run["receipt"]["execution_limits"],
+        decision["execution_limits"]
+    );
+
+    let standalone = drill.ok(
+        &release,
+        &[
+            "run",
+            "app.js",
+            "--runtime",
+            "franken-engine",
+            "--frozen-modules",
+            "--registry-artifact",
+            manifest.to_str().unwrap(),
+            "--publisher-public-key",
+            drill.public_key.to_str().unwrap(),
+            "--json",
+        ],
+    );
+    let decision = &standalone["dispatch"]["engine_decision"];
+    for lane in ["deterministic", "throughput"] {
+        assert_eq!(
+            decision["execution_limits"][lane]["max_instructions"],
+            400_000
+        );
+    }
+    assert_eq!(decision["parser_budget"]["max_source_bytes"], 2048);
+    assert_eq!(decision["parser_budget"]["max_token_count"], 256);
+}
+
+#[test]
 fn supersede_replaces_a_revoked_pending_target_without_rewriting_its_evidence() {
     for stage in ["intent", "history"] {
         let drill = Drill::new();
@@ -2682,6 +3045,205 @@ mod external_release_live_control {
         assert_eq!(report["retire_on_activation"], true);
         assert_eq!(guest_stdout(&report["run"]), "REPLACEMENT_RUNNING\n");
         assert!(blocked.replacement.join("replacement.marker").is_file());
+    }
+
+    #[test]
+    fn deployment_operator_fleet_hold_stops_external_io_and_retains_unknown_effects() {
+        let drill = Drill::new();
+        let mut blocked = BlockedActivationRun::start(&drill, false);
+        let operator_before = drill.sessions(drill.root.path());
+        let release_before = drill.sessions(blocked.release.path());
+        assert_eq!(operator_before["records"].as_array().unwrap().len(), 1);
+        assert_eq!(operator_before["records"], release_before["records"]);
+        assert_eq!(operator_before["pending_sessions"], 1);
+        assert_eq!(operator_before["quiescence_certified"], false);
+        let nonce = operator_before["records"][0]["admission"]["session_nonce"]
+            .as_str()
+            .expect("retained native session nonce")
+            .to_owned();
+        let operator_fleet = drill.state_home.path().join("operator-fleet");
+        drill.fleet_ok(
+            drill.root.path(),
+            &operator_fleet,
+            &[
+                "fleet",
+                "hold",
+                "--zone",
+                "east",
+                "--id",
+                "live-deployment-owner",
+                "--reason",
+                "contain the admitted external deployment",
+                "--json",
+            ],
+        );
+        let first_poll = drill.fleet_poll(drill.root.path(), &operator_fleet, "operator-node");
+        let first_drain = &first_poll["native_session_drain"];
+        assert_eq!(first_drain["admitted_sessions"], 1, "{first_poll}");
+        assert_eq!(first_drain["fence_held"], true, "{first_poll}");
+        assert_eq!(
+            first_drain["pending_sessions"].as_u64().unwrap()
+                + first_drain["indeterminate_sessions"].as_u64().unwrap(),
+            1,
+            "an admitted external HTTP effect must not disappear from the operator drain: {first_poll}"
+        );
+
+        let (code, stopped) = blocked.finish();
+        assert_ne!(code, Some(0), "{stopped}");
+        assert_eq!(stopped["phase"], "failed", "{stopped}");
+        assert_eq!(stopped["ok"], false);
+        assert!(stopped.get("recovery").is_none());
+        assert!(stopped.get("resumed").is_none());
+        let evidence = &stopped["run"];
+        assert_eq!(
+            evidence["schema_version"],
+            "franken-node/native-effect-interruption-evidence/v1"
+        );
+        assert_eq!(evidence["control_trigger"]["kind"], "fleet_drain");
+        assert_eq!(evidence["terminal_state"], "control_indeterminate");
+        assert_eq!(evidence["journal_complete"], true);
+        assert_eq!(evidence["replay_certified"], false);
+        assert_eq!(evidence["interrupted_effect_count"], 1);
+        assert!(
+            evidence["entries"].as_array().unwrap().iter().any(|entry| {
+                entry["effect_kind"] == "network_request"
+                    && entry["state"] == "interrupted_indeterminate"
+                    && entry.get("policy_outcome").is_none()
+                    && entry.get("allowed").is_none()
+                    && entry.get("denied").is_none()
+            }),
+            "the outstanding network request is not certified as rolled back: {evidence}"
+        );
+        let receipt_path = blocked.release.path().join(
+            evidence["receipt_path"]
+                .as_str()
+                .expect("durable interruption receipt"),
+        );
+        let persisted: Value =
+            serde_json::from_slice(&fs::read(receipt_path).expect("retained receipt"))
+                .expect("receipt JSON");
+        assert_eq!(persisted, evidence["receipt"]);
+        assert!(!blocked.release.path().join("after.marker").exists());
+        let _ = blocked.release_http_response();
+        assert!(
+            !blocked.release.path().join("after.marker").exists(),
+            "late HTTP completion must not revive the held deployment"
+        );
+
+        // A fresh process reconstructs the same population from the signed
+        // admission. Reaping the worker does not resolve its external effect.
+        let operator_after = drill.sessions(drill.root.path());
+        let release_after = drill.sessions(blocked.release.path());
+        assert_eq!(operator_after["records"], release_after["records"]);
+        assert_eq!(operator_after["records"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            operator_after["records"][0]["admission"]["session_nonce"],
+            nonce
+        );
+        assert_eq!(operator_after["pending_sessions"], 0);
+        assert_eq!(operator_after["terminal_sessions"], 1);
+        assert_eq!(operator_after["unknown_effect_sessions"], 1);
+        assert_eq!(operator_after["quiescence_certified"], false);
+        let retained = drill.fleet_poll(drill.root.path(), &operator_fleet, "operator-node");
+        let drain = &retained["native_session_drain"];
+        assert_eq!(retained["node_health"], "degraded", "{retained}");
+        assert_eq!(
+            drain["session_set_sha256"],
+            first_drain["session_set_sha256"]
+        );
+        assert_eq!(drain["admitted_sessions"], 1);
+        assert_eq!(drain["terminal_sessions"], 0);
+        assert_eq!(drain["pending_sessions"], 0);
+        assert_eq!(drain["indeterminate_sessions"], 1);
+        assert_eq!(drain["fence_held"], true);
+
+        // Releasing the maintenance owner cannot erase the unresolved effect
+        // or evade it by activating a different release/entrypoint.
+        drill.fleet_ok(
+            drill.root.path(),
+            &operator_fleet,
+            &[
+                "fleet",
+                "resume",
+                "--hold",
+                "live-deployment-owner",
+                "--json",
+            ],
+        );
+        let resumed = drill.fleet_poll(drill.root.path(), &operator_fleet, "operator-node");
+        assert_eq!(
+            resumed["native_session_drain"]["session_set_sha256"],
+            drain["session_set_sha256"]
+        );
+        assert_eq!(resumed["native_session_drain"]["indeterminate_sessions"], 1);
+        assert_eq!(resumed["native_session_drain"]["fence_held"], true);
+        drill.activate("2.0.0");
+        let (code, refused) = drill.run();
+        assert_ne!(code, Some(0), "{refused}");
+        assert!(
+            refused
+                .to_string()
+                .contains("native-session admission is fenced"),
+            "{refused}"
+        );
+        assert!(!blocked.replacement.join("replacement.marker").exists());
+        assert_no_health_or_recovery(&drill);
+        assert_eq!(
+            fs::read(
+                blocked
+                    .release
+                    .path()
+                    .join(".franken-node/safe-mode/state.json")
+            )
+            .ok(),
+            blocked.safe_mode_before,
+            "fleet containment is not a native crash"
+        );
+    }
+
+    #[test]
+    fn deployment_operator_policy_tightening_interrupts_already_admitted_external_io() {
+        use frankenengine_node::control_plane::fleet_transport::{
+            FleetActionRecord, activate_fleet_policy_snapshot,
+        };
+
+        let drill = Drill::new();
+        let mut blocked = BlockedActivationRun::start(&drill, false);
+        let operator_fleet = drill.state_home.path().join("operator-fleet");
+        let publication = drill.publish_fleet_policy(
+            drill.root.path(),
+            &operator_fleet,
+            "operator-network-policy",
+            &serde_json::json!({"block_private_network": true}),
+        );
+        let action: FleetActionRecord =
+            serde_json::from_value(publication["action"].clone()).expect("published policy action");
+        // Use the agent's canonical activation API with the real publication.
+        // A fleet-agent poll also establishes an admission fence, which would
+        // obscure whether the independent operator policy observer works.
+        activate_fleet_policy_snapshot(drill.root.path(), &[action], "east")
+            .expect("activate operator restriction")
+            .expect("active operator policy");
+        let (code, stopped) = blocked.finish();
+        assert_ne!(code, Some(0), "{stopped}");
+        assert_eq!(stopped["phase"], "failed", "{stopped}");
+        assert!(stopped.get("recovery").is_none());
+        assert!(stopped.get("resumed").is_none());
+        let evidence = &stopped["run"];
+        assert_eq!(evidence["control_trigger"]["kind"], "fleet_policy_changed");
+        assert_eq!(evidence["terminal_state"], "control_indeterminate");
+        assert_eq!(evidence["interrupted_effect_count"], 1);
+        assert_eq!(evidence["replay_certified"], false);
+        assert!(!blocked.release.path().join("after.marker").exists());
+        let _ = blocked.release_http_response();
+        assert!(!blocked.release.path().join("after.marker").exists());
+        assert_no_health_or_recovery(&drill);
+        let operator_sessions = drill.sessions(drill.root.path());
+        assert_eq!(operator_sessions["unknown_effect_sessions"], 1);
+        assert_eq!(
+            operator_sessions["records"],
+            drill.sessions(blocked.release.path())["records"]
+        );
     }
 
     #[test]

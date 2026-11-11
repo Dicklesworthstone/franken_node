@@ -131,6 +131,30 @@ current action history remain mandatory for guarded policy publication; a
 released-cohort observation cannot satisfy that guard. Enrollment records without
 the additional key retain their existing bearer-authenticated observation scope.
 
+### Deployment operator and release control scopes
+
+`deploy run` retains the operator project as an additional native-session owner,
+including when the approved release is stored outside that project. The release
+remains the primary project for source identity, dependency trust, and guest
+filesystem authority. `fleet sessions` and native drain accounting in either
+project include the same session nonce. The signed admission binds the additional
+project, its admission generation, and its observed fleet-policy digest.
+
+Admission checks both projects' fences and generations in one inventory
+transaction. A concurrent hold therefore either includes the admitted worker in
+its census or prevents that worker from starting. Both scopes remain under live
+observation after startup. Resuming the operator's hold cannot release a separate
+hold owned by the release project, and changing a deployment activation cannot
+erase a stopped worker's unresolved external effects. Ordinary standalone runs
+of the release do not acquire the deployment operator's additional ownership.
+
+Historical admissions without an explicit control-scope census remain readable.
+Their additional owners are unknown, so their unresolved obligations remain
+visible to every project drain. An older held census that omitted such an
+obligation cannot be finalized or freshly attested as complete. Authenticated
+terminal evidence can resolve the obligation; an upgrade does not invent an
+empty owner list or rewrite a historical signed admission.
+
 ## Purpose
 
 Defines the operational policy for fleet-wide quarantine and revocation of nodes, tenants, or zones. These operations are used during security incidents, trust violations, or compliance breaches that require coordinated isolation of affected fleet segments.
@@ -423,12 +447,21 @@ cannot prove the previous high-water mark from replacement coordinator history.
 Restore the retained documents from trusted recovery material. Activation is
 refused on platforms without this descriptor-relative storage implementation.
 
-The enforcement scope is **new run admission**. `run` applies the policy before
-trust preflight, the dispatcher binds that activation to the native worker
-request, and the worker checks it again before constructing runtime controls.
-An enrolled worker cannot start after the expected policy disappears or rolls
-back. An already executing guest retains its admitted policy; this command does
-not claim to hot-reload budgets or stop existing guests.
+`run` applies the policy before trust preflight, the dispatcher binds that
+activation to the native worker request, and the worker checks it again before
+constructing runtime controls. Supervised deployments additionally intersect the
+operator project's active policy with the release project's policy. Minimum
+profiles, instruction and parser ceilings, and network restrictions from either
+project remain effective. Each project retains its own revision high-water mark;
+a newer release policy cannot replace the operator's policy history.
+
+An enrolled worker cannot start after an expected policy disappears or rolls
+back. The native supervisor also observes both retained scopes during execution.
+A changed effective restriction, missing expected policy, or rollback interrupts
+the current worker; it does not hot-reload budgets into an already running guest.
+Equivalent newer revisions advance the observation without interrupting the
+worker. Interruption and effect accounting still follow the normal native drain
+contract, including retained unknown external effects.
 
 ## Decision Receipts
 
