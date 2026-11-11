@@ -663,7 +663,11 @@ impl FleetPolicyStore {
                     Err(error) => return Err(error.into()),
                 };
             }
-            let flags = OFlags::RDWR | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+            // A contained worker sees its independent operator through the
+            // read-only host mount. Shared observation needs no write access;
+            // both readers and writers still lock this same checked inode.
+            let access = if create { OFlags::RDWR } else { OFlags::RDONLY };
+            let flags = access | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
             let (lock, enrollment_created) = match openat(
                 &directory,
                 FLEET_POLICY_LOCK_FILE,
@@ -882,6 +886,45 @@ pub fn load_active_fleet_policy(
 /// package markers. The normal policy reader also refuses corrupt enrollment,
 /// missing documents with a retained lock, and linked state paths.
 pub fn validate_fleet_policy_project_root(project: &Path) -> Result<(), FleetTransportError> {
+    validate_fleet_policy_project_root_with_operator(project, None)
+}
+
+/// Preserve one independently admitted deployment operator without widening
+/// the release's filesystem authority. Callers must enforce that operator's
+/// policy separately; this exception only permits its exact retained ancestor
+/// while continuing to inspect every enclosing enrollment for corruption or
+/// another control owner that has not been retained.
+pub fn validate_fleet_policy_project_root_with_operator(
+    project: &Path,
+    operator: Option<&Path>,
+) -> Result<(), FleetTransportError> {
+    if let Some(operator) = operator {
+        let normalized: PathBuf = operator.components().collect();
+        if !operator.is_absolute()
+            || normalized.as_os_str() != operator.as_os_str()
+            || operator.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::CurDir | std::path::Component::ParentDir
+                )
+            })
+        {
+            return Err(FleetTransportError::stale_state(
+                "retained fleet operator must be a normalized absolute canonical project root",
+            ));
+        }
+        let canonical_operator = operator.canonicalize().map_err(|error| {
+            FleetTransportError::io(format!(
+                "failed resolving retained fleet operator project root {}: {error}",
+                operator.display()
+            ))
+        })?;
+        if canonical_operator.as_os_str() != operator.as_os_str() {
+            return Err(FleetTransportError::stale_state(
+                "retained fleet operator must be a normalized absolute canonical project root",
+            ));
+        }
+    }
     let canonical = project.canonicalize().map_err(|error| {
         FleetTransportError::io(format!(
             "failed resolving fleet policy project root {}: {error}",
@@ -897,7 +940,7 @@ pub fn validate_fleet_policy_project_root(project: &Path) -> Result<(), FleetTra
                 canonical.display()
             ))
         })?;
-        if active.is_some() {
+        if active.is_some() && operator != Some(ancestor) {
             return Err(FleetTransportError::stale_state(format!(
                 "selected project {} is inside fleet-managed project {}; \
                  select the enrolled project directory explicitly to preserve its policy",
@@ -917,6 +960,19 @@ pub fn enforce_active_fleet_policy(
     config: &mut Config,
     profile: Profile,
 ) -> Result<Option<ActiveFleetPolicy>, FleetTransportError> {
+    enforce_active_fleet_policy_with_operator(project, config, profile, None)
+}
+
+/// Apply the release's policy while preserving an independently admitted
+/// operator ancestor. The caller must also enforce the operator's own policy
+/// through the strict entry point so both restrictions compose and no outer
+/// enrollment is discarded.
+pub fn enforce_active_fleet_policy_with_operator(
+    project: &Path,
+    config: &mut Config,
+    profile: Profile,
+    operator: Option<&Path>,
+) -> Result<Option<ActiveFleetPolicy>, FleetTransportError> {
     // Capture relative aliases once so ancestry admission and the activation
     // read cannot resolve different projects. Absolute inputs retain the
     // descriptor reader's existing refusal of symlinked path components.
@@ -931,7 +987,7 @@ pub fn enforce_active_fleet_policy(
         })?)
     };
     let project = canonical_relative.as_deref().unwrap_or(project);
-    validate_fleet_policy_project_root(project)?;
+    validate_fleet_policy_project_root_with_operator(project, operator)?;
     let active = load_active_fleet_policy(project)?;
     if let Some(active) = &active {
         if config.profile != profile {
@@ -4204,6 +4260,259 @@ mod tests {
     };
 
     use tempfile::tempdir;
+
+    #[cfg(unix)]
+    mod operator_policy_ancestry {
+        use super::*;
+        use crate::config::{Config, Profile};
+        use crate::control_plane::fleet_transport::{
+            FleetPolicyArtifact, FleetRuntimePolicy, activate_fleet_policy_snapshot,
+            enforce_active_fleet_policy, enforce_active_fleet_policy_with_operator,
+            validate_fleet_policy_project_root, validate_fleet_policy_project_root_with_operator,
+        };
+
+        fn activate(project: &Path, limit: u64) {
+            activate_fleet_policy_snapshot(
+                project,
+                &[FleetActionRecord {
+                    action_id: format!("restricted-{limit}"),
+                    emitted_at: Utc::now(),
+                    action: FleetAction::PolicyUpdate {
+                        zone_id: "prod".to_string(),
+                        policy_version: "revision-1".to_string(),
+                        changed_fields: vec!["max_instructions".to_string()],
+                        artifact: Some(
+                            FleetPolicyArtifact::new(
+                                1,
+                                FleetRuntimePolicy {
+                                    max_instructions: Some(limit),
+                                    ..FleetRuntimePolicy::default()
+                                },
+                            )
+                            .unwrap(),
+                        ),
+                    },
+                }],
+                "prod",
+            )
+            .unwrap()
+            .unwrap();
+        }
+
+        #[test]
+        fn retained_operator_allows_nested_release_and_both_restrictions_compose() {
+            let workspace = tempdir().unwrap();
+            let operator = workspace.path().canonicalize().unwrap();
+            let release = operator.join("releases/current");
+            fs::create_dir_all(&release).unwrap();
+            activate(&operator, 1_000);
+            activate(&release, 2_000);
+            let mut config = Config::for_profile(Profile::Balanced);
+            let original = config.clone();
+
+            assert!(validate_fleet_policy_project_root(&release).is_err());
+            assert!(enforce_active_fleet_policy(&release, &mut config, Profile::Balanced).is_err());
+            assert_eq!(config, original);
+            validate_fleet_policy_project_root_with_operator(&release, Some(&operator)).unwrap();
+            let child_policy = enforce_active_fleet_policy_with_operator(
+                &release,
+                &mut config,
+                Profile::Balanced,
+                Some(&operator),
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(
+                child_policy.policies["prod"].policy.max_instructions,
+                Some(2_000)
+            );
+            assert_eq!(config.runtime.max_instructions, Some(2_000));
+            let operator_policy =
+                enforce_active_fleet_policy(&operator, &mut config, Profile::Balanced)
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(
+                operator_policy.policies["prod"].policy.max_instructions,
+                Some(1_000)
+            );
+            assert_eq!(config.runtime.max_instructions, Some(1_000));
+            // The exception never changes ordinary execution admission.
+            assert!(validate_fleet_policy_project_root(&release).is_err());
+        }
+
+        #[test]
+        fn retained_operator_exception_cannot_skip_other_enrolled_ancestors() {
+            for scenario in ["intermediate", "outer", "unrelated"] {
+                let workspace = tempdir().unwrap();
+                let outer = workspace.path().canonicalize().unwrap();
+                let operator = outer.join("operator");
+                let intermediate = operator.join("releases");
+                let release = intermediate.join("current");
+                let unrelated = outer.join("unrelated");
+                fs::create_dir_all(&release).unwrap();
+                fs::create_dir(&unrelated).unwrap();
+                activate(&operator, 2_000);
+                let (retained, blocked) = match scenario {
+                    "intermediate" => {
+                        activate(&intermediate, 1_000);
+                        (&operator, &intermediate)
+                    }
+                    "outer" => {
+                        activate(&outer, 1_000);
+                        (&operator, &outer)
+                    }
+                    _ => (&unrelated, &operator),
+                };
+                let mut config = Config::for_profile(Profile::Balanced);
+                let original = config.clone();
+                let error = enforce_active_fleet_policy_with_operator(
+                    &release,
+                    &mut config,
+                    Profile::Balanced,
+                    Some(retained),
+                )
+                .unwrap_err()
+                .to_string();
+                assert!(
+                    error.contains("inside fleet-managed project"),
+                    "{scenario}: {error}"
+                );
+                assert!(
+                    error.contains(blocked.to_str().unwrap()),
+                    "{scenario}: {error}"
+                );
+                assert_eq!(config, original);
+                if scenario == "outer" {
+                    assert!(
+                        enforce_active_fleet_policy(&operator, &mut config, Profile::Balanced)
+                            .is_err(),
+                        "the operator's own strict admission must preserve outer enrollment"
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn retained_operator_enrollment_corruption_is_not_skipped() {
+            for corruption in ["malformed", "missing", "linked"] {
+                let workspace = tempdir().unwrap();
+                let operator = workspace.path().canonicalize().unwrap();
+                let release = operator.join("releases/current");
+                fs::create_dir_all(&release).unwrap();
+                activate(&operator, 1_000);
+                activate(&release, 2_000);
+                let state = operator.join(".franken-node/state");
+                match corruption {
+                    "malformed" => fs::write(state.join("fleet-policy.json"), b"{").unwrap(),
+                    "missing" => fs::rename(
+                        state.join("fleet-policy-required.json"),
+                        state.join("fleet-policy-required.retained"),
+                    )
+                    .unwrap(),
+                    _ => {
+                        let retained = state.with_file_name("state-retained");
+                        fs::rename(&state, &retained).unwrap();
+                        std::os::unix::fs::symlink(&retained, &state).unwrap();
+                    }
+                }
+                let mut config = Config::for_profile(Profile::Balanced);
+                let original = config.clone();
+                let error = enforce_active_fleet_policy_with_operator(
+                    &release,
+                    &mut config,
+                    Profile::Balanced,
+                    Some(&operator),
+                )
+                .unwrap_err()
+                .to_string();
+                assert!(
+                    error.contains("cannot exclude fleet policy enrollment at ancestor"),
+                    "{corruption}: {error}"
+                );
+                assert!(
+                    error.contains(operator.to_str().unwrap()),
+                    "{corruption}: {error}"
+                );
+                assert_eq!(config, original);
+            }
+        }
+
+        #[test]
+        fn retained_operator_root_rejects_relative_traversal_and_symlink_aliases() {
+            let workspace = tempdir().unwrap();
+            let root = workspace.path().canonicalize().unwrap();
+            let operator = root.join("operator");
+            let release = operator.join("current");
+            fs::create_dir_all(&release).unwrap();
+            activate(&operator, 1_000);
+            let alias = root.join("operator-alias");
+            std::os::unix::fs::symlink(&operator, &alias).unwrap();
+            for invalid in [
+                PathBuf::from("operator"),
+                operator.join(".."),
+                operator.join("."),
+                alias,
+            ] {
+                let error =
+                    validate_fleet_policy_project_root_with_operator(&release, Some(&invalid))
+                        .unwrap_err()
+                        .to_string();
+                assert!(
+                    error.contains("normalized absolute canonical project root"),
+                    "{}: {error}",
+                    invalid.display()
+                );
+            }
+        }
+
+        #[test]
+        fn policy_readers_use_read_only_shared_locks_and_exclude_writers() {
+            use crate::control_plane::fleet_transport::{
+                FleetPolicyStore, load_active_fleet_policy,
+            };
+            use rustix::fs::{OFlags, fcntl_getfl};
+            use std::os::unix::fs::PermissionsExt as _;
+
+            let workspace = tempdir().unwrap();
+            let operator = workspace.path().canonicalize().unwrap();
+            activate(&operator, 1_000);
+            let lock_path = operator.join(".franken-node/state/fleet-policy.lock");
+            fs::set_permissions(&lock_path, fs::Permissions::from_mode(0o400)).unwrap();
+            let reader = FleetPolicyStore::open(&operator, false).unwrap().unwrap();
+            assert_eq!(
+                fcntl_getfl(&reader.lock).unwrap() & OFlags::RWMODE,
+                OFlags::RDONLY,
+                "read-only containment cannot open the enrollment lock for writing"
+            );
+            assert_eq!(
+                load_active_fleet_policy(&operator).unwrap(),
+                reader.active().unwrap(),
+                "independent shared readers retain the same complete policy"
+            );
+
+            // Permit a writer to open its own descriptor, then verify that
+            // the reader's shared lock still prevents an exclusive commit.
+            fs::set_permissions(&lock_path, fs::Permissions::from_mode(0o600)).unwrap();
+            let writer_probe = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&lock_path)
+                .unwrap();
+            assert!(matches!(
+                writer_probe.try_lock(),
+                Err(std::fs::TryLockError::WouldBlock)
+            ));
+            drop(reader);
+            writer_probe.try_lock().unwrap();
+            writer_probe.unlock().unwrap();
+            let writer = FleetPolicyStore::open(&operator, true).unwrap().unwrap();
+            assert_eq!(
+                fcntl_getfl(&writer.lock).unwrap() & OFlags::RWMODE,
+                OFlags::RDWR,
+                "policy activation retains its writable exclusive descriptor"
+            );
+        }
+    }
 
     struct TestTransport {
         layout: FleetTransportLayout,

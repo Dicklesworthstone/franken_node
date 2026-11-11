@@ -140,6 +140,15 @@ filesystem authority. `fleet sessions` and native drain accounting in either
 project include the same session nonce. The signed admission binds the additional
 project, its admission generation, and its observed fleet-policy digest.
 
+Approved releases may also live beneath the operator project, for example at
+`releases/1.0.0`. Deployment admission preserves only the exact retained operator
+ancestor and enforces its policy separately. It still reads every ancestor's
+enrollment: corrupt state, an additional managed directory between the operator
+and release, or another managed ancestor above the operator refuses execution.
+Ordinary `run` retains its existing refusal to select a narrower project beneath
+fleet enrollment. The deployment exception never widens the guest filesystem
+root or changes the publisher-approved source graph.
+
 Admission checks both projects' fences and generations in one inventory
 transaction. A concurrent hold therefore either includes the admitted worker in
 its census or prevents that worker from starting. Both scopes remain under live

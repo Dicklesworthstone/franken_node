@@ -2005,6 +2005,150 @@ fn deployment_intersects_operator_and_release_fleet_budgets_in_worker_and_receip
 }
 
 #[test]
+#[cfg(target_os = "linux")]
+fn nested_deployment_retains_both_fleet_policies_and_refuses_unretained_ancestors() {
+    let drill = Drill::new();
+    let (release, manifest) = drill.publish_release("1.0.0", HEALTHY_V1);
+    assert!(release.starts_with(drill.root.path()));
+    drill.install_published("1.0.0", &release, &manifest);
+    drill.activate("1.0.0");
+    let admitted = drill.admitted_release("1.0.0");
+    for (project, name, policy) in [
+        (
+            drill.root.path(),
+            "operator",
+            serde_json::json!({
+                "max_instructions": 100_000,
+                "max_parse_source_bytes": 4096,
+                "max_parse_tokens": 128,
+            }),
+        ),
+        (
+            release.as_path(),
+            "release",
+            serde_json::json!({
+                "max_instructions": 400_000,
+                "max_parse_source_bytes": 2048,
+                "max_parse_tokens": 256,
+            }),
+        ),
+    ] {
+        let fleet_state = drill.state_home.path().join(format!("{name}-fleet"));
+        drill.publish_fleet_policy(project, &fleet_state, name, &policy);
+        let applied = drill.fleet_poll(project, &fleet_state, name);
+        assert_eq!(applied["node_health"], "healthy", "{applied}");
+    }
+
+    let (code, completed) = drill.run();
+    assert_eq!(code, Some(0), "{completed}");
+    let run = &completed["run"];
+    assert_eq!(guest_stdout(run), "RELEASE_ONE_HEALTHY\n");
+    let decision = &run["dispatch"]["engine_decision"];
+    assert_eq!(
+        decision["frozen_modules"]["graph_input_hash"],
+        admitted.approval.graph_input_hash()
+    );
+    assert_eq!(
+        decision["frozen_modules"]["publisher_artifact"],
+        serde_json::to_value(admitted.approval.identity()).unwrap()
+    );
+    for lane in ["deterministic", "throughput"] {
+        assert_eq!(
+            decision["execution_limits"][lane]["max_instructions"],
+            100_000
+        );
+    }
+    assert_eq!(decision["parser_budget"]["max_source_bytes"], 2048);
+    assert_eq!(decision["parser_budget"]["max_token_count"], 128);
+    assert_eq!(run["receipt"]["parser_budget"], decision["parser_budget"]);
+    assert_eq!(
+        run["receipt"]["execution_limits"],
+        decision["execution_limits"]
+    );
+
+    let operator_sessions = drill.sessions(drill.root.path());
+    assert_eq!(operator_sessions["records"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        operator_sessions["records"],
+        drill.sessions(&release)["records"]
+    );
+    let admission = &operator_sessions["records"][0]["admission"];
+    assert_eq!(
+        admission["project_root"],
+        release.canonicalize().unwrap().to_str().unwrap()
+    );
+    assert_eq!(
+        admission["entrypoint"],
+        release
+            .join("app.js")
+            .canonicalize()
+            .unwrap()
+            .to_str()
+            .unwrap()
+    );
+    let scopes = admission["control_scopes"].as_array().unwrap();
+    assert_eq!(scopes.len(), 1);
+    assert_eq!(
+        scopes[0]["project_root"],
+        drill.root.path().canonicalize().unwrap().to_str().unwrap()
+    );
+
+    // An ordinary nested invocation has no retained operator owner. It must
+    // still refuse to choose a narrower source root beneath fleet enrollment.
+    let standalone = drill.cli(
+        &release,
+        &[
+            "run",
+            "app.js",
+            "--runtime",
+            "franken-engine",
+            "--frozen-modules",
+            "--registry-artifact",
+            manifest.to_str().unwrap(),
+            "--publisher-public-key",
+            drill.public_key.to_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert!(!standalone.status.success());
+    let refused: Value = serde_json::from_slice(&standalone.stdout).expect("nested refusal JSON");
+    assert!(
+        refused.to_string().contains("inside fleet-managed project"),
+        "{refused}"
+    );
+
+    // Retaining the exact operator is not permission to ignore a different
+    // enrolled project between that operator and the signed release.
+    let intermediate = release.parent().expect("intermediate releases directory");
+    assert_ne!(intermediate, drill.root.path());
+    let intermediate_fleet = drill.state_home.path().join("intermediate-fleet");
+    drill.publish_fleet_policy(
+        intermediate,
+        &intermediate_fleet,
+        "intermediate-policy",
+        &serde_json::json!({"max_instructions": 50_000}),
+    );
+    let applied = drill.fleet_poll(intermediate, &intermediate_fleet, "intermediate-node");
+    assert_eq!(applied["node_health"], "healthy", "{applied}");
+    let (code, refused) = drill.run();
+    assert_ne!(code, Some(0), "{refused}");
+    assert!(
+        refused.to_string().contains("inside fleet-managed project"),
+        "{refused}"
+    );
+    assert!(
+        refused.to_string().contains(intermediate.to_str().unwrap()),
+        "the refusal must identify the unretained ancestor: {refused}"
+    );
+    assert_eq!(drill.status()["releases"][0]["healthy_runs"], 1);
+    assert_eq!(
+        drill.sessions(drill.root.path())["records"],
+        operator_sessions["records"],
+        "both refusals must happen before admitting another native worker"
+    );
+}
+
+#[test]
 fn supersede_replaces_a_revoked_pending_target_without_rewriting_its_evidence() {
     for stage in ["intent", "history"] {
         let drill = Drill::new();

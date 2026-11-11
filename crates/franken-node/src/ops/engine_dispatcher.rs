@@ -1,5 +1,6 @@
 use crate::control_plane::fleet_transport::{
-    ActiveFleetPolicy, enforce_active_fleet_policy, validate_fleet_policy_project_root,
+    ActiveFleetPolicy, enforce_active_fleet_policy_with_operator,
+    validate_fleet_policy_project_root_with_operator,
 };
 #[cfg(feature = "engine")]
 use crate::ops::native_session_inventory::{
@@ -3311,8 +3312,9 @@ fn resolve_run_target_path(app_path: &Path, anchored: &Path) -> io::Result<PathB
 /// file uses its nearest project marker at or below the invocation directory,
 /// or its own parent when none exists. Absolute files select only their
 /// parent. Every entrypoint must remain inside the selected root.
-/// A selected root below an enrolled fleet project is refused; selecting a
-/// narrower guest authority cannot discard the enclosing project's policy.
+/// A selected root below an enrolled fleet project is refused unless that
+/// exact operator is retained and independently enforced by deployment
+/// supervision. Narrower guest authority never discards an enclosing policy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunProjectPaths {
@@ -3329,6 +3331,17 @@ impl RunProjectPaths {
     /// Marker discovery never crosses the invocation directory. Canonical
     /// containment checks reject entrypoint and directory-main symlink escapes.
     pub fn resolve(app_path: &Path, working_dir: &Path) -> Result<Self> {
+        Self::resolve_with_operator_project(app_path, working_dir, None)
+    }
+
+    /// Resolve the same narrow source authority while preserving one explicit
+    /// deployment operator. The caller must validate its retained control
+    /// anchor and enforce its policy independently of the release's policy.
+    pub fn resolve_with_operator_project(
+        app_path: &Path,
+        working_dir: &Path,
+        operator_project: Option<&Path>,
+    ) -> Result<Self> {
         let invocation_root = working_dir.canonicalize().with_context(|| {
             format!("resolve run invocation directory {}", working_dir.display())
         })?;
@@ -3416,7 +3429,7 @@ impl RunProjectPaths {
                 project_root.display()
             );
         }
-        validate_fleet_policy_project_root(&project_root)?;
+        validate_fleet_policy_project_root_with_operator(&project_root, operator_project)?;
         let entrypoint_format =
             resolve_run_entrypoint_format(&entrypoint, &project_root, &mut package_manifests)
                 .map_err(anyhow::Error::msg)?;
@@ -3442,8 +3455,14 @@ impl RunProjectPaths {
         &self.project_root
     }
 
-    fn verify_target(&self, app_path: &Path, working_dir: &Path) -> Result<()> {
-        let observed = Self::resolve(app_path, working_dir)?;
+    fn verify_target_with_operator_project(
+        &self,
+        app_path: &Path,
+        working_dir: &Path,
+        operator_project: Option<&Path>,
+    ) -> Result<()> {
+        let observed =
+            Self::resolve_with_operator_project(app_path, working_dir, operator_project)?;
         if observed != *self {
             anyhow::bail!(
                 "run project authority changed after preflight; resolve and verify the project again"
@@ -3947,9 +3966,23 @@ pub fn enforce_execution_fleet_policy(
     config: &mut Config,
     expected: Option<&ActiveFleetPolicy>,
 ) -> Result<Option<ActiveFleetPolicy>> {
+    enforce_execution_fleet_policy_with_operator(project_root, config, expected, None)
+}
+
+fn enforce_execution_fleet_policy_with_operator(
+    project_root: &Path,
+    config: &mut Config,
+    expected: Option<&ActiveFleetPolicy>,
+    operator_project: Option<&Path>,
+) -> Result<Option<ActiveFleetPolicy>> {
     let profile = config.profile;
     let mut effective = config.clone();
-    let active = enforce_active_fleet_policy(project_root, &mut effective, profile)?;
+    let active = enforce_active_fleet_policy_with_operator(
+        project_root,
+        &mut effective,
+        profile,
+        operator_project,
+    )?;
     if let Some(expected) = expected {
         let current = active
             .as_ref()
@@ -4062,10 +4095,11 @@ fn recheck_native_run_controls(
     }
 
     let mut effective = config.clone();
-    let current_fleet = enforce_execution_fleet_policy(
+    let current_fleet = enforce_execution_fleet_policy_with_operator(
         project_paths.project_root(),
         &mut effective,
         fleet_high_water.as_ref(),
+        requirements.operator_fleet_project_root.as_deref(),
     )
     .map_err(|error| NativeRunControlTrigger::new(NativeRunControlKind::FleetPolicy, error))?;
     let current_operator_fleet = requirements
@@ -4185,7 +4219,8 @@ impl NativeRunControlMonitor {
                     ) {
                         return;
                     }
-                })?;
+                }
+            })?;
         Ok(Self {
             cancelled,
             stop,
@@ -7396,26 +7431,37 @@ impl EngineDispatcher {
 
         let working_dir =
             std::env::current_dir().context("failed resolving run invocation directory")?;
+        if let Some(operator_project) = &self.operator_fleet_project_root {
+            self.operator_safe_mode_scope
+                .as_ref()
+                .context("operator fleet project requires its retained control anchor")?
+                .validate_project_root(operator_project)?;
+        }
         let project_paths = match self.project_paths.as_ref() {
             Some(paths) => {
-                paths.verify_target(app_path, &working_dir)?;
+                paths.verify_target_with_operator_project(
+                    app_path,
+                    &working_dir,
+                    self.operator_fleet_project_root.as_deref(),
+                )?;
                 paths.clone()
             }
-            None => RunProjectPaths::resolve(app_path, &working_dir)?,
+            None => RunProjectPaths::resolve_with_operator_project(
+                app_path,
+                &working_dir,
+                self.operator_fleet_project_root.as_deref(),
+            )?,
         };
         crate::runtime::safe_mode::enforce_run_safe_mode(project_paths.entrypoint())?;
         let mut execution_config = config.clone();
-        let active_fleet_policy = enforce_execution_fleet_policy(
+        let active_fleet_policy = enforce_execution_fleet_policy_with_operator(
             project_paths.project_root(),
             &mut execution_config,
             self.preflight_fleet_policy.as_ref(),
+            self.operator_fleet_project_root.as_deref(),
         )?;
         let operator_fleet_policy =
             if let Some(operator_project) = &self.operator_fleet_project_root {
-                self.operator_safe_mode_scope
-                    .as_ref()
-                    .context("operator fleet project requires its retained control anchor")?
-                    .validate_project_root(operator_project)?;
                 enforce_execution_fleet_policy(
                     operator_project,
                     &mut execution_config,
@@ -8140,7 +8186,11 @@ impl EngineDispatcher {
         }
         request
             .project_paths
-            .verify_target(&request.app_path, &actual_working_dir)
+            .verify_target_with_operator_project(
+                &request.app_path,
+                &actual_working_dir,
+                request.trust_requirements.operator_fleet_project_root.as_deref(),
+            )
             .context("native-session project authority no longer matches preflight")?;
 
         #[cfg(target_os = "linux")]
@@ -8886,7 +8936,11 @@ impl EngineDispatcher {
         })?;
         let nonce = uuid::Uuid::now_v7().to_string();
         project_paths
-            .verify_target(&app_path_buf, &working_dir)
+            .verify_target_with_operator_project(
+                &app_path_buf,
+                &working_dir,
+                trust_requirements.operator_fleet_project_root.as_deref(),
+            )
             .context("project authority changed before native-session launch")?;
         trust_requirements
             .verify_dependency_capture(project_paths.project_root())
@@ -10764,10 +10818,11 @@ impl EngineDispatcher {
         } = run_context;
         let mut telemetry_guard = Some(telemetry_guard);
         let mut execution_config = config.clone();
-        enforce_execution_fleet_policy(
+        enforce_execution_fleet_policy_with_operator(
             project_paths.project_root(),
             &mut execution_config,
             fleet_policy.as_ref(),
+            trust_requirements.operator_fleet_project_root.as_deref(),
         )
         .map_err(|error| {
             native_engine_spawn_error_with_telemetry_cleanup(
@@ -10841,7 +10896,11 @@ impl EngineDispatcher {
             )
         })?;
         project_paths
-            .verify_target(app_path, &current_dir)
+            .verify_target_with_operator_project(
+                app_path,
+                &current_dir,
+                trust_requirements.operator_fleet_project_root.as_deref(),
+            )
             .map_err(|error| {
                 native_engine_spawn_error_with_telemetry_cleanup(
                     format!("Run project authority changed before execution: {error:#}"),
@@ -17165,7 +17224,7 @@ exec "$2" pinned-worker-image"#,
                 .expect("new higher-precedence source");
 
             let error = selected
-                .verify_target(Path::new("app"), root)
+                .verify_target_with_operator_project(Path::new("app"), root, None)
                 .expect_err("a new resolution winner invalidates preflight");
             assert!(
                 error

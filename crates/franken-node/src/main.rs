@@ -36992,22 +36992,6 @@ fn main() -> Result<()> {
                     ),
                 );
             }
-            // Resolve one canonical authority before consulting trust state.
-            // The dispatcher and private worker revalidate these exact paths
-            // instead of rediscovering a different root after preflight.
-            let project_paths = match std::env::current_dir()
-                .map_err(anyhow::Error::from)
-                .and_then(|working_dir| RunProjectPaths::resolve(&app_path, &working_dir))
-            {
-                Ok(project_paths) => project_paths,
-                Err(err) => {
-                    return named_cli_fail("franken-node/run-error-cli/v1", "run", json, err);
-                }
-            };
-            if let Err(err) = runtime::safe_mode::enforce_run_safe_mode(project_paths.entrypoint())
-            {
-                return named_cli_fail("franken-node/run-error-cli/v1", "run", json, err);
-            }
             let operator_safe_mode_scope = match admitted_operator_scope
                 .as_deref()
                 .map(runtime::safe_mode::AdmittedSafeModeScope::capture)
@@ -37034,11 +37018,35 @@ fn main() -> Result<()> {
                     return named_cli_fail("franken-node/run-error-cli/v1", "run", json, error);
                 }
             }
+            // Resolve one canonical source authority after validating the
+            // independent operator. A nested release keeps its narrow root
+            // while retaining that exact operator's separately enforced policy.
+            // The dispatcher and private worker revalidate both boundaries.
+            let project_paths = match std::env::current_dir()
+                .map_err(anyhow::Error::from)
+                .and_then(|working_dir| {
+                    RunProjectPaths::resolve_with_operator_project(
+                        &app_path,
+                        &working_dir,
+                        admitted_operator_project.as_deref(),
+                    )
+                })
+            {
+                Ok(project_paths) => project_paths,
+                Err(err) => {
+                    return named_cli_fail("franken-node/run-error-cli/v1", "run", json, err);
+                }
+            };
+            if let Err(err) = runtime::safe_mode::enforce_run_safe_mode(project_paths.entrypoint())
+            {
+                return named_cli_fail("franken-node/run-error-cli/v1", "run", json, err);
+            }
             let active_fleet_policy =
-                match control_plane::fleet_transport::enforce_active_fleet_policy(
+                match control_plane::fleet_transport::enforce_active_fleet_policy_with_operator(
                     project_paths.project_root(),
                     &mut resolved.config,
                     resolved.selected_profile,
+                    admitted_operator_project.as_deref(),
                 ) {
                     Ok(active) => active,
                     Err(err) => {
