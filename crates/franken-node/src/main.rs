@@ -747,6 +747,8 @@ enum TrustViolationKind {
     RegistryCorrupt,
     /// The signed card and selected package metadata name different artifacts.
     ArtifactMismatch,
+    /// Strict admission requires a current card for every declared dependency.
+    Untracked,
     Revoked,
     Quarantined,
     /// bd-fp1je: the run target itself is under an active Sentinel
@@ -5468,6 +5470,17 @@ fn run_preflight_block_error(report: &RunPreFlightReport) -> ActionableError {
             ActionableError::new(
                 format!("run blocked by contradictory package trust evidence: {reason}"),
                 "franken-node trust scan --refresh",
+            )
+        }
+        PreFlightVerdict::Blocked {
+            reason, violations, ..
+        } if violations
+            .iter()
+            .any(|violation| violation.kind == TrustViolationKind::Untracked) =>
+        {
+            ActionableError::new(
+                format!("run blocked by untracked dependencies under strict policy: {reason}"),
+                "franken-node trust scan .",
             )
         }
         PreFlightVerdict::Blocked { reason, .. } => ActionableError::new(
@@ -22626,6 +22639,12 @@ fn build_run_preflight_receipt(
             if violations.iter().any(|violation| violation.kind == TrustViolationKind::ArtifactMismatch)
     ) {
         "franken-node trust scan --refresh"
+    } else if matches!(
+        verdict,
+        PreFlightVerdict::Blocked { violations, .. }
+            if violations.iter().any(|violation| violation.kind == TrustViolationKind::Untracked)
+    ) {
+        "franken-node trust scan ."
     } else {
         "franken-node trust sync --force"
     };
@@ -22752,7 +22771,18 @@ fn evaluate_run_trust_preflight(
                                     let detail = format!(
                                         "dependency `{extension_id}` is untracked in the authoritative trust registry"
                                     );
-                                    warnings.push(detail.clone());
+                                    if policy_mode == Profile::Strict {
+                                        violations.push(TrustViolation {
+                                            dependency_name: Some(dependency_name.clone()),
+                                            extension_id: Some(extension_id.clone()),
+                                            kind: TrustViolationKind::Untracked,
+                                            detail: format!(
+                                                "{detail}; strict policy requires a local trust card before execution"
+                                            ),
+                                        });
+                                    } else {
+                                        warnings.push(detail.clone());
+                                    }
                                     results.push(RunDependencyTrustResult {
                                         dependency_name,
                                         version_requirement: dependency.version_requirement,

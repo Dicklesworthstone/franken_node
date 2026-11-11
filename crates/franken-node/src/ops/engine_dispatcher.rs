@@ -3790,6 +3790,8 @@ impl RunTrustRequirements {
 /// Both the dispatcher and authenticated native worker use this same policy.
 /// Previously trusted cards must remain present; newly tracked dependencies
 /// must obey their current revocation, quarantine, and risk state as well.
+/// Strict requires every retained dependency to have a current card, including
+/// identities that were untracked when a less restrictive profile admitted them.
 /// A retained publisher approval always requires authenticated current registry
 /// state for its exact signing key and artifact, even without dependencies.
 /// Warnings retain the existing balanced/legacy profile behavior.
@@ -3881,6 +3883,15 @@ pub fn validate_execution_trust(
                     "Execution blocked: extension '{}' is no longer tracked in trust registry since preflight check. This prevents TOCTOU attacks.",
                     extension_id,
                 );
+            }
+            if config.profile == Profile::Strict {
+                return Err(ActionableError::new(
+                    format!(
+                        "Execution blocked: dependency `{extension_id}` is untracked in the authoritative trust registry; strict policy requires a local trust card before execution"
+                    ),
+                    "franken-node trust scan .",
+                )
+                .into());
             }
             warnings.push(format!(
                 "dependency `{extension_id}` remains untracked at execution admission"
@@ -14393,6 +14404,80 @@ mod tests {
         )
         .expect("record independent fresh frontier");
         config
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn strict_live_trust_recheck_refuses_card_loss_without_a_required_card_list() {
+        let root = TempDir::new().expect("live strict trust project");
+        fs::write(root.path().join("app.js"), "console.log('admitted');\n")
+            .expect("real project entry");
+        let now_secs = Utc::now().timestamp().max(0) as u64;
+        let mut config = seed_execution_trust_artifact_registry(root.path(), now_secs);
+        config.profile = Profile::Strict;
+        // Explicit name-only library admission must have the same strict
+        // missing-card rule as an admission produced by the product CLI.
+        let requirements = RunTrustRequirements::new(
+            &["npm:fixture-actual".to_string()],
+            &[],
+            false,
+        )
+        .expect("retain the dependency despite no separate required-card set");
+        let paths = RunProjectPaths::resolve(Path::new("app.js"), root.path())
+            .expect("admitted project paths");
+        let mut fleet_high_water = None;
+        let mut operator_fleet_high_water = None;
+        let cancelled = AtomicBool::new(false);
+        recheck_native_run_controls(
+            &paths,
+            &config,
+            &requirements,
+            &mut fleet_high_water,
+            &mut operator_fleet_high_water,
+            &cancelled,
+        )
+        .expect("the signed current card admits the initial observation");
+
+        fs::rename(
+            root.path().join(".franken-node/state"),
+            root.path().join("retained-trust-state"),
+        )
+        .expect("preserve the original trust state after admission");
+        TrustCardRegistry::from_config(&config.trust)
+            .expect("a legitimate but empty replacement registry")
+            .persist_authoritative_state(
+                &crate::supply_chain::trust_card_registry_store::registry_snapshot_path(root.path()),
+            )
+            .expect("persist the authenticated replacement state");
+
+        let trigger = recheck_native_run_controls(
+            &paths,
+            &config,
+            &requirements,
+            &mut fleet_high_water,
+            &mut operator_fleet_high_water,
+            &cancelled,
+        )
+        .expect_err("a live strict session must stop when its dependency becomes untracked");
+        assert_eq!(trigger.kind, NativeRunControlKind::ExecutionTrust);
+        assert!(trigger.detail.contains("npm:fixture-actual"), "{trigger:?}");
+        assert!(
+            trigger.detail.contains("strict policy requires a local trust card"),
+            "{trigger:?}"
+        );
+
+        for profile in [Profile::Balanced, Profile::LegacyRisky] {
+            config.profile = profile;
+            recheck_native_run_controls(
+                &paths,
+                &config,
+                &requirements,
+                &mut fleet_high_water,
+                &mut operator_fleet_high_water,
+                &cancelled,
+            )
+            .expect("the same live observation preserves non-strict warning behavior");
+        }
     }
 
     #[cfg(all(feature = "engine", unix))]

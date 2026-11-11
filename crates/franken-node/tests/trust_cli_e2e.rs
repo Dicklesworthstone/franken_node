@@ -1,3 +1,6 @@
+#[path = "trust_support/strict_dependency_admission.rs"]
+mod strict_dependency_admission;
+
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
