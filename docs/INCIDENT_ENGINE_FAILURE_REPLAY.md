@@ -1,9 +1,10 @@
 # Native replay of finalized engine stops
 
 The public `NativeReplayCapture::from_finalized_failure` entrypoint captures
-three independently typed outcomes: an uncaught guest exception, an interpreter
-capability denial, or exhaustion of the interpreter's instruction budget. The
-existing `reexecute` entrypoint consumes these captures using the native engine.
+four independently typed outcomes: an uncaught guest exception, an interpreter
+capability denial, exhaustion of the interpreter's instruction budget, or a
+console entry/byte budget stop. The existing `reexecute` entrypoint consumes
+these captures using the native engine.
 It never repeats live filesystem, network, environment or process effects.
 
 ## Capture and integration boundary
@@ -16,9 +17,10 @@ code or watchdog receipt cannot manufacture an engine failure.
 
 The run-facing `from_failed_execution` entrypoint now delegates every certified
 post-cell failure to `from_finalized_failure`. Existing `run --capture-replay`
-callers can therefore retain uncaught guest exceptions, capability denials, and
-instruction-budget exhaustion without inferring a stop from stderr, an exit
-code, or a watchdog. The capture and verifier schemas carry the terminal state
+callers can therefore retain uncaught guest exceptions, capability denials,
+instruction-budget exhaustion, and console-budget stops without inferring a stop
+from stderr, an exit code, or a watchdog. The capture and verifier schemas carry
+the terminal state
 explicitly as `uncaught_exception` or `engine_failure`.
 
 This does not broaden the accepted failure boundary: supervisor deadlines,
@@ -45,8 +47,26 @@ and retains a typed reason plus the exact primary interpreter diagnostic:
 {"kind":"instruction_budget_exhausted","budget":100000}
 ```
 
-The budget must belong to one of the captured execution profiles. The denied
-capability must be recognized. Without an authenticated module-source capsule,
+```json
+{"kind":"console_budget_exceeded","entries":2,"max_entries":1,"bytes":39,"max_bytes":8388608}
+```
+
+The instruction budget must belong to one of the captured execution profiles.
+For a console stop, the entry and byte limits must together match an effective
+interpreter profile derived from the captured runtime settings. The configured
+`max_console_entries` override is retained, and the byte ceiling comes from
+the engine's profile. At least one attempted counter must exceed its ceiling;
+equal limits do not establish exhaustion. Replay compares both observed
+counters and both limits exactly. Console timer/count labels also consume
+budgets, so attempted counts must not be inferred from retained output length.
+
+Only accepted console output is retained in the console transcript. A rejected
+oversized message is regenerated from the captured source during replay; a
+small source that constructs a large message does not put the rejected message
+in the capture. Replay still consumes the recorded effect prefix without
+repeating live reads or writes.
+
+The denied capability must be recognized. Without an authenticated module-source capsule,
 replay removes module-loading authority and refuses a claimed module denial
 if the original package was granted module loading. Explicit frozen-module
 capture can now supply its source capsule to this API. In that case replay
@@ -87,6 +107,16 @@ denial and budget stops after actual file effects, exact cause/diagnostic
 comparison, a changed terminal state, transcript corruption, incomplete cleanup,
 wrong traces, unsupported errors and preflight limits. They do not substitute a
 Node process for the native engine.
+
+The four `engine_failure_console_` tests extend that coverage to both native
+execution profiles and both console ceilings. They use an explicit low entry
+limit and a generated message larger than the byte limit, check the bounded
+accepted-output capture, move original files before replay, and require that
+the captured write is not repeated. They also mutate limits, attempted
+counters, diagnostics, runtime settings and effect transcripts; a guest throw
+imitating the console diagnostic, an unfinalized typed error, a wrong cleanup
+trace and an additional cancellation error must not certify the captured
+console stop.
 
 These are inline library tests, excluded by the default library test gate.
 Use the dedicated discovery and execution commands in

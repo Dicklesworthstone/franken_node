@@ -744,7 +744,9 @@ mod engine {
         CapturedModuleGraph, capsule, engine_resolver::CapturedEngineResolver,
     };
     use frankenengine_engine::ast::ParseGoal;
-    use frankenengine_engine::baseline_interpreter::{ConsoleEntry, InterpreterError, LaneChoice};
+    use frankenengine_engine::baseline_interpreter::{
+        ConsoleEntry, InterpreterConfig, InterpreterError, LaneChoice,
+    };
     use frankenengine_engine::capability::RuntimeCapability;
     use frankenengine_engine::deterministic_replay::NondeterminismTrace;
     use frankenengine_engine::evidence_ledger::RuntimeEvidenceAuthority;
@@ -1362,8 +1364,18 @@ mod engine {
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
     enum EngineFailureReason {
-        CapabilityDenied { capability: String },
-        InstructionBudgetExhausted { budget: u64 },
+        CapabilityDenied {
+            capability: String,
+        },
+        InstructionBudgetExhausted {
+            budget: u64,
+        },
+        ConsoleBudgetExceeded {
+            entries: usize,
+            max_entries: usize,
+            bytes: usize,
+            max_bytes: usize,
+        },
     }
 
     fn engine_failure_reason(error: &InterpreterError) -> Option<EngineFailureReason> {
@@ -1376,6 +1388,17 @@ mod engine {
             InterpreterError::BudgetExhausted { budget, .. } => {
                 Some(EngineFailureReason::InstructionBudgetExhausted { budget: *budget })
             }
+            InterpreterError::ConsoleBudgetExceeded {
+                entries,
+                max_entries,
+                bytes,
+                max_bytes,
+            } => Some(EngineFailureReason::ConsoleBudgetExceeded {
+                entries: *entries,
+                max_entries: *max_entries,
+                bytes: *bytes,
+                max_bytes: *max_bytes,
+            }),
             _ => None,
         }
     }
@@ -1421,6 +1444,31 @@ mod engine {
                         && *budget != payload.runtime.execution.throughput_budget
                     {
                         return Err("captured instruction limit does not belong to either captured execution profile".to_string());
+                    }
+                }
+                EngineFailureReason::ConsoleBudgetExceeded {
+                    entries,
+                    max_entries,
+                    bytes,
+                    max_bytes,
+                } => {
+                    let profiles = [
+                        InterpreterConfig::deterministic_from_config(&payload.runtime.execution),
+                        InterpreterConfig::throughput_from_config(&payload.runtime.execution),
+                    ];
+                    if !profiles.iter().any(|profile| {
+                        *max_entries == profile.max_console_entries
+                            && *max_bytes == profile.max_console_bytes
+                    }) {
+                        return Err(
+                            "captured console limits do not belong to either captured execution profile"
+                                .to_string(),
+                        );
+                    }
+                    if entries <= max_entries && bytes <= max_bytes {
+                        return Err(
+                            "captured console stop does not exceed an execution limit".to_string(),
+                        );
                     }
                 }
             }
@@ -1771,9 +1819,10 @@ mod engine {
             InterpreterError::UncaughtException { .. }
                 | InterpreterError::CapabilityDenied { .. }
                 | InterpreterError::BudgetExhausted { .. }
+                | InterpreterError::ConsoleBudgetExceeded { .. }
         )) {
             return Err(
-                "native failure replay requires a certified guest exception, capability denial, or instruction-budget stop"
+                "native failure replay requires a certified guest exception, capability denial, instruction-budget stop, or console-budget stop"
                     .to_string(),
             );
         }
@@ -1935,7 +1984,8 @@ mod engine {
             encode_capture(&payload)
         }
 
-        /// Capture an uncaught guest exception and its finalized effect prefix.
+        /// Capture a certified guest exception or engine stop and its finalized
+        /// effect prefix.
         /// No successful IR4 witness or finalized nondeterminism trace is
         /// manufactured for an attempt the engine reported as failed.
         /// As with from_execution, Some process_preparation requires the exact
@@ -1960,16 +2010,18 @@ mod engine {
             // distinguish uncaught guest exceptions from typed interpreter
             // stops. Keep one capture boundary for all certified post-cell
             // failures so run --capture-replay does not discard capability
-            // denials or instruction-budget exhaustion after cleanup succeeds.
+            // denials, instruction-budget exhaustion, or console-budget stops
+            // after cleanup succeeds.
             Self::from_finalized_failure(
                 package, orchestrator_config, runtime_config, ambient_authority,
                 process_argv, process_preparation, module_sources, orchestrator, error,
             )
         }
 
-        /// Capture a finalized guest exception, native capability denial, or
-        /// instruction-budget stop. This entrypoint never infers a failure's
-        /// cause from a log line, guest value, watchdog exit, or wall-clock time.
+        /// Capture a finalized guest exception, native capability denial,
+        /// instruction-budget stop, or console-budget stop. This entrypoint never
+        /// infers a failure's cause from a log line, guest value, watchdog exit,
+        /// or wall-clock time.
         /// Authenticate the containing record before replaying these inputs.
         /// Process-provider and source/settings contracts match from_execution.
         #[allow(clippy::too_many_arguments)]
@@ -2709,10 +2761,6 @@ mod engine {
             ExecutionOrchestrator,
             OrchestratorError,
         ) {
-            let config = OrchestratorConfig {
-                commonjs_entry: true,
-                ..OrchestratorConfig::default()
-            };
             let runtime = RuntimeConfig {
                 execution: frankenengine_engine::runtime_config::ExecutionConfig {
                     deterministic_budget: 100_000,
@@ -2725,6 +2773,50 @@ mod engine {
                 "while (true) {}"
             } else {
                 "process.env.MISSING;"
+            };
+            let stopped = stopped_run_with_settings(root, ending, runtime, None);
+            let error = &stopped.4;
+            if budget_stop {
+                assert!(
+                    matches!(
+                        error.primary_error(),
+                        OrchestratorError::Interpreter(InterpreterError::BudgetExhausted {
+                            budget: 100_000,
+                            ..
+                        })
+                    ),
+                    "{error}"
+                );
+            } else {
+                assert!(
+                    matches!(
+                        error.primary_error(),
+                        OrchestratorError::Interpreter(
+                            InterpreterError::CapabilityDenied { capability }
+                        ) if capability == "env_read"
+                    ),
+                    "{error}"
+                );
+            }
+            stopped
+        }
+
+        fn stopped_run_with_settings(
+            root: &Path,
+            ending: &str,
+            runtime: RuntimeConfig,
+            force_lane: Option<LaneChoice>,
+        ) -> (
+            ExtensionPackage,
+            OrchestratorConfig,
+            RuntimeConfig,
+            ExecutionOrchestrator,
+            OrchestratorError,
+        ) {
+            let config = OrchestratorConfig {
+                commonjs_entry: true,
+                force_lane,
+                ..OrchestratorConfig::default()
             };
             let source = format!("{STOP_PREFIX} {ending}");
             let path = root.join("stopped.cjs");
@@ -2761,23 +2853,76 @@ mod engine {
                 Arc::new(SandboxedHostIo::with_root(root).unwrap()),
                 Some(Arc::new(InMemoryHostIoTranscript::recording())),
             );
-            let error = orchestrator.execute(&package).expect_err("native engine stop");
-            if budget_stop {
-                assert!(matches!(error.primary_error(), OrchestratorError::Interpreter(
-                    InterpreterError::BudgetExhausted { budget: 100_000, .. }
-                )), "{error}");
-            } else {
-                assert!(matches!(error.primary_error(), OrchestratorError::Interpreter(
-                    InterpreterError::CapabilityDenied { capability }
-                ) if capability == "env_read"), "{error}");
-            }
-            assert_eq!(std::fs::read_to_string(root.join("output.txt")).unwrap(),
-                "captured-before-stop");
+            let error = orchestrator
+                .execute(&package)
+                .expect_err("native engine stop");
+            assert_eq!(
+                std::fs::read_to_string(root.join("output.txt")).unwrap(),
+                "captured-before-stop"
+            );
             (package, config, runtime, orchestrator, error)
         }
 
+        fn console_stopped_run(
+            root: &Path,
+            byte_stop: bool,
+            lane: LaneChoice,
+        ) -> (
+            ExtensionPackage,
+            OrchestratorConfig,
+            RuntimeConfig,
+            ExecutionOrchestrator,
+            OrchestratorError,
+        ) {
+            let mut runtime = RuntimeConfig::default();
+            runtime.execution.max_console_entries = Some(if byte_stop { 4 } else { 1 });
+            let limits = InterpreterConfig::deterministic_from_config(&runtime.execution);
+            let ending = if byte_stop {
+                assert_eq!(limits.max_console_bytes, 8 * 1024 * 1024);
+                concat!(
+                    "let message = 'x'; for (let i = 0; i < 23; i++) {",
+                    "message = message + message; } console.log(message + 'x');"
+                )
+                .to_string()
+            } else {
+                "console.error('refused-console-entry');".to_string()
+            };
+            let stopped = stopped_run_with_settings(root, &ending, runtime, Some(lane));
+            let error = &stopped.4;
+            let OrchestratorError::Interpreter(InterpreterError::ConsoleBudgetExceeded {
+                entries,
+                max_entries,
+                bytes,
+                max_bytes,
+            }) = error.primary_error()
+            else {
+                panic!("expected the real typed console stop, got {error}");
+            };
+            assert_eq!(*entries, 2);
+            assert_eq!(*max_entries, limits.max_console_entries);
+            assert_eq!(*max_bytes, limits.max_console_bytes);
+            if byte_stop {
+                assert!(*bytes > *max_bytes && *entries <= *max_entries);
+            } else {
+                assert!(*entries > *max_entries && *bytes <= *max_bytes);
+            }
+            stopped
+        }
+
         fn capture_stop(root: &Path, budget_stop: bool) -> NativeReplayCapture {
-            let (package, config, runtime, orchestrator, error) = stopped_run(root, budget_stop);
+            capture_stopped_run(stopped_run(root, budget_stop))
+        }
+
+        fn capture_stopped_run(
+            stopped: (
+                ExtensionPackage,
+                OrchestratorConfig,
+                RuntimeConfig,
+                ExecutionOrchestrator,
+                OrchestratorError,
+            ),
+        ) -> NativeReplayCapture {
+            let (package, config, runtime, orchestrator, error) = stopped;
             let capture = NativeReplayCapture::from_failed_execution(
                 &package,
                 &config,
@@ -2808,6 +2953,269 @@ mod engine {
             .expect("capture the same finalized native stop explicitly");
             assert_eq!(capture, explicit);
             capture
+        }
+
+        #[test]
+        fn engine_failure_console_replay_preserves_both_limits_and_lanes() {
+            on_native_stack(|| {
+                for lane in [LaneChoice::QuickJs, LaneChoice::V8] {
+                    for byte_stop in [false, true] {
+                        let root = tempfile::tempdir().unwrap();
+                        let capture =
+                            capture_stopped_run(console_stopped_run(root.path(), byte_stop, lane));
+                        let payload: NativeReplayPayload =
+                            serde_json::from_str(&capture.payload_json).unwrap();
+                        let CapturedAttempt::EngineFailure(expected) = &payload.expected else {
+                            panic!("console limit must remain a typed engine failure");
+                        };
+                        assert!(matches!(
+                            expected.reason,
+                            EngineFailureReason::ConsoleBudgetExceeded { .. }
+                        ));
+                        assert_eq!(expected.console_output.len(), 1);
+                        assert_eq!(expected.console_output[0].message, "before-engine-stop");
+                        assert_eq!(payload.host_effect_transcript.len(), 2);
+                        assert!(
+                            capture.payload_json.len() < 32 * 1024,
+                            "the refused oversized message must not enter the retained capture"
+                        );
+                        for name in ["stopped.cjs", "input.txt", "output.txt"] {
+                            std::fs::rename(
+                                root.path().join(name),
+                                root.path().join(format!("saved-{name}")),
+                            )
+                            .unwrap();
+                        }
+                        let outcome = reexecute(&capture).expect("replay native console limit");
+                        assert!(outcome.matched, "{lane:?}, bytes={byte_stop}: {outcome:?}");
+                        assert_eq!(outcome.verification_scope, "engine_failure_prefix");
+                        assert_eq!(
+                            outcome.replay_terminal_state,
+                            NativeReplayTerminalState::EngineFailure
+                        );
+                        assert!(
+                            outcome.terminal_state_match
+                                && outcome.console_match
+                                && outcome.host_effects_match
+                        );
+                        assert_eq!(outcome.ir4_witness_match, None);
+                        assert_eq!(outcome.instruction_count_match, None);
+                        assert_eq!(outcome.nondeterminism_trace_match, None);
+                        assert_eq!(outcome.exception_value_match, None);
+                        assert_eq!(outcome.decisions_match, None);
+                        assert!(
+                            !root.path().join("output.txt").exists(),
+                            "offline replay must not repeat the captured write"
+                        );
+                        assert_eq!(
+                            std::fs::read_to_string(root.path().join("saved-output.txt")).unwrap(),
+                            "captured-before-stop",
+                        );
+                    }
+                }
+            });
+        }
+
+        #[test]
+        fn engine_failure_console_payload_refuses_forged_limits_and_nonexhaustion() {
+            on_native_stack(|| {
+                let root = tempfile::tempdir().unwrap();
+                let capture = capture_stopped_run(console_stopped_run(
+                    root.path(),
+                    false,
+                    LaneChoice::QuickJs,
+                ));
+                let original: NativeReplayPayload =
+                    serde_json::from_str(&capture.payload_json).unwrap();
+                for mutate in [
+                    (|p: &mut NativeReplayPayload| {
+                        let CapturedAttempt::EngineFailure(failure) = &mut p.expected else {
+                            panic!()
+                        };
+                        let EngineFailureReason::ConsoleBudgetExceeded { max_entries, .. } =
+                            &mut failure.reason
+                        else {
+                            panic!()
+                        };
+                        *max_entries += 1;
+                    }) as fn(&mut NativeReplayPayload),
+                    |p| {
+                        let CapturedAttempt::EngineFailure(failure) = &mut p.expected else {
+                            panic!()
+                        };
+                        let EngineFailureReason::ConsoleBudgetExceeded { max_bytes, .. } =
+                            &mut failure.reason
+                        else {
+                            panic!()
+                        };
+                        *max_bytes += 1;
+                    },
+                    |p| {
+                        let CapturedAttempt::EngineFailure(failure) = &mut p.expected else {
+                            panic!()
+                        };
+                        let EngineFailureReason::ConsoleBudgetExceeded {
+                            entries,
+                            max_entries,
+                            bytes,
+                            max_bytes,
+                        } = &mut failure.reason
+                        else {
+                            panic!()
+                        };
+                        *entries = *max_entries;
+                        *bytes = *max_bytes;
+                    },
+                    |p| p.runtime.execution.max_console_entries = Some(3),
+                    |p| p.runtime.execution.max_console_entries = None,
+                ] {
+                    let mut changed = original.clone();
+                    mutate(&mut changed);
+                    let error = changed
+                        .validate()
+                        .expect_err("unbound or unexceeded console limit");
+                    assert!(error.starts_with("captured console"), "{error}");
+                    assert!(reexecute(&encode_capture(&changed).unwrap()).is_err());
+                }
+            });
+        }
+
+        #[test]
+        fn engine_failure_console_replay_requires_exact_observation_and_complete_effects() {
+            on_native_stack(|| {
+                let root = tempfile::tempdir().unwrap();
+                let capture = capture_stopped_run(console_stopped_run(
+                    root.path(),
+                    false,
+                    LaneChoice::QuickJs,
+                ));
+                let original: NativeReplayPayload =
+                    serde_json::from_str(&capture.payload_json).unwrap();
+                for mutate in [
+                    (|f: &mut CapturedEngineFailure| {
+                        let EngineFailureReason::ConsoleBudgetExceeded { entries, .. } =
+                            &mut f.reason
+                        else {
+                            panic!()
+                        };
+                        *entries += 1;
+                    }) as fn(&mut CapturedEngineFailure),
+                    |f| {
+                        let EngineFailureReason::ConsoleBudgetExceeded { bytes, .. } =
+                            &mut f.reason
+                        else {
+                            panic!()
+                        };
+                        *bytes += 1;
+                    },
+                    |f| f.diagnostic.push_str(" altered"),
+                    |f| f.console_output[0].message.push_str(" altered"),
+                ] {
+                    let mut changed = original.clone();
+                    let CapturedAttempt::EngineFailure(failure) = &mut changed.expected else {
+                        panic!()
+                    };
+                    mutate(failure);
+                    // Bypass only the outer hash to exercise the exact native
+                    // comparison. An authenticated envelope also rejects edits.
+                    let outcome = reexecute(&encode_capture(&changed).unwrap()).unwrap();
+                    assert!(!outcome.matched, "{outcome:?}");
+                    assert!(outcome.terminal_state_match && outcome.host_effects_match);
+                }
+                for mutate in [
+                    (|p: &mut NativeReplayPayload| {
+                        p.host_effect_transcript.remove(0);
+                    }) as fn(&mut NativeReplayPayload),
+                    |p| p.host_effect_transcript.swap(0, 1),
+                    |p| {
+                        p.host_effect_transcript
+                            .push(p.host_effect_transcript[0].clone())
+                    },
+                ] {
+                    let mut changed = original.clone();
+                    mutate(&mut changed);
+                    assert!(
+                        reexecute(&encode_capture(&changed).unwrap()).is_err(),
+                        "a repeated console stop cannot excuse a corrupt effect prefix"
+                    );
+                }
+                let mut changed = original;
+                changed.package.source =
+                    format!("{STOP_PREFIX} throw 'console output budget exceeded';");
+                let outcome = reexecute(&encode_capture(&changed).unwrap()).unwrap();
+                assert!(!outcome.matched && !outcome.terminal_state_match);
+                assert_eq!(
+                    outcome.replay_terminal_state,
+                    NativeReplayTerminalState::UncaughtException
+                );
+                assert!(outcome.console_match && outcome.host_effects_match);
+            });
+        }
+
+        #[test]
+        fn engine_failure_console_capture_requires_native_finalization() {
+            on_native_stack(|| {
+                for wrong_trace in [false, true] {
+                    let root = tempfile::tempdir().unwrap();
+                    let (package, config, runtime, orchestrator, mut error) =
+                        console_stopped_run(root.path(), false, LaneChoice::QuickJs);
+                    let OrchestratorError::Interpreter(InterpreterError::ConsoleBudgetExceeded {
+                        entries,
+                        max_entries,
+                        bytes,
+                        max_bytes,
+                    }) = error.primary_error()
+                    else {
+                        panic!()
+                    };
+                    let unfinalized =
+                        OrchestratorError::Interpreter(InterpreterError::ConsoleBudgetExceeded {
+                            entries: *entries,
+                            max_entries: *max_entries,
+                            bytes: *bytes,
+                            max_bytes: *max_bytes,
+                        });
+                    assert!(
+                        NativeReplayCapture::from_finalized_failure(
+                            &package,
+                            &config,
+                            &runtime,
+                            AmbientAuthorityGrant::DenyAll,
+                            &[],
+                            None,
+                            None,
+                            &orchestrator,
+                            &unfinalized,
+                        )
+                        .is_err(),
+                        "typed console limits alone do not certify cell cleanup"
+                    );
+                    let OrchestratorError::PostCellFailure(failure) = &mut error else {
+                        panic!()
+                    };
+                    if wrong_trace {
+                        failure.cleanup.trace_id.push_str("-different");
+                    } else {
+                        failure
+                            .additional_errors
+                            .push(OrchestratorError::Interpreter(InterpreterError::Cancelled));
+                    }
+                    assert!(
+                        NativeReplayCapture::from_finalized_failure(
+                            &package,
+                            &config,
+                            &runtime,
+                            AmbientAuthorityGrant::DenyAll,
+                            &[],
+                            None,
+                            None,
+                            &orchestrator,
+                            &error,
+                        )
+                        .is_err()
+                    );
+                }
+            });
         }
 
         #[test]

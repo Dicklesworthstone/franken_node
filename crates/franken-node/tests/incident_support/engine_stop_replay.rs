@@ -9,6 +9,7 @@ use std::path::Path;
 use std::process::{Command, Output};
 
 const INSTRUCTION_BUDGET: u64 = 10_000;
+const CONSOLE_BYTE_LIMIT: usize = 8 * 1024 * 1024;
 const EFFECT_PREFIX: &str = "const fs = require('fs'); console.log(fs.readFileSync('input.txt', 'utf8')); console.warn('captured-warning'); ";
 const DENIAL: &str = "process.env.FRANKEN_ENGINE_FAILURE_TEST;";
 const EXHAUSTION: &str = "while (true) {}";
@@ -41,6 +42,14 @@ impl Project {
 
     fn root(&self) -> &Path {
         self.workspace.path()
+    }
+
+    fn set_console_entries(&self, entries: usize) {
+        let path = self.root().join("franken_node.toml");
+        let mut config: frankenengine_node::config::Config =
+            toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        config.runtime.max_console_entries = Some(entries);
+        fs::write(path, config.to_toml().unwrap()).unwrap();
     }
 
     fn invoke(&self, arguments: &[&str]) -> Output {
@@ -156,7 +165,18 @@ fn assert_engine_prefix(output: &Output) -> Value {
 }
 
 fn exercise_stop(stop: &str, expected_reason: Value) {
+    exercise_stop_with_console_limit(stop, expected_reason, None);
+}
+
+fn exercise_stop_with_console_limit(
+    stop: &str,
+    expected_reason: Value,
+    console_entries: Option<usize>,
+) {
     let project = Project::new(&format!("{EFFECT_PREFIX}{stop}"));
+    if let Some(entries) = console_entries {
+        project.set_console_entries(entries);
+    }
     let run = project.failed_run(true);
     assert_eq!(run["dispatch"]["captured_output"]["stdout"], "captured-input\n");
     assert_eq!(run["dispatch"]["captured_output"]["stderr"], "captured-warning\n");
@@ -171,6 +191,28 @@ fn exercise_stop(stop: &str, expected_reason: Value) {
     assert_eq!(payload["host_effect_transcript"].as_array().unwrap().len(), 1);
     assert!(payload["expected"].get("ir4_witness").is_none());
     let (name, _) = project.bundle(&run);
+    // Anchor both authorities in the key created by init, outside the bundle.
+    // The independent SDK authenticates actual product output before replay.
+    let mut public_key = [0_u8; 32];
+    hex::decode_to_slice(
+        fs::read_to_string(project.root().join(".franken-node/keys/receipt-signing.pub"))
+            .unwrap()
+            .trim(),
+        &mut public_key,
+    )
+    .unwrap();
+    let trusted = ed25519_dalek::VerifyingKey::from_bytes(&public_key).unwrap();
+    let verified =
+        frankenengine_verifier_sdk::incident_bundle::verify_incident_bundle_with_run_key(
+            &fs::read(project.root().join(&name)).unwrap(),
+            &trusted,
+            &trusted,
+        )
+        .expect("authenticate the exported bundle and original failed run independently");
+    assert_eq!(
+        verified.bundle.native_capture.unwrap().captured_terminal_state,
+        frankenengine_verifier_sdk::incident_bundle::CapturedNativeTerminalState::EngineFailure
+    );
     project.move_originals();
     assert_engine_prefix(&project.replay(&name));
     assert!(!project.root().join("app.js").exists());
@@ -180,6 +222,9 @@ fn exercise_stop(stop: &str, expected_reason: Value) {
     // source or new host bytes that happen to occupy the original paths.
     fs::write(project.root().join("app.js"), "throw 'LIVE_SOURCE_MUST_NOT_RUN';").unwrap();
     fs::write(project.root().join("input.txt"), "LIVE_INPUT_MUST_NOT_BE_READ").unwrap();
+    if console_entries.is_some() {
+        project.set_console_entries(1);
+    }
     assert_engine_prefix(&project.replay(&name));
     assert_eq!(fs::read_to_string(project.root().join("input.txt")).unwrap(), "LIVE_INPUT_MUST_NOT_BE_READ");
     assert_eq!(fs::read_to_string(project.root().join("saved-input.txt")).unwrap(), "captured-input");
@@ -193,6 +238,82 @@ fn native_engine_stop_cli_captures_and_replays_capability_denial_after_real_read
 #[test]
 fn native_engine_stop_cli_captures_and_replays_instruction_exhaustion_after_real_read() {
     exercise_stop(EXHAUSTION, serde_json::json!({"kind":"instruction_budget_exhausted","budget":INSTRUCTION_BUDGET}));
+}
+
+#[test]
+fn native_engine_stop_cli_captures_and_replays_console_entry_limit_after_real_read() {
+    exercise_stop_with_console_limit(
+        "console.log('refused-output');",
+        serde_json::json!({
+            "kind":"console_budget_exceeded",
+            "entries":3,
+            "max_entries":2,
+            "bytes":"captured-input".len() + "captured-warning".len() + "refused-output".len(),
+            "max_bytes":CONSOLE_BYTE_LIMIT
+        }),
+        Some(2),
+    );
+}
+
+#[test]
+fn native_engine_stop_cli_captures_and_replays_console_byte_limit_after_real_read() {
+    exercise_stop_with_console_limit(
+        // Build 8 MiB + 1 without depending on a separate string-library quota.
+        "let message = 'x'; for (let i = 0; i < 23; i++) { message = message + message; } console.log(message + 'x');",
+        serde_json::json!({
+            "kind":"console_budget_exceeded",
+            "entries":3,
+            "max_entries":3,
+            "bytes":"captured-input".len() + "captured-warning".len() + CONSOLE_BYTE_LIMIT + 1,
+            "max_bytes":CONSOLE_BYTE_LIMIT
+        }),
+        Some(3),
+    );
+}
+
+#[test]
+fn native_engine_stop_cli_rejects_signed_false_console_counters_and_diagnostic() {
+    let project = Project::new(&format!("{EFFECT_PREFIX}console.log('refused-output');"));
+    project.set_console_entries(2);
+    let run = project.failed_run(true);
+    let (_, bundle) = project.bundle(&run);
+    let original = captured_payload(&run);
+    let raw = run["dispatch"]["native_replay"]["payload_json"].as_str().unwrap();
+    for field in ["entries", "bytes", "diagnostic"] {
+        // Preserve the producer's canonical struct-field ordering. Reserializing
+        // a Value would test a framing refusal before native reproduction.
+        let (needle, replacement) = if field == "diagnostic" {
+            let diagnostic = serde_json::to_string(&original["expected"]["diagnostic"]).unwrap();
+            (
+                format!("\"diagnostic\":{diagnostic}"),
+                "\"diagnostic\":\"invented console diagnostic\"".to_string(),
+            )
+        } else {
+            let count = original["expected"]["reason"][field].as_u64().unwrap();
+            (
+                format!("\"{field}\":{count},"),
+                format!("\"{field}\":{},", count + 1),
+            )
+        };
+        assert_eq!(raw.matches(&needle).count(), 1, "unique {field} field");
+        write_authenticated_native_candidate(
+            project.root(),
+            &bundle,
+            &format!("false-console-{field}.fnbundle"),
+            raw.replacen(&needle, &replacement, 1),
+        );
+    }
+    project.move_originals();
+    for field in ["entries", "bytes", "diagnostic"] {
+        let replay = project.replay(&format!("false-console-{field}.fnbundle"));
+        assert!(!replay.status.success(), "false {field} must not verify");
+        let replay: Value = serde_json::from_slice(&replay.stdout).unwrap();
+        assert_eq!(replay["execution_result"]["terminal_state_match"], true, "{replay}");
+        assert_eq!(replay["execution_result"]["console_match"], true, "{replay}");
+        assert_eq!(replay["execution_result"]["host_effects_match"], true, "{replay}");
+        assert_eq!(replay["execution_result"]["matched"], false, "{replay}");
+        assert_eq!(replay["replay_result"]["matched"], false, "{replay}");
+    }
 }
 
 #[test]
