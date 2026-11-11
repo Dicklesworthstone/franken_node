@@ -14,6 +14,9 @@
 
 #![cfg(all(feature = "engine", feature = "test-support", unix))]
 
+#[path = "deployment_support/dependency_admission.rs"]
+mod dependency_admission;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};

@@ -6403,8 +6403,8 @@ fn deploy_publisher_key(
 /// Everything a release must still satisfy before it is activated or run:
 /// its directory and config bytes, the identical publisher approval, the
 /// exact on-disk source graph that approval pins, the release's current
-/// authenticated trust admission (no publisher-key or artifact revocation),
-/// and this build.
+/// authenticated trust admission (dependency cards and publisher/artifact
+/// revocations), and this build.
 fn verify_deploy_release(release: &runtime::deployment::ReleaseRecord) -> Result<()> {
     #[cfg(not(unix))]
     {
@@ -6474,10 +6474,15 @@ fn verify_deploy_release(release: &runtime::deployment::ReleaseRecord) -> Result
             "release source graph changed after admission ({graph} != {})",
             release.approval.graph_input_hash()
         );
-        // The same admission the release's own `run` performs: its project's
-        // authenticated trust registry must be current and must not revoke
-        // the approval's publisher key or exact artifact.
+        // Use the same runtime dependency capture and authenticated registry
+        // as the release's own `run`, including aliases and transitive packages.
+        // Healthy history cannot authorize a dependency revoked since that
+        // run, or an untracked dependency under the release's strict policy.
+        let dependencies =
+            supply_chain::trust_card::CapturedDependencyTrust::capture(&directory)
+                .context("release dependency graph is unreadable")?;
         let requirements = ops::engine_dispatcher::RunTrustRequirements::new(&[], &[], false)?
+            .with_dependency_capture(dependencies)?
             .with_registry_artifact_approval(release.approval.clone())?;
         ops::engine_dispatcher::validate_execution_trust(
             &directory,
