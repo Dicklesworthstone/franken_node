@@ -37,11 +37,12 @@ use crate::capacity_defaults::aliases::{MAX_ACTION_LOG_ENTRIES, MAX_NODES_CAP};
 
 use super::fleet_transport::{
     FLEET_ACTION_LOG_FILE, FLEET_GUARDED_POLICY_RECEIPT_SCHEMA, FleetAction, FleetActionRecord,
-    FleetGuardedPolicyObservationScope, FleetGuardedPolicyReceipt, FleetSharedState, FleetTransport,
-    FleetTransportError, GuardedFleetPolicyPublication, MAX_ACTION_RECORD_BYTES,
-    MAX_GUARDED_POLICY_RECEIPT_BYTES, MAX_GUARDED_POLICY_STALE_AFTER, NodeStatus, validate_action_record,
-    validate_fleet_native_session_publication, validate_fleet_policy_publication,
-    validate_guarded_fleet_policy_publication, validate_node_status,
+    FleetGuardedPolicyObservationScope, FleetGuardedPolicyReceipt, FleetSharedState,
+    FleetTransport, FleetTransportError, GuardedFleetPolicyPublication, MAX_ACTION_RECORD_BYTES,
+    MAX_GUARDED_POLICY_RECEIPT_BYTES, MAX_GUARDED_POLICY_STALE_AFTER, NodeStatus,
+    validate_action_record, validate_fleet_native_session_publication,
+    validate_fleet_policy_publication, validate_guarded_fleet_policy_publication,
+    validate_node_status,
 };
 
 const FLEET_DB_FILE: &str = "fleet-state.db";
@@ -563,18 +564,17 @@ impl DurableFleetTransport {
                         "native supervisor drain generation cannot replace its retained session population",
                     ));
                 }
-                if let Some(current) = &current {
-                    if current
+                if let Some(current) = &current
+                    && current
                         .native_session_drain
                         .as_ref()
                         .and_then(|drain| drain.supervisor_attestation.as_ref())
                         .is_none()
-                        && next.observed_at <= current.last_seen
-                    {
-                        return Err(FleetTransportError::stale_state(
-                            "native drain evidence was withdrawn; a new supervisor observation is required",
-                        ));
-                    }
+                    && next.observed_at <= current.last_seen
+                {
+                    return Err(FleetTransportError::stale_state(
+                        "native drain evidence was withdrawn; a new supervisor observation is required",
+                    ));
                 }
             }
         }

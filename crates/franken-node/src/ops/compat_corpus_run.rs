@@ -40,9 +40,11 @@ use std::io::Write as _;
 #[cfg(all(feature = "engine", target_os = "linux"))]
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::path::{Component, Path, PathBuf};
+#[cfg(any(feature = "engine", test))]
 use std::process::Command;
 #[cfg(all(feature = "engine", not(target_os = "linux")))]
 use std::process::Stdio;
+#[cfg(any(feature = "engine", test))]
 use std::time::Duration;
 #[cfg(all(feature = "engine", not(target_os = "linux")))]
 use std::time::Instant;
@@ -107,6 +109,7 @@ const DEFAULT_OVERALL_MIN_PCT: f64 = 95.0;
 const DEFAULT_FAMILY_FLOOR_PCT: f64 = 80.0;
 const DEFAULT_BAND_FLOORS: [(&str, f64); 3] =
     [("core", 99.0), ("edge", 90.0), ("high-value", 95.0)];
+#[cfg(feature = "engine")]
 const TRACKING_REASON_MAX_CHARS: usize = 200;
 #[cfg(feature = "engine")]
 const NODE_NO_WARNINGS_ENV: &str = "NODE_NO_WARNINGS";
@@ -177,8 +180,10 @@ struct SnapshotManifest {
 #[derive(Debug)]
 struct SnapshotCase {
     case: ResolvedCase,
+    #[cfg_attr(not(feature = "engine"), allow(dead_code))]
     family_key: String,
     corpus_relative_path: String,
+    #[cfg_attr(not(feature = "engine"), allow(dead_code))]
     staged_relative_path: PathBuf,
     source_bytes: Vec<u8>,
 }
@@ -191,6 +196,7 @@ struct SnapshotFamily {
 #[derive(Debug)]
 struct SnapshotSupportFile {
     corpus_relative_path: String,
+    #[cfg_attr(not(feature = "engine"), allow(dead_code))]
     staged_relative_path: PathBuf,
     bytes: Vec<u8>,
 }

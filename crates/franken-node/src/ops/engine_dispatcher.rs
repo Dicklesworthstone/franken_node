@@ -11,6 +11,11 @@ use crate::ops::telemetry_bridge::{
     ShutdownReason, TelemetryBridge, TelemetryRuntimeHandle, TelemetryRuntimeReport,
 };
 use crate::runtime::lockstep_harness::LockstepHarness;
+#[cfg(feature = "engine")]
+use crate::security::impossible_default::{
+    ChildProcessSpawnAdmission, configured_child_process_spawn_admission_in_active_containment,
+    configured_child_process_spawn_admission_in_active_containment_from_authenticated_run_key,
+};
 use crate::storage::frankensqlite_adapter::FrankensqliteAdapter;
 #[cfg(feature = "engine")]
 use crate::supply_chain::registry_artifact::ArtifactRuntimeAuthority;
@@ -21,10 +26,8 @@ use crate::{
     ActionableError,
     config::{Config, PreferredRuntime, Profile, RuntimeParseBudget},
     security::impossible_default::{
-        ChildProcessSpawnAdmission, configured_child_process_spawn_admission,
+        configured_child_process_spawn_admission,
         configured_child_process_spawn_admission_from_authenticated_run_key,
-        configured_child_process_spawn_admission_in_active_containment,
-        configured_child_process_spawn_admission_in_active_containment_from_authenticated_run_key,
     },
     security::revocation_freshness::{SafetyTier, registry_revocation_freshness_denial},
     supply_chain::trust_card::{
@@ -2205,7 +2208,6 @@ fn native_engine_panic_message(payload: &(dyn std::any::Any + Send)) -> String {
     }
 }
 
-#[cfg(feature = "engine")]
 /// Entry-source marker that makes a `test-support` build's native engine
 /// worker panic inside its caught boundary, so crash-loop drills exercise
 /// the real validated panic path (envelope, nonce, durable crash record,
@@ -2215,7 +2217,7 @@ fn native_engine_panic_message(payload: &(dyn std::any::Any + Send)) -> String {
 pub const TEST_SUPPORT_NATIVE_ENGINE_PANIC_MARKER: &str =
     "__FRANKEN_NODE_TEST_SUPPORT_NATIVE_ENGINE_PANIC__";
 
-#[cfg(feature = "test-support")]
+#[cfg(all(feature = "engine", feature = "test-support"))]
 fn inject_test_support_native_engine_panic(entrypoint: &Path) {
     let marker = TEST_SUPPORT_NATIVE_ENGINE_PANIC_MARKER.as_bytes();
     let requested = std::fs::read(entrypoint)
@@ -2225,6 +2227,7 @@ fn inject_test_support_native_engine_panic(entrypoint: &Path) {
     }
 }
 
+#[cfg(feature = "engine")]
 fn spawn_caught_native_engine_worker<T: Send + 'static>(
     cleanup_successful: Arc<AtomicBool>,
     worker: impl FnOnce() -> T + Send + 'static,
@@ -7545,6 +7548,8 @@ impl EngineDispatcher {
                 "Remove security.child_process_spawn to keep spawning disabled, or replace it with a valid signed policy-bound token and a ready Linux Bubblewrap backend",
             )
         })?;
+        #[cfg(not(feature = "engine"))]
+        let _ = &process_spawn_admission;
 
         let mut trust_requirements = RunTrustRequirements::new(
             &self.preflight_dependency_ids,
@@ -8213,7 +8218,10 @@ impl EngineDispatcher {
             .verify_target_with_operator_project(
                 &request.app_path,
                 &actual_working_dir,
-                request.trust_requirements.operator_fleet_project_root.as_deref(),
+                request
+                    .trust_requirements
+                    .operator_fleet_project_root
+                    .as_deref(),
             )
             .context("native-session project authority no longer matches preflight")?;
 
@@ -14417,12 +14425,9 @@ mod tests {
         config.profile = Profile::Strict;
         // Explicit name-only library admission must have the same strict
         // missing-card rule as an admission produced by the product CLI.
-        let requirements = RunTrustRequirements::new(
-            &["npm:fixture-actual".to_string()],
-            &[],
-            false,
-        )
-        .expect("retain the dependency despite no separate required-card set");
+        let requirements =
+            RunTrustRequirements::new(&["npm:fixture-actual".to_string()], &[], false)
+                .expect("retain the dependency despite no separate required-card set");
         let paths = RunProjectPaths::resolve(Path::new("app.js"), root.path())
             .expect("admitted project paths");
         let mut fleet_high_water = None;
@@ -14446,7 +14451,9 @@ mod tests {
         TrustCardRegistry::from_config(&config.trust)
             .expect("a legitimate but empty replacement registry")
             .persist_authoritative_state(
-                &crate::supply_chain::trust_card_registry_store::registry_snapshot_path(root.path()),
+                &crate::supply_chain::trust_card_registry_store::registry_snapshot_path(
+                    root.path(),
+                ),
             )
             .expect("persist the authenticated replacement state");
 
@@ -14462,7 +14469,9 @@ mod tests {
         assert_eq!(trigger.kind, NativeRunControlKind::ExecutionTrust);
         assert!(trigger.detail.contains("npm:fixture-actual"), "{trigger:?}");
         assert!(
-            trigger.detail.contains("strict policy requires a local trust card"),
+            trigger
+                .detail
+                .contains("strict policy requires a local trust card"),
             "{trigger:?}"
         );
 

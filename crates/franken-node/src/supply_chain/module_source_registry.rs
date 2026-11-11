@@ -7,8 +7,8 @@
 //! engine consumers must authorize every lookup through ModulePolicyHook.
 
 use super::{
-    CapturedModuleGraph, EdgeState, ImportAttributes, LoadKind, ModuleId, ResolutionError, ResolutionUrl, SourceLanguage,
-    error,
+    CapturedModuleGraph, EdgeState, ImportAttributes, LoadKind, ModuleId, ResolutionError,
+    ResolutionUrl, SourceLanguage, error,
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -19,7 +19,8 @@ type Result<T> = std::result::Result<T, ResolutionError>;
 const ID_DOMAIN: &[u8] = b"franken-node/sealed-module-id/v1\0";
 const BUILTIN_ID_DOMAIN: &[u8] = b"franken-node/sealed-native-builtin/v1\0";
 const URL_ID_DOMAIN: &[u8] = b"franken-node/sealed-resolution-url/v1\0";
-type ImporterRoutes = BTreeMap<RequestStyle, BTreeMap<String, BTreeMap<ImportAttributes, RegisteredTarget>>>;
+type ImporterRoutes =
+    BTreeMap<RequestStyle, BTreeMap<String, BTreeMap<ImportAttributes, RegisteredTarget>>>;
 static EMPTY_IMPORT_ATTRIBUTES: ImportAttributes = ImportAttributes::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -290,8 +291,10 @@ pub(super) struct ValidatedSourceClosure {
 
 impl PinnedModuleRegistry {
     pub fn new(graph: CapturedModuleGraph, independent_graph_pin: &str) -> Result<Self> {
-        Self::new_with_kind_resolver(graph, independent_graph_pin, |module, _, _| {
-            match (module.source_language, module.format_hint.as_str()) {
+        Self::new_with_kind_resolver(
+            graph,
+            independent_graph_pin,
+            |module, _, _| match (module.source_language, module.format_hint.as_str()) {
                 (SourceLanguage::JavaScript, "module") => Ok(ModuleKind::EsModule),
                 (SourceLanguage::JavaScript, "commonjs") => Ok(ModuleKind::CommonJs),
                 _ => Err(error(
@@ -301,8 +304,9 @@ impl PinnedModuleRegistry {
                         module.id.path
                     ),
                 )),
-            }
-        }, |_, _| Ok(None))
+            },
+            |_, _| Ok(None),
+        )
     }
 
     /// Validate the pin and complete source closure before source preparation.
@@ -342,10 +346,12 @@ impl PinnedModuleRegistry {
         let mut missing_builtin_resolutions =
             BTreeMap::<(ModuleId, String), ResolutionError>::new();
         let mut has_missing_routes = false;
-        let incomplete = || error(
-            "ERR_MODULE_REGISTRY_INCOMPLETE",
-            "source delivery requires a closed, analyzed graph with engine-approved terminal requirements",
-        );
+        let incomplete = || {
+            error(
+                "ERR_MODULE_REGISTRY_INCOMPLETE",
+                "source delivery requires a closed, analyzed graph with engine-approved terminal requirements",
+            )
+        };
         if !report.diagnostics.is_empty() || report.modules.iter().any(|m| !m.analyzed) {
             return Err(incomplete());
         }
@@ -370,8 +376,9 @@ impl PinnedModuleRegistry {
                 EdgeState::Resolved | EdgeState::TypeOnly => {}
                 EdgeState::RuntimeRequired
                     if edge.target.is_none()
-                        && edge.error.as_ref().is_some_and(|failure|
-                            failure.code == "ERR_RUNTIME_MODULE_REQUIRED") =>
+                        && edge.error.as_ref().is_some_and(|failure| {
+                            failure.code == "ERR_RUNTIME_MODULE_REQUIRED"
+                        }) =>
                 {
                     let request = edge.specifier.as_deref().ok_or_else(incomplete)?;
                     let style = RequestStyle::for_load(edge.kind);
@@ -424,18 +431,22 @@ impl PinnedModuleRegistry {
                         && edge.specifier.is_some()
                         && matches!(
                             (edge.kind, edge.error.as_ref().map(|failure| failure.code)),
-                            (LoadKind::Require | LoadKind::RequireResolve, Some("MODULE_NOT_FOUND"))
-                                | (
-                                    LoadKind::DynamicImport | LoadKind::ImportMetaResolve,
-                                    Some("ERR_MODULE_NOT_FOUND"),
-                                )
-                                | (
-                                    LoadKind::Require
-                                        | LoadKind::RequireResolve
-                                        | LoadKind::DynamicImport
-                                        | LoadKind::ImportMetaResolve,
-                                    Some("ERR_PACKAGE_PATH_NOT_EXPORTED" | "ERR_PACKAGE_IMPORT_NOT_DEFINED"),
-                                )
+                            (
+                                LoadKind::Require | LoadKind::RequireResolve,
+                                Some("MODULE_NOT_FOUND")
+                            ) | (
+                                LoadKind::DynamicImport | LoadKind::ImportMetaResolve,
+                                Some("ERR_MODULE_NOT_FOUND"),
+                            ) | (
+                                LoadKind::Require
+                                    | LoadKind::RequireResolve
+                                    | LoadKind::DynamicImport
+                                    | LoadKind::ImportMetaResolve,
+                                Some(
+                                    "ERR_PACKAGE_PATH_NOT_EXPORTED"
+                                        | "ERR_PACKAGE_IMPORT_NOT_DEFINED"
+                                ),
+                            )
                         ) =>
                 {
                     // Optional require/import() dependencies are ordinary
@@ -491,8 +502,10 @@ impl PinnedModuleRegistry {
             .collect();
         let mut resolutions = BTreeMap::new();
         for target in &report.resolution_targets {
-            let Some(super::Entry::File { bytes, sha256 }) =
-                graph.inputs.get(&target.id.path).map(|entry| entry.as_ref())
+            let Some(super::Entry::File { bytes, sha256 }) = graph
+                .inputs
+                .get(&target.id.path)
+                .map(|entry| entry.as_ref())
             else {
                 return Err(invalid_graph());
             };
@@ -502,17 +515,30 @@ impl PinnedModuleRegistry {
             {
                 return Err(invalid_graph());
             }
-            let id = identities.get(&target.id).ok_or_else(invalid_graph)?.clone();
-            if resolutions.insert(id.clone(), RegisteredResolution {
-                id,
-                origin: target.id.clone(),
-                kind: ResolutionKind::File,
-            }).is_some() {
+            let id = identities
+                .get(&target.id)
+                .ok_or_else(invalid_graph)?
+                .clone();
+            if resolutions
+                .insert(
+                    id.clone(),
+                    RegisteredResolution {
+                        id,
+                        origin: target.id.clone(),
+                        kind: ResolutionKind::File,
+                    },
+                )
+                .is_some()
+            {
                 return Err(invalid_graph());
             }
         }
         let mut url_resolutions = BTreeMap::<String, RegisteredUrlResolution>::new();
-        for target in report.edges.iter().filter_map(|edge| edge.resolved_url.as_ref()) {
+        for target in report
+            .edges
+            .iter()
+            .filter_map(|edge| edge.resolved_url.as_ref())
+        {
             validate_url_target(target)?;
             let id = url_target_id(&report.input_hash, target);
             if let Some(previous) = url_resolutions.get(&id) {
@@ -568,21 +594,31 @@ impl PinnedModuleRegistry {
         }
         for ((_, style, _), (id, name)) in &builtin_targets {
             if *style == RequestStyle::RequireResolve {
-                resolutions.entry(id.clone()).or_insert_with(|| RegisteredResolution {
-                    id: id.clone(),
-                    origin: ModuleId { path: (*name).to_owned(), url_suffix: String::new() },
-                    kind: ResolutionKind::Builtin,
-                });
+                resolutions
+                    .entry(id.clone())
+                    .or_insert_with(|| RegisteredResolution {
+                        id: id.clone(),
+                        origin: ModuleId {
+                            path: (*name).to_owned(),
+                            url_suffix: String::new(),
+                        },
+                        kind: ResolutionKind::Builtin,
+                    });
                 continue;
             }
-            modules.entry(id.clone()).or_insert_with(|| RegisteredModule {
-                id: id.clone(),
-                origin: ModuleId { path: (*name).to_owned(), url_suffix: String::new() },
-                kind: ModuleKind::NativeBuiltin,
-                source: Arc::from(""),
-                source_sha256: hex::encode(Sha256::digest([])),
-                dependencies: Vec::new(),
-            });
+            modules
+                .entry(id.clone())
+                .or_insert_with(|| RegisteredModule {
+                    id: id.clone(),
+                    origin: ModuleId {
+                        path: (*name).to_owned(),
+                        url_suffix: String::new(),
+                    },
+                    kind: ModuleKind::NativeBuiltin,
+                    source: Arc::from(""),
+                    source_sha256: hex::encode(Sha256::digest([])),
+                    dependencies: Vec::new(),
+                });
         }
         let mut routes = BTreeMap::<String, ImporterRoutes>::new();
         let mut resolution_routes = BTreeMap::<String, BTreeMap<String, RegisteredTarget>>::new();
@@ -630,8 +666,10 @@ impl PinnedModuleRegistry {
                 continue;
             }
             let target = match edge.state {
-                EdgeState::RuntimeRequired if style == RequestStyle::RequireResolve
-                    && missing_builtin_resolutions.contains_key(&(edge.importer.clone(), specifier.clone())) =>
+                EdgeState::RuntimeRequired
+                    if style == RequestStyle::RequireResolve
+                        && missing_builtin_resolutions
+                            .contains_key(&(edge.importer.clone(), specifier.clone())) =>
                 {
                     RegisteredTarget::Missing {
                         error: missing_builtin_resolutions
@@ -800,7 +838,9 @@ impl PinnedModuleRegistry {
                 )
             })?;
         match target {
-            RegisteredTarget::Module { id } => self.url_resolutions.get(id).ok_or_else(invalid_graph),
+            RegisteredTarget::Module { id } => {
+                self.url_resolutions.get(id).ok_or_else(invalid_graph)
+            }
             RegisteredTarget::Missing { error } => Err(error.clone()),
         }
     }
@@ -826,7 +866,8 @@ impl PinnedModuleRegistry {
                 "referrer does not belong to this sealed graph",
             ));
         }
-        let target = self.resolution_routes
+        let target = self
+            .resolution_routes
             .get(importer)
             .and_then(|requests| requests.get(specifier))
             .ok_or_else(|| {
@@ -865,15 +906,20 @@ impl PinnedModuleRegistry {
     ) -> Result<&RegisteredModule> {
         validate_specifier(specifier)?;
         super::import_attributes::validate(import_attributes)?;
-        if matches!(style, RequestStyle::RequireResolve | RequestStyle::ImportMetaResolve) {
+        if matches!(
+            style,
+            RequestStyle::RequireResolve | RequestStyle::ImportMetaResolve
+        ) {
             return Err(error(
                 "ERR_MODULE_REGISTRY_ROUTE",
                 "metadata lookup cannot deliver executable source",
             ));
         }
         let id = match referrer {
-            None if specifier == self.entrypoint() && style == self.entry_style()
-                && import_attributes.is_empty() => {
+            None if specifier == self.entrypoint()
+                && style == self.entry_style()
+                && import_attributes.is_empty() =>
+            {
                 self.entrypoint()
             }
             None => {
@@ -953,6 +999,7 @@ impl PinnedModuleRegistry {
     /// its returned module list, so diamond/cycle edges cannot bypass policy.
     /// Consumers that can stop on denial should use `walk_requests` instead
     /// of allocating this complete owned projection.
+    #[allow(clippy::type_complexity)]
     pub fn reachable_requests(
         &self,
         referrer: Option<&str>,
@@ -1040,7 +1087,10 @@ fn native_builtin_id(graph_hash: &str, name: &str) -> String {
         digest.update((part.len() as u64).to_le_bytes());
         digest.update(part.as_bytes());
     }
-    format!("franken-captured-builtin:{}", hex::encode(digest.finalize()))
+    format!(
+        "franken-captured-builtin:{}",
+        hex::encode(digest.finalize())
+    )
 }
 
 fn canonical_id(graph_hash: &str, id: &ModuleId) -> String {
@@ -1079,7 +1129,11 @@ mod tests {
     #[test]
     fn source_closure_admission_preserves_native_and_sealed_missing_routes() {
         let root = tempfile::tempdir().unwrap();
-        put(root.path(), "app.cjs", "require('node:path'); try { require('optional-addon'); } catch (error) {} require('./side.cjs');");
+        put(
+            root.path(),
+            "app.cjs",
+            "require('node:path'); try { require('optional-addon'); } catch (error) {} require('./side.cjs');",
+        );
         put(root.path(), "side.cjs", "module.exports = 42;");
         let captured = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
         let capsule = capsule::encode(&captured).unwrap();
@@ -1088,18 +1142,53 @@ mod tests {
         let provider = |specifier: &str, _: RequestStyle| {
             Ok((specifier == "node:path").then_some("node:path"))
         };
-        let closure = PinnedModuleRegistry::validate_source_closure(&graph, &pin, provider).unwrap();
+        let closure =
+            PinnedModuleRegistry::validate_source_closure(&graph, &pin, provider).unwrap();
         assert!(!graph.report().fully_resolved);
         assert_eq!(closure.builtin_targets.len(), 1);
         let registry = PinnedModuleRegistry::new_with_kind_resolver(
-            graph, &pin, |_, _, _| Ok(ModuleKind::CommonJs), provider,
-        ).ok().unwrap();
-        assert_eq!(registry.lookup(Some(registry.entrypoint()), "node:path", RequestStyle::Require)
-            .unwrap().kind(), ModuleKind::NativeBuiltin);
-        assert_eq!(registry.lookup(Some(registry.entrypoint()), "optional-addon", RequestStyle::Require)
-            .err().unwrap().code, "MODULE_NOT_FOUND");
-        assert_eq!(registry.lookup(Some(registry.entrypoint()), "optional-addon", RequestStyle::Import)
-            .err().unwrap().code, "ERR_MODULE_REGISTRY_ROUTE");
+            graph,
+            &pin,
+            |_, _, _| Ok(ModuleKind::CommonJs),
+            provider,
+        )
+        .ok()
+        .unwrap();
+        assert_eq!(
+            registry
+                .lookup(
+                    Some(registry.entrypoint()),
+                    "node:path",
+                    RequestStyle::Require
+                )
+                .unwrap()
+                .kind(),
+            ModuleKind::NativeBuiltin
+        );
+        assert_eq!(
+            registry
+                .lookup(
+                    Some(registry.entrypoint()),
+                    "optional-addon",
+                    RequestStyle::Require
+                )
+                .err()
+                .unwrap()
+                .code,
+            "MODULE_NOT_FOUND"
+        );
+        assert_eq!(
+            registry
+                .lookup(
+                    Some(registry.entrypoint()),
+                    "optional-addon",
+                    RequestStyle::Import
+                )
+                .err()
+                .unwrap()
+                .code,
+            "ERR_MODULE_REGISTRY_ROUTE"
+        );
     }
 
     #[test]
@@ -1114,41 +1203,94 @@ mod tests {
             put(root.path(), "app.mjs", source);
             let graph = capture(root.path(), "app.mjs", GraphOptions::default()).unwrap();
             let pin = graph.report().input_hash.clone();
-            assert_eq!(PinnedModuleRegistry::validate_source_closure(&graph, &pin,
-                |specifier, _| Ok((specifier == "node:path").then_some("node:path")))
-                .err().unwrap().code, "ERR_MODULE_REGISTRY_INCOMPLETE", "{source}");
-            assert_eq!(PinnedModuleRegistry::validate_source_closure(&graph,
-                &format!("sha256:{}", "0".repeat(64)), |_, _| panic!("pin must precede provider selection"))
-                .err().unwrap().code, "ERR_MODULE_REGISTRY_PIN_MISMATCH");
+            assert_eq!(
+                PinnedModuleRegistry::validate_source_closure(&graph, &pin, |specifier, _| Ok(
+                    (specifier == "node:path").then_some("node:path")
+                ))
+                .err()
+                .unwrap()
+                .code,
+                "ERR_MODULE_REGISTRY_INCOMPLETE",
+                "{source}"
+            );
+            assert_eq!(
+                PinnedModuleRegistry::validate_source_closure(
+                    &graph,
+                    &format!("sha256:{}", "0".repeat(64)),
+                    |_, _| panic!("pin must precede provider selection")
+                )
+                .err()
+                .unwrap()
+                .code,
+                "ERR_MODULE_REGISTRY_PIN_MISMATCH"
+            );
         }
     }
 
     #[test]
     fn complete_attribute_maps_distinguish_routes_before_engine_format_admission() {
         let root = tempfile::tempdir().unwrap();
-        put(root.path(), "app.mjs", r#"
+        put(
+            root.path(),
+            "app.mjs",
+            r#"
 import first from './dep.mjs' with {color:'red',type:'json'};
 import second from './dep.mjs' with {type:'json',color:'red'};
 import third from './dep.mjs' with {color:'blue',type:'json'};
-"#);
+"#,
+        );
         put(root.path(), "dep.mjs", "export default 42;");
         // The registry preserves request authority. The engine subsequently
         // rejects these unsupported attributes and the non-JSON format.
         let registry = registry(root.path(), "app.mjs");
         assert_eq!(registry.summary().routes, 2);
         assert_eq!(entry(&registry).dependencies().len(), 2);
-        let red = ImportAttributes::from([("color".into(), "red".into()), ("type".into(), "json".into())]);
-        let blue = ImportAttributes::from([("color".into(), "blue".into()), ("type".into(), "json".into())]);
-        let first = registry.lookup_with_attributes(Some(registry.entrypoint()), "./dep.mjs",
-            RequestStyle::Import, &red).unwrap();
-        let second = registry.lookup_with_attributes(Some(registry.entrypoint()), "./dep.mjs",
-            RequestStyle::Import, &blue).unwrap();
+        let red = ImportAttributes::from([
+            ("color".into(), "red".into()),
+            ("type".into(), "json".into()),
+        ]);
+        let blue = ImportAttributes::from([
+            ("color".into(), "blue".into()),
+            ("type".into(), "json".into()),
+        ]);
+        let first = registry
+            .lookup_with_attributes(
+                Some(registry.entrypoint()),
+                "./dep.mjs",
+                RequestStyle::Import,
+                &red,
+            )
+            .unwrap();
+        let second = registry
+            .lookup_with_attributes(
+                Some(registry.entrypoint()),
+                "./dep.mjs",
+                RequestStyle::Import,
+                &blue,
+            )
+            .unwrap();
         assert!(std::ptr::eq(first, second));
-        for attributes in [ImportAttributes::new(), ImportAttributes::from([("type".into(), "json".into())])] {
-            assert_eq!(registry.lookup_with_attributes(Some(registry.entrypoint()), "./dep.mjs",
-                RequestStyle::Import, &attributes).err().unwrap().code, "ERR_MODULE_REGISTRY_ROUTE");
+        for attributes in [
+            ImportAttributes::new(),
+            ImportAttributes::from([("type".into(), "json".into())]),
+        ] {
+            assert_eq!(
+                registry
+                    .lookup_with_attributes(
+                        Some(registry.entrypoint()),
+                        "./dep.mjs",
+                        RequestStyle::Import,
+                        &attributes
+                    )
+                    .err()
+                    .unwrap()
+                    .code,
+                "ERR_MODULE_REGISTRY_ROUTE"
+            );
         }
-        let requests = registry.reachable_requests(None, registry.entrypoint(), RequestStyle::Import).unwrap();
+        let requests = registry
+            .reachable_requests(None, registry.entrypoint(), RequestStyle::Import)
+            .unwrap();
         assert_eq!(requests.len(), 3);
         assert_eq!(requests[1].3, red);
         assert_eq!(requests[2].3, blue);
@@ -1227,13 +1369,15 @@ import third from './dep.mjs' with {color:'blue',type:'json'};
                     ModuleKind::EsModule
                 })
             },
-            |specifier, _| Ok(match specifier {
-                "path" | "node:path" => Some("node:path"),
-                "path/posix" => Some("node:path/posix"),
-                "node:path/win32" => Some("node:path/win32"),
-                "node:querystring" => Some("node:querystring"),
-                _ => None,
-            }),
+            |specifier, _| {
+                Ok(match specifier {
+                    "path" | "node:path" => Some("node:path"),
+                    "path/posix" => Some("node:path/posix"),
+                    "node:path/win32" => Some("node:path/win32"),
+                    "node:querystring" => Some("node:querystring"),
+                    _ => None,
+                })
+            },
         )
         .ok()
         .unwrap();
@@ -1330,7 +1474,11 @@ import third from './dep.mjs' with {color:'blue',type:'json'};
             "node_modules/pkg/package.json",
             r##"{"exports":"./index.mjs","imports":{"#shared":"path/win32"}}"##,
         );
-        put(root.path(), "node_modules/pkg/index.mjs", "import '#shared';");
+        put(
+            root.path(),
+            "node_modules/pkg/index.mjs",
+            "import '#shared';",
+        );
         put(
             root.path(),
             "node_modules/path/index.js",
@@ -1412,7 +1560,11 @@ import third from './dep.mjs' with {color:'blue',type:'json'};
         for (importer, specifier, style) in [
             (registry.entrypoint(), "#shared", RequestStyle::Require),
             (registry.entrypoint(), "path/posix", RequestStyle::Import),
-            (registry.entrypoint(), "node:path/posix", RequestStyle::Import),
+            (
+                registry.entrypoint(),
+                "node:path/posix",
+                RequestStyle::Import,
+            ),
             (registry.entrypoint(), "#core/events", RequestStyle::Import),
             (package.id(), "#core/buffer", RequestStyle::Import),
         ] {
@@ -1485,11 +1637,15 @@ import third from './dep.mjs' with {color:'blue',type:'json'};
     #[test]
     fn captured_missing_require_routes_are_terminal_without_invented_modules() {
         let root = tempfile::tempdir().unwrap();
-        put(root.path(), "app.cjs", r#"
+        put(
+            root.path(),
+            "app.cjs",
+            r#"
             try { module.exports = require('optional-addon'); }
             catch (error) { module.exports = require('./fallback.cjs'); }
             try { require.resolve('optional-addon'); } catch (error) {}
-        "#);
+        "#,
+        );
         put(root.path(), "fallback.cjs", "module.exports = 42;");
         let graph = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
         assert!(!graph.report().fully_resolved);
@@ -1506,13 +1662,25 @@ import third from './dep.mjs' with {color:'blue',type:'json'};
             RegisteredTarget::Missing { .. }
         ));
         for _ in 0..2 {
-            let missing = r.lookup(Some(r.entrypoint()), "optional-addon", RequestStyle::Require)
-                .err().unwrap();
+            let missing = r
+                .lookup(
+                    Some(r.entrypoint()),
+                    "optional-addon",
+                    RequestStyle::Require,
+                )
+                .err()
+                .unwrap();
             assert_eq!(missing.code, "MODULE_NOT_FOUND");
         }
         assert_eq!(
-            r.lookup(Some(r.entrypoint()), "./fallback.cjs", RequestStyle::Require)
-                .ok().unwrap().source(),
+            r.lookup(
+                Some(r.entrypoint()),
+                "./fallback.cjs",
+                RequestStyle::Require
+            )
+            .ok()
+            .unwrap()
+            .source(),
             "module.exports = 42;"
         );
         for (specifier, style) in [
@@ -1521,18 +1689,31 @@ import third from './dep.mjs' with {color:'blue',type:'json'};
             ("././fallback.cjs", RequestStyle::Require),
         ] {
             assert_eq!(
-                r.lookup(Some(r.entrypoint()), specifier, style).err().unwrap().code,
+                r.lookup(Some(r.entrypoint()), specifier, style)
+                    .err()
+                    .unwrap()
+                    .code,
                 "ERR_MODULE_REGISTRY_ROUTE"
             );
         }
-        let fallback = r.lookup(Some(r.entrypoint()), "./fallback.cjs", RequestStyle::Require)
-            .ok().unwrap();
+        let fallback = r
+            .lookup(
+                Some(r.entrypoint()),
+                "./fallback.cjs",
+                RequestStyle::Require,
+            )
+            .ok()
+            .unwrap();
         assert_eq!(
             r.lookup(Some(fallback.id()), "optional-addon", RequestStyle::Require)
-                .err().unwrap().code,
+                .err()
+                .unwrap()
+                .code,
             "ERR_MODULE_REGISTRY_ROUTE"
         );
-        let mut walk = r.walk_requests(None, r.entrypoint(), r.entry_style()).unwrap();
+        let mut walk = r
+            .walk_requests(None, r.entrypoint(), r.entry_style())
+            .unwrap();
         assert!(walk.next().unwrap().is_ok());
         assert_eq!(walk.next().unwrap().err().unwrap().code, "MODULE_NOT_FOUND");
         assert!(walk.next().is_none());
@@ -1585,8 +1766,14 @@ import third from './dep.mjs' with {color:'blue',type:'json'};
             let pin = graph.report().input_hash.clone();
             let encoded = capsule::encode(&graph).unwrap();
             let registry = PinnedModuleRegistry::new(graph, &pin).ok().unwrap();
-            assert_eq!(registry.summary().missing_routes, if style == RequestStyle::Require { 1 } else { 2 });
-            assert_eq!(registry.summary().missing_resolution_routes, usize::from(style == RequestStyle::Require));
+            assert_eq!(
+                registry.summary().missing_routes,
+                if style == RequestStyle::Require { 1 } else { 2 }
+            );
+            assert_eq!(
+                registry.summary().missing_resolution_routes,
+                usize::from(style == RequestStyle::Require)
+            );
 
             // The host now admits both requests, but the reviewed registry
             // and replay capsule must retain their original package failures.
@@ -1612,14 +1799,24 @@ import third from './dep.mjs' with {color:'blue',type:'json'};
                 ] {
                     let resolution_only = style == RequestStyle::Require && request == "#optional";
                     let failure = if resolution_only {
-                        registry.lookup_resolution(Some(registry.entrypoint()), request).err().unwrap()
+                        registry
+                            .lookup_resolution(Some(registry.entrypoint()), request)
+                            .err()
+                            .unwrap()
                     } else {
-                        registry.lookup(Some(registry.entrypoint()), request, style).err().unwrap()
+                        registry
+                            .lookup(Some(registry.entrypoint()), request, style)
+                            .err()
+                            .unwrap()
                     };
                     assert_eq!(failure.code, expected);
                     if resolution_only {
                         assert_eq!(
-                            registry.lookup(Some(registry.entrypoint()), request, style).err().unwrap().code,
+                            registry
+                                .lookup(Some(registry.entrypoint()), request, style)
+                                .err()
+                                .unwrap()
+                                .code,
                             "ERR_MODULE_REGISTRY_ROUTE"
                         );
                     }
@@ -1660,16 +1857,26 @@ import third from './dep.mjs' with {color:'blue',type:'json'};
         put(root.path(), "app.cjs", "require('./new.cjs');");
         let replayed = capsule::replay(encoded.bytes(), encoded.digest()).unwrap();
         assert!(!replayed.report().fully_resolved);
-        let r = PinnedModuleRegistry::new(replayed, &graph_pin).ok().unwrap();
+        let r = PinnedModuleRegistry::new(replayed, &graph_pin)
+            .ok()
+            .unwrap();
         assert_eq!(entry(&r).source(), "require('./optional.cjs');");
         assert_eq!(
-            r.lookup(Some(r.entrypoint()), "./optional.cjs", RequestStyle::Require)
-                .err().unwrap().code,
+            r.lookup(
+                Some(r.entrypoint()),
+                "./optional.cjs",
+                RequestStyle::Require
+            )
+            .err()
+            .unwrap()
+            .code,
             "MODULE_NOT_FOUND"
         );
         assert_eq!(
             r.lookup(Some(r.entrypoint()), "./new.cjs", RequestStyle::Require)
-                .err().unwrap().code,
+                .err()
+                .unwrap()
+                .code,
             "ERR_MODULE_REGISTRY_ROUTE"
         );
         let current = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
@@ -1679,9 +1886,17 @@ import third from './dep.mjs' with {color:'blue',type:'json'};
     #[test]
     fn captured_missing_dynamic_imports_keep_importer_and_load_style_boundaries() {
         let root = tempfile::tempdir().unwrap();
-        put(root.path(), "app.mjs", "import('./optional.mjs'); import './nested/app.mjs';");
+        put(
+            root.path(),
+            "app.mjs",
+            "import('./optional.mjs'); import './nested/app.mjs';",
+        );
         put(root.path(), "nested/app.mjs", "import('./optional.mjs');");
-        put(root.path(), "nested/optional.mjs", "export const answer = 42;");
+        put(
+            root.path(),
+            "nested/optional.mjs",
+            "export const answer = 42;",
+        );
         let graph = capture(root.path(), "app.mjs", GraphOptions::default()).unwrap();
         let pin = graph.report().input_hash.clone();
         assert!(!graph.report().fully_resolved);
@@ -1691,16 +1906,31 @@ import third from './dep.mjs' with {color:'blue',type:'json'};
         assert_eq!(registry.summary().routes, 3);
         assert_eq!(registry.summary().missing_routes, 1);
         assert_eq!(
-            registry.lookup(Some(registry.entrypoint()), "./optional.mjs", RequestStyle::Import)
-                .err().unwrap().code,
+            registry
+                .lookup(
+                    Some(registry.entrypoint()),
+                    "./optional.mjs",
+                    RequestStyle::Import
+                )
+                .err()
+                .unwrap()
+                .code,
             "ERR_MODULE_NOT_FOUND"
         );
         let nested = registry
-            .lookup(Some(registry.entrypoint()), "./nested/app.mjs", RequestStyle::Import)
-            .ok().unwrap();
+            .lookup(
+                Some(registry.entrypoint()),
+                "./nested/app.mjs",
+                RequestStyle::Import,
+            )
+            .ok()
+            .unwrap();
         assert_eq!(
-            registry.lookup(Some(nested.id()), "./optional.mjs", RequestStyle::Import)
-                .ok().unwrap().source(),
+            registry
+                .lookup(Some(nested.id()), "./optional.mjs", RequestStyle::Import)
+                .ok()
+                .unwrap()
+                .source(),
             "export const answer = 42;"
         );
         for (request, style) in [
@@ -1708,15 +1938,22 @@ import third from './dep.mjs' with {color:'blue',type:'json'};
             ("./uncaptured.mjs", RequestStyle::Import),
         ] {
             assert_eq!(
-                registry.lookup(Some(registry.entrypoint()), request, style)
-                    .err().unwrap().code,
+                registry
+                    .lookup(Some(registry.entrypoint()), request, style)
+                    .err()
+                    .unwrap()
+                    .code,
                 "ERR_MODULE_REGISTRY_ROUTE"
             );
         }
         let mut walk = registry
-            .walk_requests(None, registry.entrypoint(), RequestStyle::Import).unwrap();
+            .walk_requests(None, registry.entrypoint(), RequestStyle::Import)
+            .unwrap();
         assert!(walk.next().unwrap().is_ok());
-        assert_eq!(walk.next().unwrap().err().unwrap().code, "ERR_MODULE_NOT_FOUND");
+        assert_eq!(
+            walk.next().unwrap().err().unwrap().code,
+            "ERR_MODULE_NOT_FOUND"
+        );
         assert!(walk.next().is_none());
     }
 
@@ -1727,8 +1964,16 @@ import third from './dep.mjs' with {color:'blue',type:'json'};
         let graph = capture(root.path(), "app.mjs", GraphOptions::default()).unwrap();
         let pin = graph.report().input_hash.clone();
         let encoded = capsule::encode(&graph).unwrap();
-        put(root.path(), "node_modules/optional-package/package.json", r#"{"main":"index.mjs"}"#);
-        put(root.path(), "node_modules/optional-package/index.mjs", "export const answer = 99;");
+        put(
+            root.path(),
+            "node_modules/optional-package/package.json",
+            r#"{"main":"index.mjs"}"#,
+        );
+        put(
+            root.path(),
+            "node_modules/optional-package/index.mjs",
+            "export const answer = 99;",
+        );
         let live = capture(root.path(), "app.mjs", GraphOptions::default()).unwrap();
         assert!(live.report().fully_resolved);
         assert_ne!(live.report().input_hash, pin);
@@ -1739,8 +1984,15 @@ import third from './dep.mjs' with {color:'blue',type:'json'};
         assert_eq!(registry.summary().missing_routes, 1);
         for _ in 0..2 {
             assert_eq!(
-                registry.lookup(Some(registry.entrypoint()), "optional-package", RequestStyle::Import)
-                    .err().unwrap().code,
+                registry
+                    .lookup(
+                        Some(registry.entrypoint()),
+                        "optional-package",
+                        RequestStyle::Import
+                    )
+                    .err()
+                    .unwrap()
+                    .code,
                 "ERR_MODULE_NOT_FOUND"
             );
         }
@@ -1765,13 +2017,19 @@ import third from './dep.mjs' with {color:'blue',type:'json'};
         ] {
             let root = tempfile::tempdir().unwrap();
             put(root.path(), "app.cjs", source);
-            put(root.path(), "node_modules/pkg/package.json", r#"{"exports":{".":"./index.cjs"}}"#);
+            put(
+                root.path(),
+                "node_modules/pkg/package.json",
+                r#"{"exports":{".":"./index.cjs"}}"#,
+            );
             put(root.path(), "node_modules/broken/package.json", "{invalid");
             let graph = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
             let pin = graph.report().input_hash.clone();
             assert_eq!(
-                PinnedModuleRegistry::new(graph, &pin).err()
-                    .unwrap_or_else(|| panic!("unexpectedly admitted {source}")).code,
+                PinnedModuleRegistry::new(graph, &pin)
+                    .err()
+                    .unwrap_or_else(|| panic!("unexpectedly admitted {source}"))
+                    .code,
                 "ERR_MODULE_REGISTRY_INCOMPLETE",
                 "{source}"
             );
@@ -2098,8 +2356,12 @@ import third from './dep.mjs' with {color:'blue',type:'json'};
         for request in walk.by_ref() {
             let request = request.unwrap();
             let looked_up = r
-                .lookup_with_attributes(request.referrer, request.specifier, request.style,
-                    request.import_attributes)
+                .lookup_with_attributes(
+                    request.referrer,
+                    request.specifier,
+                    request.style,
+                    request.import_attributes,
+                )
                 .unwrap();
             assert!(std::ptr::eq(looked_up, request.module));
             order.push((
@@ -2145,7 +2407,11 @@ import third from './dep.mjs' with {color:'blue',type:'json'};
         put(root.path(), "app.mjs", &roots);
         for i in 0..width {
             put(root.path(), &format!("parent{i}.mjs"), &leaves);
-            put(root.path(), &format!("leaf{i}.mjs"), "export const value=1;");
+            put(
+                root.path(),
+                &format!("leaf{i}.mjs"),
+                "export const value=1;",
+            );
         }
         let r = registry(root.path(), "app.mjs");
         assert_eq!(r.summary().routes, width + width * width);
@@ -2198,8 +2464,9 @@ import third from './dep.mjs' with {color:'blue',type:'json'};
         put(root.path(), "dep.mjs", "export const value=1;");
         let mut r = registry(root.path(), "app.mjs");
         let entry_id = r.entrypoint().to_owned();
-        r.modules.get_mut(&entry_id).unwrap().dependencies[0].target =
-            RegisteredTarget::Module { id: "missing".into() };
+        r.modules.get_mut(&entry_id).unwrap().dependencies[0].target = RegisteredTarget::Module {
+            id: "missing".into(),
+        };
         let mut walk = r
             .walk_requests(None, r.entrypoint(), r.entry_style())
             .unwrap();
@@ -2230,8 +2497,10 @@ import third from './dep.mjs' with {color:'blue',type:'json'};
                     Ok(ModuleKind::CommonJs)
                 },
                 |specifier, style| {
-                    Ok((specifier == "path" && (style == RequestStyle::Require || admit_import))
-                        .then_some("node:path"))
+                    Ok(
+                        (specifier == "path" && (style == RequestStyle::Require || admit_import))
+                            .then_some("node:path"),
+                    )
                 },
             );
             if !admit_import {
@@ -2279,10 +2548,15 @@ import third from './dep.mjs' with {color:'blue',type:'json'};
             } else {
                 graph.report().input_hash.clone()
             };
-            let result = PinnedModuleRegistry::new_with_kind_resolver(graph, &pin, |_, _, _| {
-                calls.set(calls.get() + 1);
-                Ok(ModuleKind::EsModule)
-            }, |_, _| Ok(None));
+            let result = PinnedModuleRegistry::new_with_kind_resolver(
+                graph,
+                &pin,
+                |_, _, _| {
+                    calls.set(calls.get() + 1);
+                    Ok(ModuleKind::EsModule)
+                },
+                |_, _| Ok(None),
+            );
             assert_eq!(
                 result.err().unwrap().code,
                 if mismatch {
@@ -2298,18 +2572,26 @@ import third from './dep.mjs' with {color:'blue',type:'json'};
     #[test]
     fn resolution_only_files_never_become_executable_routes_or_dependencies() {
         let root = tempfile::tempdir().unwrap();
-        put(root.path(), "app.cjs", r#"
+        put(
+            root.path(),
+            "app.cjs",
+            r#"
             require.resolve('./asset.node');
             require.resolve('./invalid.json');
             require.resolve('./invalid.cjs');
             require.resolve('./nested.cjs');
             require.resolve('./both.cjs');
             require('./both.cjs');
-        "#);
+        "#,
+        );
         std::fs::write(root.path().join("asset.node"), [0, 255, 128, 1]).unwrap();
         put(root.path(), "invalid.json", "{not json");
         put(root.path(), "invalid.cjs", "function { invalid syntax");
-        put(root.path(), "nested.cjs", "require('uncaptured-package'); throw Error('never run');");
+        put(
+            root.path(),
+            "nested.cjs",
+            "require('uncaptured-package'); throw Error('never run');",
+        );
         put(root.path(), "both.cjs", "module.exports = 42;");
         let graph = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
         assert!(graph.report().fully_resolved);
@@ -2328,25 +2610,46 @@ import third from './dep.mjs' with {color:'blue',type:'json'};
             let metadata = registry.lookup_resolution(Some(entry), &request).unwrap();
             assert_eq!(metadata.origin().path, name);
             assert_eq!(metadata.kind(), ResolutionKind::File);
-            for style in [RequestStyle::Require, RequestStyle::Import, RequestStyle::RequireResolve] {
+            for style in [
+                RequestStyle::Require,
+                RequestStyle::Import,
+                RequestStyle::RequireResolve,
+            ] {
                 assert_eq!(
-                    registry.lookup(Some(entry), &request, style).err().unwrap().code,
+                    registry
+                        .lookup(Some(entry), &request, style)
+                        .err()
+                        .unwrap()
+                        .code,
                     "ERR_MODULE_REGISTRY_ROUTE"
                 );
             }
             assert_eq!(
-                registry.lookup_resolution(Some(entry), metadata.id()).err().unwrap().code,
+                registry
+                    .lookup_resolution(Some(entry), metadata.id())
+                    .err()
+                    .unwrap()
+                    .code,
                 "ERR_MODULE_REGISTRY_ROUTE"
             );
             assert_eq!(
-                registry.lookup_resolution(None, &request).err().unwrap().code,
+                registry
+                    .lookup_resolution(None, &request)
+                    .err()
+                    .unwrap()
+                    .code,
                 "ERR_MODULE_REGISTRY_ENTRY"
             );
         }
-        let both = registry.lookup(Some(entry), "./both.cjs", RequestStyle::Require).unwrap();
+        let both = registry
+            .lookup(Some(entry), "./both.cjs", RequestStyle::Require)
+            .unwrap();
         assert_eq!(both.source(), "module.exports = 42;");
         assert_eq!(
-            registry.lookup_resolution(Some(entry), "./both.cjs").unwrap().id(),
+            registry
+                .lookup_resolution(Some(entry), "./both.cjs")
+                .unwrap()
+                .id(),
             both.id()
         );
         for (referrer, request) in [
@@ -2355,11 +2658,17 @@ import third from './dep.mjs' with {color:'blue',type:'json'};
             (both.id(), "./asset.node"),
         ] {
             assert_eq!(
-                registry.lookup_resolution(Some(referrer), request).err().unwrap().code,
+                registry
+                    .lookup_resolution(Some(referrer), request)
+                    .err()
+                    .unwrap()
+                    .code,
                 "ERR_MODULE_REGISTRY_ROUTE"
             );
         }
-        let walk = registry.reachable_requests(None, entry, RequestStyle::Require).unwrap();
+        let walk = registry
+            .reachable_requests(None, entry, RequestStyle::Require)
+            .unwrap();
         assert_eq!(walk.len(), 2);
         assert_eq!(walk[1].1, "./both.cjs");
     }
@@ -2367,11 +2676,15 @@ import third from './dep.mjs' with {color:'blue',type:'json'};
     #[test]
     fn filename_builtin_names_are_separate_from_executable_native_providers() {
         let root = tempfile::tempdir().unwrap();
-        put(root.path(), "app.cjs", r#"
+        put(
+            root.path(),
+            "app.cjs",
+            r#"
             require.resolve('fs');
             require.resolve('node:fs');
             try { require.resolve('node:not-real'); } catch (error) {}
-        "#);
+        "#,
+        );
         let graph = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
         let pin = graph.report().input_hash.clone();
         assert_eq!(
@@ -2391,7 +2704,9 @@ import third from './dep.mjs' with {color:'blue',type:'json'};
                     _ => Ok(None),
                 }
             },
-        ).ok().unwrap();
+        )
+        .ok()
+        .unwrap();
         assert_eq!(registry.summary().modules, 1);
         assert_eq!(registry.summary().routes, 0);
         assert_eq!(registry.summary().resolution_targets, 1);
@@ -2404,22 +2719,39 @@ import third from './dep.mjs' with {color:'blue',type:'json'};
         assert_eq!(bare.origin().path, "node:fs");
         assert_eq!(bare.id(), prefixed.id());
         assert_eq!(
-            registry.lookup_resolution(Some(entry), "node:not-real").err().unwrap().code,
+            registry
+                .lookup_resolution(Some(entry), "node:not-real")
+                .err()
+                .unwrap()
+                .code,
             "MODULE_NOT_FOUND"
         );
         for name in ["fs", "node:fs", "node:not-real"] {
             assert_eq!(
-                registry.lookup(Some(entry), name, RequestStyle::Require).err().unwrap().code,
+                registry
+                    .lookup(Some(entry), name, RequestStyle::Require)
+                    .err()
+                    .unwrap()
+                    .code,
                 "ERR_MODULE_REGISTRY_ROUTE"
             );
         }
-        assert_eq!(registry.reachable_requests(None, entry, RequestStyle::Require).unwrap().len(), 1);
+        assert_eq!(
+            registry
+                .reachable_requests(None, entry, RequestStyle::Require)
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]
     fn url_resolution_routes_replay_without_source_or_filename_authority() {
         let root = tempfile::tempdir().unwrap();
-        put(root.path(), "app.mjs", r#"
+        put(
+            root.path(),
+            "app.mjs",
+            r#"
             import './shared.mjs';
             import.meta.resolve('./shared.mjs');
             import.meta.resolve('./missing//asset.json?one#frag');
@@ -2429,13 +2761,18 @@ import third from './dep.mjs' with {color:'blue',type:'json'};
             import.meta.resolve('node:not-real');
             import.meta.resolve('https://EXAMPLE.com:443/a/../asset');
             try { import.meta.resolve('missing-package'); } catch (error) {}
-        "#);
+        "#,
+        );
         put(root.path(), "shared.mjs", "export const value = 42;");
         std::fs::create_dir(root.path().join("assets")).unwrap();
         let graph = capture(root.path(), "app.mjs", GraphOptions::default()).unwrap();
         let pin = graph.report().input_hash.clone();
         let encoded = capsule::encode(&graph).unwrap();
-        put(root.path(), "app.mjs", "throw Error('live source changed');");
+        put(
+            root.path(),
+            "app.mjs",
+            "throw Error('live source changed');",
+        );
         put(root.path(), "missing/asset.json", "{}");
         let replay = capsule::replay(encoded.bytes(), encoded.digest()).unwrap();
         assert_eq!(replay.report(), graph.report());
@@ -2447,14 +2784,21 @@ import third from './dep.mjs' with {color:'blue',type:'json'};
         assert_eq!(registry.summary().url_resolution_targets, 6);
         assert_eq!(registry.summary().url_resolution_routes, 8);
         assert_eq!(registry.summary().missing_url_resolution_routes, 1);
-        let shared = registry.lookup(Some(entry), "./shared.mjs", RequestStyle::Import).unwrap();
+        let shared = registry
+            .lookup(Some(entry), "./shared.mjs", RequestStyle::Import)
+            .unwrap();
         assert_eq!(
-            registry.lookup_url_resolution(Some(entry), "./shared.mjs").unwrap().id(),
+            registry
+                .lookup_url_resolution(Some(entry), "./shared.mjs")
+                .unwrap()
+                .id(),
             shared.id(),
         );
         assert_eq!(
-            registry.lookup_url_resolution(Some(entry), "./missing//asset.json?one#frag")
-                .unwrap().target(),
+            registry
+                .lookup_url_resolution(Some(entry), "./missing//asset.json?one#frag")
+                .unwrap()
+                .target(),
             &ResolutionUrl::File {
                 id: ModuleId {
                     path: "missing//asset.json".into(),
@@ -2463,54 +2807,112 @@ import third from './dep.mjs' with {color:'blue',type:'json'};
             },
         );
         assert_eq!(
-            registry.lookup_url_resolution(Some(entry), "./assets/").unwrap().target(),
+            registry
+                .lookup_url_resolution(Some(entry), "./assets/")
+                .unwrap()
+                .target(),
             &ResolutionUrl::File {
-                id: ModuleId { path: "assets/".into(), url_suffix: String::new() },
+                id: ModuleId {
+                    path: "assets/".into(),
+                    url_suffix: String::new()
+                },
             },
         );
         for (request, expected) in [
             ("fs", "node:fs"),
             ("node:fs", "node:fs"),
             ("node:not-real", "node:not-real"),
-            ("https://EXAMPLE.com:443/a/../asset", "https://example.com/asset"),
+            (
+                "https://EXAMPLE.com:443/a/../asset",
+                "https://example.com/asset",
+            ),
         ] {
-            let metadata = registry.lookup_url_resolution(Some(entry), request).unwrap();
-            assert_eq!(metadata.target(), &ResolutionUrl::Absolute { url: expected.into() });
-            assert!(registry.lookup_url_resolution(Some(entry), metadata.id()).is_err());
-            assert!(registry.lookup_url_resolution(Some(shared.id()), request).is_err());
+            let metadata = registry
+                .lookup_url_resolution(Some(entry), request)
+                .unwrap();
+            assert_eq!(
+                metadata.target(),
+                &ResolutionUrl::Absolute {
+                    url: expected.into()
+                }
+            );
+            assert!(
+                registry
+                    .lookup_url_resolution(Some(entry), metadata.id())
+                    .is_err()
+            );
+            assert!(
+                registry
+                    .lookup_url_resolution(Some(shared.id()), request)
+                    .is_err()
+            );
             assert!(registry.lookup_url_resolution(None, request).is_err());
             assert!(registry.lookup_resolution(Some(entry), request).is_err());
-            for style in [RequestStyle::Import, RequestStyle::Require, RequestStyle::ImportMetaResolve] {
+            for style in [
+                RequestStyle::Import,
+                RequestStyle::Require,
+                RequestStyle::ImportMetaResolve,
+            ] {
                 assert!(registry.lookup(Some(entry), request, style).is_err());
             }
         }
         assert_eq!(
-            registry.lookup_url_resolution(Some(entry), "missing-package").err().unwrap().code,
+            registry
+                .lookup_url_resolution(Some(entry), "missing-package")
+                .err()
+                .unwrap()
+                .code,
             "ERR_MODULE_NOT_FOUND",
         );
-        assert_eq!(registry.reachable_requests(None, entry, RequestStyle::Import).unwrap().len(), 2);
+        assert_eq!(
+            registry
+                .reachable_requests(None, entry, RequestStyle::Import)
+                .unwrap()
+                .len(),
+            2
+        );
     }
 
     #[test]
     fn malformed_url_metadata_and_changed_purpose_fail_before_source_preparation() {
         use std::cell::Cell;
         let root = tempfile::tempdir().unwrap();
-        put(root.path(), "app.mjs", "import.meta.resolve('./missing.json');");
+        put(
+            root.path(),
+            "app.mjs",
+            "import.meta.resolve('./missing.json');",
+        );
         let bad = [
             ResolutionUrl::File {
-                id: ModuleId { path: "../escape".into(), url_suffix: String::new() },
+                id: ModuleId {
+                    path: "../escape".into(),
+                    url_suffix: String::new(),
+                },
             },
             ResolutionUrl::File {
-                id: ModuleId { path: "/absolute".into(), url_suffix: String::new() },
+                id: ModuleId {
+                    path: "/absolute".into(),
+                    url_suffix: String::new(),
+                },
             },
             ResolutionUrl::File {
-                id: ModuleId { path: "a\\b".into(), url_suffix: String::new() },
+                id: ModuleId {
+                    path: "a\\b".into(),
+                    url_suffix: String::new(),
+                },
             },
             ResolutionUrl::File {
-                id: ModuleId { path: "missing.json".into(), url_suffix: "/extra".into() },
+                id: ModuleId {
+                    path: "missing.json".into(),
+                    url_suffix: "/extra".into(),
+                },
             },
-            ResolutionUrl::Absolute { url: "file:///outside".into() },
-            ResolutionUrl::Absolute { url: "HTTPS://EXAMPLE.COM/".into() },
+            ResolutionUrl::Absolute {
+                url: "file:///outside".into(),
+            },
+            ResolutionUrl::Absolute {
+                url: "HTTPS://EXAMPLE.COM/".into(),
+            },
         ];
         for target in bad {
             let mut graph = capture(root.path(), "app.mjs", GraphOptions::default()).unwrap();

@@ -641,7 +641,7 @@ fn sdk_verifier_public_api_golden_conformance() {
     assert_eq!(facade.verifier_identity, "verifier://facade-test");
     assert_eq!(facade.sdk_version, SDK_VERSION);
     assert!(is_lower_hex_digest(&facade.artifact_binding_hash));
-    assert!(is_lower_hex_digest(&facade.verifier_signature));
+    assert!(is_lower_hex_ed25519_signature(&facade.verifier_signature));
     assert_rfc3339_timestamp(
         &facade.execution_timestamp,
         "facade_result execution_timestamp",

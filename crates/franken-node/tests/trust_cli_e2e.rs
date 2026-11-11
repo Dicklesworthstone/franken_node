@@ -3042,7 +3042,9 @@ fn trust_quarantine_propagates_through_fleet_transport_pipeline() {
         // catch-all panic arm.
         FleetAction::Release { .. }
         | FleetAction::PolicyUpdate { .. }
-        | FleetAction::Revoke { .. } => {
+        | FleetAction::Revoke { .. }
+        | FleetAction::NativeSessionHold { .. }
+        | FleetAction::NativeSessionResume { .. } => {
             panic!("expected quarantine action: {action_record:#?}")
         }
     };
@@ -3592,8 +3594,11 @@ fn trust_sync_collects_all_osv_pages_before_updating_signed_risk() {
             .contains("OSV-1, OSV-2, OSV-3")
     );
     let card = serde_json::from_value(card).expect("decode signed trust card");
-    frankenengine_node::supply_chain::trust_card::verify_card_signature(&card, FIXTURE_REGISTRY_KEY)
-        .expect("all-page vulnerability assessment remains signed");
+    frankenengine_node::supply_chain::trust_card::verify_card_signature(
+        &card,
+        FIXTURE_REGISTRY_KEY,
+    )
+    .expect("all-page vulnerability assessment remains signed");
 }
 
 #[test]
@@ -3652,8 +3657,7 @@ fn trust_sync_rejects_malformed_osv_success_envelopes_without_refreshing_cards()
         let after = parse_json_stdout(&after, "card after malformed response");
         assert_eq!(after["card_hash"], before["card_hash"], "{response}");
         assert_eq!(
-            after["last_verified_timestamp"],
-            before["last_verified_timestamp"],
+            after["last_verified_timestamp"], before["last_verified_timestamp"],
             "{response}"
         );
     }
@@ -4048,7 +4052,10 @@ fn trust_sync_keeps_signed_camouflage_risk_after_vulnerable_then_clean_refresh()
         after_vulnerable.trust_card_version
     );
     assert_eq!(after_clean.card_hash, after_vulnerable.card_hash);
-    assert_eq!(after_clean.osv_risk_baseline, after_vulnerable.osv_risk_baseline);
+    assert_eq!(
+        after_clean.osv_risk_baseline,
+        after_vulnerable.osv_risk_baseline
+    );
     assert!(after_clean.osv_risk_baseline.is_some());
     assert_eq!(after_clean.camouflage_hints, marked.camouflage_hints);
     assert_eq!(
@@ -4220,7 +4227,9 @@ fn run_preflight_refuses_different_selected_artifacts_in_every_profile() {
                     .any(|violation| violation["kind"] == "artifact_mismatch"),
                 "{report}"
             );
-            assert!(!String::from_utf8_lossy(&run.stdout).contains("artifact-guest-must-not-start"));
+            assert!(
+                !String::from_utf8_lossy(&run.stdout).contains("artifact-guest-must-not-start")
+            );
         }
     }
 }
@@ -4304,7 +4313,10 @@ fn trust_scan_explicit_refresh_repairs_changed_artifacts_without_resetting_histo
         ));
         let skipped = run_cli_in_workspace(workspace.path(), &["trust", "scan", ".", "--json"]);
         assert!(skipped.status.success());
-        assert_eq!(parse_json_stdout(&skipped, "ordinary rescan")["skipped_existing"], 1);
+        assert_eq!(
+            parse_json_stdout(&skipped, "ordinary rescan")["skipped_existing"],
+            1
+        );
         assert_eq!(exported_card().card_hash, previous.card_hash);
 
         let refreshed = run_cli_in_workspace(
@@ -4324,10 +4336,19 @@ fn trust_scan_explicit_refresh_repairs_changed_artifacts_without_resetting_histo
         let card = exported_card();
         assert_eq!(card.extension.version, version);
         assert_eq!(card.trust_card_version, previous.trust_card_version + 1);
-        assert_eq!(card.previous_version_hash.as_deref(), Some(previous.card_hash.as_str()));
+        assert_eq!(
+            card.previous_version_hash.as_deref(),
+            Some(previous.card_hash.as_str())
+        );
         assert_eq!(card.audit_history.len(), previous.audit_history.len() + 1);
         for evidence in &previous.derivation_evidence.as_ref().unwrap().evidence_refs {
-            assert!(card.derivation_evidence.as_ref().unwrap().evidence_refs.contains(evidence));
+            assert!(
+                card.derivation_evidence
+                    .as_ref()
+                    .unwrap()
+                    .evidence_refs
+                    .contains(evidence)
+            );
         }
         assert_eq!(
             match_trust_card_artifact(&card, &capture.packages["npm:acme-runtime"]),
@@ -4341,7 +4362,9 @@ fn trust_scan_explicit_refresh_repairs_changed_artifacts_without_resetting_histo
         .unwrap()
         .with_dependency_capture(capture)
         .unwrap();
-        requirements.verify_dependency_capture(workspace.path()).unwrap();
+        requirements
+            .verify_dependency_capture(workspace.path())
+            .unwrap();
         validate_execution_trust(
             workspace.path(),
             &config,
@@ -4892,11 +4915,12 @@ fn attributed_osv_scan_workspace(package: &str, byte: Option<u8>) -> tempfile::T
 }
 
 fn export_osv_scan_card(workspace: &Path, extension: &str) -> TrustCard {
-    let output = run_cli_in_workspace(
-        workspace,
-        &["trust-card", "export", extension, "--json"],
+    let output = run_cli_in_workspace(workspace, &["trust-card", "export", extension, "--json"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
     );
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     serde_json::from_value(parse_json_stdout(&output, "export attributed OSV card")).unwrap()
 }
 
@@ -4918,7 +4942,11 @@ fn audited_scan_retains_attribution_across_repeats_and_authenticated_clearance()
         );
         let created = trust_scan_audit(workspace.path(), &url);
         server.join().unwrap();
-        assert!(created.status.success(), "{}", String::from_utf8_lossy(&created.stderr));
+        assert!(
+            created.status.success(),
+            "{}",
+            String::from_utf8_lossy(&created.stderr)
+        );
         assert_eq!(requests.lock().unwrap().len(), 1);
         let report = parse_json_stdout(&created, "initial audited scan");
         assert_eq!(report["created_cards"], 1);
@@ -4929,10 +4957,17 @@ fn audited_scan_retains_attribution_across_repeats_and_authenticated_clearance()
         // One package creates a signed independent baseline and then its
         // signed OSV overlay before the command persists the registry.
         assert_eq!(first.trust_card_version, 2);
-        let baseline = first.osv_risk_baseline.clone().expect("signed OSV attribution");
+        let baseline = first
+            .osv_risk_baseline
+            .clone()
+            .expect("signed OSV attribution");
         assert_eq!(
             baseline.risk_assessment.level,
-            if package == "lodahs" { RiskLevel::High } else { RiskLevel::Low }
+            if package == "lodahs" {
+                RiskLevel::High
+            } else {
+                RiskLevel::Low
+            }
         );
         if package == "lodahs" {
             assert!(baseline.risk_assessment.summary.contains("typosquat"));
@@ -4951,12 +4986,25 @@ fn audited_scan_retains_attribution_across_repeats_and_authenticated_clearance()
         );
         let repeated = trust_scan_audit(workspace.path(), &url);
         server.join().unwrap();
-        assert!(repeated.status.success(), "{}", String::from_utf8_lossy(&repeated.stderr));
-        assert_eq!(parse_json_stdout(&repeated, "repeat audited scan")["refreshed_cards"], 1);
+        assert!(
+            repeated.status.success(),
+            "{}",
+            String::from_utf8_lossy(&repeated.stderr)
+        );
+        assert_eq!(
+            parse_json_stdout(&repeated, "repeat audited scan")["refreshed_cards"],
+            1
+        );
         let retained = export_osv_scan_card(workspace.path(), &extension);
         assert_eq!(retained.osv_risk_baseline, first.osv_risk_baseline);
-        assert_eq!(retained.reputation_score_basis_points, first.reputation_score_basis_points);
-        assert_eq!(retained.previous_version_hash.as_deref(), Some(first.card_hash.as_str()));
+        assert_eq!(
+            retained.reputation_score_basis_points,
+            first.reputation_score_basis_points
+        );
+        assert_eq!(
+            retained.previous_version_hash.as_deref(),
+            Some(first.card_hash.as_str())
+        );
         assert_eq!(retained.publisher, first.publisher);
         assert_eq!(retained.behavioral_profile, first.behavioral_profile);
 
@@ -4995,8 +5043,14 @@ fn audited_scan_retains_attribution_across_repeats_and_authenticated_clearance()
         registry.persist_authoritative_state(&path).unwrap();
         let exported = export_osv_scan_card(workspace.path(), &extension);
         assert_eq!(exported.card_hash, clean.card_hash);
-        assert_eq!(exported.user_facing_risk_assessment, baseline.risk_assessment);
-        assert_eq!(exported.reputation_score_basis_points, baseline.reputation_score_basis_points);
+        assert_eq!(
+            exported.user_facing_risk_assessment,
+            baseline.risk_assessment
+        );
+        assert_eq!(
+            exported.reputation_score_basis_points,
+            baseline.reputation_score_basis_points
+        );
         assert_eq!(exported.reputation_trend, baseline.reputation_trend);
         assert!(exported.osv_risk_baseline.is_none());
         verify_card_signature(&exported, FIXTURE_REGISTRY_KEY).unwrap();
@@ -5019,9 +5073,16 @@ fn incomplete_artifact_scan_cannot_clear_masked_osv_and_explicit_repair_retains_
     );
     let created = trust_scan_audit(workspace.path(), &url);
     server.join().unwrap();
-    assert!(created.status.success(), "{}", String::from_utf8_lossy(&created.stderr));
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
     let vulnerable = export_osv_scan_card(workspace.path(), extension);
-    assert_eq!(vulnerable.user_facing_risk_assessment.level, RiskLevel::High);
+    assert_eq!(
+        vulnerable.user_facing_risk_assessment.level,
+        RiskLevel::High
+    );
     let baseline = vulnerable.osv_risk_baseline.as_ref().unwrap();
     assert_eq!(baseline.risk_assessment.level, RiskLevel::High);
     assert!(vulnerable.reputation_score_basis_points < baseline.reputation_score_basis_points);
@@ -5033,27 +5094,53 @@ fn incomplete_artifact_scan_cannot_clear_masked_osv_and_explicit_repair_retains_
     let report = parse_json_stdout(&clean, "incomplete artifact cannot discard source");
     assert_eq!(report["refreshed_cards"], 0);
     assert_eq!(report["skipped_existing"], 1);
-    assert!(report["warnings"].as_array().unwrap().iter().any(|warning| {
-        warning.as_str().unwrap().contains("active OSV evidence")
-    }));
-    assert_eq!(export_osv_scan_card(workspace.path(), extension).card_hash, vulnerable.card_hash);
+    assert!(
+        report["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|warning| { warning.as_str().unwrap().contains("active OSV evidence") })
+    );
+    assert_eq!(
+        export_osv_scan_card(workspace.path(), extension).card_hash,
+        vulnerable.card_hash
+    );
 
     write_osv_scan_artifact(workspace.path(), "lodahs", "2.0.0", Some(0xbb));
     let (url, requests, server) = spawn_osv_static_response_server(1, 200, "OK", r#"{"vulns":[]}"#);
     let repaired = trust_scan_audit_with_options(workspace.path(), &url, &["--refresh"]);
     server.join().unwrap();
-    assert!(repaired.status.success(), "{}", String::from_utf8_lossy(&repaired.stderr));
-    assert_eq!(parse_json_stdout(&repaired, "explicit artifact repair")["refreshed_cards"], 1);
+    assert!(
+        repaired.status.success(),
+        "{}",
+        String::from_utf8_lossy(&repaired.stderr)
+    );
+    assert_eq!(
+        parse_json_stdout(&repaired, "explicit artifact repair")["refreshed_cards"],
+        1
+    );
     let request: Value = serde_json::from_str(&requests.lock().unwrap()[0]).unwrap();
     assert_eq!(request["version"], "2.0.0");
     let card = export_osv_scan_card(workspace.path(), extension);
     assert_eq!(card.extension.version, "2.0.0");
     assert_eq!(card.user_facing_risk_assessment.level, RiskLevel::High);
-    assert_eq!(card.reputation_score_basis_points, vulnerable.reputation_score_basis_points);
+    assert_eq!(
+        card.reputation_score_basis_points,
+        vulnerable.reputation_score_basis_points
+    );
     assert_eq!(card.reputation_trend, ReputationTrend::Declining);
-    assert!(card.osv_risk_baseline.is_none(), "old artifact cannot grant clearance authority");
-    assert_eq!(card.previous_version_hash.as_deref(), Some(vulnerable.card_hash.as_str()));
-    assert_eq!(card.provenance_summary.artifact_hashes, vec![format!("sha256:{}", "b".repeat(64))]);
+    assert!(
+        card.osv_risk_baseline.is_none(),
+        "old artifact cannot grant clearance authority"
+    );
+    assert_eq!(
+        card.previous_version_hash.as_deref(),
+        Some(vulnerable.card_hash.as_str())
+    );
+    assert_eq!(
+        card.provenance_summary.artifact_hashes,
+        vec![format!("sha256:{}", "b".repeat(64))]
+    );
     verify_card_signature(&card, FIXTURE_REGISTRY_KEY).unwrap();
 }
 

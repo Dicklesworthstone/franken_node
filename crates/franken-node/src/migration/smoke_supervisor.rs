@@ -345,6 +345,7 @@ pub(crate) struct Completion {
 
 /// Execute one native smoke leg. The deadline includes pipe draining; cleanup
 /// has a separate bounded reap allowance and also runs on setup/I/O errors.
+#[allow(dead_code)]
 pub(super) fn run_command_with_timeout(
     command: &mut Command,
     timeout: Duration,
@@ -357,6 +358,7 @@ pub(super) fn run_command_with_timeout(
 /// invocation starts at offset zero, even if a preceding guest seeks/writes.
 /// There is no pipe-writer thread, inherited terminal, or blocked stdin join.
 /// This models redirected file input, not a terminal or interactive pipe.
+#[allow(dead_code)]
 pub(super) fn run_command_with_input(
     command: &mut Command,
     timeout: Duration,
@@ -377,6 +379,7 @@ pub(super) fn run_command_with_input(
 /// stdout/stderr on the supervisor thread. Queued bytes are transport progress,
 /// not proof of guest consumption. A zero exit before the whole request is
 /// queued is an error; native failures retain their original exit status.
+#[allow(dead_code)]
 pub(super) fn run_command_with_pipe_input(
     command: &mut Command,
     timeout: Duration,
@@ -396,6 +399,7 @@ pub(super) fn run_command_with_pipe_input(
 /// Cancellable version of the same bounded executor, with no new child owner
 /// or pipe thread. A request is checked before spawn and between bounded I/O
 /// pumps, including while a silent child or inherited pipe remains alive.
+#[allow(dead_code)]
 pub(super) fn run_command_cancellable(
     command: &mut Command,
     timeout: Duration,
@@ -407,13 +411,21 @@ pub(super) fn run_command_cancellable(
     cancellation.check()?;
     if pipe_input {
         capture_command(
-            command, timeout, drain_timeout, MAX_STREAM_BYTES,
+            command,
+            timeout,
+            drain_timeout,
+            MAX_STREAM_BYTES,
             InputTransport::Pipe(input.context("pipe stdin requires captured bytes")?),
             Some(cancellation),
         )
     } else {
         run_bounded_input(
-            command, timeout, drain_timeout, MAX_STREAM_BYTES, input, Some(cancellation),
+            command,
+            timeout,
+            drain_timeout,
+            MAX_STREAM_BYTES,
+            input,
+            Some(cancellation),
         )
     }
 }
@@ -432,12 +444,25 @@ pub(super) fn run_command_guarded(
     check_cancellation(cancellation)?;
     control()?;
     if pipe_input {
-        capture_command_controlled(command, timing.0, timing.1, MAX_STREAM_BYTES,
+        capture_command_controlled(
+            command,
+            timing.0,
+            timing.1,
+            MAX_STREAM_BYTES,
             InputTransport::Pipe(input.context("pipe stdin requires captured bytes")?),
-            cancellation, Some(control))
+            cancellation,
+            Some(control),
+        )
     } else {
-        run_bounded_input_controlled(command, timing.0, timing.1, MAX_STREAM_BYTES,
-            input, cancellation, Some(control))
+        run_bounded_input_controlled(
+            command,
+            timing.0,
+            timing.1,
+            MAX_STREAM_BYTES,
+            input,
+            cancellation,
+            Some(control),
+        )
     }
 }
 
@@ -451,6 +476,7 @@ fn run_bounded(
     run_bounded_input(command, timeout, drain_timeout, limit, None, None)
 }
 
+#[allow(dead_code)]
 fn run_bounded_input(
     command: &mut Command,
     timeout: Duration,
@@ -459,7 +485,15 @@ fn run_bounded_input(
     input: Option<&[u8]>,
     cancellation: Option<&CancellationToken>,
 ) -> Result<Output> {
-    run_bounded_input_controlled(command, timeout, drain_timeout, limit, input, cancellation, None)
+    run_bounded_input_controlled(
+        command,
+        timeout,
+        drain_timeout,
+        limit,
+        input,
+        cancellation,
+        None,
+    )
 }
 
 fn run_bounded_input_controlled(
@@ -505,6 +539,7 @@ fn run_bounded_input_controlled(
     )
 }
 
+#[allow(dead_code)]
 fn capture_command(
     command: &mut Command,
     timeout: Duration,
@@ -513,7 +548,15 @@ fn capture_command(
     input: InputTransport<'_>,
     cancellation: Option<&CancellationToken>,
 ) -> Result<Output> {
-    capture_command_controlled(command, timeout, drain_timeout, limit, input, cancellation, None)
+    capture_command_controlled(
+        command,
+        timeout,
+        drain_timeout,
+        limit,
+        input,
+        cancellation,
+        None,
+    )
 }
 
 fn capture_command_controlled(
@@ -556,7 +599,14 @@ fn capture_command_controlled(
             0,
         ),
         input => supervise_with_input_controlled(
-            command, timeout, drain_timeout, input, |_| Ok(()), observer, cancellation, control,
+            command,
+            timeout,
+            drain_timeout,
+            input,
+            |_| Ok(()),
+            observer,
+            cancellation,
+            control,
         )?,
     };
     check_cancellation(cancellation)?;
@@ -621,6 +671,7 @@ pub(crate) fn supervise_with_observer(
 /// deadline is the caller's original budget, including request preparation.
 /// The caller owns framing and input limits; existing migration caps remain
 /// unchanged. No writer thread or inherited terminal is introduced.
+#[allow(dead_code)]
 pub(crate) fn supervise_with_redirected_input(
     command: &mut Command,
     deadline: Instant,
@@ -651,8 +702,16 @@ fn supervise_with_input(
     observe: impl FnMut(Stream, &[u8]) -> io::Result<()>,
     cancellation: Option<&CancellationToken>,
 ) -> Result<(Completion, usize)> {
-    supervise_with_input_controlled(command, timeout, drain_timeout, input,
-        after_spawn, observe, cancellation, None)
+    supervise_with_input_controlled(
+        command,
+        timeout,
+        drain_timeout,
+        input,
+        after_spawn,
+        observe,
+        cancellation,
+        None,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -838,27 +897,46 @@ mod tests {
         let observed_exit = std::cell::Cell::new(false);
         let started = Instant::now();
         let error = supervise_with_input_controlled(
-            &mut shell("/bin/sleep 60 & exit 0"), Duration::from_secs(10),
-            Duration::from_secs(5), InputTransport::Null,
-            |raw| { leader.set(Pid::from_raw(i32::try_from(raw).unwrap())); Ok(()) },
-            |_, _| Ok(()), None, Some(&|| {
+            &mut shell("/bin/sleep 60 & exit 0"),
+            Duration::from_secs(10),
+            Duration::from_secs(5),
+            InputTransport::Null,
+            |raw| {
+                leader.set(Pid::from_raw(i32::try_from(raw).unwrap()));
+                Ok(())
+            },
+            |_, _| Ok(()),
+            None,
+            Some(&|| {
                 // NOWAIT observes the pinned leader without taking its wait
                 // ownership. The background child still holds both pipes.
                 if let Some(pid) = leader.get()
-                    && waitid(WaitId::Pid(pid),
-                        WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT)?
-                        .is_some() {
-                            observed_exit.set(true);
-                            bail!("trusted control revoked during drain");
-                        }
+                    && waitid(
+                        WaitId::Pid(pid),
+                        WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT,
+                    )?
+                    .is_some()
+                {
+                    observed_exit.set(true);
+                    bail!("trusted control revoked during drain");
+                }
                 Ok(())
             }),
-        ).unwrap_err();
+        )
+        .unwrap_err();
         assert!(observed_exit.get());
-        assert!(format!("{error:#}").contains("trusted control revoked"), "{error:#}");
+        assert!(
+            format!("{error:#}").contains("trusted control revoked"),
+            "{error:#}"
+        );
         assert!(started.elapsed() < Duration::from_secs(3));
-        assert!(matches!(waitid(WaitId::Pid(leader.get().unwrap()),
-            WaitIdOptions::EXITED | WaitIdOptions::NOHANG), Err(Errno::CHILD)));
+        assert!(matches!(
+            waitid(
+                WaitId::Pid(leader.get().unwrap()),
+                WaitIdOptions::EXITED | WaitIdOptions::NOHANG
+            ),
+            Err(Errno::CHILD)
+        ));
     }
 
     #[test]
@@ -869,16 +947,28 @@ mod tests {
         for pipe in [false, true] {
             let error = run_command_cancellable(
                 &mut Command::new("/must-not-be-resolved"),
-                Duration::from_secs(3), Duration::from_secs(1), Some(b"request"),
-                pipe, &cancelled,
-            ).unwrap_err();
-            assert!(error.to_string().contains("MIGRATION_CANCELLED"), "{error:#}");
+                Duration::from_secs(3),
+                Duration::from_secs(1),
+                Some(b"request"),
+                pipe,
+                &cancelled,
+            )
+            .unwrap_err();
+            assert!(
+                error.to_string().contains("MIGRATION_CANCELLED"),
+                "{error:#}"
+            );
         }
         let independent = CancellationToken::default();
         let result = run_command_cancellable(
-            &mut shell("exit 7"), Duration::from_secs(3), Duration::from_secs(1),
-            None, false, &independent,
-        ).unwrap();
+            &mut shell("exit 7"),
+            Duration::from_secs(3),
+            Duration::from_secs(1),
+            None,
+            false,
+            &independent,
+        )
+        .unwrap();
         assert_eq!(result.status.code(), Some(7));
         assert!(!independent.is_cancelled());
     }
@@ -888,19 +978,39 @@ mod tests {
         for pipe in [false, true] {
             let cancellation = CancellationToken::default();
             let input = vec![0; MAX_INPUT_BYTES];
-            let transport = if pipe { InputTransport::Pipe(&input) } else { InputTransport::Null };
+            let transport = if pipe {
+                InputTransport::Pipe(&input)
+            } else {
+                InputTransport::Null
+            };
             let mut pid = None;
             let started = Instant::now();
             let error = supervise_with_input(
-                &mut shell("exec /bin/sleep 60"), Duration::from_secs(20),
-                Duration::from_secs(5), transport,
-                |raw| { pid = Pid::from_raw(i32::try_from(raw).unwrap()); cancellation.cancel(); Ok(()) },
-                |_, _| Ok(()), Some(&cancellation),
-            ).unwrap_err();
-            assert!(error.to_string().contains("MIGRATION_CANCELLED"), "{error:#}");
+                &mut shell("exec /bin/sleep 60"),
+                Duration::from_secs(20),
+                Duration::from_secs(5),
+                transport,
+                |raw| {
+                    pid = Pid::from_raw(i32::try_from(raw).unwrap());
+                    cancellation.cancel();
+                    Ok(())
+                },
+                |_, _| Ok(()),
+                Some(&cancellation),
+            )
+            .unwrap_err();
+            assert!(
+                error.to_string().contains("MIGRATION_CANCELLED"),
+                "{error:#}"
+            );
             assert!(started.elapsed() < Duration::from_secs(3));
-            assert!(matches!(waitid(WaitId::Pid(pid.unwrap()),
-                WaitIdOptions::EXITED | WaitIdOptions::NOHANG), Err(Errno::CHILD)));
+            assert!(matches!(
+                waitid(
+                    WaitId::Pid(pid.unwrap()),
+                    WaitIdOptions::EXITED | WaitIdOptions::NOHANG
+                ),
+                Err(Errno::CHILD)
+            ));
         }
     }
 
@@ -909,15 +1019,28 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let marker = root.path().join("escaped-work");
         let cancellation = CancellationToken::default();
-        let mut command = shell("(/bin/sleep 0.4; printf unwanted > \"$MARKER\") & printf ready; wait");
+        let mut command =
+            shell("(/bin/sleep 0.4; printf unwanted > \"$MARKER\") & printf ready; wait");
         command.env("MARKER", &marker);
         let error = supervise_with_input(
-            &mut command, Duration::from_secs(20), Duration::from_secs(5),
-            InputTransport::Null, |_| Ok(()),
-            |_, bytes| { if !bytes.is_empty() { cancellation.cancel(); } Ok(()) },
+            &mut command,
+            Duration::from_secs(20),
+            Duration::from_secs(5),
+            InputTransport::Null,
+            |_| Ok(()),
+            |_, bytes| {
+                if !bytes.is_empty() {
+                    cancellation.cancel();
+                }
+                Ok(())
+            },
             Some(&cancellation),
-        ).unwrap_err();
-        assert!(error.to_string().contains("MIGRATION_CANCELLED"), "{error:#}");
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("MIGRATION_CANCELLED"),
+            "{error:#}"
+        );
         thread::sleep(Duration::from_millis(600));
         assert!(!marker.exists(), "a group descendant survived cancellation");
     }
@@ -928,10 +1051,21 @@ mod tests {
         let started = Instant::now();
         let error = supervise_with_input(
             &mut shell("/bin/sleep 60 & printf ready; exit 0"),
-            Duration::from_secs(20), Duration::from_secs(10), InputTransport::Null,
-            |_| Ok(()), |_, _| { cancellation.cancel(); Ok(()) }, Some(&cancellation),
-        ).unwrap_err();
-        assert!(error.to_string().contains("MIGRATION_CANCELLED"), "{error:#}");
+            Duration::from_secs(20),
+            Duration::from_secs(10),
+            InputTransport::Null,
+            |_| Ok(()),
+            |_, _| {
+                cancellation.cancel();
+                Ok(())
+            },
+            Some(&cancellation),
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("MIGRATION_CANCELLED"),
+            "{error:#}"
+        );
         assert!(started.elapsed() < Duration::from_secs(3));
     }
 
@@ -941,22 +1075,37 @@ mod tests {
         let bytes = [0, 255, 13, 10];
         for pipe in [false, true] {
             let output = run_command_cancellable(
-                &mut Command::new("/bin/cat"), Duration::from_secs(3),
-                Duration::from_secs(1), Some(&bytes), pipe, &cancellation,
-            ).unwrap();
+                &mut Command::new("/bin/cat"),
+                Duration::from_secs(3),
+                Duration::from_secs(1),
+                Some(&bytes),
+                pipe,
+                &cancellation,
+            )
+            .unwrap();
             assert!(output.status.success());
             assert_eq!(output.stdout, bytes);
             assert!(output.stderr.is_empty());
         }
         let error = capture_command(
-            &mut Command::new("/bin/cat"), Duration::from_secs(3),
-            Duration::from_secs(1), 3, InputTransport::Pipe(&bytes), Some(&cancellation),
-        ).unwrap_err();
+            &mut Command::new("/bin/cat"),
+            Duration::from_secs(3),
+            Duration::from_secs(1),
+            3,
+            InputTransport::Pipe(&bytes),
+            Some(&cancellation),
+        )
+        .unwrap_err();
         assert!(format!("{error:#}").contains("exceeds 3 bytes"));
         let output = run_command_cancellable(
-            &mut shell("printf binary; exit 9"), Duration::from_secs(3),
-            Duration::from_secs(1), None, false, &cancellation,
-        ).unwrap();
+            &mut shell("printf binary; exit 9"),
+            Duration::from_secs(3),
+            Duration::from_secs(1),
+            None,
+            false,
+            &cancellation,
+        )
+        .unwrap();
         assert_eq!(output.status.code(), Some(9));
         assert_eq!(output.stdout, b"binary");
     }

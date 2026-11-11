@@ -582,6 +582,7 @@ pub fn configured_child_process_spawn_admission_in_active_containment(
 /// corpus parent to its exact `run` child, then the native-session supervisor
 /// to its PID-namespace worker. Keeping this entry point crate-private prevents
 /// any public config or environment selector from bypassing those checks.
+#[cfg_attr(not(feature = "engine"), allow(dead_code))]
 pub(crate) fn configured_child_process_spawn_admission_in_active_containment_from_authenticated_run_key(
     config: &Config,
     trusted_public_key_hex: &str,

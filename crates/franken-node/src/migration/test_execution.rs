@@ -17,12 +17,12 @@
 //! puts its own option terminator before them; Node/Bun receive them after the
 //! script. Argument values can contain secrets and are omitted from Debug.
 
+use super::super::execution_control::ExecutionControl;
 use super::super::{
     Entry, EntryData, Invocation, MAX_PATH_BYTES, Snapshot, excluded_from_discovery,
     smoke_supervisor,
 };
 use anyhow::{Context, Result, ensure};
-use super::super::execution_control::ExecutionControl;
 use serde::{
     Deserialize, Deserializer,
     de::{MapAccess, Visitor},
@@ -85,9 +85,8 @@ where
     // Do not let serde echo a mistakenly supplied secret string into a parse
     // diagnostic. This is still a strict vector: null, shell strings, numbers
     // and nested objects are errors, never coerced into application arguments.
-    Vec::<String>::deserialize(deserializer).map_err(|_| {
-        serde::de::Error::custom("test arguments must be an array of UTF-8 strings")
-    })
+    Vec::<String>::deserialize(deserializer)
+        .map_err(|_| serde::de::Error::custom("test arguments must be an array of UTF-8 strings"))
 }
 
 fn validate_arguments(arguments: &[String]) -> Result<()> {
@@ -343,6 +342,7 @@ fn configured_command(
     Ok(command)
 }
 
+#[allow(dead_code)]
 pub(super) fn run(
     snapshot: &Snapshot,
     settings: &Settings,
@@ -350,10 +350,23 @@ pub(super) fn run(
     invocation: &Invocation,
     workspace: &Path,
     environment: &BTreeMap<OsString, OsString>,
-    timing: (Instant, Duration, Option<&smoke_supervisor::CancellationToken>),
+    timing: (
+        Instant,
+        Duration,
+        Option<&smoke_supervisor::CancellationToken>,
+    ),
 ) -> Result<Output> {
     let control = ExecutionControl::admit(&[snapshot])?;
-    run_guarded(snapshot, settings, test, invocation, workspace, environment, timing, &control)
+    run_guarded(
+        snapshot,
+        settings,
+        test,
+        invocation,
+        workspace,
+        environment,
+        timing,
+        &control,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -364,7 +377,11 @@ pub(super) fn run_guarded(
     invocation: &Invocation,
     workspace: &Path,
     environment: &BTreeMap<OsString, OsString>,
-    timing: (Instant, Duration, Option<&smoke_supervisor::CancellationToken>),
+    timing: (
+        Instant,
+        Duration,
+        Option<&smoke_supervisor::CancellationToken>,
+    ),
     control: &ExecutionControl,
 ) -> Result<Output> {
     control.enforce()?;
@@ -455,12 +472,26 @@ mod tests {
     #[test]
     fn literal_argument_values_are_not_logged_or_shell_restricted() {
         let arguments: Vec<String> = [
-            "", "--", "--runtime", "node", "--eval", "process.exit(99)",
-            "space separated", "λ", "line\nbreak", "$(touch must-not-execute)",
+            "",
+            "--",
+            "--runtime",
+            "node",
+            "--eval",
+            "process.exit(99)",
+            "space separated",
+            "λ",
+            "line\nbreak",
+            "$(touch must-not-execute)",
             "private-argument-value",
-        ].into_iter().map(str::to_owned).collect();
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
         validate_arguments(&arguments).unwrap();
-        let settings = Settings { arguments, ..Settings::default() };
+        let settings = Settings {
+            arguments,
+            ..Settings::default()
+        };
         let debug = format!("{settings:?}");
         assert!(debug.contains("argument_count: 11"));
         assert!(!debug.contains("private-argument-value"));
@@ -482,20 +513,28 @@ mod tests {
             let raw = format!(
                 r#"{{"schema_version":"franken-node/migration-tests/v1","tests":["{TEST}"],"execution":{{"{TEST}":{settings}}}}}"#
             );
-            put(root.path(), ".franken-node/migration-tests.json", raw.as_bytes());
-            assert!(inventory(&snapshot(root.path()).entries).is_err(), "{settings}");
+            put(
+                root.path(),
+                ".franken-node/migration-tests.json",
+                raw.as_bytes(),
+            );
+            assert!(
+                inventory(&snapshot(root.path()).entries).is_err(),
+                "{settings}"
+            );
         }
     }
 
     #[test]
     fn malformed_argument_vectors_do_not_echo_private_values_in_parse_errors() {
-        let error = serde_json::from_str::<Settings>(
-            r#"{"arguments":"private-request-token"}"#,
-        ).unwrap_err().to_string();
+        let error = serde_json::from_str::<Settings>(r#"{"arguments":"private-request-token"}"#)
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("array of UTF-8 strings"));
         assert!(!error.contains("private-request-token"));
         let error = validate_arguments(&[format!("private-request-token{}", "x".repeat(4096))])
-            .unwrap_err().to_string();
+            .unwrap_err()
+            .to_string();
         assert!(!error.contains("private-request-token"));
     }
 
@@ -518,24 +557,46 @@ mod tests {
         use super::super::super::runtime_invocations;
         let (_reference, native) = runtime_invocations(Path::new("/bin/false")).unwrap();
         let arguments = vec![
-            "--runtime".into(), "node".into(), "--engine-bin".into(), "/untrusted".into(),
-            "--".into(), "".into(), "--json".into(),
+            "--runtime".into(),
+            "node".into(),
+            "--engine-bin".into(),
+            "/untrusted".into(),
+            "--".into(),
+            "".into(),
+            "--json".into(),
         ];
         let settings = Settings {
-            cwd: Some("packages/api".into()), arguments: arguments.clone(),
+            cwd: Some("packages/api".into()),
+            arguments: arguments.clone(),
             ..Settings::default()
         };
         let command = configured_command(
-            &settings, Path::new(TEST), &native, Path::new("/workspace"), &BTreeMap::new(),
-        ).unwrap();
+            &settings,
+            Path::new(TEST),
+            &native,
+            Path::new("/workspace"),
+            &BTreeMap::new(),
+        )
+        .unwrap();
         let mut expected: Vec<OsString> = vec![
-            "run".into(), "./check.cjs".into(), "--runtime".into(), "franken-engine".into(),
-            "--engine-bin".into(), native.executable.clone().into_os_string(),
-            "--console-only".into(), "--".into(),
+            "run".into(),
+            "./check.cjs".into(),
+            "--runtime".into(),
+            "franken-engine".into(),
+            "--engine-bin".into(),
+            native.executable.clone().into_os_string(),
+            "--console-only".into(),
+            "--".into(),
         ];
         expected.extend(arguments.into_iter().map(OsString::from));
-        assert_eq!(command.get_args().collect::<Vec<_>>(), expected.iter().map(OsString::as_os_str).collect::<Vec<_>>());
-        assert_eq!(command.get_current_dir(), Some(Path::new("/workspace/packages/api")));
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            expected.iter().map(OsString::as_os_str).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            command.get_current_dir(),
+            Some(Path::new("/workspace/packages/api"))
+        );
         assert_eq!(command.get_program(), native.executable.as_os_str());
     }
 
@@ -543,35 +604,77 @@ mod tests {
     fn reference_arguments_have_no_extra_application_separator() {
         let runtime = node();
         let settings = Settings {
-            arguments: vec!["".into(), "--".into(), "--eval".into(), "never executed".into()],
+            arguments: vec![
+                "".into(),
+                "--".into(),
+                "--eval".into(),
+                "never executed".into(),
+            ],
             ..Settings::default()
         };
         let command = configured_command(
-            &settings, Path::new(TEST), &runtime, Path::new("/workspace"), &BTreeMap::new(),
-        ).unwrap();
+            &settings,
+            Path::new(TEST),
+            &runtime,
+            Path::new("/workspace"),
+            &BTreeMap::new(),
+        )
+        .unwrap();
         let expected: Vec<OsString> = [
-            "./packages/api/check.cjs", "", "--", "--eval", "never executed",
-        ].into_iter().map(OsString::from).collect();
-        assert_eq!(command.get_args().collect::<Vec<_>>(), expected.iter().map(OsString::as_os_str).collect::<Vec<_>>());
+            "./packages/api/check.cjs",
+            "",
+            "--",
+            "--eval",
+            "never executed",
+        ]
+        .into_iter()
+        .map(OsString::from)
+        .collect();
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            expected.iter().map(OsString::as_os_str).collect::<Vec<_>>()
+        );
     }
 
     #[test]
     fn captured_arguments_execute_as_literal_guest_argv_not_runtime_options() {
         let root = fixture();
-        put(root.path(), TEST, b"process.stdout.write(JSON.stringify(process.argv.slice(2)));");
+        put(
+            root.path(),
+            TEST,
+            b"process.stdout.write(JSON.stringify(process.argv.slice(2)));",
+        );
         let expected = serde_json::json!([
-            "--eval", "process.exit(99)", "--runtime", "node", "--", "", "λ", "a b",
-            "$(touch must-not-execute)", "; exit 7", "line\nbreak",
+            "--eval",
+            "process.exit(99)",
+            "--runtime",
+            "node",
+            "--",
+            "",
+            "λ",
+            "a b",
+            "$(touch must-not-execute)",
+            "; exit 7",
+            "line\nbreak",
         ]);
-        manifest(root.path(), serde_json::json!({(TEST):{
-            "cwd":"packages/api", "arguments":expected,
-        }}));
+        manifest(
+            root.path(),
+            serde_json::json!({(TEST):{
+                "cwd":"packages/api", "arguments":expected,
+            }}),
+        );
         let captured = snapshot(root.path());
-        manifest(root.path(), serde_json::json!({(TEST):{"arguments":["later"]}}));
+        manifest(
+            root.path(),
+            serde_json::json!({(TEST):{"arguments":["later"]}}),
+        );
         let output = execute_captured(&captured);
         assert!(output.status.success());
         assert!(output.stderr.is_empty());
-        assert_eq!(serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap(), expected);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap(),
+            expected
+        );
         assert!(!root.path().join("packages/api/must-not-execute").exists());
     }
 
@@ -587,24 +690,42 @@ process.stdout.write(result);
 "#;
 
     fn argument_request() -> serde_json::Value {
-        serde_json::json!(["emit", "artifact", "--eval", "process.exit(99)", "", "λ a", "--", "--runtime", "node"])
+        serde_json::json!([
+            "emit",
+            "artifact",
+            "--eval",
+            "process.exit(99)",
+            "",
+            "λ a",
+            "--",
+            "--runtime",
+            "node"
+        ])
     }
 
     fn argument_fixture() -> tempfile::TempDir {
         let root = fixture();
         put(root.path(), TEST, ARGUMENT_PROGRAM);
-        manifest(root.path(), serde_json::json!({(TEST):{
-            "arguments":argument_request(), "cwd":"packages/api",
-            "stdin":"fixtures/input.bin", "stdin_mode":"pipe",
-            "environment":{"APP_MODE":"captured"}
-        }}));
+        manifest(
+            root.path(),
+            serde_json::json!({(TEST):{
+                "arguments":argument_request(), "cwd":"packages/api",
+                "stdin":"fixtures/input.bin", "stdin_mode":"pipe",
+                "environment":{"APP_MODE":"captured"}
+            }}),
+        );
         root
     }
 
     fn expected_argument_output() -> Vec<u8> {
         serde_json::to_vec(&serde_json::json!([
-            argument_request(), [0, 255, 120, 10], "captured", "package-local", 42
-        ])).unwrap()
+            argument_request(),
+            [0, 255, 120, 10],
+            "captured",
+            "package-local",
+            42
+        ]))
+        .unwrap()
     }
 
     #[test]
@@ -614,7 +735,8 @@ process.stdout.write(result);
         put(root.path(), "fixtures/argv.stdout", &expected);
         put(root.path(), "fixtures/empty.bin", b"");
         let manifest_path = root.path().join(".franken-node/migration-tests.json");
-        let mut raw: serde_json::Value = serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        let mut raw: serde_json::Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
         raw["expectations"] = serde_json::json!({(TEST):{
             "stdout":"fixtures/argv.stdout", "stderr":"fixtures/empty.bin",
             "files":{"packages/api/artifact":"fixtures/argv.stdout"}
@@ -641,16 +763,25 @@ process.stdout.write(result);
         ] {
             let candidate = argument_fixture();
             let manifest_path = candidate.path().join(".franken-node/migration-tests.json");
-            let mut changed: serde_json::Value = serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+            let mut changed: serde_json::Value =
+                serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
             changed["execution"][TEST]["arguments"] = arguments;
             fs::write(&manifest_path, serde_json::to_vec(&changed).unwrap()).unwrap();
             let candidate_pin = snapshot(candidate.path()).digest;
             // Both pins are correct: refusal must come from request mismatch,
             // before any runtime can be selected, not from a stale hash.
             let error = ApprovedInputs::capture(
-                original.path(), Some(candidate.path()), &original_pin, &candidate_pin,
-            ).err().expect("different application requests must not be admitted");
-            assert!(format!("{error:#}").contains("execution settings differ"), "{error:#}");
+                original.path(),
+                Some(candidate.path()),
+                &original_pin,
+                &candidate_pin,
+            )
+            .err()
+            .expect("different application requests must not be admitted");
+            assert!(
+                format!("{error:#}").contains("execution settings differ"),
+                "{error:#}"
+            );
             assert!(!candidate.path().join("packages/api/artifact").exists());
         }
     }
@@ -664,21 +795,41 @@ process.stdout.write(result);
         let deadline = Instant::now() + Duration::from_secs(120);
         let expected_hash = hex::encode(sha2::Sha256::digest(expected_argument_output()));
         let pair = execute_suite_pair(
-            &captured, &captured, &runtime, &runtime, deadline, Duration::from_secs(5), true,
-        ).unwrap();
+            &captured,
+            &captured,
+            &runtime,
+            &runtime,
+            deadline,
+            Duration::from_secs(5),
+            true,
+        )
+        .unwrap();
         assert_eq!(pair.verdict, "PASS", "{pair:#?}");
-        assert_eq!(pair.cases[0].reference.as_ref().unwrap().stdout.sha256, expected_hash);
+        assert_eq!(
+            pair.cases[0].reference.as_ref().unwrap().stdout.sha256,
+            expected_hash
+        );
         assert_eq!(pair.cases[0].reference, pair.cases[0].native);
         let identity = runtime.identity(deadline).unwrap();
         // Same installed Node in all roles tests the shared execution path;
         // it deliberately cannot establish three-runtime admission or parity.
         let product = product_oracle::execute(
-            &captured, &captured, [&runtime, &runtime, &runtime],
-            [identity.clone(), identity.clone(), identity], deadline, Duration::from_secs(5), true,
-        ).unwrap();
+            &captured,
+            &captured,
+            [&runtime, &runtime, &runtime],
+            [identity.clone(), identity.clone(), identity],
+            deadline,
+            Duration::from_secs(5),
+            true,
+        )
+        .unwrap();
         assert_eq!(product.verdict, "PASS", "{product:#?}");
         assert!(!product.distinct_reference_binaries);
-        for observed in [&product.cases[0].node, &product.cases[0].bun, &product.cases[0].native] {
+        for observed in [
+            &product.cases[0].node,
+            &product.cases[0].bun,
+            &product.cases[0].native,
+        ] {
             let observed = observed.as_ref().unwrap();
             assert_eq!(observed.stdout.sha256, expected_hash);
             assert_eq!(observed.workspace_delta.as_ref().unwrap().changed_paths, 1);
@@ -689,14 +840,19 @@ process.stdout.write(result);
     #[test]
     fn checked_rewrites_validate_the_argv_selected_behavior_and_keep_sources_unchanged() {
         let root = argument_fixture();
-        let mut candidate = RewriteCandidate::capture(
-            root.path(), Instant::now() + Duration::from_secs(120),
-        ).unwrap();
-        let rewritten = String::from_utf8(ARGUMENT_PROGRAM.to_vec()).unwrap()
+        let mut candidate =
+            RewriteCandidate::capture(root.path(), Instant::now() + Duration::from_secs(120))
+                .unwrap();
+        let rewritten = String::from_utf8(ARGUMENT_PROGRAM.to_vec())
+            .unwrap()
             .replace("const answer = 21 + 21;", "const answer = 42;");
-        candidate.prepare(&[Replacement {
-            path: TEST, before: ARGUMENT_PROGRAM, after: rewritten.as_bytes(),
-        }]).unwrap();
+        candidate
+            .prepare(&[Replacement {
+                path: TEST,
+                before: ARGUMENT_PROGRAM,
+                after: rewritten.as_bytes(),
+            }])
+            .unwrap();
         let report = candidate.validate_node_pair().unwrap();
         assert_eq!(report.verdict, "PASS", "{report:#?}");
         candidate.check_validation(&report).unwrap();
@@ -708,16 +864,17 @@ process.stdout.write(result);
     #[test]
     fn changing_only_argv_invalidates_the_captured_project_and_checked_admission() {
         let root = argument_fixture();
-        let before = RewriteCandidate::capture(
-            root.path(), Instant::now() + Duration::from_secs(60),
-        ).unwrap();
+        let before =
+            RewriteCandidate::capture(root.path(), Instant::now() + Duration::from_secs(60))
+                .unwrap();
         let path = root.path().join(".franken-node/migration-tests.json");
-        let mut changed: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let mut changed: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         changed["execution"][TEST]["arguments"][2] = "different request".into();
         fs::write(&path, serde_json::to_vec(&changed).unwrap()).unwrap();
-        let after = RewriteCandidate::capture(
-            root.path(), Instant::now() + Duration::from_secs(60),
-        ).unwrap();
+        let after =
+            RewriteCandidate::capture(root.path(), Instant::now() + Duration::from_secs(60))
+                .unwrap();
         assert_ne!(before.input_sha256(), after.input_sha256());
         assert!(before.ensure_source_unchanged().is_err());
         assert!(!root.path().join("packages/api/artifact").exists());
@@ -734,34 +891,60 @@ process.stdout.write(result);
             // replaying the measured failure, NOT passing Bun/Franken parity.
             let (pin, cases) = if three_roles {
                 let measured = product::capture_project(
-                    root.path(), None, Path::new("/bin/false"), Path::new("/bin/true"), true,
-                ).unwrap();
+                    root.path(),
+                    None,
+                    Path::new("/bin/false"),
+                    Path::new("/bin/true"),
+                    true,
+                )
+                .unwrap();
                 assert_eq!(measured.report.verdict, "INCONCLUSIVE");
-                (measured.write_capsule(&path).unwrap().content_sha256,
-                    serde_json::to_value(&measured.report.cases).unwrap())
+                (
+                    measured.write_capsule(&path).unwrap().content_sha256,
+                    serde_json::to_value(&measured.report.cases).unwrap(),
+                )
             } else {
                 let measured = native_replay::capture_project(
-                    root.path(), None, Path::new("/bin/false"), true,
-                ).unwrap();
+                    root.path(),
+                    None,
+                    Path::new("/bin/false"),
+                    true,
+                )
+                .unwrap();
                 assert_eq!(measured.report.verdict, "FAIL");
-                (measured.write_capsule(&path).unwrap().content_sha256,
-                    serde_json::to_value(&measured.report.cases).unwrap())
+                (
+                    measured.write_capsule(&path).unwrap().content_sha256,
+                    serde_json::to_value(&measured.report.cases).unwrap(),
+                )
             };
             let changed = serde_json::json!({(TEST):{"arguments":["must not be executed"]}});
             manifest(root.path(), changed);
-            let current_manifest = fs::read(root.path().join(".franken-node/migration-tests.json")).unwrap();
+            let current_manifest =
+                fs::read(root.path().join(".franken-node/migration-tests.json")).unwrap();
             let replayed = if three_roles {
-                serde_json::to_value(product::replay(
-                    &path, &pin, Path::new("/bin/false"), Path::new("/bin/true"), false,
-                ).unwrap()).unwrap()
+                serde_json::to_value(
+                    product::replay(
+                        &path,
+                        &pin,
+                        Path::new("/bin/false"),
+                        Path::new("/bin/true"),
+                        false,
+                    )
+                    .unwrap(),
+                )
+                .unwrap()
             } else {
-                serde_json::to_value(native_replay::replay(
-                    &path, &pin, Path::new("/bin/false"), false,
-                ).unwrap()).unwrap()
+                serde_json::to_value(
+                    native_replay::replay(&path, &pin, Path::new("/bin/false"), false).unwrap(),
+                )
+                .unwrap()
             };
             assert_eq!(replayed["verdict"], "REPRODUCED");
             assert_eq!(replayed["validation"]["cases"], cases);
-            assert_eq!(fs::read(root.path().join(".franken-node/migration-tests.json")).unwrap(), current_manifest);
+            assert_eq!(
+                fs::read(root.path().join(".franken-node/migration-tests.json")).unwrap(),
+                current_manifest
+            );
             assert!(!root.path().join("packages/api/artifact").exists());
         }
     }

@@ -486,7 +486,8 @@ impl Resolver {
             .collect()
     }
     fn probe(&mut self, path: &str) -> Result<Rc<Entry>> {
-        self.locate_with_bytes(path, !self.url_lookup).map(|(_, entry)| entry)
+        self.locate_with_bytes(path, !self.url_lookup)
+            .map(|(_, entry)| entry)
     }
 
     /// Resolve link components in order. In particular, a '..' inside link text
@@ -576,10 +577,10 @@ impl Resolver {
         if self.sealed {
             self.observed.insert(path.to_owned());
         }
-        if let Some(entry) = self.entries.get(path) {
-            if !read_bytes || !matches!(entry.as_ref(), Entry::FileMetadata { .. }) {
-                return Ok(Rc::clone(entry));
-            }
+        if let Some(entry) = self.entries.get(path)
+            && (!read_bytes || !matches!(entry.as_ref(), Entry::FileMetadata { .. }))
+        {
+            return Ok(Rc::clone(entry));
         }
         // An omitted observation is NOT evidence that the path was missing.
         // Sealed replay has no host descriptors and must never consult the host.
@@ -594,10 +595,13 @@ impl Resolver {
         if !self.entries.contains_key(path) && self.entries.len() >= MAX_PROBES {
             return Err(limit());
         }
-        let expected_version = self.entries.get(path).and_then(|entry| match entry.as_ref() {
-            Entry::FileMetadata { version } => *version,
-            _ => None,
-        });
+        let expected_version = self
+            .entries
+            .get(path)
+            .and_then(|entry| match entry.as_ref() {
+                Entry::FileMetadata { version } => *version,
+                _ => None,
+            });
         let entry = if let Entry::Directory(Some(directory)) = directory.as_ref() {
             let name = path.rsplit('/').next().unwrap_or(path);
             match statat(directory, name, AtFlags::SYMLINK_NOFOLLOW) {
@@ -817,10 +821,17 @@ impl Resolver {
 
     /// Resolve a URL without acquiring source bytes or executable authority.
     /// Package manifests and realpath observations remain captured evidence.
-    fn resolve_url(&mut self, directory: &str, request: &str) -> Result<source_graph::ResolutionUrl> {
+    fn resolve_url(
+        &mut self,
+        directory: &str,
+        request: &str,
+    ) -> Result<source_graph::ResolutionUrl> {
         use source_graph::{ModuleId, ResolutionUrl};
         if request.is_empty() || request.len() > MAX_PATH || request.chars().any(char::is_control) {
-            return Err(error("ERR_INVALID_MODULE_SPECIFIER", "invalid URL resolution request"));
+            return Err(error(
+                "ERR_INVALID_MODULE_SPECIFIER",
+                "invalid URL resolution request",
+            ));
         }
         let absolute = match url::Url::parse(request) {
             Ok(url) => Some(url),
@@ -840,7 +851,9 @@ impl Resolver {
             return Ok(ResolutionUrl::Absolute { url: url.into() });
         }
         if bare_builtin(request) {
-            return Ok(ResolutionUrl::Absolute { url: format!("node:{request}") });
+            return Ok(ResolutionUrl::Absolute {
+                url: format!("node:{request}"),
+            });
         }
         let previous = self.url_lookup;
         self.url_lookup = true;
@@ -860,7 +873,9 @@ impl Resolver {
         } else {
             path
         };
-        Ok(ResolutionUrl::File { id: ModuleId { path, url_suffix } })
+        Ok(ResolutionUrl::File {
+            id: ModuleId { path, url_suffix },
+        })
     }
 
     fn selected_path(&self, directory: &str, request: &str) -> Result<(String, String)> {
@@ -1143,7 +1158,11 @@ impl Resolver {
         suffix: String,
         mode: ResolutionMode,
     ) -> Result<(String, String)> {
-        let physical = if self.url_lookup { normalize("", path)? } else { path.into() };
+        let physical = if self.url_lookup {
+            normalize("", path)?
+        } else {
+            path.into()
+        };
         let entry = self.probe(&physical)?;
         if entry.is_file() || self.url_lookup {
             // URL resolution admits missing paths and directories. The final
@@ -1431,9 +1450,12 @@ fn metadata_url_path(directory: &str, request: &str) -> Result<(String, String)>
         match part {
             "." => {}
             ".." => {
-                depth = depth.checked_sub(1).ok_or_else(|| error(
-                    "ERR_MODULE_OUTSIDE_PROJECT", "module URL escapes the captured project root",
-                ))?;
+                depth = depth.checked_sub(1).ok_or_else(|| {
+                    error(
+                        "ERR_MODULE_OUTSIDE_PROJECT",
+                        "module URL escapes the captured project root",
+                    )
+                })?;
             }
             _ => {
                 if !part.is_empty() {
@@ -1446,13 +1468,21 @@ fn metadata_url_path(directory: &str, request: &str) -> Result<(String, String)>
             }
         }
     }
-    let base = url::Url::from_directory_path(Path::new(ROOT).join(directory))
-        .map_err(|_| error("ERR_INVALID_MODULE_SPECIFIER", "invalid captured URL origin"))?;
-    let url = base.join(request)
+    let base = url::Url::from_directory_path(Path::new(ROOT).join(directory)).map_err(|_| {
+        error(
+            "ERR_INVALID_MODULE_SPECIFIER",
+            "invalid captured URL origin",
+        )
+    })?;
+    let url = base
+        .join(request)
         .map_err(|_| error("ERR_INVALID_URL", "invalid relative module URL"))?;
-    let encoded = url.path().strip_prefix(ROOT).ok_or_else(|| error(
-        "ERR_MODULE_OUTSIDE_PROJECT", "module URL escapes the captured project root",
-    ))?;
+    let encoded = url.path().strip_prefix(ROOT).ok_or_else(|| {
+        error(
+            "ERR_MODULE_OUTSIDE_PROJECT",
+            "module URL escapes the captured project root",
+        )
+    })?;
     let path = decoded_url_path(encoded)?;
     if path.len() > MAX_PATH || path.split('/').count() > MAX_DEPTH {
         return Err(limit());
@@ -1657,47 +1687,101 @@ mod tests {
     fn import_meta_resolve_promotes_only_the_same_observed_file() {
         let root = fixture();
         put(root.path(), "asset.css", b"initial");
-        let mut resolver = Resolver::new(root.path(), &ResolutionMode::Import.default_conditions(),
-            SymlinkPolicy::Reject).unwrap();
+        let mut resolver = Resolver::new(
+            root.path(),
+            &ResolutionMode::Import.default_conditions(),
+            SymlinkPolicy::Reject,
+        )
+        .unwrap();
         resolver.resolve_url("", "./asset.css").unwrap();
-        assert!(matches!(resolver.entries.get("asset.css").unwrap().as_ref(),
-            Entry::FileMetadata { version: Some(_) }));
-        put(root.path(), "asset.css", b"changed after metadata observation");
-        assert_eq!(resolver.locate("asset.css").err().unwrap().code, "ERR_MODULE_INPUT_CHANGED");
+        assert!(matches!(
+            resolver.entries.get("asset.css").unwrap().as_ref(),
+            Entry::FileMetadata { version: Some(_) }
+        ));
+        put(
+            root.path(),
+            "asset.css",
+            b"changed after metadata observation",
+        );
+        assert_eq!(
+            resolver.locate("asset.css").err().unwrap().code,
+            "ERR_MODULE_INPUT_CHANGED"
+        );
     }
 
     #[test]
     fn import_meta_resolve_url_walk_preserves_space_and_suffix_boundaries() {
-        assert_eq!(metadata_url_path("a", "../.. ").unwrap_err().code,
-            "ERR_MODULE_OUTSIDE_PROJECT");
-        assert_eq!(metadata_url_path("", "./a//../missing ").unwrap(),
-            ("a/missing".into(), String::new()));
-        assert_eq!(metadata_url_path("", "./a/.. ?query#fragment ").unwrap(),
-            ("a/.. ".into(), "?query#fragment".into()));
+        assert_eq!(
+            metadata_url_path("a", "../.. ").unwrap_err().code,
+            "ERR_MODULE_OUTSIDE_PROJECT"
+        );
+        assert_eq!(
+            metadata_url_path("", "./a//../missing ").unwrap(),
+            ("a/missing".into(), String::new())
+        );
+        assert_eq!(
+            metadata_url_path("", "./a/.. ?query#fragment ").unwrap(),
+            ("a/.. ".into(), "?query#fragment".into())
+        );
     }
 
     #[test]
     fn import_meta_resolve_package_cache_cannot_authorize_an_import() {
         let root = fixture();
-        put(root.path(), "node_modules/exports/package.json",
-            br#"{"exports":"./missing.js"}"#);
-        put(root.path(), "node_modules/legacy/package.json",
-            br#"{"main":"./missing.js"}"#);
-        let mut resolver = Resolver::new(root.path(), &ResolutionMode::Import.default_conditions(),
-            SymlinkPolicy::Reject).unwrap();
-        assert_eq!(resolver.resolve_url("", "exports").unwrap(),
-            source_graph::ResolutionUrl::File { id: source_graph::ModuleId {
-                path: "node_modules/exports/missing.js".into(), url_suffix: String::new(),
-            } });
-        assert_eq!(resolver.request("", "exports", ResolutionMode::Import, 0).unwrap_err().code,
-            "ERR_MODULE_NOT_FOUND");
-        assert_eq!(resolver.resolve_url("", "legacy").unwrap_err().code, "ERR_MODULE_NOT_FOUND");
-        assert_eq!(resolver.resolve_url("", "not-installed").unwrap_err().code, "ERR_MODULE_NOT_FOUND");
+        put(
+            root.path(),
+            "node_modules/exports/package.json",
+            br#"{"exports":"./missing.js"}"#,
+        );
+        put(
+            root.path(),
+            "node_modules/legacy/package.json",
+            br#"{"main":"./missing.js"}"#,
+        );
+        let mut resolver = Resolver::new(
+            root.path(),
+            &ResolutionMode::Import.default_conditions(),
+            SymlinkPolicy::Reject,
+        )
+        .unwrap();
+        assert_eq!(
+            resolver.resolve_url("", "exports").unwrap(),
+            source_graph::ResolutionUrl::File {
+                id: source_graph::ModuleId {
+                    path: "node_modules/exports/missing.js".into(),
+                    url_suffix: String::new(),
+                }
+            }
+        );
+        assert_eq!(
+            resolver
+                .request("", "exports", ResolutionMode::Import, 0)
+                .unwrap_err()
+                .code,
+            "ERR_MODULE_NOT_FOUND"
+        );
+        assert_eq!(
+            resolver.resolve_url("", "legacy").unwrap_err().code,
+            "ERR_MODULE_NOT_FOUND"
+        );
+        assert_eq!(
+            resolver.resolve_url("", "not-installed").unwrap_err().code,
+            "ERR_MODULE_NOT_FOUND"
+        );
         for prefix_only in ["sea", "sqlite", "test", "test/reporters"] {
-            assert_eq!(resolver.resolve_url("", prefix_only).unwrap_err().code,
-                "ERR_MODULE_NOT_FOUND", "{prefix_only}");
-            assert_eq!(resolver.resolve_url("", &format!("node:{prefix_only}")).unwrap(),
-                source_graph::ResolutionUrl::Absolute { url: format!("node:{prefix_only}") });
+            assert_eq!(
+                resolver.resolve_url("", prefix_only).unwrap_err().code,
+                "ERR_MODULE_NOT_FOUND",
+                "{prefix_only}"
+            );
+            assert_eq!(
+                resolver
+                    .resolve_url("", &format!("node:{prefix_only}"))
+                    .unwrap(),
+                source_graph::ResolutionUrl::Absolute {
+                    url: format!("node:{prefix_only}")
+                }
+            );
         }
     }
 
@@ -1914,37 +1998,83 @@ mod tests {
         use source_graph::{GraphOptions, capsule, capture};
 
         let root = fixture();
-        let root_manifest = "\u{feff}{\"type\":\"module\",\"imports\":{\"#local\":\"./local.mjs\"}}";
+        let root_manifest =
+            "\u{feff}{\"type\":\"module\",\"imports\":{\"#local\":\"./local.mjs\"}}";
         let package_manifest = "\u{feff}{\"exports\":{\"./*\":[\"./%*\",\"./fallback.cjs\"]}}";
         put(root.path(), "package.json", root_manifest.as_bytes());
-        put(root.path(), "node_modules/fixture/package.json", package_manifest.as_bytes());
-        put(root.path(), "app.js", b"import 'fixture/61.cjs'; import '#local';");
+        put(
+            root.path(),
+            "node_modules/fixture/package.json",
+            package_manifest.as_bytes(),
+        );
+        put(
+            root.path(),
+            "app.js",
+            b"import 'fixture/61.cjs'; import '#local';",
+        );
         put(root.path(), "local.mjs", b"export const value = 1;");
-        put(root.path(), "node_modules/fixture/a.cjs", b"module.exports = 42;");
-        put(root.path(), "node_modules/fixture/fallback.cjs", b"throw Error('wrong target');");
+        put(
+            root.path(),
+            "node_modules/fixture/a.cjs",
+            b"module.exports = 42;",
+        );
+        put(
+            root.path(),
+            "node_modules/fixture/fallback.cjs",
+            b"throw Error('wrong target');",
+        );
         let captured = capture(root.path(), "app.js", GraphOptions::default()).unwrap();
         assert!(captured.report().fully_resolved);
         assert_eq!(captured.report().modules.len(), 3);
-        assert!(captured.report().modules.iter().any(|module|
-            module.id.path == "node_modules/fixture/a.cjs"));
-        assert!(!captured.report().probes.iter().any(|probe|
-            probe.path == "node_modules/fixture/fallback.cjs"));
+        assert!(
+            captured
+                .report()
+                .modules
+                .iter()
+                .any(|module| module.id.path == "node_modules/fixture/a.cjs")
+        );
+        assert!(
+            !captured
+                .report()
+                .probes
+                .iter()
+                .any(|probe| probe.path == "node_modules/fixture/fallback.cjs")
+        );
         for (path, original) in [
             ("package.json", root_manifest),
             ("node_modules/fixture/package.json", package_manifest),
         ] {
-            let probe = captured.report().probes.iter().find(|probe| probe.path == path).unwrap();
+            let probe = captured
+                .report()
+                .probes
+                .iter()
+                .find(|probe| probe.path == path)
+                .unwrap();
             assert_eq!(probe.bytes, Some(original.len()));
-            assert_eq!(probe.sha256, Some(hex::encode(Sha256::digest(original.as_bytes()))));
+            assert_eq!(
+                probe.sha256,
+                Some(hex::encode(Sha256::digest(original.as_bytes())))
+            );
         }
         let encoded = capsule::encode(&captured).unwrap();
         put(root.path(), "package.json", br#"{"type":"commonjs"}"#);
-        put(root.path(), "node_modules/fixture/package.json", br#"{"exports":{"./*":"./fallback.cjs"}}"#);
-        put(root.path(), "node_modules/fixture/a.cjs", b"throw Error('live source reopened');");
+        put(
+            root.path(),
+            "node_modules/fixture/package.json",
+            br#"{"exports":{"./*":"./fallback.cjs"}}"#,
+        );
+        put(
+            root.path(),
+            "node_modules/fixture/a.cjs",
+            b"throw Error('live source reopened');",
+        );
         let replayed = capsule::replay(encoded.bytes(), encoded.digest()).unwrap();
         assert_eq!(replayed.report(), captured.report());
         for module in &captured.report().modules {
-            assert_eq!(replayed.source_bytes(&module.id), captured.source_bytes(&module.id));
+            assert_eq!(
+                replayed.source_bytes(&module.id),
+                captured.source_bytes(&module.id)
+            );
         }
         assert_eq!(capsule::encode(&replayed).unwrap().bytes(), encoded.bytes());
         let fresh = capture(root.path(), "app.js", GraphOptions::default()).unwrap();
@@ -1963,24 +2093,48 @@ mod tests {
         ] {
             let root = fixture();
             let manifest = serde_json::json!({"exports":{"./*":[target,"./fallback.cjs"]}});
-            put(root.path(), "node_modules/fixture/package.json", manifest.to_string().as_bytes());
-            put(root.path(), "app.cjs", format!("require('fixture/{capture_name}');").as_bytes());
+            put(
+                root.path(),
+                "node_modules/fixture/package.json",
+                manifest.to_string().as_bytes(),
+            );
+            put(
+                root.path(),
+                "app.cjs",
+                format!("require('fixture/{capture_name}');").as_bytes(),
+            );
             for file in [
                 "node_modules/private.cjs",
                 "node_modules/fixture/node_modules/private.cjs",
                 "node_modules/fixture/fallback.cjs",
             ] {
-                put(root.path(), file, b"throw Error('refused target must not be captured');");
+                put(
+                    root.path(),
+                    file,
+                    b"throw Error('refused target must not be captured');",
+                );
             }
             let graph = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
             assert!(!graph.report().fully_resolved);
             assert_eq!(graph.report().modules.len(), 1);
             assert_eq!(graph.report().edges.len(), 1);
-            assert_eq!(graph.report().edges[0].error.as_ref().unwrap().code, "ERR_INVALID_MODULE_SPECIFIER");
-            assert!(!graph.report().probes.iter().any(|probe|
-                probe.path.ends_with("private.cjs") || probe.path.ends_with("fallback.cjs")));
+            assert_eq!(
+                graph.report().edges[0].error.as_ref().unwrap().code,
+                "ERR_INVALID_MODULE_SPECIFIER"
+            );
+            assert!(
+                !graph
+                    .report()
+                    .probes
+                    .iter()
+                    .any(|probe| probe.path.ends_with("private.cjs")
+                        || probe.path.ends_with("fallback.cjs"))
+            );
             let pin = graph.report().input_hash.clone();
-            assert_eq!(PinnedModuleRegistry::new(graph, &pin).err().unwrap().code, "ERR_MODULE_REGISTRY_INCOMPLETE");
+            assert_eq!(
+                PinnedModuleRegistry::new(graph, &pin).err().unwrap().code,
+                "ERR_MODULE_REGISTRY_INCOMPLETE"
+            );
         }
     }
 
@@ -2011,12 +2165,7 @@ mod tests {
             rejected(root.path(), "app.js", "#feature", ResolutionMode::Require),
             "MODULE_NOT_FOUND"
         );
-        let required = run(
-            root.path(),
-            "app.js",
-            "#exact",
-            ResolutionMode::Require,
-        );
+        let required = run(root.path(), "app.js", "#exact", ResolutionMode::Require);
         assert_eq!(required.report.path, "node_modules/dep/feature.js");
         assert_eq!(required.report.mode, ResolutionMode::Require);
         assert_eq!(required.report.format_hint, "commonjs");
@@ -2025,16 +2174,18 @@ mod tests {
         // An ordinary bare CommonJS request still searches extensions. Only
         // private-import external targets use PACKAGE_RESOLVE's exact subpath.
         assert_eq!(
-            run(root.path(), "app.js", "dep/feature", ResolutionMode::Require).report.path,
+            run(
+                root.path(),
+                "app.js",
+                "dep/feature",
+                ResolutionMode::Require
+            )
+            .report
+            .path,
             "node_modules/dep/feature.js"
         );
         assert_eq!(
-            rejected(
-                root.path(),
-                "app.js",
-                "#feature",
-                ResolutionMode::Import,
-            ),
+            rejected(root.path(), "app.js", "#feature", ResolutionMode::Import,),
             "ERR_MODULE_NOT_FOUND"
         );
     }
@@ -2878,13 +3029,25 @@ mod tests {
         let root = fixture();
         put(root.path(), "lib/value.ts", b"const value: number = 42;");
         put(root.path(), "lib/index.ts", b"const value: number = 42;");
-        let first = run(root.path(), "app.js", "./lib/value.ts", ResolutionMode::Import);
+        let first = run(
+            root.path(),
+            "app.js",
+            "./lib/value.ts",
+            ResolutionMode::Import,
+        );
         assert_eq!(first.report.format_hint, "commonjs");
-        assert!(first.report.probes.iter().any(|probe| {
-            probe.path == "lib/package.json" && probe.kind == ProbeKind::Missing
-        }));
+        assert!(
+            first.report.probes.iter().any(|probe| {
+                probe.path == "lib/package.json" && probe.kind == ProbeKind::Missing
+            })
+        );
         put(root.path(), "lib/package.json", br#"{"type":"module"}"#);
-        let changed = run(root.path(), "app.js", "./lib/value.ts", ResolutionMode::Import);
+        let changed = run(
+            root.path(),
+            "app.js",
+            "./lib/value.ts",
+            ResolutionMode::Import,
+        );
         assert_eq!(changed.report.format_hint, "module");
         assert_eq!(first.report.content_sha256, changed.report.content_sha256);
         assert_ne!(first.report.input_hash, changed.report.input_hash);
@@ -2899,12 +3062,24 @@ mod tests {
     #[test]
     fn linked_typescript_uses_physical_package_scope_not_link_extension() {
         let root = fixture();
-        put(root.path(), "packages/typed/package.json", br#"{"type":"module"}"#);
-        put(root.path(), "packages/typed/value.ts", b"export const value: number = 42;");
+        put(
+            root.path(),
+            "packages/typed/package.json",
+            br#"{"type":"module"}"#,
+        );
+        put(
+            root.path(),
+            "packages/typed/value.ts",
+            b"export const value: number = 42;",
+        );
         link(root.path(), "entry.cts", "packages/typed/value.ts");
         let captured = linked(
-            root.path(), "app.js", "./entry.cts?instance=one", ResolutionMode::Import,
-        ).unwrap();
+            root.path(),
+            "app.js",
+            "./entry.cts?instance=one",
+            ResolutionMode::Import,
+        )
+        .unwrap();
         assert_eq!(captured.report.path, "packages/typed/value.ts");
         assert_eq!(captured.report.format_hint, "module");
         assert_eq!(captured.report.url_suffix, "?instance=one");
@@ -3477,8 +3652,15 @@ mod tests {
         assert!(captured.report().fully_resolved);
         assert_eq!(captured.report().modules.len(), 2);
         assert_eq!(captured.report().resolution_targets.len(), 1);
-        assert_eq!(captured.report().edges.iter().map(|edge| edge.kind).collect::<Vec<_>>(),
-            [LoadKind::Require, LoadKind::RequireResolve]);
+        assert_eq!(
+            captured
+                .report()
+                .edges
+                .iter()
+                .map(|edge| edge.kind)
+                .collect::<Vec<_>>(),
+            [LoadKind::Require, LoadKind::RequireResolve]
+        );
         let requests: Vec<_> = captured
             .report()
             .edges
@@ -3520,7 +3702,11 @@ mod tests {
         assert_eq!(registry.summary().routes, 1);
         assert_eq!(registry.summary().resolution_routes, 1);
         let module = registry
-            .lookup(Some(registry.entrypoint()), "legacy/", RequestStyle::Require)
+            .lookup(
+                Some(registry.entrypoint()),
+                "legacy/",
+                RequestStyle::Require,
+            )
             .unwrap();
         assert_eq!(module.origin().path, "node_modules/legacy/entry.cjs");
         assert_eq!(module.source(), "module.exports=41;");
@@ -3528,16 +3714,19 @@ mod tests {
             .lookup_resolution(Some(registry.entrypoint()), "legacy/sub/")
             .unwrap();
         assert_eq!(metadata.origin().path, "node_modules/legacy/sub/index.js");
-        assert!(registry.lookup(Some(registry.entrypoint()), "legacy/sub/", RequestStyle::Require)
-            .is_err());
+        assert!(
+            registry
+                .lookup(
+                    Some(registry.entrypoint()),
+                    "legacy/sub/",
+                    RequestStyle::Require
+                )
+                .is_err()
+        );
         for id in [module.id(), metadata.id()] {
             assert_eq!(
                 registry
-                    .lookup(
-                        Some(registry.entrypoint()),
-                        id,
-                        RequestStyle::Require
-                    )
+                    .lookup(Some(registry.entrypoint()), id, RequestStyle::Require)
                     .err()
                     .unwrap()
                     .code,
