@@ -10,8 +10,8 @@ Node/Bun/Franken comparison. An imported JSON report cannot authorize writes.
 Keep original and candidate in separate, non-nested directories. Prepare the
 candidate using the same test inventory, golden fixtures, application request,
 metadata, dependencies and existing permissions as the original, except for
-intended ordinary-file replacements and new regular files under existing
-directories. Inspect without executing project code or opening the rewrite writer:
+intended ordinary-file replacements, new regular files, and newly created
+directory trees. Inspect without executing project code or opening the rewrite writer:
 
 ```sh
 cargo +stable run --manifest-path tools/migration-validator/Cargo.toml \
@@ -19,12 +19,20 @@ cargo +stable run --manifest-path tools/migration-validator/Cargo.toml \
 ```
 
 The JSON report includes both captured hashes, the selected tests, and changed
-paths with before/after hashes and byte counts. Each change has `kind: "replace"`
-or `kind: "create"`. Creations report `before_sha256: null` and
+paths with before/after hashes and byte counts. Each change has `kind: "replace"`,
+`kind: "create"`, or `kind: "create_tree"`. Creations report `before_sha256: null` and
 `before_bytes: null`: absence is not an empty file. Their `created_mode` is the
 reviewed permission bits as an integer (for example, 416 is octal 0640).
+Each tree change names one maximal absent directory root. Its `created_tree`
+contains a `summary` of file, directory and logical-byte counts, plus a complete
+sorted `entries` inventory relative to that root. Directory counts include the
+root, and empty directories are explicit. Each descendant records its kind,
+mode, byte count and file hash; directories have zero bytes and a null hash.
+The tree's `after_sha256` hashes the transaction writer's canonical content/mode
+index, while `after_bytes` counts its regular-file contents. It is not the hash
+or size of a single source file.
 The report does not print source bytes. Review the proposed source diff
-independently, including added files and their modes, along with that inventory.
+independently, including added files, directories and their modes, along with that inventory.
 Do not blindly promote a hash from an untrusted report as an independent approval.
 Set ORIGINAL_SHA256 and CANDIDATE_SHA256 to the reviewed hashes, then run:
 
@@ -46,8 +54,9 @@ runtime discovery. The candidate is reconstructed through the shared
 `RewriteCandidate` preparation implementation, and its complete captured hash
 must still equal the reviewed candidate hash. It is not a partial diff silently
 omitting unsupported changes. Replacement-only library consumers are refused
-when a candidate adds files; the installer consumes the complete `changes()`
-plan containing both replacements and additions.
+when a candidate adds files or directory trees, including empty trees; the
+installer consumes the complete `changes()` plan containing replacements,
+ordinary-file additions and complete tree additions.
 
 The command then holds the native rewrite lock across execution, admission and
 installation. It deliberately refuses an unfinished rewrite instead of
@@ -78,21 +87,25 @@ the inventory and is still rejected; a new helper cannot redefine the oracle.
 
 After complete passing evidence, both on-disk input trees must still match their
 pre-execution snapshots, with the original's exact writer initialization covered
-by its separate guard. Only immutable captured bytes and reviewed new-file
+by its separate guard. Only immutable captured bytes and reviewed new-entry
 modes are passed to the native transaction. The proposal is never reread to
 redefine the installed bytes. Changes during validation refuse installation;
 the command does not conceal ambient guest effects by silently undoing them.
 
-Supported changes are existing regular-file content replacements and new
-regular files whose parent directories already exist in the original capture.
-New files require ordinary owner-readable modes, no symlink parents, and the
-same filesystem as the transaction store. New directories, deleted or renamed
-entries, changed existing file modes, changed link targets/kinds, reserved
+Supported changes are existing regular-file content replacements, new regular
+files under existing directories, and complete new directory trees under
+existing directories or the project root. New files require ordinary
+owner-readable modes; new directories also require owner search permission.
+New tree roots must be absent and share the transaction filesystem, and their
+existing parents must be ordinary captured directories. New links, deleted or
+renamed entries, changed existing modes, changed link targets/kinds, reserved
 metadata changes, and altered golden expectations or execution requests remain
-rejected. The existing limits remain: at most 1,000 combined replacements and
-creations, 10 MiB per before/after file, 256 MiB of logical plan bytes, and the
-validator's bounded whole-project capture and execution budgets. This command
-does not run a package manager or implement arbitrary structural migration.
+rejected. The combined limit of 1,000 counts replacements and every new file
+and directory, including each tree root. The existing 10 MiB per before/after
+file and 256 MiB plan limits remain; tree indexes also count toward the
+transaction byte budget and each index is bounded at 2 MiB. The validator's
+whole-project capture and execution budgets still apply. This command does
+not run a package manager or implement arbitrary structural migration.
 
 Successful installation returns status `APPLIED` and `source_transaction`:
 
@@ -109,13 +122,17 @@ lock is held, never from guessing the latest history entry. An identical
 candidate still requires validation but returns `UNCHANGED`; without a request
 ID it creates no transaction. Named requests retain a zero-file outcome as
 explained below. A creation-only plan is not unchanged: even adding an empty
-file requires a transaction. `REJECTED` and `ERROR` exit nonzero.
+file or an empty directory requires a transaction. The receipt's existing
+`files` field counts journal records: a complete new tree is one record,
+while `created_tree.summary` reports its actual descendant counts.
+`REJECTED` and `ERROR` exit nonzero.
 `execution_attempted` means the executor was called, not proof that every guest
 launched or completed; individual observations record the measured outcomes.
 
 The transaction preserves original backups, modes, all-source preflight,
 no-follow descriptor access, write-ahead intent and durability barriers. Each
-file replacement or creation is atomic, not the entire multi-file tree.
+file replacement, file creation or whole new-tree publication is atomic.
+The complete mixed plan is not one atomic transaction across all roots.
 Interruptions or I/O errors can leave recovery work; retain journals/backups
 and inspect them. A lost stdout report after a completed transaction is not an
 automatic rollback.
@@ -123,9 +140,11 @@ automatic rollback.
 ## Successive migrations and transaction-scoped originals
 
 Without `--request-id`, replacement-only reviewed installs retain
-`franken-node/rewrite-transaction/v2` journals, and plans containing new files
-use `franken-node/rewrite-transaction/v3`. Named requests use v4 as described
-below. Each replaced file's exact pre-install bytes are retained privately at:
+`franken-node/rewrite-transaction/v2` journals, and plans containing only
+replacements and new files use `franken-node/rewrite-transaction/v3`. Named
+requests without new trees use v4 as described below. Any plan containing new
+directory trees uses v5, with the same optional request binding.
+Each replaced file's exact pre-install bytes are retained privately at:
 
 ```
 .migrate-backup/.franken-rewrite/TRANSACTION-ID/RECORD-INDEX.before
@@ -170,7 +189,7 @@ storage format.
 
 ## New-file creation and restoration of absence
 
-A v3 or v4 creation record explicitly marks its original as absent. It never
+A v3, v4 or v5 creation record explicitly marks its original as absent. It never
 treats an existing empty file as an absent target. Preparation checks the complete
 plan before staging recovery images or changing a live source. Creation uses an
 atomic no-replace rename, so a pathname appearing after preflight is not
@@ -197,12 +216,51 @@ can restore safe records while preserving conflicts and leaving pending intent
 for retry. A later migration can replace an earlier created helper; restore
 that later generation first before restoring the earlier file's absence.
 
-Use an updated recovery binary that understands the emitted v3/v4 schema for
+Use an updated recovery binary that understands the emitted v3/v4/v5 schema for
 plans containing new files; older readers reject unknown schemas. Keep the
 complete transaction directories, including retained images, not just the
 returned JSON summary. No automatic history conversion, backup deletion,
 garbage collection, or fallback to another generation is performed. The same
 per-operation limits and non-atomic multi-file recovery contract apply.
+
+## New directory trees and complete-tree restoration
+
+A reviewed candidate can now introduce a module subtree such as
+`compat/deep/answer.cjs` together with `compat/empty/`, while replacing an
+existing entrypoint to import that module. The complete immutable candidate,
+including all new directories, is staged for live validation. Nested new
+directories are grouped beneath their first absent ancestor; files directly
+under an existing captured parent remain ordinary file creations. New trees
+under existing subdirectories and trees containing only empty directories use
+the same workflow.
+
+The installer hands the captured plan to the existing v5 tree writer. Before
+publishing write-ahead intent, that writer stages complete trees privately and
+retains a canonical index binding every path, kind, permission mode and file
+hash. Each new root is published by a no-replace rename of the complete staged
+tree. A live pathname that appears after preflight is preserved, even when its
+contents happen to match the proposal. Existing directories are never adopted
+as approved absent roots.
+
+Pinned rollback first checks the complete mixed plan, including every tree
+descendant and the absence of unreviewed descendants. Changed bytes, modes,
+links or an added user file block ordinary explicit rollback before any
+earlier replacement is restored. Successful rollback moves each complete tree
+into its private transaction directory as `RECORD-INDEX.retired`; nested files,
+empty directories and modes remain available there. Its canonical index is
+retained in `RECORD-INDEX.after`. No tree is recursively deleted to restore
+absence. Interrupted installation and recovery use the existing v5 journal
+protocol; retain the complete transaction directory for recovery.
+
+Named tree installations retain the request binding in that same v5 journal.
+A retry returns the recorded result without reexecuting guests or rebuilding
+the tree. A rolled-back request stays consumed and cannot reinstall a tree
+over later independent work.
+
+The focused integration tests execute the nested candidate module through an
+explicit Node-backed test role and exercise the real capture, validation,
+writer, request and rollback paths. Controlled reference/test executables are
+not evidence of Bun or native Franken compatibility.
 
 ## Continue to rollout or restore
 
@@ -358,12 +416,13 @@ or deleted; retain it for inspection. Pending requests require explicit pinned
 recovery. After rollback or a different migration, use a new request ID and new
 independently reviewed hashes for any new installation.
 
-Named installations use `franken-node/rewrite-transaction/v4` journals and need
-an updated recovery binary. The schema embeds the request binding, reuses the
-same per-generation originals and new-file absence restoration, and permits a
-zero-file journal only for identical input/candidate hashes. Named no-op outcomes
-are not ordinary source-changing rollout plans. Unnamed installation behavior
-and historical v1/v2/v3 serialization are unchanged. No new store, dependency,
+Named installations without new trees use `franken-node/rewrite-transaction/v4`
+journals; named tree installations use v5. Both need an updated recovery
+binary. The schemas embed the request binding and reuse the same per-generation
+originals and absence restoration. A zero-file outcome uses v4 and requires
+identical input/candidate hashes. Named no-op outcomes are not ordinary
+source-changing rollout plans. Plans without trees retain their existing
+serialization. No new store, dependency,
 imported-PASS path, backup deletion or weaker admission policy is introduced.
 
 Keep the complete local transaction history. The mechanism coordinates

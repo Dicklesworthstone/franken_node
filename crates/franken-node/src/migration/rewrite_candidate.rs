@@ -13,7 +13,7 @@ use anyhow::{Context, Result, ensure};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::time::Instant;
 
@@ -31,11 +31,33 @@ pub struct Addition<'a> {
     pub mode: u32,
 }
 
+/// A captured descendant of a newly created tree. Paths are relative to its
+/// absent root; None is a directory, distinct from an empty regular file.
+pub struct TreeEntry<'a> {
+    pub path: &'a str,
+    pub contents: Option<&'a [u8]>,
+    pub mode: u32,
+}
+
+/// One maximal absent directory root and its complete captured descendants.
+/// Existing parents are not included, and every new empty directory is kept.
+pub struct TreeAddition<'a> {
+    pub path: &'a str,
+    pub mode: u32,
+    pub entries: Vec<TreeEntry<'a>>,
+}
+
+struct DirectoryAddition<'a> {
+    path: &'a str,
+    mode: u32,
+}
+
 /// The complete installation plan. Consumers must not silently drop additions
 /// after measuring the whole candidate. Contains private source bytes.
 pub struct Changes<'a> {
     pub replacements: Vec<Replacement<'a>>,
     pub additions: Vec<Addition<'a>>,
+    pub trees: Vec<TreeAddition<'a>>,
 }
 
 fn change_path(value: &str) -> Result<&Path> {
@@ -114,8 +136,8 @@ impl RewriteCandidate {
     }
 
     /// Prepare an independently reviewed directory, not an imported verdict.
-    /// Accept regular-file replacements and new regular files under existing
-    /// directories. Removal, new directories, relinking and existing-mode edits
+    /// Accept regular-file replacements, new regular files and new directory
+    /// trees. Removal, relinking and existing-mode edits
     /// are errors, never silently omitted. Reserved metadata and golden/request
     /// changes remain subject to the shared replacement/inventory checks.
     pub fn prepare_project(&mut self, project: &Path, expected_sha256: &str) -> Result<()> {
@@ -160,19 +182,18 @@ impl RewriteCandidate {
             path, before, after,
         }).collect();
         let mut additions = Vec::new();
+        let mut directories = Vec::new();
         for (path, entry) in &proposed.entries {
             if !self.original.entries.contains_key(path) {
-                let EntryData::File(after) = &entry.data else {
-                    anyhow::bail!("migration additions must be regular files under existing directories: {}", path.display());
-                };
-                additions.push(Addition {
-                    path: path.to_str().context("migration path is not UTF-8")?,
-                    after,
-                    mode: entry.mode,
-                });
+                let path = path.to_str().context("migration path is not UTF-8")?;
+                match &entry.data {
+                    EntryData::File(after) => additions.push(Addition { path, after, mode: entry.mode }),
+                    EntryData::Directory => directories.push(DirectoryAddition { path, mode: entry.mode }),
+                    EntryData::Link(_) => anyhow::bail!("migration additions cannot introduce links: {path}"),
+                }
             }
         }
-        self.prepare_changes(&replacements, &additions)?;
+        self.prepare_changes_with_directories(&replacements, &additions, &directories)?;
         if self.candidate.as_ref().map(|s| s.digest.as_str()) != Some(expected_sha256) {
             self.candidate = None;
             anyhow::bail!("prepared migration differs from the complete reviewed candidate");
@@ -198,11 +219,11 @@ impl RewriteCandidate {
 
     /// Borrow the exact captured before/after bytes. No source-tree reread or
     /// report decoding may redefine the installation after live validation.
-    /// Replacement-only consumers must not silently omit newly added files.
+    /// Replacement-only consumers must not silently omit files or empty trees.
     pub fn replacements(&self) -> Result<Vec<Replacement<'_>>> {
         let changes = self.changes()?;
-        ensure!(changes.additions.is_empty(),
-            "candidate creates files; consume the complete changes plan, not replacements alone");
+        ensure!(changes.additions.is_empty() && changes.trees.is_empty(),
+            "candidate creates files or directory trees; consume the complete changes plan, not replacements alone");
         Ok(changes.replacements)
     }
 
@@ -210,6 +231,7 @@ impl RewriteCandidate {
         Ok(Changes {
             replacements: self.replacement_images()?,
             additions: self.additions()?,
+            trees: self.trees()?,
         })
     }
 
@@ -239,7 +261,13 @@ impl RewriteCandidate {
         let candidate = self.candidate.as_ref().context("checked rewrite candidate is not prepared")?;
         let mut result = Vec::new();
         for (path, entry) in &candidate.entries {
-            if !self.original.entries.contains_key(path) {
+            if !self.original.entries.contains_key(path)
+                && path.parent().is_none_or(|parent| parent.as_os_str().is_empty()
+                    || self.original.entries.contains_key(parent))
+            {
+                if matches!(&entry.data, EntryData::Directory) {
+                    continue;
+                }
                 let EntryData::File(after) = &entry.data else {
                     anyhow::bail!("prepared addition is not a regular file");
                 };
@@ -253,6 +281,47 @@ impl RewriteCandidate {
         Ok(result)
     }
 
+    fn trees(&self) -> Result<Vec<TreeAddition<'_>>> {
+        budget(self.deadline)?;
+        let candidate = self.candidate.as_ref().context("checked rewrite candidate is not prepared")?;
+        let added: Vec<_> = candidate.entries.iter()
+            .filter(|(path, _)| !self.original.entries.contains_key(*path)).collect();
+        let mut trees = Vec::new();
+        for (root, entry) in &added {
+            budget(self.deadline)?;
+            if !matches!(&entry.data, EntryData::Directory)
+                || root.parent().is_some_and(|parent| !parent.as_os_str().is_empty()
+                    && !self.original.entries.contains_key(parent))
+            {
+                continue;
+            }
+            let mut entries = Vec::new();
+            for (path, entry) in &added {
+                if path == root || !path.starts_with(root) {
+                    continue;
+                }
+                let contents = match &entry.data {
+                    EntryData::File(bytes) => Some(bytes.as_slice()),
+                    EntryData::Directory => None,
+                    EntryData::Link(_) => anyhow::bail!("prepared tree contains a link"),
+                };
+                entries.push(TreeEntry {
+                    path: path.strip_prefix(root)?.to_str().context("tree path is not UTF-8")?,
+                    contents,
+                    mode: entry.mode,
+                });
+            }
+            entries.sort_by(|left, right| left.path.cmp(right.path));
+            trees.push(TreeAddition {
+                path: root.to_str().context("tree root is not UTF-8")?,
+                mode: entry.mode,
+                entries,
+            });
+        }
+        trees.sort_by(|left, right| left.path.cmp(right.path));
+        Ok(trees)
+    }
+
     /// Validate every replacement before staging any of them. This existing
     /// entrypoint does not infer new files from empty replacement preimages.
     pub fn prepare(&mut self, replacements: &[Replacement<'_>]) -> Result<()> {
@@ -260,15 +329,34 @@ impl RewriteCandidate {
     }
 
     fn prepare_changes(&mut self, replacements: &[Replacement<'_>], additions: &[Addition<'_>]) -> Result<()> {
+        self.prepare_changes_with_directories(replacements, additions, &[])
+    }
+
+    fn prepare_changes_with_directories(
+        &mut self, replacements: &[Replacement<'_>], additions: &[Addition<'_>],
+        directories: &[DirectoryAddition<'_>],
+    ) -> Result<()> {
         // A failed second preparation cannot leave an earlier candidate usable.
         self.candidate = None;
         self.candidate_project = None;
         ensure!(
-            replacements.len().checked_add(additions.len()).is_some_and(|count| count <= 1_000),
+            replacements.len().checked_add(additions.len())
+                .and_then(|count| count.checked_add(directories.len()))
+                .is_some_and(|count| count <= 1_000),
             "checked rewrite replacement count exceeded"
         );
         let mut seen = BTreeSet::new();
         let mut total = 0_usize;
+        let mut directory_modes = BTreeMap::new();
+        for directory in directories {
+            budget(self.deadline)?;
+            let path = change_path(directory.path)?;
+            ensure!(seen.insert(directory.path), "duplicate checked rewrite target");
+            ensure!(!self.original.entries.contains_key(path), "directory addition replaces an original entry");
+            ensure!(directory.mode <= 0o777 && directory.mode & 0o500 == 0o500,
+                "new directories require ordinary owner-readable and searchable permissions");
+            directory_modes.insert(directory.path, directory.mode);
+        }
         for edit in replacements {
             budget(self.deadline)?;
             let path = change_path(edit.path)?;
@@ -307,10 +395,15 @@ impl RewriteCandidate {
             total = total.checked_add(addition.after.len()).context("checked rewrite byte count overflow")?;
             ensure!(total <= super::MAX_PROJECT_BYTES && addition.after.len() <= 10 * 1024 * 1024,
                 "checked rewrite addition byte limit exceeded");
-            for parent in path.ancestors().skip(1).filter(|parent| !parent.as_os_str().is_empty()) {
+        }
+        for path in additions.iter().map(|entry| entry.path)
+            .chain(directories.iter().map(|entry| entry.path))
+        {
+            for parent in Path::new(path).ancestors().skip(1).filter(|parent| !parent.as_os_str().is_empty()) {
                 ensure!(self.original.entries.get(parent)
-                    .is_some_and(|entry| matches!(&entry.data, EntryData::Directory)),
-                    "new file parents must be existing captured directories");
+                    .is_some_and(|entry| matches!(&entry.data, EntryData::Directory))
+                    || directory_modes.contains_key(parent.to_str().context("new parent is not UTF-8")?),
+                    "new entry parents must be existing captured or explicitly added directories");
             }
         }
         // Preserve each source file's mode inside an owner-only parent. The
@@ -321,6 +414,12 @@ impl RewriteCandidate {
             .tempdir()?;
         let root = temporary.path().join("project");
         self.original.stage(&root, self.deadline)?;
+        // New parents are built privately with writable owner permissions;
+        // their exact reviewed modes are applied only after their descendants.
+        for path in directory_modes.keys() {
+            budget(self.deadline)?;
+            fs::DirBuilder::new().mode(0o700).create(root.join(path))?;
+        }
         for edit in replacements {
             budget(self.deadline)?;
             let target = root.join(edit.path);
@@ -346,6 +445,10 @@ impl RewriteCandidate {
             staged.write_all(addition.after)?;
             staged.as_file().set_permissions(fs::Permissions::from_mode(addition.mode))?;
             staged.persist_noclobber(&target).map_err(|error| error.error)?;
+        }
+        for (path, mode) in directory_modes.iter().rev() {
+            budget(self.deadline)?;
+            fs::set_permissions(root.join(path), fs::Permissions::from_mode(*mode))?;
         }
         let candidate = Snapshot::capture(&root, self.deadline)?;
         matched_tests(&self.original, &candidate)?;
@@ -1320,7 +1423,10 @@ mod reviewed_directory_tests {
             let (_root, original, proposed) = pair();
             fs::write(proposed.join("case.test.cjs"), "console.log(42);\n").unwrap();
             match mutation {
-                0 => fs::create_dir(proposed.join("new-directory")).unwrap(),
+                0 => {
+                    fs::rename(proposed.join("config.json"), proposed.join("saved.json")).unwrap();
+                    fs::create_dir(proposed.join("config.json")).unwrap();
+                }
                 1 => { fs::rename(proposed.join("config.json"), proposed.join("renamed.json")).unwrap(); }
                 2 => fs::set_permissions(proposed.join("config.json"), fs::Permissions::from_mode(0o600)).unwrap(),
                 3 => {
@@ -1417,7 +1523,7 @@ mod reviewed_directory_tests {
     }
 
     #[test]
-    fn additions_cannot_change_test_inventory_authority_directories_or_links() {
+    fn additions_cannot_change_test_inventory_authority_or_links() {
         for mutation in 0..4 {
             let (_root, original, proposed) = pair();
             for root in [&original, &proposed] {
@@ -1426,7 +1532,10 @@ mod reviewed_directory_tests {
             match mutation {
                 0 => fs::write(proposed.join("extra.test.cjs"), "console.log(42);").unwrap(),
                 1 => fs::write(proposed.join(".franken-node/authority"), "new authority").unwrap(),
-                2 => fs::create_dir(proposed.join("new-directory")).unwrap(),
+                2 => {
+                    fs::create_dir(proposed.join("compat")).unwrap();
+                    fs::write(proposed.join("compat/extra.test.cjs"), "console.log(42);").unwrap();
+                }
                 _ => symlink("config.json", proposed.join("linked-helper.cjs")).unwrap(),
             }
             let mut plan = capture(&original);
@@ -1457,6 +1566,121 @@ mod reviewed_directory_tests {
         ]).is_err());
         assert!(!original.join("helper.cjs").exists());
         assert!(!original.join(".migrate-backup").exists());
+    }
+
+    #[test]
+    fn reviewed_trees_keep_maximal_roots_modes_empty_directories_and_captured_execution() {
+        let (_root, original, proposed) = pair();
+        for root in [&original, &proposed] {
+            fs::create_dir(root.join("existing")).unwrap();
+        }
+        for path in ["compat/deep", "compat/empty", "existing/adapters", "unused"] {
+            fs::create_dir_all(proposed.join(path)).unwrap();
+        }
+        let helper = b"module.exports = 42;\n";
+        fs::write(proposed.join("compat/deep/answer.cjs"), helper).unwrap();
+        fs::write(proposed.join("existing/direct.cjs"), b"module.exports = 'direct';\n").unwrap();
+        fs::write(proposed.join("case.test.cjs"), b"console.log(require('./compat/deep/answer.cjs'));\n").unwrap();
+        for (path, mode) in [("compat", 0o750), ("compat/deep", 0o500),
+            ("compat/deep/answer.cjs", 0o640), ("compat/empty", 0o700)]
+        {
+            fs::set_permissions(proposed.join(path), fs::Permissions::from_mode(mode)).unwrap();
+        }
+        let expected = pin(&proposed);
+        let mut plan = capture(&original);
+        plan.prepare_project(&proposed, &expected).unwrap();
+        let changes = plan.changes().unwrap();
+        assert_eq!(changes.replacements.len(), 1);
+        assert_eq!(changes.additions.len(), 1);
+        assert_eq!(changes.additions[0].path, "existing/direct.cjs");
+        assert_eq!(changes.trees.iter().map(|tree| tree.path).collect::<Vec<_>>(),
+            ["compat", "existing/adapters", "unused"]);
+        let tree = &changes.trees[0];
+        assert_eq!(tree.mode, 0o750);
+        assert_eq!(tree.entries.iter().map(|entry| (entry.path, entry.mode)).collect::<Vec<_>>(),
+            [("deep", 0o500), ("deep/answer.cjs", 0o640), ("empty", 0o700)]);
+        assert!(tree.entries[0].contents.is_none() && tree.entries[2].contents.is_none());
+        assert_eq!(tree.entries[1].contents, Some(helper.as_slice()));
+        assert!(changes.trees[1].entries.is_empty() && changes.trees[2].entries.is_empty());
+        assert!(plan.replacements().is_err());
+        fs::write(proposed.join("compat/deep/answer.cjs"), b"throw new Error('later edit');\n").unwrap();
+        // Explicit Node/Node execution proves use of the captured nested helper,
+        // not native Franken or Bun compatibility.
+        let report = plan.validate_node_pair().unwrap();
+        assert_eq!(report.verdict, "PASS", "{report:?}");
+        plan.check_validation(&report).unwrap();
+        assert_eq!(report.candidate_input_sha256, expected);
+        assert!(plan.ensure_candidate_source_unchanged().is_err());
+        plan.ensure_source_unchanged().unwrap();
+        assert!(!original.join("compat").exists() && !original.join("existing/adapters").exists());
+    }
+
+    #[test]
+    fn an_empty_tree_is_not_an_empty_replacement_plan() {
+        let (_root, original, proposed) = pair();
+        fs::create_dir(proposed.join("empty")).unwrap();
+        fs::set_permissions(proposed.join("empty"), fs::Permissions::from_mode(0o500)).unwrap();
+        let mut plan = capture(&original);
+        plan.prepare_project(&proposed, &pin(&proposed)).unwrap();
+        let changes = plan.changes().unwrap();
+        assert!(changes.replacements.is_empty() && changes.additions.is_empty());
+        assert_eq!(changes.trees.len(), 1);
+        assert_eq!(changes.trees[0].path, "empty");
+        assert_eq!(changes.trees[0].mode, 0o500);
+        assert!(changes.trees[0].entries.is_empty());
+        assert!(plan.replacements().is_err());
+        assert!(!original.join("empty").exists());
+    }
+
+    #[test]
+    fn tree_preparation_requires_absent_safe_directories_and_counts_every_descendant() {
+        let (_root, original, _) = pair();
+        let mut plan = capture(&original);
+        for path in ["config.json", "../compat", "/compat", "a//b", ".franken-node/compat",
+            ".migrate-backup", ".franken-rewrite", "compat/.git", "missing/compat"]
+        {
+            assert!(plan.prepare_changes_with_directories(&[], &[],
+                &[DirectoryAddition { path, mode: 0o700 }]).is_err(), "{path}");
+            assert!(plan.changes().is_err());
+        }
+        for mode in [0, 0o400, 0o100, 0o4755] {
+            assert!(plan.prepare_changes_with_directories(&[], &[],
+                &[DirectoryAddition { path: "compat", mode }]).is_err());
+        }
+        assert!(plan.prepare_changes_with_directories(&[],
+            &[Addition { path: "compat", after: b"file", mode: 0o600 }],
+            &[DirectoryAddition { path: "compat", mode: 0o700 }]).is_err());
+        let paths: Vec<_> = (0..1_000).map(|index| format!("compat/entry-{index:04}")).collect();
+        let files: Vec<_> = paths.iter().map(|path| Addition { path, after: b"", mode: 0o600 }).collect();
+        assert!(plan.prepare_changes_with_directories(&[], &files,
+            &[DirectoryAddition { path: "compat", mode: 0o700 }]).is_err());
+        assert!(plan.changes().is_err());
+        assert!(!original.join("compat").exists() && !original.join(".migrate-backup").exists());
+    }
+
+    #[test]
+    fn new_tree_links_and_unreviewed_modes_invalidate_the_entire_candidate() {
+        for mutation in 0..3 {
+            let (_root, original, proposed) = pair();
+            fs::create_dir(proposed.join("compat")).unwrap();
+            fs::set_permissions(proposed.join("compat"), fs::Permissions::from_mode(0o700)).unwrap();
+            fs::write(proposed.join("compat/helper.cjs"), b"module.exports = 42;\n").unwrap();
+            let expected = pin(&proposed);
+            let mut plan = capture(&original);
+            plan.prepare_project(&proposed, &expected).unwrap();
+            match mutation {
+                0 => symlink("helper.cjs", proposed.join("compat/alias.cjs")).unwrap(),
+                1 => fs::set_permissions(proposed.join("compat"), fs::Permissions::from_mode(0o750)).unwrap(),
+                _ => fs::create_dir(proposed.join("compat/unreviewed-empty")).unwrap(),
+            }
+            assert!(plan.prepare_project(&proposed, &expected).is_err());
+            assert!(plan.changes().is_err());
+            if mutation == 0 {
+                assert!(plan.prepare_project(&proposed, &pin(&proposed)).is_err());
+                assert!(plan.changes().is_err());
+            }
+            assert!(!original.join("compat").exists());
+        }
     }
 
     #[test]

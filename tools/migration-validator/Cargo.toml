@@ -53,6 +53,7 @@ tempfile = "3"
 ed25519-dalek = { version = "2.1.1", features = ["rand_core"] }
 zeroize = "1.8.2"
 rand = "0.8.5"
+url = "2.5"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ctrlc = { version = "3.5.2", features = ["termination"] }

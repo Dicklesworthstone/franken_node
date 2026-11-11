@@ -87,11 +87,11 @@ mod linux {
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
     use std::time::{Duration, Instant};
-    use rewrite_transaction::{AppliedRewrite, CreateFile, Edit, InstallRequest, RewriteTransaction};
+    use rewrite_transaction::{AppliedRewrite, CreateFile, CreateTree, Edit, InstallRequest, RewriteTransaction, trees};
     use rewrite_transaction::rollback::{HistoryEntry, TransactionState, inspect_request};
     use validation_suite::{
         product_oracle::{CancellationToken, ProductReport},
-        rewrite_candidate::RewriteCandidate,
+        rewrite_candidate::{RewriteCandidate, TreeAddition},
     };
 
     #[derive(Debug, Serialize)]
@@ -135,6 +135,29 @@ mod linux {
         after_bytes: usize,
         #[serde(skip_serializing_if = "Option::is_none")]
         created_mode: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        created_tree: Option<CreatedTree>,
+    }
+
+    #[derive(Debug, Serialize)]
+    struct CreatedTree {
+        summary: trees::Summary,
+        entries: Vec<CreatedTreeEntry>,
+    }
+
+    #[derive(Debug, Serialize)]
+    struct CreatedTreeEntry {
+        path: String,
+        kind: &'static str,
+        mode: u32,
+        bytes: usize,
+        sha256: Option<String>,
+    }
+
+    fn tree_entries<'a>(tree: &TreeAddition<'a>) -> Vec<trees::Entry<'a>> {
+        tree.entries.iter().map(|entry| trees::Entry {
+            path: entry.path, contents: entry.contents, mode: entry.mode,
+        }).collect()
     }
 
     struct Prepared {
@@ -174,6 +197,7 @@ mod linux {
             before_bytes: Some(edit.before.len()),
             after_bytes: edit.after.len(),
             created_mode: None,
+            created_tree: None,
         }).collect();
         descriptions.extend(changes.additions.iter().map(|addition| Change {
             kind: "create",
@@ -183,7 +207,27 @@ mod linux {
             before_bytes: None,
             after_bytes: addition.after.len(),
             created_mode: Some(addition.mode),
+            created_tree: None,
         }));
+        for tree in &changes.trees {
+            let entries = tree_entries(tree);
+            let (index, summary) = trees::encode(&CreateTree {
+                path: tree.path, mode: tree.mode, entries: &entries,
+            })?;
+            let inventory = tree.entries.iter().map(|entry| CreatedTreeEntry {
+                path: entry.path.into(),
+                kind: if entry.contents.is_some() { "file" } else { "directory" },
+                mode: entry.mode,
+                bytes: entry.contents.map_or(0, <[u8]>::len),
+                sha256: entry.contents.map(|bytes| hex::encode(Sha256::digest(bytes))),
+            }).collect();
+            descriptions.push(Change {
+                kind: "create_tree", path: tree.path.into(), before_sha256: None,
+                after_sha256: hex::encode(Sha256::digest(&index)), before_bytes: None,
+                after_bytes: summary.bytes, created_mode: Some(tree.mode),
+                created_tree: Some(CreatedTree { summary, entries: inventory }),
+            });
+        }
         descriptions.sort_by(|left, right| left.path.cmp(&right.path));
         drop(changes);
         capture.ensure_source_unchanged()?;
@@ -343,18 +387,22 @@ mod linux {
         let creations: Vec<_> = changes.additions.iter().map(|addition| CreateFile {
             path: addition.path, after: addition.after, mode: addition.mode,
         }).collect();
+        let tree_images: Vec<_> = changes.trees.iter().map(tree_entries).collect();
+        let trees: Vec<_> = changes.trees.iter().zip(&tree_images).map(|(tree, entries)| CreateTree {
+            path: tree.path, mode: tree.mode, entries,
+        }).collect();
         cancellation.check()?;
         report.installation_started = true;
         // This call owns exact per-generation originals and returns the actual
         // journal identity. No cancellation checks are added inside the writer.
         report.source_transaction = if let Some(request) = &report.request {
-            Some(writer.apply_for_request(request, &edits, &creations)?)
+            Some(writer.apply_with_trees_for_request(request, &edits, &creations, &trees)?)
         } else {
-            writer.apply_with_creations_receipt(&edits, &creations)?
+            writer.apply_with_trees_receipt(&edits, &creations, &trees)?
         };
         // Named no-op requests deliberately retain a zero-file journal. That
         // receipt must not turn an unchanged source plan into an APPLIED claim.
-        report.status = if edits.is_empty() && creations.is_empty() { "UNCHANGED" } else { "APPLIED" };
+        report.status = if edits.is_empty() && creations.is_empty() && trees.is_empty() { "UNCHANGED" } else { "APPLIED" };
         Ok(())
     }
 
@@ -1037,6 +1085,166 @@ mod linux {
             assert_eq!(fs::read(original.join("helper.cjs")).unwrap(), b"later independent work");
         }
 
+        fn reviewed_tree_candidate(candidate: &Path) {
+            fs::create_dir_all(candidate.join("compat/deep")).unwrap();
+            fs::create_dir(candidate.join("compat/empty")).unwrap();
+            fs::write(candidate.join("compat/deep/answer.cjs"), b"module.exports = 42;\n").unwrap();
+            fs::write(candidate.join("case.test.cjs"),
+                b"if (require('./compat/deep/answer.cjs') !== 42) throw new Error('wrong adapter');\n\
+                  if (!require('fs').statSync('./compat/empty').isDirectory()) throw new Error('missing directory');\n").unwrap();
+            for (path, mode) in [("compat", 0o750), ("compat/deep", 0o700),
+                ("compat/deep/answer.cjs", 0o640), ("compat/empty", 0o500)]
+            {
+                fs::set_permissions(candidate.join(path), fs::Permissions::from_mode(mode)).unwrap();
+            }
+        }
+
+        #[test]
+        fn reviewed_tree_installation_executes_nested_modules_and_restores_whole_trees() {
+            use rewrite_transaction::rollback::RollbackStatus;
+            let (root, original, candidate) = pair();
+            reviewed_tree_candidate(&candidate);
+            fs::write(candidate.join("top-level.dat"), b"flat addition").unwrap();
+            let inspected = prepare(&original, &candidate, None).unwrap().report;
+            assert_eq!(inspected.changes.len(), 3);
+            let described = inspected.changes.iter().find(|change| change.kind == "create_tree").unwrap();
+            assert_eq!(described.path, "compat");
+            assert_eq!(described.created_mode, Some(0o750));
+            assert!(described.before_sha256.is_none() && described.before_bytes.is_none());
+            let tree = described.created_tree.as_ref().unwrap();
+            assert_eq!((tree.summary.files, tree.summary.directories, tree.summary.bytes),
+                (1, 3, b"module.exports = 42;\n".len()));
+            assert_eq!(tree.entries.iter().map(|entry| (entry.path.as_str(), entry.kind)).collect::<Vec<_>>(),
+                [("deep", "directory"), ("deep/answer.cjs", "file"), ("empty", "directory")]);
+            assert!(tree.entries[0].sha256.is_none() && tree.entries[2].sha256.is_none());
+            assert!(!serde_json::to_string(&inspected).unwrap().contains("module.exports"));
+            assert!(!original.join("compat").exists() && !original.join(".migrate-backup").exists());
+            // The native-role test executable runs the actual captured JS with
+            // Node; the controlled Bun role is /bin/true. This proves installer
+            // orchestration and module availability, not runtime compatibility.
+            let native = controlled_native(root.path());
+            fs::write(&native, "#!/bin/sh\ntest \"$1\" = run && exec node \"$2\"\n").unwrap();
+            let report = apply_requested(&original, &candidate,
+                (&inspected.input_sha256, &inspected.candidate_input_sha256),
+                (&native, Path::new("/bin/true")), true, &CancellationToken::default(),
+                Some("tree-release")).unwrap();
+            assert_eq!(report.status, "APPLIED", "{report:?}");
+            assert_eq!(report.validation.as_ref().unwrap().verdict, "PASS");
+            assert!(!report.release_certification);
+            assert_eq!(fs::read(original.join("compat/deep/answer.cjs")).unwrap(), b"module.exports = 42;\n");
+            assert!(original.join("compat/empty").is_dir());
+            for path in ["compat", "compat/deep", "compat/deep/answer.cjs", "compat/empty"] {
+                assert_eq!(fs::metadata(original.join(path)).unwrap().permissions().mode() & 0o777,
+                    fs::metadata(candidate.join(path)).unwrap().permissions().mode() & 0o777);
+            }
+            let receipt = report.source_transaction.as_ref().unwrap();
+            let request = report.request.as_ref().unwrap();
+            assert_eq!(receipt.files, 3); // Replacement, flat file and whole tree.
+            let journal: serde_json::Value = serde_json::from_slice(
+                &fs::read(receipt_directory(&original, receipt).join("applied.json")).unwrap()).unwrap();
+            assert_eq!(journal["schema_version"], "franken-node/rewrite-transaction/v5");
+            assert_eq!(journal["records"][2]["after_sha256"], described.after_sha256);
+            let repeated = repeat_without_inputs(&original, request);
+            assert_eq!(repeated.status, "RECORDED_APPLIED", "{repeated:?}");
+            assert!(!repeated.execution_attempted && !repeated.installation_started);
+            assert_eq!(repeated.source_transaction.as_ref(), Some(receipt));
+
+            // A new descendant is independent work. The full rollback preflight
+            // must refuse before restoring the replacement or retiring any tree.
+            fs::write(original.join("compat/deep/user.txt"), b"independent work").unwrap();
+            assert_eq!(restore(&original, receipt).status, RollbackStatus::Conflict);
+            assert_eq!(fs::read(original.join("case.test.cjs")).unwrap(), fs::read(candidate.join("case.test.cjs")).unwrap());
+            assert_eq!(fs::read(original.join("top-level.dat")).unwrap(), b"flat addition");
+            fs::rename(original.join("compat/deep/user.txt"), root.path().join("preserved-user.txt")).unwrap();
+            assert_eq!(restore(&original, receipt).status, RollbackStatus::RolledBack);
+            assert!(!original.join("compat").exists() && !original.join("top-level.dat").exists());
+            assert_eq!(fs::read(original.join("case.test.cjs")).unwrap(), b"globalThis.answer = 40 + 2;\n");
+            let retained = receipt_directory(&original, receipt).join("2.retired");
+            assert_eq!(fs::read(retained.join("deep/answer.cjs")).unwrap(), b"module.exports = 42;\n");
+            assert!(retained.join("empty").is_dir());
+            assert_eq!(fs::metadata(retained).unwrap().permissions().mode() & 0o777, 0o750);
+            assert_eq!(fs::read(root.path().join("preserved-user.txt")).unwrap(), b"independent work");
+            fs::create_dir(original.join("compat")).unwrap();
+            fs::write(original.join("compat/later.txt"), b"later independent tree").unwrap();
+            let repeated = repeat_without_inputs(&original, request);
+            assert_eq!(repeated.status, "RECORDED_ROLLED_BACK");
+            assert!(!repeated.execution_attempted && !repeated.installation_started);
+            assert_eq!(fs::read(original.join("compat/later.txt")).unwrap(), b"later independent tree");
+            assert!(!original.join("compat/deep").exists());
+        }
+
+        #[test]
+        fn an_empty_directory_only_installation_is_applied_and_recoverable() {
+            let (root, original, candidate) = pair();
+            fs::write(candidate.join("case.test.cjs"), fs::read(original.join("case.test.cjs")).unwrap()).unwrap();
+            fs::create_dir_all(candidate.join("empty/nested")).unwrap();
+            let report = apply_current(&original, &candidate, &controlled_native(root.path()));
+            assert_eq!(report.status, "APPLIED", "{report:?}");
+            assert_eq!(report.changes.len(), 1);
+            assert_eq!(report.changes[0].kind, "create_tree");
+            assert_eq!(report.changes[0].after_bytes, 0);
+            let summary = &report.changes[0].created_tree.as_ref().unwrap().summary;
+            assert_eq!((summary.files, summary.directories, summary.bytes), (0, 2, 0));
+            assert!(original.join("empty/nested").is_dir());
+            let receipt = report.source_transaction.unwrap();
+            assert_eq!(receipt.files, 1);
+            assert_eq!(restore(&original, &receipt).status, rewrite_transaction::rollback::RollbackStatus::RolledBack);
+            assert!(!original.join("empty").exists());
+            assert!(receipt_directory(&original, &receipt).join("0.retired/nested").is_dir());
+        }
+
+        #[test]
+        fn reviewed_trees_reject_stale_pins_before_writer_or_guest_execution() {
+            for mutation in 0..4 {
+                let (_root, original, candidate) = pair();
+                reviewed_tree_candidate(&candidate);
+                let inspected = prepare(&original, &candidate, None).unwrap().report;
+                match mutation {
+                    0 => fs::write(candidate.join("compat/deep/answer.cjs"), b"unreviewed bytes").unwrap(),
+                    1 => fs::set_permissions(candidate.join("compat"), fs::Permissions::from_mode(0o700)).unwrap(),
+                    2 => fs::create_dir(candidate.join("compat/unreviewed-empty")).unwrap(),
+                    _ => symlink("deep/answer.cjs", candidate.join("compat/alias.cjs")).unwrap(),
+                }
+                assert!(apply(&original, &candidate,
+                    (&inspected.input_sha256, &inspected.candidate_input_sha256),
+                    Path::new("/missing-native"), Path::new("/missing-bun"), true).is_err(), "{mutation}");
+                assert!(!original.join(".migrate-backup").exists() && !original.join("compat").exists());
+                assert_eq!(fs::read(original.join("case.test.cjs")).unwrap(), b"globalThis.answer = 40 + 2;\n");
+            }
+        }
+
+        #[test]
+        fn passing_guests_cannot_redefine_tree_images_or_overwrite_new_roots() {
+            for original_target in [false, true] {
+                let (root, original, candidate) = pair();
+                reviewed_tree_candidate(&candidate);
+                let target = if original_target { &original } else { &candidate };
+                let source = if original_target {
+                    format!("require('fs').mkdirSync({},{{recursive:true}});\nrequire('fs').writeFileSync({},'independent new bytes');\n",
+                        serde_json::to_string(&target.join("compat")).unwrap(),
+                        serde_json::to_string(&target.join("compat/user.txt")).unwrap())
+                } else {
+                    format!("require('fs').writeFileSync({},'independent new bytes');\n",
+                        serde_json::to_string(&target.join("compat/deep/answer.cjs")).unwrap())
+                };
+                fs::write(original.join("case.test.cjs"), &source).unwrap();
+                fs::write(candidate.join("case.test.cjs"), format!("{source}// candidate\n")).unwrap();
+                let report = apply_current(&original, &candidate, &controlled_native(root.path()));
+                assert_eq!(report.validation.as_ref().unwrap().verdict, "PASS");
+                assert_eq!(report.status, "ERROR", "{report:?}");
+                assert!(!report.installation_started && report.source_transaction.is_none());
+                assert_eq!(fs::read(original.join("case.test.cjs")).unwrap(), source.as_bytes());
+                if original_target {
+                    assert_eq!(fs::read(original.join("compat/user.txt")).unwrap(), b"independent new bytes");
+                    assert!(!original.join("compat/deep").exists());
+                } else {
+                    assert_eq!(fs::read(candidate.join("compat/deep/answer.cjs")).unwrap(), b"independent new bytes");
+                    assert!(!original.join("compat").exists());
+                }
+                assert!(rewrite_transaction::rollback::run(&original, None, false).history.is_empty());
+            }
+        }
+
         #[test]
         fn a_creation_only_plan_is_applied_not_reported_as_unchanged() {
             let (root, original, candidate) = pair();
@@ -1059,6 +1267,7 @@ mod linux {
         #[test]
         fn a_failed_live_comparison_installs_neither_new_helpers_nor_replacements() {
             let (_root, original, candidate) = pair();
+            reviewed_tree_candidate(&candidate);
             fs::write(candidate.join("helper.cjs"), b"module.exports = 42;").unwrap();
             let rejected = apply_current(&original, &candidate, Path::new("/bin/false"));
             assert_eq!(rejected.status, "REJECTED", "{rejected:?}");
@@ -1067,6 +1276,7 @@ mod linux {
             assert!(!original.join("helper.cjs").exists());
             assert_eq!(fs::read(original.join("case.test.cjs")).unwrap(), b"globalThis.answer = 40 + 2;\n");
             assert!(rewrite_transaction::rollback::run(&original, None, false).history.is_empty());
+            assert!(!original.join("compat").exists());
         }
 
         #[test]
