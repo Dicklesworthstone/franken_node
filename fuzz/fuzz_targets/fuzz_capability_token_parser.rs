@@ -209,7 +209,7 @@ fn bounded_string(value: String) -> String {
 }
 
 fn endpoint_for_prefix(prefix: &str) -> String {
-    if prefix.ends_with('/') || prefix.ends_with(':') {
+    if prefix.ends_with('/') {
         format!("{prefix}resource")
     } else {
         format!("{prefix}/resource")

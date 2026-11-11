@@ -929,15 +929,33 @@ fn validate_endpoint_prefix_lexical(prefix: &str) -> Result<&str, String> {
         ));
     }
 
-    let scheme = prefix
-        .split_once("://")
-        .map(|(scheme, _)| scheme)
-        .ok_or_else(|| {
-            format!(
-                "endpoint prefix '{}' must use network scheme (https://, http://, federation://, revocation://, ws://, wss://)",
-                prefix
-            )
-        })?;
+    let (scheme, remainder) = prefix.split_once("://").ok_or_else(|| {
+        format!(
+            "endpoint prefix '{}' must use network scheme (https://, http://, federation://, revocation://, ws://, wss://)",
+            prefix
+        )
+    })?;
+
+    let authority_end = remainder.find(['/', '?', '#']).unwrap_or(remainder.len());
+    let authority = &remainder[..authority_end];
+    if authority.is_empty() {
+        return Err(format!(
+            "endpoint prefix '{}' has no domain after scheme",
+            prefix
+        ));
+    }
+    if authority.ends_with(':') {
+        return Err(format!(
+            "endpoint prefix '{}' has an empty port specification",
+            prefix
+        ));
+    }
+    if prefix.contains('#') {
+        return Err(format!(
+            "endpoint prefix '{}' must not include a fragment",
+            prefix
+        ));
+    }
 
     let forbidden_schemes = ["file", "data", "javascript", "vbscript", "ftp"];
     if forbidden_schemes
@@ -965,29 +983,29 @@ fn validate_endpoint_prefix_lexical(prefix: &str) -> Result<&str, String> {
 }
 
 #[cfg(feature = "http-client")]
-fn validate_endpoint_prefix(prefix: &str) -> Result<(), String> {
-    let _scheme = validate_endpoint_prefix_lexical(prefix)?;
-    let parsed = Url::parse(prefix)
-        .map_err(|source| format!("endpoint prefix '{}' is not a valid URL: {source}", prefix))?;
+fn validate_endpoint_url_common(value: &str) -> Result<(), String> {
+    let _scheme = validate_endpoint_prefix_lexical(value)?;
+    let parsed = Url::parse(value)
+        .map_err(|source| format!("endpoint prefix '{}' is not a valid URL: {source}", value))?;
     if parsed.host_str().is_none_or(str::is_empty) {
         return Err(format!(
             "endpoint prefix '{}' has no domain after scheme",
-            prefix
+            value
         ));
     }
     if parsed.username() != "" || parsed.password().is_some() {
         return Err(format!(
             "endpoint prefix '{}' must not include userinfo",
-            prefix
+            value
         ));
     }
     if parsed.port() == Some(0) {
-        return Err(format!("endpoint prefix '{}' has invalid port 0", prefix));
+        return Err(format!("endpoint prefix '{}' has invalid port 0", value));
     }
     if parsed.fragment().is_some() {
         return Err(format!(
             "endpoint prefix '{}' must not include a fragment",
-            prefix
+            value
         ));
     }
 
@@ -995,13 +1013,24 @@ fn validate_endpoint_prefix(prefix: &str) -> Result<(), String> {
 }
 
 #[cfg(not(feature = "http-client"))]
+fn validate_endpoint_url_common(value: &str) -> Result<(), String> {
+    validate_endpoint_prefix_lexical(value)?;
+    Ok(())
+}
+
 fn validate_endpoint_prefix(prefix: &str) -> Result<(), String> {
-    validate_endpoint_prefix_lexical(prefix)?;
+    validate_endpoint_url_common(prefix)?;
+    if prefix.contains('?') {
+        return Err(format!(
+            "endpoint prefix '{}' must not include a query string",
+            prefix
+        ));
+    }
     Ok(())
 }
 
 fn validate_requested_endpoint(endpoint: &str) -> Result<(), String> {
-    validate_endpoint_prefix(endpoint)
+    validate_endpoint_url_common(endpoint)
         .map_err(|detail| detail.replace("endpoint prefix", "endpoint"))
 }
 
@@ -1042,14 +1071,14 @@ fn endpoint_matches_prefix(endpoint: &str, prefix: &str) -> bool {
         return false;
     }
 
-    // If the prefix already ends with a URL delimiter, any continuation is valid
-    if prefix.ends_with('/') || prefix.ends_with(':') {
+    // If the prefix already ends with a path delimiter, any continuation under that path is valid
+    if prefix.ends_with('/') {
         return true;
     }
 
     match endpoint.as_bytes().get(prefix.len()) {
         None => true,
-        Some(b'/') | Some(b'?') | Some(b'#') | Some(b':') => true,
+        Some(b'/') | Some(b'?') => true,
         Some(_) => false,
     }
 }

@@ -32,7 +32,11 @@ fn fuzz_trust_card_raw_bytes(bytes: &[u8]) {
         // Test deterministic trust card envelope parsing
         let result1 = serde_json::from_str::<serde_json::Value>(json_str);
         let result2 = serde_json::from_str::<serde_json::Value>(json_str);
-        assert_eq!(result1.is_ok(), result2.is_ok(), "Trust card parsing should be deterministic");
+        assert_eq!(
+            result1.is_ok(),
+            result2.is_ok(),
+            "Trust card parsing should be deterministic"
+        );
 
         // Test malformed JSON edge cases that could trigger parser vulnerabilities
         test_json_edge_cases(json_str);
@@ -67,12 +71,15 @@ fn fuzz_trust_card_raw_bytes(bytes: &[u8]) {
 
 /// Test JSON edge cases that could trigger parser vulnerabilities
 fn test_json_edge_cases(json_str: &str) {
-    if json_str.len() < 2 {
+    let Some((last_char_idx, _)) = json_str.char_indices().next_back() else {
+        return;
+    };
+    if last_char_idx == 0 {
         return;
     }
 
-    // Test with truncated JSON (incomplete parsing)
-    let truncated = &json_str[..json_str.len() - 1];
+    // Test with truncated JSON (incomplete parsing) on a valid UTF-8 char boundary
+    let truncated = &json_str[..last_char_idx];
     let _ = serde_json::from_str::<serde_json::Value>(truncated);
 
     // Test with extra characters (over-parsing)

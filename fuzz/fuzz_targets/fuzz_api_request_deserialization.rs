@@ -30,18 +30,30 @@ macro_rules! round_trip_json {
         if let Ok(json) = serde_json::to_string(&value) {
             // Round-trip property: deserialize(serialize(value)) should succeed
             let parsed = serde_json::from_str::<$ty>(&json);
-            assert!(parsed.is_ok(), "Round-trip deserialization from string should succeed");
+            assert!(
+                parsed.is_ok(),
+                "Round-trip deserialization from string should succeed"
+            );
 
             let parsed_bytes = serde_json::from_slice::<$ty>(json.as_bytes());
-            assert!(parsed_bytes.is_ok(), "Round-trip deserialization from bytes should succeed");
+            assert!(
+                parsed_bytes.is_ok(),
+                "Round-trip deserialization from bytes should succeed"
+            );
         }
 
         if let Ok(json_pretty) = serde_json::to_string_pretty(&value) {
             let parsed_pretty = serde_json::from_str::<$ty>(&json_pretty);
-            assert!(parsed_pretty.is_ok(), "Pretty-printed JSON should deserialize correctly");
+            assert!(
+                parsed_pretty.is_ok(),
+                "Pretty-printed JSON should deserialize correctly"
+            );
 
             let parsed_pretty_bytes = serde_json::from_slice::<$ty>(json_pretty.as_bytes());
-            assert!(parsed_pretty_bytes.is_ok(), "Pretty-printed JSON bytes should deserialize correctly");
+            assert!(
+                parsed_pretty_bytes.is_ok(),
+                "Pretty-printed JSON bytes should deserialize correctly"
+            );
         }
 
         if let Ok(json_value) = serde_json::to_value(&value) {
@@ -106,7 +118,11 @@ fn fuzz_api_request_raw_bytes(bytes: &[u8]) {
     // Test deterministic behavior - same input should give same result
     let quarantine_result1 = serde_json::from_slice::<QuarantineRequest>(bytes);
     let quarantine_result2 = serde_json::from_slice::<QuarantineRequest>(bytes);
-    assert_eq!(quarantine_result1.is_ok(), quarantine_result2.is_ok(), "Quarantine deserialization should be deterministic");
+    assert_eq!(
+        quarantine_result1.is_ok(),
+        quarantine_result2.is_ok(),
+        "Quarantine deserialization should be deterministic"
+    );
 
     let revoke_result = serde_json::from_slice::<RevokeRequest>(bytes);
     let release_result = serde_json::from_slice::<ReleaseRequest>(bytes);
@@ -131,9 +147,18 @@ fn fuzz_api_request_raw_bytes(bytes: &[u8]) {
         let single_operator = serde_json::from_slice::<OperatorNodeStatus>(single_byte);
 
         // Single bytes are very unlikely to be valid JSON for complex structures
-        assert!(single_quarantine.is_err(), "Single byte should not parse as QuarantineRequest");
-        assert!(single_session.is_err(), "Single byte should not parse as SessionConfig");
-        assert!(single_operator.is_err(), "Single byte should not parse as OperatorNodeStatus");
+        assert!(
+            single_quarantine.is_err(),
+            "Single byte should not parse as QuarantineRequest"
+        );
+        assert!(
+            single_session.is_err(),
+            "Single byte should not parse as SessionConfig"
+        );
+        assert!(
+            single_operator.is_err(),
+            "Single byte should not parse as OperatorNodeStatus"
+        );
 
         if bytes.len() > 2 {
             let partial = &bytes[..bytes.len() / 2];
@@ -143,9 +168,18 @@ fn fuzz_api_request_raw_bytes(bytes: &[u8]) {
 
             // Truncated JSON should generally be rejected
             if partial.len() < 10 {
-                assert!(partial_receipt.is_err(), "Truncated bytes too short for DecisionReceipt");
-                assert!(partial_auth.is_err(), "Truncated bytes too short for AuthenticatedMessage");
-                assert!(partial_health.is_err(), "Truncated bytes too short for HealthCheck");
+                assert!(
+                    partial_receipt.is_err(),
+                    "Truncated bytes too short for DecisionReceipt"
+                );
+                assert!(
+                    partial_auth.is_err(),
+                    "Truncated bytes too short for AuthenticatedMessage"
+                );
+                assert!(
+                    partial_health.is_err(),
+                    "Truncated bytes too short for HealthCheck"
+                );
             }
 
             if bytes.len() > 10 {
@@ -154,8 +188,14 @@ fn fuzz_api_request_raw_bytes(bytes: &[u8]) {
                 let oversized_pagination = serde_json::from_slice::<Pagination>(&oversized);
 
                 // Oversized with null padding should be rejected
-                assert!(oversized_release.is_err(), "Null-padded oversized input should be rejected for ReleaseRequest");
-                assert!(oversized_pagination.is_err(), "Null-padded oversized input should be rejected for Pagination");
+                assert!(
+                    oversized_release.is_err(),
+                    "Null-padded oversized input should be rejected for ReleaseRequest"
+                );
+                assert!(
+                    oversized_pagination.is_err(),
+                    "Null-padded oversized input should be rejected for Pagination"
+                );
             }
         }
     }
@@ -165,7 +205,11 @@ fn fuzz_api_request_json(json_str: &str) {
     // Test deterministic parsing behavior
     let quarantine_result1 = serde_json::from_str::<QuarantineRequest>(json_str);
     let quarantine_result2 = serde_json::from_str::<QuarantineRequest>(json_str);
-    assert_eq!(quarantine_result1.is_ok(), quarantine_result2.is_ok(), "JSON parsing should be deterministic for QuarantineRequest");
+    assert_eq!(
+        quarantine_result1.is_ok(),
+        quarantine_result2.is_ok(),
+        "JSON parsing should be deterministic for QuarantineRequest"
+    );
 
     let revoke_result = serde_json::from_str::<RevokeRequest>(json_str);
     let release_result = serde_json::from_str::<ReleaseRequest>(json_str);
@@ -183,7 +227,11 @@ fn fuzz_api_request_json(json_str: &str) {
 
     let json_value_result1 = serde_json::from_str::<serde_json::Value>(json_str);
     let json_value_result2 = serde_json::from_str::<serde_json::Value>(json_str);
-    assert_eq!(json_value_result1.is_ok(), json_value_result2.is_ok(), "JSON Value parsing should be deterministic");
+    assert_eq!(
+        json_value_result1.is_ok(),
+        json_value_result2.is_ok(),
+        "JSON Value parsing should be deterministic"
+    );
 
     test_api_json_edge_cases(json_str);
 
@@ -191,38 +239,55 @@ fn fuzz_api_request_json(json_str: &str) {
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(json_str) {
         if let Ok(reencoded) = serde_json::to_string(&value) {
             let reencoded_result = serde_json::from_str::<serde_json::Value>(&reencoded);
-            assert!(reencoded_result.is_ok(), "Re-encoded JSON should parse successfully");
+            assert!(
+                reencoded_result.is_ok(),
+                "Re-encoded JSON should parse successfully"
+            );
         }
 
         if let Ok(pretty) = serde_json::to_string_pretty(&value) {
             let pretty_result = serde_json::from_str::<serde_json::Value>(&pretty);
-            assert!(pretty_result.is_ok(), "Pretty-printed JSON should parse successfully");
+            assert!(
+                pretty_result.is_ok(),
+                "Pretty-printed JSON should parse successfully"
+            );
         }
     }
 }
 
 fn test_api_json_edge_cases(json_str: &str) {
-    if json_str.len() < 2 {
+    let Some((last_char_idx, _)) = json_str.char_indices().next_back() else {
+        return;
+    };
+    if last_char_idx == 0 {
         return;
     }
 
     // Truncated JSON should generally be rejected
-    let truncated = &json_str[..json_str.len() - 1];
-    let truncated_value = serde_json::from_str::<serde_json::Value>(truncated);
-    let truncated_receipt = serde_json::from_str::<DecisionReceipt>(truncated);
-    let truncated_auth = serde_json::from_str::<AuthenticatedMessage>(truncated);
-    let truncated_health = serde_json::from_str::<HealthCheck>(truncated);
+    let truncated = &json_str[..last_char_idx];
+    let _truncated_value = serde_json::from_str::<serde_json::Value>(truncated);
+    let _truncated_receipt = serde_json::from_str::<DecisionReceipt>(truncated);
+    let _truncated_auth = serde_json::from_str::<AuthenticatedMessage>(truncated);
+    let _truncated_health = serde_json::from_str::<HealthCheck>(truncated);
 
-    // Malformed JSON with extra brace should be rejected
-    let extended = format!("{json_str}}}");
-    let extended_result = serde_json::from_str::<serde_json::Value>(&extended);
-    assert!(extended_result.is_err(), "JSON with extra closing brace should be rejected");
+    // Valid JSON with an extra closing brace appended should be rejected
+    if serde_json::from_str::<serde_json::Value>(json_str).is_ok() {
+        let extended = format!("{json_str}}}");
+        let extended_result = serde_json::from_str::<serde_json::Value>(&extended);
+        assert!(
+            extended_result.is_err(),
+            "JSON with extra closing brace should be rejected"
+        );
+    }
 
     // Valid envelope structure should parse as JSON Value
     let request_envelope = format!("{{\"request\": {json_str}}}");
     if serde_json::from_str::<serde_json::Value>(json_str).is_ok() {
         let envelope_result = serde_json::from_str::<serde_json::Value>(&request_envelope);
-        assert!(envelope_result.is_ok(), "Valid JSON in envelope should parse");
+        assert!(
+            envelope_result.is_ok(),
+            "Valid JSON in envelope should parse"
+        );
     }
 
     // Valid batch structure should parse as JSON Value
@@ -233,35 +298,58 @@ fn test_api_json_edge_cases(json_str: &str) {
     }
 
     // Valid metadata structure should parse
-    let with_metadata = format!("{{\"data\": {json_str}, \"meta\": {{\"timestamp\": 1234567890}}}}");
+    let with_metadata =
+        format!("{{\"data\": {json_str}, \"meta\": {{\"timestamp\": 1234567890}}}}");
     if serde_json::from_str::<serde_json::Value>(json_str).is_ok() {
         let metadata_result = serde_json::from_str::<serde_json::Value>(&with_metadata);
-        assert!(metadata_result.is_ok(), "Valid JSON with metadata should parse");
+        assert!(
+            metadata_result.is_ok(),
+            "Valid JSON with metadata should parse"
+        );
     }
 
     // JSON with surrounding whitespace should parse if original was valid
     let with_spaces = format!(" \t\n{json_str}\n\t ");
     let original_quarantine = serde_json::from_str::<QuarantineRequest>(json_str);
     let spaced_quarantine = serde_json::from_str::<QuarantineRequest>(&with_spaces);
-    assert_eq!(original_quarantine.is_ok(), spaced_quarantine.is_ok(), "Whitespace should not affect parsing result");
+    assert_eq!(
+        original_quarantine.is_ok(),
+        spaced_quarantine.is_ok(),
+        "Whitespace should not affect parsing result"
+    );
 
     let original_session = serde_json::from_str::<SessionConfig>(json_str);
     let spaced_session = serde_json::from_str::<SessionConfig>(&with_spaces);
-    assert_eq!(original_session.is_ok(), spaced_session.is_ok(), "Whitespace should not affect SessionConfig parsing");
+    assert_eq!(
+        original_session.is_ok(),
+        spaced_session.is_ok(),
+        "Whitespace should not affect SessionConfig parsing"
+    );
 
     let original_operator = serde_json::from_str::<OperatorNodeStatus>(json_str);
     let spaced_operator = serde_json::from_str::<OperatorNodeStatus>(&with_spaces);
-    assert_eq!(original_operator.is_ok(), spaced_operator.is_ok(), "Whitespace should not affect OperatorNodeStatus parsing");
+    assert_eq!(
+        original_operator.is_ok(),
+        spaced_operator.is_ok(),
+        "Whitespace should not affect OperatorNodeStatus parsing"
+    );
 
     let original_value = serde_json::from_str::<serde_json::Value>(json_str);
     let spaced_value = serde_json::from_str::<serde_json::Value>(&with_spaces);
-    assert_eq!(original_value.is_ok(), spaced_value.is_ok(), "Whitespace should not affect JSON Value parsing");
+    assert_eq!(
+        original_value.is_ok(),
+        spaced_value.is_ok(),
+        "Whitespace should not affect JSON Value parsing"
+    );
 
     // Deeply nested valid JSON should parse successfully
     if json_str.len() < 100 && serde_json::from_str::<serde_json::Value>(json_str).is_ok() {
         let deeply_nested = format!("{{\"level1\": {{\"level2\": {{\"level3\": {json_str}}}}}}}");
         let nested_result = serde_json::from_str::<serde_json::Value>(&deeply_nested);
-        assert!(nested_result.is_ok(), "Deeply nested valid JSON should parse successfully");
+        assert!(
+            nested_result.is_ok(),
+            "Deeply nested valid JSON should parse successfully"
+        );
     }
 }
 

@@ -149,6 +149,12 @@ fn capability_gate_endpoint_boundary_fuzz_corpus_preserves_prefix_delimiters() -
             endpoint: "https://api.example.com/root\\admin",
             should_authorize: false,
         },
+        EndpointBoundaryFuzzCase {
+            label: "cross-origin port escalation under default-port prefix fails closed",
+            prefix: "https://api.example.com",
+            endpoint: "https://api.example.com:8443/root",
+            should_authorize: false,
+        },
     ];
 
     for case in cases {
@@ -340,6 +346,103 @@ fn capability_gate_mutated_signature_seed_corpus_fails_closed() -> Result<(), St
         };
         assert!(!event.allowed);
         assert_eq!(event.denial_code.as_deref(), Some("REMOTECAP_INVALID"));
+    }
+
+    Ok(())
+}
+
+#[test]
+fn capability_provider_rejects_empty_port_and_query_string_prefixes() -> Result<(), String> {
+    let invalid_prefixes = [
+        "http://api.example.com:",
+        "http://api.example.com:/root",
+        "https://[::1]:/root",
+        "https://api.example.com/root?tenant=acme",
+        "https://api.example.com/root?tenant=acme/",
+    ];
+
+    for invalid_prefix in invalid_prefixes {
+        let scope = RemoteScope::new(
+            vec![RemoteOperation::NetworkEgress],
+            vec![invalid_prefix.to_string()],
+        );
+        let err = provider()?
+            .issue(
+                "r79-invalid-prefix-regression",
+                scope,
+                ISSUED_AT,
+                300,
+                true,
+                false,
+                "invalid-prefix-check",
+            )
+            .expect_err("empty-port or query-bearing prefix must fail closed");
+        assert_eq!(
+            err.code(),
+            "REMOTECAP_SCOPE_INVALID",
+            "unexpected code for invalid prefix {invalid_prefix}: {err}"
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
+fn checked_in_fuzz_crash_artifacts_replay_deterministically_without_panicking() -> Result<(), String>
+{
+    use frankenengine_node::api::fleet_quarantine::QuarantineRequest;
+    use frankenengine_node::security::decision_receipt::SignedReceipt;
+    use frankenengine_node::supply_chain::artifact_signing::ChecksumManifest;
+    use frankenengine_node::supply_chain::extension_registry::ExtensionRegistrationManifest;
+    use frankenengine_node::supply_chain::trust_card::TrustCard;
+
+    let artifacts_root =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fuzz/artifacts");
+    let mut crash_files = Vec::new();
+    for target_entry in std::fs::read_dir(&artifacts_root).map_err(|err| err.to_string())? {
+        let target_dir = target_entry.map_err(|err| err.to_string())?.path();
+        if !target_dir.is_dir() {
+            continue;
+        }
+        for file_entry in std::fs::read_dir(&target_dir).map_err(|err| err.to_string())? {
+            let file_path = file_entry.map_err(|err| err.to_string())?.path();
+            if file_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("crash-"))
+            {
+                crash_files.push(file_path);
+            }
+        }
+    }
+    crash_files.sort();
+    assert!(
+        crash_files.len() >= 9,
+        "expected at least 9 checked-in fuzz crash artifacts, found {}",
+        crash_files.len()
+    );
+
+    for crash_path in crash_files {
+        let bytes = std::fs::read(&crash_path).map_err(|err| err.to_string())?;
+        let r1 = serde_json::from_slice::<RemoteCap>(&bytes);
+        let r2 = serde_json::from_slice::<RemoteCap>(&bytes);
+        assert_eq!(r1.is_ok(), r2.is_ok());
+
+        let _ = serde_json::from_slice::<RemoteScope>(&bytes);
+        let _ = serde_json::from_slice::<QuarantineRequest>(&bytes);
+        let _ = serde_json::from_slice::<ExtensionRegistrationManifest>(&bytes);
+        let _ = serde_json::from_slice::<SignedReceipt>(&bytes);
+        let _ = serde_json::from_slice::<TrustCard>(&bytes);
+
+        if let Ok(text) = std::str::from_utf8(&bytes) {
+            let _ = ChecksumManifest::parse_canonical(text);
+            if let Some((last_char_idx, _)) = text.char_indices().next_back()
+                && last_char_idx > 0
+            {
+                let truncated = &text[..last_char_idx];
+                let _ = serde_json::from_str::<serde_json::Value>(truncated);
+            }
+        }
     }
 
     Ok(())
