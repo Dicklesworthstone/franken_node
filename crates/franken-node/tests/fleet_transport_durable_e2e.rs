@@ -85,6 +85,7 @@ fn completed_drain(node: &NodeStatus) -> NativeSessionDrainCheckpoint {
         pending_sessions: 0,
         indeterminate_sessions: 0,
         fence_held: false,
+        supervisor_attestation: None,
     }
 }
 

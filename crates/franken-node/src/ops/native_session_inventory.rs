@@ -21,6 +21,7 @@ use sha2::{Digest, Sha256};
 
 use crate::control_plane::fleet_transport::{
     FleetActionRecord, FleetApplicationCheckpoint, MAX_NATIVE_SESSION_MAINTENANCE_HOLDS,
+    NATIVE_SESSION_DRAIN_ATTESTATION_SCHEMA, NativeSessionDrainAttestation,
     NativeSessionDrainCheckpoint, fleet_action_snapshot_prefix, fleet_application_checkpoint,
     fleet_native_session_holds, validate_action_id, validate_node_id, validate_zone_id,
 };
@@ -46,6 +47,9 @@ const MAX_IDENTITY_CAPTURES: usize = crate::capacity_defaults::base::LARGE;
 // Do not introduce an accounting ceiling below the existing admitted request:
 // identity strings can expand in JSON even within their raw 2MiB trust bound.
 const MAX_ADMISSION_BYTES: usize = NATIVE_SESSION_MAX_REQUEST_BYTES;
+const ADMISSION_RECEIPT_SCHEMA: &str = "franken-node/native-session-admission-receipt/v1";
+const ADMISSION_RECEIPT_DIRECTORY: &str = "session-admissions";
+const MAX_ADMISSION_RECEIPT_BYTES: usize = 4 * 1024;
 const MAX_OUTCOME_BYTES: usize =
     NATIVE_SESSION_MAX_EFFECT_WAL_STREAM_BYTES + NATIVE_SESSION_MAX_DIAGNOSTIC_BYTES;
 const OUTCOME_RECEIPT_SCHEMA: &str = "franken-node/native-session-outcome-receipt/v1";
@@ -134,6 +138,69 @@ struct StoredNativeSessionDrain {
     /// snapshot. A terminal population alone cannot skip an unapplied hold.
     #[serde(default)]
     actions_applied: bool,
+    /// Signed once when the initial cohort is sealed. Historical unsealed
+    /// drains remain inspectable but cannot become authenticated observations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    census_signature_hex: Option<String>,
+}
+
+impl StoredNativeSessionDrain {
+    fn census_preimage(&self) -> Result<Vec<u8>> {
+        #[derive(Serialize)]
+        struct Census<'a> {
+            drain_id: &'a str,
+            generation: u64,
+            project_root: &'a str,
+            node_id: &'a str,
+            zone_id: &'a str,
+            session_nonces: &'a [String],
+            actions: &'a FleetApplicationCheckpoint,
+            maintenance_hold_ids: &'a [String],
+        }
+        let bytes = bounded_json(
+            &Census {
+                drain_id: &self.drain_id,
+                generation: self.generation,
+                project_root: project_key(&self.project_root)?,
+                node_id: &self.node_id,
+                zone_id: &self.zone_id,
+                session_nonces: &self.session_nonces,
+                actions: &self.actions,
+                maintenance_hold_ids: &self.maintenance_hold_ids,
+            },
+            MAX_DRAIN_BYTES,
+        )?;
+        let mut payload = b"franken-node/native-session-drain-census/v1\0".to_vec();
+        payload.extend_from_slice(&u64::try_from(bytes.len())?.to_be_bytes());
+        payload.extend_from_slice(bytes.as_bytes());
+        Ok(payload)
+    }
+
+    fn seal_census(&mut self, root: &ed25519_dalek::SigningKey) -> Result<()> {
+        use ed25519_dalek::Signer as _;
+        if self.census_signature_hex.is_some() {
+            bail!("native-session drain census is already sealed");
+        }
+        self.census_signature_hex =
+            Some(hex::encode(root.sign(&self.census_preimage()?).to_bytes()));
+        Ok(())
+    }
+
+    fn verify_census(&self, root: &ed25519_dalek::VerifyingKey) -> Result<()> {
+        let signature_hex = self
+            .census_signature_hex
+            .as_deref()
+            .context("native-session drain has no authenticated initial census; a new action snapshot is required")?;
+        if signature_hex.len() != 128 {
+            bail!("native-session drain census signature has invalid length");
+        }
+        let bytes = hex::decode(signature_hex)
+            .context("native-session drain census signature is not hexadecimal")?;
+        let signature = ed25519_dalek::Signature::from_slice(&bytes)
+            .context("native-session drain census signature has invalid length")?;
+        root.verify_strict(&self.census_preimage()?, &signature)
+            .context("native-session drain retained census was altered")
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -237,6 +304,19 @@ struct NativeSessionOutcomeReceipt {
     signature_hex: String,
 }
 
+/// Immutable authentication of the complete admission, including its project
+/// attribution. The runtime identity capture binds only nonce/root/epoch; a
+/// pending database row cannot supply its own authoritative project identity.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeSessionAdmissionReceipt {
+    schema_version: String,
+    session_nonce: String,
+    product_root_key_id: String,
+    admission_sha256: String,
+    signature_hex: String,
+}
+
 fn admission_digest(admission: &NativeSessionAdmission) -> Result<String> {
     let bytes = bounded_json(admission, MAX_ADMISSION_BYTES)?;
     let mut digest = Sha256::new();
@@ -244,6 +324,73 @@ fn admission_digest(admission: &NativeSessionAdmission) -> Result<String> {
     digest.update(u64::try_from(bytes.len())?.to_be_bytes());
     digest.update(bytes.as_bytes());
     Ok(hex::encode(digest.finalize()))
+}
+
+impl NativeSessionAdmissionReceipt {
+    fn preimage(&self) -> Result<Vec<u8>> {
+        #[derive(Serialize)]
+        struct Payload<'a> {
+            schema_version: &'a str,
+            session_nonce: &'a str,
+            product_root_key_id: &'a str,
+            admission_sha256: &'a str,
+        }
+        let bytes = bounded_json(
+            &Payload {
+                schema_version: &self.schema_version,
+                session_nonce: &self.session_nonce,
+                product_root_key_id: &self.product_root_key_id,
+                admission_sha256: &self.admission_sha256,
+            },
+            MAX_ADMISSION_RECEIPT_BYTES,
+        )?;
+        let mut preimage = b"franken-node/native-session-admission-signature/v1\0".to_vec();
+        preimage.extend_from_slice(&u64::try_from(bytes.len())?.to_be_bytes());
+        preimage.extend_from_slice(bytes.as_bytes());
+        Ok(preimage)
+    }
+
+    fn issue(admission: &NativeSessionAdmission, root: &ed25519_dalek::SigningKey) -> Result<Self> {
+        use ed25519_dalek::Signer as _;
+        validate_admission(admission)?;
+        let mut receipt = Self {
+            schema_version: ADMISSION_RECEIPT_SCHEMA.to_owned(),
+            session_nonce: admission.session_nonce.clone(),
+            product_root_key_id: admission.product_root_key_id.clone(),
+            admission_sha256: admission_digest(admission)?,
+            signature_hex: String::new(),
+        };
+        receipt.signature_hex = hex::encode(root.sign(&receipt.preimage()?).to_bytes());
+        receipt.verify(admission, &root.verifying_key())?;
+        Ok(receipt)
+    }
+
+    fn verify(
+        &self,
+        admission: &NativeSessionAdmission,
+        trusted_root: &ed25519_dalek::VerifyingKey,
+    ) -> Result<()> {
+        validate_admission(admission)?;
+        if self.schema_version != ADMISSION_RECEIPT_SCHEMA
+            || self.session_nonce != admission.session_nonce
+            || self.product_root_key_id != admission.product_root_key_id
+            || self.product_root_key_id
+                != format!("ed25519:{}", hex::encode(trusted_root.as_bytes()))
+            || self.admission_sha256 != admission_digest(admission)?
+            || self.signature_hex.len() != 128
+        {
+            bail!(
+                "native-session admission receipt is not bound to this admission and trusted root"
+            );
+        }
+        let bytes = hex::decode(&self.signature_hex)
+            .context("native-session admission receipt signature is not hexadecimal")?;
+        let signature = ed25519_dalek::Signature::from_slice(&bytes)
+            .context("native-session admission receipt signature has invalid length")?;
+        trusted_root
+            .verify_strict(&self.preimage()?, &signature)
+            .context("native-session admission receipt signature verification failed")
+    }
 }
 
 impl NativeSessionOutcomeReceipt {
@@ -738,6 +885,67 @@ fn outcome_receipt_path(protected_root: &Path, nonce: &str) -> PathBuf {
     ))
 }
 
+fn admission_receipt_path(protected_root: &Path, nonce: &str) -> PathBuf {
+    protected_root
+        .join(ADMISSION_RECEIPT_DIRECTORY)
+        .join(format!(
+            "{}.json",
+            hex::encode(Sha256::digest(nonce.as_bytes()))
+        ))
+}
+
+fn read_admission_receipt(
+    protected_root: &Path,
+    admission: &NativeSessionAdmission,
+    trusted_root: &ed25519_dalek::VerifyingKey,
+) -> Result<Option<NativeSessionAdmissionReceipt>> {
+    let path = admission_receipt_path(protected_root, &admission.session_nonce);
+    if !validate_private_path_if_present(&path)? {
+        return Ok(None);
+    }
+    let bytes = read_runtime_evidence_private_file(&path, MAX_ADMISSION_RECEIPT_BYTES)?;
+    let receipt: NativeSessionAdmissionReceipt = serde_json::from_slice(&bytes)
+        .context("decode retained native-session admission receipt")?;
+    receipt.verify(admission, trusted_root)?;
+    Ok(Some(receipt))
+}
+
+fn retain_admission_receipt(
+    protected_root: &Path,
+    admission: &NativeSessionAdmission,
+) -> Result<()> {
+    use std::io::Write as _;
+    verify_admission_capture(protected_root, admission)?;
+    let root = load_runtime_evidence_product_root(
+        &protected_root.join(RUNTIME_EVIDENCE_ROOT_KEY_RELATIVE_PATH),
+    )?;
+    let receipt = NativeSessionAdmissionReceipt::issue(admission, &root)?;
+    let bytes = bounded_json(&receipt, MAX_ADMISSION_RECEIPT_BYTES)?;
+    let directory = protected_root.join(ADMISSION_RECEIPT_DIRECTORY);
+    ensure_runtime_evidence_directory(&directory, true)?;
+    let path = admission_receipt_path(protected_root, &admission.session_nonce);
+    let mut staged = tempfile::NamedTempFile::new_in(&directory)
+        .context("stage private native-session admission receipt")?;
+    staged.write_all(bytes.as_bytes())?;
+    staged.as_file().sync_all()?;
+    match staged.persist_noclobber(&path) {
+        Ok(_) => {}
+        Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
+            read_admission_receipt(protected_root, admission, &root.verifying_key())?
+                .context("retained native-session admission disappeared during publication")?;
+        }
+        Err(error) => return Err(error.error).context("publish native-session admission receipt"),
+    }
+    // A receipt with no committed inventory row never certifies that the
+    // worker ran or stopped; its identity capture stays untracked/indeterminate.
+    #[cfg(unix)]
+    {
+        std::fs::File::open(&directory)?.sync_all()?;
+        std::fs::File::open(protected_root)?.sync_all()?;
+    }
+    Ok(())
+}
+
 fn read_outcome_receipt(
     protected_root: &Path,
     admission: &NativeSessionAdmission,
@@ -752,6 +960,63 @@ fn read_outcome_receipt(
         serde_json::from_slice(&bytes).context("decode retained native-session outcome receipt")?;
     receipt.verify(admission, trusted_root)?;
     Ok(Some(receipt))
+}
+
+#[derive(Default)]
+struct NativeSessionRecordAuthority {
+    /// These records cannot supply trusted project attribution. Preserve them
+    /// in every project census until independent signed evidence resolves them.
+    unproven_admissions: BTreeSet<String>,
+    /// An unsigned database outcome cannot establish terminal accounting.
+    unproven_outcomes: BTreeSet<String>,
+}
+
+fn authenticate_inventory_records(
+    protected_root: &Path,
+    records: &[NativeSessionInventoryRecord],
+) -> Result<NativeSessionRecordAuthority> {
+    let mut authority = NativeSessionRecordAuthority::default();
+    if records.is_empty() {
+        return Ok(authority);
+    }
+    for name in [ADMISSION_RECEIPT_DIRECTORY, OUTCOME_RECEIPT_DIRECTORY] {
+        let directory = protected_root.join(name);
+        match std::fs::symlink_metadata(&directory) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("inspect native-session receipt directory"),
+            Ok(_) => ensure_runtime_evidence_directory(&directory, true)?,
+        }
+    }
+    let root = load_runtime_evidence_product_root(
+        &protected_root.join(RUNTIME_EVIDENCE_ROOT_KEY_RELATIVE_PATH),
+    )?;
+    let key = root.verifying_key();
+    for record in records {
+        verify_admission_capture(protected_root, &record.admission)?;
+        let admission = read_admission_receipt(protected_root, &record.admission, &key)?;
+        let outcome = read_outcome_receipt(protected_root, &record.admission, &key)?;
+        if admission.is_none() && outcome.is_none() {
+            authority
+                .unproven_admissions
+                .insert(record.admission.session_nonce.clone());
+        }
+        if let Some(observed) = &record.outcome {
+            match outcome {
+                Some(receipt) if receipt.outcome != *observed => {
+                    bail!(
+                        "native-session database outcome disagrees with its signed supervisor receipt"
+                    );
+                }
+                None => {
+                    authority
+                        .unproven_outcomes
+                        .insert(record.admission.session_nonce.clone());
+                }
+                Some(_) => {}
+            }
+        }
+    }
+    Ok(authority)
 }
 
 fn retain_outcome_receipt(
@@ -917,30 +1182,32 @@ impl NativeSessionInventoryGuard {
         let admission_json = bounded_json(&admission, MAX_ADMISSION_BYTES)?;
         let connection = retry_snapshot_conflict(|| open_inventory(protected_root, true))?
             .context("native-session inventory was not created")?;
+        retain_admission_receipt(protected_root, &admission)?;
+        // A refused attempt keeps the same decision and timestamp through
+        // transaction retries. Its receipt is issued only after this unique
+        // insertion commits, so a duplicate/losing admission cannot create a
+        // false never-spawned receipt for an already running worker.
+        let mut refused_outcome = None;
         let admitted = retry_snapshot_conflict(|| {
             let mut tx = connection.transaction()?;
             serialize_project_admission(&mut tx, &admission.project_root)?;
             let drain = latest_drain(&tx, &admission.project_root)?;
-            let admitted = drain.as_ref().is_none_or(|drain| !drain.fence_held)
+            let admitted = refused_outcome.is_none()
+                && drain.as_ref().is_none_or(|drain| !drain.fence_held)
                 && drain.as_ref().map_or(0, |drain| drain.generation) == expected_generation;
             // A race after identity provisioning must leave a known unspawned
             // outcome, rather than an untracked capture or an apparent worker.
             let outcome = if admitted {
                 SqliteValue::Null
             } else {
-                SqliteValue::Text(
-                    bounded_json(
-                        &NativeSessionOutcome {
-                            observed_at: Utc::now(),
-                            kind: NativeSessionOutcomeKind::SupervisionIncomplete,
-                            process: NativeSessionProcessObservation::NotSpawned,
-                            containment_empty_observed: false,
-                            effects: NativeSessionEffectObservation::NotStarted,
-                        },
-                        MAX_OUTCOME_BYTES,
-                    )?
-                    .into(),
-                )
+                let refused = refused_outcome.get_or_insert_with(|| NativeSessionOutcome {
+                    observed_at: Utc::now(),
+                    kind: NativeSessionOutcomeKind::SupervisionIncomplete,
+                    process: NativeSessionProcessObservation::NotSpawned,
+                    containment_empty_observed: false,
+                    effects: NativeSessionEffectObservation::NotStarted,
+                });
+                SqliteValue::Text(bounded_json(refused, MAX_OUTCOME_BYTES)?.into())
             };
             tx.execute_with_params(
                 "INSERT INTO native_sessions(session_nonce, admission_json, outcome_json)
@@ -957,6 +1224,16 @@ impl NativeSessionInventoryGuard {
         })
         .context("persist native-session admission before worker spawn")?;
         if !admitted {
+            // No worker was started for this committed row. A crash before
+            // receipt persistence leaves its unsigned outcome indeterminate;
+            // reconciliation never invents a signature from database counts.
+            retain_outcome_receipt(
+                protected_root,
+                &admission,
+                refused_outcome
+                    .as_ref()
+                    .context("refused native-session admission lost its outcome")?,
+            )?;
             bail!(
                 "native-session admission crossed a fleet drain fence; no worker was started; retry under the current applied policy"
             );
@@ -1219,6 +1496,7 @@ pub(crate) fn native_session_admission_ticket(project_root: &Path) -> Result<u64
 fn drain_report(
     drain: &StoredNativeSessionDrain,
     records: &[NativeSessionInventoryRecord],
+    authority: &NativeSessionRecordAuthority,
 ) -> Result<NativeSessionDrainReport> {
     let records: BTreeMap<_, _> = records
         .iter()
@@ -1239,6 +1517,12 @@ fn drain_report(
             indeterminate += 1;
             continue;
         };
+        if authority.unproven_admissions.contains(nonce)
+            || authority.unproven_outcomes.contains(nonce)
+        {
+            indeterminate += 1;
+            continue;
+        }
         let Some(outcome) = &record.outcome else {
             pending += 1;
             continue;
@@ -1274,6 +1558,7 @@ fn drain_report(
         pending_sessions: pending,
         indeterminate_sessions: indeterminate,
         fence_held: drain.fence_held,
+        supervisor_attestation: None,
     };
     checkpoint.validate()?;
     Ok(NativeSessionDrainReport {
@@ -1459,20 +1744,28 @@ fn begin_drain_at(
         .into_iter()
         .collect();
     let key = project_key(project_root)?;
-    // Includes old identity captures with unknown projects. The transaction
-    // below also includes every admission committed since this observation.
+    // Recover outcomes from this read. The transaction below rereads signed
+    // captures against its own admission rows before sealing the census.
     let inventory = retry_snapshot_conflict(|| read_inventory_at(protected_root, None))?;
     let connection = retry_snapshot_conflict(|| open_inventory(protected_root, true))?
         .context("native-session drain inventory was not created")?;
     recover_retained_outcomes(protected_root, &connection, &inventory.records)?;
+    let product_root = load_runtime_evidence_product_root(
+        &protected_root.join(RUNTIME_EVIDENCE_ROOT_KEY_RELATIVE_PATH),
+    )?;
     retry_snapshot_conflict(|| {
         let mut tx = connection.transaction()?;
         serialize_project_admission(&mut tx, project_root)?;
         let previous = latest_drain(&tx, project_root)?;
         let records = read_records_in_transaction(&tx)?;
+        let authority = authenticate_inventory_records(protected_root, &records)?;
+        let untracked = untracked_identity_captures_at(protected_root, &records)?;
         if let Some(previous) = &previous {
             check_drain_owner(previous, node_id, zone_id)?;
-            let report = drain_report(previous, &records)?;
+            if previous.census_signature_hex.is_some() {
+                previous.verify_census(&product_root.verifying_key())?;
+            }
+            let report = drain_report(previous, &records, &authority)?;
             if previous.actions == *checkpoint {
                 if previous.maintenance_hold_ids != maintenance_hold_ids {
                     bail!(
@@ -1515,9 +1808,9 @@ fn begin_drain_at(
             .iter()
             .filter(|record| record.admission.project_root == project_root)
             .map(|record| record.admission.session_nonce.clone())
+            .chain(authority.unproven_admissions.iter().cloned())
             .chain(
-                inventory
-                    .untracked_identity_captures
+                untracked
                     .iter()
                     .map(|capture| capture.session_nonce.clone()),
             )
@@ -1536,7 +1829,7 @@ fn begin_drain_at(
             .map_or(0, |drain| drain.generation)
             .checked_add(1)
             .context("native-session drain generation exhausted")?;
-        let drain = StoredNativeSessionDrain {
+        let mut drain = StoredNativeSessionDrain {
             drain_id: uuid::Uuid::now_v7().to_string(),
             generation,
             project_root: project_root.to_path_buf(),
@@ -1551,8 +1844,10 @@ fn begin_drain_at(
             fence_held: checkpoint.action_count != 0,
             maintenance_hold_ids: maintenance_hold_ids.clone(),
             actions_applied: false,
+            census_signature_hex: None,
         };
-        let report = drain_report(&drain, &records)?;
+        drain.seal_census(&product_root)?;
+        let report = drain_report(&drain, &records, &authority)?;
         tx.execute_with_params(
             "INSERT INTO native_session_drains(drain_id, project_root, generation, state_json)
              VALUES (?1, ?2, ?3, ?4);",
@@ -1613,17 +1908,24 @@ fn finish_drain_at(
     let connection =
         open_inventory(protected_root, false)?.context("native-session drain store is absent")?;
     recover_retained_outcomes(protected_root, &connection, &inventory.records)?;
+    let product_root = load_runtime_evidence_product_root(
+        &protected_root.join(RUNTIME_EVIDENCE_ROOT_KEY_RELATIVE_PATH),
+    )?;
     retry_snapshot_conflict(|| {
         let mut tx = connection.transaction()?;
         serialize_project_admission(&mut tx, project_root)?;
         let mut drain =
             latest_drain(&tx, project_root)?.context("no retained native-session drain")?;
         check_drain_owner(&drain, node_id, zone_id)?;
+        if drain.census_signature_hex.is_some() {
+            drain.verify_census(&product_root.verifying_key())?;
+        }
         if drain.actions != *checkpoint {
             bail!("native-session drain completion requires its exact retained action checkpoint");
         }
         let records = read_records_in_transaction(&tx)?;
-        let report = drain_report(&drain, &records)?;
+        let authority = authenticate_inventory_records(protected_root, &records)?;
+        let report = drain_report(&drain, &records, &authority)?;
         let mut changed = !drain.actions_applied;
         drain.actions_applied = true;
         if drain.fence_held
@@ -1642,7 +1944,139 @@ fn finish_drain_at(
                 ],
             )?;
         }
-        let report = drain_report(&drain, &records)?;
+        let report = drain_report(&drain, &records, &authority)?;
+        tx.commit()?;
+        Ok(report)
+    })
+}
+
+/// Produce a fresh source-free supervisor observation from the retained
+/// inventory, after rechecking the exact action snapshot and every signed
+/// admission/outcome. Caller-provided counts are never signing inputs.
+///
+/// This authenticates local accounting only. A released fence allows later
+/// admissions, so the result cannot certify ongoing fleet quiescence.
+pub fn attest_local_native_session_drain(
+    project_root: &Path,
+    node_id: &str,
+    zone_id: &str,
+    checkpoint: &FleetApplicationCheckpoint,
+) -> Result<NativeSessionDrainReport> {
+    let project_root = project_root
+        .canonicalize()
+        .context("resolve native drain attestation project")?;
+    let root = inventory_root()?;
+    attest_drain_at(&root, &project_root, node_id, zone_id, checkpoint)
+}
+
+fn attest_drain_at(
+    protected_root: &Path,
+    project_root: &Path,
+    node_id: &str,
+    zone_id: &str,
+    checkpoint: &FleetApplicationCheckpoint,
+) -> Result<NativeSessionDrainReport> {
+    use ed25519_dalek::Signer as _;
+
+    retry_snapshot_conflict(|| read_inventory_at(protected_root, None))?;
+    let connection = open_inventory(protected_root, false)?
+        .context("native-session drain attestation requires its retained inventory")?;
+    let root = load_runtime_evidence_product_root(
+        &protected_root.join(RUNTIME_EVIDENCE_ROOT_KEY_RELATIVE_PATH),
+    )?;
+    retry_snapshot_conflict(|| {
+        let mut tx = connection.transaction()?;
+        // Serialize with both admission and fence transitions. Do not freshly
+        // sign an earlier read that can omit a newly committed session.
+        serialize_project_admission(&mut tx, project_root)?;
+        let drain = latest_drain(&tx, project_root)?
+            .context("native-session drain attestation requires a retained drain")?;
+        check_drain_owner(&drain, node_id, zone_id)?;
+        drain.verify_census(&root.verifying_key())?;
+        if drain.actions != *checkpoint {
+            bail!("native-session drain attestation requires its exact retained action checkpoint");
+        }
+        if !drain.actions_applied {
+            bail!(
+                "native-session drain attestation requires confirmed application of its exact retained actions"
+            );
+        }
+        let records = read_records_in_transaction(&tx)?;
+        let authority = authenticate_inventory_records(protected_root, &records)?;
+        let untracked = untracked_identity_captures_at(protected_root, &records)?;
+        let never_spawned: BTreeSet<_> = records
+            .iter()
+            .filter(|record| {
+                !authority
+                    .unproven_admissions
+                    .contains(&record.admission.session_nonce)
+                    && !authority
+                        .unproven_outcomes
+                        .contains(&record.admission.session_nonce)
+                    && record.outcome.as_ref().is_some_and(|outcome| {
+                        outcome.process == NativeSessionProcessObservation::NotSpawned
+                            && outcome.effects == NativeSessionEffectObservation::NotStarted
+                    })
+            })
+            .map(|record| record.admission.session_nonce.as_str())
+            .collect();
+        let required: BTreeSet<_> = records
+            .iter()
+            .filter(|record| {
+                record.admission.project_root == project_root
+                    && !never_spawned.contains(record.admission.session_nonce.as_str())
+            })
+            .map(|record| record.admission.session_nonce.as_str())
+            .chain(authority.unproven_admissions.iter().map(String::as_str))
+            .chain(
+                untracked
+                    .iter()
+                    .filter(|capture| !never_spawned.contains(capture.session_nonce.as_str()))
+                    .map(|capture| capture.session_nonce.as_str()),
+            )
+            .collect();
+        // An active fence claims the retained population is still held, so
+        // newly unknown obligations cannot be omitted. After release this is
+        // only a fresh verification of the historical sealed cohort: normal
+        // current-policy sessions may run, and must not be cancelled merely
+        // to refresh an old observation. Maintenance gates require fence_held.
+        if drain.fence_held
+            && required.iter().any(|nonce| {
+                drain
+                    .session_nonces
+                    .binary_search_by(|item| item.as_str().cmp(nonce))
+                    .is_err()
+            })
+        {
+            bail!(
+                "native-session drain population changed after the retained snapshot; refusing a fresh attestation for an older population"
+            );
+        }
+        let mut report = drain_report(&drain, &records, &authority)?;
+        let project = project_key(project_root)?;
+        let mut digest = Sha256::new();
+        digest.update(b"franken-node/native-session-drain-project/v1\0");
+        digest.update(u64::try_from(project.len())?.to_be_bytes());
+        digest.update(project.as_bytes());
+        let mut attestation = NativeSessionDrainAttestation {
+            schema_version: NATIVE_SESSION_DRAIN_ATTESTATION_SCHEMA.to_owned(),
+            node_id: drain.node_id.clone(),
+            zone_id: drain.zone_id.clone(),
+            drain_id: drain.drain_id.clone(),
+            generation: drain.generation,
+            project_root_sha256: hex::encode(digest.finalize()),
+            observed_at: Utc::now(),
+            product_root_key_id: format!(
+                "ed25519:{}",
+                hex::encode(root.verifying_key().as_bytes())
+            ),
+            checkpoint_sha256: report.checkpoint.observation_sha256()?,
+            signature_hex: String::new(),
+        };
+        attestation.signature_hex =
+            hex::encode(root.sign(&attestation.signing_payload()?).to_bytes());
+        attestation.verify(&report.checkpoint, node_id, zone_id, &root.verifying_key())?;
+        report.checkpoint.supervisor_attestation = Some(attestation);
         tx.commit()?;
         Ok(report)
     })
@@ -1665,6 +2099,74 @@ pub fn read_local_native_session_inventory(
         .join(RUNTIME_EVIDENCE_PRODUCT_STATE_DIRECTORY)
         .join(RUNTIME_EVIDENCE_STATE_DIRECTORY);
     read_inventory_at(&protected_root, project_root)
+}
+
+/// Match retained signed captures against the exact transaction's rows. A
+/// pre-lock inventory snapshot must not hide a newly untracked identity when
+/// sealing or signing a population.
+fn untracked_identity_captures_at(
+    protected_root: &Path,
+    records: &[NativeSessionInventoryRecord],
+) -> Result<Vec<UntrackedNativeIdentityCapture>> {
+    let tracked: BTreeMap<_, _> = records
+        .iter()
+        .map(|record| (record.admission.session_nonce.clone(), &record.admission))
+        .collect();
+    let mut matched = BTreeSet::new();
+    let mut untracked = Vec::new();
+    let capture_directory = protected_root.join(RUNTIME_EVIDENCE_CAPTURE_DIR_RELATIVE_PATH);
+    let captures_present = match std::fs::symlink_metadata(&capture_directory) {
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error).context("inspect native identity capture directory"),
+    };
+    if captures_present {
+        ensure_runtime_evidence_directory(&capture_directory, true)?;
+        ensure_runtime_evidence_directory(&protected_root.join("keys"), true)?;
+        let product_root = load_runtime_evidence_product_root(
+            &protected_root.join(RUNTIME_EVIDENCE_ROOT_KEY_RELATIVE_PATH),
+        )?;
+        let mut captures = std::fs::read_dir(&capture_directory)?;
+        for index in 0..=MAX_IDENTITY_CAPTURES {
+            let Some(entry) = captures.next() else {
+                break;
+            };
+            if index == MAX_IDENTITY_CAPTURES {
+                bail!(
+                    "native identity capture inventory exceeds its bound; refusing incomplete coverage"
+                );
+            }
+            let path = entry?.path();
+            let bytes = read_runtime_evidence_private_file(&path, 64 * 1024)?;
+            let capture: RuntimeEvidenceIdentityCapture = serde_json::from_slice(&bytes)?;
+            capture.verify_with_product_root(&product_root.verifying_key())?;
+            if let Some(admission) = tracked.get(&capture.session_nonce) {
+                if admission.identity_capture_path != path
+                    || admission.product_root_key_id != capture.product_root_key_id
+                    || admission.security_epoch
+                        != capture
+                            .evidence_verification_identity
+                            .key_provenance
+                            .activation_epoch
+                            .as_u64()
+                    || !matched.insert(capture.session_nonce)
+                {
+                    bail!("native-session inventory and captured identity disagree");
+                }
+            } else {
+                untracked.push(UntrackedNativeIdentityCapture {
+                    session_nonce: capture.session_nonce,
+                    product_root_key_id: capture.product_root_key_id,
+                    identity_capture_path: path,
+                });
+            }
+        }
+    }
+    if matched.len() != records.len() {
+        bail!("native-session inventory is missing a retained identity capture");
+    }
+    untracked.sort_by(|left, right| left.session_nonce.cmp(&right.session_nonce));
+    Ok(untracked)
 }
 
 fn read_inventory_at(
@@ -1719,67 +2221,7 @@ fn read_inventory_at(
         Vec::new()
     };
     report.total_stored_sessions = records.len();
-    let tracked: BTreeMap<_, _> = records
-        .iter()
-        .map(|record| (record.admission.session_nonce.clone(), &record.admission))
-        .collect();
-    let mut matched = BTreeSet::new();
-    let capture_directory = protected_root.join(RUNTIME_EVIDENCE_CAPTURE_DIR_RELATIVE_PATH);
-    let captures_present = match std::fs::symlink_metadata(&capture_directory) {
-        Ok(_) => true,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-        Err(error) => return Err(error).context("inspect native identity capture directory"),
-    };
-    if captures_present {
-        ensure_runtime_evidence_directory(&capture_directory, true)?;
-        ensure_runtime_evidence_directory(&protected_root.join("keys"), true)?;
-        let product_root = load_runtime_evidence_product_root(
-            &protected_root.join(RUNTIME_EVIDENCE_ROOT_KEY_RELATIVE_PATH),
-        )?;
-        let mut captures = std::fs::read_dir(&capture_directory)?;
-        for index in 0..=MAX_IDENTITY_CAPTURES {
-            let Some(entry) = captures.next() else {
-                break;
-            };
-            if index == MAX_IDENTITY_CAPTURES {
-                bail!(
-                    "native identity capture inventory exceeds its bound; refusing incomplete coverage"
-                );
-            }
-            let path = entry?.path();
-            let bytes = read_runtime_evidence_private_file(&path, 64 * 1024)?;
-            let capture: RuntimeEvidenceIdentityCapture = serde_json::from_slice(&bytes)?;
-            capture.verify_with_product_root(&product_root.verifying_key())?;
-            if let Some(admission) = tracked.get(&capture.session_nonce) {
-                if admission.identity_capture_path != path
-                    || admission.product_root_key_id != capture.product_root_key_id
-                    || admission.security_epoch
-                        != capture
-                            .evidence_verification_identity
-                            .key_provenance
-                            .activation_epoch
-                            .as_u64()
-                    || !matched.insert(capture.session_nonce)
-                {
-                    bail!("native-session inventory and captured identity disagree");
-                }
-            } else {
-                report
-                    .untracked_identity_captures
-                    .push(UntrackedNativeIdentityCapture {
-                        session_nonce: capture.session_nonce,
-                        product_root_key_id: capture.product_root_key_id,
-                        identity_capture_path: path,
-                    });
-            }
-        }
-    }
-    if matched.len() != records.len() {
-        bail!("native-session inventory is missing a retained identity capture");
-    }
-    report
-        .untracked_identity_captures
-        .sort_by(|left, right| left.session_nonce.cmp(&right.session_nonce));
+    report.untracked_identity_captures = untracked_identity_captures_at(protected_root, &records)?;
     for record in records {
         if report
             .project_root
@@ -2044,6 +2486,7 @@ mod tests {
             fence_held: true,
             maintenance_hold_ids: Vec::new(),
             actions_applied: false,
+            census_signature_hex: None,
         };
         let bytes = bounded_json(&drain, MAX_DRAIN_BYTES).unwrap();
         assert!(
@@ -2052,7 +2495,7 @@ mod tests {
         );
         let decoded: StoredNativeSessionDrain = serde_json::from_str(&bytes).unwrap();
         assert_eq!(decoded.session_nonces, drain.session_nonces);
-        let report = drain_report(&decoded, &[]).unwrap();
+        let report = drain_report(&decoded, &[], &NativeSessionRecordAuthority::default()).unwrap();
         assert_eq!(report.checkpoint.admitted_sessions, population as u64);
         assert_eq!(report.checkpoint.indeterminate_sessions, population as u64);
         assert!(report.checkpoint.fence_held);
@@ -2690,6 +3133,371 @@ mod tests {
             .unwrap();
         assert!(begin_drain_at(&root, &project, "node-a", "prod", &actions(1)).is_err());
         assert_eq!(read_inventory_at(&root, None).unwrap().pending_sessions, 1);
+    }
+
+    #[test]
+    fn supervisor_attestation_binds_fresh_held_population_without_private_inputs() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("evidence");
+        let admission = fixture(&root, 81);
+        let project = admission.project_root.clone();
+        let nonce = admission.session_nonce.clone();
+        let mut guard = NativeSessionInventoryGuard::admit(&root, admission, 0).unwrap();
+        guard.worker_started();
+        guard.worker_reaped();
+        guard.finish(
+            NativeSessionOutcomeKind::ControlStopped,
+            successful_ledger_observation(),
+        );
+        let history = vec![maintenance_action("hold-authenticated", None)];
+        let checkpoint = fleet_application_checkpoint(&history, "prod").unwrap();
+        super::begin_drain_at(&root, &project, "node-a", "prod", &checkpoint, &history).unwrap();
+        let unapplied =
+            attest_drain_at(&root, &project, "node-a", "prod", &checkpoint).unwrap_err();
+        assert!(unapplied.to_string().contains("confirmed application"));
+        let held = finish_drain_at(&root, &project, "node-a", "prod", &checkpoint).unwrap();
+        let signed = attest_drain_at(&root, &project, "node-a", "prod", &checkpoint).unwrap();
+        assert_eq!(signed.drain_id, held.drain_id);
+        assert_eq!(signed.generation, held.generation);
+        assert_eq!(signed.session_nonces, held.session_nonces);
+        assert_eq!(signed.checkpoint.admitted_sessions, 1);
+        assert_eq!(signed.checkpoint.terminal_sessions, 1);
+        assert!(signed.checkpoint.fence_held);
+        assert!(!signed.fleet_quiescence_certified);
+        let attestation = signed.checkpoint.supervisor_attestation.as_ref().unwrap();
+        let trusted_root = ed25519_dalek::SigningKey::from_bytes(&[17; 32]).verifying_key();
+        attestation
+            .verify(&signed.checkpoint, "node-a", "prod", &trusted_root)
+            .unwrap();
+        attestation.validate_freshness(Utc::now()).unwrap();
+        let public_json = serde_json::to_string(&signed.checkpoint).unwrap();
+        for private in [project.to_str().unwrap(), nonce.as_str(), "package-a"] {
+            assert!(
+                !public_json.contains(private),
+                "private field leaked: {private}"
+            );
+        }
+        let mut altered = signed.checkpoint.clone();
+        altered.session_set_sha256 = "c".repeat(64);
+        assert!(
+            attestation
+                .verify(&altered, "node-a", "prod", &trusted_root)
+                .is_err()
+        );
+        assert!(
+            attestation
+                .verify(&signed.checkpoint, "node-b", "prod", &trusted_root)
+                .is_err()
+        );
+        let foreign_root = ed25519_dalek::SigningKey::from_bytes(&[99; 32]).verifying_key();
+        assert!(
+            attestation
+                .verify(&signed.checkpoint, "node-a", "prod", &foreign_root)
+                .is_err()
+        );
+        assert!(attest_drain_at(&root, &project, "node-b", "prod", &checkpoint).is_err());
+        assert!(attest_drain_at(&root, &project, "node-a", "prod", &actions(2)).is_err());
+    }
+
+    #[test]
+    fn unsigned_database_terminal_outcome_remains_indeterminate_when_attested() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("evidence");
+        let admission = fixture(&root, 82);
+        let project = admission.project_root.clone();
+        let nonce = admission.session_nonce.clone();
+        let mut guard = NativeSessionInventoryGuard::admit(&root, admission, 0).unwrap();
+        guard.worker_started();
+        // Model a forged terminal database projection without any supervisor
+        // receipt. A matching shape and real admission are insufficient.
+        guard.finished = true;
+        drop(guard);
+        let forged = terminal_outcome();
+        let connection = open_inventory(&root, false).unwrap().unwrap();
+        let mut tx = connection.transaction().unwrap();
+        tx.execute_with_params(
+            "UPDATE native_sessions SET outcome_json = ?1 WHERE session_nonce = ?2;",
+            &[
+                SqliteValue::Text(serde_json::to_string(&forged).unwrap().into()),
+                SqliteValue::Text(nonce.into()),
+            ],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        let started = begin_drain_at(&root, &project, "node-a", "prod", &actions(1)).unwrap();
+        assert_eq!(started.checkpoint.terminal_sessions, 0);
+        assert_eq!(started.checkpoint.indeterminate_sessions, 1);
+        let held = finish_drain_at(&root, &project, "node-a", "prod", &actions(1)).unwrap();
+        assert!(held.checkpoint.fence_held);
+        let signed = attest_drain_at(&root, &project, "node-a", "prod", &actions(1)).unwrap();
+        assert_eq!(signed.checkpoint.terminal_sessions, 0);
+        assert_eq!(signed.checkpoint.indeterminate_sessions, 1);
+        assert!(signed.checkpoint.supervisor_attestation.is_some());
+        assert!(!signed.checkpoint.is_complete());
+        assert!(admission_ticket_at(&root, &project).is_err());
+        assert_eq!(
+            read_records(&connection).unwrap()[0].outcome.as_ref(),
+            Some(&forged)
+        );
+    }
+
+    #[test]
+    fn altered_signed_outcome_cannot_be_promoted_into_a_drain_attestation() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("evidence");
+        let admission = fixture(&root, 83);
+        let project = admission.project_root.clone();
+        let path = outcome_receipt_path(&root, &admission.session_nonce);
+        let mut guard = NativeSessionInventoryGuard::admit(&root, admission, 0).unwrap();
+        guard.worker_started();
+        guard.worker_reaped();
+        guard.finish(
+            NativeSessionOutcomeKind::ControlStopped,
+            successful_ledger_observation(),
+        );
+        let history = vec![maintenance_action("held", None)];
+        let checkpoint = fleet_application_checkpoint(&history, "prod").unwrap();
+        super::begin_drain_at(&root, &project, "node-a", "prod", &checkpoint, &history).unwrap();
+        finish_drain_at(&root, &project, "node-a", "prod", &checkpoint).unwrap();
+        let mut receipt: NativeSessionOutcomeReceipt =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        receipt.outcome.containment_empty_observed = true;
+        std::fs::write(&path, serde_json::to_vec(&receipt).unwrap()).unwrap();
+        assert!(attest_drain_at(&root, &project, "node-a", "prod", &checkpoint).is_err());
+        assert!(finish_drain_at(&root, &project, "node-a", "prod", &checkpoint).is_err());
+        assert!(admission_ticket_at(&root, &project).is_err());
+    }
+
+    #[test]
+    fn signed_pending_admission_cannot_be_moved_out_of_its_project_census() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("evidence");
+        let mut admission = fixture(&root, 84);
+        let project = admission.project_root.clone();
+        let mut guard = NativeSessionInventoryGuard::admit(&root, admission.clone(), 0).unwrap();
+        guard.worker_started();
+        guard.finished = true;
+        drop(guard);
+        begin_drain_at(&root, &project, "node-a", "prod", &actions(1)).unwrap();
+        finish_drain_at(&root, &project, "node-a", "prod", &actions(1)).unwrap();
+        admission.project_root = temp.path().join("different-project");
+        admission.entrypoint = admission.project_root.join("index.js");
+        let connection = open_inventory(&root, false).unwrap().unwrap();
+        let mut tx = connection.transaction().unwrap();
+        tx.execute_with_params(
+            "UPDATE native_sessions SET admission_json = ?1 WHERE session_nonce = ?2;",
+            &[
+                SqliteValue::Text(serde_json::to_string(&admission).unwrap().into()),
+                SqliteValue::Text(admission.session_nonce.into()),
+            ],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        assert!(attest_drain_at(&root, &project, "node-a", "prod", &actions(1)).is_err());
+        assert!(finish_drain_at(&root, &project, "node-a", "prod", &actions(1)).is_err());
+        assert!(admission_ticket_at(&root, &project).is_err());
+    }
+
+    #[test]
+    fn historical_unbound_pending_admission_remains_in_every_project_census() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("evidence");
+        let admission = fixture(&root, 85);
+        let nonce = admission.session_nonce.clone();
+        let mut guard = NativeSessionInventoryGuard::admit(&root, admission, 0).unwrap();
+        guard.worker_started();
+        guard.finished = true;
+        drop(guard);
+        // Preserve the receipt separately to model an older admitted record
+        // that predates full admission signatures. Never re-sign its DB facts.
+        let path = admission_receipt_path(&root, &nonce);
+        std::fs::rename(&path, path.with_extension("preserved")).unwrap();
+        let another_project = temp.path().join("another-project");
+        let started =
+            begin_drain_at(&root, &another_project, "node-a", "prod", &actions(1)).unwrap();
+        assert_eq!(started.session_nonces, vec![nonce]);
+        assert_eq!(started.checkpoint.indeterminate_sessions, 1);
+        assert_eq!(started.checkpoint.terminal_sessions, 0);
+        finish_drain_at(&root, &another_project, "node-a", "prod", &actions(1)).unwrap();
+        let signed =
+            attest_drain_at(&root, &another_project, "node-a", "prod", &actions(1)).unwrap();
+        assert!(signed.checkpoint.fence_held);
+        assert_eq!(signed.checkpoint.indeterminate_sessions, 1);
+        assert!(!signed.fleet_quiescence_certified);
+    }
+
+    #[test]
+    fn fence_refusal_retains_authenticated_unspawned_outcome_without_poisoning_held_census() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("evidence");
+        let initial = fixture(&root, 86);
+        let project = initial.project_root.clone();
+        drop(NativeSessionInventoryGuard::admit(&root, initial, 0).unwrap());
+        let history = vec![maintenance_action("held", None)];
+        let checkpoint = fleet_application_checkpoint(&history, "prod").unwrap();
+        super::begin_drain_at(&root, &project, "node-a", "prod", &checkpoint, &history).unwrap();
+        let held = finish_drain_at(&root, &project, "node-a", "prod", &checkpoint).unwrap();
+        let denied = fixture(&root, 87);
+        // A newly captured identity is unknown until the refused admission
+        // retains an authenticated never-spawned outcome.
+        let unknown = attest_drain_at(&root, &project, "node-a", "prod", &checkpoint).unwrap_err();
+        assert!(unknown.to_string().contains("population changed"));
+        assert!(
+            NativeSessionInventoryGuard::admit(&root, denied.clone(), held.generation).is_err()
+        );
+        let key = ed25519_dalek::SigningKey::from_bytes(&[17; 32]).verifying_key();
+        assert!(
+            read_admission_receipt(&root, &denied, &key)
+                .unwrap()
+                .is_some()
+        );
+        let receipt = read_outcome_receipt(&root, &denied, &key).unwrap().unwrap();
+        assert_eq!(
+            receipt.outcome.process,
+            NativeSessionProcessObservation::NotSpawned
+        );
+        assert_eq!(
+            receipt.outcome.effects,
+            NativeSessionEffectObservation::NotStarted
+        );
+        let signed = attest_drain_at(&root, &project, "node-a", "prod", &checkpoint).unwrap();
+        assert_eq!(signed.session_nonces, held.session_nonces);
+        assert_eq!(signed.checkpoint.terminal_sessions, 1);
+        assert!(signed.checkpoint.fence_held);
+        assert!(signed.checkpoint.supervisor_attestation.is_some());
+        assert_eq!(read_inventory_at(&root, None).unwrap().records.len(), 2);
+    }
+
+    #[test]
+    fn rejected_duplicate_admission_cannot_sign_a_running_session_as_never_spawned() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("evidence");
+        let admission = fixture(&root, 90);
+        let project = admission.project_root.clone();
+        let mut guard = NativeSessionInventoryGuard::admit(&root, admission.clone(), 0).unwrap();
+        guard.worker_started();
+        begin_drain_at(&root, &project, "node-a", "prod", &actions(1)).unwrap();
+        assert!(NativeSessionInventoryGuard::admit(&root, admission.clone(), 0).is_err());
+        let root_key = ed25519_dalek::SigningKey::from_bytes(&[17; 32]).verifying_key();
+        assert!(
+            read_outcome_receipt(&root, &admission, &root_key)
+                .unwrap()
+                .is_none()
+        );
+        let pending = finish_drain_at(&root, &project, "node-a", "prod", &actions(1)).unwrap();
+        assert!(pending.checkpoint.fence_held);
+        assert_eq!(pending.checkpoint.pending_sessions, 1);
+        assert_eq!(pending.checkpoint.terminal_sessions, 0);
+        guard.worker_reaped();
+        guard.finish(
+            NativeSessionOutcomeKind::ControlStopped,
+            successful_ledger_observation(),
+        );
+        assert!(
+            finish_drain_at(&root, &project, "node-a", "prod", &actions(1))
+                .unwrap()
+                .checkpoint
+                .is_complete()
+        );
+    }
+
+    #[test]
+    fn released_cohort_attestation_preserves_later_current_policy_sessions() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("evidence");
+        let initial = fixture(&root, 88);
+        let project = initial.project_root.clone();
+        drop(NativeSessionInventoryGuard::admit(&root, initial, 0).unwrap());
+        begin_drain_at(&root, &project, "node-a", "prod", &actions(1)).unwrap();
+        let completed = finish_drain_at(&root, &project, "node-a", "prod", &actions(1)).unwrap();
+        let before = attest_drain_at(&root, &project, "node-a", "prod", &actions(1)).unwrap();
+        assert!(before.checkpoint.is_complete());
+        let next = fixture(&root, 89);
+        let mut guard =
+            NativeSessionInventoryGuard::admit(&root, next, completed.generation).unwrap();
+        guard.worker_started();
+        let during = attest_drain_at(&root, &project, "node-a", "prod", &actions(1)).unwrap();
+        assert_eq!(during.drain_id, before.drain_id);
+        assert_eq!(during.generation, before.generation);
+        assert_eq!(during.session_nonces, before.session_nonces);
+        assert_eq!(during.checkpoint.admitted_sessions, 1);
+        assert!(!during.checkpoint.fence_held);
+        assert!(!during.fleet_quiescence_certified);
+        assert_eq!(read_inventory_at(&root, None).unwrap().pending_sessions, 1);
+        let same = begin_drain_at(&root, &project, "node-a", "prod", &actions(1)).unwrap();
+        assert_eq!(same.generation, before.generation);
+        assert!(!same.checkpoint.fence_held);
+        assert_eq!(
+            admission_ticket_at(&root, &project).unwrap(),
+            before.generation
+        );
+        guard.worker_reaped();
+        guard.finish(
+            NativeSessionOutcomeKind::ControlStopped,
+            successful_ledger_observation(),
+        );
+        let historical = attest_drain_at(&root, &project, "node-a", "prod", &actions(1)).unwrap();
+        assert_eq!(historical.session_nonces, before.session_nonces);
+        assert_eq!(historical.checkpoint.admitted_sessions, 1);
+        let next = begin_drain_at(&root, &project, "node-a", "prod", &actions(2)).unwrap();
+        assert_eq!(next.checkpoint.admitted_sessions, 2);
+        finish_drain_at(&root, &project, "node-a", "prod", &actions(2)).unwrap();
+        assert!(
+            attest_drain_at(&root, &project, "node-a", "prod", &actions(2))
+                .unwrap()
+                .checkpoint
+                .is_complete()
+        );
+    }
+
+    #[test]
+    fn released_census_cannot_be_replaced_before_its_first_public_attestation() {
+        for mutation in 0..4 {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("evidence");
+            let admission = fixture(&root, 91);
+            let project = admission.project_root.clone();
+            drop(NativeSessionInventoryGuard::admit(&root, admission, 0).unwrap());
+            begin_drain_at(&root, &project, "node-a", "prod", &actions(1)).unwrap();
+            finish_drain_at(&root, &project, "node-a", "prod", &actions(1)).unwrap();
+            let connection = open_inventory(&root, false).unwrap().unwrap();
+            let mut tx = connection.transaction().unwrap();
+            let mut retained = latest_drain(&tx, &project).unwrap().unwrap();
+            match mutation {
+                0 => retained.session_nonces.clear(),
+                1 => retained.session_nonces = vec![uuid::Uuid::now_v7().to_string()],
+                2 => retained.census_signature_hex = None,
+                _ => retained.census_signature_hex = Some("0".repeat(128)),
+            }
+            tx.execute_with_params(
+                "UPDATE native_session_drains SET state_json = ?1 WHERE drain_id = ?2;",
+                &[
+                    SqliteValue::Text(serde_json::to_string(&retained).unwrap().into()),
+                    SqliteValue::Text(retained.drain_id.into()),
+                ],
+            )
+            .unwrap();
+            tx.commit().unwrap();
+            let error =
+                attest_drain_at(&root, &project, "node-a", "prod", &actions(1)).unwrap_err();
+            assert!(
+                format!("{error:#}").contains("census"),
+                "mutation {mutation}: {error:#}"
+            );
+            if mutation == 2 {
+                // Legacy rows stay inspectable but are never re-sealed from
+                // mutable database values. Only a newly captured action
+                // snapshot creates a fresh, authenticated initial census.
+                begin_drain_at(&root, &project, "node-a", "prod", &actions(1)).unwrap();
+                finish_drain_at(&root, &project, "node-a", "prod", &actions(1)).unwrap();
+                assert!(attest_drain_at(&root, &project, "node-a", "prod", &actions(1)).is_err());
+                begin_drain_at(&root, &project, "node-a", "prod", &actions(2)).unwrap();
+                finish_drain_at(&root, &project, "node-a", "prod", &actions(2)).unwrap();
+                let next = attest_drain_at(&root, &project, "node-a", "prod", &actions(2)).unwrap();
+                assert_eq!(next.checkpoint.admitted_sessions, 1);
+                assert!(next.checkpoint.supervisor_attestation.is_some());
+            }
+        }
     }
 
     #[cfg(unix)]

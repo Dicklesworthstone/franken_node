@@ -364,7 +364,7 @@ impl DurableFleetTransport {
             let status: NodeStatus = serde_json::from_str(&raw).map_err(|err| {
                 FleetTransportError::serialization(format!("legacy {}: {err}", path.display()))
             })?;
-            Self::upsert_status(connection, &status)?;
+            Self::upsert_status(connection, &status, None)?;
             imported += 1;
         }
         Ok(imported)
@@ -461,6 +461,7 @@ impl DurableFleetTransport {
     fn upsert_status(
         connection: &Connection,
         status: &NodeStatus,
+        supervisor_root: Option<&ed25519_dalek::VerifyingKey>,
     ) -> Result<(), FleetTransportError> {
         validate_node_status(status)?;
         let status_json = serde_json::to_string(status)
@@ -469,6 +470,9 @@ impl DurableFleetTransport {
             .transaction()
             .map_err(|err| FleetTransportError::io(err.to_string()))?;
         serialize_fleet_mutation(&tx)?;
+        if let Some(root) = supervisor_root {
+            Self::retain_supervisor_head(&tx, status, &status_json, root)?;
+        }
         tx.execute_with_params(
             "INSERT INTO fleet_nodes(zone_id, node_id, status_json)
              VALUES (?1, ?2, ?3)
@@ -485,6 +489,122 @@ impl DurableFleetTransport {
         tx.commit()
             .map_err(|err| FleetTransportError::io(err.to_string()))?;
         Ok(())
+    }
+
+    /// Retain authenticated monotonic identity separately from availability.
+    /// A degraded heartbeat may clear its public drain without erasing the
+    /// last signed project/generation or making an old good receipt reusable.
+    fn retain_supervisor_head(
+        tx: &Transaction<'_>,
+        status: &NodeStatus,
+        status_json: &str,
+        root: &ed25519_dalek::VerifyingKey,
+    ) -> Result<(), FleetTransportError> {
+        let identity = [
+            SqliteValue::Text(status.zone_id.clone().into()),
+            SqliteValue::Text(status.node_id.clone().into()),
+        ];
+        let rows = tx.query_with_params(
+            "SELECT status_json FROM fleet_node_supervisor_heads WHERE zone_id = ?1 AND node_id = ?2;",
+            &identity,
+        ).map_err(|error| FleetTransportError::io(error.to_string()))?;
+        let current = tx
+            .query_with_params(
+                "SELECT status_json FROM fleet_nodes WHERE zone_id = ?1 AND node_id = ?2;",
+                &identity,
+            )
+            .map_err(|error| FleetTransportError::io(error.to_string()))?;
+        let current: Option<NodeStatus> = current
+            .first()
+            .map(|row| parse_row_json(&row.values()[0], "status_json"))
+            .transpose()?;
+        if let Some(current) = &current {
+            validate_node_status(current)?;
+            // The coordinator stamps requests before serializing their writes.
+            // Reject an older request even when it carries no drain, so two
+            // reordered degraded heartbeats cannot lower the withdrawal barrier.
+            if status.last_seen < current.last_seen {
+                return Err(FleetTransportError::stale_state(
+                    "enrolled node heartbeat precedes its retained coordinator timestamp",
+                ));
+            }
+        }
+        let next = match &status.native_session_drain {
+            Some(drain) => {
+                let attestation = drain.supervisor_attestation.as_ref().ok_or_else(|| {
+                    FleetTransportError::serialization(
+                        "enrolled supervisor requires a signed native drain observation",
+                    )
+                })?;
+                attestation.verify(drain, &status.node_id, &status.zone_id, root)?;
+                Some(attestation)
+            }
+            None => None,
+        };
+        if let Some(row) = rows.first() {
+            let previous: NodeStatus = parse_row_json(&row.values()[0], "supervisor_head_json")?;
+            validate_node_status(&previous)?;
+            let drain = previous.native_session_drain.as_ref().ok_or_else(|| {
+                FleetTransportError::serialization("retained supervisor head lost its signed drain")
+            })?;
+            let attestation = drain.supervisor_attestation.as_ref().ok_or_else(|| {
+                FleetTransportError::serialization("retained supervisor head lost its signature")
+            })?;
+            attestation.verify(drain, &status.node_id, &status.zone_id, root)?;
+            if let Some(next) = next {
+                next.validate_successor_of(attestation)?;
+                if next.generation == attestation.generation
+                    && status.native_session_drain.as_ref().is_some_and(|current| {
+                        current.session_set_sha256 != drain.session_set_sha256
+                            || current.admitted_sessions != drain.admitted_sessions
+                    })
+                {
+                    return Err(FleetTransportError::stale_state(
+                        "native supervisor drain generation cannot replace its retained session population",
+                    ));
+                }
+                if let Some(current) = &current {
+                    if current
+                        .native_session_drain
+                        .as_ref()
+                        .and_then(|drain| drain.supervisor_attestation.as_ref())
+                        .is_none()
+                        && next.observed_at <= current.last_seen
+                    {
+                        return Err(FleetTransportError::stale_state(
+                            "native drain evidence was withdrawn; a new supervisor observation is required",
+                        ));
+                    }
+                }
+            }
+        }
+        if next.is_some() {
+            tx.execute_with_params(
+                "INSERT INTO fleet_node_supervisor_heads(zone_id, node_id, status_json)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(zone_id, node_id) DO UPDATE SET status_json = excluded.status_json;",
+                &[
+                    identity[0].clone(),
+                    identity[1].clone(),
+                    SqliteValue::Text(status_json.to_owned().into()),
+                ],
+            )
+            .map_err(|error| FleetTransportError::io(error.to_string()))?;
+            enforce_table_capacity(tx, "fleet_node_supervisor_heads", MAX_NODES_CAP)?;
+        }
+        Ok(())
+    }
+
+    /// Coordinator ingestion with an independently enrolled supervisor root.
+    /// The status and retained signature head commit in the same WAL transaction.
+    #[cfg(feature = "fleet-control-plane-server")]
+    pub(super) fn upsert_node_status_with_supervisor(
+        &mut self,
+        status: &NodeStatus,
+        root: &ed25519_dalek::VerifyingKey,
+    ) -> Result<(), FleetTransportError> {
+        self.ensure_initialized()?;
+        self.with_connection(|connection| Self::upsert_status(connection, status, Some(root)))
     }
 
     fn query_actions(
@@ -746,6 +866,16 @@ impl FleetTransport for DurableFleetTransport {
                 .map_err(|err| FleetTransportError::io(err.to_string()))?;
             connection
                 .execute(
+                    "CREATE TABLE IF NOT EXISTS fleet_node_supervisor_heads (
+                        zone_id TEXT NOT NULL,
+                        node_id TEXT NOT NULL,
+                        status_json TEXT NOT NULL,
+                        PRIMARY KEY (zone_id, node_id)
+                    );",
+                )
+                .map_err(|err| FleetTransportError::io(err.to_string()))?;
+            connection
+                .execute(
                     "CREATE TABLE IF NOT EXISTS fleet_guarded_policy_publications (
                         action_id TEXT PRIMARY KEY REFERENCES fleet_actions(action_id),
                         hold_action_id TEXT NOT NULL,
@@ -806,7 +936,7 @@ impl FleetTransport for DurableFleetTransport {
 
     fn upsert_node_status(&mut self, status: &NodeStatus) -> Result<(), FleetTransportError> {
         self.ensure_initialized()?;
-        self.with_connection(|connection| Self::upsert_status(connection, status))
+        self.with_connection(|connection| Self::upsert_status(connection, status, None))
     }
 
     fn list_node_statuses(&self) -> Result<Vec<NodeStatus>, FleetTransportError> {

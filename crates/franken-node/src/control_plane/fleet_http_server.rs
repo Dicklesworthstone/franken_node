@@ -73,6 +73,10 @@ struct NodeCredentialRecord {
     zone_id: String,
     node_id: String,
     token_sha256: String,
+    /// Independently provisioned protected supervisor root, never inferred
+    /// from the heartbeat that it is supposed to authenticate.
+    #[serde(default)]
+    supervisor_public_key_hex: Option<String>,
 }
 
 #[derive(Clone)]
@@ -80,6 +84,7 @@ struct EnrolledNode {
     zone_id: String,
     node_id: String,
     token_sha256: [u8; 32],
+    supervisor_public_key: Option<ed25519_dalek::VerifyingKey>,
 }
 
 /// Validated, bounded enrollment for the existing TLS bearer transport. Each
@@ -172,10 +177,28 @@ impl FleetNodeCredentials {
                     "fleet node credentials must not share a bearer token",
                 ));
             }
+            let supervisor_public_key = record.supervisor_public_key_hex.as_deref().map(|pin| {
+                let bytes: [u8; 32] = hex::decode(pin)
+                    .ok()
+                    .and_then(|bytes| bytes.try_into().ok())
+                    .filter(|_| pin.len() == 64 && pin.bytes().all(|byte| {
+                        byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
+                    }))
+                    .ok_or_else(|| FleetTransportError::not_initialized(
+                        "supervisor public-key pins must be 32-byte lowercase Ed25519 keys",
+                    ))?;
+                ed25519_dalek::VerifyingKey::from_bytes(&bytes)
+                    .ok()
+                    .filter(|key| !key.is_weak())
+                    .ok_or_else(|| FleetTransportError::not_initialized(
+                        "invalid supervisor public-key pin",
+                    ))
+            }).transpose()?;
             nodes.push(EnrolledNode {
                 zone_id: record.zone_id,
                 node_id: record.node_id,
                 token_sha256: digest,
+                supervisor_public_key,
             });
         }
         Ok(Self { nodes })
@@ -225,11 +248,14 @@ fn enrolled_node_view(
     nodes: &mut Vec<NodeStatus>,
     credentials: &FleetNodeCredentials,
     authenticated: &AuthenticatedNodes,
+    now: DateTime<Utc>,
 ) -> Result<(), FleetTransportError> {
     let mut present = BTreeSet::new();
     for node in nodes.iter_mut() {
         present.insert((node.zone_id.clone(), node.node_id.clone()));
-        if authenticated.get(&(node.zone_id.clone(), node.node_id.clone())) != Some(&*node) {
+        if authenticated.get(&(node.zone_id.clone(), node.node_id.clone())) != Some(&*node)
+            || verify_supervisor_observation(node, credentials, now).is_err()
+        {
             node.applied_actions = None;
             node.native_session_drain = None;
             if node.health == NodeHealth::Maintenance {
@@ -265,6 +291,37 @@ fn enrolled_node_view(
         (&left.zone_id, &left.node_id).cmp(&(&right.zone_id, &right.node_id))
     });
     Ok(())
+}
+
+/// Bearer authentication establishes the sender; an enrolled root additionally
+/// establishes which protected supervisor produced its local drain evidence.
+/// Recheck the signature's clock at every read/guard, since last_seen is stamped
+/// by the coordinator and must not extend the lifetime of a replayed signature.
+fn verify_supervisor_observation(
+    status: &NodeStatus,
+    credentials: &FleetNodeCredentials,
+    now: DateTime<Utc>,
+) -> Result<(), FleetTransportError> {
+    let Some(root) = credentials
+        .nodes
+        .iter()
+        .find(|node| node.node_id == status.node_id && node.zone_id == status.zone_id)
+        .and_then(|node| node.supervisor_public_key.as_ref())
+    else {
+        return Ok(());
+    };
+    let Some(drain) = &status.native_session_drain else {
+        // A node may still report degraded/lost evidence; no drain means the
+        // existing maintenance/publication gates remain closed.
+        return Ok(());
+    };
+    let attestation = drain.supervisor_attestation.as_ref().ok_or_else(|| {
+        FleetTransportError::serialization(
+            "enrolled supervisor requires a signed native drain observation",
+        )
+    })?;
+    attestation.verify(drain, &status.node_id, &status.zone_id, root)?;
+    attestation.validate_freshness(now)
 }
 
 /// One HTTP request as the service sees it.
@@ -639,7 +696,7 @@ impl FleetControlPlaneService {
                         FleetGuardedPolicyObservationScope::EnrolledNodeObservations,
                         MAX_GUARDED_POLICY_STALE_AFTER,
                         clock,
-                        |nodes| enrolled_node_view(nodes, &enrollment, authenticated),
+                        |nodes| enrolled_node_view(nodes, &enrollment, authenticated, clock()),
                     )?;
                     Ok(FleetHttpResponse::json(
                         if receipt.already_published { 200 } else { 201 },
@@ -649,10 +706,11 @@ impl FleetControlPlaneService {
                 })
             }
             ("GET", FLEET_HTTP_NODES_PATH) => {
+                let clock = self.clock;
                 self.with_transport(move |transport, authenticated| {
                     let mut nodes = transport.list_node_statuses()?;
                     if let Some(credentials) = &enrollment {
-                        enrolled_node_view(&mut nodes, credentials, authenticated)?;
+                        enrolled_node_view(&mut nodes, credentials, authenticated, clock())?;
                     }
                     principal.filter_nodes(&mut nodes);
                     Ok(FleetHttpResponse::json(
@@ -684,9 +742,23 @@ impl FleetControlPlaneService {
                     );
                 }
                 let recorded_at = (self.clock)();
+                if let Some(credentials) = &enrollment
+                    && let Err(error) = verify_supervisor_observation(&status, credentials, recorded_at)
+                {
+                    return invalid_record(&error);
+                }
                 status.last_seen = recorded_at;
                 self.with_transport(move |transport, authenticated| {
-                    transport.upsert_node_status(&status)?;
+                    let root = enrollment.as_ref().and_then(|credentials| {
+                        credentials.nodes.iter().find(|node| {
+                            node.node_id == status.node_id && node.zone_id == status.zone_id
+                        }).and_then(|node| node.supervisor_public_key.as_ref())
+                    });
+                    if let Some(root) = root {
+                        transport.upsert_node_status_with_supervisor(&status, root)?;
+                    } else {
+                        transport.upsert_node_status(&status)?;
+                    }
                     if matches!(principal, FleetPrincipal::Node { .. }) {
                         authenticated.insert(
                             (status.zone_id.clone(), status.node_id.clone()),
@@ -705,10 +777,11 @@ impl FleetControlPlaneService {
                 })
             }
             ("GET", FLEET_HTTP_STATE_PATH) => {
+                let clock = self.clock;
                 self.with_transport(move |transport, authenticated| {
                     let mut state = transport.read_shared_state()?;
                     if let Some(credentials) = &enrollment {
-                        enrolled_node_view(&mut state.nodes, credentials, authenticated)?;
+                        enrolled_node_view(&mut state.nodes, credentials, authenticated, clock())?;
                     }
                     Ok(FleetHttpResponse::json(
                         200,
@@ -1077,9 +1150,15 @@ fn build_fleet_app(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::control_plane::fleet_transport::{FleetAction, FleetTargetKind, NodeHealth};
+    use crate::control_plane::fleet_transport::{
+        FleetAction, FleetTargetKind, NATIVE_SESSION_DRAIN_ATTESTATION_SCHEMA,
+        NativeSessionDrainAttestation, NativeSessionDrainCheckpoint, NodeHealth,
+        fleet_application_checkpoint,
+    };
+    use ed25519_dalek::Signer as _;
 
     const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef";
+    const NODE_TOKEN: &str = "independent-node-token-0123456789abcdef0123456789abcdef";
 
     fn fixed_clock() -> DateTime<Utc> {
         DateTime::parse_from_rfc3339("2026-10-06T12:00:00Z")
@@ -1140,6 +1219,443 @@ mod tests {
             applied_actions: None,
             native_session_drain: None,
         }
+    }
+
+    fn supervisor_enrollment(root: &ed25519_dalek::SigningKey) -> FleetNodeCredentials {
+        FleetNodeCredentials::from_json(
+            &serde_json::to_vec(&serde_json::json!({
+                "schema_version": FLEET_NODE_CREDENTIALS_SCHEMA,
+                "nodes": [{
+                    "zone_id": "zone-a", "node_id": "node-a",
+                    "token_sha256": hex::encode(Sha256::digest(NODE_TOKEN.as_bytes())),
+                    "supervisor_public_key_hex": hex::encode(root.verifying_key().as_bytes())
+                }]
+            }))
+            .unwrap(),
+        )
+        .expect("independently enrolled supervisor")
+    }
+
+    fn signed_maintenance(
+        root: &ed25519_dalek::SigningKey,
+        observed_at: DateTime<Utc>,
+    ) -> NodeStatus {
+        let action = FleetActionRecord {
+            action_id: "supervisor-maintenance".into(),
+            emitted_at: fixed_clock(),
+            action: FleetAction::NativeSessionHold {
+                zone_id: "zone-a".into(),
+                reason: "verified supervisor maintenance".into(),
+            },
+        };
+        let checkpoint = fleet_application_checkpoint(&[action], "zone-a").unwrap();
+        let mut drain = NativeSessionDrainCheckpoint {
+            applied_actions: checkpoint.clone(),
+            session_set_sha256: hex::encode(Sha256::digest(b"retained-two-session-population")),
+            admitted_sessions: 2,
+            terminal_sessions: 2,
+            pending_sessions: 0,
+            indeterminate_sessions: 0,
+            fence_held: true,
+            supervisor_attestation: None,
+        };
+        let mut attestation = NativeSessionDrainAttestation {
+            schema_version: NATIVE_SESSION_DRAIN_ATTESTATION_SCHEMA.into(),
+            node_id: "node-a".into(),
+            zone_id: "zone-a".into(),
+            drain_id: "01900000-0000-7000-8000-000000000001".into(),
+            generation: 2,
+            project_root_sha256: hex::encode(Sha256::digest(b"private-project-root")),
+            observed_at,
+            product_root_key_id: format!(
+                "ed25519:{}",
+                hex::encode(root.verifying_key().as_bytes())
+            ),
+            checkpoint_sha256: drain.observation_sha256().unwrap(),
+            signature_hex: String::new(),
+        };
+        attestation.signature_hex = hex::encode(
+            root.sign(&attestation.signing_payload().unwrap())
+                .to_bytes(),
+        );
+        drain.supervisor_attestation = Some(attestation);
+        let mut status = heartbeat("node-a");
+        status.health = NodeHealth::Maintenance;
+        status.applied_actions = Some(checkpoint);
+        status.native_session_drain = Some(drain);
+        status
+    }
+
+    fn resign_observation(status: &mut NodeStatus, root: &ed25519_dalek::SigningKey) {
+        let drain = status.native_session_drain.as_mut().unwrap();
+        let digest = drain.observation_sha256().unwrap();
+        let attestation = drain.supervisor_attestation.as_mut().unwrap();
+        attestation.checkpoint_sha256 = digest;
+        attestation.signature_hex = hex::encode(
+            root.sign(&attestation.signing_payload().unwrap())
+                .to_bytes(),
+        );
+    }
+
+    #[test]
+    fn enrolled_supervisor_drains_require_the_pinned_key_and_exact_observation() {
+        let root = ed25519_dalek::SigningKey::from_bytes(&[23; 32]);
+        let (_dir, service) = service();
+        let service = service
+            .with_node_credentials(supervisor_enrollment(&root))
+            .unwrap();
+        let auth = format!("Bearer {NODE_TOKEN}");
+        let status = signed_maintenance(&root, fixed_clock());
+        let post = |status: &NodeStatus| {
+            service.handle(request(
+                "POST",
+                FLEET_HTTP_NODES_PATH,
+                Some(&auth),
+                &serde_json::to_vec(status).unwrap(),
+            ))
+        };
+        assert_eq!(
+            post(&status).status,
+            200,
+            "useful signed maintenance heartbeat"
+        );
+        assert_eq!(post(&status).status, 200, "exact retry remains idempotent");
+        let mut missing = status.clone();
+        missing
+            .native_session_drain
+            .as_mut()
+            .unwrap()
+            .supervisor_attestation = None;
+        assert_eq!(
+            post(&missing).status,
+            422,
+            "a bearer cannot invent a terminal census"
+        );
+        let foreign = signed_maintenance(
+            &ed25519_dalek::SigningKey::from_bytes(&[24; 32]),
+            fixed_clock(),
+        );
+        assert_eq!(
+            post(&foreign).status,
+            422,
+            "producer-selected root is not an anchor"
+        );
+
+        for mutation in 0..10 {
+            let mut changed = status.clone();
+            let drain = changed.native_session_drain.as_mut().unwrap();
+            match mutation {
+                0 => {
+                    drain.admitted_sessions += 1;
+                    drain.terminal_sessions += 1;
+                }
+                1 => drain.session_set_sha256 = "a".repeat(64),
+                2 => drain.applied_actions.actions_sha256 = "b".repeat(64),
+                3 => {
+                    drain
+                        .supervisor_attestation
+                        .as_mut()
+                        .unwrap()
+                        .project_root_sha256 = "c".repeat(64)
+                }
+                4 => drain.supervisor_attestation.as_mut().unwrap().generation += 1,
+                5 => {
+                    drain.supervisor_attestation.as_mut().unwrap().drain_id =
+                        "01900000-0000-7000-8000-000000000002".into()
+                }
+                6 => {
+                    drain.supervisor_attestation.as_mut().unwrap().observed_at -=
+                        chrono::Duration::seconds(1)
+                }
+                7 => drain.supervisor_attestation.as_mut().unwrap().node_id = "node-b".into(),
+                8 => drain.supervisor_attestation.as_mut().unwrap().signature_hex = "0".repeat(128),
+                _ => drain.supervisor_attestation.as_mut().unwrap().zone_id = "zone-b".into(),
+            }
+            assert_eq!(post(&changed).status, 422, "tampered field {mutation}");
+        }
+        let response = service.handle(request("GET", FLEET_HTTP_NODES_PATH, Some(&bearer()), b""));
+        let nodes: FleetHttpNodeList = serde_json::from_slice(&response.body).unwrap();
+        assert_eq!(
+            nodes.nodes[0].native_session_drain, status.native_session_drain,
+            "refused substitutions preserve accepted evidence"
+        );
+        let public = String::from_utf8(response.body).unwrap();
+        assert!(!public.contains("private-project-root"));
+        assert!(!public.contains(NODE_TOKEN));
+    }
+
+    #[test]
+    fn supervisor_signature_age_cannot_be_extended_by_heartbeats_or_guard_reads() {
+        let root = ed25519_dalek::SigningKey::from_bytes(&[25; 32]);
+        let (_dir, service) = service();
+        let service = service
+            .with_node_credentials(supervisor_enrollment(&root))
+            .unwrap();
+        let auth = format!("Bearer {NODE_TOKEN}");
+        for offset in [-300, 1] {
+            let invalid =
+                signed_maintenance(&root, fixed_clock() + chrono::Duration::seconds(offset));
+            assert_eq!(
+                service
+                    .handle(request(
+                        "POST",
+                        FLEET_HTTP_NODES_PATH,
+                        Some(&auth),
+                        &serde_json::to_vec(&invalid).unwrap()
+                    ))
+                    .status,
+                422
+            );
+        }
+        let valid = signed_maintenance(&root, fixed_clock() - chrono::Duration::seconds(299));
+        assert_eq!(
+            service
+                .handle(request(
+                    "POST",
+                    FLEET_HTTP_NODES_PATH,
+                    Some(&auth),
+                    &serde_json::to_vec(&valid).unwrap()
+                ))
+                .status,
+            200
+        );
+        fn one_second_later() -> DateTime<Utc> {
+            fixed_clock() + chrono::Duration::seconds(1)
+        }
+        let service = service.with_clock(one_second_later);
+        let response = service.handle(request("GET", FLEET_HTTP_STATE_PATH, Some(&bearer()), b""));
+        let snapshot: FleetHttpState = serde_json::from_slice(&response.body).unwrap();
+        assert_eq!(snapshot.state.nodes[0].health, NodeHealth::Stale);
+        assert!(snapshot.state.nodes[0].native_session_drain.is_none());
+        assert!(snapshot.state.nodes[0].applied_actions.is_none());
+        assert_eq!(
+            service
+                .handle(request(
+                    "POST",
+                    FLEET_HTTP_NODES_PATH,
+                    Some(&auth),
+                    &serde_json::to_vec(&valid).unwrap()
+                ))
+                .status,
+            422,
+            "receipt remains expired despite fresh ingest time"
+        );
+    }
+
+    #[test]
+    fn signed_supervisor_history_survives_coordinator_restart_without_becoming_fresh() {
+        let root = ed25519_dalek::SigningKey::from_bytes(&[26; 32]);
+        let (dir, service) = service();
+        let service = service
+            .with_node_credentials(supervisor_enrollment(&root))
+            .unwrap();
+        let auth = format!("Bearer {NODE_TOKEN}");
+        let original = signed_maintenance(&root, fixed_clock() - chrono::Duration::seconds(2));
+        assert_eq!(
+            service
+                .handle(request(
+                    "POST",
+                    FLEET_HTTP_NODES_PATH,
+                    Some(&auth),
+                    &serde_json::to_vec(&original).unwrap()
+                ))
+                .status,
+            200
+        );
+        drop(service);
+        let service = FleetControlPlaneService::open(dir.path().join("fleet"), TOKEN)
+            .unwrap()
+            .with_clock(fixed_clock)
+            .with_node_credentials(supervisor_enrollment(&root))
+            .unwrap();
+        let response = service.handle(request("GET", FLEET_HTTP_NODES_PATH, Some(&bearer()), b""));
+        let nodes: FleetHttpNodeList = serde_json::from_slice(&response.body).unwrap();
+        assert!(
+            nodes.nodes[0].native_session_drain.is_none(),
+            "retained signature is not a fresh heartbeat"
+        );
+        for mutation in 0..5 {
+            let mut changed = original.clone();
+            let attestation = changed
+                .native_session_drain
+                .as_mut()
+                .unwrap()
+                .supervisor_attestation
+                .as_mut()
+                .unwrap();
+            attestation.observed_at += chrono::Duration::seconds(1);
+            match mutation {
+                0 => attestation.generation -= 1,
+                1 => attestation.project_root_sha256 = "d".repeat(64),
+                2 => attestation.drain_id = "01900000-0000-7000-8000-000000000003".into(),
+                _ => {}
+            }
+            let checkpoint = changed.native_session_drain.as_mut().unwrap();
+            match mutation {
+                3 => checkpoint.session_set_sha256 = "e".repeat(64),
+                4 => {
+                    checkpoint.admitted_sessions += 1;
+                    checkpoint.terminal_sessions += 1;
+                }
+                _ => {}
+            }
+            resign_observation(&mut changed, &root);
+            let response = service.handle(request(
+                "POST",
+                FLEET_HTTP_NODES_PATH,
+                Some(&auth),
+                &serde_json::to_vec(&changed).unwrap(),
+            ));
+            assert_ne!(
+                response.status, 200,
+                "signed regression {mutation} must still refuse"
+            );
+        }
+        let mut refreshed = original;
+        refreshed
+            .native_session_drain
+            .as_mut()
+            .unwrap()
+            .supervisor_attestation
+            .as_mut()
+            .unwrap()
+            .observed_at = fixed_clock();
+        resign_observation(&mut refreshed, &root);
+        assert_eq!(
+            service
+                .handle(request(
+                    "POST",
+                    FLEET_HTTP_NODES_PATH,
+                    Some(&auth),
+                    &serde_json::to_vec(&refreshed).unwrap()
+                ))
+                .status,
+            200
+        );
+    }
+
+    #[test]
+    fn degraded_heartbeat_cannot_erase_supervisor_history_or_replay_old_good_evidence() {
+        let root = ed25519_dalek::SigningKey::from_bytes(&[27; 32]);
+        let (dir, service) = service();
+        let service = service
+            .with_node_credentials(supervisor_enrollment(&root))
+            .unwrap();
+        let auth = format!("Bearer {NODE_TOKEN}");
+        let original = signed_maintenance(&root, fixed_clock() - chrono::Duration::seconds(2));
+        assert_eq!(
+            service
+                .handle(request(
+                    "POST",
+                    FLEET_HTTP_NODES_PATH,
+                    Some(&auth),
+                    &serde_json::to_vec(&original).unwrap()
+                ))
+                .status,
+            200
+        );
+        let mut degraded = heartbeat("node-a");
+        degraded.health = NodeHealth::Degraded;
+        assert_eq!(
+            service
+                .handle(request(
+                    "POST",
+                    FLEET_HTTP_NODES_PATH,
+                    Some(&auth),
+                    &serde_json::to_vec(&degraded).unwrap()
+                ))
+                .status,
+            200,
+            "loss of supervisor evidence must remain reportable"
+        );
+        drop(service);
+        fn next_poll() -> DateTime<Utc> {
+            fixed_clock() + chrono::Duration::seconds(1)
+        }
+        let service = FleetControlPlaneService::open(dir.path().join("fleet"), TOKEN)
+            .unwrap()
+            .with_clock(next_poll)
+            .with_node_credentials(supervisor_enrollment(&root))
+            .unwrap();
+        let post = |status: &NodeStatus| {
+            service.handle(request(
+                "POST",
+                FLEET_HTTP_NODES_PATH,
+                Some(&auth),
+                &serde_json::to_vec(status).unwrap(),
+            ))
+        };
+        assert_ne!(
+            post(&original).status,
+            200,
+            "cached good evidence was explicitly withdrawn"
+        );
+        let mut switched = signed_maintenance(&root, next_poll());
+        switched
+            .native_session_drain
+            .as_mut()
+            .unwrap()
+            .supervisor_attestation
+            .as_mut()
+            .unwrap()
+            .project_root_sha256 = "e".repeat(64);
+        resign_observation(&mut switched, &root);
+        assert_ne!(
+            post(&switched).status,
+            200,
+            "shared user root cannot replace enrolled project identity"
+        );
+        assert_eq!(
+            post(&signed_maintenance(&root, next_poll())).status,
+            200,
+            "fresh supervisor observation can restore availability"
+        );
+    }
+
+    #[test]
+    fn reordered_degraded_heartbeats_cannot_lower_the_supervisor_withdrawal_barrier() {
+        let root = ed25519_dalek::SigningKey::from_bytes(&[29; 32]);
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = DurableFleetTransport::new(dir.path()).unwrap();
+        let mut original = signed_maintenance(&root, fixed_clock());
+        original.last_seen = fixed_clock();
+        store
+            .upsert_node_status_with_supervisor(&original, &root.verifying_key())
+            .unwrap();
+
+        let mut degraded = heartbeat("node-a");
+        degraded.health = NodeHealth::Degraded;
+        degraded.last_seen = fixed_clock() + chrono::Duration::seconds(2);
+        store
+            .upsert_node_status_with_supervisor(&degraded, &root.verifying_key())
+            .unwrap();
+        let mut delayed = degraded.clone();
+        delayed.last_seen = fixed_clock() + chrono::Duration::seconds(1);
+        assert!(
+            store
+                .upsert_node_status_with_supervisor(&delayed, &root.verifying_key())
+                .is_err(),
+            "a request recorded earlier must not overwrite the later withdrawal"
+        );
+        drop(store);
+
+        let mut store = DurableFleetTransport::new(dir.path()).unwrap();
+        let mut cached =
+            signed_maintenance(&root, fixed_clock() + chrono::Duration::milliseconds(1500));
+        cached.last_seen = fixed_clock() + chrono::Duration::seconds(3);
+        assert!(
+            store
+                .upsert_node_status_with_supervisor(&cached, &root.verifying_key())
+                .is_err(),
+            "an unsubmitted cached observation predating withdrawal stays unusable after restart"
+        );
+        let retained = store.list_node_statuses().unwrap();
+        assert_eq!(retained, vec![degraded]);
+        let mut fresh = signed_maintenance(&root, cached.last_seen);
+        fresh.last_seen = cached.last_seen;
+        store
+            .upsert_node_status_with_supervisor(&fresh, &root.verifying_key())
+            .unwrap();
     }
 
     #[test]
@@ -1352,6 +1868,19 @@ mod tests {
             FleetNodeCredentials::from_json(&serde_json::to_vec(value).expect("encode document"))
         };
         assert!(parse(&valid).is_ok());
+        for pin in [
+            "g".repeat(64),
+            "1".repeat(63),
+            "0".repeat(64),
+            "A".repeat(64),
+        ] {
+            let mut bad_key = valid.clone();
+            bad_key["nodes"][0]["supervisor_public_key_hex"] = pin.into();
+            assert!(
+                parse(&bad_key).is_err(),
+                "malformed supervisor pin must never downgrade enrollment"
+            );
+        }
         let mut empty = valid.clone();
         empty["nodes"] = serde_json::json!([]);
         let mut wrong_schema = valid.clone();
@@ -1472,6 +2001,7 @@ mod tests {
             pending_sessions: 0,
             indeterminate_sessions: 0,
             fence_held: true,
+            supervisor_attestation: None,
         });
         validate_node_status(&held).unwrap();
         let credentials = FleetNodeCredentials {
@@ -1479,10 +2009,17 @@ mod tests {
                 zone_id: "zone-a".into(),
                 node_id: "node-a".into(),
                 token_sha256: Sha256::digest(b"independent-node-credential").into(),
+                supervisor_public_key: None,
             }],
         };
         let mut nodes = vec![held.clone()];
-        enrolled_node_view(&mut nodes, &credentials, &AuthenticatedNodes::new()).unwrap();
+        enrolled_node_view(
+            &mut nodes,
+            &credentials,
+            &AuthenticatedNodes::new(),
+            fixed_clock(),
+        )
+        .unwrap();
         assert_eq!(
             nodes.len(),
             1,
@@ -1495,10 +2032,10 @@ mod tests {
 
         let authenticated = BTreeMap::from([(("zone-a".into(), "node-a".into()), held.clone())]);
         let mut nodes = vec![held.clone()];
-        enrolled_node_view(&mut nodes, &credentials, &authenticated).unwrap();
+        enrolled_node_view(&mut nodes, &credentials, &authenticated, fixed_clock()).unwrap();
         assert_eq!(nodes, vec![held]);
         nodes[0].last_seen = fixed_clock();
-        enrolled_node_view(&mut nodes, &credentials, &authenticated).unwrap();
+        enrolled_node_view(&mut nodes, &credentials, &authenticated, fixed_clock()).unwrap();
         assert_eq!(
             nodes[0].health,
             NodeHealth::Stale,

@@ -1768,6 +1768,7 @@ impl MaintenanceCliFixture {
 #[test]
 #[cfg(feature = "fleet-control-plane-server")]
 fn live_http_guarded_policy_requires_enrolled_fresh_hold_and_retains_original_retry() {
+    use ed25519_dalek::Signer as _;
     use frankenengine_node::control_plane::fleet_http_server::{
         FLEET_NODE_CREDENTIALS_SCHEMA, FleetControlPlaneService, FleetHttpEventSink,
         FleetHttpServerConfig, FleetHttpServerControl, FleetNodeCredentials,
@@ -1775,7 +1776,8 @@ fn live_http_guarded_policy_requires_enrolled_fresh_hold_and_retains_original_re
     };
     use frankenengine_node::control_plane::fleet_transport::{
         FleetGuardedPolicyObservationScope, FleetPolicyMaintenanceGuard,
-        GuardedFleetPolicyPublication, fleet_action_log_checkpoint,
+        GuardedFleetPolicyPublication, NATIVE_SESSION_DRAIN_ATTESTATION_SCHEMA,
+        NativeSessionDrainAttestation, fleet_action_log_checkpoint,
     };
     use frankenengine_node::control_plane::fleet_transport_http::HttpFleetTransport;
     use std::sync::{Arc, mpsc};
@@ -1790,6 +1792,7 @@ fn live_http_guarded_policy_requires_enrolled_fresh_hold_and_retains_original_re
     let directory = tempdir().expect("guarded HTTP coordinator");
     let operator_token = "guard-operator-0123456789abcdef0123456789abcdef";
     let node_token = "guard-node-0123456789abcdef0123456789abcdef";
+    let supervisor = ed25519_dalek::SigningKey::from_bytes(&[47; 32]);
     let credentials = directory.path().join("node-credentials.json");
     std::fs::write(
         &credentials,
@@ -1797,15 +1800,17 @@ fn live_http_guarded_policy_requires_enrolled_fresh_hold_and_retains_original_re
             "schema_version": FLEET_NODE_CREDENTIALS_SCHEMA,
             "nodes": [{
                 "zone_id": "east", "node_id": "guarded-node",
-                "token_sha256": hex::encode(Sha256::digest(node_token.as_bytes()))
+                "token_sha256": hex::encode(Sha256::digest(node_token.as_bytes())),
+                "supervisor_public_key_hex": hex::encode(supervisor.verifying_key().as_bytes())
             }]
         }))
         .unwrap(),
     )
     .expect("node enrollment");
     let start = |enrolled: bool| {
-        let service = FleetControlPlaneService::open(directory.path().to_path_buf(), operator_token)
-            .expect("open guarded coordinator");
+        let service =
+            FleetControlPlaneService::open(directory.path().to_path_buf(), operator_token)
+                .expect("open guarded coordinator");
         let service = if enrolled {
             service
                 .with_node_credentials(FleetNodeCredentials::load(&credentials).unwrap())
@@ -1854,7 +1859,7 @@ fn live_http_guarded_policy_requires_enrolled_fresh_hold_and_retains_original_re
     population.update(0_u64.to_be_bytes());
     // This test exercises authenticated HTTP observations. Actual native
     // worker draining and admission are exercised by the companion CLI tests.
-    let node = NodeStatus {
+    let mut node = NodeStatus {
         zone_id: "east".into(),
         node_id: "guarded-node".into(),
         last_seen: Utc::now(),
@@ -1869,6 +1874,7 @@ fn live_http_guarded_policy_requires_enrolled_fresh_hold_and_retains_original_re
             pending_sessions: 0,
             indeterminate_sessions: 0,
             fence_held: true,
+            supervisor_attestation: None,
         }),
     };
     let mut request = GuardedFleetPolicyPublication {
@@ -1891,8 +1897,7 @@ fn live_http_guarded_policy_requires_enrolled_fresh_hold_and_retains_original_re
         .expect_err("shared bearer observations cannot establish enrolled-node authority")
         .to_string();
     assert!(
-        refused.contains("HTTP 409")
-            && refused.contains("FLEET_HTTP_NODE_ENROLLMENT_REQUIRED"),
+        refused.contains("HTTP 409") && refused.contains("FLEET_HTTP_NODE_ENROLLMENT_REQUIRED"),
         "{refused}"
     );
     assert_eq!(operator.list_actions().unwrap(), [hold.clone()]);
@@ -1927,6 +1932,33 @@ fn live_http_guarded_policy_requires_enrolled_fresh_hold_and_retains_original_re
             .contains("HTTP 403"),
         "enrolled nodes cannot publish operator policy actions"
     );
+    let refused = agent
+        .upsert_node_status(&node)
+        .expect_err("node bearer cannot replace supervisor evidence with invented counts")
+        .to_string();
+    assert!(refused.contains("HTTP 422"), "{refused}");
+    let drain = node.native_session_drain.as_mut().unwrap();
+    let mut attestation = NativeSessionDrainAttestation {
+        schema_version: NATIVE_SESSION_DRAIN_ATTESTATION_SCHEMA.into(),
+        node_id: "guarded-node".into(),
+        zone_id: "east".into(),
+        drain_id: uuid::Uuid::now_v7().to_string(),
+        generation: 1,
+        project_root_sha256: hex::encode(Sha256::digest(b"guarded-test-project")),
+        observed_at: Utc::now(),
+        product_root_key_id: format!(
+            "ed25519:{}",
+            hex::encode(supervisor.verifying_key().as_bytes())
+        ),
+        checkpoint_sha256: drain.observation_sha256().unwrap(),
+        signature_hex: String::new(),
+    };
+    attestation.signature_hex = hex::encode(
+        supervisor
+            .sign(&attestation.signing_payload().unwrap())
+            .to_bytes(),
+    );
+    drain.supervisor_attestation = Some(attestation);
     agent.upsert_node_status(&node).unwrap();
     let unrelated = FleetActionRecord {
         action_id: "west-append-before-guard".into(),
@@ -4945,6 +4977,7 @@ fn fleet_reconcile_native_drain_requires_observations_and_signs_exact_population
                         pending_sessions: u64::from(blocked && !indeterminate),
                         indeterminate_sessions: u64::from(blocked && indeterminate),
                         fence_held: blocked,
+                        supervisor_attestation: None,
                     }),
                 })
                 .expect("well-formed incomplete population");
@@ -4980,6 +5013,7 @@ fn fleet_reconcile_native_drain_requires_observations_and_signs_exact_population
                     pending_sessions: 0,
                     indeterminate_sessions: 0,
                     fence_held: false,
+                    supervisor_attestation: None,
                 }),
             })
             .expect("fresh completed population");

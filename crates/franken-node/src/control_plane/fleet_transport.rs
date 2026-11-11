@@ -51,6 +51,11 @@ pub const MAX_NATIVE_SESSION_MAINTENANCE_HOLDS: usize = 64;
 pub const MAX_GUARDED_POLICY_REQUEST_BYTES: usize = 512 * 1024;
 pub const MAX_GUARDED_POLICY_RECEIPT_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_GUARDED_POLICY_STALE_AFTER: Duration = Duration::from_secs(300);
+pub const NATIVE_SESSION_DRAIN_ATTESTATION_SCHEMA: &str =
+    "franken-node/native-session-drain-attestation/v1";
+/// Use the existing maintenance observation window for supervisor evidence.
+/// A new heartbeat must never renew an older signature's validity.
+pub const MAX_NATIVE_DRAIN_ATTESTATION_AGE: Duration = MAX_GUARDED_POLICY_STALE_AFTER;
 pub const FLEET_GUARDED_POLICY_RECEIPT_SCHEMA: &str =
     "franken-node/fleet-guarded-policy-publication/v1";
 const FLEET_ACTION_COMPACTION_LOCK_FILE: &str = "actions.compaction.lock";
@@ -1096,9 +1101,10 @@ pub enum NativeSessionDrainState {
 /// Local supervisor accounting bound to the same ordered action snapshot as
 /// policy application. The session-set digest commits to retained admission
 /// nonces, rather than a PID or an entrypoint name that can be reused.
-/// Enrolled HTTP transports authenticate this observation with the existing
-/// node credential. File and shared-bearer transports carry local observations
-/// without enrolled-node authority. This is not a cryptographic attestation.
+/// Enrolled HTTP transports authenticate the sender with its node credential.
+/// An optional supervisor attestation additionally binds the observation to a
+/// separately enrolled product root. File and shared-bearer transports carry
+/// local observations without enrolled-node authority.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NativeSessionDrainCheckpoint {
@@ -1111,9 +1117,190 @@ pub struct NativeSessionDrainCheckpoint {
     /// The admission fence is released only after the retained population is
     /// terminal with no unknown effect obligations and policy is applied.
     pub fence_held: bool,
+    /// Optional supervisor signature. Its embedded key identity is not a trust
+    /// anchor: the coordinator must separately enroll the supervisor public key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supervisor_attestation: Option<NativeSessionDrainAttestation>,
+}
+
+/// Source-free evidence of one local supervisor's retained drain observation.
+/// The signature binds the exact checkpoint, owner, generation and observation
+/// time. It does not certify a distributed epoch, remote-effect rollback, or
+/// the absence of later admissions after a fence has been released.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeSessionDrainAttestation {
+    pub schema_version: String,
+    pub node_id: String,
+    pub zone_id: String,
+    pub drain_id: String,
+    pub generation: u64,
+    pub project_root_sha256: String,
+    pub observed_at: DateTime<Utc>,
+    pub product_root_key_id: String,
+    pub checkpoint_sha256: String,
+    pub signature_hex: String,
+}
+
+impl NativeSessionDrainAttestation {
+    /// Domain-separated canonical preimage; used only by the authoritative
+    /// inventory signer and verifiers. The signature itself is excluded.
+    pub fn signing_payload(&self) -> Result<Vec<u8>, FleetTransportError> {
+        #[derive(Serialize)]
+        struct Payload<'a> {
+            schema_version: &'a str,
+            node_id: &'a str,
+            zone_id: &'a str,
+            drain_id: &'a str,
+            generation: u64,
+            project_root_sha256: &'a str,
+            observed_at: DateTime<Utc>,
+            product_root_key_id: &'a str,
+            checkpoint_sha256: &'a str,
+        }
+        let bytes = canonical_fleet_convergence_receipt_payload(&Payload {
+            schema_version: &self.schema_version,
+            node_id: &self.node_id,
+            zone_id: &self.zone_id,
+            drain_id: &self.drain_id,
+            generation: self.generation,
+            project_root_sha256: &self.project_root_sha256,
+            observed_at: self.observed_at,
+            product_root_key_id: &self.product_root_key_id,
+            checkpoint_sha256: &self.checkpoint_sha256,
+        })?;
+        let mut preimage = b"franken-node/native-session-drain-signature/v1\0".to_vec();
+        preimage.extend_from_slice(&(bytes.len() as u64).to_be_bytes());
+        preimage.extend_from_slice(&bytes);
+        Ok(preimage)
+    }
+
+    fn validate_shape(&self) -> Result<(), FleetTransportError> {
+        validate_node_id(&self.node_id)?;
+        validate_zone_id(&self.zone_id)?;
+        if self.schema_version != NATIVE_SESSION_DRAIN_ATTESTATION_SCHEMA
+            || self.zone_id == "all"
+            || self.generation == 0
+            || Uuid::parse_str(&self.drain_id)
+                .ok()
+                .is_none_or(|id| id.to_string() != self.drain_id)
+            || !is_lowercase_sha256(&self.project_root_sha256)
+            || !is_lowercase_sha256(&self.checkpoint_sha256)
+            || !self
+                .product_root_key_id
+                .strip_prefix("ed25519:")
+                .is_some_and(is_lowercase_sha256)
+            || self.signature_hex.len() != 128
+            || !self
+                .signature_hex
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(FleetTransportError::serialization(
+                "invalid native supervisor drain attestation identity or encoding",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Check integrity against an independently provisioned supervisor root.
+    /// Freshness must additionally be checked at every use, not only ingestion.
+    pub fn verify(
+        &self,
+        checkpoint: &NativeSessionDrainCheckpoint,
+        node_id: &str,
+        zone_id: &str,
+        trusted_root: &ed25519_dalek::VerifyingKey,
+    ) -> Result<(), FleetTransportError> {
+        checkpoint.validate()?;
+        self.validate_shape()?;
+        if self.node_id != node_id
+            || self.zone_id != zone_id
+            || self.product_root_key_id
+                != format!("ed25519:{}", hex::encode(trusted_root.as_bytes()))
+            || self.checkpoint_sha256 != checkpoint.observation_sha256()?
+        {
+            return Err(FleetTransportError::serialization(
+                "native supervisor drain attestation does not match its node, checkpoint or enrolled root",
+            ));
+        }
+        let bytes = hex::decode(&self.signature_hex).map_err(|_| {
+            FleetTransportError::serialization("invalid native supervisor drain signature encoding")
+        })?;
+        let signature = ed25519_dalek::Signature::from_slice(&bytes).map_err(|_| {
+            FleetTransportError::serialization("invalid native supervisor drain signature length")
+        })?;
+        trusted_root
+            .verify_strict(&self.signing_payload()?, &signature)
+            .map_err(|_| {
+                FleetTransportError::serialization(
+                    "native supervisor drain signature verification failed",
+                )
+            })
+    }
+
+    pub fn validate_freshness(&self, now: DateTime<Utc>) -> Result<(), FleetTransportError> {
+        if self.observed_at > now
+            || now.signed_duration_since(self.observed_at)
+                >= chrono::Duration::seconds(MAX_NATIVE_DRAIN_ATTESTATION_AGE.as_secs() as i64)
+        {
+            return Err(FleetTransportError::stale_state(
+                "native supervisor drain attestation is future-dated or expired; obtain a fresh supervisor observation",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Both observations must first be verified against the enrolled root.
+    /// A node identity cannot silently move to another project or older drain.
+    pub fn validate_successor_of(&self, previous: &Self) -> Result<(), FleetTransportError> {
+        if self.node_id != previous.node_id
+            || self.zone_id != previous.zone_id
+            || self.product_root_key_id != previous.product_root_key_id
+            || self.project_root_sha256 != previous.project_root_sha256
+            || self.generation < previous.generation
+            || (self.generation == previous.generation && self.drain_id != previous.drain_id)
+            || self.observed_at < previous.observed_at
+            || (self.observed_at == previous.observed_at && self != previous)
+        {
+            return Err(FleetTransportError::stale_state(
+                "native supervisor observation regresses or replaces its enrolled project/drain history",
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl NativeSessionDrainCheckpoint {
+    /// Commit only to the original observation fields, without recursively
+    /// including the optional attestation or relying on mutable path metadata.
+    pub fn observation_sha256(&self) -> Result<String, FleetTransportError> {
+        #[derive(Serialize)]
+        struct Observation<'a> {
+            applied_actions: &'a FleetApplicationCheckpoint,
+            session_set_sha256: &'a str,
+            admitted_sessions: u64,
+            terminal_sessions: u64,
+            pending_sessions: u64,
+            indeterminate_sessions: u64,
+            fence_held: bool,
+        }
+        let bytes = canonical_fleet_convergence_receipt_payload(&Observation {
+            applied_actions: &self.applied_actions,
+            session_set_sha256: &self.session_set_sha256,
+            admitted_sessions: self.admitted_sessions,
+            terminal_sessions: self.terminal_sessions,
+            pending_sessions: self.pending_sessions,
+            indeterminate_sessions: self.indeterminate_sessions,
+            fence_held: self.fence_held,
+        })?;
+        let mut digest = Sha256::new();
+        digest.update(b"franken-node/native-session-drain-checkpoint/v1\0");
+        digest.update((bytes.len() as u64).to_be_bytes());
+        digest.update(bytes);
+        Ok(hex::encode(digest.finalize()))
+    }
+
     pub fn validate(&self) -> Result<(), FleetTransportError> {
         self.applied_actions.validate()?;
         if !is_lowercase_sha256(&self.session_set_sha256) {
@@ -1134,6 +1321,14 @@ impl NativeSessionDrainCheckpoint {
             return Err(FleetTransportError::serialization(
                 "native session drain cannot release its fence with pending or indeterminate sessions",
             ));
+        }
+        if let Some(attestation) = &self.supervisor_attestation {
+            attestation.validate_shape()?;
+            if attestation.checkpoint_sha256 != self.observation_sha256()? {
+                return Err(FleetTransportError::serialization(
+                    "native supervisor drain attestation checkpoint was altered",
+                ));
+            }
         }
         Ok(())
     }
@@ -3732,6 +3927,13 @@ pub fn validate_node_status(status: &NodeStatus) -> Result<(), FleetTransportErr
     }
     if let Some(drain) = &status.native_session_drain {
         drain.validate()?;
+        if let Some(attestation) = &drain.supervisor_attestation
+            && (attestation.node_id != status.node_id || attestation.zone_id != status.zone_id)
+        {
+            return Err(FleetTransportError::serialization(
+                "native supervisor drain attestation belongs to a different node/zone identity",
+            ));
+        }
         if !drain.is_complete() && status.health == NodeHealth::Healthy {
             return Err(FleetTransportError::serialization(
                 "a node with pending or indeterminate native drain obligations cannot report healthy convergence",
@@ -4169,6 +4371,213 @@ mod tests {
         }
         leftovers.sort();
         leftovers
+    }
+
+    fn signed_supervisor_fixture(
+        root: &SigningKey,
+        observed_at: DateTime<Utc>,
+    ) -> (FleetActionRecord, NodeStatus) {
+        let action = FleetActionRecord {
+            action_id: "signed-maintenance".into(),
+            emitted_at: observed_at,
+            action: FleetAction::NativeSessionHold {
+                zone_id: "zone-a".into(),
+                reason: "maintenance".into(),
+            },
+        };
+        let actions =
+            fleet_application_checkpoint(std::slice::from_ref(&action), "zone-a").unwrap();
+        let mut drain = super::NativeSessionDrainCheckpoint {
+            applied_actions: actions.clone(),
+            session_set_sha256: "a".repeat(64),
+            admitted_sessions: 2,
+            terminal_sessions: 2,
+            pending_sessions: 0,
+            indeterminate_sessions: 0,
+            fence_held: true,
+            supervisor_attestation: None,
+        };
+        let mut attestation = super::NativeSessionDrainAttestation {
+            schema_version: super::NATIVE_SESSION_DRAIN_ATTESTATION_SCHEMA.into(),
+            node_id: "node-a".into(),
+            zone_id: "zone-a".into(),
+            drain_id: "01900000-0000-7000-8000-000000000001".into(),
+            generation: 2,
+            project_root_sha256: "b".repeat(64),
+            observed_at,
+            product_root_key_id: format!(
+                "ed25519:{}",
+                hex::encode(root.verifying_key().as_bytes())
+            ),
+            checkpoint_sha256: drain.observation_sha256().unwrap(),
+            signature_hex: String::new(),
+        };
+        attestation.signature_hex = hex::encode(
+            root.sign(&attestation.signing_payload().unwrap())
+                .to_bytes(),
+        );
+        drain.supervisor_attestation = Some(attestation);
+        let mut node = node_status(
+            "zone-a",
+            "node-a",
+            &observed_at.to_rfc3339(),
+            1,
+            NodeHealth::Maintenance,
+        );
+        node.applied_actions = Some(actions);
+        node.native_session_drain = Some(drain);
+        (action, node)
+    }
+
+    #[test]
+    fn supervisor_signature_binds_population_actions_and_enrolled_identity() {
+        let root = SigningKey::from_bytes(&[37; 32]);
+        let now = DateTime::from_timestamp(1_800_000_000, 0).unwrap();
+        let (_, status) = signed_supervisor_fixture(&root, now);
+        let drain = status.native_session_drain.as_ref().unwrap();
+        let signed = drain.supervisor_attestation.as_ref().unwrap();
+        signed
+            .verify(drain, "node-a", "zone-a", &root.verifying_key())
+            .unwrap();
+        assert!(
+            signed
+                .verify(drain, "node-b", "zone-a", &root.verifying_key())
+                .is_err()
+        );
+        assert!(
+            signed
+                .verify(drain, "node-a", "zone-b", &root.verifying_key())
+                .is_err()
+        );
+        for mutation in 0..5 {
+            let mut altered = drain.clone();
+            match mutation {
+                0 => altered.session_set_sha256 = "c".repeat(64),
+                1 => altered.applied_actions.actions_sha256 = "c".repeat(64),
+                2 => altered.fence_held = false,
+                3 => {
+                    altered.terminal_sessions -= 1;
+                    altered.pending_sessions += 1;
+                }
+                _ => {
+                    altered.admitted_sessions += 1;
+                    altered.terminal_sessions += 1;
+                }
+            }
+            assert!(
+                signed
+                    .verify(&altered, "node-a", "zone-a", &root.verifying_key())
+                    .is_err(),
+                "mutation {mutation}"
+            );
+        }
+        let foreign = SigningKey::from_bytes(&[38; 32]);
+        let (_, forged) = signed_supervisor_fixture(&foreign, now);
+        let forged = forged.native_session_drain.as_ref().unwrap();
+        let proof = forged.supervisor_attestation.as_ref().unwrap();
+        proof
+            .verify(forged, "node-a", "zone-a", &foreign.verifying_key())
+            .unwrap();
+        assert!(
+            proof
+                .verify(forged, "node-a", "zone-a", &root.verifying_key())
+                .is_err(),
+            "a self-consistent incoming key is not enrollment"
+        );
+    }
+
+    #[test]
+    fn supervisor_observation_cannot_renew_its_clock_or_regress_history() {
+        let root = SigningKey::from_bytes(&[39; 32]);
+        let now = DateTime::from_timestamp(1_800_000_000, 0).unwrap();
+        let (_, status) = signed_supervisor_fixture(&root, now);
+        let signed = status
+            .native_session_drain
+            .unwrap()
+            .supervisor_attestation
+            .unwrap();
+        signed.validate_freshness(now).unwrap();
+        signed
+            .validate_freshness(now + chrono::Duration::seconds(299))
+            .unwrap();
+        assert!(
+            signed
+                .validate_freshness(now + chrono::Duration::seconds(300))
+                .is_err()
+        );
+        assert!(
+            signed
+                .validate_freshness(now - chrono::Duration::nanoseconds(1))
+                .is_err()
+        );
+        signed.validate_successor_of(&signed).unwrap();
+        for mutation in 0..5 {
+            let mut next = signed.clone();
+            next.observed_at += chrono::Duration::seconds(1);
+            match mutation {
+                0 => next.generation -= 1,
+                1 => next.drain_id = "01900000-0000-7000-8000-000000000002".into(),
+                2 => next.project_root_sha256 = "c".repeat(64),
+                3 => next.observed_at = now - chrono::Duration::seconds(1),
+                _ => {
+                    next.observed_at = now;
+                    next.generation += 1;
+                }
+            }
+            assert!(
+                next.validate_successor_of(&signed).is_err(),
+                "regression {mutation}"
+            );
+        }
+        let mut next = signed.clone();
+        next.observed_at += chrono::Duration::seconds(1);
+        next.generation += 1;
+        next.drain_id = "01900000-0000-7000-8000-000000000002".into();
+        next.validate_successor_of(&signed).unwrap();
+    }
+
+    #[test]
+    fn released_signed_cohort_cannot_satisfy_held_maintenance() {
+        let root = SigningKey::from_bytes(&[40; 32]);
+        let now = DateTime::from_timestamp(1_800_000_000, 0).unwrap();
+        let (action, mut node) = signed_supervisor_fixture(&root, now);
+        let required = std::collections::BTreeSet::from([("zone-a".into(), "node-a".into())]);
+        let observe = |node| {
+            super::fleet_native_session_hold_evidence(
+                &FleetSharedState {
+                    schema_version: FLEET_SHARED_STATE_SCHEMA.into(),
+                    actions: vec![action.clone()],
+                    nodes: vec![node],
+                },
+                &action.action_id,
+                super::FleetNativeSessionHoldTarget::Held,
+                &required,
+                now,
+                Duration::from_secs(30),
+            )
+            .unwrap()
+        };
+        assert!(observe(node.clone()).complete);
+        let drain = node.native_session_drain.as_mut().unwrap();
+        drain.fence_held = false;
+        let digest = drain.observation_sha256().unwrap();
+        let proof = drain.supervisor_attestation.as_mut().unwrap();
+        proof.checkpoint_sha256 = digest;
+        proof.signature_hex = hex::encode(root.sign(&proof.signing_payload().unwrap()).to_bytes());
+        drain
+            .supervisor_attestation
+            .as_ref()
+            .unwrap()
+            .verify(drain, "node-a", "zone-a", &root.verifying_key())
+            .unwrap();
+        node.health = NodeHealth::Healthy;
+        let evidence = observe(node);
+        assert!(!evidence.complete);
+        assert!(!evidence.fleet_quiescence_certified);
+        assert_eq!(
+            evidence.nodes[0].reason,
+            super::FleetNativeDrainReadiness::MaintenanceFenceMissing
+        );
     }
 
     #[test]

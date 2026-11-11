@@ -77,6 +77,60 @@ they do not prove native-session quiescence, successful effect cleanup, or an
 epoch barrier. Those stronger outcomes still require their separate session and
 effect evidence.
 
+### Supervisor-signed native drain observations
+
+Each enrolled node can additionally pin the native supervisor's Ed25519 public
+key with `supervisor_public_key_hex` (64 lowercase hexadecimal digits) in the
+same enrollment record. Provision this key independently from the trusted
+installation's protected runtime-evidence root. A key supplied by an incoming
+heartbeat is never used as its own trust anchor. The bearer credential still
+identifies the node and zone; the extra key authenticates the supervisor that
+observed its sessions.
+
+Upgrade the coordinator and other strict checkpoint readers before upgrading
+agents that emit this field. An older reader rejects the additional attestation
+instead of silently treating it as verified evidence.
+
+Native agents attach `supervisor_attestation` to their drain checkpoints after
+re-reading the retained population under the admission lock. The signature binds
+the node, zone, drain ID and generation, a commitment to the project root, the
+exact ordered action checkpoint, population digest and counts, fence state, and
+observation time. It contains no source bytes, raw project path, capability
+tokens, or host-effect payloads. Issuance requires recorded application of the
+exact action snapshot. Signed admission and outcome receipts authenticate the
+underlying accounting. An initial census seal binds the generation's original
+ordered session population independently of mutable database fields; deleting
+or changing that population cannot produce a new valid observation. Missing
+historical receipts remain indeterminate rather than being upgraded to
+successful terminal observations.
+
+With a supervisor key enrolled, an unsigned, altered, foreign-key, future-dated,
+or expired drain is refused. A signature expires after the existing 300-second
+maximum maintenance observation window; replaying its heartbeat does not extend
+that lifetime. Reads and guarded policy publication recheck signature freshness
+as well as the configured heartbeat freshness. The coordinator atomically
+retains the last authenticated project and drain generation in its durable
+store. A degraded heartbeat can withdraw evidence without erasing this history;
+restoring readiness requires a fresh supervisor observation after withdrawal.
+Coordinator restart still requires a fresh node-authenticated heartbeat, and
+changing a node's project requires an explicitly distinct enrolled identity.
+
+Older retained drains without an authenticated initial census remain readable,
+but cannot receive a supervisor attestation. The agent reports degraded and
+withholds its application acknowledgement until a genuinely new applicable
+action snapshot creates a sealed drain. It never retroactively signs an old
+database census. Plan this transition before requiring supervisor signatures
+for an existing installation.
+
+This is authenticated local supervisor accounting. `fleet_quiescence_certified`
+remains false. A released fence does not establish that later sessions are
+absent: its fresh signature re-verifies the retained cohort, while later normal
+workers remain admitted without being cancelled by every heartbeat. No signature
+resolves an unknown external effect. Held maintenance observations and the exact
+current action history remain mandatory for guarded policy publication; a
+released-cohort observation cannot satisfy that guard. Enrollment records without
+the additional key retain their existing bearer-authenticated observation scope.
+
 ## Purpose
 
 Defines the operational policy for fleet-wide quarantine and revocation of nodes, tenants, or zones. These operations are used during security incidents, trust violations, or compliance breaches that require coordinated isolation of affected fleet segments.

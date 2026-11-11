@@ -30410,6 +30410,7 @@ fn run_fleet_agent(args: &FleetAgentArgs) -> Result<()> {
 
         #[cfg(feature = "engine")]
         let native_session_drain = {
+            let mut reconciled_this_poll = false;
             // Do not open admission until every action in this exact snapshot
             // applied successfully and all retained local obligations drained.
             if node_health == NodeHealth::Healthy {
@@ -30421,6 +30422,7 @@ fn run_fleet_agent(args: &FleetAgentArgs) -> Result<()> {
                 ) {
                     Ok(report) => {
                         native_drain = report;
+                        reconciled_this_poll = true;
                         if !native_drain.maintenance_hold_ids.is_empty()
                             && native_drain.checkpoint.fence_held
                             && native_drain.checkpoint.population_is_terminal()
@@ -30445,9 +30447,50 @@ fn run_fleet_agent(args: &FleetAgentArgs) -> Result<()> {
             }
             // A retained completed drain must not be republished as a fresh
             // application acknowledgement when reconciliation now failed.
-            (matches!(node_health, NodeHealth::Healthy | NodeHealth::Maintenance)
-                || native_drain.checkpoint.fence_held)
-                .then_some(native_drain.checkpoint)
+            if reconciled_this_poll
+                && (matches!(node_health, NodeHealth::Healthy | NodeHealth::Maintenance)
+                    || native_drain.checkpoint.fence_held)
+            {
+                match ops::native_session_inventory::attest_local_native_session_drain(
+                    Path::new("."),
+                    &resolved.node_id,
+                    &resolved.zone_id,
+                    &expected_checkpoint,
+                ) {
+                    Ok(report) => {
+                        // The signed read may discover newly unavailable
+                        // receipts after finalization. Its current accounting
+                        // also determines whether this heartbeat can acknowledge
+                        // maintenance or completed application.
+                        if (node_health == NodeHealth::Healthy
+                            && !report.checkpoint.is_complete())
+                            || (node_health == NodeHealth::Maintenance
+                                && (!report.checkpoint.fence_held
+                                    || !report.checkpoint.population_is_terminal()))
+                        {
+                            node_health = NodeHealth::Degraded;
+                        }
+                        (matches!(node_health, NodeHealth::Healthy | NodeHealth::Maintenance)
+                            || report.checkpoint.fence_held)
+                            .then_some(report.checkpoint)
+                    }
+                    Err(error) => {
+                        // Never downgrade failed authenticated accounting into
+                        // a fresh unsigned terminal/application assertion.
+                        node_health = NodeHealth::Degraded;
+                        tracing::error!(node_id = resolved.node_id.as_str(), %error,
+                            "fleet agent could not authenticate native-session drain");
+                        if !resolved.json {
+                            eprintln!(
+                                "fleet agent: native-session drain attestation unavailable: {error}"
+                            );
+                        }
+                        None
+                    }
+                }
+            } else {
+                None
+            }
         };
         #[cfg(not(feature = "engine"))]
         let native_session_drain = None;
