@@ -6884,6 +6884,48 @@ fn enforce_deploy_safe_mode(store: &runtime::deployment::DeploymentStore) -> Res
 struct DeployChildRun {
     exit_code: i32,
     report: serde_json::Value,
+    native_observation: Option<DeployNativeObservation>,
+    authentication_error: Option<String>,
+    crash_threshold: u32,
+    crash_window_secs: u64,
+    safe_mode_state_path: PathBuf,
+}
+
+struct DeployReleaseChild {
+    child: std::process::Child,
+    session_nonce: String,
+    operator_project: PathBuf,
+    crash_threshold: u32,
+    crash_window_secs: u64,
+    safe_mode_state_path: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum DeployNativeOutcome {
+    Completed,
+    Panicked,
+    Other,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct DeployNativeObservation {
+    session_nonce: String,
+    entrypoint: String,
+    observed_at_epoch_secs: u64,
+    outcome: DeployNativeOutcome,
+    no_admitted_host_effects: bool,
+}
+
+impl DeployChildRun {
+    fn authentication_report(&self) -> serde_json::Value {
+        serde_json::json!({
+            "source": "protected_native_session_admission_and_outcome_receipts",
+            "verified": self.native_observation.is_some(),
+            "observation": self.native_observation,
+            "error": self.authentication_error,
+        })
+    }
 }
 
 fn spawn_deploy_release_child(
@@ -6891,11 +6933,26 @@ fn spawn_deploy_release_child(
     release: &runtime::deployment::ReleaseRecord,
     app_args: &[String],
     activation_restriction: Option<&runtime::deployment::ActivationRestriction>,
-) -> Result<std::process::Child> {
+) -> Result<DeployReleaseChild> {
     // Bind the complete approval, including its publisher and authority
     // envelope, rather than accepting a newly signed replacement at the same
     // manifest path. The child checks this after authenticating what it loads.
     let approval_sha256 = release.approval.admission_sha256()?;
+    let safe_mode_state_path = release
+        .release_dir
+        .join(".franken-node/safe-mode/state.json");
+    let crash_policy = runtime::safe_mode::read_persisted_safe_mode(&safe_mode_state_path)?
+        .map(|controller| controller.config().clone())
+        .unwrap_or_default();
+    anyhow::ensure!(
+        crash_policy.crash_loop_threshold > 0
+            && crash_policy.crash_loop_threshold
+                <= runtime::deployment::MAX_DEPLOYMENT_CRASH_THRESHOLD
+            && crash_policy.crash_loop_window_secs > 0
+            && crash_policy.crash_loop_window_secs <= 86_400,
+        "deployment crash-window policy exceeds its retained history or native detector bounds"
+    );
+    let session_nonce = uuid::Uuid::now_v7().to_string();
     #[cfg(target_os = "linux")]
     let executable = PathBuf::from("/proc/self/exe");
     #[cfg(not(target_os = "linux"))]
@@ -6925,7 +6982,9 @@ fn spawn_deploy_release_child(
         .arg("--admitted-operator-scope")
         .arg(store.root().join("deployment.lock"))
         .arg("--admitted-operator-project")
-        .arg(store.project_root());
+        .arg(store.project_root())
+        .arg("--admitted-native-session-nonce")
+        .arg(&session_nonce);
     if let Some(restriction) = activation_restriction {
         let encoded = serde_json::to_string(restriction)
             .context("failed serializing the admitted deployment activation")?;
@@ -6948,19 +7007,28 @@ fn spawn_deploy_release_child(
     if !app_args.is_empty() {
         command.arg("--").args(app_args);
     }
-    command
+    let child = command
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::inherit())
         .spawn()
-        .context("failed starting the supervised release run")
+        .context("failed starting the supervised release run")?;
+    Ok(DeployReleaseChild {
+        child,
+        session_nonce,
+        operator_project: store.project_root().to_path_buf(),
+        crash_threshold: crash_policy.crash_loop_threshold,
+        crash_window_secs: crash_policy.crash_loop_window_secs,
+        safe_mode_state_path,
+    })
 }
 
 fn finish_deploy_release_child(
-    child: std::process::Child,
+    child: DeployReleaseChild,
     release: &runtime::deployment::ReleaseRecord,
 ) -> Result<DeployChildRun> {
     let output = child
+        .child
         .wait_with_output()
         .context("failed waiting for the supervised release run")?;
     let report = serde_json::from_slice(&output.stdout).with_context(|| {
@@ -6969,16 +7037,83 @@ fn finish_deploy_release_child(
             release.release_id
         )
     })?;
+    let authenticated = authenticate_deploy_native_observation(
+        &child.session_nonce,
+        release,
+        &child.operator_project,
+    );
+    let (native_observation, authentication_error) = match authenticated {
+        Ok(observation) => (Some(observation), None),
+        Err(error) => (None, Some(format!("{error:#}"))),
+    };
     Ok(DeployChildRun {
         exit_code: output.status.code().unwrap_or(1),
         report,
+        native_observation,
+        authentication_error,
+        crash_threshold: child.crash_threshold,
+        crash_window_secs: child.crash_window_secs,
+        safe_mode_state_path: child.safe_mode_state_path,
     })
+}
+
+fn authenticate_deploy_native_observation(
+    nonce: &str,
+    release: &runtime::deployment::ReleaseRecord,
+    operator_project: &Path,
+) -> Result<DeployNativeObservation> {
+    #[cfg(not(feature = "engine"))]
+    {
+        let _ = (nonce, release, operator_project);
+        anyhow::bail!("authenticated deployment outcomes require the native engine build");
+    }
+    #[cfg(feature = "engine")]
+    {
+        use ops::native_session_inventory::{
+            NativeSessionEffectObservation, NativeSessionOutcomeKind,
+            NativeSessionProcessObservation, authenticate_local_native_session_outcome,
+        };
+        let record = authenticate_local_native_session_outcome(
+            nonce,
+            &release.release_dir,
+            &release.release_dir.join(&release.entrypoint),
+            operator_project,
+        )?;
+        let outcome = record
+            .outcome
+            .context("authenticated deployment outcome is absent")?;
+        anyhow::ensure!(
+            outcome.process == NativeSessionProcessObservation::WorkerReaped,
+            "deployment outcome has no parent-observed worker reap"
+        );
+        let observed_at_epoch_secs = u64::try_from(outcome.observed_at.timestamp())
+            .context("authenticated deployment observation predates the Unix epoch")?;
+        anyhow::ensure!(
+            observed_at_epoch_secs <= current_unix_secs(),
+            "authenticated deployment observation is future-dated"
+        );
+        Ok(DeployNativeObservation {
+            session_nonce: record.admission.session_nonce,
+            entrypoint: record.admission.entrypoint.to_string_lossy().into_owned(),
+            observed_at_epoch_secs,
+            outcome: match outcome.kind {
+                NativeSessionOutcomeKind::Completed => DeployNativeOutcome::Completed,
+                NativeSessionOutcomeKind::Panicked => DeployNativeOutcome::Panicked,
+                _ => DeployNativeOutcome::Other,
+            },
+            no_admitted_host_effects: matches!(
+                outcome.effects,
+                NativeSessionEffectObservation::NoAdmittedHostEffects
+            ),
+        })
+    }
 }
 
 /// How the supervisor reads one child run.
 enum DeployRunVerdict {
     Healthy { receipt_id: String },
     ActivationInterrupted,
+    NativePanic(runtime::deployment::NativePanicEvidence),
     CrashLoop(runtime::deployment::CrashLoopEvidence),
     Crashed,
     Failed,
@@ -6994,51 +7129,92 @@ fn classify_deploy_run(run: &DeployChildRun) -> DeployRunVerdict {
         // successfully activated replacement or a completed external effect.
         return DeployRunVerdict::ActivationInterrupted;
     }
-    if report["outcome"] == "native_engine_panic" {
-        let observation = &report["crash_loop"];
-        let counted_loop = observation["tracking_failure"].is_null()
-            && observation["counted"] == true
-            && observation["safe_mode_active"] == true
-            && observation["crashes_in_window"].as_u64() >= observation["threshold"].as_u64()
-            && observation["threshold"]
-                .as_u64()
-                .is_some_and(|threshold| threshold > 0);
-        if !counted_loop {
-            return DeployRunVerdict::Crashed;
-        }
-        return DeployRunVerdict::CrashLoop(runtime::deployment::CrashLoopEvidence {
-            session_nonce: observation["session_nonce"]
-                .as_str()
-                .unwrap_or_default()
-                .to_string(),
-            entrypoint: observation["entrypoint"]
-                .as_str()
-                .unwrap_or_default()
-                .to_string(),
-            observed_at_epoch_secs: observation["observed_at_epoch_secs"].as_u64().unwrap_or(0),
-            crashes_in_window: observation["crashes_in_window"]
-                .as_u64()
-                .and_then(|count| u32::try_from(count).ok())
-                .unwrap_or(u32::MAX),
-            threshold: observation["threshold"]
-                .as_u64()
-                .and_then(|threshold| u32::try_from(threshold).ok())
-                .unwrap_or(0),
-            window_secs: observation["window_secs"].as_u64().unwrap_or(0),
-            safe_mode_state_path: observation["state_path"]
-                .as_str()
-                .unwrap_or_default()
-                .to_string(),
-        });
+    let Some(observation) = &run.native_observation else {
+        return DeployRunVerdict::Failed;
+    };
+    let reported_nonce = report["session_nonce"].as_str().or_else(|| {
+        report["dispatch"]["runtime_evidence_identity_capture"]["session_nonce"].as_str()
+    });
+    if reported_nonce != Some(observation.session_nonce.as_str()) {
+        return DeployRunVerdict::Failed;
     }
-    match report["receipt"]["receipt_id"].as_str() {
-        Some(receipt_id) if run.exit_code == 0 && report["success"] == true => {
+    match observation.outcome {
+        DeployNativeOutcome::Completed if run.exit_code == 0 && report["success"] == true => {
             DeployRunVerdict::Healthy {
-                receipt_id: receipt_id.to_string(),
+                // The signed native outcome supplies this identity. Child
+                // stdout cannot manufacture a healthy receipt or reuse one.
+                receipt_id: format!("native-session:{}", observation.session_nonce),
             }
+        }
+        DeployNativeOutcome::Panicked
+            if run.exit_code != 0
+                && report["schema_version"] == "franken-node/run-error-cli/v1"
+                && report["outcome"] == "native_engine_panic" =>
+        {
+            DeployRunVerdict::NativePanic(runtime::deployment::NativePanicEvidence {
+                session_nonce: observation.session_nonce.clone(),
+                entrypoint: observation.entrypoint.clone(),
+                observed_at_epoch_secs: observation.observed_at_epoch_secs,
+                no_admitted_host_effects: observation.no_admitted_host_effects,
+            })
         }
         _ => DeployRunVerdict::Failed,
     }
+}
+
+fn classify_and_record_deploy_run(
+    store: &runtime::deployment::DeploymentStore,
+    authority: &runtime::deployment::DeploymentAuthority,
+    release: &runtime::deployment::ReleaseRecord,
+    run: &DeployChildRun,
+) -> Result<DeployRunVerdict> {
+    let verdict = classify_deploy_run(run);
+    let DeployRunVerdict::NativePanic(evidence) = verdict else {
+        return Ok(verdict);
+    };
+    let lock = store.lock()?;
+    let health = store.record_health(
+        &lock,
+        authority,
+        &release.release_id,
+        runtime::deployment::HealthEvent::NativePanic {
+            evidence: evidence.clone(),
+        },
+    )?;
+    // Retired local observations and tracking failures remain refusals. These
+    // unsigned fields cannot supply any panic to the signed window below;
+    // they only preserve the existing detector's additional containment gate.
+    let local = &run.report["crash_loop"];
+    if local["counted"] != true
+        || !local["tracking_failure"].is_null()
+        || local["safe_mode_active"] != true
+        || local["session_nonce"].as_str() != Some(evidence.session_nonce.as_str())
+        || local["threshold"].as_u64() != Some(u64::from(run.crash_threshold))
+        || local["window_secs"].as_u64() != Some(run.crash_window_secs)
+        || !local["crashes_in_window"]
+            .as_u64()
+            .is_some_and(|count| count >= u64::from(run.crash_threshold))
+    {
+        return Ok(DeployRunVerdict::Crashed);
+    }
+    let crash = health.native_crash_loop_evidence(
+        &evidence.session_nonce,
+        run.crash_threshold,
+        run.crash_window_secs,
+        &run.safe_mode_state_path,
+    )?;
+    let Some(crash) = crash else {
+        return Ok(DeployRunVerdict::Crashed);
+    };
+    // A threshold is authenticated history; containment remains the existing
+    // local operator gate. Missing or failed detector persistence never grants
+    // recovery permission or manufactures an active safe-mode controller.
+    anyhow::ensure!(
+        runtime::safe_mode::read_persisted_safe_mode(&run.safe_mode_state_path)?
+            .is_some_and(|controller| controller.is_active()),
+        "authenticated deployment crash threshold lacks retained safe-mode containment"
+    );
+    Ok(DeployRunVerdict::CrashLoop(crash))
 }
 
 fn deploy_guest_stdout(report: &serde_json::Value) -> Option<&str> {
@@ -7077,7 +7253,7 @@ fn handle_deploy_run(args: &cli::DeployRunArgs) -> Result<(serde_json::Value, i3
         (activation, release, child)
     };
     let run = finish_deploy_release_child(child, &release)?;
-    let verdict = classify_deploy_run(&run);
+    let verdict = classify_and_record_deploy_run(&store, &authority, &release, &run)?;
     let mut report = serde_json::json!({
         "schema_version": DEPLOY_RUN_CLI_SCHEMA_VERSION,
         "command": "deploy.run",
@@ -7085,6 +7261,7 @@ fn handle_deploy_run(args: &cli::DeployRunArgs) -> Result<(serde_json::Value, i3
         "release_id": release.release_id,
         "activation_sequence": activation.sequence,
         "retire_on_activation": args.retire_on_activation,
+        "observation_authentication": run.authentication_report(),
         "run": run.report,
     });
     let (phase, exit_code) = match verdict {
@@ -7103,7 +7280,9 @@ fn handle_deploy_run(args: &cli::DeployRunArgs) -> Result<(serde_json::Value, i3
         }
         DeployRunVerdict::ActivationInterrupted => ("activation_interrupted", run.exit_code.max(1)),
         DeployRunVerdict::Failed => ("failed", run.exit_code.max(1)),
-        DeployRunVerdict::Crashed => ("crashed", run.exit_code.max(1)),
+        DeployRunVerdict::Crashed | DeployRunVerdict::NativePanic(_) => {
+            ("crashed", run.exit_code.max(1))
+        }
         DeployRunVerdict::CrashLoop(evidence) => {
             let recovery = {
                 let lock = store.lock()?;
@@ -7163,6 +7342,11 @@ fn handle_deploy_run(args: &cli::DeployRunArgs) -> Result<(serde_json::Value, i3
                         );
                         enforce_deploy_safe_mode(&store)?;
                         let selected = store.release(&authority, selected)?;
+                        let health = store.health(&authority, &selected.release_id)?;
+                        anyhow::ensure!(
+                            !health.crash_looped() && !health.has_indeterminate_native_effects(),
+                            "recovery release acquired a crash loop or indeterminate effects before restart"
+                        );
                         verify_deploy_release(&selected)
                             .context("recovery release no longer passes current admission")?;
                         let current = current
@@ -7192,7 +7376,8 @@ fn handle_deploy_run(args: &cli::DeployRunArgs) -> Result<(serde_json::Value, i3
                         }
                     };
                     let resumed = finish_deploy_release_child(child, &selected)?;
-                    let resumed_verdict = classify_deploy_run(&resumed);
+                    let resumed_verdict =
+                        classify_and_record_deploy_run(&store, &authority, &selected, &resumed)?;
                     let (resume_phase, resume_code) = match resumed_verdict {
                         DeployRunVerdict::Healthy { receipt_id } => {
                             let lock = store.lock()?;
@@ -7226,6 +7411,7 @@ fn handle_deploy_run(args: &cli::DeployRunArgs) -> Result<(serde_json::Value, i3
                     report["resumed"] = serde_json::json!({
                         "release_id": selected.release_id,
                         "activation_sequence": resumed_activation_sequence,
+                        "observation_authentication": resumed.authentication_report(),
                         "run": resumed.report,
                     });
                     (resume_phase, resume_code)
@@ -7233,6 +7419,9 @@ fn handle_deploy_run(args: &cli::DeployRunArgs) -> Result<(serde_json::Value, i3
                 (RecoveryOutcome::RolledBack, _, _) => ("rolled_back", run.exit_code.max(1)),
                 (RecoveryOutcome::ContainedNoKnownGood, _, _) => {
                     ("contained_no_known_good", run.exit_code.max(1))
+                }
+                (RecoveryOutcome::ContainedEffectsIndeterminate, _, _) => {
+                    ("contained_effects_indeterminate", run.exit_code.max(1))
                 }
                 (RecoveryOutcome::Contained, _, _) => ("contained", run.exit_code.max(1)),
             }
@@ -13202,7 +13391,11 @@ fn quarantine_trusted_run_dependencies(
 
 /// Content address of the run target's bytes; the identity a sentinel
 /// quarantine record is keyed by (paths can move, bytes are what escalated).
-fn sentinel_subject_content_hash(entrypoint: &Path) -> Result<String> {
+fn sentinel_subject_content_hash(project_paths: &RunProjectPaths) -> Result<String> {
+    if let Some(hash) = project_paths.publisher_entrypoint_sha256() {
+        return Ok(hash.to_owned());
+    }
+    let entrypoint = project_paths.entrypoint();
     // Callers pass the selected entrypoint, including for directory targets.
     // Re-resolving package `main` after execution could quarantine different
     // code if the application modified its manifest during the run.
@@ -13270,9 +13463,18 @@ fn persist_sentinel_quarantine_record(
     Ok(())
 }
 
-fn sentinel_release_command(app_path: &str) -> String {
+fn sentinel_release_command(app_path: &str, publisher_source: Option<(&Path, &Path)>) -> String {
+    let quote = |value: &str| format!("'{}'", value.replace('\'', "'\\''"));
+    let source_args = publisher_source.map_or_else(String::new, |(manifest, key)| {
+        format!(
+            " --registry-artifact {} --publisher-public-key {}",
+            quote(&manifest.display().to_string()),
+            quote(&key.display().to_string()),
+        )
+    });
+    let app_path = quote(app_path);
     format!(
-        "franken-node trust release --app {app_path} --operator-id <operator> --reason \"<remediation summary>\""
+        "franken-node trust release --app {app_path}{source_args} --operator-id <operator> --reason \"<remediation summary>\""
     )
 }
 
@@ -13290,6 +13492,7 @@ fn maybe_enforce_sentinel_escalation(
     profile: Profile,
     policy_mode: &str,
     app_path: &Path,
+    publisher_source: Option<(&Path, &Path)>,
     preflight: &RunPreFlightReport,
     dispatch: &ops::engine_dispatcher::RunDispatchReport,
     now_secs: u64,
@@ -13309,8 +13512,9 @@ fn maybe_enforce_sentinel_escalation(
     };
 
     let project_root = project_paths.project_root();
-    let app_content_hash = sentinel_subject_content_hash(project_paths.entrypoint())?;
-    let release_command = sentinel_release_command(&app_path.display().to_string());
+    let app_content_hash = sentinel_subject_content_hash(project_paths)?;
+    let release_command =
+        sentinel_release_command(&app_path.display().to_string(), publisher_source);
     if !config.trust.quarantine_on_high_risk {
         return Ok(Some(SentinelEnforcementSummary {
             mode: "recommend-only".to_string(),
@@ -13398,7 +13602,7 @@ fn apply_sentinel_subject_quarantine_gate(
     app_path: &Path,
 ) -> Result<PreFlightVerdict> {
     let project_root = project_paths.project_root();
-    let app_content_hash = match sentinel_subject_content_hash(project_paths.entrypoint()) {
+    let app_content_hash = match sentinel_subject_content_hash(project_paths) {
         Ok(hash) => hash,
         Err(err) => {
             // The dispatcher fails on an unreadable target anyway; an
@@ -13716,6 +13920,7 @@ fn emit_trust_release_error_json(message: &str) -> Result<()> {
 }
 
 fn handle_trust_release_command(args: &cli::TrustReleaseArgs) -> Result<()> {
+    args.validate_source_approval()?;
     if args.app.as_os_str().is_empty() && args.artifact.is_none() {
         let message = "trust release requires --app or --artifact";
         if args.json {
@@ -13738,9 +13943,21 @@ fn handle_trust_release_command(args: &cli::TrustReleaseArgs) -> Result<()> {
     if let Some(artifact) = &args.artifact {
         return handle_trust_artifact_release(artifact, args);
     }
-    let project_paths = RunProjectPaths::resolve(&args.app, &std::env::current_dir()?)?;
+    let publisher_approval = match (&args.registry_artifact, &args.publisher_public_key) {
+        (Some(manifest), Some(key)) => Some(load_run_registry_artifact(manifest, key)?),
+        _ => None,
+    };
+    let project_paths = RunProjectPaths::resolve_with_registry_artifact(
+        &args.app,
+        &std::env::current_dir()?,
+        None,
+        publisher_approval.as_ref(),
+    )?;
+    if let Some(key) = &args.publisher_public_key {
+        validate_publisher_key_placement(key, &project_paths)?;
+    }
     let project_root = project_paths.project_root();
-    let app_content_hash = sentinel_subject_content_hash(project_paths.entrypoint())?;
+    let app_content_hash = sentinel_subject_content_hash(&project_paths)?;
     let record_path = sentinel_quarantine_record_path(project_root, &app_content_hash)?;
     let Some(mut record) = load_sentinel_quarantine_record(&record_path)? else {
         let message = format!(
@@ -22839,6 +23056,7 @@ fn evaluate_run_trust_preflight(
     project_paths: &RunProjectPaths,
     policy_mode: Profile,
     config: &config::Config,
+    publisher_approval: Option<&PublisherSourceGraphApproval>,
     now_secs: u64,
 ) -> Result<RunPreFlightReport> {
     use supply_chain::trust_card::{DependencyArtifactMatch, match_trust_card_artifact};
@@ -22849,7 +23067,28 @@ fn evaluate_run_trust_preflight(
         .as_ref()
         .map(|(_, capture)| capture.clone())
         .unwrap_or_default();
-    let dependencies = captured_dependencies.map(|(dependencies, _)| dependencies);
+    let mut dependencies = captured_dependencies.map(|(dependencies, _)| dependencies);
+    let publisher_packages = publisher_approval
+        .map(PublisherSourceGraphApproval::module_packages)
+        .transpose()?
+        .unwrap_or_default();
+    if !publisher_packages.is_empty() {
+        let dependencies = dependencies.get_or_insert_with(Vec::new);
+        for package in publisher_packages {
+            if dependencies.iter().any(|dependency| dependency.extension_id == package.extension_id) {
+                continue;
+            }
+            dependencies.push(RunPackageDependency {
+                dependency_name: package.extension_id.strip_prefix("npm:")
+                    .context("publisher module identity is not an npm package")?.to_owned(),
+                extension_id: package.extension_id,
+                version_requirement: package.version.unwrap_or_else(|| "*".to_owned()),
+                section: "publisher source capsule".to_owned(),
+                lockfile_metadata: TrustScanLockfileMetadata::default(),
+            });
+        }
+        dependencies.sort_by(|left, right| left.extension_id.cmp(&right.extension_id));
+    }
     let dependency_ids = dependencies
         .as_ref()
         .into_iter()
@@ -24223,7 +24462,8 @@ fn incident_replay_cli_summary(
                 ops::native_replay::reexecute_supervised(&capture, timeout)
             };
             Some(
-                execution.map_err(|error| anyhow::anyhow!("native re-execution failed: {error}"))?,
+                execution
+                    .map_err(|error| anyhow::anyhow!("native re-execution failed: {error}"))?,
             )
         }
         #[cfg(not(feature = "engine"))]
@@ -25925,20 +26165,23 @@ fn inspect_local_registry_artifact(
 fn load_run_registry_artifact(
     manifest_path: &Path,
     publisher_key_path: &Path,
-    project_paths: &RunProjectPaths,
-    config: &config::Config,
 ) -> Result<PublisherSourceGraphApproval> {
     use supply_chain::registry_artifact::{absolute_artifact_path, read_artifact_file};
     let key_path = absolute_artifact_path(publisher_key_path)?;
-    anyhow::ensure!(
-        !key_path.starts_with(project_paths.project_root()),
-        "publisher public key must be independently retained outside the guest project"
-    );
     let key_bytes = read_artifact_file(&key_path, 64 * 1024)
         .context("failed reading independent publisher public key")?;
     let key = parse_verifying_key_from_blob(&key_bytes)
         .context("publisher public key is not a supported Ed25519 verification key")?;
-    let approval = PublisherSourceGraphApproval::load(manifest_path, &key)?;
+    PublisherSourceGraphApproval::load(manifest_path, &key)
+}
+
+fn validate_run_registry_artifact(
+    approval: &PublisherSourceGraphApproval,
+    publisher_key_path: &Path,
+    project_paths: &RunProjectPaths,
+    config: &config::Config,
+) -> Result<()> {
+    validate_publisher_key_placement(publisher_key_path, project_paths)?;
     let entrypoint = project_paths
         .entrypoint()
         .strip_prefix(project_paths.project_root())?
@@ -25950,8 +26193,19 @@ fn load_run_registry_artifact(
         config.runtime.frozen_module_symlinks == Some(true),
         &config.runtime.module_conditions,
         config.runtime.frozen_module_graph_hash.as_deref(),
-    )?;
-    Ok(approval)
+    )
+}
+
+fn validate_publisher_key_placement(
+    publisher_key_path: &Path,
+    project_paths: &RunProjectPaths,
+) -> Result<()> {
+    let key_path = supply_chain::registry_artifact::absolute_artifact_path(publisher_key_path)?;
+    anyhow::ensure!(
+        !key_path.starts_with(project_paths.project_root()),
+        "publisher public key must be independently retained outside the guest project"
+    );
+    Ok(())
 }
 
 fn local_registry_search_rows(
@@ -37222,6 +37476,7 @@ fn main() -> Result<()> {
                 admitted_approval_sha256,
                 admitted_operator_scope,
                 admitted_operator_project,
+                admitted_native_session_nonce,
                 admitted_deployment_activation,
                 runtime,
                 engine_bin,
@@ -37336,6 +37591,21 @@ fn main() -> Result<()> {
                     return named_cli_fail("franken-node/run-error-cli/v1", "run", json, error);
                 }
             }
+            // Authenticate the source selection before resolving a capsule-only
+            // directory. The external key's placement is checked against the
+            // selected live project before any execution admission.
+            let registry_artifact_approval = match (
+                registry_artifact.as_deref(),
+                publisher_public_key.as_deref(),
+            ) {
+                (Some(manifest), Some(key)) => match load_run_registry_artifact(manifest, key) {
+                    Ok(approval) => Some(approval),
+                    Err(err) => {
+                        return named_cli_fail("franken-node/run-error-cli/v1", "run", json, err);
+                    }
+                },
+                _ => None,
+            };
             // Resolve one canonical source authority after validating the
             // independent operator. A nested release keeps its narrow root
             // while retaining that exact operator's separately enforced policy.
@@ -37343,10 +37613,11 @@ fn main() -> Result<()> {
             let project_paths = match std::env::current_dir()
                 .map_err(anyhow::Error::from)
                 .and_then(|working_dir| {
-                    RunProjectPaths::resolve_with_operator_project(
+                    RunProjectPaths::resolve_with_registry_artifact(
                         &app_path,
                         &working_dir,
                         admitted_operator_project.as_deref(),
+                        registry_artifact_approval.as_ref(),
                     )
                 }) {
                 Ok(project_paths) => project_paths,
@@ -37354,8 +37625,7 @@ fn main() -> Result<()> {
                     return named_cli_fail("franken-node/run-error-cli/v1", "run", json, err);
                 }
             };
-            if let Err(err) = runtime::safe_mode::enforce_run_safe_mode(project_paths.entrypoint())
-            {
+            if let Err(err) = project_paths.enforce_safe_mode() {
                 return named_cli_fail("franken-node/run-error-cli/v1", "run", json, err);
             }
             let active_fleet_policy =
@@ -37386,23 +37656,16 @@ fn main() -> Result<()> {
                     return named_cli_fail("franken-node/run-error-cli/v1", "run", json, error);
                 }
             };
-            let registry_artifact_approval = match (
-                registry_artifact.as_deref(),
+            if let (Some(approval), Some(key)) = (
+                registry_artifact_approval.as_ref(),
                 publisher_public_key.as_deref(),
             ) {
-                (Some(manifest), Some(key)) => match load_run_registry_artifact(
-                    manifest,
-                    key,
-                    &project_paths,
-                    &resolved.config,
-                ) {
-                    Ok(approval) => Some(approval),
-                    Err(err) => {
-                        return named_cli_fail("franken-node/run-error-cli/v1", "run", json, err);
-                    }
-                },
-                _ => None,
-            };
+                if let Err(err) =
+                    validate_run_registry_artifact(approval, key, &project_paths, &resolved.config)
+                {
+                    return named_cli_fail("franken-node/run-error-cli/v1", "run", json, err);
+                }
+            }
             if let Some(expected) = admitted_approval_sha256.as_deref() {
                 let binding = registry_artifact_approval
                     .as_ref()
@@ -37439,6 +37702,7 @@ fn main() -> Result<()> {
                 &project_paths,
                 resolved.selected_profile,
                 &resolved.config,
+                registry_artifact_approval.as_ref(),
                 now_unix_secs(),
             ) {
                 Ok(preflight) => preflight,
@@ -37531,6 +37795,7 @@ fn main() -> Result<()> {
                     .with_registry_artifact_approval(registry_artifact_approval)
                     .with_operator_safe_mode_scope(operator_safe_mode_scope)
                     .with_operator_fleet_project(admitted_operator_project)
+                    .with_admitted_native_session_nonce(admitted_native_session_nonce)
                     .with_preflight_operator_fleet_policy(operator_fleet_policy)
                     .with_deployment_activation(deployment_activation)
                     .with_preflight_registry_requirement(preflight_registry_required)
@@ -37697,6 +37962,9 @@ fn main() -> Result<()> {
                     resolved.selected_profile,
                     &policy,
                     &app_path,
+                    registry_artifact
+                        .as_deref()
+                        .zip(publisher_public_key.as_deref()),
                     &preflight,
                     &dispatch,
                     now_unix_secs(),
@@ -39973,6 +40241,92 @@ mod ops_metrics_tests {
 mod run_trust_gate_tests {
     use super::*;
 
+    fn deployment_report(exit_code: i32, report: serde_json::Value) -> DeployChildRun {
+        DeployChildRun {
+            exit_code,
+            report,
+            native_observation: None,
+            authentication_error: Some("no independently authenticated outcome".into()),
+            crash_threshold: 3,
+            crash_window_secs: 60,
+            safe_mode_state_path: PathBuf::from("/release/.franken-node/safe-mode/state.json"),
+        }
+    }
+
+    #[test]
+    fn deployment_stdout_cannot_create_healthy_or_panic_authority() {
+        for (code, report) in [
+            (
+                0,
+                serde_json::json!({"success":true,"receipt":{"receipt_id":"forged"}}),
+            ),
+            (
+                1,
+                serde_json::json!({
+                    "schema_version":"franken-node/run-error-cli/v1",
+                    "outcome":"native_engine_panic",
+                    "session_nonce":"00000000-0000-4000-8000-000000000001",
+                    "crash_loop":{"counted":true,"safe_mode_active":true,
+                        "crashes_in_window":999,"threshold":1,"window_secs":60}
+                }),
+            ),
+        ] {
+            assert!(matches!(
+                classify_deploy_run(&deployment_report(code, report)),
+                DeployRunVerdict::Failed
+            ));
+        }
+    }
+
+    #[test]
+    fn deployment_classification_binds_the_launch_and_ignores_unsigned_panic_totals() {
+        let nonce = "00000000-0000-4000-8000-000000000001";
+        let mut run = deployment_report(
+            1,
+            serde_json::json!({
+                "schema_version":"franken-node/run-error-cli/v1",
+                "outcome":"native_engine_panic","session_nonce":nonce,
+                "crash_loop":{"crashes_in_window":u64::MAX,"threshold":1,
+                    "observed_at_epoch_secs":u64::MAX}
+            }),
+        );
+        run.native_observation = Some(DeployNativeObservation {
+            session_nonce: nonce.into(),
+            entrypoint: "/release/app.js".into(),
+            observed_at_epoch_secs: 42,
+            outcome: DeployNativeOutcome::Panicked,
+            no_admitted_host_effects: true,
+        });
+        run.authentication_error = None;
+        let DeployRunVerdict::NativePanic(evidence) = classify_deploy_run(&run) else {
+            panic!("only the authenticated individual panic may be classified");
+        };
+        assert_eq!(evidence.observed_at_epoch_secs, 42);
+        assert_eq!(evidence.session_nonce, nonce);
+        run.report["session_nonce"] = serde_json::json!(uuid::Uuid::from_u128(2).to_string());
+        assert!(matches!(
+            classify_deploy_run(&run),
+            DeployRunVerdict::Failed
+        ));
+        run.report = serde_json::json!({"success":true,"receipt":{"receipt_id":"forged"},
+            "dispatch":{"runtime_evidence_identity_capture":{"session_nonce":nonce}}});
+        run.exit_code = 0;
+        assert!(matches!(
+            classify_deploy_run(&run),
+            DeployRunVerdict::Failed
+        ));
+        run.native_observation.as_mut().unwrap().outcome = DeployNativeOutcome::Completed;
+        let DeployRunVerdict::Healthy { receipt_id } = classify_deploy_run(&run) else {
+            panic!("completed native outcome and successful child status must be admitted");
+        };
+        assert_eq!(receipt_id, format!("native-session:{nonce}"));
+        run.exit_code = 1;
+        assert!(matches!(
+            classify_deploy_run(&run),
+            DeployRunVerdict::Failed
+        ));
+    }
+
     #[test]
     fn deployment_activation_retirement_never_becomes_readiness_or_crash_recovery() {
         for report in [
@@ -40001,10 +40355,7 @@ mod run_trust_gate_tests {
             }),
         ] {
             assert!(matches!(
-                classify_deploy_run(&DeployChildRun {
-                    exit_code: 1,
-                    report
-                }),
+                classify_deploy_run(&deployment_report(1, report)),
                 DeployRunVerdict::ActivationInterrupted
             ));
         }
@@ -40019,10 +40370,7 @@ mod run_trust_gate_tests {
             }),
         ] {
             assert!(matches!(
-                classify_deploy_run(&DeployChildRun {
-                    exit_code: 1,
-                    report
-                }),
+                classify_deploy_run(&deployment_report(1, report)),
                 DeployRunVerdict::Failed
             ));
         }
@@ -40068,6 +40416,7 @@ mod run_trust_gate_tests {
             &RunProjectPaths::resolve(root, root).expect("run project authority"),
             policy_mode,
             &config::Config::for_profile(policy_mode),
+            None,
             2_000,
         )
         .expect("preflight report")
@@ -41212,6 +41561,7 @@ mod run_trust_gate_tests {
             &RunProjectPaths::resolve(tmp.path(), tmp.path()).expect("run project authority"),
             Profile::Strict,
             &config::Config::for_profile(Profile::Strict),
+            None,
             stale_now,
         )
         .expect("preflight");

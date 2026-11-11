@@ -1805,7 +1805,7 @@ fn manifest_directory(path: &str) -> &str {
     path.rsplit_once('/').map_or("", |(directory, _)| directory)
 }
 
-fn validate_package_name(name: &str) -> ModuleResolutionGraphResult<()> {
+pub(crate) fn validate_package_name(name: &str) -> ModuleResolutionGraphResult<()> {
     let components: Vec<_> = name.split('/').collect();
     let scoped = name.starts_with('@');
     let valid = name.len() <= 214

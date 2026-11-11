@@ -446,9 +446,17 @@ impl PublishedSourceFixture {
     }
 
     fn run_with_policy(&self, policy: &str, extra: &[&str]) -> Output {
+        self.run_target_with_policy(&self.entrypoint, policy, extra)
+    }
+
+    fn run_directory(&self, extra: &[&str]) -> Output {
+        self.run_target_with_policy(".", "balanced", extra)
+    }
+
+    fn run_target_with_policy(&self, target: &str, policy: &str, extra: &[&str]) -> Output {
         let mut args = vec![
             "run",
-            &self.entrypoint,
+            target,
             "--config",
             "franken_node.toml",
             "--policy",
@@ -990,7 +998,8 @@ fn registry_source_capsule_admits_native_cjs_and_esm() {
         if native_terminals {
             // The negative filesystem observation is part of the publisher's
             // commitment too. A newly installed optional module cannot borrow
-            // the old signature, even when the entry source stays unchanged.
+            // the old signature: the resolver retains the original missing
+            // route without reading or executing the new file.
             fs::write(
                 fixture
                     .project
@@ -999,7 +1008,16 @@ fn registry_source_capsule_admits_native_cjs_and_esm() {
                 "console.log('UNAPPROVED_OPTIONAL_MODULE');\n",
             )
             .unwrap();
-            fixture.assert_denied(&[], "ERR_MODULE_REGISTRY_PIN_MISMATCH");
+            let output = fixture.run(&[]);
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(report["dispatch"]["captured_output"]["stdout"], expected_output);
+            assert!(!String::from_utf8_lossy(&output.stdout).contains("UNAPPROVED_OPTIONAL_MODULE"));
         }
     }
 }
@@ -1214,7 +1232,10 @@ fn registry_runtime_authority_denies_filesystem_effect_in_loaded_module() {
         "PUBLIC_FIXTURE_DATA",
     )
     .unwrap();
-    let output = fixture.run(&[]);
+    for path in ["app.cjs", "side.cjs"] {
+        fs::rename(fixture.project.path().join(path), fixture.registry.path().join(path)).unwrap();
+    }
+    let output = fixture.run_directory(&[]);
     let diagnostics = format!(
         "{}\n{}",
         String::from_utf8_lossy(&output.stdout),
@@ -1506,19 +1527,157 @@ fn registry_source_capsule_requires_signed_run_record_persistence() {
 
 #[test]
 #[cfg(all(feature = "engine", unix))]
-fn registry_source_capsule_rejects_live_source_key_and_policy_substitutions() {
+fn registry_source_capsule_executes_original_bytes_after_live_source_replacement() {
     let fixture = PublishedSourceFixture::new(false);
     let dependency = fixture.project.path().join("side.cjs");
     fs::write(&dependency, "module.exports = 9001;\n").unwrap();
-    fixture.assert_denied(&[], "ERR_MODULE_REGISTRY_PIN_MISMATCH");
-    fs::write(&dependency, "module.exports = 42;\n").unwrap();
     let entry = fixture.project.path().join(&fixture.entrypoint);
-    let original_entry = fs::read(&entry).unwrap();
     fs::write(&entry, "console.log('UNSIGNED_ENTRY_EXECUTED');\n").unwrap();
-    let refused = fixture.run(&[]);
+    let output = fixture.run(&[]);
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["dispatch"]["captured_output"]["stdout"], "PUBLISHER_APPROVED_WORKLOAD 42\n");
+    assert_eq!(report["receipt"]["native_module_graph"]["graph_input_hash"], fixture.graph_hash);
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("UNSIGNED_ENTRY_EXECUTED"));
+}
+
+#[test]
+#[cfg(all(feature = "engine", unix))]
+fn registry_source_capsule_directory_runs_without_installed_sources() {
+    for esm in [false, true] {
+        let (entry, dependency, source, side, expected) = if esm {
+            ("src/app.mjs", "src/side.mjs", "import value from './side.mjs'; console.log('PUBLISHER_APPROVED_WORKLOAD', value); import('./optional.mjs').catch(error => console.log('OPTIONAL', error.code));\n", "export default 42;\n", "PUBLISHER_APPROVED_WORKLOAD 42\nOPTIONAL ERR_MODULE_NOT_FOUND\n")
+        } else {
+            ("src/app.cjs", "src/side.cjs", "const value = require('./side.cjs'); console.log('PUBLISHER_APPROVED_WORKLOAD', value); try { require('./optional.cjs'); } catch (error) { console.log('OPTIONAL', error.code); }\n", "module.exports = 42;\n", "PUBLISHER_APPROVED_WORKLOAD 42\nOPTIONAL MODULE_NOT_FOUND\n")
+        };
+        let fixture = PublishedSourceFixture::with_modules(entry, &[(entry, source), (dependency, side)]);
+        fs::rename(fixture.project.path().join("src"), fixture.registry.path().join("retained-sources")).unwrap();
+        for replaced in [false, true] {
+            if replaced {
+                fs::create_dir(fixture.project.path().join("src")).unwrap();
+                fs::write(fixture.project.path().join(entry), "console.log('UNSIGNED_ENTRY_EXECUTED');\n").unwrap();
+                fs::write(fixture.project.path().join(dependency), "throw new Error('unsigned dependency');\n").unwrap();
+                fs::write(fixture.project.path().join(if esm { "src/optional.mjs" } else { "src/optional.cjs" }), "console.log('UNSIGNED_OPTIONAL_EXECUTED');\n").unwrap();
+            }
+            let output = fixture.run_directory(&["--capture-replay"]);
+            assert!(
+                output.status.success(),
+                "esm={esm} replaced={replaced}: {}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(report["dispatch"]["captured_output"]["stdout"], expected);
+            assert_eq!(report["receipt"]["native_module_graph"]["graph_input_hash"], fixture.graph_hash);
+            assert!(report["dispatch"]["native_replay"]["payload_json"].is_string());
+            assert!(!String::from_utf8_lossy(&output.stdout).contains("UNSIGNED_"));
+        }
+    }
+}
+
+#[test]
+#[cfg(all(feature = "engine", unix))]
+fn registry_source_capsule_quarantine_release_uses_authenticated_source_without_disk_entry() {
+    let source = "const http = require('http');\n\
+        for (let i = 0; i < 5; i++) {\n\
+            const req = http.get('http://169.254.169.254/latest/meta-data/', () => {});\n\
+            req.on('error', () => {});\n\
+        }\n\
+        throw new Error('after repeated denied egress');\n";
+    let fixture = PublishedSourceFixture::with_modules("app.cjs", &[("app.cjs", source)]);
+    fs::rename(
+        fixture.project.path().join("app.cjs"),
+        fixture.registry.path().join("retained-app.cjs"),
+    )
+    .unwrap();
+    let first = fixture.run_directory(&[]);
+    assert!(!first.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&first.stdout).unwrap();
+    assert_eq!(report["schema_version"], "franken-node/run-failure-effect-evidence/v2");
+    assert_eq!(report["dispatch"]["sentinel"]["escalated"], true, "{report}");
+    let enforcement = &report["receipt"]["sentinel_enforcement"];
+    assert_eq!(enforcement["mode"], "enforced");
+    let hash = frankenengine_node::supply_chain::registry_artifact::artifact_sha256(source.as_bytes());
+    assert_eq!(enforcement["app_content_hash"], hash);
+    let record_path = fixture
+        .project
+        .path()
+        .join(enforcement["quarantine_record_path"].as_str().unwrap());
+    let original: serde_json::Value =
+        serde_json::from_slice(&fs::read(&record_path).unwrap()).unwrap();
+    let release_hint = original["release_command"].as_str().unwrap();
+    assert!(release_hint.contains("--registry-artifact"));
+    assert!(release_hint.contains("--publisher-public-key"));
+    let blocked = fixture.run_directory(&[]);
+    assert!(!blocked.status.success());
+    let blocked: serde_json::Value = serde_json::from_slice(&blocked.stdout).unwrap();
+    assert!(blocked.to_string().contains("sentinel_quarantined"), "{blocked}");
+    assert!(blocked["dispatch"].is_null());
+
+    let release = |key: &Path| {
+        run_source_fixture_cli(
+            fixture.project.path(),
+            fixture.state_home.path(),
+            &[
+                "trust",
+                "release",
+                "--app",
+                ".",
+                "--registry-artifact",
+                fixture.manifest.to_str().unwrap(),
+                "--publisher-public-key",
+                key.to_str().unwrap(),
+                "--operator-id",
+                "capsule-operator",
+                "--reason",
+                "reviewed captured source and remediated policy",
+                "--json",
+            ],
+        )
+    };
+    let guest_key = fixture.project.path().join("publisher.pub");
+    fs::copy(&fixture.public_key, &guest_key).unwrap();
+    let refused = release(&guest_key);
     assert!(!refused.status.success());
-    assert!(!String::from_utf8_lossy(&refused.stdout).contains("UNSIGNED_ENTRY_EXECUTED"));
-    fs::write(&entry, original_entry).unwrap();
+    assert!(String::from_utf8_lossy(&refused.stdout).contains("outside the guest project"));
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&fs::read(&record_path).unwrap()).unwrap(),
+        original
+    );
+    let released = release(&fixture.public_key);
+    assert!(
+        released.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&released.stdout),
+        String::from_utf8_lossy(&released.stderr)
+    );
+    let released: serde_json::Value = serde_json::from_slice(&released.stdout).unwrap();
+    assert_eq!(released["app_content_hash"], hash);
+    assert_eq!(released["release_operator"], "capsule-operator");
+    let retained: serde_json::Value =
+        serde_json::from_slice(&fs::read(&record_path).unwrap()).unwrap();
+    assert_eq!(retained["released"], true);
+    assert_eq!(retained["escalation_receipt"], original["escalation_receipt"]);
+    assert!(!fixture.project.path().join("app.cjs").exists());
+
+    // Releasing the subject permits another evaluation; it does not erase the
+    // source, grant network authority, or suppress the next real escalation.
+    let rerun = fixture.run_directory(&[]);
+    assert!(!rerun.status.success());
+    let rerun: serde_json::Value = serde_json::from_slice(&rerun.stdout).unwrap();
+    assert_eq!(rerun["schema_version"], "franken-node/run-failure-effect-evidence/v2");
+    assert_eq!(rerun["dispatch"]["sentinel"]["escalated"], true);
+}
+
+#[test]
+#[cfg(all(feature = "engine", unix))]
+fn registry_source_capsule_rejects_key_and_policy_substitutions() {
+    let fixture = PublishedSourceFixture::new(false);
     fixture.assert_denied(
         &[
             "--frozen-module-graph-hash",

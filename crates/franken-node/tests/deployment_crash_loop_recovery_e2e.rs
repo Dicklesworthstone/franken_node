@@ -25,6 +25,8 @@ use frankenengine_node::runtime::deployment::ReleaseRecord;
 use serde_json::Value;
 
 const PANIC_MARKER: &str = "__FRANKEN_NODE_TEST_SUPPORT_NATIVE_ENGINE_PANIC__";
+const PANIC_AFTER_HOST_EFFECT_MARKER: &str =
+    "__FRANKEN_NODE_TEST_SUPPORT_NATIVE_ENGINE_PANIC_AFTER_HOST_EFFECT__";
 
 fn binary() -> &'static str {
     env!("CARGO_BIN_EXE_franken-node")
@@ -632,6 +634,11 @@ impl Drill {
             assert_ne!(code, Some(0));
             assert_eq!(report["run"]["outcome"], "native_engine_panic", "{report}");
             assert_eq!(report["run"]["crash_loop"]["crashes_in_window"], attempt);
+            assert_eq!(report["observation_authentication"]["verified"], true, "{report}");
+            assert_eq!(
+                report["observation_authentication"]["observation"]["session_nonce"],
+                report["run"]["session_nonce"],
+            );
             assert!(report.get("recovery").is_none(), "{report}");
         }
     }
@@ -1216,6 +1223,7 @@ fn crash_loop_rolls_back_to_the_healthy_release_and_resumes_it() {
     let (code, healthy) = drill.run();
     assert_eq!(code, Some(0), "{healthy}");
     assert_eq!(healthy["phase"], "healthy");
+    assert_eq!(healthy["observation_authentication"]["verified"], true);
     assert!(guest_stdout(&healthy["run"]).contains("RELEASE_ONE_HEALTHY"));
 
     // The bad release crash-loops; the third validated panic recovers.
@@ -1223,6 +1231,12 @@ fn crash_loop_rolls_back_to_the_healthy_release_and_resumes_it() {
     let (code, recovered) = drill.crash_until_loop();
     assert_eq!(recovered["phase"], "resumed_healthy", "{recovered}");
     assert_eq!(code, Some(0), "{recovered}");
+    assert_eq!(recovered["observation_authentication"]["verified"], true);
+    assert_eq!(
+        recovered["observation_authentication"]["observation"]["no_admitted_host_effects"],
+        true,
+    );
+    assert_eq!(recovered["resumed"]["observation_authentication"]["verified"], true);
     let recovery = &recovered["recovery"];
     assert_eq!(recovery["outcome"], "rolled_back", "{recovery}");
     assert_eq!(recovery["failed_release_id"], "2.0.0");
@@ -1280,6 +1294,95 @@ fn crash_loop_rolls_back_to_the_healthy_release_and_resumes_it() {
     assert_eq!(code, Some(0), "{next}");
     assert_eq!(next["release_id"], "1.0.0");
     assert_eq!(next["phase"], "healthy");
+}
+
+#[test]
+fn forged_unsigned_crash_counter_cannot_authorize_a_deployment_rollback() {
+    let drill = Drill::new();
+    drill.install("1.0.0", HEALTHY_V1);
+    let failed = drill.install("2.0.0", &crashing_v2());
+    drill.policy("rollback", "automatic");
+    drill.activate("1.0.0");
+    assert_eq!(drill.run().1["phase"], "healthy");
+    drill.activate("2.0.0");
+
+    let (code, first) = drill.run();
+    assert_ne!(code, Some(0));
+    assert_eq!(first["phase"], "crashed", "{first}");
+    assert_eq!(first["observation_authentication"]["verified"], true);
+    let state_path = failed.join(".franken-node/safe-mode/state.json");
+    let mut state: Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+    let crashes = state["native_crashes"].as_array_mut().expect("local crash history");
+    assert_eq!(crashes.len(), 1);
+    let mut forged = crashes[0].clone();
+    forged["session_nonce"] = serde_json::json!(uuid::Uuid::from_u128(12_345).to_string());
+    crashes.push(forged);
+    fs::write(&state_path, serde_json::to_vec_pretty(&state).unwrap()).unwrap();
+
+    let (code, second) = drill.run();
+    assert_ne!(code, Some(0));
+    assert_eq!(second["run"]["crash_loop"]["crashes_in_window"], 3, "{second}");
+    assert_eq!(second["run"]["crash_loop"]["safe_mode_active"], true);
+    assert_eq!(second["observation_authentication"]["verified"], true);
+    assert_eq!(second["phase"], "crashed", "{second}");
+    assert!(second.get("recovery").is_none());
+    assert!(second.get("resumed").is_none());
+    let status = drill.status();
+    assert_eq!(status["active"]["release_id"], "2.0.0");
+    assert!(status["recoveries"].as_array().unwrap().is_empty());
+    assert!(failed.join("app.js").is_file());
+}
+
+#[test]
+fn authenticated_panic_after_real_host_effect_stays_contained_without_restart() {
+    let drill = Drill::new();
+    drill.install("1.0.0", HEALTHY_V1);
+    let source = format!(
+        "require('fs').writeFileSync('before-panic', 'admitted effect');\n// {PANIC_AFTER_HOST_EFFECT_MARKER}\n"
+    );
+    let directory = drill.root.path().join("releases/2.0.0");
+    let (failed, manifest) = drill.publish_release_with_config(
+        "2.0.0",
+        &source,
+        &directory,
+        Some("profile = \"legacy-risky\"\n"),
+    );
+    drill.install_published("2.0.0", &failed, &manifest);
+    drill.policy("rollback", "automatic");
+    drill.activate("1.0.0");
+    assert_eq!(drill.run().1["phase"], "healthy");
+    drill.activate("2.0.0");
+
+    let (code, report) = drill.crash_until_loop();
+    assert_ne!(code, Some(0));
+    assert_eq!(report["phase"], "contained_effects_indeterminate", "{report}");
+    assert_eq!(report["observation_authentication"]["verified"], true);
+    assert_eq!(
+        report["observation_authentication"]["observation"]["no_admitted_host_effects"],
+        false,
+    );
+    assert_eq!(report["recovery"]["outcome"], "contained_effects_indeterminate");
+    assert!(report["recovery"]["selected_release_id"].is_null());
+    assert!(report["recovery"]["activation_sequence"].is_null());
+    assert!(report.get("resumed").is_none());
+    assert_eq!(fs::read_to_string(failed.join("before-panic")).unwrap(), "admitted effect");
+    assert_eq!(fs::read_to_string(failed.join("app.js")).unwrap(), source);
+
+    let inventory = drill.sessions(&failed);
+    assert_eq!(inventory["unknown_effect_sessions"], 3, "{inventory}");
+    let records = inventory["records"].as_array().unwrap();
+    assert_eq!(records.len(), 3);
+    assert!(records.iter().all(|record| {
+        record["outcome"]["kind"] == "panicked"
+            && record["outcome"]["effects"]["kind"] == "unknown"
+    }));
+    let status = drill.status();
+    assert_eq!(status["active"]["release_id"], "2.0.0");
+    assert_eq!(status["activations"].as_array().unwrap().len(), 2);
+    assert_eq!(status["recoveries"].as_array().unwrap().len(), 1);
+    let good = status["releases"].as_array().unwrap().iter()
+        .find(|release| release["release_id"] == "1.0.0").unwrap();
+    assert_eq!(good["healthy_runs"], 1);
 }
 
 #[test]

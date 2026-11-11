@@ -20,7 +20,7 @@ use crate::storage::frankensqlite_adapter::FrankensqliteAdapter;
 #[cfg(feature = "engine")]
 use crate::supply_chain::registry_artifact::ArtifactRuntimeAuthority;
 use crate::supply_chain::registry_artifact::{
-    PublisherArtifactIdentity, PublisherSourceGraphApproval,
+    PublisherArtifactIdentity, PublisherModulePackage, PublisherSourceGraphApproval,
 };
 use crate::{
     ActionableError,
@@ -31,8 +31,8 @@ use crate::{
     },
     security::revocation_freshness::{SafetyTier, registry_revocation_freshness_denial},
     supply_chain::trust_card::{
-        CapturedDependencyTrust, DependencyArtifactMatch, SnapshotSourceContext, TrustCardRegistry,
-        match_trust_card_artifact,
+        CapturedDependencyArtifact, CapturedDependencyTrust, DependencyArtifactMatch,
+        SnapshotSourceContext, TrustCardRegistry, match_trust_card_artifact,
     },
 };
 use anyhow::{Context, Result};
@@ -2217,6 +2217,12 @@ fn native_engine_panic_message(payload: &(dyn std::any::Any + Send)) -> String {
 pub const TEST_SUPPORT_NATIVE_ENGINE_PANIC_MARKER: &str =
     "__FRANKEN_NODE_TEST_SUPPORT_NATIVE_ENGINE_PANIC__";
 
+/// Test-only crash after a real admitted filesystem write and its WAL return
+/// marker. This exercises uncertain-effect recovery without a fabricated run.
+#[cfg(feature = "test-support")]
+pub const TEST_SUPPORT_NATIVE_ENGINE_PANIC_AFTER_HOST_EFFECT_MARKER: &str =
+    "__FRANKEN_NODE_TEST_SUPPORT_NATIVE_ENGINE_PANIC_AFTER_HOST_EFFECT__";
+
 #[cfg(all(feature = "engine", feature = "test-support"))]
 fn inject_test_support_native_engine_panic(entrypoint: &Path) {
     let marker = TEST_SUPPORT_NATIVE_ENGINE_PANIC_MARKER.as_bytes();
@@ -2511,6 +2517,8 @@ impl NativeEffectWalWriter {
 #[derive(Clone, Debug)]
 struct NativeEffectWalEmitter {
     writer: Arc<Mutex<NativeEffectWalWriter>>,
+    #[cfg(feature = "test-support")]
+    panic_after_host_effect: bool,
 }
 
 #[cfg(feature = "engine")]
@@ -2518,7 +2526,17 @@ impl NativeEffectWalEmitter {
     fn new(nonce: String, sink: Box<dyn Write + Send>) -> Self {
         Self {
             writer: Arc::new(Mutex::new(NativeEffectWalWriter::new(nonce, sink))),
+            #[cfg(feature = "test-support")]
+            panic_after_host_effect: false,
         }
+    }
+
+    #[cfg(feature = "test-support")]
+    fn with_post_effect_panic_marker(mut self, entrypoint: &Path) -> Self {
+        let marker = TEST_SUPPORT_NATIVE_ENGINE_PANIC_AFTER_HOST_EFFECT_MARKER.as_bytes();
+        self.panic_after_host_effect = std::fs::read(entrypoint)
+            .is_ok_and(|source| source.windows(marker.len()).any(|window| window == marker));
+        self
     }
 
     fn admit(&self, request: &HostIoRequest) -> std::result::Result<u64, String> {
@@ -2600,6 +2618,13 @@ impl<P: HostIoProvider> WriteAheadHostIo<P> {
                 error = %error,
                 "Native host effect returned but its WAL completion marker failed"
             );
+        }
+        #[cfg(feature = "test-support")]
+        if emitter.panic_after_host_effect
+            && outcome.is_ok()
+            && matches!(request, HostIoRequest::FsWrite { .. })
+        {
+            panic!("test-support fault injection: native engine panic after admitted host effect");
         }
         outcome
     }
@@ -3308,6 +3333,13 @@ fn resolve_run_target_path(app_path: &Path, anchored: &Path) -> io::Result<PathB
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RunPublisherSource {
+    entrypoint_sha256: String,
+    resolved_entrypoint: PathBuf,
+}
+
 /// Canonical filesystem authority selected for one product run.
 ///
 /// Resolved directory targets select that directory, even when `main` is
@@ -3326,6 +3358,8 @@ pub struct RunProjectPaths {
     project_root: PathBuf,
     entrypoint_format: RunEntrypointFormat,
     package_manifests: Vec<RunPackageManifest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    publisher_source: Option<RunPublisherSource>,
 }
 
 impl RunProjectPaths {
@@ -3443,7 +3477,120 @@ impl RunProjectPaths {
             project_root,
             entrypoint_format,
             package_manifests,
+            publisher_source: None,
         })
+    }
+
+    /// An explicitly selected directory supplies current trust, policy and
+    /// guest-effect authority. Its entrypoint and source come from the signed
+    /// capsule, so an installation need not contain executable source files.
+    /// File targets retain ordinary root selection and must still exist.
+    pub fn resolve_with_registry_artifact(
+        app_path: &Path,
+        working_dir: &Path,
+        operator_project: Option<&Path>,
+        publisher_approval: Option<&PublisherSourceGraphApproval>,
+    ) -> Result<Self> {
+        let Some(approval) = publisher_approval else {
+            return Self::resolve_with_operator_project(app_path, working_dir, operator_project);
+        };
+        #[cfg(not(unix))]
+        {
+            let _ = approval;
+            anyhow::bail!("registry source admission requires Unix");
+        }
+        #[cfg(unix)]
+        {
+            let graph = approval.revalidate_source_graph()?;
+            let report = graph.report();
+            let invocation_root = working_dir.canonicalize().with_context(|| {
+                format!("resolve run invocation directory {}", working_dir.display())
+            })?;
+            anyhow::ensure!(
+                invocation_root.is_dir(),
+                "run invocation directory is not a directory"
+            );
+            let requested =
+                EngineDispatcher::lexical_execution_app_path(app_path, &invocation_root);
+            let anchored = resolve_run_target_path(app_path, &requested)
+                .with_context(|| format!("inspect run target {}", requested.display()))?;
+            let target = anchored
+                .canonicalize()
+                .with_context(|| format!("resolve run target {}", anchored.display()))?;
+            let mut paths = if target.is_dir() {
+                anyhow::ensure!(
+                    anchored == requested,
+                    "inferred run target is not a regular file"
+                );
+                validate_fleet_policy_project_root_with_operator(&target, operator_project)?;
+                // Capsule replay already validates relative module paths.
+                // Keep this boundary explicit before creating logical origins;
+                // never canonicalize or read a guest source path here.
+                for relative in [&report.entrypoint, &report.resolved_entrypoint.path] {
+                    anyhow::ensure!(
+                        !relative.is_empty()
+                            && Path::new(relative).components().all(|component| matches!(
+                                component,
+                                std::path::Component::Normal(_)
+                            )),
+                        "publisher entrypoint must remain inside the selected project root"
+                    );
+                }
+                Self {
+                    entrypoint: target.join(&report.entrypoint),
+                    project_root: target.clone(),
+                    target,
+                    // The native resolver selects the actual format from the
+                    // capsule during source preparation under current limits.
+                    entrypoint_format: RunEntrypointFormat::Ambiguous,
+                    package_manifests: Vec::new(),
+                    publisher_source: None,
+                }
+            } else {
+                Self::resolve_with_operator_project(app_path, working_dir, operator_project)?
+            };
+            anyhow::ensure!(
+                paths.entrypoint.strip_prefix(&paths.project_root)?
+                    == Path::new(approval.entrypoint()),
+                "run entrypoint does not match publisher-approved source capsule"
+            );
+            let source = graph
+                .source_bytes(&report.resolved_entrypoint)
+                .context("publisher source capsule is missing its entrypoint bytes")?;
+            paths.publisher_source = Some(RunPublisherSource {
+                entrypoint_sha256: crate::supply_chain::registry_artifact::artifact_sha256(source),
+                resolved_entrypoint: paths.project_root.join(&report.resolved_entrypoint.path),
+            });
+            Ok(paths)
+        }
+    }
+
+    /// Quarantine the code that will execute, including when its disk source is
+    /// absent or has changed. This commitment is rederived from the verified
+    /// capsule whenever parent and worker revalidate this path admission.
+    pub fn publisher_entrypoint_sha256(&self) -> Option<&str> {
+        self.publisher_source
+            .as_ref()
+            .map(|source| source.entrypoint_sha256.as_str())
+    }
+
+    /// Consult both the selected origin and the capsule's resolved origin
+    /// without following guest source symlinks. Ordinary runs retain their
+    /// existing canonical entry-file gate.
+    pub fn enforce_safe_mode(&self) -> Result<()> {
+        if self.publisher_source.is_some() {
+            self.enforce_admitted_safe_mode()
+        } else {
+            crate::runtime::safe_mode::enforce_run_safe_mode(&self.entrypoint)
+        }
+    }
+
+    fn enforce_admitted_safe_mode(&self) -> Result<()> {
+        crate::runtime::safe_mode::enforce_admitted_run_safe_mode(&self.entrypoint)?;
+        if let Some(source) = &self.publisher_source {
+            crate::runtime::safe_mode::enforce_admitted_run_safe_mode(&source.resolved_entrypoint)?;
+        }
+        Ok(())
     }
 
     /// The entrypoint whose source will execute inside this authority.
@@ -3463,9 +3610,14 @@ impl RunProjectPaths {
         app_path: &Path,
         working_dir: &Path,
         operator_project: Option<&Path>,
+        publisher_approval: Option<&PublisherSourceGraphApproval>,
     ) -> Result<()> {
-        let observed =
-            Self::resolve_with_operator_project(app_path, working_dir, operator_project)?;
+        let observed = Self::resolve_with_registry_artifact(
+            app_path,
+            working_dir,
+            operator_project,
+            publisher_approval,
+        )?;
         if observed != *self {
             anyhow::bail!(
                 "run project authority changed after preflight; resolve and verify the project again"
@@ -3479,9 +3631,9 @@ impl RunProjectPaths {
 /// that decision depended. These are different sets: an untracked dependency
 /// may acquire a revocation before execution and must still be rechecked.
 ///
-/// This records the declared dependency graph, not the modules the engine will
-/// actually import. The native worker receives the complete record through its
-/// authenticated control frame and validates it again before guest execution.
+/// Publisher capsules also retain the package identities in their actual source
+/// closure. The native worker receives both records through its authenticated
+/// control frame and validates them again before guest execution.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunTrustRequirements {
@@ -3497,6 +3649,10 @@ pub struct RunTrustRequirements {
     /// dependency trust, operator capabilities, and execution limits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     registry_artifact_approval: Option<PublisherSourceGraphApproval>,
+    /// Additional signed module identities survive removal or relabeling of
+    /// the live dependency inventory. The worker rederives this exact set.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    publisher_module_packages: Vec<PublisherModulePackage>,
     /// An additional supervisor scope, independent of the release's location.
     /// Authenticated alongside the remaining admission so worker startup and
     /// the live observer cannot forget the operator's safe-mode restriction.
@@ -3516,6 +3672,10 @@ pub struct RunTrustRequirements {
     /// location. It can only retire this attempt, never authorize a successor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     deployment_activation: Option<crate::runtime::deployment::ActivationRestriction>,
+    /// Parent-selected identity for exactly one supervised deployment attempt.
+    /// It adds freshness binding to signed inventory outcomes, not authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    admitted_native_session_nonce: Option<String>,
 }
 
 /// An activation restriction no longer permits this attempt.
@@ -3566,10 +3726,12 @@ impl RunTrustRequirements {
             registry_required: registry_required || !required_card_ids.is_empty(),
             dependency_capture: None,
             registry_artifact_approval: None,
+            publisher_module_packages: Vec::new(),
             operator_safe_mode_scope: None,
             operator_fleet_project_root: None,
             operator_fleet_policy: None,
             deployment_activation: None,
+            admitted_native_session_nonce: None,
             required_card_ids: required_card_ids
                 .iter()
                 .cloned()
@@ -3599,6 +3761,14 @@ impl RunTrustRequirements {
         approval: PublisherSourceGraphApproval,
     ) -> Result<Self> {
         approval.validate()?;
+        self.publisher_module_packages = approval.module_packages()?;
+        self.dependency_ids.extend(
+            self.publisher_module_packages
+                .iter()
+                .map(|package| package.extension_id.clone()),
+        );
+        self.dependency_ids.sort();
+        self.dependency_ids.dedup();
         self.registry_artifact_approval = Some(approval);
         self.validate()?;
         Ok(self)
@@ -3646,6 +3816,12 @@ impl RunTrustRequirements {
         Ok(self)
     }
 
+    pub fn with_admitted_native_session_nonce(mut self, nonce: String) -> Result<Self> {
+        self.admitted_native_session_nonce = Some(nonce);
+        self.validate()?;
+        Ok(self)
+    }
+
     /// A retained activation only removes permission to continue this attempt.
     /// A changed or unavailable store cannot select or admit another release.
     pub fn enforce_deployment_activation(&self) -> Result<()> {
@@ -3688,7 +3864,10 @@ impl RunTrustRequirements {
                 &config.runtime.module_conditions,
                 config.runtime.frozen_module_graph_hash.as_deref(),
             )?;
-            approval.revalidate()?;
+            anyhow::ensure!(
+                approval.module_packages()? == self.publisher_module_packages,
+                "publisher module package identities changed after admission"
+            );
         }
         Ok(())
     }
@@ -3737,6 +3916,26 @@ impl RunTrustRequirements {
         if let Some(approval) = &self.registry_artifact_approval {
             approval.validate()?;
         }
+        anyhow::ensure!(
+            (self.registry_artifact_approval.is_some()
+                || self.publisher_module_packages.is_empty())
+                && self.publisher_module_packages.len() <= 4096
+                && self
+                    .publisher_module_packages
+                    .windows(2)
+                    .all(|pair| pair[0] < pair[1])
+                && serde_json::to_vec(&self.publisher_module_packages)?.len() <= 2 * 1024 * 1024,
+            "publisher module package admission is invalid or exceeds its bound"
+        );
+        for package in &self.publisher_module_packages {
+            package.validate()?;
+            anyhow::ensure!(
+                self.dependency_ids
+                    .binary_search(&package.extension_id)
+                    .is_ok(),
+                "execution trust requirements omitted a publisher module package identity"
+            );
+        }
         if let Some(scope) = &self.operator_safe_mode_scope {
             scope.validate()?;
         }
@@ -3755,6 +3954,17 @@ impl RunTrustRequirements {
         }
         if let Some(restriction) = &self.deployment_activation {
             restriction.validate()?;
+        }
+        if let Some(nonce) = &self.admitted_native_session_nonce {
+            let parsed = uuid::Uuid::parse_str(nonce)
+                .context("admitted native-session nonce is not a UUID")?;
+            anyhow::ensure!(
+                parsed.to_string() == *nonce
+                    && !parsed.is_nil()
+                    && self.registry_artifact_approval.is_some()
+                    && self.operator_fleet_project_root.is_some(),
+                "admitted native-session nonce requires a canonical identity and retained deployment authority"
+            );
         }
         for ids in [&self.dependency_ids, &self.required_card_ids] {
             if ids.windows(2).any(|pair| pair[0] >= pair[1]) {
@@ -3907,6 +4117,27 @@ pub fn validate_execution_trust(
                 extension_id,
                 reason,
             );
+        }
+        let publisher_artifacts = requirements
+            .publisher_module_packages
+            .iter()
+            .filter(|package| package.extension_id == *extension_id)
+            .map(|package| CapturedDependencyArtifact {
+                location: Some(package.location.clone()),
+                version: package.version.clone(),
+                integrity: None,
+            })
+            .collect::<Vec<_>>();
+        if !publisher_artifacts.is_empty() {
+            match match_trust_card_artifact(&card, &publisher_artifacts) {
+                DependencyArtifactMatch::Matched => {}
+                DependencyArtifactMatch::Unverified(detail) => warnings.push(format!(
+                    "publisher module package '{extension_id}' has incomplete artifact inventory at execution admission: {detail}"
+                )),
+                DependencyArtifactMatch::Mismatch(detail) => anyhow::bail!(
+                    "Execution blocked: publisher module package '{extension_id}' trust-card artifact mismatch at execution admission: {detail}"
+                ),
+            }
         }
         if let Some(capture) = &requirements.dependency_capture {
             if let Some(expected) = capture.packages.get(extension_id) {
@@ -4083,7 +4314,8 @@ fn recheck_native_run_controls(
                 )
             })?;
     }
-    crate::runtime::safe_mode::enforce_admitted_run_safe_mode(project_paths.entrypoint())
+    project_paths
+        .enforce_admitted_safe_mode()
         .map_err(|error| NativeRunControlTrigger::new(NativeRunControlKind::SafeMode, error))?;
     if cancelled.load(Ordering::Acquire) {
         return Ok(());
@@ -4326,6 +4558,7 @@ pub struct EngineDispatcher {
     operator_fleet_project_root: Option<PathBuf>,
     preflight_operator_fleet_policy: Option<ActiveFleetPolicy>,
     deployment_activation: Option<crate::runtime::deployment::ActivationRestriction>,
+    admitted_native_session_nonce: Option<String>,
     /// Whether preflight relied on an available authoritative registry. Only
     /// legacy-risky's explicitly skipped preflight may start without one.
     preflight_registry_required: bool,
@@ -6551,8 +6784,9 @@ fn apply_publisher_runtime_authority(
     Ok(())
 }
 
-/// Capture only after the worker's project, trust and fleet-policy rechecks.
-/// Construction drops live filesystem authority before native evaluation.
+/// Prepare source only after the worker's project, trust and fleet-policy
+/// rechecks. Publisher runs consume the authenticated capsule directly; other
+/// frozen runs capture the live project. Neither retains loader disk authority.
 #[cfg(feature = "engine")]
 fn prepare_native_frozen_modules(
     project_paths: &RunProjectPaths,
@@ -6594,17 +6828,32 @@ fn prepare_native_frozen_modules(
             .map_err(|_| "Frozen module entrypoint escapes the admitted project root".to_string())?
             .to_str()
             .ok_or_else(|| "Frozen module entrypoint is not valid UTF-8".to_string())?;
-        let options = GraphOptions {
-            symlink_policy: if contained_symlinks {
-                SymlinkPolicy::Contained
-            } else {
-                SymlinkPolicy::Reject
-            },
-            additional_conditions: orchestrator_config.module_conditions.clone(),
-            ..GraphOptions::default()
+        let graph = if let Some(approval) = publisher_approval {
+            approval
+                .validate_run(
+                    entrypoint,
+                    true,
+                    contained_symlinks,
+                    &orchestrator_config.module_conditions,
+                    expected_graph_hash,
+                )
+                .map_err(|error| format!("Publisher module policy admission failed: {error:#}"))?;
+            approval
+                .revalidate_source_graph()
+                .map_err(|error| format!("Publisher module source admission failed: {error:#}"))?
+        } else {
+            let options = GraphOptions {
+                symlink_policy: if contained_symlinks {
+                    SymlinkPolicy::Contained
+                } else {
+                    SymlinkPolicy::Reject
+                },
+                additional_conditions: orchestrator_config.module_conditions.clone(),
+                ..GraphOptions::default()
+            };
+            capture(root, entrypoint, options)
+                .map_err(|error| format!("Frozen module graph capture failed: {error}"))?
         };
-        let graph = capture(root, entrypoint, options)
-            .map_err(|error| format!("Frozen module graph capture failed: {error}"))?;
         let replay_sources = if capture_replay {
             Some(crate::ops::native_replay::CapturedModuleSources::capture(
                 &graph,
@@ -7125,6 +7374,7 @@ impl Default for EngineDispatcher {
             operator_fleet_project_root: None,
             preflight_operator_fleet_policy: None,
             deployment_activation: None,
+            admitted_native_session_nonce: None,
             preflight_registry_required: true,
             preflight_fleet_policy: None,
             app_args: Vec::new(),
@@ -7369,6 +7619,13 @@ impl EngineDispatcher {
         self
     }
 
+    /// Bind a supervised deployment attempt to its parent's fresh identity.
+    #[must_use]
+    pub fn with_admitted_native_session_nonce(mut self, nonce: Option<String>) -> Self {
+        self.admitted_native_session_nonce = nonce;
+        self
+    }
+
     /// Preserve whether preflight consulted an authoritative registry. A false
     /// value only retains legacy-risky's existing missing/corrupt-state policy;
     /// newly available valid cards are always examined before execution.
@@ -7470,16 +7727,18 @@ impl EngineDispatcher {
                     app_path,
                     &working_dir,
                     self.operator_fleet_project_root.as_deref(),
+                    self.registry_artifact_approval.as_ref(),
                 )?;
                 paths.clone()
             }
-            None => RunProjectPaths::resolve_with_operator_project(
+            None => RunProjectPaths::resolve_with_registry_artifact(
                 app_path,
                 &working_dir,
                 self.operator_fleet_project_root.as_deref(),
+                self.registry_artifact_approval.as_ref(),
             )?,
         };
-        crate::runtime::safe_mode::enforce_run_safe_mode(project_paths.entrypoint())?;
+        project_paths.enforce_safe_mode()?;
         let mut execution_config = config.clone();
         let active_fleet_policy = enforce_execution_fleet_policy_with_operator(
             project_paths.project_root(),
@@ -7573,6 +7832,10 @@ impl EngineDispatcher {
         if let Some(restriction) = &self.deployment_activation {
             trust_requirements =
                 trust_requirements.with_deployment_activation(restriction.clone())?;
+        }
+        if let Some(nonce) = &self.admitted_native_session_nonce {
+            trust_requirements =
+                trust_requirements.with_admitted_native_session_nonce(nonce.clone())?;
         }
         trust_requirements
             .enforce_operator_safe_mode()
@@ -8195,6 +8458,12 @@ impl EngineDispatcher {
             anyhow::bail!("native-session request policy mode does not match its resolved profile");
         }
         request.trust_requirements.validate()?;
+        if let Some(nonce) = &request.trust_requirements.admitted_native_session_nonce {
+            anyhow::ensure!(
+                crate::security::constant_time::ct_eq(nonce, &request.nonce),
+                "native-session request differs from the admitted deployment launch"
+            );
+        }
         request.config.runtime.validate_execution_budget()?;
         request.config.runtime.validate_parse_budget()?;
         request.validate_module_requirements()?;
@@ -8222,6 +8491,10 @@ impl EngineDispatcher {
                     .trust_requirements
                     .operator_fleet_project_root
                     .as_deref(),
+                request
+                    .trust_requirements
+                    .registry_artifact_approval
+                    .as_ref(),
             )
             .context("native-session project authority no longer matches preflight")?;
 
@@ -8350,6 +8623,8 @@ impl EngineDispatcher {
         let capture_replay = request.capture_replay;
         let nonce = request.nonce;
         let effect_wal = NativeEffectWalEmitter::new(nonce.clone(), Box::new(io::stdout()));
+        #[cfg(feature = "test-support")]
+        let effect_wal = effect_wal.with_post_effect_panic_marker(project_paths.entrypoint());
         let spawned = spawn_caught_native_engine_worker(cleanup_for_worker, move || {
             #[cfg(feature = "test-support")]
             inject_test_support_native_engine_panic(project_paths.entrypoint());
@@ -8966,12 +9241,16 @@ impl EngineDispatcher {
             };
             anyhow::Error::new(dispatch_error.to_actionable())
         })?;
-        let nonce = uuid::Uuid::now_v7().to_string();
+        let nonce = trust_requirements
+            .admitted_native_session_nonce
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
         project_paths
             .verify_target_with_operator_project(
                 &app_path_buf,
                 &working_dir,
                 trust_requirements.operator_fleet_project_root.as_deref(),
+                trust_requirements.registry_artifact_approval.as_ref(),
             )
             .context("project authority changed before native-session launch")?;
         trust_requirements
@@ -10944,6 +11223,7 @@ impl EngineDispatcher {
                 app_path,
                 &current_dir,
                 trust_requirements.operator_fleet_project_root.as_deref(),
+                trust_requirements.registry_artifact_approval.as_ref(),
             )
             .map_err(|error| {
                 native_engine_spawn_error_with_telemetry_cleanup(
@@ -10968,14 +11248,12 @@ impl EngineDispatcher {
                 )
             })?;
         // Operator entry may occur while the authenticated worker starts.
-        crate::runtime::safe_mode::enforce_run_safe_mode(project_paths.entrypoint()).map_err(
-            |error| {
-                native_engine_spawn_error_with_telemetry_cleanup(
-                    format!("Native execution safe-mode admission failed: {error:#}"),
-                    &mut telemetry_guard,
-                )
-            },
-        )?;
+        project_paths.enforce_safe_mode().map_err(|error| {
+            native_engine_spawn_error_with_telemetry_cleanup(
+                format!("Native execution safe-mode admission failed: {error:#}"),
+                &mut telemetry_guard,
+            )
+        })?;
         // Worker startup, key provisioning, and telemetry setup can outlive
         // the parent's preflight decision. Read current signed trust state
         // here, on the worker's clock, before loading or executing guest code.
@@ -14534,8 +14812,22 @@ mod tests {
 
         impl PublisherFixture {
             fn new(key_byte: u8, source: &str, with_authority: bool) -> Self {
+                Self::with_modules(key_byte, source, with_authority, &[])
+            }
+
+            fn with_modules(
+                key_byte: u8,
+                source: &str,
+                with_authority: bool,
+                modules: &[(&str, &str)],
+            ) -> Self {
                 let directory = TempDir::new().expect("publisher source workspace");
                 fs::write(directory.path().join("app.cjs"), source).expect("source");
+                for (path, contents) in modules {
+                    let path = directory.path().join(path);
+                    fs::create_dir_all(path.parent().unwrap()).unwrap();
+                    fs::write(path, contents).unwrap();
+                }
                 let graph = capture(directory.path(), "app.cjs", GraphOptions::default())
                     .expect("capture complete source graph");
                 let bytes = capsule::encode(&graph).expect("capsule").bytes().to_vec();
@@ -14693,6 +14985,170 @@ mod tests {
                 .expect("independent authenticated revocation frontier");
             }
             config
+        }
+
+        #[test]
+        fn publisher_directory_admission_and_native_preparation_need_no_live_source() {
+            let source = "console.log(42);\n";
+            let fixture = PublisherFixture::new(42, source, true);
+            let root = fixture.directory.path().canonicalize().unwrap();
+            fs::rename(root.join("app.cjs"), root.join("retained-app.cjs")).unwrap();
+            let paths = RunProjectPaths::resolve_with_registry_artifact(
+                Path::new("."),
+                &root,
+                None,
+                Some(&fixture.approval),
+            )
+            .unwrap();
+            assert_eq!(paths.project_root(), root);
+            assert_eq!(paths.entrypoint(), root.join("app.cjs"));
+            let expected_hash = artifact_sha256(source.as_bytes());
+            assert_eq!(
+                paths.publisher_entrypoint_sha256(),
+                Some(expected_hash.as_str())
+            );
+            paths.enforce_safe_mode().unwrap();
+            paths
+                .verify_target_with_operator_project(
+                    Path::new("."),
+                    &root,
+                    None,
+                    Some(&fixture.approval),
+                )
+                .unwrap();
+            assert!(
+                paths
+                    .verify_target_with_operator_project(Path::new("."), &root, None, None)
+                    .is_err()
+            );
+
+            let config = Config::for_profile(Profile::Balanced);
+            let orchestrator = EngineDispatcher::map_config_to_orchestrator_config(&config);
+            let capabilities = EngineDispatcher::map_profile_to_capabilities(Profile::Balanced);
+            let prepared = prepare_native_frozen_modules(
+                &paths,
+                &orchestrator,
+                &capabilities,
+                false,
+                true,
+                None,
+                Some(&fixture.approval),
+            )
+            .unwrap();
+            assert_eq!(prepared.entry.module.record.source, source);
+            assert_eq!(
+                prepared.summary.graph_input_hash,
+                fixture.approval.graph_input_hash()
+            );
+            assert!(prepared.replay_sources.is_some());
+
+            fs::write(
+                root.join("app.cjs"),
+                "throw new Error('unsigned replacement');\n",
+            )
+            .unwrap();
+            paths
+                .verify_target_with_operator_project(
+                    Path::new("."),
+                    &root,
+                    None,
+                    Some(&fixture.approval),
+                )
+                .unwrap();
+            let prepared = prepare_native_frozen_modules(
+                &paths,
+                &orchestrator,
+                &capabilities,
+                false,
+                false,
+                None,
+                Some(&fixture.approval),
+            )
+            .unwrap();
+            assert_eq!(prepared.entry.module.record.source, source);
+        }
+
+        #[test]
+        fn publisher_module_trust_survives_missing_metadata_and_refuses_omission() {
+            let fixture = PublisherFixture::with_modules(
+                42,
+                "console.log(require('alias'));\n",
+                false,
+                &[
+                    (
+                        "node_modules/alias/package.json",
+                        r#"{"name":"fixture-actual","version":"1.0.0","main":"index.cjs"}"#,
+                    ),
+                    ("node_modules/alias/index.cjs", "module.exports = 42;\n"),
+                ],
+            );
+            let root = fixture.directory.path();
+            fs::rename(root.join("node_modules"), root.join("retained-modules")).unwrap();
+            let mut config =
+                seed_execution_trust_artifact_registry(root, Utc::now().timestamp().max(0) as u64);
+            config.runtime.frozen_modules = Some(true);
+            let requirements = RunTrustRequirements::new(&[], &[], false)
+                .unwrap()
+                .with_registry_artifact_approval(fixture.approval.clone())
+                .unwrap();
+            assert_eq!(requirements.dependency_ids, ["npm:fixture-actual"]);
+            assert_eq!(
+                requirements.publisher_module_packages[0].version.as_deref(),
+                Some("1.0.0")
+            );
+            let paths = RunProjectPaths::resolve_with_registry_artifact(
+                Path::new("."),
+                root,
+                None,
+                Some(&fixture.approval),
+            )
+            .unwrap();
+            requirements
+                .verify_registry_artifact(&paths, &config)
+                .unwrap();
+            let mut omitted = requirements.clone();
+            omitted.dependency_ids.clear();
+            assert!(omitted.validate().is_err());
+            omitted.publisher_module_packages.clear();
+            assert!(omitted.verify_registry_artifact(&paths, &config).is_err());
+
+            let now = Utc::now().timestamp().max(0) as u64;
+            validate_execution_trust(root, &config, &requirements, now).unwrap();
+            let path = registry_snapshot_path(root);
+            let mut registry = TrustCardRegistry::load_authoritative_state_from_config(
+                &path,
+                &config.trust,
+                now,
+                SnapshotSourceContext::TrustedFile,
+            )
+            .unwrap();
+            registry
+                .update(
+                    "npm:fixture-actual",
+                    TrustCardMutation {
+                        certification_level: None,
+                        revocation_status: Some(RevocationStatus::Revoked {
+                            reason: "operator revoked the captured module".into(),
+                            revoked_at: "2026-11-11T00:00:00Z".into(),
+                        }),
+                        active_quarantine: Some(true),
+                        reputation_score_basis_points: None,
+                        reputation_trend: None,
+                        user_facing_risk_assessment: None,
+                        last_verified_timestamp: None,
+                        evidence_refs: None,
+                    },
+                    now,
+                    "publisher-module-revocation",
+                )
+                .unwrap();
+            registry.persist_authoritative_state(&path).unwrap();
+            for profile in [Profile::Strict, Profile::Balanced, Profile::LegacyRisky] {
+                config.profile = profile;
+                let error =
+                    validate_execution_trust(root, &config, &requirements, now).unwrap_err();
+                assert!(error.to_string().contains("was revoked"), "{error:#}");
+            }
         }
 
         fn revoke(root: &Path, config: &Config, target: ExecutionRevocationTarget, now: u64) {
@@ -22786,6 +23242,7 @@ exec "$2" pinned-worker-image"#,
                 project_root: PathBuf::from("/tmp/native-session-frame"),
                 entrypoint_format: RunEntrypointFormat::CommonJs,
                 package_manifests: Vec::new(),
+                publisher_source: None,
             },
             trust_requirements: RunTrustRequirements::new(
                 &["npm:untracked".to_string(), "npm:trusted".to_string()],

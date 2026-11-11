@@ -338,6 +338,11 @@ pub struct RunArgs {
     #[arg(long, hide = true)]
     pub admitted_operator_project: Option<PathBuf>,
 
+    /// Parent-selected identity for this supervised native execution attempt.
+    /// Internal handoff: binds signed outcomes and grants no execution authority.
+    #[arg(long, hide = true)]
+    pub admitted_native_session_nonce: Option<String>,
+
     /// Exact activation restriction captured by the deployment supervisor.
     /// Internal handoff: this can retire a run but grants no execution authority.
     #[arg(long, hide = true)]
@@ -472,6 +477,17 @@ impl RunArgs {
             anyhow::ensure!(
                 project.is_absolute(),
                 "an admitted operator project requires an absolute project path"
+            );
+        }
+        if let Some(nonce) = &self.admitted_native_session_nonce {
+            let parsed = uuid::Uuid::parse_str(nonce)
+                .context("admitted native-session nonce is not a UUID")?;
+            anyhow::ensure!(
+                parsed.to_string() == *nonce
+                    && !parsed.is_nil()
+                    && self.admitted_config_sha256.is_some()
+                    && self.admitted_operator_project.is_some(),
+                "an admitted native-session nonce requires a canonical nonnil identity, deployment commitments and an operator project"
             );
         }
         if let Some(restriction) = &self.admitted_deployment_activation {
@@ -1890,7 +1906,9 @@ pub struct TrustGraphArgs {
 
 #[derive(Debug, Parser)]
 pub struct TrustReleaseArgs {
-    /// Path to the previously quarantined run target (entry file).
+    /// Path to the previously quarantined run target. With --registry-artifact,
+    /// an existing project directory can select the capsule's entrypoint even
+    /// when its installed source files are absent or changed.
     /// Required by the handler (not clap) so `--json` failures emit
     /// `franken-node/trust-release-error/v1` instead of a human clap error.
     #[arg(long, default_value = "", value_parser = parse_handler_required_pathbuf)]
@@ -1900,6 +1918,17 @@ pub struct TrustReleaseArgs {
     /// released. Mutually exclusive with --app; fleet owners remain active.
     #[arg(long)]
     pub artifact: Option<String>,
+
+    /// Publisher-signed source capsule manifest for an --app release. Requires
+    /// --publisher-public-key; the artifact's exact entry bytes identify the
+    /// quarantined subject without executing them.
+    #[arg(long)]
+    pub registry_artifact: Option<PathBuf>,
+
+    /// Independently retained publisher key outside the guest project. Paired
+    /// with --registry-artifact and only available for --app releases.
+    #[arg(long)]
+    pub publisher_public_key: Option<PathBuf>,
 
     /// Operator identity recorded on the release.
     /// Required by the handler (not clap) so `--json` failures emit
@@ -1919,6 +1948,29 @@ pub struct TrustReleaseArgs {
     /// `franken-node/trust-release-error/v1` then exit 1.
     #[arg(long)]
     pub json: bool,
+}
+
+impl TrustReleaseArgs {
+    /// Handler validation preserves structured --json errors for invalid
+    /// combinations, as for the existing required release arguments.
+    pub fn validate_source_approval(&self) -> Result<()> {
+        anyhow::ensure!(
+            self.registry_artifact.is_some() == self.publisher_public_key.is_some(),
+            "--registry-artifact and --publisher-public-key must be supplied together"
+        );
+        anyhow::ensure!(
+            self.registry_artifact.is_none()
+                || (!self.app.as_os_str().is_empty() && self.artifact.is_none()),
+            "publisher source approval is only valid with --app"
+        );
+        for path in [&self.registry_artifact, &self.publisher_public_key]
+            .into_iter()
+            .flatten()
+        {
+            validate_system_binary_pathbuf(path)?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Parser)]
@@ -4019,6 +4071,73 @@ mod parser_contract_extra_tests {
     }
 
     #[test]
+    fn trust_release_accepts_capsule_subject_and_refuses_partial_or_artifact_bindings() {
+        let base = [
+            "franken-node",
+            "trust",
+            "release",
+            "--operator-id",
+            "operator",
+            "--reason",
+            "remediated",
+            "--json",
+        ];
+        for (tail, valid) in [
+            (
+                vec![
+                    "--app",
+                    ".",
+                    "--registry-artifact",
+                    "publication.json",
+                    "--publisher-public-key",
+                    "/operator/publisher.pub",
+                ],
+                true,
+            ),
+            (
+                vec!["--app", ".", "--registry-artifact", "publication.json"],
+                false,
+            ),
+            (
+                vec![
+                    "--app",
+                    ".",
+                    "--publisher-public-key",
+                    "/operator/publisher.pub",
+                ],
+                false,
+            ),
+            (
+                vec![
+                    "--registry-artifact",
+                    "publication.json",
+                    "--publisher-public-key",
+                    "/operator/publisher.pub",
+                ],
+                false,
+            ),
+            (
+                vec![
+                    "--artifact",
+                    "npm:example",
+                    "--registry-artifact",
+                    "publication.json",
+                    "--publisher-public-key",
+                    "/operator/publisher.pub",
+                ],
+                false,
+            ),
+        ] {
+            let cli = <Cli as clap::Parser>::try_parse_from(base.into_iter().chain(tail))
+                .expect("handler reports structured errors");
+            let Command::Trust(TrustCommand::Release(args)) = cli.command else {
+                panic!("expected release");
+            };
+            assert_eq!(args.validate_source_approval().is_ok(), valid);
+        }
+    }
+
+    #[test]
     fn trust_quarantine_parses_without_artifact_so_json_can_fail_closed() {
         let cli = <Cli as clap::Parser>::try_parse_from([
             "franken-node",
@@ -4177,6 +4296,39 @@ mod parser_contract_extra_tests {
             args.admitted_operator_project.as_deref(),
             Some(Path::new("/operator"))
         );
+        let nonce = "65e04f98-7ae6-4053-91f2-adbe7d6b07b3";
+        let mut bound = scoped.clone();
+        bound.extend(["--admitted-native-session-nonce", nonce]);
+        let Command::Run(args) = parse(&bound).map_err(|error| error.to_string())?.command else {
+            return Err("expected launch-bound admitted run".to_string());
+        };
+        args.validate_paths().map_err(|error| error.to_string())?;
+        assert_eq!(args.admitted_native_session_nonce.as_deref(), Some(nonce));
+        for invalid in [
+            "",
+            "not-a-uuid",
+            "00000000-0000-0000-0000-000000000000",
+            "65E04F98-7AE6-4053-91F2-ADBE7D6B07B3",
+        ] {
+            let mut command = scoped.clone();
+            command.extend(["--admitted-native-session-nonce", invalid]);
+            let Command::Run(args) = parse(&command).map_err(|error| error.to_string())?.command
+            else {
+                return Err("expected invalid native-session nonce run".to_string());
+            };
+            assert!(args.validate_paths().is_err(), "invalid nonce {invalid:?}");
+        }
+        for mut command in [
+            base.clone(),
+            vec!["franken-node", "run", "app.js"],
+        ] {
+            command.extend(["--admitted-native-session-nonce", nonce]);
+            let Command::Run(args) = parse(&command).map_err(|error| error.to_string())?.command
+            else {
+                return Err("expected unbound native-session nonce run".to_string());
+            };
+            assert!(args.validate_paths().is_err());
+        }
         for project in ["/operator", "relative/operator"] {
             let mut unanchored = base.clone();
             unanchored.extend(["--admitted-operator-project", project]);

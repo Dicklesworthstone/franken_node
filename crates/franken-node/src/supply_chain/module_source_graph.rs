@@ -319,6 +319,21 @@ impl CapturedModuleGraph {
             _ => None,
         }
     }
+
+    /// Package identity observations retained by this same immutable capture.
+    /// Consumers can apply current trust policy without reopening manifests or
+    /// trusting an unrelated installed dependency inventory.
+    pub fn captured_package_manifests(&self) -> impl Iterator<Item = (&str, &[u8])> {
+        self.inputs.iter().filter_map(|(path, entry)| {
+            if path != "package.json" && !path.ends_with("/package.json") {
+                return None;
+            }
+            match entry.as_ref() {
+                Entry::File { bytes, .. } => Some((path.as_str(), bytes.as_slice())),
+                _ => None,
+            }
+        })
+    }
 }
 
 #[derive(Default)]

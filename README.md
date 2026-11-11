@@ -4437,13 +4437,53 @@ one pass.
   project**; an embedded key cannot approve itself. The registry artifact must
   be a complete `FNSGCAP1` source capsule within the registry's 5 MiB artifact
   limit. Both the dispatcher and its authenticated native worker reverify the
-  exact retained manifest and capsule using this external key. The worker then
-  checks the live graph against that signed content and executes its single
-  immutable capture. Changed entry/dependency bytes, observed manifests or
-  probes are refused before evaluation. The entrypoint, additional conditions
+  exact retained manifest and capsule using this external key. The worker
+  passes that verified in-memory graph directly to the native resolver;
+  installed module files are not recaptured or used as a fallback. Replacing
+  installed source cannot change the program selected by the signed capsule.
+  The entrypoint, additional conditions
   and contained-symlink policy must match the capsule, and an explicit
   `--frozen-module-graph-hash` must agree with it. Manifest, artifact and key
   reads are bounded and reject symlinks in every path component.
+
+  Select the project directory explicitly to run a capsule whose original source
+  files or source directories are no longer installed:
+
+  ```sh
+  franken-node run . --frozen-modules \
+    --registry-artifact /registry/path/artifact.manifest.json \
+    --publisher-public-key /operator/publisher.pub --capture-replay --json
+  ```
+
+  The existing directory remains the authority for current configuration,
+  dependency trust, fleet controls and guest filesystem effects. Its signed
+  capsule selects the entrypoint and module bytes, including CommonJS/ESM
+  format and recorded optional-module failures. File targets retain ordinary
+  installed-path resolution; use the directory form for source-free execution.
+  Safe mode checks both the selected and resolved logical source ancestry.
+  Sentinel quarantine hashes the actual authenticated entry source even when
+  its disk file is absent or different.
+
+  To release that same quarantined capsule after remediation, use its signed
+  source approval again. The release records the operator and reason without
+  executing the capsule or changing its source identity:
+
+  ```sh
+  franken-node trust release --app . \
+    --registry-artifact /registry/path/artifact.manifest.json \
+    --publisher-public-key /operator/publisher.pub \
+    --operator-id oncall --reason 'Reviewed and remediated the finding' --json
+  ```
+
+  Package names, placements and observed versions from the signed module
+  closure are included in execution trust checks and rederived by the worker.
+  Removing a live dependency declaration cannot remove those package identities
+  from revocation or quarantine checks. Alias packages retain their signed
+  package name, and observed versions are checked against current trust cards.
+  This source binding does not assert npm tarball integrity. Live dependency
+  metadata checks and current operator/publisher capability ceilings still apply.
+  Deployment installation and activation retain their separate live release
+  graph verification; this directory mode does not make deployments source-free.
 
   Native-enabled builds also export and admit capsules containing supported Node
   builtins and captured failures for optional `require()` or `import()` requests.
@@ -4451,7 +4491,9 @@ one pass.
   loader. The source report retains `fully_resolved: false`; successful explicit
   export adds `capsule_closure_verified: true`. Missing static imports, unknown
   builtin providers and unbounded computed loads remain refused. A dependency
-  that appears after capture changes the graph pin and requires new approval.
+  that appears on disk after capture does not change a sealed optional failure;
+  executing it requires a newly approved capsule. Plain frozen runs without a
+  publisher capsule continue to capture live source and check any operator pin.
   Capsule admission grants no capabilities and does not replace the worker's
   source preparation or current policy checks.
 
@@ -4744,10 +4786,11 @@ records the immutable session nonce and original observation time in the
 resolved project root's controller; the controller's `crash_loop_threshold`
 and `crash_loop_window_secs` configure those defaults. Guest exceptions,
 timeouts, and generic worker exits do not contribute to this panic count.
-These are parent-observed panic records; the separately signed session-key
-capture does not sign the panic outcome itself. A plain `run` performs
-containment only. Under `franken-node deploy`, the same validated crash-loop
-observation drives a signed recovery to an earlier release (below).
+These are parent-observed panic records. The local safe-mode counter supplies
+containment state; independent recovery evidence comes from the protected
+signed admission and outcome receipts. A plain `run` performs containment only.
+Under `franken-node deploy`, authenticated individual panic observations can
+drive a signed recovery to an earlier release (below).
 
 #### Deployments and crash-loop recovery to a known-good release
 
@@ -4801,15 +4844,32 @@ record and readiness remain intact.
   child startup fails closed. Release configuration uses the admitted file
   and its selected profile block; the supervisor's `FRANKEN_NODE_*` and
   `FRANKEN_ENGINE_*` environment overrides are not inherited. A
-  healthy run (exit 0 with a signed receipt) records readiness for the
-  release. When the run ends in a validated native engine panic that completes
+  healthy run requires exit 0 and an independently authenticated completed
+  native outcome before it records readiness for the release. Each child is
+  bound to a fresh parent-selected session nonce. The supervisor verifies both
+  admission and outcome receipts under the protected runtime root, including
+  the exact release, entrypoint and operator scope. Missing, substituted or
+  contradictory records cannot establish health or trigger recovery. JSON
+  reports retain this check under `observation_authentication`; the child's
+  ordinary stdout remains diagnostic input.
+
+  Every authenticated panic is retained in the release's signed health history.
+  Crash-window counts use those individual observations and their original
+  timestamps; unsigned child counters and edited local crash history cannot
+  supply additional panics. Repeated nonces cannot inflate the count, clock
+  rollback fails closed, and expired panics do not count toward the current
+  window. The operator's configured threshold and window are retained before
+  each launch; deployment thresholds are bounded to 511 observations, leaving
+  room for a threshold-crossing record in the 512-event health store.
+  When an authenticated native engine panic completes
   a crash loop, the supervisor marks the release `crash_looped` and applies the
   policy. `rollback` selects the newest previously activated release that ran
   healthy, never crash-looped, and still verifies. It then appends a
   `crash_loop_rollback` activation; with `--restart automatic` it starts that
   release once immediately. `--json` emits `franken-node/deploy-run-cli/v1`
   with `phase` = `healthy`, `failed`, `crashed`, `contained`,
-  `contained_no_known_good`, `rolled_back`, `resumed_healthy` or
+  `contained_no_known_good`, `contained_effects_indeterminate`, `rolled_back`,
+  `resumed_healthy` or
   `resume_failed`, plus the signed `recovery` record (including every refused
   candidate and why). Before an automatic restart, the supervisor rechecks the
   exact activation, current restart policy, operator safe mode and release
@@ -4818,6 +4878,17 @@ record and readiness remain intact.
   If an operator changes the activation while a release is crashing, the
   supervisor retains that release's crash mark and reports
   `contained_activation_changed` without replacing the operator's choice.
+
+  Recovery also retains effect uncertainty. An authenticated panic with any
+  admitted host effect, incomplete cleanup, or process-spawn authority cannot
+  authorize automatic rollback or restart. It reports
+  `contained_effects_indeterminate` and leaves the activation unchanged.
+  A no-effects panic requires the parent's fully reconciled empty host-effect
+  WAL, successful cleanup, a reaped worker and no process-spawn authority.
+  An earlier indeterminate observation remains a blocker even after leaving the
+  crash-counting window; a later clean panic cannot erase it. Known-good
+  selection, interrupted rollback reconciliation and the final restart gate
+  also reject releases with retained indeterminate panic effects.
 - `deploy status <name> [--json]` shows the policy, the activation chain,
   each release's readiness and crash-loop marks, and every committed recovery.
   An interrupted signed transition remains inspectable as `pending_activation`,

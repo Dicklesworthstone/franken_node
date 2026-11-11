@@ -477,6 +477,43 @@ pub fn write_new_source_capsule(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// Package identities observed in the authenticated module closure. A version
+/// is signed package metadata; it is not a tarball integrity attestation.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PublisherModulePackage {
+    pub extension_id: String,
+    pub location: String,
+    pub version: Option<String>,
+}
+
+impl PublisherModulePackage {
+    pub fn validate(&self) -> Result<()> {
+        let name = self
+            .extension_id
+            .strip_prefix("npm:")
+            .context("publisher module package is not an npm identity")?;
+        super::module_resolution_graph::validate_package_name(name)?;
+        anyhow::ensure!(
+            !self.location.is_empty()
+                && self.location.len() <= 4096
+                && !self.location.chars().any(char::is_control)
+                && self
+                    .location
+                    .split('/')
+                    .all(|part| !matches!(part, "" | "." | ".."))
+                && !self.location.contains(['\\', ':'])
+                && self.version.as_ref().is_none_or(|version| {
+                    !version.is_empty()
+                        && version.len() <= 128
+                        && !version.chars().any(char::is_control)
+                }),
+            "publisher module package has invalid placement metadata"
+        );
+        Ok(())
+    }
+}
+
 /// Small immutable handoff through the authenticated native worker channel.
 /// Capsule contents remain in the registry artifact, not in the control frame.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -502,65 +539,199 @@ impl PublisherSourceGraphApproval {
         }
         #[cfg(unix)]
         {
-            #[cfg(feature = "engine")]
-            use super::module_resolution_graph::file_resolution::source_graph::engine_resolver::CapturedEngineResolver;
-            use super::module_resolution_graph::file_resolution::{
-                SymlinkPolicy, source_graph::capsule,
-            };
-            let manifest_path = absolute_artifact_path(manifest_path)?;
-            let manifest_bytes = read_artifact_file(&manifest_path, MAX_ARTIFACT_BYTES)?;
-            let manifest: LocalRegistryArtifactManifest =
-                serde_json::from_slice(&manifest_bytes)
-                    .context("invalid local registry artifact manifest")?;
-            anyhow::ensure!(
-                artifact_file_name_is_safe(&manifest.artifact_file_name),
-                "registry artifact file name is unsafe"
-            );
-            let bytes = read_artifact_file(
-                &manifest_path.with_file_name(&manifest.artifact_file_name),
-                MAX_ARTIFACT_BYTES,
-            )?;
-            let identity = verify_artifact_bytes(&manifest, &bytes, Some(trusted_publisher))?;
-            // This digest is safe to derive here because the external publisher
-            // signature has already authenticated the raw artifact SHA-256.
-            let capsule_digest = capsule::digest(&bytes);
-            let graph = capsule::replay(&bytes, &capsule_digest)
-                .context("registry artifact is not a valid module source capsule")?;
-            let report = graph.report();
-            // A closed native graph can contain source-free builtin providers
-            // and sealed, catchable failures for optional dependencies. Those
-            // observations deliberately leave `fully_resolved` false. Use the
-            // same closure admission as execution instead of rejecting useful
-            // signed packages or maintaining a second provider allowlist here.
-            // This performs no source normalization and grants no capabilities;
-            // the worker still prepares this graph with its current parser and
-            // policy limits before evaluation.
-            #[cfg(feature = "engine")]
-            CapturedEngineResolver::validate_source_closure(&graph, &report.input_hash)
-                .context("registry source capsule is not admitted by the native module resolver")?;
-            #[cfg(not(feature = "engine"))]
-            anyhow::ensure!(
-                report.fully_resolved,
-                "registry source capsule requires native engine closure admission"
-            );
-            anyhow::ensure!(
-                report.options.conditions.is_none(),
-                "registry source capsule overrides the native import/require conditions"
-            );
-            let approval = Self {
-                manifest_path,
-                manifest_sha256: artifact_sha256(&manifest_bytes),
-                publisher_public_key_hex: hex::encode(trusted_publisher.as_bytes()),
-                identity,
-                capsule_digest,
-                graph_input_hash: report.input_hash.clone(),
-                entrypoint: report.entrypoint.clone(),
-                additional_conditions: report.options.additional_conditions.clone(),
-                contained_symlinks: report.options.symlink_policy == SymlinkPolicy::Contained,
-            };
-            approval.validate()?;
-            Ok(approval)
+            Self::load_source_graph(manifest_path, trusted_publisher).map(|(approval, _)| approval)
         }
+    }
+
+    #[cfg(unix)]
+    fn load_source_graph(
+        manifest_path: &Path,
+        trusted_publisher: &VerifyingKey,
+    ) -> Result<(
+        Self,
+        super::module_resolution_graph::file_resolution::source_graph::CapturedModuleGraph,
+    )> {
+        #[cfg(feature = "engine")]
+        use super::module_resolution_graph::file_resolution::source_graph::engine_resolver::CapturedEngineResolver;
+        use super::module_resolution_graph::file_resolution::{
+            SymlinkPolicy, source_graph::capsule,
+        };
+        let manifest_path = absolute_artifact_path(manifest_path)?;
+        let manifest_bytes = read_artifact_file(&manifest_path, MAX_ARTIFACT_BYTES)?;
+        let manifest: LocalRegistryArtifactManifest = serde_json::from_slice(&manifest_bytes)
+            .context("invalid local registry artifact manifest")?;
+        anyhow::ensure!(
+            artifact_file_name_is_safe(&manifest.artifact_file_name),
+            "registry artifact file name is unsafe"
+        );
+        let bytes = read_artifact_file(
+            &manifest_path.with_file_name(&manifest.artifact_file_name),
+            MAX_ARTIFACT_BYTES,
+        )?;
+        let identity = verify_artifact_bytes(&manifest, &bytes, Some(trusted_publisher))?;
+        // This digest is safe to derive here because the external publisher
+        // signature has already authenticated the raw artifact SHA-256.
+        let capsule_digest = capsule::digest(&bytes);
+        let graph = capsule::replay(&bytes, &capsule_digest)
+            .context("registry artifact is not a valid module source capsule")?;
+        let report = graph.report();
+        // A closed native graph can contain source-free builtin providers
+        // and sealed, catchable failures for optional dependencies. Those
+        // observations deliberately leave `fully_resolved` false. Use the
+        // same closure admission as execution instead of rejecting useful
+        // signed packages or maintaining a second provider allowlist here.
+        // This performs no source normalization and grants no capabilities;
+        // the worker still prepares this graph with its current parser and
+        // policy limits before evaluation.
+        #[cfg(feature = "engine")]
+        CapturedEngineResolver::validate_source_closure(&graph, &report.input_hash)
+            .context("registry source capsule is not admitted by the native module resolver")?;
+        #[cfg(not(feature = "engine"))]
+        anyhow::ensure!(
+            report.fully_resolved,
+            "registry source capsule requires native engine closure admission"
+        );
+        anyhow::ensure!(
+            report.options.conditions.is_none(),
+            "registry source capsule overrides the native import/require conditions"
+        );
+        let approval = Self {
+            manifest_path,
+            manifest_sha256: artifact_sha256(&manifest_bytes),
+            publisher_public_key_hex: hex::encode(trusted_publisher.as_bytes()),
+            identity,
+            capsule_digest,
+            graph_input_hash: report.input_hash.clone(),
+            entrypoint: report.entrypoint.clone(),
+            additional_conditions: report.options.additional_conditions.clone(),
+            contained_symlinks: report.options.symlink_policy == SymlinkPolicy::Contained,
+        };
+        approval.validate()?;
+        Ok((approval, graph))
+    }
+
+    pub fn entrypoint(&self) -> &str {
+        &self.entrypoint
+    }
+
+    /// Retain the names and versions of packages actually represented by the
+    /// authenticated closure, independently of mutable installation metadata.
+    /// Current trust cards can then revoke or quarantine those same identities
+    /// even when the installation no longer declares their dependencies.
+    pub fn module_packages(&self) -> Result<Vec<PublisherModulePackage>> {
+        #[cfg(not(unix))]
+        anyhow::bail!("registry source admission requires Unix");
+        #[cfg(unix)]
+        {
+            let graph = self.revalidate_source_graph()?;
+            Self::captured_module_packages(&graph)
+        }
+    }
+
+    #[cfg(unix)]
+    fn captured_module_packages(
+        graph: &super::module_resolution_graph::file_resolution::source_graph::CapturedModuleGraph,
+    ) -> Result<Vec<PublisherModulePackage>> {
+        use std::collections::{BTreeMap, BTreeSet};
+        let manifests = graph
+            .captured_package_manifests()
+            .collect::<BTreeMap<_, _>>();
+        let mut locations = BTreeMap::<String, Option<String>>::new();
+        for module in &graph.report().modules {
+            let components = module.id.path.split('/').collect::<Vec<_>>();
+            // The innermost placement owns this module. Outer node_modules
+            // segments can be package-manager stores (for example .pnpm), not
+            // package identities; another loaded parent has its own module.
+            if let Some(index) = components.iter().rposition(|part| *part == "node_modules") {
+                if index + 1 >= components.len() {
+                    continue;
+                }
+                let end = index
+                    + if components[index + 1].starts_with('@') {
+                        3
+                    } else {
+                        2
+                    };
+                anyhow::ensure!(
+                    end <= components.len(),
+                    "invalid captured package placement"
+                );
+                locations.insert(
+                    components[..end].join("/"),
+                    Some(components[index + 1..end].join("/")),
+                );
+                anyhow::ensure!(
+                    locations.len() <= 4096,
+                    "publisher module packages exceed the placement bound"
+                );
+            }
+        }
+        // Workspace and relative package imports can have no node_modules
+        // placement. Their captured named package scopes still carry identity.
+        for path in manifests.keys() {
+            if let Some(directory) = path.strip_suffix("/package.json")
+                && graph.report().modules.iter().any(|module| {
+                    module
+                        .id
+                        .path
+                        .strip_prefix(directory)
+                        .is_some_and(|tail| tail.starts_with('/'))
+                })
+            {
+                locations.entry(directory.to_owned()).or_default();
+                anyhow::ensure!(
+                    locations.len() <= 4096,
+                    "publisher module packages exceed the placement bound"
+                );
+            }
+        }
+        let mut packages = BTreeSet::new();
+        for (location, placement_name) in locations {
+            let manifest = manifests
+                .get(format!("{location}/package.json").as_str())
+                .map(|bytes| {
+                    serde_json::from_slice::<serde_json::Value>(
+                        bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes),
+                    )
+                })
+                .transpose()
+                .context("invalid captured package identity manifest")?;
+            let name = manifest.as_ref().and_then(|value| value.get("name"));
+            let name = match name {
+                Some(value) => Some(
+                    value
+                        .as_str()
+                        .context("captured package name is not a string")?,
+                ),
+                None => placement_name.as_deref(),
+            };
+            let Some(name) = name else {
+                continue;
+            };
+            let version = manifest
+                .as_ref()
+                .and_then(|value| value.get("version"))
+                .map(|value| {
+                    value
+                        .as_str()
+                        .context("captured package version is not a string")
+                })
+                .transpose()?
+                .map(str::to_owned);
+            let package = PublisherModulePackage {
+                extension_id: format!("npm:{name}"),
+                location,
+                version,
+            };
+            package.validate()?;
+            packages.insert(package);
+        }
+        let packages = packages.into_iter().collect::<Vec<_>>();
+        anyhow::ensure!(
+            serde_json::to_vec(&packages)?.len() <= 2 * 1024 * 1024,
+            "publisher module packages exceed the metadata bound"
+        );
+        Ok(packages)
     }
 
     pub fn graph_input_hash(&self) -> &str {
@@ -639,18 +810,33 @@ impl PublisherSourceGraphApproval {
     /// Reauthenticate the exact parent-approved envelope and capsule; another
     /// valid artifact signed by the same publisher is not an interchangeable run.
     pub fn revalidate(&self) -> Result<()> {
+        #[cfg(not(unix))]
+        anyhow::bail!("registry source admission requires Unix");
+        #[cfg(unix)]
+        self.revalidate_source_graph().map(|_| ())
+    }
+
+    /// Reauthenticate and return the exact immutable source owner used by the
+    /// native resolver. No live project files are recaptured after this check.
+    /// Another valid publisher artifact cannot replace the retained admission.
+    #[cfg(unix)]
+    pub fn revalidate_source_graph(
+        &self,
+    ) -> Result<super::module_resolution_graph::file_resolution::source_graph::CapturedModuleGraph>
+    {
         self.validate()?;
         let bytes = hex::decode(&self.publisher_public_key_hex)?;
         let key: [u8; 32] = bytes
             .as_slice()
             .try_into()
             .context("invalid retained publisher key")?;
-        let observed = Self::load(&self.manifest_path, &VerifyingKey::from_bytes(&key)?)?;
+        let (observed, graph) =
+            Self::load_source_graph(&self.manifest_path, &VerifyingKey::from_bytes(&key)?)?;
         anyhow::ensure!(
             &observed == self,
             "registry artifact changed after publisher admission"
         );
-        Ok(())
+        Ok(graph)
     }
 
     pub fn validate_run(
@@ -748,9 +934,18 @@ mod tests {
         }
 
         fn with_entrypoint(entrypoint: &str, source: &str) -> Self {
+            Self::with_modules(entrypoint, source, &[])
+        }
+
+        fn with_modules(entrypoint: &str, source: &str, modules: &[(&str, &str)]) -> Self {
             let directory = tempfile::tempdir().unwrap();
             std::fs::write(directory.path().join(entrypoint), source).unwrap();
             std::fs::write(directory.path().join("side.cjs"), "module.exports = 42;\n").unwrap();
+            for (path, contents) in modules {
+                let path = directory.path().join(path);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, contents).unwrap();
+            }
             let graph = capture(directory.path(), entrypoint, GraphOptions::default()).unwrap();
             let graph_hash = graph.report().input_hash.clone();
             let bytes = capsule::encode(&graph).unwrap().bytes().to_vec();
@@ -1573,6 +1768,93 @@ mod tests {
     }
 
     #[test]
+    fn authenticated_source_owner_ignores_absent_replaced_and_symlinked_live_sources() {
+        let source = "console.log(require('./side.cjs'));\n";
+        let fixture = Fixture::new(source);
+        let approval = fixture.approval();
+        for path in ["app.cjs", "side.cjs"] {
+            std::fs::rename(
+                fixture.directory.path().join(path),
+                fixture.directory.path().join(format!("retained-{path}")),
+            )
+            .unwrap();
+        }
+        let assert_original = |graph: &super::super::module_resolution_graph::file_resolution::source_graph::CapturedModuleGraph| {
+            assert_eq!(graph.report().input_hash, fixture.graph_hash);
+            assert_eq!(
+                graph.source_bytes(&graph.report().resolved_entrypoint),
+                Some(source.as_bytes())
+            );
+            let dependency = graph.report().modules.iter()
+                .find(|module| module.id.path == "side.cjs")
+                .expect("signed dependency remains in the source owner");
+            assert_eq!(graph.source_bytes(&dependency.id), Some(b"module.exports = 42;\n".as_slice()));
+        };
+        let retained = approval.revalidate_source_graph().unwrap();
+        assert_original(&retained);
+        std::fs::write(fixture.directory.path().join("side.cjs"), "module.exports = 9001;\n")
+            .unwrap();
+        let foreign = tempfile::tempdir().unwrap();
+        let foreign_entry = foreign.path().join("unsigned.cjs");
+        std::fs::write(&foreign_entry, "throw new Error('unsigned replacement');\n").unwrap();
+        std::os::unix::fs::symlink(&foreign_entry, fixture.directory.path().join("app.cjs"))
+            .unwrap();
+        assert_original(&approval.revalidate_source_graph().unwrap());
+
+        // Losing or corrupting the authenticated capsule must never cause a
+        // fallback to the installed source tree. An already returned owner
+        // continues to contain the exact bytes that were authenticated.
+        let capsule_path = fixture.directory.path().join(&fixture.manifest.artifact_file_name);
+        std::fs::rename(&capsule_path, capsule_path.with_extension("retained-capsule")).unwrap();
+        assert!(approval.revalidate_source_graph().is_err());
+        std::fs::write(&capsule_path, b"substituted capsule").unwrap();
+        let error = approval.revalidate_source_graph().err().expect("artifact hash refusal");
+        assert!(error.to_string().contains("artifact hash mismatch"), "{error:#}");
+        assert_original(&retained);
+    }
+
+    #[test]
+    fn capsule_module_packages_retain_alias_identity_and_version_without_live_metadata() {
+        let fixture = Fixture::with_modules(
+            "app.cjs",
+            "console.log(require('alias'));\n",
+            &[
+                ("package.json", r#"{"dependencies":{"alias":"npm:real-package@2.3.4"}}"#),
+                ("node_modules/alias/package.json", r#"{"name":"real-package","version":"2.3.4","main":"index.cjs"}"#),
+                ("node_modules/alias/index.cjs", "module.exports = 42;\n"),
+            ],
+        );
+        let approval = fixture.approval();
+        let expected = vec![PublisherModulePackage {
+            extension_id: "npm:real-package".into(),
+            location: "node_modules/alias".into(),
+            version: Some("2.3.4".into()),
+        }];
+        assert_eq!(approval.module_packages().unwrap(), expected);
+        std::fs::write(fixture.directory.path().join("package.json"), "{}").unwrap();
+        std::fs::rename(
+            fixture.directory.path().join("node_modules"),
+            fixture.directory.path().join("retained-modules"),
+        ).unwrap();
+        assert_eq!(approval.module_packages().unwrap(), expected);
+    }
+
+    #[test]
+    fn capsule_module_packages_include_explicit_undeclared_placements() {
+        for (location, identity) in [
+            ("node_modules/@scope/pkg", "npm:@scope/pkg"),
+            ("node_modules/.pnpm/pkg@1.0.0/node_modules/pkg", "npm:pkg"),
+        ] {
+            let path = format!("{location}/index.cjs");
+            let source = format!("console.log(require('./{path}'));\n");
+            let fixture = Fixture::with_modules("app.cjs", &source, &[(&path, "module.exports = 42;\n")]);
+            assert_eq!(fixture.approval().module_packages().unwrap(), vec![PublisherModulePackage {
+                extension_id: identity.into(), location: location.into(), version: None,
+            }]);
+        }
+    }
+
+    #[test]
     fn deployment_handoff_commitment_binds_the_entire_publisher_approval() {
         let fixture = Fixture::new("console.log(require('./side.cjs'));\n")
             .with_runtime_authority(&runtime_authority());
@@ -1655,10 +1937,9 @@ mod tests {
                 .validate_run(entrypoint, true, false, &[], Some(&fixture.graph_hash))
                 .unwrap();
 
-            // Reauthentication uses only the signed capsule. Native execution
-            // separately recaptures the live project and enforces its graph pin.
-            // Moving sources preserves them while proving that this approval
-            // does not silently consult live dependency bytes or missing paths.
+            // Reauthentication returns the immutable owner consumed by native
+            // execution. Moving sources proves that this handoff never consults
+            // live dependency bytes or newly present optional modules.
             std::fs::rename(
                 fixture.directory.path().join(entrypoint),
                 fixture.directory.path().join("retained-entrypoint"),
@@ -1679,7 +1960,14 @@ mod tests {
                 "throw new Error('not part of the signed capture');",
             )
             .unwrap();
-            approval.revalidate().unwrap();
+            let retained = approval.revalidate_source_graph().unwrap();
+            assert_eq!(retained.report(), graph.report());
+            for module in &graph.report().modules {
+                assert_eq!(
+                    retained.source_bytes(&module.id),
+                    graph.source_bytes(&module.id)
+                );
+            }
         }
     }
 

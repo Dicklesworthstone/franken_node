@@ -58,8 +58,10 @@ pub const MAX_ACTIVATIONS: u64 = 4_096;
 /// Recoveries retained per deployment.
 pub const MAX_RECOVERIES: u64 = 4_096;
 /// Health events retained per release; the oldest healthy runs are evicted
-/// first, crash-loop marks are never evicted.
+/// first; native panic and crash-loop marks are never evicted.
 pub const MAX_HEALTH_EVENTS: usize = 512;
+/// Reserve one retained event for the threshold-crossing crash-loop mark.
+pub const MAX_DEPLOYMENT_CRASH_THRESHOLD: u32 = (MAX_HEALTH_EVENTS - 1) as u32;
 const MAX_RECORD_BYTES: u64 = 1 << 20;
 const MAX_NAME_BYTES: usize = 64;
 const MAX_REASON_BYTES: usize = 512;
@@ -230,6 +232,18 @@ pub struct ActivationRecord {
     pub supersedes_transaction_digest: Option<String>,
 }
 
+/// One launch-bound panic authenticated against the protected native inventory.
+/// The caller must authenticate its admission and outcome before signing it
+/// into this release's history. Original observation times are never refreshed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativePanicEvidence {
+    pub session_nonce: String,
+    pub entrypoint: String,
+    pub observed_at_epoch_secs: u64,
+    pub no_admitted_host_effects: bool,
+}
+
 /// The supervisor's validated crash-loop observation for the failed release.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -251,6 +265,8 @@ pub enum HealthEvent {
         receipt_id: String,
         observed_at_epoch_secs: u64,
     },
+    /// An independently authenticated native panic from this exact release.
+    NativePanic { evidence: NativePanicEvidence },
     /// The native supervisor saw this release crash-loop.
     CrashLoop { evidence: CrashLoopEvidence },
 }
@@ -289,9 +305,76 @@ impl ReleaseHealth {
                     observed_at_epoch_secs,
                     ..
                 } => Some(*observed_at_epoch_secs),
-                HealthEvent::CrashLoop { .. } => None,
+                HealthEvent::NativePanic { .. } | HealthEvent::CrashLoop { .. } => None,
             })
             .max()
+    }
+
+    /// An unresolved admitted effect remains a recovery blocker even after its
+    /// panic leaves the counting window. A later clean panic cannot erase it.
+    #[must_use]
+    pub fn has_indeterminate_native_effects(&self) -> bool {
+        self.events.iter().any(|event| {
+            matches!(event, HealthEvent::NativePanic { evidence }
+                if !evidence.no_admitted_host_effects)
+        })
+    }
+
+    /// Derive a threshold crossing solely from signed, deduplicated launch
+    /// observations. The unsigned local safe-mode counter is never an input.
+    pub fn native_crash_loop_evidence(
+        &self,
+        session_nonce: &str,
+        threshold: u32,
+        window_secs: u64,
+        safe_mode_state_path: &Path,
+    ) -> Result<Option<CrashLoopEvidence>> {
+        anyhow::ensure!(
+            threshold > 0
+                && threshold <= MAX_DEPLOYMENT_CRASH_THRESHOLD
+                && window_secs > 0
+                && window_secs <= 86_400,
+            "deployment crash-window policy exceeds its retained history or native detector bounds"
+        );
+        let current = self
+            .events
+            .iter()
+            .find_map(|event| match event {
+                HealthEvent::NativePanic { evidence }
+                    if evidence.session_nonce == session_nonce =>
+                {
+                    Some(evidence)
+                }
+                _ => None,
+            })
+            .context("deployment crash window has no authenticated current panic")?;
+        let mut seen = BTreeSet::new();
+        let mut count = 0_u32;
+        for event in &self.events {
+            let HealthEvent::NativePanic { evidence } = event else {
+                continue;
+            };
+            anyhow::ensure!(
+                evidence.entrypoint == current.entrypoint
+                    && evidence.observed_at_epoch_secs <= current.observed_at_epoch_secs
+                    && seen.insert(&evidence.session_nonce),
+                "deployment panic history has a foreign entrypoint, duplicate identity or clock rollback"
+            );
+            if current.observed_at_epoch_secs - evidence.observed_at_epoch_secs <= window_secs {
+                count = count
+                    .checked_add(1)
+                    .context("deployment panic count overflow")?;
+            }
+        }
+        Ok((count >= threshold).then(|| CrashLoopEvidence {
+            session_nonce: current.session_nonce.clone(),
+            entrypoint: current.entrypoint.clone(),
+            observed_at_epoch_secs: current.observed_at_epoch_secs,
+            crashes_in_window: count,
+            threshold,
+            window_secs,
+            safe_mode_state_path: safe_mode_state_path.display().to_string(),
+        }))
     }
 }
 
@@ -309,6 +392,9 @@ pub enum RecoveryOutcome {
     Contained,
     /// Policy is `rollback` but no candidate verified; nothing was switched.
     ContainedNoKnownGood,
+    /// A prior authenticated panic may have committed an external effect.
+    /// Neither activation nor automatic restart is authorized by recovery.
+    ContainedEffectsIndeterminate,
     /// The activation pointer now names the selected known-good release.
     RolledBack,
 }
@@ -1810,6 +1896,10 @@ impl DeploymentStore {
             );
             let failed_health = self.health(authority, &recovery.failed_release_id)?;
             anyhow::ensure!(
+                !failed_health.has_indeterminate_native_effects(),
+                "recovery intent now has indeterminate native effects"
+            );
+            anyhow::ensure!(
                 failed_health.events.iter().any(|event| matches!(event, HealthEvent::CrashLoop { evidence } if evidence == &recovery.crash)),
                 "recovery intent lacks its recorded crash-loop evidence"
             );
@@ -1820,6 +1910,7 @@ impl DeploymentStore {
                     .iter()
                     .any(|previous| previous.release_id == release.release_id)
                     && !health.crash_looped()
+                    && !health.has_indeterminate_native_effects()
                     && health
                         .last_healthy_at()
                         .is_some_and(|observed| observed <= now_secs),
@@ -2009,7 +2100,7 @@ impl DeploymentStore {
         event: HealthEvent,
     ) -> Result<ReleaseHealth> {
         self.require_lock(lock)?;
-        self.release(authority, release_id)?;
+        let release = self.release(authority, release_id)?;
         let mut health = self.health(authority, release_id)?;
         if let HealthEvent::HealthyRun { receipt_id, .. } = &event {
             anyhow::ensure!(
@@ -2020,6 +2111,32 @@ impl DeploymentStore {
                 matches!(existing, HealthEvent::HealthyRun { receipt_id: seen, .. } if seen == receipt_id)
             }) {
                 return Ok(health);
+            }
+        }
+        if let HealthEvent::NativePanic { evidence } = &event {
+            let nonce = uuid::Uuid::parse_str(&evidence.session_nonce)
+                .context("native panic session identity is not a UUID")?;
+            anyhow::ensure!(
+                nonce.to_string() == evidence.session_nonce
+                    && !nonce.is_nil()
+                    && Path::new(&evidence.entrypoint)
+                        == release.release_dir.join(&release.entrypoint),
+                "native panic is not bound to the admitted release entrypoint"
+            );
+            for existing in &health.events {
+                if let HealthEvent::NativePanic { evidence: seen } = existing {
+                    if seen.session_nonce == evidence.session_nonce {
+                        anyhow::ensure!(
+                            seen == evidence,
+                            "native panic session nonce was replayed with different evidence"
+                        );
+                        return Ok(health);
+                    }
+                    anyhow::ensure!(
+                        seen.observed_at_epoch_secs <= evidence.observed_at_epoch_secs,
+                        "native panic observation predates retained history; refusing clock rollback"
+                    );
+                }
             }
         }
         if let HealthEvent::CrashLoop { evidence } = &event {
@@ -2048,7 +2165,7 @@ impl DeploymentStore {
                 .position(|event| matches!(event, HealthEvent::HealthyRun { .. }))
             else {
                 anyhow::bail!(
-                    "release `{release_id}` retains {MAX_HEALTH_EVENTS} crash-loop marks; none may be evicted"
+                    "release `{release_id}` retains {MAX_HEALTH_EVENTS} native panic or crash-loop marks; none may be evicted"
                 );
             };
             health.events.remove(oldest_healthy);
@@ -2124,6 +2241,12 @@ impl DeploymentStore {
                 refusals.push(refuse("release crash-looped before".to_string()));
                 continue;
             }
+            if health.has_indeterminate_native_effects() {
+                refusals.push(refuse(
+                    "release retains indeterminate native effects".to_string(),
+                ));
+                continue;
+            }
             match health.last_healthy_at() {
                 None => {
                     refusals.push(refuse("release never completed a healthy run".to_string()));
@@ -2176,6 +2299,9 @@ impl DeploymentStore {
             self.policy(authority)? == *policy,
             "recovery policy is not the current authenticated deployment policy"
         );
+        let indeterminate_effects = self
+            .health(authority, failed_release_id)?
+            .has_indeterminate_native_effects();
         anyhow::ensure!(
             self.active(authority)?
                 .as_ref()
@@ -2211,33 +2337,44 @@ impl DeploymentStore {
             self.name
         );
         let (outcome, selected_release_id, activation, candidate_refusals) =
-            match policy.on_crash_loop {
-                CrashLoopAction::Contain => (RecoveryOutcome::Contained, None, None, Vec::new()),
-                CrashLoopAction::Rollback => {
-                    let selection =
-                        self.select_known_good(authority, failed_release_id, now_secs, verify)?;
-                    match selection.selected {
-                        None => (
-                            RecoveryOutcome::ContainedNoKnownGood,
-                            None,
-                            None,
-                            selection.refusals,
-                        ),
-                        Some(release) => {
-                            let activation = self.prepare_activation(
-                                authority,
-                                &release.release_id,
-                                ActivationReason::CrashLoopRollback,
+            if indeterminate_effects {
+                (
+                    RecoveryOutcome::ContainedEffectsIndeterminate,
+                    None,
+                    None,
+                    Vec::new(),
+                )
+            } else {
+                match policy.on_crash_loop {
+                    CrashLoopAction::Contain => {
+                        (RecoveryOutcome::Contained, None, None, Vec::new())
+                    }
+                    CrashLoopAction::Rollback => {
+                        let selection =
+                            self.select_known_good(authority, failed_release_id, now_secs, verify)?;
+                        match selection.selected {
+                            None => (
+                                RecoveryOutcome::ContainedNoKnownGood,
                                 None,
-                                Some(sequence),
-                                now_secs,
-                            )?;
-                            (
-                                RecoveryOutcome::RolledBack,
-                                Some(release.release_id),
-                                Some(activation),
+                                None,
                                 selection.refusals,
-                            )
+                            ),
+                            Some(release) => {
+                                let activation = self.prepare_activation(
+                                    authority,
+                                    &release.release_id,
+                                    ActivationReason::CrashLoopRollback,
+                                    None,
+                                    Some(sequence),
+                                    now_secs,
+                                )?;
+                                (
+                                    RecoveryOutcome::RolledBack,
+                                    Some(release.release_id),
+                                    Some(activation),
+                                    selection.refusals,
+                                )
+                            }
                         }
                     }
                 }
@@ -2614,6 +2751,17 @@ mod tests {
         HealthEvent::HealthyRun {
             receipt_id: receipt.to_string(),
             observed_at_epoch_secs: at,
+        }
+    }
+
+    fn native_panic(release_id: &str, nonce: u128, at: u64, no_effects: bool) -> HealthEvent {
+        HealthEvent::NativePanic {
+            evidence: NativePanicEvidence {
+                session_nonce: uuid::Uuid::from_u128(nonce).to_string(),
+                entrypoint: format!("/releases/{release_id}/app.js"),
+                observed_at_epoch_secs: at,
+                no_admitted_host_effects: no_effects,
+            },
         }
     }
 
@@ -3174,6 +3322,129 @@ mod tests {
     }
 
     #[test]
+    fn authenticated_panic_history_deduplicates_and_ignores_unsigned_counters() {
+        let f = fixture();
+        let lock = f.store.lock().unwrap();
+        f.store
+            .install_release(&lock, &f.authority, test_release(&f.store, "v2"))
+            .unwrap();
+        for event in [
+            native_panic("v2", 1, 20, true),
+            native_panic("v2", 2, 100, true),
+            native_panic("v2", 3, 101, true),
+        ] {
+            f.store.record_health(&lock, &f.authority, "v2", event).unwrap();
+        }
+        let mut aggregate = crash("unsigned-counter");
+        aggregate.crashes_in_window = 999;
+        f.store
+            .record_health(
+                &lock,
+                &f.authority,
+                "v2",
+                HealthEvent::CrashLoop { evidence: aggregate },
+            )
+            .unwrap();
+        let nonce = uuid::Uuid::from_u128(3).to_string();
+        let state = Path::new("/releases/v2/.franken-node/safe-mode/state.json");
+        let before = f.store.health(&f.authority, "v2").unwrap();
+        assert!(
+            before.native_crash_loop_evidence(&nonce, 3, 60, state).unwrap().is_none(),
+            "expired panics and aggregate crash marks cannot add authenticated launches"
+        );
+        assert_eq!(
+            f.store
+                .record_health(&lock, &f.authority, "v2", native_panic("v2", 3, 101, true))
+                .unwrap(),
+            before,
+            "replaying the exact signed observation is idempotent"
+        );
+        for conflicting in [
+            native_panic("v2", 3, 102, true),
+            native_panic("v2", 3, 101, false),
+            native_panic("v2", 4, 99, true),
+            native_panic("v1", 4, 102, true),
+            native_panic("v2", 0, 102, true),
+        ] {
+            assert!(f.store.record_health(&lock, &f.authority, "v2", conflicting).is_err());
+            assert_eq!(f.store.health(&f.authority, "v2").unwrap(), before);
+        }
+        let health = f.store
+            .record_health(&lock, &f.authority, "v2", native_panic("v2", 4, 102, true))
+            .unwrap();
+        let current = uuid::Uuid::from_u128(4).to_string();
+        let crossing = health.native_crash_loop_evidence(&current, 3, 60, state).unwrap().unwrap();
+        assert_eq!(crossing.crashes_in_window, 3);
+        assert_eq!(crossing.observed_at_epoch_secs, 102);
+        assert_eq!(crossing.session_nonce, current);
+        for (threshold, window) in [
+            (0, 60),
+            (MAX_DEPLOYMENT_CRASH_THRESHOLD + 1, 60),
+            (3, 0),
+            (3, 86_401),
+        ] {
+            assert!(health.native_crash_loop_evidence(&current, threshold, window, state).is_err());
+        }
+    }
+
+    #[test]
+    fn expired_indeterminate_panic_still_blocks_signed_recovery_and_known_good_selection() {
+        let f = fixture();
+        let lock = f.store.lock().unwrap();
+        for release in ["v1", "v2"] {
+            f.store.install_release(&lock, &f.authority, test_release(&f.store, release)).unwrap();
+        }
+        f.store.activate(
+            &lock, &f.authority, "v1", ActivationReason::Operator, Some("ops"), None, 20,
+        ).unwrap();
+        f.store.record_health(&lock, &f.authority, "v1", healthy("ready", 25)).unwrap();
+        f.store.activate(
+            &lock, &f.authority, "v2", ActivationReason::Operator, Some("ops"), None, 30,
+        ).unwrap();
+        let mut policy = rollback_policy(&f.store);
+        policy.restart = RestartPolicy::Automatic;
+        f.store.set_policy(&lock, &f.authority, policy.clone()).unwrap();
+        assert_eq!(
+            f.store.select_known_good(&f.authority, "v2", 202, &|_| Ok(())).unwrap()
+                .selected.unwrap().release_id,
+            "v1"
+        );
+        for event in [
+            native_panic("v2", 1, 40, false),
+            native_panic("v2", 2, 200, true),
+            native_panic("v2", 3, 201, true),
+            native_panic("v2", 4, 202, true),
+        ] {
+            f.store.record_health(&lock, &f.authority, "v2", event).unwrap();
+        }
+        let health = f.store.health(&f.authority, "v2").unwrap();
+        assert!(health.has_indeterminate_native_effects());
+        let crossing = health.native_crash_loop_evidence(
+            &uuid::Uuid::from_u128(4).to_string(), 3, 60,
+            Path::new("/releases/v2/.franken-node/safe-mode/state.json"),
+        ).unwrap().unwrap();
+        assert_eq!(crossing.crashes_in_window, 3);
+        let pointer = fs::read(f.store.pointer_path()).unwrap();
+        let recovery = f.store.recover_from_crash_loop(
+            &lock, &f.authority, "v2", crossing, &policy, 203, &|_| Ok(()),
+        ).unwrap();
+        assert_eq!(recovery.outcome, RecoveryOutcome::ContainedEffectsIndeterminate);
+        assert!(recovery.selected_release_id.is_none());
+        assert!(recovery.activation_sequence.is_none());
+        assert_eq!(fs::read(f.store.pointer_path()).unwrap(), pointer);
+        assert_eq!(f.store.recoveries(&f.authority).unwrap(), vec![recovery]);
+
+        f.store.record_health(
+            &lock, &f.authority, "v1", native_panic("v1", 5, 204, false),
+        ).unwrap();
+        let selection = f.store.select_known_good(&f.authority, "v2", 205, &|_| Ok(())).unwrap();
+        assert!(selection.selected.is_none());
+        assert!(selection.refusals.iter().any(|refusal| {
+            refusal.release_id == "v1" && refusal.reason.contains("indeterminate native effects")
+        }));
+    }
+
+    #[test]
     fn healthy_runs_are_deduplicated_and_crash_marks_are_never_evicted() {
         let f = fixture();
         let lock = f.store.lock().expect("lock");
@@ -3459,7 +3730,13 @@ mod tests {
 
     #[test]
     fn rollback_reconciliation_rechecks_policy_and_known_good_health() {
-        for case in ["policy_changed", "target_crashed", "future_readiness"] {
+        for case in [
+            "policy_changed",
+            "target_crashed",
+            "future_readiness",
+            "target_effects_indeterminate",
+            "failed_effects_indeterminate",
+        ] {
             let f = fixture();
             let lock = f.store.lock().unwrap();
             let transaction = pending_rollback(&f, &lock);
@@ -3487,6 +3764,12 @@ mod tests {
                     f.store
                         .record_health(&lock, &f.authority, "v1", healthy("future", 102))
                         .unwrap();
+                }
+                "target_effects_indeterminate" | "failed_effects_indeterminate" => {
+                    let release = if case == "target_effects_indeterminate" { "v1" } else { "v2" };
+                    f.store.record_health(
+                        &lock, &f.authority, release, native_panic(release, 9, 100, false),
+                    ).unwrap();
                 }
                 _ => unreachable!(),
             }
