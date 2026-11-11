@@ -20,6 +20,10 @@ pub(crate) mod module_capsule;
 
 const CAPTURE_SCHEMA: &str = "franken-node/native-replay-capture/v3";
 const MAX_PAYLOAD_BYTES: usize = 4 * 1024 * 1024;
+// Engine-independent v3 wire contract. Product integration tests exercise these
+// values against actual native captures; inspection never executes the guest.
+const MAX_NATIVE_CONSOLE_BYTES: u64 = 8 * 1024 * 1024;
+const DEFAULT_NATIVE_CONSOLE_ENTRIES: [u64; 2] = [100_000, 1_000_000];
 const ENVELOPE_FIELDS: &[&str] = &["schema_version", "payload_json", "payload_sha256"];
 const PAYLOAD_FIELDS: &[&str] = &[
     "package", "orchestrator", "runtime", "ambient_authority",
@@ -115,6 +119,54 @@ fn nonblank<'a>(value: &'a Value, field: &str) -> Result<&'a str> {
     Ok(value)
 }
 
+fn console_budget_reason(payload: &Value, reason: &Value) -> Result<()> {
+    exact(
+        reason,
+        ".payload.expected.reason",
+        &["kind", "entries", "max_entries", "bytes", "max_bytes"],
+        &[],
+    )?;
+    let counter = |field: &str| {
+        reason[field].as_u64().ok_or_else(|| {
+            invalid(
+                ".payload.expected.reason",
+                "console counters must be unsigned integers",
+            )
+        })
+    };
+    let entries = counter("entries")?;
+    let max_entries = counter("max_entries")?;
+    let bytes = counter("bytes")?;
+    let max_bytes = counter("max_bytes")?;
+    let runtime = object(&payload["runtime"], ".payload.runtime")?;
+    // Omitted execution settings use RuntimeConfig's defaults. A present null
+    // or nonobject execution value cannot deserialize as native configuration.
+    let execution = runtime
+        .get("execution")
+        .map(|value| object(value, ".payload.runtime.execution"))
+        .transpose()?;
+    let configured_entries = execution.and_then(|value| value.get("max_console_entries"));
+    let bound_entries = match configured_entries {
+        None | Some(Value::Null) => DEFAULT_NATIVE_CONSOLE_ENTRIES.contains(&max_entries),
+        Some(value) => value.as_u64() == Some(max_entries),
+    };
+    if !bound_entries || max_bytes != MAX_NATIVE_CONSOLE_BYTES {
+        return Err(invalid(
+            ".payload.expected.reason",
+            "console limits are not bound to captured runtime settings",
+        ));
+    }
+    if entries <= max_entries && bytes <= max_bytes {
+        return Err(invalid(
+            ".payload.expected.reason",
+            "console counters do not exceed either captured limit",
+        ));
+    }
+    // Timer/count labels also consume console budgets without emitting entries.
+    // Do not invent a relationship between attempted counts and retained output.
+    Ok(())
+}
+
 fn terminal(payload: &Value) -> Result<CapturedNativeTerminalState> {
     let expected = &payload["expected"];
     object(expected, ".payload.expected")?;
@@ -171,6 +223,7 @@ fn terminal(payload: &Value) -> Result<CapturedNativeTerminalState> {
                         return Err(invalid(".payload.expected.reason.budget", "instruction limit is not bound to captured runtime settings"));
                     }
                 }
+                "console_budget_exceeded" => console_budget_reason(payload, reason)?,
                 _ => return Err(invalid(".payload.expected.reason.kind", "unsupported native stopping reason")),
             }
             CapturedNativeTerminalState::EngineFailure
@@ -517,6 +570,94 @@ pub(in crate::incident_bundle) mod tests {
         value["expected"]["exception_value"] = json!("instruction budget exhausted");
         assert_eq!(verify(&captured(&value)).unwrap().unwrap().captured_terminal_state,
             CapturedNativeTerminalState::UncaughtException);
+    }
+
+    fn console_stop_payload(entries: u64, max_entries: u64, bytes: u64) -> Value {
+        let mut value = payload("engine_failure");
+        value["runtime"]["execution"]["max_console_entries"] = json!(max_entries);
+        value["expected"]["reason"] = json!({
+            "kind":"console_budget_exceeded",
+            "entries":entries,
+            "max_entries":max_entries,
+            "bytes":bytes,
+            "max_bytes":MAX_NATIVE_CONSOLE_BYTES
+        });
+        value["expected"]["diagnostic"] = json!("console output budget exceeded");
+        value
+    }
+
+    #[test]
+    fn console_budget_stops_bind_entry_and_byte_limits_without_claiming_execution() {
+        use super::super::verify_incident_bundle;
+
+        for value in [
+            console_stop_payload(3, 2, 30),
+            console_stop_payload(1, 2, MAX_NATIVE_CONSOLE_BYTES + 1),
+        ] {
+            let mut initial = with_run_context("engine_failure");
+            initial["native_replay"] = captured(&value)["native_replay"].clone();
+            let raw = signed_bundle(initial);
+            let verified = verify_incident_bundle(&raw, &signing_key().verifying_key()).unwrap();
+            assert_eq!(
+                verified.native_capture.unwrap().captured_terminal_state,
+                CapturedNativeTerminalState::EngineFailure
+            );
+            let stranger = ed25519_dalek::SigningKey::from_bytes(&[0x12; 32]);
+            assert!(matches!(
+                verify_incident_bundle(&raw, &stranger.verifying_key()),
+                Err(IncidentBundleError::SignerNotTrusted)
+            ));
+        }
+        for max_entries in DEFAULT_NATIVE_CONSOLE_ENTRIES {
+            let mut value = console_stop_payload(max_entries + 1, max_entries, 30);
+            value["runtime"]["execution"]
+                .as_object_mut().unwrap().remove("max_console_entries");
+            assert!(verify(&captured(&value)).is_ok());
+            value["runtime"]["execution"]["max_console_entries"] = Value::Null;
+            assert!(verify(&captured(&value)).is_ok());
+            value["runtime"].as_object_mut().unwrap().remove("execution");
+            assert!(verify(&captured(&value)).is_ok());
+            // Labels can exhaust budgets with no accepted console output.
+            assert_eq!(value["expected"]["console_output"], json!([]));
+        }
+    }
+
+    #[test]
+    fn console_budget_stops_reject_unbound_limits_false_stops_and_malformed_counters() {
+        let original = console_stop_payload(3, 2, 30);
+        for field in ["entries", "max_entries", "bytes", "max_bytes"] {
+            for invalid in [Value::Null, json!(-1), json!(1.5), json!("3"), json!(true)] {
+                let mut value = original.clone();
+                value["expected"]["reason"][field] = invalid;
+                assert!(verify(&captured(&value)).is_err(), "{field}");
+            }
+            let mut value = original.clone();
+            value["expected"]["reason"].as_object_mut().unwrap().remove(field);
+            assert!(verify(&captured(&value)).is_err(), "missing {field}");
+        }
+        for (field, replacement) in [
+            ("max_entries", json!(1)),
+            ("max_bytes", json!(MAX_NATIVE_CONSOLE_BYTES - 1)),
+            ("unknown", json!(true)),
+        ] {
+            let mut value = original.clone();
+            value["expected"]["reason"][field] = replacement;
+            assert!(verify(&captured(&value)).is_err(), "{field}");
+        }
+        for invalid in [json!(1), json!(-1), json!(1.5), json!("2"), json!(true), Value::Null] {
+            let mut value = original.clone();
+            value["runtime"]["execution"]["max_console_entries"] = invalid;
+            assert!(verify(&captured(&value)).is_err());
+        }
+        for invalid in [Value::Null, json!(true), json!([]), json!("settings"), json!(1)] {
+            let mut value = console_stop_payload(100_001, 100_000, 30);
+            value["runtime"]["execution"] = invalid;
+            assert!(verify(&captured(&value)).is_err());
+        }
+        let mut value = console_stop_payload(2, 2, MAX_NATIVE_CONSOLE_BYTES);
+        assert!(verify(&captured(&value)).is_err(), "equal limits are not exhaustion");
+        value["expected"]["reason"]["bytes"] = json!(MAX_NATIVE_CONSOLE_BYTES + 1);
+        assert!(verify(&captured(&value)).is_ok());
     }
 
     #[test]
