@@ -65,8 +65,14 @@ const JOURNAL_VERSION: &str = "franken-node/rewrite-transaction/v1";
 const VERSIONED_JOURNAL_VERSION: &str = "franken-node/rewrite-transaction/v2";
 const REQUEST_JOURNAL_VERSION: &str = "franken-node/rewrite-transaction/v4";
 const TREE_JOURNAL_VERSION: &str = "franken-node/rewrite-transaction/v5";
+pub const PACKED_JOURNAL_VERSION: &str = "franken-node/rewrite-transaction/v6";
 const STORE: &str = ".franken-rewrite";
 const PENDING: &str = "pending.json";
+const SESSION_PACK_FILE: &str = "session.pack";
+const SESSION_PACK_MAGIC: &[u8; 9] = b"FNRWPACK\x01";
+const SESSION_PACK_ROW_BYTES: usize = 4 + 1 + 8 + 8 + 32;
+const PACK_KIND_BEFORE: u8 = 0;
+const PACK_KIND_AFTER: u8 = 1;
 
 pub struct Edit<'a> {
     pub path: &'a str,
@@ -111,7 +117,9 @@ impl InstallRequest {
     }
 
     fn project_digest(project: &Path) -> Result<String> {
-        let project = project.canonicalize().context("resolve installation request project")?;
+        let project = project
+            .canonicalize()
+            .context("resolve installation request project")?;
         let mut hash = Sha256::new();
         hash.update(b"franken-node/install-request-project/v1\0");
         hash.update(project.as_os_str().as_bytes());
@@ -120,14 +128,22 @@ impl InstallRequest {
 
     pub fn check_project(&self, project: &Path) -> Result<()> {
         self.validate()?;
-        ensure!(Self::project_digest(project)? == self.project_sha256,
-            "installation request belongs to a different project");
+        ensure!(
+            Self::project_digest(project)? == self.project_sha256,
+            "installation request belongs to a different project"
+        );
         Ok(())
     }
 
-    pub fn id(&self) -> &str { &self.request_id }
-    pub fn input_sha256(&self) -> &str { &self.input_sha256 }
-    pub fn candidate_input_sha256(&self) -> &str { &self.candidate_input_sha256 }
+    pub fn id(&self) -> &str {
+        &self.request_id
+    }
+    pub fn input_sha256(&self) -> &str {
+        &self.input_sha256
+    }
+    pub fn candidate_input_sha256(&self) -> &str {
+        &self.candidate_input_sha256
+    }
 
     /// Only the opaque ID chooses this slot. Reusing the ID with different
     /// reviewed hashes must conflict, not silently select a second slot.
@@ -139,13 +155,27 @@ impl InstallRequest {
     }
 
     fn validate(&self) -> Result<()> {
-        ensure!(!self.request_id.is_empty() && self.request_id.len() <= 64
-            && self.request_id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'),
-            "request ID must be 1..=64 ASCII letters, digits, hyphens or underscores");
-        for pin in [&self.project_sha256, &self.input_sha256, &self.candidate_input_sha256] {
-            ensure!(pin.len() == 64
-                && pin.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
-                "installation request hashes must be lowercase SHA-256 digests");
+        ensure!(
+            !self.request_id.is_empty()
+                && self.request_id.len() <= 64
+                && self
+                    .request_id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'),
+            "request ID must be 1..=64 ASCII letters, digits, hyphens or underscores"
+        );
+        for pin in [
+            &self.project_sha256,
+            &self.input_sha256,
+            &self.candidate_input_sha256,
+        ] {
+            ensure!(
+                pin.len() == 64
+                    && pin
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+                "installation request hashes must be lowercase SHA-256 digests"
+            );
         }
         Ok(())
     }
@@ -185,7 +215,7 @@ pub(crate) struct Journal {
     request: Option<InstallRequest>,
 }
 
-struct Contents {
+pub(super) struct Contents {
     bytes: Vec<u8>,
     metadata: Metadata,
 }
@@ -418,6 +448,15 @@ impl Drop for StagedFile<'_> {
 }
 
 fn stage<'a>(parent: &'a File, bytes: &[u8], mode: u32) -> Result<StagedFile<'a>> {
+    stage_with_barrier(parent, bytes, mode, "file")
+}
+
+fn stage_with_barrier<'a>(
+    parent: &'a File,
+    bytes: &[u8],
+    mode: u32,
+    barrier_kind: &'static str,
+) -> Result<StagedFile<'a>> {
     let name = unique_name(".rewrite-stage");
     let mut file = File::from(openat(
         parent,
@@ -433,8 +472,168 @@ fn stage<'a>(parent: &'a File, bytes: &[u8], mode: u32) -> Result<StagedFile<'a>
     file.write_all(bytes)?;
     file.set_permissions(Permissions::from_mode(mode))?;
     // Data must be durable before any rename can make it visible (protocol 1).
-    durable_sync(&file, "file")?;
+    durable_sync(&file, barrier_kind)?;
     Ok(staged)
+}
+
+/// Owned Wave-2 staging handle allowing N replacement files to be written to page
+/// cache first, synced together before any rename, and then atomically renamed.
+struct OwnedStagedReplacement {
+    record_index: usize,
+    parent: File,
+    target_name: OsString,
+    expected_before_metadata: Metadata,
+    expected_before_bytes: Vec<u8>,
+    staged_file: File,
+    staged_name: String,
+    installed: bool,
+}
+
+impl Drop for OwnedStagedReplacement {
+    fn drop(&mut self) {
+        if !self.installed {
+            let _ = unlinkat(&self.parent, self.staged_name.as_str(), AtFlags::empty());
+        }
+    }
+}
+
+fn encode_session_pack(entries: &[(u32, u8, &[u8])]) -> Result<Vec<u8>> {
+    let count = u32::try_from(entries.len()).context("session pack entry count overflow")?;
+    let header_len = SESSION_PACK_MAGIC
+        .len()
+        .checked_add(4)
+        .and_then(|n| {
+            entries
+                .len()
+                .checked_mul(SESSION_PACK_ROW_BYTES)
+                .and_then(|rows| n.checked_add(rows))
+        })
+        .context("session pack header byte overflow")?;
+    let payload_len = entries.iter().try_fold(0_usize, |acc, (_, _, payload)| {
+        acc.checked_add(payload.len())
+            .context("session pack payload byte overflow")
+    })?;
+    let total_len = header_len
+        .checked_add(payload_len)
+        .context("session pack total byte overflow")?;
+    let max_pack_bytes = MAX_PLAN_BYTES
+        .saturating_mul(2)
+        .saturating_add(2 * 1024 * 1024);
+    ensure!(
+        total_len <= max_pack_bytes,
+        "session pack exceeds maximum byte budget"
+    );
+
+    let mut out = Vec::with_capacity(total_len);
+    out.extend_from_slice(SESSION_PACK_MAGIC);
+    out.extend_from_slice(&count.to_le_bytes());
+
+    let mut cursor = header_len as u64;
+    for &(ordinal, kind, payload) in entries {
+        let len_u64 = payload.len() as u64;
+        let hash = Sha256::digest(payload);
+        out.extend_from_slice(&ordinal.to_le_bytes());
+        out.push(kind);
+        out.extend_from_slice(&cursor.to_le_bytes());
+        out.extend_from_slice(&len_u64.to_le_bytes());
+        out.extend_from_slice(&hash);
+        cursor = cursor
+            .checked_add(len_u64)
+            .context("session pack offset overflow")?;
+    }
+    for &(_, _, payload) in entries {
+        out.extend_from_slice(payload);
+    }
+    Ok(out)
+}
+
+fn read_session_pack_entry(
+    session: &File,
+    ordinal: usize,
+    kind: u8,
+    limit: usize,
+) -> Result<Contents> {
+    let max_pack_bytes = MAX_PLAN_BYTES
+        .saturating_mul(2)
+        .saturating_add(2 * 1024 * 1024);
+    let pack = read_required(session, OsStr::new(SESSION_PACK_FILE), max_pack_bytes)?;
+    ensure!(
+        pack.metadata.mode() & 0o7777 == 0o600,
+        "transaction session pack must retain private permissions"
+    );
+    let bytes = &pack.bytes;
+    let prefix_len = SESSION_PACK_MAGIC.len() + 4;
+    ensure!(
+        bytes.len() >= prefix_len && &bytes[..SESSION_PACK_MAGIC.len()] == SESSION_PACK_MAGIC,
+        "corrupt rewrite session pack header"
+    );
+    let count = u32::from_le_bytes(
+        bytes[SESSION_PACK_MAGIC.len()..prefix_len]
+            .try_into()
+            .expect("4-byte count"),
+    ) as usize;
+    ensure!(
+        count <= MAX_EDITS.saturating_mul(2),
+        "session pack entry count exceeds maximum"
+    );
+    let table_end = prefix_len
+        .checked_add(
+            count
+                .checked_mul(SESSION_PACK_ROW_BYTES)
+                .context("session pack index overflow")?,
+        )
+        .context("session pack table end overflow")?;
+    ensure!(
+        table_end <= bytes.len(),
+        "truncated rewrite session pack index"
+    );
+
+    let target_ordinal = u32::try_from(ordinal).context("invalid session pack ordinal")?;
+    let mut expected_cursor = table_end;
+    let mut found: Option<(usize, usize)> = None;
+    for row_idx in 0..count {
+        let row_start = prefix_len + row_idx * SESSION_PACK_ROW_BYTES;
+        let row = &bytes[row_start..row_start + SESSION_PACK_ROW_BYTES];
+        let row_ordinal = u32::from_le_bytes(row[0..4].try_into().expect("ordinal"));
+        let row_kind = row[4];
+        let offset_u64 = u64::from_le_bytes(row[5..13].try_into().expect("offset"));
+        let len_u64 = u64::from_le_bytes(row[13..21].try_into().expect("len"));
+        let mut expected_hash = [0_u8; 32];
+        expected_hash.copy_from_slice(&row[21..53]);
+
+        let offset = usize::try_from(offset_u64).context("session pack offset out of range")?;
+        let length = usize::try_from(len_u64).context("session pack length out of range")?;
+        let end = offset
+            .checked_add(length)
+            .context("session pack slice end overflow")?;
+        ensure!(
+            offset == expected_cursor && end <= bytes.len(),
+            "session pack entry slice out of bounds or non-contiguous"
+        );
+        let row_slice = &bytes[offset..end];
+        ensure!(
+            Sha256::digest(row_slice).as_slice() == expected_hash,
+            "session pack entry SHA-256 integrity mismatch"
+        );
+        expected_cursor = end;
+
+        if row_ordinal == target_ordinal && row_kind == kind {
+            ensure!(found.is_none(), "duplicate entry in rewrite session pack");
+            found = Some((offset, length));
+        }
+    }
+    ensure!(
+        expected_cursor == bytes.len(),
+        "trailing unauthenticated bytes in rewrite session pack"
+    );
+
+    let (offset, length) = found.context("missing entry in rewrite session pack")?;
+    ensure!(length <= limit, "session pack entry exceeds byte limit");
+    let slice = &bytes[offset..offset + length];
+    Ok(Contents {
+        bytes: slice.to_vec(),
+        metadata: pack.metadata,
+    })
 }
 
 fn verify_image(contents: &Contents, sha256: &str, length: usize, mode: Option<u32>) -> bool {
@@ -491,7 +690,8 @@ impl RewriteTransaction {
                 .context("pending rewrite recovery failed; refusing a new apply")?;
         } else {
             ensure!(
-                read_optional(&transaction.store, OsStr::new(PENDING), MAX_JOURNAL_BYTES)?.is_none(),
+                read_optional(&transaction.store, OsStr::new(PENDING), MAX_JOURNAL_BYTES)?
+                    .is_none(),
                 "unfinished rewrite requires explicit recovery before reviewed migration installation"
             );
         }
@@ -504,7 +704,8 @@ impl RewriteTransaction {
                 || journal.schema_version == VERSIONED_JOURNAL_VERSION
                 || journal.schema_version == creations::JOURNAL_VERSION
                 || journal.schema_version == REQUEST_JOURNAL_VERSION
-                || journal.schema_version == TREE_JOURNAL_VERSION,
+                || journal.schema_version == TREE_JOURNAL_VERSION
+                || journal.schema_version == PACKED_JOURNAL_VERSION,
             "unsupported rewrite transaction schema"
         );
         ensure!(
@@ -516,19 +717,32 @@ impl RewriteTransaction {
                     .all(|b| b.is_ascii_alphanumeric() || b == b'-'),
             "invalid rewrite session"
         );
-        ensure!(journal.schema_version != REQUEST_JOURNAL_VERSION || journal.request.is_some(),
-            "request journal is missing its binding");
+        ensure!(
+            journal.schema_version != REQUEST_JOURNAL_VERSION || journal.request.is_some(),
+            "request journal is missing its binding"
+        );
         if let Some(request) = &journal.request {
-            ensure!(journal.schema_version == REQUEST_JOURNAL_VERSION
-                || journal.schema_version == TREE_JOURNAL_VERSION,
-                "request bindings require the request journal schema");
+            ensure!(
+                journal.schema_version == REQUEST_JOURNAL_VERSION
+                    || journal.schema_version == TREE_JOURNAL_VERSION
+                    || journal.schema_version == PACKED_JOURNAL_VERSION,
+                "request bindings require the request journal schema"
+            );
             request.validate()?;
-            ensure!(journal.session == request.transaction_id(), "request journal slot differs from its binding");
-            ensure!(!journal.records.is_empty() || request.input_sha256 == request.candidate_input_sha256,
-                "an unchanged request must bind identical captures");
+            ensure!(
+                journal.session == request.transaction_id(),
+                "request journal slot differs from its binding"
+            );
+            ensure!(
+                !journal.records.is_empty()
+                    || request.input_sha256 == request.candidate_input_sha256,
+                "an unchanged request must bind identical captures"
+            );
         }
         ensure!(
-            (!journal.records.is_empty() || journal.schema_version == REQUEST_JOURNAL_VERSION)
+            (!journal.records.is_empty()
+                || journal.schema_version == REQUEST_JOURNAL_VERSION
+                || (journal.schema_version == PACKED_JOURNAL_VERSION && journal.request.is_some()))
                 && journal.records.len() <= MAX_EDITS,
             "invalid rewrite journal count"
         );
@@ -542,7 +756,8 @@ impl RewriteTransaction {
                 ensure!(
                     (journal.schema_version == creations::JOURNAL_VERSION
                         || journal.schema_version == REQUEST_JOURNAL_VERSION
-                        || journal.schema_version == TREE_JOURNAL_VERSION)
+                        || journal.schema_version == TREE_JOURNAL_VERSION
+                        || journal.schema_version == PACKED_JOURNAL_VERSION)
                         && record.before_bytes == 0
                         && record.before_sha256 == digest(b"")
                         && record.mode & 0o400 != 0,
@@ -569,17 +784,27 @@ impl RewriteTransaction {
                 .and_then(|v| v.checked_add(record.after_bytes))
                 .context("rewrite journal byte overflow")?;
             if let Some(tree) = &record.tree {
-                ensure!(journal.schema_version == TREE_JOURNAL_VERSION && record.created
-                    && record.mode & 0o500 == 0o500
-                    && record.after_bytes <= trees::MAX_INDEX_BYTES
-                    && tree.directories > 0 && tree.bytes <= MAX_PLAN_BYTES,
-                    "invalid absent-root tree record");
-                entries = entries.checked_add(tree.files)
+                ensure!(
+                    (journal.schema_version == TREE_JOURNAL_VERSION
+                        || journal.schema_version == PACKED_JOURNAL_VERSION)
+                        && record.created
+                        && record.mode & 0o500 == 0o500
+                        && record.after_bytes <= trees::MAX_INDEX_BYTES
+                        && tree.directories > 0
+                        && tree.bytes <= MAX_PLAN_BYTES,
+                    "invalid absent-root tree record"
+                );
+                entries = entries
+                    .checked_add(tree.files)
                     .and_then(|count| count.checked_add(tree.directories))
                     .context("tree entry count overflow")?;
-                total = total.checked_add(tree.bytes).context("tree byte count overflow")?;
+                total = total
+                    .checked_add(tree.bytes)
+                    .context("tree byte count overflow")?;
             } else {
-                entries = entries.checked_add(1).context("rewrite entry count overflow")?;
+                entries = entries
+                    .checked_add(1)
+                    .context("rewrite entry count overflow")?;
             }
             ensure!(
                 total <= MAX_PLAN_BYTES && entries <= MAX_EDITS,
@@ -592,9 +817,11 @@ impl RewriteTransaction {
             if record.tree.is_some() {
                 for (other_index, other) in journal.records.iter().enumerate() {
                     if index != other_index {
-                        ensure!(!Path::new(&record.path).starts_with(&other.path)
-                            && !Path::new(&other.path).starts_with(&record.path),
-                            "tree roots overlap another installation target");
+                        ensure!(
+                            !Path::new(&record.path).starts_with(&other.path)
+                                && !Path::new(&other.path).starts_with(&record.path),
+                            "tree roots overlap another installation target"
+                        );
                     }
                 }
             }
@@ -610,7 +837,11 @@ impl RewriteTransaction {
         self.prepare_changes(
             edits,
             &[],
-            if versioned { VERSIONED_JOURNAL_VERSION } else { JOURNAL_VERSION },
+            if versioned {
+                VERSIONED_JOURNAL_VERSION
+            } else {
+                JOURNAL_VERSION
+            },
         )
     }
 
@@ -641,18 +872,29 @@ impl RewriteTransaction {
         schema: &str,
         request: Option<&InstallRequest>,
     ) -> Result<Journal> {
-        let count = edits.len().checked_add(creations.len())
-            .and_then(|count| count.checked_add(trees.len())).context("rewrite count overflow")?;
+        let count = edits
+            .len()
+            .checked_add(creations.len())
+            .and_then(|count| count.checked_add(trees.len()))
+            .context("rewrite count overflow")?;
         ensure!(
             (count > 0 || request.is_some()) && count <= MAX_EDITS,
             "rewrite plan entry limit exceeded"
         );
-        ensure!(creations.is_empty() || schema == creations::JOURNAL_VERSION
-            || schema == REQUEST_JOURNAL_VERSION || schema == TREE_JOURNAL_VERSION,
-            "new files require the creation journal schema");
-        ensure!(trees.is_empty() || schema == TREE_JOURNAL_VERSION,
-            "new directory trees require the tree journal schema");
+        ensure!(
+            creations.is_empty()
+                || schema == creations::JOURNAL_VERSION
+                || schema == REQUEST_JOURNAL_VERSION
+                || schema == TREE_JOURNAL_VERSION
+                || schema == PACKED_JOURNAL_VERSION,
+            "new files require the creation journal schema"
+        );
+        ensure!(
+            trees.is_empty() || schema == TREE_JOURNAL_VERSION || schema == PACKED_JOURNAL_VERSION,
+            "new directory trees require the tree journal schema"
+        );
         let versioned = schema != JOURNAL_VERSION;
+        let packed = schema == PACKED_JOURNAL_VERSION;
         let mut journal = Journal {
             schema_version: schema.into(),
             session: request.map_or_else(|| unique_name("txn"), InstallRequest::transaction_id),
@@ -712,18 +954,30 @@ impl RewriteTransaction {
         for creation in creations {
             validate_path(creation.path)?;
             ensure!(paths.insert(creation.path), "duplicate rewrite target");
-            total = total.checked_add(creation.after.len()).context("rewrite plan byte overflow")?;
-            ensure!(total <= MAX_PLAN_BYTES && creation.after.len() <= MAX_FILE_BYTES,
-                "rewrite plan byte limit exceeded");
-            ensure!(creation.mode <= 0o777 && creation.mode & 0o400 != 0,
-                "created files require ordinary owner-readable permissions");
+            total = total
+                .checked_add(creation.after.len())
+                .context("rewrite plan byte overflow")?;
+            ensure!(
+                total <= MAX_PLAN_BYTES && creation.after.len() <= MAX_FILE_BYTES,
+                "rewrite plan byte limit exceeded"
+            );
+            ensure!(
+                creation.mode <= 0o777 && creation.mode & 0o400 != 0,
+                "created files require ordinary owner-readable permissions"
+            );
             // Parents must already exist. No directory creation or structural
             // replacement is smuggled into an absent-file approval.
             let (parent, name) = parent_and_name(&self.root, creation.path, false)?;
-            ensure!(read_optional(&parent, &name, MAX_FILE_BYTES)?.is_none(),
-                "creation target already exists: {}", creation.path);
-            ensure!(parent.metadata()?.dev() == self.store.metadata()?.dev(),
-                "creation target must share the transaction filesystem: {}", creation.path);
+            ensure!(
+                read_optional(&parent, &name, MAX_FILE_BYTES)?.is_none(),
+                "creation target already exists: {}",
+                creation.path
+            );
+            ensure!(
+                parent.metadata()?.dev() == self.store.metadata()?.dev(),
+                "creation target must share the transaction filesystem: {}",
+                creation.path
+            );
             journal.records.push(Record {
                 path: creation.path.into(),
                 before_sha256: digest(b""),
@@ -740,18 +994,31 @@ impl RewriteTransaction {
             validate_path(tree.path)?;
             ensure!(paths.insert(tree.path), "duplicate rewrite target");
             let (index, summary) = trees::encode(tree)?;
-            total = total.checked_add(index.len()).and_then(|n| n.checked_add(summary.bytes))
+            total = total
+                .checked_add(index.len())
+                .and_then(|n| n.checked_add(summary.bytes))
                 .context("tree plan byte overflow")?;
             ensure!(total <= MAX_PLAN_BYTES, "rewrite plan byte limit exceeded");
             let (parent, name) = parent_and_name(&self.root, tree.path, false)?;
-            ensure!(trees::verify(&parent, &name, &index)?.is_none(),
-                "tree creation target already exists: {}", tree.path);
-            ensure!(parent.metadata()?.dev() == self.store.metadata()?.dev(),
-                "tree creation must share the transaction filesystem: {}", tree.path);
+            ensure!(
+                trees::verify(&parent, &name, &index)?.is_none(),
+                "tree creation target already exists: {}",
+                tree.path
+            );
+            ensure!(
+                parent.metadata()?.dev() == self.store.metadata()?.dev(),
+                "tree creation must share the transaction filesystem: {}",
+                tree.path
+            );
             journal.records.push(Record {
-                path: tree.path.into(), before_sha256: digest(b""), before_bytes: 0,
-                after_sha256: digest(&index), after_bytes: index.len(),
-                mode: tree.mode, created: true, tree: Some(summary),
+                path: tree.path.into(),
+                before_sha256: digest(b""),
+                before_bytes: 0,
+                after_sha256: digest(&index),
+                after_bytes: index.len(),
+                mode: tree.mode,
+                created: true,
+                tree: Some(summary),
             });
             tree_indexes.push(index);
         }
@@ -763,59 +1030,115 @@ impl RewriteTransaction {
         )?;
         self.dirty.borrow_mut().mark(&self.store)?;
         let session = directory(&self.store, Path::new(&journal.session), false)?;
-        for (index, edit) in edits.iter().enumerate() {
-            if versioned {
-                // The preimage belongs to this journal, not to the first edit
-                // ever made to this pathname. An earlier generation's backups
-                // are never overwritten, adopted or used as a fallback.
+        if packed {
+            let mut pack_entries =
+                Vec::with_capacity(edits.len() * 2 + creations.len() + trees.len());
+            for (index, edit) in edits.iter().enumerate() {
+                let ord = u32::try_from(index).context("edit index overflow")?;
+                pack_entries.push((ord, PACK_KIND_BEFORE, edit.before));
+                pack_entries.push((ord, PACK_KIND_AFTER, edit.after));
+            }
+            for (offset, creation) in creations.iter().enumerate() {
+                let index = edits.len() + offset;
+                let ord = u32::try_from(index).context("creation index overflow")?;
+                pack_entries.push((ord, PACK_KIND_AFTER, creation.after));
+            }
+            for (offset, index_bytes) in tree_indexes.iter().enumerate() {
+                let ordinal = edits.len() + creations.len() + offset;
+                let ord = u32::try_from(ordinal).context("tree index overflow")?;
+                pack_entries.push((ord, PACK_KIND_AFTER, index_bytes.as_slice()));
+            }
+            let pack_bytes = encode_session_pack(&pack_entries)?;
+            let mut staged_pack = stage_with_barrier(&session, &pack_bytes, 0o600, "pack")?;
+            renameat_with(
+                &session,
+                staged_pack.name.as_str(),
+                &session,
+                SESSION_PACK_FILE,
+                RenameFlags::NOREPLACE,
+            )?;
+            staged_pack.installed = true;
+            self.dirty.borrow_mut().mark(&session)?;
+
+            for (offset, creation) in creations.iter().enumerate() {
+                let index = edits.len() + offset;
                 self.publish_staged(
                     &session,
-                    OsStr::new(&format!("{index}.before")),
-                    edit.before,
+                    OsStr::new(&format!("{index}.new")),
+                    creation.after,
+                    creation.mode,
+                )?;
+            }
+            for (offset, (tree, index_bytes)) in trees.iter().zip(&tree_indexes).enumerate() {
+                let ordinal = edits.len() + creations.len() + offset;
+                trees::stage(
+                    &session,
+                    OsStr::new(&format!("{ordinal}.new")),
+                    tree,
+                    index_bytes,
+                )?;
+                record_barrier("tree");
+            }
+        } else {
+            for (index, edit) in edits.iter().enumerate() {
+                if versioned {
+                    // The preimage belongs to this journal, not to the first edit
+                    // ever made to this pathname. An earlier generation's backups
+                    // are never overwritten, adopted or used as a fallback.
+                    self.publish_staged(
+                        &session,
+                        OsStr::new(&format!("{index}.before")),
+                        edit.before,
+                        0o600,
+                    )?;
+                } else {
+                    let (parent, name) = parent_and_name(&self.backups, edit.path, false)?;
+                    if let Some(backup) = read_optional(&parent, &name, MAX_FILE_BYTES)? {
+                        ensure!(
+                            backup.bytes == edit.before,
+                            "immutable migration backup changed: {}",
+                            edit.path
+                        );
+                    } else {
+                        self.publish_staged(&parent, &name, edit.before, 0o600)?;
+                    }
+                }
+                self.publish_staged(
+                    &session,
+                    OsStr::new(&format!("{index}.after")),
+                    edit.after,
                     0o600,
                 )?;
-            } else {
-                let (parent, name) = parent_and_name(&self.backups, edit.path, false)?;
-                if let Some(backup) = read_optional(&parent, &name, MAX_FILE_BYTES)? {
-                    ensure!(
-                        backup.bytes == edit.before,
-                        "immutable migration backup changed: {}",
-                        edit.path
-                    );
-                } else {
-                    self.publish_staged(&parent, &name, edit.before, 0o600)?;
-                }
             }
-            self.publish_staged(
-                &session,
-                OsStr::new(&format!("{index}.after")),
-                edit.after,
-                0o600,
-            )?;
-        }
-        for (offset, creation) in creations.iter().enumerate() {
-            let index = edits.len() + offset;
-            self.publish_staged(
-                &session,
-                OsStr::new(&format!("{index}.after")),
-                creation.after,
-                0o600,
-            )?;
-            // This durable image is consumed by the no-replace installation
-            // rename. Its continued presence proves we did not create a
-            // colliding pathname, even if that other file has identical bytes.
-            self.publish_staged(
-                &session,
-                OsStr::new(&format!("{index}.new")),
-                creation.after,
-                creation.mode,
-            )?;
-        }
-        for (offset, (tree, index)) in trees.iter().zip(&tree_indexes).enumerate() {
-            let ordinal = edits.len() + creations.len() + offset;
-            self.publish_staged(&session, OsStr::new(&format!("{ordinal}.after")), index, 0o600)?;
-            trees::stage(&session, OsStr::new(&format!("{ordinal}.new")), tree, index)?;
-            record_barrier("tree");
+            for (offset, creation) in creations.iter().enumerate() {
+                let index = edits.len() + offset;
+                self.publish_staged(
+                    &session,
+                    OsStr::new(&format!("{index}.after")),
+                    creation.after,
+                    0o600,
+                )?;
+                // This durable image is consumed by the no-replace installation
+                // rename. Its continued presence proves we did not create a
+                // colliding pathname, even if that other file has identical bytes.
+                self.publish_staged(
+                    &session,
+                    OsStr::new(&format!("{index}.new")),
+                    creation.after,
+                    creation.mode,
+                )?;
+            }
+            for (offset, (tree, index)) in trees.iter().zip(&tree_indexes).enumerate() {
+                let ordinal = edits.len() + creations.len() + offset;
+                self.publish_staged(
+                    &session,
+                    OsStr::new(&format!("{ordinal}.after")),
+                    index,
+                    0o600,
+                )?;
+                trees::stage(&session, OsStr::new(&format!("{ordinal}.new")), tree, index)?;
+                record_barrier("tree");
+            }
         }
         // Recovery material must be durable before the journal references it.
         self.flush_dirty()?;
@@ -832,22 +1155,51 @@ impl RewriteTransaction {
     /// record ordinal. Never try a legacy or another session's backup when a
     /// versioned preimage is missing or damaged. Callers verify its content hash.
     fn read_preimage(&self, journal: &Journal, index: usize) -> Result<Contents> {
-        let record = journal.records.get(index).context("invalid preimage record index")?;
+        let record = journal
+            .records
+            .get(index)
+            .context("invalid preimage record index")?;
         ensure!(!record.created, "a created file has no original image");
         match journal.schema_version.as_str() {
             JOURNAL_VERSION => {
                 let (parent, name) = parent_and_name(&self.backups, &record.path, false)?;
                 read_required(&parent, &name, MAX_FILE_BYTES)
             }
-            VERSIONED_JOURNAL_VERSION | creations::JOURNAL_VERSION | REQUEST_JOURNAL_VERSION
+            VERSIONED_JOURNAL_VERSION
+            | creations::JOURNAL_VERSION
+            | REQUEST_JOURNAL_VERSION
             | TREE_JOURNAL_VERSION => {
                 let session = directory(&self.store, Path::new(&journal.session), false)?;
-                let image = read_required(&session, OsStr::new(&format!("{index}.before")), MAX_FILE_BYTES)?;
-                ensure!(image.metadata.mode() & 0o7777 == 0o600,
-                    "transaction preimage must retain private permissions");
+                let image = read_required(
+                    &session,
+                    OsStr::new(&format!("{index}.before")),
+                    MAX_FILE_BYTES,
+                )?;
+                ensure!(
+                    image.metadata.mode() & 0o7777 == 0o600,
+                    "transaction preimage must retain private permissions"
+                );
                 Ok(image)
             }
+            PACKED_JOURNAL_VERSION => {
+                let session = directory(&self.store, Path::new(&journal.session), false)?;
+                read_session_pack_entry(&session, index, PACK_KIND_BEFORE, MAX_FILE_BYTES)
+            }
             _ => bail!("unsupported rewrite preimage schema"),
+        }
+    }
+
+    pub(super) fn read_after_image_bounded(
+        &self,
+        journal: &Journal,
+        index: usize,
+        limit: usize,
+    ) -> Result<Contents> {
+        let session = directory(&self.store, Path::new(&journal.session), false)?;
+        if journal.schema_version == PACKED_JOURNAL_VERSION {
+            read_session_pack_entry(&session, index, PACK_KIND_AFTER, limit)
+        } else {
+            read_required(&session, OsStr::new(&format!("{index}.after")), limit)
         }
     }
 
@@ -920,12 +1272,12 @@ impl RewriteTransaction {
 
     pub(crate) fn install(&self, journal: &Journal, index: usize) -> Result<()> {
         let record = &journal.records[index];
-        let session = directory(&self.store, Path::new(&journal.session), false)?;
-        let after = read_required(
-            &session,
-            OsStr::new(&format!("{index}.after")),
-            MAX_FILE_BYTES,
-        )?;
+        let limit = if record.tree.is_some() {
+            trees::MAX_INDEX_BYTES
+        } else {
+            MAX_FILE_BYTES
+        };
+        let after = self.read_after_image_bounded(journal, index, limit)?;
         ensure!(
             verify_image(&after, &record.after_sha256, record.after_bytes, None),
             "staged rewrite bytes changed"
@@ -1037,7 +1389,10 @@ impl RewriteTransaction {
     /// This supports repeated reviewed migrations of the same files. Recovery
     /// remains the shared pinned protocol, including for historical v1 journals.
     /// The path-global first-original API above retains its existing contract.
-    pub fn apply_versioned_with_receipt(&self, edits: &[Edit<'_>]) -> Result<Option<AppliedRewrite>> {
+    pub fn apply_versioned_with_receipt(
+        &self,
+        edits: &[Edit<'_>],
+    ) -> Result<Option<AppliedRewrite>> {
         if edits.is_empty() {
             return Ok(None);
         }
@@ -1056,12 +1411,202 @@ impl RewriteTransaction {
         creations: &[CreateFile<'_>],
     ) -> Result<AppliedRewrite> {
         request.check_project(&self.project)?;
-        ensure!(rollback::lookup_request(self, request)?.is_none(),
-            "installation request already has a recorded outcome; inspect it instead of applying again");
-        ensure!(read_optional(&self.store, OsStr::new(PENDING), MAX_JOURNAL_BYTES)?.is_none(),
-            "unfinished rewrite requires explicit recovery before a named installation");
-        let journal = self.prepare_bound_changes(edits, creations, REQUEST_JOURNAL_VERSION, Some(request))?;
-        self.apply_prepared(journal)?.context("named installation did not return its journal identity")
+        ensure!(
+            rollback::lookup_request(self, request)?.is_none(),
+            "installation request already has a recorded outcome; inspect it instead of applying again"
+        );
+        ensure!(
+            read_optional(&self.store, OsStr::new(PENDING), MAX_JOURNAL_BYTES)?.is_none(),
+            "unfinished rewrite requires explicit recovery before a named installation"
+        );
+        let journal =
+            self.prepare_bound_changes(edits, creations, REQUEST_JOURNAL_VERSION, Some(request))?;
+        self.apply_prepared(journal)?
+            .context("named installation did not return its journal identity")
+    }
+
+    /// Two-wave group-commit installation (`PACKED_JOURNAL_VERSION` / `v6`).
+    ///
+    /// Wave 1 packs all `(before, after)` recovery images into a single `0o600`
+    /// `session.pack` file (1 `"pack"` fsync instead of 2N per-blob `"file"`
+    /// fsyncs) before publishing `pending.json`.
+    /// Wave 2 pipelines all replacement target writes into page cache first,
+    /// flushes data durability across staged targets before any rename, executes
+    /// the atomic rename batch, flushes each unique dirty parent directory once,
+    /// and archives `applied.json`.
+    pub fn apply_group_commit_with_receipt(
+        &self,
+        edits: &[Edit<'_>],
+    ) -> Result<Option<AppliedRewrite>> {
+        if edits.is_empty() {
+            return Ok(None);
+        }
+        self.apply_group_commit_plan_with_receipt(edits, &[], &[], None)
+    }
+
+    /// Two-wave group-commit installation supporting edits, file creations,
+    /// absent-root directory trees, and optional caller-owned `InstallRequest`
+    /// idempotency slots.
+    pub fn apply_group_commit_plan_with_receipt(
+        &self,
+        edits: &[Edit<'_>],
+        creations: &[CreateFile<'_>],
+        trees: &[CreateTree<'_>],
+        request: Option<&InstallRequest>,
+    ) -> Result<Option<AppliedRewrite>> {
+        if let Some(req) = request {
+            req.check_project(&self.project)?;
+            ensure!(
+                rollback::lookup_request(self, req)?.is_none(),
+                "installation request already has a recorded outcome; inspect it instead of applying again"
+            );
+        } else if edits.is_empty() && creations.is_empty() && trees.is_empty() {
+            return Ok(None);
+        }
+        ensure!(
+            read_optional(&self.store, OsStr::new(PENDING), MAX_JOURNAL_BYTES)?.is_none(),
+            "unfinished rewrite requires explicit recovery before group-commit installation"
+        );
+        let journal =
+            self.prepare_bound_plan(edits, creations, trees, PACKED_JOURNAL_VERSION, request)?;
+        self.apply_prepared_group_commit(journal)
+    }
+
+    fn apply_prepared_group_commit(&self, journal: Journal) -> Result<Option<AppliedRewrite>> {
+        let receipt = AppliedRewrite {
+            transaction_id: journal.session.clone(),
+            journal_sha256: digest(&serde_json::to_vec(&journal)?),
+            files: journal.records.len(),
+        };
+        let result = (|| -> Result<()> {
+            let mut staged_replacements = Vec::with_capacity(journal.records.len());
+
+            // Wave 2A: Preflight every target and write all replacement staging files
+            // into page cache before issuing per-inode sync barriers, enabling OS
+            // writeback coalescing across the entire multi-file batch.
+            for (index, record) in journal.records.iter().enumerate() {
+                if record.tree.is_some() {
+                    self.check_tree_ready(&journal, index)?;
+                    continue;
+                }
+                if record.created {
+                    self.check_creation_ready(&journal, index)?;
+                    continue;
+                }
+                let before = self.read_preimage(&journal, index)?;
+                ensure!(
+                    verify_image(&before, &record.before_sha256, record.before_bytes, None),
+                    "transaction preimage integrity failed before installation: {}",
+                    record.path
+                );
+                let after = self.read_after_image_bounded(&journal, index, MAX_FILE_BYTES)?;
+                ensure!(
+                    verify_image(&after, &record.after_sha256, record.after_bytes, None),
+                    "staged rewrite bytes changed: {}",
+                    record.path
+                );
+                let (parent, target_name) = parent_and_name(&self.root, &record.path, false)?;
+                let current = read_required(&parent, &target_name, MAX_FILE_BYTES)?;
+                ensure!(
+                    verify_image(
+                        &current,
+                        &record.before_sha256,
+                        record.before_bytes,
+                        Some(record.mode)
+                    ),
+                    "source changed before rewrite commit: {}",
+                    record.path
+                );
+
+                let staged_name = unique_name(".rewrite-stage");
+                let mut staged_file = File::from(openat(
+                    &parent,
+                    staged_name.as_str(),
+                    OFlags::WRONLY
+                        | OFlags::CREATE
+                        | OFlags::EXCL
+                        | OFlags::NOFOLLOW
+                        | OFlags::CLOEXEC,
+                    Mode::from_raw_mode(0o600),
+                )?);
+                let owned = OwnedStagedReplacement {
+                    record_index: index,
+                    parent,
+                    target_name,
+                    expected_before_metadata: current.metadata,
+                    expected_before_bytes: current.bytes,
+                    staged_file: staged_file.try_clone()?,
+                    staged_name,
+                    installed: false,
+                };
+                staged_file.write_all(&after.bytes)?;
+                staged_file.set_permissions(Permissions::from_mode(record.mode))?;
+                staged_replacements.push(owned);
+            }
+
+            // Wave 2B: Persist all staged replacement inodes to stable media BEFORE
+            // any rename can make them visible.
+            if !staged_replacements.is_empty() {
+                for item in &staged_replacements {
+                    item.staged_file
+                        .sync_all()
+                        .context("rewrite durability barrier failed (wave2_data)")?;
+                }
+                record_barrier("wave2_data");
+            }
+
+            // Wave 2C: Execute tight atomic rename batch (rechecking unchanged source
+            // immediately prior to each rename) + creations/trees.
+            let mut replacement_iter = staged_replacements.iter_mut().peekable();
+            for (index, record) in journal.records.iter().enumerate() {
+                if record.tree.is_some() {
+                    self.install_tree(&journal, index)?;
+                    continue;
+                }
+                if record.created {
+                    self.install_created(&journal, index)?;
+                    continue;
+                }
+                let staged = replacement_iter
+                    .next()
+                    .filter(|item| item.record_index == index)
+                    .context("internal group-commit replacement index mismatch")?;
+                let checked = read_required(&staged.parent, &staged.target_name, MAX_FILE_BYTES)?;
+                ensure!(
+                    same_version(&staged.expected_before_metadata, &checked.metadata)
+                        && checked.bytes == staged.expected_before_bytes,
+                    "rewrite source changed while staging: {}",
+                    record.path
+                );
+                renameat_with(
+                    &staged.parent,
+                    staged.staged_name.as_str(),
+                    &staged.parent,
+                    &staged.target_name,
+                    RenameFlags::empty(),
+                )?;
+                staged.installed = true;
+                self.dirty.borrow_mut().mark(&staged.parent)?;
+            }
+
+            // Wave 2D: Flush each unique dirty parent directory once, then archive.
+            self.flush_dirty()?;
+            self.archive(&journal, "applied.json")
+        })();
+        if let Err(error) = result {
+            return match self.recover_pending() {
+                Ok(true) => {
+                    Err(error.context("rewrite installation failed; original sources restored"))
+                }
+                Ok(false) => Err(error.context(
+                    "rewrite completion durability failed; inspect retained transaction evidence",
+                )),
+                Err(recovery) => Err(anyhow::anyhow!(
+                    "rewrite installation failed: {error:#}; recovery also failed: {recovery:#}"
+                )),
+            };
+        }
+        Ok(Some(receipt))
     }
 
     fn apply_prepared(&self, journal: Journal) -> Result<Option<AppliedRewrite>> {
@@ -1576,14 +2121,33 @@ mod applied_receipt_tests {
         fs::write(root.path().join("app.js"), b"original").unwrap();
         let receipt = {
             let writer = RewriteTransaction::open_without_recovery(root.path()).unwrap();
-            writer.apply_with_receipt(&[Edit { path: "app.js", before: b"original", after: b"candidate" }])
-                .unwrap().unwrap()
+            writer
+                .apply_with_receipt(&[Edit {
+                    path: "app.js",
+                    before: b"original",
+                    after: b"candidate",
+                }])
+                .unwrap()
+                .unwrap()
         };
         assert_eq!(receipt.files, 1);
-        let preview = rollback::run_pinned(root.path(), &receipt.transaction_id, &receipt.journal_sha256, false);
+        let preview = rollback::run_pinned(
+            root.path(),
+            &receipt.transaction_id,
+            &receipt.journal_sha256,
+            false,
+        );
         assert_eq!(preview.status, rollback::RollbackStatus::Ready);
-        assert_eq!(preview.transaction.unwrap().journal_sha256, receipt.journal_sha256);
-        let restored = rollback::run_pinned(root.path(), &receipt.transaction_id, &receipt.journal_sha256, true);
+        assert_eq!(
+            preview.transaction.unwrap().journal_sha256,
+            receipt.journal_sha256
+        );
+        let restored = rollback::run_pinned(
+            root.path(),
+            &receipt.transaction_id,
+            &receipt.journal_sha256,
+            true,
+        );
         assert_eq!(restored.status, rollback::RollbackStatus::RolledBack);
         assert_eq!(fs::read(root.path().join("app.js")).unwrap(), b"original");
     }
@@ -1594,12 +2158,22 @@ mod applied_receipt_tests {
         fs::write(root.path().join("app.js"), b"original").unwrap();
         {
             let writer = RewriteTransaction::open(root.path()).unwrap();
-            let journal = writer.prepare(&[Edit { path: "app.js", before: b"original", after: b"candidate" }]).unwrap();
+            let journal = writer
+                .prepare(&[Edit {
+                    path: "app.js",
+                    before: b"original",
+                    after: b"candidate",
+                }])
+                .unwrap();
             writer.install(&journal, 0).unwrap();
         }
         assert!(RewriteTransaction::open_without_recovery(root.path()).is_err());
         assert_eq!(fs::read(root.path().join("app.js")).unwrap(), b"candidate");
-        assert!(root.path().join(".migrate-backup/.franken-rewrite/pending.json").exists());
+        assert!(
+            root.path()
+                .join(".migrate-backup/.franken-rewrite/pending.json")
+                .exists()
+        );
         // The existing explicit recovery-capable entrypoint retains its contract.
         drop(RewriteTransaction::open(root.path()).unwrap());
         assert_eq!(fs::read(root.path().join("app.js")).unwrap(), b"original");
@@ -1634,20 +2208,36 @@ mod versioned_preimage_tests {
 
     fn apply(root: &Path, before: [&[u8]; 2], after: [&[u8]; 2]) -> AppliedRewrite {
         let writer = RewriteTransaction::open_without_recovery(root).unwrap();
-        writer.apply_versioned_with_receipt(&[
-            Edit { path: "a.js", before: before[0], after: after[0] },
-            Edit { path: "b.js", before: before[1], after: after[1] },
-        ]).unwrap().unwrap()
+        writer
+            .apply_versioned_with_receipt(&[
+                Edit {
+                    path: "a.js",
+                    before: before[0],
+                    after: after[0],
+                },
+                Edit {
+                    path: "b.js",
+                    before: before[1],
+                    after: after[1],
+                },
+            ])
+            .unwrap()
+            .unwrap()
     }
 
     fn session(root: &Path, receipt: &AppliedRewrite) -> PathBuf {
-        root.join(".migrate-backup").join(STORE).join(&receipt.transaction_id)
+        root.join(".migrate-backup")
+            .join(STORE)
+            .join(&receipt.transaction_id)
     }
 
     fn sources(root: &Path, a: &[u8], b: &[u8]) {
         assert_eq!(fs::read(root.join("a.js")).unwrap(), a);
         assert_eq!(fs::read(root.join("b.js")).unwrap(), b);
-        assert_eq!(fs::metadata(root.join("a.js")).unwrap().mode() & 0o777, 0o751);
+        assert_eq!(
+            fs::metadata(root.join("a.js")).unwrap().mode() & 0o777,
+            0o751
+        );
     }
 
     fn restore(root: &Path, receipt: &AppliedRewrite) -> rollback::RollbackReport {
@@ -1664,24 +2254,49 @@ mod versioned_preimage_tests {
         sources(root.path(), b"a2", b"b2");
         for (receipt, a, b) in [(&first, b"a0", b"b0"), (&second, b"a1", b"b1")] {
             let directory = session(root.path(), receipt);
-            let journal: Journal = serde_json::from_slice(&fs::read(directory.join("applied.json")).unwrap()).unwrap();
+            let journal: Journal =
+                serde_json::from_slice(&fs::read(directory.join("applied.json")).unwrap()).unwrap();
             assert_eq!(journal.schema_version, VERSIONED_JOURNAL_VERSION);
-            assert_eq!(digest(&serde_json::to_vec(&journal).unwrap()), receipt.journal_sha256);
+            assert_eq!(
+                digest(&serde_json::to_vec(&journal).unwrap()),
+                receipt.journal_sha256
+            );
             assert_eq!(fs::read(directory.join("0.before")).unwrap(), a);
             assert_eq!(fs::read(directory.join("1.before")).unwrap(), b);
-            assert_eq!(fs::metadata(directory.join("0.before")).unwrap().mode() & 0o777, 0o600);
+            assert_eq!(
+                fs::metadata(directory.join("0.before")).unwrap().mode() & 0o777,
+                0o600
+            );
         }
         assert!(!root.path().join(".migrate-backup/a.js").exists());
-        assert_eq!(restore(root.path(), &first).status, rollback::RollbackStatus::Conflict);
+        assert_eq!(
+            restore(root.path(), &first).status,
+            rollback::RollbackStatus::Conflict
+        );
         sources(root.path(), b"a2", b"b2");
-        assert_eq!(restore(root.path(), &second).status, rollback::RollbackStatus::RolledBack);
+        assert_eq!(
+            restore(root.path(), &second).status,
+            rollback::RollbackStatus::RolledBack
+        );
         sources(root.path(), b"a1", b"b1");
-        assert_eq!(restore(root.path(), &first).status, rollback::RollbackStatus::RolledBack);
+        assert_eq!(
+            restore(root.path(), &first).status,
+            rollback::RollbackStatus::RolledBack
+        );
         sources(root.path(), b"a0", b"b0");
-        assert_eq!(fs::read(session(root.path(), &second).join("0.before")).unwrap(), b"a1");
+        assert_eq!(
+            fs::read(session(root.path(), &second).join("0.before")).unwrap(),
+            b"a1"
+        );
         fs::write(root.path().join("a.js"), b"later user work").unwrap();
-        assert_eq!(restore(root.path(), &second).status, rollback::RollbackStatus::AlreadyRolledBack);
-        assert_eq!(fs::read(root.path().join("a.js")).unwrap(), b"later user work");
+        assert_eq!(
+            restore(root.path(), &second).status,
+            rollback::RollbackStatus::AlreadyRolledBack
+        );
+        assert_eq!(
+            fs::read(root.path().join("a.js")).unwrap(),
+            b"later user work"
+        );
     }
 
     #[test]
@@ -1689,19 +2304,46 @@ mod versioned_preimage_tests {
         let root = project();
         let legacy = {
             let writer = RewriteTransaction::open(root.path()).unwrap();
-            writer.apply_with_receipt(&[
-                Edit { path: "a.js", before: b"a0", after: b"a1" },
-                Edit { path: "b.js", before: b"b0", after: b"b1" },
-            ]).unwrap().unwrap()
+            writer
+                .apply_with_receipt(&[
+                    Edit {
+                        path: "a.js",
+                        before: b"a0",
+                        after: b"a1",
+                    },
+                    Edit {
+                        path: "b.js",
+                        before: b"b0",
+                        after: b"b1",
+                    },
+                ])
+                .unwrap()
+                .unwrap()
         };
-        let original_journal = fs::read(session(root.path(), &legacy).join("applied.json")).unwrap();
+        let original_journal =
+            fs::read(session(root.path(), &legacy).join("applied.json")).unwrap();
         let second = apply(root.path(), [b"a1", b"b1"], [b"a2", b"b2"]);
-        assert_eq!(fs::read(root.path().join(".migrate-backup/a.js")).unwrap(), b"a0");
-        assert_eq!(fs::read(session(root.path(), &legacy).join("applied.json")).unwrap(), original_journal);
-        assert_eq!(restore(root.path(), &legacy).status, rollback::RollbackStatus::Conflict);
-        assert_eq!(restore(root.path(), &second).status, rollback::RollbackStatus::RolledBack);
+        assert_eq!(
+            fs::read(root.path().join(".migrate-backup/a.js")).unwrap(),
+            b"a0"
+        );
+        assert_eq!(
+            fs::read(session(root.path(), &legacy).join("applied.json")).unwrap(),
+            original_journal
+        );
+        assert_eq!(
+            restore(root.path(), &legacy).status,
+            rollback::RollbackStatus::Conflict
+        );
+        assert_eq!(
+            restore(root.path(), &second).status,
+            rollback::RollbackStatus::RolledBack
+        );
         sources(root.path(), b"a1", b"b1");
-        assert_eq!(restore(root.path(), &legacy).status, rollback::RollbackStatus::RolledBack);
+        assert_eq!(
+            restore(root.path(), &legacy).status,
+            rollback::RollbackStatus::RolledBack
+        );
         sources(root.path(), b"a0", b"b0");
     }
 
@@ -1727,10 +2369,25 @@ mod versioned_preimage_tests {
                 _ => fs::set_permissions(&before, Permissions::from_mode(0o644)).unwrap(),
             }
             let report = restore(root.path(), &receipt);
-            assert_eq!(report.status, rollback::RollbackStatus::Conflict, "mutation {mutation}: {report:?}");
+            assert_eq!(
+                report.status,
+                rollback::RollbackStatus::Conflict,
+                "mutation {mutation}: {report:?}"
+            );
             sources(root.path(), b"a1", b"b1");
-            assert!(!root.path().join(".migrate-backup").join(STORE).join(PENDING).exists());
-            assert!(!session(root.path(), &receipt).join("rolled-back.json").exists());
+            assert!(
+                !root
+                    .path()
+                    .join(".migrate-backup")
+                    .join(STORE)
+                    .join(PENDING)
+                    .exists()
+            );
+            assert!(
+                !session(root.path(), &receipt)
+                    .join("rolled-back.json")
+                    .exists()
+            );
         }
     }
 
@@ -1740,10 +2397,23 @@ mod versioned_preimage_tests {
         let first = apply(root.path(), [b"a0", b"b0"], [b"a1", b"b1"]);
         let second = {
             let writer = RewriteTransaction::open_without_recovery(root.path()).unwrap();
-            let journal = writer.prepare_with_preimages(&[
-                Edit { path: "a.js", before: b"a1", after: b"a2" },
-                Edit { path: "b.js", before: b"b1", after: b"b2" },
-            ], true).unwrap();
+            let journal = writer
+                .prepare_with_preimages(
+                    &[
+                        Edit {
+                            path: "a.js",
+                            before: b"a1",
+                            after: b"a2",
+                        },
+                        Edit {
+                            path: "b.js",
+                            before: b"b1",
+                            after: b"b2",
+                        },
+                    ],
+                    true,
+                )
+                .unwrap();
             writer.install(&journal, 0).unwrap();
             AppliedRewrite {
                 transaction_id: journal.session.clone(),
@@ -1757,9 +2427,20 @@ mod versioned_preimage_tests {
         // recovery implementation and no reliance on a global original.
         drop(RewriteTransaction::open(root.path()).unwrap());
         sources(root.path(), b"a1", b"b1");
-        assert!(session(root.path(), &second).join("rolled-back.json").is_file());
-        assert!(!session(root.path(), &first).join("rolled-back.json").exists());
-        assert_eq!(restore(root.path(), &first).status, rollback::RollbackStatus::RolledBack);
+        assert!(
+            session(root.path(), &second)
+                .join("rolled-back.json")
+                .is_file()
+        );
+        assert!(
+            !session(root.path(), &first)
+                .join("rolled-back.json")
+                .exists()
+        );
+        assert_eq!(
+            restore(root.path(), &first).status,
+            rollback::RollbackStatus::RolledBack
+        );
         sources(root.path(), b"a0", b"b0");
     }
 
@@ -1768,11 +2449,17 @@ mod versioned_preimage_tests {
         let root = project();
         let receipt = apply(root.path(), [b"a0", b"b0"], [b"a1", b"b1"]);
         fs::write(root.path().join("b.js"), b"independent user edit").unwrap();
-        assert_eq!(restore(root.path(), &receipt).status, rollback::RollbackStatus::Conflict);
+        assert_eq!(
+            restore(root.path(), &receipt).status,
+            rollback::RollbackStatus::Conflict
+        );
         sources(root.path(), b"a1", b"independent user edit");
         // Explicit conflict resolution, not something performed by recovery.
         fs::write(root.path().join("b.js"), b"b1").unwrap();
-        assert_eq!(restore(root.path(), &receipt).status, rollback::RollbackStatus::RolledBack);
+        assert_eq!(
+            restore(root.path(), &receipt).status,
+            rollback::RollbackStatus::RolledBack
+        );
         sources(root.path(), b"a0", b"b0");
     }
 
@@ -1781,18 +2468,31 @@ mod versioned_preimage_tests {
         let root = project();
         let writer = RewriteTransaction::open_without_recovery(root.path()).unwrap();
         DURABILITY_LOG.with(|log| log.borrow_mut().clear());
-        writer.apply_versioned_with_receipt(&[
-            Edit { path: "a.js", before: b"a0", after: b"a1" },
-            Edit { path: "b.js", before: b"b0", after: b"b1" },
-        ]).unwrap();
+        writer
+            .apply_versioned_with_receipt(&[
+                Edit {
+                    path: "a.js",
+                    before: b"a0",
+                    after: b"a1",
+                },
+                Edit {
+                    path: "b.js",
+                    before: b"b0",
+                    after: b"b1",
+                },
+            ])
+            .unwrap();
         let log = DURABILITY_LOG.with(|log| std::mem::take(&mut *log.borrow_mut()));
-        assert_eq!(log, [
-            "file", "file", "file", "file", // both before/after pairs
-            "dir", "dir", // session contents and its entry in the store
-            "file", "journal", // pending intent
-            "file", "file", "dir", // installed sources and their directory
-            "archive", "archive", // completed journal and pending retirement
-        ]);
+        assert_eq!(
+            log,
+            [
+                "file", "file", "file", "file", // both before/after pairs
+                "dir", "dir", // session contents and its entry in the store
+                "file", "journal", // pending intent
+                "file", "file", "dir", // installed sources and their directory
+                "archive", "archive", // completed journal and pending retirement
+            ]
+        );
     }
 
     #[test]
@@ -1800,10 +2500,22 @@ mod versioned_preimage_tests {
         let root = project();
         {
             let writer = RewriteTransaction::open_without_recovery(root.path()).unwrap();
-            assert!(writer.apply_versioned_with_receipt(&[
-                Edit { path: "a.js", before: b"a0", after: b"a1" },
-                Edit { path: "b.js", before: b"stale", after: b"b1" },
-            ]).is_err());
+            assert!(
+                writer
+                    .apply_versioned_with_receipt(&[
+                        Edit {
+                            path: "a.js",
+                            before: b"a0",
+                            after: b"a1"
+                        },
+                        Edit {
+                            path: "b.js",
+                            before: b"stale",
+                            after: b"b1"
+                        },
+                    ])
+                    .is_err()
+            );
             assert!(writer.apply_versioned_with_receipt(&[]).unwrap().is_none());
         }
         sources(root.path(), b"a0", b"b0");
@@ -1817,32 +2529,82 @@ mod versioned_preimage_tests {
         let root = project();
         let first = apply(root.path(), [b"a0", b"b0"], [b"a1", b"b1"]);
         let writer = RewriteTransaction::open_without_recovery(root.path()).unwrap();
-        let journal = writer.prepare_with_preimages(&[
-            Edit { path: "a.js", before: b"a1", after: b"a2" },
-            Edit { path: "b.js", before: b"b1", after: b"b2" },
-        ], true).unwrap();
-        let session = root.path().join(".migrate-backup").join(STORE).join(&journal.session);
+        let journal = writer
+            .prepare_with_preimages(
+                &[
+                    Edit {
+                        path: "a.js",
+                        before: b"a1",
+                        after: b"a2",
+                    },
+                    Edit {
+                        path: "b.js",
+                        before: b"b1",
+                        after: b"b2",
+                    },
+                ],
+                true,
+            )
+            .unwrap();
+        let session = root
+            .path()
+            .join(".migrate-backup")
+            .join(STORE)
+            .join(&journal.session);
         fs::write(session.join("1.after"), b"damaged after-image").unwrap();
         let error = writer.apply_prepared(journal).unwrap_err();
-        assert!(format!("{error:#}").contains("original sources restored"), "{error:#}");
+        assert!(
+            format!("{error:#}").contains("original sources restored"),
+            "{error:#}"
+        );
         sources(root.path(), b"a1", b"b1");
         assert!(session.join("rolled-back.json").is_file());
-        assert!(!root.path().join(".migrate-backup").join(STORE)
-            .join(&first.transaction_id).join("rolled-back.json").exists());
+        assert!(
+            !root
+                .path()
+                .join(".migrate-backup")
+                .join(STORE)
+                .join(&first.transaction_id)
+                .join("rolled-back.json")
+                .exists()
+        );
     }
 
     #[test]
     fn versioned_preimage_corruption_is_detected_before_any_live_replacement() {
         let root = project();
         let writer = RewriteTransaction::open_without_recovery(root.path()).unwrap();
-        let journal = writer.prepare_with_preimages(&[
-            Edit { path: "a.js", before: b"a0", after: b"a1" },
-            Edit { path: "b.js", before: b"b0", after: b"b1" },
-        ], true).unwrap();
-        fs::write(root.path().join(".migrate-backup").join(STORE)
-            .join(&journal.session).join("1.before"), b"damaged preimage").unwrap();
+        let journal = writer
+            .prepare_with_preimages(
+                &[
+                    Edit {
+                        path: "a.js",
+                        before: b"a0",
+                        after: b"a1",
+                    },
+                    Edit {
+                        path: "b.js",
+                        before: b"b0",
+                        after: b"b1",
+                    },
+                ],
+                true,
+            )
+            .unwrap();
+        fs::write(
+            root.path()
+                .join(".migrate-backup")
+                .join(STORE)
+                .join(&journal.session)
+                .join("1.before"),
+            b"damaged preimage",
+        )
+        .unwrap();
         let error = writer.apply_prepared(journal).unwrap_err();
-        assert!(format!("{error:#}").contains("preimage integrity failed before installation"), "{error:#}");
+        assert!(
+            format!("{error:#}").contains("preimage integrity failed before installation"),
+            "{error:#}"
+        );
         sources(root.path(), b"a0", b"b0");
     }
 
@@ -1853,8 +2615,15 @@ mod versioned_preimage_tests {
         let second = apply(root.path(), [b"a1", b"b1"], [b"a2", b"b2"]);
         let preimage = session(root.path(), &second).join("0.before");
         let actual = fs::read(&preimage).unwrap();
-        fs::write(&preimage, fs::read(session(root.path(), &first).join("0.before")).unwrap()).unwrap();
-        assert_eq!(restore(root.path(), &second).status, rollback::RollbackStatus::Conflict);
+        fs::write(
+            &preimage,
+            fs::read(session(root.path(), &first).join("0.before")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            restore(root.path(), &second).status,
+            rollback::RollbackStatus::Conflict
+        );
         sources(root.path(), b"a2", b"b2");
         fs::write(&preimage, actual).unwrap();
         let path = session(root.path(), &second).join("applied.json");
@@ -1866,7 +2635,10 @@ mod versioned_preimage_tests {
         assert_ne!(report.status, rollback::RollbackStatus::RolledBack);
         sources(root.path(), b"a2", b"b2");
         fs::write(&path, raw).unwrap();
-        assert_eq!(restore(root.path(), &second).status, rollback::RollbackStatus::RolledBack);
+        assert_eq!(
+            restore(root.path(), &second).status,
+            rollback::RollbackStatus::RolledBack
+        );
         sources(root.path(), b"a1", b"b1");
     }
 }
@@ -1874,9 +2646,9 @@ mod versioned_preimage_tests {
 #[cfg(test)]
 mod request_tests {
     use super::*;
+    use rollback::{RollbackStatus, TransactionState};
     use std::fs;
     use std::path::PathBuf;
-    use rollback::{RollbackStatus, TransactionState};
 
     fn project() -> tempfile::TempDir {
         let root = tempfile::tempdir().unwrap();
@@ -1889,70 +2661,124 @@ mod request_tests {
     }
 
     fn edits() -> [Edit<'static>; 1] {
-        [Edit { path: "app.cjs", before: b"before", after: b"after" }]
+        [Edit {
+            path: "app.cjs",
+            before: b"before",
+            after: b"after",
+        }]
     }
 
     fn session(root: &Path, request: &InstallRequest) -> PathBuf {
-        root.join(".migrate-backup").join(STORE).join(request.transaction_id())
+        root.join(".migrate-backup")
+            .join(STORE)
+            .join(request.transaction_id())
     }
 
     #[test]
     fn request_validation_and_unused_lookup_never_create_metadata() {
         let root = project();
         for id in ["", "../escape", "has space", "line\n", "nonascii-\u{03b1}"] {
-            assert!(InstallRequest::new(root.path(), id, &"a".repeat(64), &"b".repeat(64)).is_err());
+            assert!(
+                InstallRequest::new(root.path(), id, &"a".repeat(64), &"b".repeat(64)).is_err()
+            );
         }
-        assert!(InstallRequest::new(root.path(), &"x".repeat(65), &"a".repeat(64), &"b".repeat(64)).is_err());
-        for hash in ["a".repeat(63), "a".repeat(65), "A".repeat(64), "g".repeat(64)] {
+        assert!(
+            InstallRequest::new(
+                root.path(),
+                &"x".repeat(65),
+                &"a".repeat(64),
+                &"b".repeat(64)
+            )
+            .is_err()
+        );
+        for hash in [
+            "a".repeat(63),
+            "a".repeat(65),
+            "A".repeat(64),
+            "g".repeat(64),
+        ] {
             assert!(InstallRequest::new(root.path(), "valid", &hash, &"b".repeat(64)).is_err());
         }
         let request = request(root.path(), "Pipeline_07-build-2");
-        assert!(rollback::inspect_request(root.path(), &request).unwrap().is_none());
+        assert!(
+            rollback::inspect_request(root.path(), &request)
+                .unwrap()
+                .is_none()
+        );
         assert!(!root.path().join(".migrate-backup").exists());
         assert_eq!(request.transaction_id().len(), 76);
-        assert_eq!(serde_json::from_slice::<InstallRequest>(&serde_json::to_vec(&request).unwrap()).unwrap(), request);
+        assert_eq!(
+            serde_json::from_slice::<InstallRequest>(&serde_json::to_vec(&request).unwrap())
+                .unwrap(),
+            request
+        );
     }
 
     #[test]
     fn recorded_request_is_exact_history_not_authority_to_repeat_or_certify_sources() {
         let root = project();
         let request = request(root.path(), "deployment-17");
-        let receipt = RewriteTransaction::open_without_recovery(root.path()).unwrap()
-            .apply_for_request(&request, &edits(), &[]).unwrap();
+        let receipt = RewriteTransaction::open_without_recovery(root.path())
+            .unwrap()
+            .apply_for_request(&request, &edits(), &[])
+            .unwrap();
         let raw = fs::read(session(root.path(), &request).join("applied.json")).unwrap();
         let journal: Journal = serde_json::from_slice(&raw).unwrap();
         assert_eq!(journal.schema_version, REQUEST_JOURNAL_VERSION);
         assert_eq!(journal.request.as_ref(), Some(&request));
         assert_eq!(receipt.transaction_id, request.transaction_id());
-        assert_eq!(receipt.journal_sha256, digest(&serde_json::to_vec(&journal).unwrap()));
+        assert_eq!(
+            receipt.journal_sha256,
+            digest(&serde_json::to_vec(&journal).unwrap())
+        );
         fs::write(root.path().join("app.cjs"), b"later user work").unwrap();
-        let found = rollback::inspect_request(root.path(), &request).unwrap().unwrap();
+        let found = rollback::inspect_request(root.path(), &request)
+            .unwrap()
+            .unwrap();
         assert_eq!(found.state, TransactionState::Applied);
         assert_eq!(found.journal_sha256, receipt.journal_sha256);
         let writer = RewriteTransaction::open_without_recovery(root.path()).unwrap();
         assert!(writer.apply_for_request(&request, &edits(), &[]).is_err());
         assert!(rollback::inspect_request(root.path(), &request).is_err()); // real lock
         drop(writer);
-        assert_eq!(fs::read(root.path().join("app.cjs")).unwrap(), b"later user work");
-        assert_eq!(fs::read(session(root.path(), &request).join("applied.json")).unwrap(), raw);
+        assert_eq!(
+            fs::read(root.path().join("app.cjs")).unwrap(),
+            b"later user work"
+        );
+        assert_eq!(
+            fs::read(session(root.path(), &request).join("applied.json")).unwrap(),
+            raw
+        );
     }
 
     #[test]
     fn request_id_reuse_with_different_pins_or_project_never_selects_new_work() {
         let root = project();
         let original = request(root.path(), "same-id");
-        RewriteTransaction::open_without_recovery(root.path()).unwrap()
-            .apply_for_request(&original, &edits(), &[]).unwrap();
+        RewriteTransaction::open_without_recovery(root.path())
+            .unwrap()
+            .apply_for_request(&original, &edits(), &[])
+            .unwrap();
         for (input, candidate) in [("b", "a"), ("a", "c")] {
-            let changed = InstallRequest::new(root.path(), "same-id", &input.repeat(64), &candidate.repeat(64)).unwrap();
+            let changed = InstallRequest::new(
+                root.path(),
+                "same-id",
+                &input.repeat(64),
+                &candidate.repeat(64),
+            )
+            .unwrap();
             assert_eq!(changed.transaction_id(), original.transaction_id());
             assert!(rollback::inspect_request(root.path(), &changed).is_err());
         }
         let other = project();
         assert!(rollback::inspect_request(other.path(), &original).is_err());
         assert!(!other.path().join(".migrate-backup").exists());
-        assert!(RewriteTransaction::open_without_recovery(other.path()).unwrap()
-            .apply_for_request(&original, &edits(), &[]).is_err());
+        assert!(
+            RewriteTransaction::open_without_recovery(other.path())
+                .unwrap()
+                .apply_for_request(&original, &edits(), &[])
+                .is_err()
+        );
         assert_eq!(fs::read(other.path().join("app.cjs")).unwrap(), b"before");
         assert_eq!(fs::read(root.path().join("app.cjs")).unwrap(), b"after");
     }
@@ -1964,14 +2790,35 @@ mod request_tests {
         let writer = RewriteTransaction::open_without_recovery(root.path()).unwrap();
         assert!(writer.apply_for_request(&invalid, &[], &[]).is_err());
         assert!(!session(root.path(), &invalid).exists());
-        let request = InstallRequest::new(root.path(), "noop", &"a".repeat(64), &"a".repeat(64)).unwrap();
+        let request =
+            InstallRequest::new(root.path(), "noop", &"a".repeat(64), &"a".repeat(64)).unwrap();
         let receipt = writer.apply_for_request(&request, &[], &[]).unwrap();
         assert_eq!(receipt.files, 0);
         drop(writer);
-        assert_eq!(rollback::inspect_request(root.path(), &request).unwrap().unwrap().state, TransactionState::Applied);
-        assert_eq!(rollback::run_pinned(root.path(), &receipt.transaction_id, &receipt.journal_sha256, true).status,
-            RollbackStatus::RolledBack);
-        assert_eq!(rollback::inspect_request(root.path(), &request).unwrap().unwrap().state, TransactionState::RolledBack);
+        assert_eq!(
+            rollback::inspect_request(root.path(), &request)
+                .unwrap()
+                .unwrap()
+                .state,
+            TransactionState::Applied
+        );
+        assert_eq!(
+            rollback::run_pinned(
+                root.path(),
+                &receipt.transaction_id,
+                &receipt.journal_sha256,
+                true
+            )
+            .status,
+            RollbackStatus::RolledBack
+        );
+        assert_eq!(
+            rollback::inspect_request(root.path(), &request)
+                .unwrap()
+                .unwrap()
+                .state,
+            TransactionState::RolledBack
+        );
         assert_eq!(fs::read(root.path().join("app.cjs")).unwrap(), b"before");
     }
 
@@ -1979,20 +2826,49 @@ mod request_tests {
     fn rolled_back_request_remains_consumed_and_preserves_later_work() {
         let root = project();
         let request = request(root.path(), "mixed-install");
-        let receipt = RewriteTransaction::open_without_recovery(root.path()).unwrap()
-            .apply_for_request(&request, &edits(), &[CreateFile { path: "helper.cjs", after: b"new", mode: 0o640 }])
+        let receipt = RewriteTransaction::open_without_recovery(root.path())
+            .unwrap()
+            .apply_for_request(
+                &request,
+                &edits(),
+                &[CreateFile {
+                    path: "helper.cjs",
+                    after: b"new",
+                    mode: 0o640,
+                }],
+            )
             .unwrap();
         assert_eq!(receipt.files, 2);
-        assert_eq!(rollback::run_pinned(root.path(), &receipt.transaction_id, &receipt.journal_sha256, true).status,
-            RollbackStatus::RolledBack);
+        assert_eq!(
+            rollback::run_pinned(
+                root.path(),
+                &receipt.transaction_id,
+                &receipt.journal_sha256,
+                true
+            )
+            .status,
+            RollbackStatus::RolledBack
+        );
         assert!(!root.path().join("helper.cjs").exists());
-        assert_eq!(fs::read(session(root.path(), &request).join("1.retired")).unwrap(), b"new");
+        assert_eq!(
+            fs::read(session(root.path(), &request).join("1.retired")).unwrap(),
+            b"new"
+        );
         fs::write(root.path().join("helper.cjs"), b"later helper").unwrap();
-        let found = rollback::inspect_request(root.path(), &request).unwrap().unwrap();
+        let found = rollback::inspect_request(root.path(), &request)
+            .unwrap()
+            .unwrap();
         assert_eq!(found.state, TransactionState::RolledBack);
-        assert!(RewriteTransaction::open_without_recovery(root.path()).unwrap()
-            .apply_for_request(&request, &edits(), &[]).is_err());
-        assert_eq!(fs::read(root.path().join("helper.cjs")).unwrap(), b"later helper");
+        assert!(
+            RewriteTransaction::open_without_recovery(root.path())
+                .unwrap()
+                .apply_for_request(&request, &edits(), &[])
+                .is_err()
+        );
+        assert_eq!(
+            fs::read(root.path().join("helper.cjs")).unwrap(),
+            b"later helper"
+        );
         assert_eq!(fs::read(root.path().join("app.cjs")).unwrap(), b"before");
     }
 
@@ -2006,9 +2882,12 @@ mod request_tests {
         drop(writer);
         assert!(rollback::inspect_request(root.path(), &request).is_err());
         assert_eq!(fs::read(root.path().join("app.cjs")).unwrap(), b"before");
-        let request = InstallRequest::new(root.path(), "complete", &"a".repeat(64), &"b".repeat(64)).unwrap();
-        RewriteTransaction::open_without_recovery(root.path()).unwrap()
-            .apply_for_request(&request, &edits(), &[]).unwrap();
+        let request =
+            InstallRequest::new(root.path(), "complete", &"a".repeat(64), &"b".repeat(64)).unwrap();
+        RewriteTransaction::open_without_recovery(root.path())
+            .unwrap()
+            .apply_for_request(&request, &edits(), &[])
+            .unwrap();
         let path = session(root.path(), &request).join("applied.json");
         let mut journal: Journal = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         journal.request.as_mut().unwrap().candidate_input_sha256 = "c".repeat(64);
@@ -2025,11 +2904,18 @@ mod request_tests {
         let encoded = serde_json::to_vec(&journal).unwrap();
         let raw: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
         assert!(raw.get("request").is_none());
-        assert_eq!(encoded, serde_json::to_vec(&serde_json::from_slice::<Journal>(&encoded).unwrap()).unwrap());
+        assert_eq!(
+            encoded,
+            serde_json::to_vec(&serde_json::from_slice::<Journal>(&encoded).unwrap()).unwrap()
+        );
         let request = request(root.path(), "schema");
         let mut changed = journal;
         changed.request = Some(request.clone());
-        for schema in [JOURNAL_VERSION, VERSIONED_JOURNAL_VERSION, creations::JOURNAL_VERSION] {
+        for schema in [
+            JOURNAL_VERSION,
+            VERSIONED_JOURNAL_VERSION,
+            creations::JOURNAL_VERSION,
+        ] {
             changed.schema_version = schema.into();
             assert!(RewriteTransaction::validate_journal(&changed).is_err());
         }
@@ -2049,36 +2935,333 @@ mod request_tests {
             let root = PathBuf::from(root);
             let request = request(&root, "crash-case");
             let writer = RewriteTransaction::open_without_recovery(&root).unwrap();
-            let journal = writer.prepare_bound_changes(&edits(),
-                &[CreateFile { path: "helper.cjs", after: b"helper", mode: 0o600 }],
-                REQUEST_JOURNAL_VERSION, Some(&request)).unwrap();
+            let journal = writer
+                .prepare_bound_changes(
+                    &edits(),
+                    &[CreateFile {
+                        path: "helper.cjs",
+                        after: b"helper",
+                        mode: 0o600,
+                    }],
+                    REQUEST_JOURNAL_VERSION,
+                    Some(&request),
+                )
+                .unwrap();
             let step: usize = std::env::var(STEP).unwrap().parse().unwrap();
             if step == 3 {
                 writer.apply_prepared(journal).unwrap();
             } else {
-                for index in 0..step { writer.install(&journal, index).unwrap(); }
+                for index in 0..step {
+                    writer.install(&journal, index).unwrap();
+                }
             }
             std::process::exit(73); // no destructors and no stdout delivery
         }
-        let module = module_path!().split_once("::").map_or(module_path!(), |(_, m)| m);
-        let test = format!("{module}::process_exit_before_and_after_commit_keeps_the_request_bound_to_one_journal");
+        let module = module_path!()
+            .split_once("::")
+            .map_or(module_path!(), |(_, m)| m);
+        let test = format!(
+            "{module}::process_exit_before_and_after_commit_keeps_the_request_bound_to_one_journal"
+        );
         for step in 0..=3 {
             let root = project();
             let request = request(root.path(), "crash-case");
             let child = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", &test]).env(ROOT, root.path()).env(STEP, step.to_string())
-                .output().unwrap();
-            assert_eq!(child.status.code(), Some(73), "{}", String::from_utf8_lossy(&child.stderr));
-            let found = rollback::inspect_request(root.path(), &request).unwrap().unwrap();
-            assert_eq!(found.state, if step == 3 { TransactionState::Applied } else { TransactionState::ApplyInterrupted });
+                .args(["--exact", &test])
+                .env(ROOT, root.path())
+                .env(STEP, step.to_string())
+                .output()
+                .unwrap();
+            assert_eq!(
+                child.status.code(),
+                Some(73),
+                "{}",
+                String::from_utf8_lossy(&child.stderr)
+            );
+            let found = rollback::inspect_request(root.path(), &request)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                found.state,
+                if step == 3 {
+                    TransactionState::Applied
+                } else {
+                    TransactionState::ApplyInterrupted
+                }
+            );
             assert_eq!(found.transaction_id, request.transaction_id());
             // Inspection cannot implicitly finish or undo an interrupted apply.
-            assert_eq!(fs::read(root.path().join("app.cjs")).unwrap(), if step == 0 { b"before".as_slice() } else { b"after" });
-            assert_eq!(rollback::run_pinned(root.path(), &found.transaction_id, &found.journal_sha256, true).status,
-                RollbackStatus::RolledBack);
+            assert_eq!(
+                fs::read(root.path().join("app.cjs")).unwrap(),
+                if step == 0 {
+                    b"before".as_slice()
+                } else {
+                    b"after"
+                }
+            );
+            assert_eq!(
+                rollback::run_pinned(
+                    root.path(),
+                    &found.transaction_id,
+                    &found.journal_sha256,
+                    true
+                )
+                .status,
+                RollbackStatus::RolledBack
+            );
             assert_eq!(fs::read(root.path().join("app.cjs")).unwrap(), b"before");
             assert!(!root.path().join("helper.cjs").exists());
-            assert_eq!(rollback::inspect_request(root.path(), &request).unwrap().unwrap().state, TransactionState::RolledBack);
+            assert_eq!(
+                rollback::inspect_request(root.path(), &request)
+                    .unwrap()
+                    .unwrap()
+                    .state,
+                TransactionState::RolledBack
+            );
         }
+    }
+
+    #[test]
+    fn group_commit_v6_coalesces_barriers_and_supports_pinned_rollback() {
+        let legacy_root = tempfile::tempdir().unwrap();
+        let group_root = tempfile::tempdir().unwrap();
+        for root in [legacy_root.path(), group_root.path()] {
+            fs::create_dir_all(root.join("src/sub")).unwrap();
+            for i in 0..8 {
+                let rel = if i % 2 == 0 {
+                    format!("src/file_{i}.cjs")
+                } else {
+                    format!("src/sub/file_{i}.cjs")
+                };
+                fs::write(root.join(rel), format!("before-{i}")).unwrap();
+            }
+        }
+
+        let paths: Vec<String> = (0..8)
+            .map(|i| {
+                if i % 2 == 0 {
+                    format!("src/file_{i}.cjs")
+                } else {
+                    format!("src/sub/file_{i}.cjs")
+                }
+            })
+            .collect();
+        let befores: Vec<Vec<u8>> = (0..8).map(|i| format!("before-{i}").into_bytes()).collect();
+        let afters: Vec<Vec<u8>> = (0..8).map(|i| format!("after-{i}").into_bytes()).collect();
+        let plan: Vec<Edit<'_>> = (0..8)
+            .map(|i| Edit {
+                path: &paths[i],
+                before: &befores[i],
+                after: &afters[i],
+            })
+            .collect();
+
+        let legacy_tx = RewriteTransaction::open(legacy_root.path()).unwrap();
+        DURABILITY_LOG.with(|log| log.borrow_mut().clear());
+        legacy_tx.apply_versioned_with_receipt(&plan).unwrap();
+        let legacy_barriers = DURABILITY_LOG.with(|log| log.borrow().clone());
+
+        let group_tx = RewriteTransaction::open(group_root.path()).unwrap();
+        DURABILITY_LOG.with(|log| log.borrow_mut().clear());
+        let receipt = group_tx
+            .apply_group_commit_with_receipt(&plan)
+            .unwrap()
+            .unwrap();
+        let group_barriers = DURABILITY_LOG.with(|log| log.borrow().clone());
+        drop(group_tx);
+
+        // Legacy v2 issues 3*8 = 24+ "file" barriers; v6 issues exactly 1 "pack"
+        // barrier in Wave 1 and 1 "wave2_data" barrier in Wave 2.
+        let legacy_file_syncs = legacy_barriers.iter().filter(|&&k| k == "file").count();
+        assert!(
+            legacy_file_syncs >= 24,
+            "expected >=24 legacy file syncs, got {legacy_file_syncs}"
+        );
+        assert_eq!(
+            group_barriers.iter().filter(|&&k| k == "pack").count(),
+            1,
+            "{group_barriers:?}"
+        );
+        assert_eq!(
+            group_barriers
+                .iter()
+                .filter(|&&k| k == "wave2_data")
+                .count(),
+            1,
+            "{group_barriers:?}"
+        );
+        assert!(
+            group_barriers.len() * 2 < legacy_barriers.len(),
+            "group commit barriers ({}) must be <50% of legacy barriers ({})",
+            group_barriers.len(),
+            legacy_barriers.len()
+        );
+
+        for i in 0..8 {
+            assert_eq!(
+                fs::read(group_root.path().join(&paths[i])).unwrap(),
+                afters[i]
+            );
+        }
+
+        let rb = rollback::run_pinned(
+            group_root.path(),
+            &receipt.transaction_id,
+            &receipt.journal_sha256,
+            true,
+        );
+        assert_eq!(rb.status, RollbackStatus::RolledBack, "{rb:?}");
+        for i in 0..8 {
+            assert_eq!(
+                fs::read(group_root.path().join(&paths[i])).unwrap(),
+                befores[i]
+            );
+        }
+    }
+
+    #[test]
+    fn group_commit_v6_recovers_cleanly_across_all_five_crash_stages() {
+        for stage in 0..5 {
+            let root = tempfile::tempdir().unwrap();
+            fs::create_dir_all(root.path().join("pkg")).unwrap();
+            fs::write(root.path().join("pkg/a.cjs"), b"orig-a").unwrap();
+            fs::write(root.path().join("pkg/b.cjs"), b"orig-b").unwrap();
+
+            let edits = [
+                Edit {
+                    path: "pkg/a.cjs",
+                    before: b"orig-a",
+                    after: b"next-a",
+                },
+                Edit {
+                    path: "pkg/b.cjs",
+                    before: b"orig-b",
+                    after: b"next-b",
+                },
+            ];
+            let creations = [CreateFile {
+                path: "pkg/c.cjs",
+                after: b"created-c",
+                mode: 0o644,
+            }];
+
+            let tx = RewriteTransaction::open(root.path()).unwrap();
+            match stage {
+                0 => {
+                    // Stage 0: Crash before Wave-1 pending.json is published (only unreferenced session dir).
+                    mkdirat(&tx.store, "txn-crash-prewave1", Mode::from_raw_mode(0o700)).unwrap();
+                    drop(tx);
+                    let recovered = RewriteTransaction::open(root.path()).unwrap();
+                    drop(recovered);
+                    assert_eq!(fs::read(root.path().join("pkg/a.cjs")).unwrap(), b"orig-a");
+                    assert_eq!(fs::read(root.path().join("pkg/b.cjs")).unwrap(), b"orig-b");
+                    assert!(!root.path().join("pkg/c.cjs").exists());
+                }
+                1 => {
+                    // Stage 1: Crash immediately after Wave-1 PREPARED pending.json before any rename.
+                    let _journal = tx
+                        .prepare_bound_plan(&edits, &creations, &[], PACKED_JOURNAL_VERSION, None)
+                        .unwrap();
+                    drop(tx);
+                    let recovered = RewriteTransaction::open(root.path()).unwrap();
+                    drop(recovered);
+                    assert_eq!(fs::read(root.path().join("pkg/a.cjs")).unwrap(), b"orig-a");
+                    assert_eq!(fs::read(root.path().join("pkg/b.cjs")).unwrap(), b"orig-b");
+                    assert!(!root.path().join("pkg/c.cjs").exists());
+                }
+                2 => {
+                    // Stage 2: Crash mid-rename (first file + creation installed, second file untouched).
+                    let journal = tx
+                        .prepare_bound_plan(&edits, &creations, &[], PACKED_JOURNAL_VERSION, None)
+                        .unwrap();
+                    tx.install(&journal, 0).unwrap();
+                    tx.install(&journal, 2).unwrap();
+                    drop(tx);
+                    assert_eq!(fs::read(root.path().join("pkg/a.cjs")).unwrap(), b"next-a");
+                    assert_eq!(fs::read(root.path().join("pkg/b.cjs")).unwrap(), b"orig-b");
+                    assert_eq!(
+                        fs::read(root.path().join("pkg/c.cjs")).unwrap(),
+                        b"created-c"
+                    );
+
+                    let recovered = RewriteTransaction::open(root.path()).unwrap();
+                    drop(recovered);
+                    assert_eq!(fs::read(root.path().join("pkg/a.cjs")).unwrap(), b"orig-a");
+                    assert_eq!(fs::read(root.path().join("pkg/b.cjs")).unwrap(), b"orig-b");
+                    assert!(!root.path().join("pkg/c.cjs").exists());
+                }
+                3 => {
+                    // Stage 3: Crash post-rename, pre-Wave-2 archive (all targets installed, pending.json still active).
+                    let journal = tx
+                        .prepare_bound_plan(&edits, &creations, &[], PACKED_JOURNAL_VERSION, None)
+                        .unwrap();
+                    for idx in 0..journal.records.len() {
+                        tx.install(&journal, idx).unwrap();
+                    }
+                    tx.flush_dirty().unwrap();
+                    drop(tx);
+
+                    let recovered = RewriteTransaction::open(root.path()).unwrap();
+                    drop(recovered);
+                    assert_eq!(fs::read(root.path().join("pkg/a.cjs")).unwrap(), b"orig-a");
+                    assert_eq!(fs::read(root.path().join("pkg/b.cjs")).unwrap(), b"orig-b");
+                    assert!(!root.path().join("pkg/c.cjs").exists());
+                }
+                4 => {
+                    // Stage 4: Post-COMMITTED archive — state stays durably applied across reopen.
+                    let receipt = tx
+                        .apply_group_commit_plan_with_receipt(&edits, &creations, &[], None)
+                        .unwrap()
+                        .unwrap();
+                    drop(tx);
+                    let reopened = RewriteTransaction::open(root.path()).unwrap();
+                    drop(reopened);
+                    assert_eq!(fs::read(root.path().join("pkg/a.cjs")).unwrap(), b"next-a");
+                    assert_eq!(fs::read(root.path().join("pkg/b.cjs")).unwrap(), b"next-b");
+                    assert_eq!(
+                        fs::read(root.path().join("pkg/c.cjs")).unwrap(),
+                        b"created-c"
+                    );
+
+                    let history = rollback::run(root.path(), None, false);
+                    assert_eq!(history.history.len(), 1);
+                    assert_eq!(history.history[0].transaction_id, receipt.transaction_id);
+                    assert_eq!(history.history[0].state, TransactionState::Applied);
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    fn group_commit_v6_tampered_session_pack_fails_closed() {
+        let root = project();
+        let tx = RewriteTransaction::open(root.path()).unwrap();
+        let receipt = tx
+            .apply_group_commit_with_receipt(&edits())
+            .unwrap()
+            .unwrap();
+        drop(tx);
+
+        let pack_path = root
+            .path()
+            .join(".migrate-backup")
+            .join(STORE)
+            .join(&receipt.transaction_id)
+            .join(SESSION_PACK_FILE);
+        let mut pack_bytes = fs::read(&pack_path).unwrap();
+        let last = pack_bytes.len() - 1;
+        pack_bytes[last] ^= 0xff;
+        fs::write(&pack_path, &pack_bytes).unwrap();
+        fs::set_permissions(&pack_path, Permissions::from_mode(0o600)).unwrap();
+
+        let rb = rollback::run_pinned(
+            root.path(),
+            &receipt.transaction_id,
+            &receipt.journal_sha256,
+            true,
+        );
+        assert_eq!(rb.status, RollbackStatus::Conflict, "{rb:?}");
+        assert_eq!(fs::read(root.path().join("app.cjs")).unwrap(), b"after");
     }
 }

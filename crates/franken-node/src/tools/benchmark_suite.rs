@@ -1069,6 +1069,15 @@ impl SuiteConfig {
                 (!trimmed.is_empty()).then(|| trimmed.to_string())
             });
 
+        let node_version = std::env::var("FRANKEN_NODE_BENCH_NODE_VERSION")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .or_else(|| detect_runtime_version("node", &["--version"]));
+        let bun_version = std::env::var("FRANKEN_NODE_BENCH_BUN_VERSION")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .or_else(|| detect_runtime_version("bun", &["--version"]));
+
         SuiteConfig {
             hardware_profile: HardwareProfile {
                 cpu,
@@ -1077,8 +1086,8 @@ impl SuiteConfig {
             },
             runtime_versions: RuntimeVersions {
                 franken_node: env!("CARGO_PKG_VERSION").to_string(),
-                node: None,
-                bun: None,
+                node: node_version,
+                bun: bun_version,
             },
             timestamp_utc,
             regression_threshold_pct: DEFAULT_REGRESSION_THRESHOLD_PCT,
@@ -1088,6 +1097,24 @@ impl SuiteConfig {
             evidence_path,
         }
     }
+}
+
+/// Probe an external JS runtime binary for its version string (`--version`),
+/// stripping trailing whitespace/newlines. Returns `None` if absent or failing.
+pub fn detect_runtime_version(program: &str, args: &[&str]) -> Option<String> {
+    let output = std::process::Command::new(program)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let version = String::from_utf8(output.stdout).ok()?;
+    let trimmed = version.lines().next()?.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
 fn benchmark_trace_id(timestamp_utc: &str, profile: &str, cpu: &str) -> String {
@@ -2007,6 +2034,381 @@ pub fn render_human_summary(report: &BenchmarkReport) -> String {
         report.provenance_hash
     ));
     lines.join("\n")
+}
+
+// ---------------------------------------------------------------------------
+// Live Randomized Interleaved Triad Subprocess Benchmark Harness
+// ---------------------------------------------------------------------------
+
+pub const TRIAD_BENCHMARK_SCHEMA_VERSION: &str = "franken-node/triad-benchmark/v1";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TriadRuntimeLeg {
+    FrankenNode,
+    Node,
+    Bun,
+}
+
+impl fmt::Display for TriadRuntimeLeg {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::FrankenNode => write!(f, "franken-node"),
+            Self::Node => write!(f, "node"),
+            Self::Bun => write!(f, "bun"),
+        }
+    }
+}
+
+/// Distribution-free order-statistic quantile estimate and 95% confidence interval.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct QuantileEstimate {
+    pub quantile: f64,
+    pub point_ms: f64,
+    pub lower_95_ms: f64,
+    pub upper_95_ms: f64,
+}
+
+/// Compute a nonparametric order-statistic quantile estimate and 95% CI
+/// (`z = 1.959964` binomial rank interval over sorted samples) without assuming
+/// Gaussian latency residuals.
+pub fn order_statistic_quantile_ci(samples_ms: &[f64], quantile: f64) -> Option<QuantileEstimate> {
+    if samples_ms.is_empty()
+        || !quantile.is_finite()
+        || !(0.0..=1.0).contains(&quantile)
+        || samples_ms.iter().any(|v| !v.is_finite())
+    {
+        return None;
+    }
+    let mut sorted = samples_ms.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    let n = sorted.len();
+    let n_f = n as f64;
+    let exact_pos = quantile * (n.saturating_sub(1) as f64);
+    let lo_idx = exact_pos.floor() as usize;
+    let hi_idx = exact_pos.ceil().min((n - 1) as f64) as usize;
+    let frac = exact_pos - (lo_idx as f64);
+    let point_ms = sorted[lo_idx] + frac * (sorted[hi_idx] - sorted[lo_idx]);
+
+    let mean_rank = n_f * quantile;
+    let sd_rank = (n_f * quantile * (1.0 - quantile)).sqrt();
+    let z = 1.959_964;
+    let lower_rank = ((mean_rank - z * sd_rank).floor().max(0.0) as usize).min(n - 1);
+    let upper_rank = ((mean_rank + z * sd_rank).ceil().max(0.0) as usize).min(n - 1);
+
+    Some(QuantileEstimate {
+        quantile,
+        point_ms,
+        lower_95_ms: sorted[lower_rank].min(point_ms),
+        upper_95_ms: sorted[upper_rank].max(point_ms),
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TriadWorkloadSpec {
+    pub name: String,
+    pub script_source: String,
+    pub expected_stdout: String,
+    pub warmup_rounds: u32,
+    pub measured_rounds: u32,
+    pub seed: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TriadLegResult {
+    pub runtime: TriadRuntimeLeg,
+    pub program: String,
+    pub version: Option<String>,
+    pub samples_ms: Vec<f64>,
+    pub p50: QuantileEstimate,
+    pub p95: QuantileEstimate,
+    pub p99: QuantileEstimate,
+    pub mean_ms: f64,
+    pub cv_pct: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TriadPairwiseComparison {
+    pub candidate: TriadRuntimeLeg,
+    pub baseline: TriadRuntimeLeg,
+    pub p50_ratio: f64,
+    pub p95_ratio: f64,
+    pub p99_ratio: f64,
+    pub holm_bonferroni_alpha: f64,
+    /// True when the two legs' 95% order-statistic CIs around p50 are disjoint.
+    pub p50_ci_separated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TriadBenchmarkReport {
+    pub schema_version: String,
+    pub workload_name: String,
+    pub seed: u64,
+    pub interleaved_schedule_len: usize,
+    pub stdout_parity_verified: bool,
+    pub legs: Vec<TriadLegResult>,
+    pub comparisons: Vec<TriadPairwiseComparison>,
+    pub provenance_hash: String,
+}
+
+fn splitmix64_next(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// Discover available triad runtime invocations (`franken-node`, `node`, `bun`).
+/// Each tuple is `(leg, executable_path_or_name, prefix_args_before_script)`.
+pub fn discover_triad_commands(
+    franken_node_bin: Option<&std::path::Path>,
+) -> Vec<(TriadRuntimeLeg, std::path::PathBuf, Vec<String>)> {
+    let mut out = Vec::new();
+    if let Some(bin) = franken_node_bin
+        && bin.is_file()
+    {
+        out.push((
+            TriadRuntimeLeg::FrankenNode,
+            bin.to_path_buf(),
+            vec![
+                "run".to_string(),
+                "--policy".to_string(),
+                "balanced".to_string(),
+                "--console-only".to_string(),
+            ],
+        ));
+    }
+    if detect_runtime_version("node", &["--version"]).is_some() {
+        out.push((
+            TriadRuntimeLeg::Node,
+            std::path::PathBuf::from("node"),
+            Vec::new(),
+        ));
+    }
+    if detect_runtime_version("bun", &["--version"]).is_some() {
+        out.push((
+            TriadRuntimeLeg::Bun,
+            std::path::PathBuf::from("bun"),
+            vec!["run".to_string()],
+        ));
+    }
+    out
+}
+
+fn run_triad_child_once(
+    scenario: &str,
+    leg: TriadRuntimeLeg,
+    program: &std::path::Path,
+    prefix_args: &[String],
+    script_path: &std::path::Path,
+    workdir: &std::path::Path,
+    expected_stdout: &str,
+) -> Result<f64, BenchRunError> {
+    let started = Instant::now();
+    let output = std::process::Command::new(program)
+        .current_dir(workdir)
+        .args(prefix_args)
+        .arg(script_path)
+        .env("NO_COLOR", "1")
+        .env_remove("FORCE_COLOR")
+        .env_remove("CLICOLOR_FORCE")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .map_err(|err| BenchRunError::ScenarioExecutionFailed {
+            scenario: scenario.to_string(),
+            detail: format!("failed spawning {leg} (`{}`): {err}", program.display()),
+        })?;
+    let elapsed = (started.elapsed().as_secs_f64() * 1_000.0).max(0.001);
+    if !output.status.success() {
+        return Err(BenchRunError::ScenarioExecutionFailed {
+            scenario: scenario.to_string(),
+            detail: format!(
+                "{leg} exited with {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+        });
+    }
+    let actual_stdout =
+        String::from_utf8(output.stdout).map_err(|err| BenchRunError::ScenarioExecutionFailed {
+            scenario: scenario.to_string(),
+            detail: format!("{leg} emitted non-UTF-8 stdout: {err}"),
+        })?;
+    if actual_stdout != expected_stdout {
+        return Err(BenchRunError::ScenarioExecutionFailed {
+            scenario: scenario.to_string(),
+            detail: format!(
+                "stdout parity mismatch on {leg}: expected {:?}, got {:?}",
+                expected_stdout, actual_stdout
+            ),
+        });
+    }
+    Ok(elapsed)
+}
+
+/// Execute a live randomized interleaved benchmark across the supplied runtime
+/// legs, verifying stdout/exit parity on every warmup and measured invocation.
+pub fn execute_triad_benchmark(
+    spec: &TriadWorkloadSpec,
+    commands: &[(TriadRuntimeLeg, std::path::PathBuf, Vec<String>)],
+) -> Result<TriadBenchmarkReport, BenchRunError> {
+    if commands.is_empty() {
+        return Err(BenchRunError::ScenarioExecutionFailed {
+            scenario: spec.name.clone(),
+            detail: "triad benchmark requires at least one runtime leg".to_string(),
+        });
+    }
+    let measured_rounds = usize::try_from(spec.measured_rounds).unwrap_or(usize::MAX);
+    if measured_rounds < MIN_MEASURED_SAMPLES {
+        return Err(BenchRunError::InsufficientSamples {
+            scenario: spec.name.clone(),
+            required: MIN_MEASURED_SAMPLES,
+            actual: measured_rounds,
+        });
+    }
+    validate_sample_count(&spec.name, measured_rounds)?;
+
+    let workspace = tempfile::tempdir().map_err(|err| BenchRunError::ScenarioExecutionFailed {
+        scenario: spec.name.clone(),
+        detail: format!("create triad benchmark workspace: {err}"),
+    })?;
+    let script_path = workspace.path().join("workload.mjs");
+    std::fs::write(&script_path, &spec.script_source).map_err(|err| {
+        BenchRunError::ScenarioExecutionFailed {
+            scenario: spec.name.clone(),
+            detail: format!("write triad workload script: {err}"),
+        }
+    })?;
+
+    // Warmup phase: also validates exit code 0 and exact stdout parity before timing.
+    for _ in 0..spec.warmup_rounds {
+        for (leg, program, prefix_args) in commands {
+            run_triad_child_once(
+                &spec.name,
+                *leg,
+                program,
+                prefix_args,
+                &script_path,
+                workspace.path(),
+                &spec.expected_stdout,
+            )?;
+        }
+    }
+
+    // Build balanced interleaved schedule and Fisher-Yates shuffle with deterministic seed.
+    let mut schedule = Vec::with_capacity(commands.len().saturating_mul(measured_rounds));
+    for _ in 0..measured_rounds {
+        for leg_idx in 0..commands.len() {
+            schedule.push(leg_idx);
+        }
+    }
+    let mut rng_state = spec.seed ^ 0xD1B5_4A32_D192_ED03;
+    for i in (1..schedule.len()).rev() {
+        let j = (splitmix64_next(&mut rng_state) as usize) % (i + 1);
+        schedule.swap(i, j);
+    }
+
+    let mut per_leg_samples: Vec<Vec<f64>> =
+        vec![Vec::with_capacity(measured_rounds); commands.len()];
+    for &leg_idx in &schedule {
+        let (leg, ref program, ref prefix_args) = commands[leg_idx];
+        let ms = run_triad_child_once(
+            &spec.name,
+            leg,
+            program,
+            prefix_args,
+            &script_path,
+            workspace.path(),
+            &spec.expected_stdout,
+        )?;
+        per_leg_samples[leg_idx].push(ms);
+    }
+
+    let mut legs = Vec::with_capacity(commands.len());
+    for (idx, (leg, program, _)) in commands.iter().enumerate() {
+        let samples = &per_leg_samples[idx];
+        let p50 = order_statistic_quantile_ci(samples, 0.50).ok_or_else(|| {
+            BenchRunError::NonFiniteMeasurement {
+                scenario: spec.name.clone(),
+            }
+        })?;
+        let p95 = order_statistic_quantile_ci(samples, 0.95).ok_or_else(|| {
+            BenchRunError::NonFiniteMeasurement {
+                scenario: spec.name.clone(),
+            }
+        })?;
+        let p99 = order_statistic_quantile_ci(samples, 0.99).ok_or_else(|| {
+            BenchRunError::NonFiniteMeasurement {
+                scenario: spec.name.clone(),
+            }
+        })?;
+        let version = detect_runtime_version(program.to_str().unwrap_or_default(), &["--version"]);
+        legs.push(TriadLegResult {
+            runtime: *leg,
+            program: program.display().to_string(),
+            version,
+            samples_ms: samples.clone(),
+            p50,
+            p95,
+            p99,
+            mean_ms: mean(samples),
+            cv_pct: coefficient_of_variation(samples),
+        });
+    }
+
+    // Pairwise ratios + Holm-Bonferroni step-down alpha across m = k*(k-1)/2 pairs.
+    let mut raw_pairs = Vec::new();
+    for i in 0..legs.len() {
+        for j in (i + 1)..legs.len() {
+            let left = &legs[i];
+            let right = &legs[j];
+            let effect = (left.p50.point_ms - right.p50.point_ms).abs()
+                / left.p50.point_ms.max(right.p50.point_ms).max(0.001);
+            raw_pairs.push((effect, i, j));
+        }
+    }
+    raw_pairs.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let total_pairs = raw_pairs.len();
+    let mut comparisons = Vec::with_capacity(total_pairs);
+    for (rank, &(_, i, j)) in raw_pairs.iter().enumerate() {
+        let cand = &legs[i];
+        let base = &legs[j];
+        let remaining = (total_pairs - rank) as f64;
+        let holm_alpha = 0.05 / remaining.max(1.0);
+        let separated = cand.p50.upper_95_ms < base.p50.lower_95_ms
+            || base.p50.upper_95_ms < cand.p50.lower_95_ms;
+        comparisons.push(TriadPairwiseComparison {
+            candidate: cand.runtime,
+            baseline: base.runtime,
+            p50_ratio: cand.p50.point_ms / base.p50.point_ms.max(0.001),
+            p95_ratio: cand.p95.point_ms / base.p95.point_ms.max(0.001),
+            p99_ratio: cand.p99.point_ms / base.p99.point_ms.max(0.001),
+            holm_bonferroni_alpha: holm_alpha,
+            p50_ci_separated: separated,
+        });
+    }
+
+    let mut report = TriadBenchmarkReport {
+        schema_version: TRIAD_BENCHMARK_SCHEMA_VERSION.to_string(),
+        workload_name: spec.name.clone(),
+        seed: spec.seed,
+        interleaved_schedule_len: schedule.len(),
+        stdout_parity_verified: true,
+        legs,
+        comparisons,
+        provenance_hash: String::new(),
+    };
+    let json = serde_json::to_string(&report).map_err(|err| BenchRunError::SerializeReport {
+        detail: err.to_string(),
+    })?;
+    let mut hasher = sha2::Sha256::new();
+    sha2::Digest::update(&mut hasher, b"triad_benchmark_report_v1:");
+    sha2::Digest::update(&mut hasher, json.as_bytes());
+    report.provenance_hash = format!("sha256:{}", hex::encode(sha2::Digest::finalize(hasher)));
+    Ok(report)
 }
 
 // ---------------------------------------------------------------------------
@@ -3849,5 +4251,75 @@ mod tests {
             MAX_SCENARIOS <= 1_000_000,
             "Should have reasonable upper bound"
         );
+    }
+
+    #[test]
+    fn order_statistic_quantile_ci_bounds_non_gaussian_distributions() {
+        let samples: Vec<f64> = (1..=40).map(|i| f64::from(i * i)).collect();
+        let p50 = order_statistic_quantile_ci(&samples, 0.50).unwrap();
+        let p95 = order_statistic_quantile_ci(&samples, 0.95).unwrap();
+        let p99 = order_statistic_quantile_ci(&samples, 0.99).unwrap();
+
+        assert!(p50.lower_95_ms <= p50.point_ms && p50.point_ms <= p50.upper_95_ms);
+        assert!(p95.lower_95_ms <= p95.point_ms && p95.point_ms <= p95.upper_95_ms);
+        assert!(p99.lower_95_ms <= p99.point_ms && p99.point_ms <= p99.upper_95_ms);
+        assert!(p50.point_ms < p95.point_ms && p95.point_ms <= p99.point_ms);
+
+        assert!(order_statistic_quantile_ci(&[], 0.5).is_none());
+        assert!(order_statistic_quantile_ci(&[1.0, f64::NAN], 0.5).is_none());
+        assert!(order_statistic_quantile_ci(&[1.0, 2.0], 1.5).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn execute_triad_benchmark_runs_real_interleaved_subprocesses_and_rejects_stdout_drift() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let bin_dir = tempfile::tempdir().unwrap();
+        let make_leg = |name: &str, body: &str| -> std::path::PathBuf {
+            let path = bin_dir.path().join(name);
+            std::fs::write(&path, format!("#!/bin/sh\nset -eu\n{body}\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+            path
+        };
+
+        let leg_fn = make_leg("fake-fn.sh", "printf 'TRIAD_OK\\n'");
+        let leg_node = make_leg("fake-node.sh", "printf 'TRIAD_OK\\n'");
+        let leg_bun = make_leg("fake-bun.sh", "printf 'TRIAD_OK\\n'");
+
+        let spec = TriadWorkloadSpec {
+            name: "triad_smoke".to_string(),
+            script_source: "console.log('TRIAD_OK');\n".to_string(),
+            expected_stdout: "TRIAD_OK\n".to_string(),
+            warmup_rounds: 1,
+            measured_rounds: 5,
+            seed: 42,
+        };
+        let commands = vec![
+            (TriadRuntimeLeg::FrankenNode, leg_fn.clone(), Vec::new()),
+            (TriadRuntimeLeg::Node, leg_node, Vec::new()),
+            (TriadRuntimeLeg::Bun, leg_bun, Vec::new()),
+        ];
+
+        let report = execute_triad_benchmark(&spec, &commands).unwrap();
+        assert_eq!(report.schema_version, TRIAD_BENCHMARK_SCHEMA_VERSION);
+        assert!(report.stdout_parity_verified);
+        assert_eq!(report.interleaved_schedule_len, 15);
+        assert_eq!(report.legs.len(), 3);
+        assert_eq!(report.comparisons.len(), 3);
+        for leg in &report.legs {
+            assert_eq!(leg.samples_ms.len(), 5);
+            assert!(leg.p50.point_ms > 0.0 && leg.p99.point_ms >= leg.p50.point_ms);
+        }
+        assert!(report.provenance_hash.starts_with("sha256:"));
+
+        // Divergent stdout on any leg must fail closed rather than emitting bogus timings.
+        let leg_bad = make_leg("fake-bad.sh", "printf 'WRONG_OUTPUT\\n'");
+        let bad_commands = vec![
+            (TriadRuntimeLeg::FrankenNode, leg_fn, Vec::new()),
+            (TriadRuntimeLeg::Node, leg_bad, Vec::new()),
+        ];
+        let err = execute_triad_benchmark(&spec, &bad_commands).unwrap_err();
+        assert!(err.to_string().contains("stdout parity mismatch"), "{err}");
     }
 }

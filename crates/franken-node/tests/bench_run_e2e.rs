@@ -515,3 +515,62 @@ fn bench_run_successful_execution_logs_expected_events() {
         "output file must contain exactly one scenario result"
     );
 }
+
+#[test]
+fn triad_interleaved_benchmark_executes_real_subprocesses_and_enforces_stdout_parity() {
+    use frankenengine_node::tools::benchmark_suite::{
+        BenchRunError, SuiteConfig, TRIAD_BENCHMARK_SCHEMA_VERSION, TriadWorkloadSpec,
+        discover_triad_commands, execute_triad_benchmark, order_statistic_quantile_ci,
+    };
+
+    let cli_cfg = SuiteConfig::for_cli();
+    assert!(
+        cli_cfg.runtime_versions.node.is_some() || cli_cfg.runtime_versions.bun.is_some(),
+        "SuiteConfig::for_cli() must populate live reference runtime versions on host"
+    );
+
+    let samples: Vec<f64> = (1..=31).map(|v| v as f64 * 1.5).collect();
+    let p50 = order_statistic_quantile_ci(&samples, 0.50).expect("p50 CI");
+    let p95 = order_statistic_quantile_ci(&samples, 0.95).expect("p95 CI");
+    let p99 = order_statistic_quantile_ci(&samples, 0.99).expect("p99 CI");
+    assert!(p50.lower_95_ms <= p50.point_ms && p50.point_ms <= p50.upper_95_ms);
+    assert!(p50.point_ms < p95.point_ms && p95.point_ms <= p99.point_ms);
+
+    let commands = discover_triad_commands(None);
+    assert!(
+        !commands.is_empty(),
+        "at least one live JS runtime (node/bun) must be discovered"
+    );
+
+    let spec = TriadWorkloadSpec {
+        name: "json-array-reduce-triad".to_string(),
+        script_source: "const xs = Array.from({ length: 256 }, (_, i) => i * 3);\nconsole.log(xs.reduce((a, b) => a + b, 0));\n".to_string(),
+        expected_stdout: "97920\n".to_string(),
+        warmup_rounds: 1,
+        measured_rounds: 5,
+        seed: 0x2026_1111,
+    };
+    let report = execute_triad_benchmark(&spec, &commands).expect("live triad benchmark succeeds");
+    assert_eq!(report.schema_version, TRIAD_BENCHMARK_SCHEMA_VERSION);
+    assert!(report.stdout_parity_verified);
+    assert_eq!(report.interleaved_schedule_len, commands.len() * 5);
+    assert!(report.provenance_hash.starts_with("sha256:"));
+    assert_eq!(report.legs.len(), commands.len());
+    for leg in &report.legs {
+        assert_eq!(leg.samples_ms.len(), 5);
+        assert!(leg.p50.point_ms > 0.0 && leg.p95.point_ms >= leg.p50.point_ms);
+    }
+    if commands.len() >= 2 {
+        assert_eq!(report.comparisons.len(), 1);
+        assert!((report.comparisons[0].holm_bonferroni_alpha - 0.05).abs() < 1e-12);
+    }
+
+    let mut bad_spec = spec;
+    bad_spec.expected_stdout = "999999\n".to_string();
+    let err = execute_triad_benchmark(&bad_spec, &commands)
+        .expect_err("stdout mismatch must fail closed");
+    assert!(
+        matches!(err, BenchRunError::ScenarioExecutionFailed { ref detail, .. } if detail.contains("stdout parity mismatch")),
+        "unexpected error: {err:?}"
+    );
+}

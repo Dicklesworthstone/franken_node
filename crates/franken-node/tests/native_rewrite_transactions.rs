@@ -37,6 +37,9 @@ fn assert_commonjs_execution(root: &Path) {
     for (file, expected) in [("a.js", b"true\n".as_slice()), ("z.js", b"/\n".as_slice())] {
         let output = std::process::Command::new("node")
             .current_dir(root)
+            .env("NO_COLOR", "1")
+            .env_remove("FORCE_COLOR")
+            .env_remove("CLICOLOR_FORCE")
             .env_remove("NODE_OPTIONS")
             .arg(file)
             .output()
@@ -578,4 +581,128 @@ mod esm_source_rewrites {
         assert!(rewritten.contains("from 'node:path'"));
         assert!(rewritten.contains("<div>import fs from 'fs';</div>"));
     }
+}
+
+#[test]
+fn group_commit_v6_session_pack_applies_and_rolls_back_atomically() {
+    use frankenengine_node::migration::rewrite_transaction::{
+        CreateFile, Edit, PACKED_JOURNAL_VERSION, RewriteTransaction, rollback,
+    };
+
+    let root = tempfile::tempdir().unwrap();
+    fs::create_dir_all(root.path().join("src/nested")).unwrap();
+    let paths: Vec<String> = (0..6)
+        .map(|i| {
+            if i % 2 == 0 {
+                format!("src/mod_{i}.cjs")
+            } else {
+                format!("src/nested/mod_{i}.cjs")
+            }
+        })
+        .collect();
+    let befores: Vec<Vec<u8>> = (0..6)
+        .map(|i| format!("const fs = require('fs'); // {i}\n").into_bytes())
+        .collect();
+    let afters: Vec<Vec<u8>> = (0..6)
+        .map(|i| format!("const fs = require('node:fs'); // {i}\n").into_bytes())
+        .collect();
+    for i in 0..6 {
+        fs::write(root.path().join(&paths[i]), &befores[i]).unwrap();
+    }
+
+    let edits: Vec<Edit<'_>> = (0..6)
+        .map(|i| Edit {
+            path: &paths[i],
+            before: &befores[i],
+            after: &afters[i],
+        })
+        .collect();
+    let creations = [CreateFile {
+        path: "src/nested/generated_helper.cjs",
+        after: b"module.exports = 42;\n",
+        mode: 0o644,
+    }];
+
+    let tx = RewriteTransaction::open(root.path()).unwrap();
+    let receipt = tx
+        .apply_group_commit_plan_with_receipt(&edits, &creations, &[], None)
+        .unwrap()
+        .expect("non-empty group-commit plan produces a receipt");
+    drop(tx);
+
+    let session_dir = root
+        .path()
+        .join(".migrate-backup/.franken-rewrite")
+        .join(&receipt.transaction_id);
+    let pack_bytes = fs::read(session_dir.join("session.pack")).unwrap();
+    assert!(pack_bytes.starts_with(b"FNRWPACK\x01"));
+    assert!(!session_dir.join("0.before").exists());
+    assert!(!session_dir.join("0.after").exists());
+
+    let journal_json: serde_json::Value =
+        serde_json::from_slice(&fs::read(session_dir.join("applied.json")).unwrap()).unwrap();
+    assert_eq!(journal_json["schema_version"], PACKED_JOURNAL_VERSION);
+
+    for i in 0..6 {
+        assert_eq!(fs::read(root.path().join(&paths[i])).unwrap(), afters[i]);
+    }
+    assert_eq!(
+        fs::read(root.path().join("src/nested/generated_helper.cjs")).unwrap(),
+        b"module.exports = 42;\n"
+    );
+
+    let rb = rollback::run_pinned(
+        root.path(),
+        &receipt.transaction_id,
+        &receipt.journal_sha256,
+        true,
+    );
+    assert_eq!(rb.status, rollback::RollbackStatus::RolledBack, "{rb:?}");
+    for i in 0..6 {
+        assert_eq!(fs::read(root.path().join(&paths[i])).unwrap(), befores[i]);
+    }
+    assert!(!root.path().join("src/nested/generated_helper.cjs").exists());
+}
+
+#[test]
+fn group_commit_v6_tampered_session_pack_fails_closed_on_pinned_rollback() {
+    use frankenengine_node::migration::rewrite_transaction::{Edit, RewriteTransaction, rollback};
+
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("entry.cjs"), b"const p = require('path');").unwrap();
+
+    let edits = [Edit {
+        path: "entry.cjs",
+        before: b"const p = require('path');",
+        after: b"const p = require('node:path');",
+    }];
+    let tx = RewriteTransaction::open(root.path()).unwrap();
+    let receipt = tx
+        .apply_group_commit_with_receipt(&edits)
+        .unwrap()
+        .expect("applied v6 receipt");
+    drop(tx);
+
+    let pack_path = root
+        .path()
+        .join(".migrate-backup/.franken-rewrite")
+        .join(&receipt.transaction_id)
+        .join("session.pack");
+    let mut bytes = fs::read(&pack_path).unwrap();
+    let tail = bytes.len() - 1;
+    bytes[tail] ^= 0x5a;
+    fs::write(&pack_path, &bytes).unwrap();
+    fs::set_permissions(&pack_path, fs::Permissions::from_mode(0o600)).unwrap();
+
+    let rb = rollback::run_pinned(
+        root.path(),
+        &receipt.transaction_id,
+        &receipt.journal_sha256,
+        true,
+    );
+    assert_eq!(rb.status, rollback::RollbackStatus::Conflict, "{rb:?}");
+    assert_eq!(
+        fs::read(root.path().join("entry.cjs")).unwrap(),
+        b"const p = require('node:path');"
+    );
 }

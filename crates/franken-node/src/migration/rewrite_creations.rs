@@ -4,9 +4,9 @@
 //! rather than unlinking them. Existing files and directories are never deleted.
 
 use super::{
-    AppliedRewrite, Contents, Edit, Journal, MAX_FILE_BYTES, RenameFlags,
-    RewriteTransaction, directory, parent_and_name, read_optional, read_required,
-    renameat_with, same_version, verify_image,
+    AppliedRewrite, Contents, Edit, Journal, MAX_FILE_BYTES, RenameFlags, RewriteTransaction,
+    directory, parent_and_name, read_optional, read_required, renameat_with, same_version,
+    verify_image,
 };
 use anyhow::{Context, Result, ensure};
 use std::ffi::{OsStr, OsString};
@@ -51,43 +51,93 @@ impl RewriteTransaction {
     }
 
     fn inspect_creation(&self, journal: &Journal, index: usize) -> Result<CreationState> {
-        let record = journal.records.get(index).context("invalid creation record index")?;
-        ensure!((journal.schema_version == JOURNAL_VERSION
-            || journal.schema_version == super::REQUEST_JOURNAL_VERSION
-            || journal.schema_version == super::TREE_JOURNAL_VERSION)
-            && record.created && record.tree.is_none(),
-            "not a creation journal record");
+        let record = journal
+            .records
+            .get(index)
+            .context("invalid creation record index")?;
+        ensure!(
+            (journal.schema_version == JOURNAL_VERSION
+                || journal.schema_version == super::REQUEST_JOURNAL_VERSION
+                || journal.schema_version == super::TREE_JOURNAL_VERSION
+                || journal.schema_version == super::PACKED_JOURNAL_VERSION)
+                && record.created
+                && record.tree.is_none(),
+            "not a creation journal record"
+        );
         let session = directory(&self.store, Path::new(&journal.session), false)?;
-        ensure!(session.metadata()?.mode() & 0o7777 == 0o700,
-            "creation recovery directory must remain private");
+        ensure!(
+            session.metadata()?.mode() & 0o7777 == 0o700,
+            "creation recovery directory must remain private"
+        );
         let (parent, name) = parent_and_name(&self.root, &record.path, false)?;
-        let queued = read_optional(&session, OsStr::new(&format!("{index}.new")), MAX_FILE_BYTES)?;
-        let retired = read_optional(&session, OsStr::new(&format!("{index}.retired")), MAX_FILE_BYTES)?;
-        ensure!(queued.is_none() || retired.is_none(),
-            "creation cannot be both uninstalled and retired");
+        let queued = read_optional(
+            &session,
+            OsStr::new(&format!("{index}.new")),
+            MAX_FILE_BYTES,
+        )?;
+        let retired = read_optional(
+            &session,
+            OsStr::new(&format!("{index}.retired")),
+            MAX_FILE_BYTES,
+        )?;
+        ensure!(
+            queued.is_none() || retired.is_none(),
+            "creation cannot be both uninstalled and retired"
+        );
         for image in queued.iter().chain(retired.iter()) {
-            ensure!(verify_image(image, &record.after_sha256, record.after_bytes, Some(record.mode)),
-                "creation recovery image content or permissions changed");
+            ensure!(
+                verify_image(
+                    image,
+                    &record.after_sha256,
+                    record.after_bytes,
+                    Some(record.mode)
+                ),
+                "creation recovery image content or permissions changed"
+            );
         }
         let current = read_optional(&parent, &name, MAX_FILE_BYTES)?;
         if let Some(current) = &current {
             // A failed NOREPLACE must not roll back somebody else's colliding
             // file, including a byte-identical one. A retired file reappearing
             // before completion likewise belongs to later work, not this retry.
-            ensure!(queued.is_none(), "uninstalled creation target appeared; preserving it: {}", record.path);
-            ensure!(retired.is_none(), "retired creation target reappeared; preserving it: {}", record.path);
-            ensure!(verify_image(current, &record.after_sha256, record.after_bytes, Some(record.mode)),
-                "created source content or permissions changed; preserving the user's edit: {}", record.path);
+            ensure!(
+                queued.is_none(),
+                "uninstalled creation target appeared; preserving it: {}",
+                record.path
+            );
+            ensure!(
+                retired.is_none(),
+                "retired creation target reappeared; preserving it: {}",
+                record.path
+            );
+            ensure!(
+                verify_image(
+                    current,
+                    &record.after_sha256,
+                    record.after_bytes,
+                    Some(record.mode)
+                ),
+                "created source content or permissions changed; preserving the user's edit: {}",
+                record.path
+            );
         }
         Ok(CreationState {
-            parent, name, session, current,
-            queued: queued.is_some(), retired: retired.is_some(),
+            parent,
+            name,
+            session,
+            current,
+            queued: queued.is_some(),
+            retired: retired.is_some(),
         })
     }
 
     /// Pure preview used by explicit rollback's all-file preflight.
     pub(super) fn creation_is_original(&self, journal: &Journal, index: usize) -> Result<bool> {
-        if journal.records.get(index).is_some_and(|record| record.tree.is_some()) {
+        if journal
+            .records
+            .get(index)
+            .is_some_and(|record| record.tree.is_some())
+        {
             return self.tree_is_original(journal, index);
         }
         Ok(self.inspect_creation(journal, index)?.current.is_none())
@@ -95,20 +145,27 @@ impl RewriteTransaction {
 
     pub(super) fn check_creation_ready(&self, journal: &Journal, index: usize) -> Result<()> {
         let state = self.inspect_creation(journal, index)?;
-        ensure!(state.current.is_none() && state.queued && !state.retired,
-            "creation is not queued against an absent target");
+        ensure!(
+            state.current.is_none() && state.queued && !state.retired,
+            "creation is not queued against an absent target"
+        );
         Ok(())
     }
 
     pub(super) fn install_created(&self, journal: &Journal, index: usize) -> Result<()> {
         let state = self.inspect_creation(journal, index)?;
-        ensure!(state.current.is_none() && state.queued && !state.retired,
-            "creation is not queued against an absent target");
+        ensure!(
+            state.current.is_none() && state.queued && !state.retired,
+            "creation is not queued against an absent target"
+        );
         // The .new image was fsynced before the durable journal. NOREPLACE
         // atomically preserves any pathname that appears after inspection.
         renameat_with(
-            &state.session, format!("{index}.new").as_str(),
-            &state.parent, &state.name, RenameFlags::NOREPLACE,
+            &state.session,
+            format!("{index}.new").as_str(),
+            &state.parent,
+            &state.name,
+            RenameFlags::NOREPLACE,
         )?;
         self.dirty.borrow_mut().mark(&state.session)?;
         self.dirty.borrow_mut().mark(&state.parent)
@@ -118,13 +175,19 @@ impl RewriteTransaction {
         let state = self.inspect_creation(journal, index)?;
         if let Some(current) = &state.current {
             let checked = read_required(&state.parent, &state.name, MAX_FILE_BYTES)?;
-            ensure!(same_version(&current.metadata, &checked.metadata) && current.bytes == checked.bytes,
-                "created source changed before retirement");
+            ensure!(
+                same_version(&current.metadata, &checked.metadata)
+                    && current.bytes == checked.bytes,
+                "created source changed before retirement"
+            );
             // Keep the exact new file in this private transaction. Never unlink
             // source bytes, replace an existing receipt, or follow a symlink.
             renameat_with(
-                &state.parent, &state.name,
-                &state.session, format!("{index}.retired").as_str(), RenameFlags::NOREPLACE,
+                &state.parent,
+                &state.name,
+                &state.session,
+                format!("{index}.retired").as_str(),
+                RenameFlags::NOREPLACE,
             )?;
         }
         // Also flush on a retry which observes an already absent source: an
@@ -136,8 +199,8 @@ impl RewriteTransaction {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::{DURABILITY_LOG, PENDING, STORE, digest, rollback};
+    use super::*;
     use std::fs::{self, Permissions};
     use std::os::unix::fs::{PermissionsExt, symlink};
     use std::path::PathBuf;
@@ -150,13 +213,25 @@ mod tests {
     }
 
     fn edits() -> [Edit<'static>; 1] {
-        [Edit { path: "app.js", before: b"original", after: b"rewritten" }]
+        [Edit {
+            path: "app.js",
+            before: b"original",
+            after: b"rewritten",
+        }]
     }
 
     fn additions() -> [CreateFile<'static>; 2] {
         [
-            CreateFile { path: "lib/helper.cjs", after: b"module.exports = 42;", mode: 0o640 },
-            CreateFile { path: "lib/empty.cjs", after: b"", mode: 0o400 },
+            CreateFile {
+                path: "lib/helper.cjs",
+                after: b"module.exports = 42;",
+                mode: 0o640,
+            },
+            CreateFile {
+                path: "lib/empty.cjs",
+                after: b"",
+                mode: 0o400,
+            },
         ]
     }
 
@@ -165,8 +240,11 @@ mod tests {
     }
 
     fn applied(root: &Path) -> AppliedRewrite {
-        RewriteTransaction::open_without_recovery(root).unwrap()
-            .apply_with_creations_receipt(&edits(), &additions()).unwrap().unwrap()
+        RewriteTransaction::open_without_recovery(root)
+            .unwrap()
+            .apply_with_creations_receipt(&edits(), &additions())
+            .unwrap()
+            .unwrap()
     }
 
     fn restore(root: &Path, receipt: &AppliedRewrite) -> rollback::RollbackReport {
@@ -187,35 +265,72 @@ mod tests {
         assert_eq!(receipt.files, 3);
         assert_eq!(fs::read(root.path().join("app.js")).unwrap(), b"rewritten");
         for creation in additions() {
-            assert_eq!(fs::read(root.path().join(creation.path)).unwrap(), creation.after);
-            assert_eq!(fs::metadata(root.path().join(creation.path)).unwrap().mode() & 0o777, creation.mode);
+            assert_eq!(
+                fs::read(root.path().join(creation.path)).unwrap(),
+                creation.after
+            );
+            assert_eq!(
+                fs::metadata(root.path().join(creation.path))
+                    .unwrap()
+                    .mode()
+                    & 0o777,
+                creation.mode
+            );
         }
         let session = store(root.path()).join(&receipt.transaction_id);
-        let journal: Journal = serde_json::from_slice(&fs::read(session.join("applied.json")).unwrap()).unwrap();
+        let journal: Journal =
+            serde_json::from_slice(&fs::read(session.join("applied.json")).unwrap()).unwrap();
         assert_eq!(journal.schema_version, JOURNAL_VERSION);
-        assert!(!journal.records[0].created && journal.records[1].created && journal.records[2].created);
-        assert_eq!(digest(&serde_json::to_vec(&journal).unwrap()), receipt.journal_sha256);
+        assert!(
+            !journal.records[0].created && journal.records[1].created && journal.records[2].created
+        );
+        assert_eq!(
+            digest(&serde_json::to_vec(&journal).unwrap()),
+            receipt.journal_sha256
+        );
         assert!(!session.join("1.before").exists() && !session.join("1.new").exists());
-        let preview = rollback::run_pinned(root.path(), &receipt.transaction_id, &receipt.journal_sha256, false);
+        let preview = rollback::run_pinned(
+            root.path(),
+            &receipt.transaction_id,
+            &receipt.journal_sha256,
+            false,
+        );
         assert_eq!(preview.status, rollback::RollbackStatus::Ready);
         assert!(preview.files[1].original_absent && preview.files[2].original_absent);
-        assert_eq!(preview.files[1].preflight_state, rollback::SourceState::Rewritten);
+        assert_eq!(
+            preview.files[1].preflight_state,
+            rollback::SourceState::Rewritten
+        );
         assert!(!session.join("1.retired").exists());
-        assert_eq!(restore(root.path(), &receipt).status, rollback::RollbackStatus::RolledBack);
+        assert_eq!(
+            restore(root.path(), &receipt).status,
+            rollback::RollbackStatus::RolledBack
+        );
         original(root.path());
-        assert_eq!(fs::read(session.join("1.retired")).unwrap(), additions()[0].after);
+        assert_eq!(
+            fs::read(session.join("1.retired")).unwrap(),
+            additions()[0].after
+        );
         assert_eq!(fs::read(session.join("2.retired")).unwrap(), b"");
         assert!(session.join("1.after").is_file());
         fs::write(root.path().join("lib/helper.cjs"), b"later user work").unwrap();
-        assert_eq!(restore(root.path(), &receipt).status, rollback::RollbackStatus::AlreadyRolledBack);
-        assert_eq!(fs::read(root.path().join("lib/helper.cjs")).unwrap(), b"later user work");
+        assert_eq!(
+            restore(root.path(), &receipt).status,
+            rollback::RollbackStatus::AlreadyRolledBack
+        );
+        assert_eq!(
+            fs::read(root.path().join("lib/helper.cjs")).unwrap(),
+            b"later user work"
+        );
     }
 
     #[test]
     fn a_collision_even_with_identical_bytes_is_not_this_transactions_creation() {
         let root = fixture();
         let writer = RewriteTransaction::open_without_recovery(root.path()).unwrap();
-        let journal = writer.prepare_changes(&edits(), &additions(), JOURNAL_VERSION).unwrap();
+        let journal = writer
+            .prepare_changes(&edits(), &additions(), JOURNAL_VERSION)
+            .unwrap();
         writer.install(&journal, 0).unwrap();
         let colliding = root.path().join("lib/helper.cjs");
         fs::write(&colliding, additions()[0].after).unwrap();
@@ -227,29 +342,81 @@ mod tests {
         assert_eq!(fs::read(&colliding).unwrap(), additions()[0].after);
         assert_eq!(fs::read(root.path().join("app.js")).unwrap(), b"original");
         assert!(store(root.path()).join(PENDING).exists());
-        assert!(store(root.path()).join(&journal.session).join("1.new").is_file());
-        assert!(!store(root.path()).join(&journal.session).join("1.retired").exists());
+        assert!(
+            store(root.path())
+                .join(&journal.session)
+                .join("1.new")
+                .is_file()
+        );
+        assert!(
+            !store(root.path())
+                .join(&journal.session)
+                .join("1.retired")
+                .exists()
+        );
     }
 
     #[test]
     fn existing_paths_duplicates_reserved_paths_modes_and_missing_parents_fail_preflight() {
         let root = fixture();
         let writer = RewriteTransaction::open_without_recovery(root.path()).unwrap();
-        for path in ["app.js", "lib", "missing/helper.cjs", "../outside", ".git/config", ".franken-node/key", ".migrate-backup/file"] {
-            assert!(writer.apply_with_creations_receipt(&edits(), &[
-                CreateFile { path, after: b"new", mode: 0o600 },
-            ]).is_err(), "{path}");
+        for path in [
+            "app.js",
+            "lib",
+            "missing/helper.cjs",
+            "../outside",
+            ".git/config",
+            ".franken-node/key",
+            ".migrate-backup/file",
+        ] {
+            assert!(
+                writer
+                    .apply_with_creations_receipt(
+                        &edits(),
+                        &[CreateFile {
+                            path,
+                            after: b"new",
+                            mode: 0o600
+                        },]
+                    )
+                    .is_err(),
+                "{path}"
+            );
             original(root.path());
         }
         for mode in [0, 0o200, 0o4644, 0o1777] {
-            assert!(writer.apply_with_creations_receipt(&edits(), &[
-                CreateFile { path: "lib/helper.cjs", after: b"new", mode },
-            ]).is_err());
+            assert!(
+                writer
+                    .apply_with_creations_receipt(
+                        &edits(),
+                        &[CreateFile {
+                            path: "lib/helper.cjs",
+                            after: b"new",
+                            mode
+                        },]
+                    )
+                    .is_err()
+            );
         }
-        assert!(writer.apply_with_creations_receipt(&[], &[
-            CreateFile { path: "lib/helper.cjs", after: b"one", mode: 0o600 },
-            CreateFile { path: "lib/helper.cjs", after: b"two", mode: 0o600 },
-        ]).is_err());
+        assert!(
+            writer
+                .apply_with_creations_receipt(
+                    &[],
+                    &[
+                        CreateFile {
+                            path: "lib/helper.cjs",
+                            after: b"one",
+                            mode: 0o600
+                        },
+                        CreateFile {
+                            path: "lib/helper.cjs",
+                            after: b"two",
+                            mode: 0o600
+                        },
+                    ]
+                )
+                .is_err()
+        );
         assert_eq!(fs::read_dir(store(root.path())).unwrap().count(), 1);
         original(root.path());
     }
@@ -259,13 +426,33 @@ mod tests {
         for parent in [false, true] {
             let root = fixture();
             let outside = tempfile::tempdir().unwrap();
-            let path = if parent { "alias/helper.cjs" } else { "lib/helper.cjs" };
-            symlink(if parent { outside.path().to_owned() } else { outside.path().join("absent") },
-                root.path().join(if parent { "alias" } else { path })).unwrap();
+            let path = if parent {
+                "alias/helper.cjs"
+            } else {
+                "lib/helper.cjs"
+            };
+            symlink(
+                if parent {
+                    outside.path().to_owned()
+                } else {
+                    outside.path().join("absent")
+                },
+                root.path().join(if parent { "alias" } else { path }),
+            )
+            .unwrap();
             let writer = RewriteTransaction::open_without_recovery(root.path()).unwrap();
-            assert!(writer.apply_with_creations_receipt(&edits(), &[
-                CreateFile { path, after: b"new", mode: 0o600 },
-            ]).is_err());
+            assert!(
+                writer
+                    .apply_with_creations_receipt(
+                        &edits(),
+                        &[CreateFile {
+                            path,
+                            after: b"new",
+                            mode: 0o600
+                        },]
+                    )
+                    .is_err()
+            );
             assert_eq!(fs::read(root.path().join("app.js")).unwrap(), b"original");
             assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 0);
             assert!(!store(root.path()).join(PENDING).exists());
@@ -288,7 +475,11 @@ mod tests {
                 }
             }
             let report = restore(root.path(), &receipt);
-            assert_eq!(report.status, rollback::RollbackStatus::Conflict, "{report:?}");
+            assert_eq!(
+                report.status,
+                rollback::RollbackStatus::Conflict,
+                "{report:?}"
+            );
             assert_eq!(fs::read(root.path().join("app.js")).unwrap(), b"rewritten");
             assert!(root.path().join("lib/empty.cjs").exists());
             assert!(!store(root.path()).join(PENDING).exists());
@@ -299,8 +490,13 @@ mod tests {
     fn absent_preimages_cannot_be_smuggled_into_older_schemas_or_empty_file_records() {
         let root = fixture();
         let writer = RewriteTransaction::open_without_recovery(root.path()).unwrap();
-        let journal = writer.prepare_changes(&edits(), &additions(), JOURNAL_VERSION).unwrap();
-        for schema in [super::super::JOURNAL_VERSION, super::super::VERSIONED_JOURNAL_VERSION] {
+        let journal = writer
+            .prepare_changes(&edits(), &additions(), JOURNAL_VERSION)
+            .unwrap();
+        for schema in [
+            super::super::JOURNAL_VERSION,
+            super::super::VERSIONED_JOURNAL_VERSION,
+        ] {
             let mut changed = journal.clone();
             changed.schema_version = schema.into();
             assert!(RewriteTransaction::validate_journal(&changed).is_err());
@@ -315,7 +511,11 @@ mod tests {
             assert!(RewriteTransaction::validate_journal(&changed).is_err());
         }
         let replacement = &journal.records[0];
-        assert!(!serde_json::to_string(replacement).unwrap().contains("created"));
+        assert!(
+            !serde_json::to_string(replacement)
+                .unwrap()
+                .contains("created")
+        );
         original(root.path());
     }
 
@@ -323,8 +523,14 @@ mod tests {
     fn queued_image_corruption_cannot_install_or_fall_back_to_an_after_image() {
         let root = fixture();
         let writer = RewriteTransaction::open_without_recovery(root.path()).unwrap();
-        let journal = writer.prepare_changes(&edits(), &additions(), JOURNAL_VERSION).unwrap();
-        fs::write(store(root.path()).join(&journal.session).join("1.new"), b"tampered").unwrap();
+        let journal = writer
+            .prepare_changes(&edits(), &additions(), JOURNAL_VERSION)
+            .unwrap();
+        fs::write(
+            store(root.path()).join(&journal.session).join("1.new"),
+            b"tampered",
+        )
+        .unwrap();
         assert!(writer.apply_prepared(journal).is_err());
         original(root.path());
         assert!(store(root.path()).join(PENDING).exists());
@@ -341,10 +547,20 @@ mod tests {
         writer.publish_journal(&raw).unwrap();
         writer.restore_created(&journal, 1).unwrap();
         fs::write(root.path().join("lib/helper.cjs"), additions()[0].after).unwrap();
-        fs::set_permissions(root.path().join("lib/helper.cjs"), Permissions::from_mode(0o640)).unwrap();
+        fs::set_permissions(
+            root.path().join("lib/helper.cjs"),
+            Permissions::from_mode(0o640),
+        )
+        .unwrap();
         assert!(writer.recover_pending().is_err());
-        assert_eq!(fs::read(root.path().join("lib/helper.cjs")).unwrap(), additions()[0].after);
-        assert_eq!(fs::read(session.join("1.retired")).unwrap(), additions()[0].after);
+        assert_eq!(
+            fs::read(root.path().join("lib/helper.cjs")).unwrap(),
+            additions()[0].after
+        );
+        assert_eq!(
+            fs::read(session.join("1.retired")).unwrap(),
+            additions()[0].after
+        );
         assert!(!session.join("rolled-back.json").exists());
     }
 
@@ -354,7 +570,9 @@ mod tests {
         const COUNT: &str = "FRANKEN_CREATION_CRASH_COUNT";
         if let Some(root) = std::env::var_os(ROOT) {
             let writer = RewriteTransaction::open_without_recovery(Path::new(&root)).unwrap();
-            let journal = writer.prepare_changes(&edits(), &additions(), JOURNAL_VERSION).unwrap();
+            let journal = writer
+                .prepare_changes(&edits(), &additions(), JOURNAL_VERSION)
+                .unwrap();
             for index in 0..std::env::var(COUNT).unwrap().parse::<usize>().unwrap() {
                 writer.install(&journal, index).unwrap();
             }
@@ -366,7 +584,12 @@ mod tests {
             let output = std::process::Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", &format!("{module}::process_exit_at_each_install_boundary_recovers_the_same_mixed_plan")])
                 .env(ROOT, root.path()).env(COUNT, count.to_string()).output().unwrap();
-            assert_eq!(output.status.code(), Some(73), "{}", String::from_utf8_lossy(&output.stderr));
+            assert_eq!(
+                output.status.code(),
+                Some(73),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
             assert!(store(root.path()).join(PENDING).exists());
             let raw = fs::read(store(root.path()).join(PENDING)).unwrap();
             let journal: Journal = serde_json::from_slice(&raw).unwrap();
@@ -375,7 +598,10 @@ mod tests {
             let session = store(root.path()).join(&journal.session);
             assert!(session.join("rolled-back.json").is_file());
             for index in 1..=2 {
-                assert_eq!(session.join(format!("{index}.retired")).exists(), index < count);
+                assert_eq!(
+                    session.join(format!("{index}.retired")).exists(),
+                    index < count
+                );
             }
         }
     }
@@ -384,13 +610,27 @@ mod tests {
     fn replacement_of_a_created_file_can_be_rolled_back_before_restoring_its_absence() {
         let root = fixture();
         let first = applied(root.path());
-        let second = RewriteTransaction::open_without_recovery(root.path()).unwrap()
+        let second = RewriteTransaction::open_without_recovery(root.path())
+            .unwrap()
             .apply_versioned_with_receipt(&[Edit {
-                path: "lib/helper.cjs", before: additions()[0].after, after: b"second generation",
-            }]).unwrap().unwrap();
-        assert_eq!(restore(root.path(), &first).status, rollback::RollbackStatus::Conflict);
-        assert_eq!(restore(root.path(), &second).status, rollback::RollbackStatus::RolledBack);
-        assert_eq!(restore(root.path(), &first).status, rollback::RollbackStatus::RolledBack);
+                path: "lib/helper.cjs",
+                before: additions()[0].after,
+                after: b"second generation",
+            }])
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            restore(root.path(), &first).status,
+            rollback::RollbackStatus::Conflict
+        );
+        assert_eq!(
+            restore(root.path(), &second).status,
+            rollback::RollbackStatus::RolledBack
+        );
+        assert_eq!(
+            restore(root.path(), &first).status,
+            rollback::RollbackStatus::RolledBack
+        );
         original(root.path());
     }
 
@@ -399,16 +639,21 @@ mod tests {
         let root = fixture();
         let writer = RewriteTransaction::open_without_recovery(root.path()).unwrap();
         DURABILITY_LOG.with(|log| log.borrow_mut().clear());
-        writer.apply_with_creations_receipt(&edits(), &additions()).unwrap();
+        writer
+            .apply_with_creations_receipt(&edits(), &additions())
+            .unwrap();
         let log = DURABILITY_LOG.with(|log| std::mem::take(&mut *log.borrow_mut()));
-        assert_eq!(log, [
-            "file", "file", // replacement before + after
-            "file", "file", "file", "file", // creation after + new pairs
-            "dir", "dir", // session and store
-            "file", "journal", // durable intent
-            "file", // replacement (creations rename already durable images)
-            "dir", "dir", "dir", // root, lib, session, each once
-            "archive", "archive",
-        ]);
+        assert_eq!(
+            log,
+            [
+                "file", "file", // replacement before + after
+                "file", "file", "file", "file", // creation after + new pairs
+                "dir", "dir", // session and store
+                "file", "journal", // durable intent
+                "file",    // replacement (creations rename already durable images)
+                "dir", "dir", "dir", // root, lib, session, each once
+                "archive", "archive",
+            ]
+        );
     }
 }
