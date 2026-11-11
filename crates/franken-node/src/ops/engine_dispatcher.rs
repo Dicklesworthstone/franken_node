@@ -9850,6 +9850,7 @@ impl EngineDispatcher {
             };
             return Err(dispatch_error.to_actionable().into());
         }
+        let no_host_effects_admitted = reconciled.entries.is_empty();
         let response = reconciled.response.ok_or_else(|| {
             EngineDispatchError::EngineExecutionError {
                 app_path: app_path_buf.clone(),
@@ -10153,7 +10154,18 @@ impl EngineDispatcher {
                 let observed_at_epoch_secs = u64::try_from(Utc::now().timestamp()).unwrap_or(0);
                 session_inventory.finish(
                     NativeSessionOutcomeKind::Panicked,
-                    NativeSessionEffectObservation::Unknown,
+                    if cleanup_successful
+                        && no_host_effects_admitted
+                        && process_spawn_admission.is_none()
+                    {
+                        // The complete, nonce-validated WAL precedes this final
+                        // response and flushes every admission before provider
+                        // I/O. An empty WAL is useful only after successful
+                        // cleanup and with no independent process authority.
+                        NativeSessionEffectObservation::NoAdmittedHostEffects
+                    } else {
+                        NativeSessionEffectObservation::Unknown
+                    },
                 );
                 Err(NativeRunPanic::from_validated_response(
                     dispatch_error.to_actionable(),

@@ -261,6 +261,11 @@ pub enum NativeSessionOutcomeKind {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum NativeSessionEffectObservation {
     NotStarted,
+    /// The authenticated panic response followed complete reconciliation of
+    /// an empty parent-observed host-effect journal, successful cleanup and
+    /// explicit absence of process-spawn authority. A missing ledger alone
+    /// never establishes this observation.
+    NoAdmittedHostEffects,
     /// The parent validated this final ledger before recording its summary.
     /// The digest is not a substitute for exporting the signed ledger itself.
     FinalLedgerObserved {
@@ -304,7 +309,7 @@ impl NativeSessionEffectObservation {
             // particular, cancellation can follow a request reaching its peer.
             Self::FinalLedgerObserved { failed_count, .. } => *failed_count > 0,
             Self::Interrupted { .. } | Self::Unknown => true,
-            Self::NotStarted => false,
+            Self::NotStarted | Self::NoAdmittedHostEffects => false,
         }
     }
 }
@@ -628,6 +633,16 @@ fn validate_outcome(
         bail!("cooperatively stopped native session lacks a validated final ledger");
     }
     match &outcome.effects {
+        Effects::NoAdmittedHostEffects => {
+            if outcome.kind != Kind::Panicked
+                || outcome.process != Process::WorkerReaped
+                || admission.process_spawn_authority_granted != Some(false)
+            {
+                bail!(
+                    "native-session no-effects panic requires a reaped worker without process authority"
+                );
+            }
+        }
         Effects::FinalLedgerObserved {
             effect_count,
             allowed_count,
@@ -1608,6 +1623,13 @@ fn terminal_outcome_observed(
         ) => true,
         (
             NativeSessionProcessObservation::WorkerReaped,
+            NativeSessionEffectObservation::NoAdmittedHostEffects,
+        ) => {
+            outcome.kind == NativeSessionOutcomeKind::Panicked
+                && admission.process_spawn_authority_granted == Some(false)
+        }
+        (
+            NativeSessionProcessObservation::WorkerReaped,
             NativeSessionEffectObservation::FinalLedgerObserved {
                 failed_count: 0, ..
             },
@@ -2229,6 +2251,118 @@ pub fn read_local_native_session_inventory(
     read_inventory_at(&protected_root, project_root)
 }
 
+/// Authenticate the supervisor outcome of one independently selected launch.
+///
+/// The caller must retain the nonce and canonical project identities before
+/// spawning the child; none may come from that child's stdout. Both immutable
+/// receipts must verify against the existing protected product root. A retained
+/// outcome can survive a missing database projection, but an unsigned database
+/// row or a conflicting projection can never establish successful execution.
+/// This preserves unknown effects and does not by itself authorize a restart.
+pub fn authenticate_local_native_session_outcome(
+    nonce: &str,
+    expected_project: &Path,
+    expected_entrypoint: &Path,
+    expected_operator_project: &Path,
+) -> Result<NativeSessionInventoryRecord> {
+    let protected_root = existing_admission_root()?
+        .context("authenticated native-session outcome requires an existing protected inventory")?;
+    authenticate_native_session_outcome_at(
+        &protected_root,
+        nonce,
+        expected_project,
+        expected_entrypoint,
+        expected_operator_project,
+    )
+}
+
+fn authenticate_native_session_outcome_at(
+    protected_root: &Path,
+    nonce: &str,
+    expected_project: &Path,
+    expected_entrypoint: &Path,
+    expected_operator_project: &Path,
+) -> Result<NativeSessionInventoryRecord> {
+    let parsed = uuid::Uuid::parse_str(nonce).context("invalid supervised native-session nonce")?;
+    if parsed.to_string() != nonce || parsed.is_nil() {
+        bail!("supervised native-session nonce must be a canonical non-nil UUID");
+    }
+    for path in [
+        expected_project,
+        expected_entrypoint,
+        expected_operator_project,
+    ] {
+        project_key(path)?;
+    }
+    if expected_entrypoint == expected_project || !expected_entrypoint.starts_with(expected_project)
+    {
+        bail!("supervised native-session entrypoint must be inside its retained project");
+    }
+    // Reading an outcome must not provision authority or create missing state.
+    for directory in [
+        protected_root.to_path_buf(),
+        protected_root.join("keys"),
+        protected_root.join(RUNTIME_EVIDENCE_CAPTURE_DIR_RELATIVE_PATH),
+        protected_root.join(ADMISSION_RECEIPT_DIRECTORY),
+        protected_root.join(OUTCOME_RECEIPT_DIRECTORY),
+    ] {
+        std::fs::symlink_metadata(&directory)
+            .context("authenticated native-session outcome is missing protected evidence")?;
+        ensure_runtime_evidence_directory(&directory, true)?;
+    }
+    let connection = open_inventory(protected_root, false)?
+        .context("authenticated native-session outcome has no retained admission database")?;
+    let mut tx = connection.transaction()?;
+    let rows = tx.query_with_params(
+        "SELECT admission_json, outcome_json FROM native_sessions WHERE session_nonce = ?1;",
+        &[SqliteValue::Text(nonce.to_owned().into())],
+    )?;
+    let [row] = rows.as_slice() else {
+        bail!("supervised native-session nonce has no unique retained admission");
+    };
+    let [admission, projected_outcome] = row.values() else {
+        bail!("supervised native-session inventory row shape is invalid");
+    };
+    let admission: NativeSessionAdmission = parse_json(admission, MAX_ADMISSION_BYTES)?;
+    validate_admission(&admission)?;
+    if admission.session_nonce != nonce
+        || admission.project_root != expected_project
+        || admission.entrypoint != expected_entrypoint
+        || (expected_operator_project != expected_project
+            && !admission.control_scopes.as_ref().is_some_and(|scopes| {
+                scopes
+                    .iter()
+                    .any(|scope| scope.project_root == expected_operator_project)
+            }))
+    {
+        bail!("native-session admission does not match the retained launch and control scope");
+    }
+    let projected_outcome: Option<NativeSessionOutcome> = match projected_outcome {
+        SqliteValue::Null => None,
+        value => Some(parse_json(value, MAX_OUTCOME_BYTES)?),
+    };
+    tx.commit()?;
+    verify_admission_capture(protected_root, &admission)?;
+    let root = load_runtime_evidence_product_root(
+        &protected_root.join(RUNTIME_EVIDENCE_ROOT_KEY_RELATIVE_PATH),
+    )?;
+    let key = root.verifying_key();
+    read_admission_receipt(protected_root, &admission, &key)?
+        .context("supervised native-session admission has no authenticated receipt")?;
+    let receipt = read_outcome_receipt(protected_root, &admission, &key)?
+        .context("supervised native-session outcome has no authenticated receipt")?;
+    if projected_outcome
+        .as_ref()
+        .is_some_and(|observed| observed != &receipt.outcome)
+    {
+        bail!("native-session database outcome disagrees with its signed supervisor receipt");
+    }
+    Ok(NativeSessionInventoryRecord {
+        admission,
+        outcome: Some(receipt.outcome),
+    })
+}
+
 /// Match retained signed captures against the exact transaction's rows. A
 /// pre-lock inventory snapshot must not hide a newly untracked identity when
 /// sealing or signing a population.
@@ -2457,6 +2591,304 @@ mod tests {
             fleet_policy_sha256: None,
         }]);
         admission
+    }
+
+    #[test]
+    fn launch_outcome_authentication_recovers_only_the_signed_projection() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("evidence");
+        let operator = temp.path().join("operator");
+        let admission = operator_fixture(&root, 112, &operator, 0);
+        let guard = NativeSessionInventoryGuard::admit(&root, admission.clone(), 0).unwrap();
+        let mut outcome = terminal_outcome();
+        outcome.kind = NativeSessionOutcomeKind::Completed;
+        abandon_after_receipt(&root, guard, &outcome);
+
+        let authenticated = authenticate_native_session_outcome_at(
+            &root,
+            &admission.session_nonce,
+            &admission.project_root,
+            &admission.entrypoint,
+            &operator,
+        )
+        .unwrap();
+        assert_eq!(authenticated.admission, admission);
+        assert_eq!(authenticated.outcome, Some(outcome));
+        let connection = open_inventory(&root, false).unwrap().unwrap();
+        assert!(
+            read_records(&connection).unwrap()[0].outcome.is_none(),
+            "authentication must not rewrite the durable projection"
+        );
+    }
+
+    #[test]
+    fn launch_outcome_authentication_binds_nonce_release_and_operator() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("evidence");
+        let operator = temp.path().join("operator");
+        let admission = operator_fixture(&root, 113, &operator, 0);
+        let guard = NativeSessionInventoryGuard::admit(&root, admission.clone(), 0).unwrap();
+        abandon_after_receipt(&root, guard, &terminal_outcome());
+        let foreign_nonce = uuid::Uuid::now_v7().to_string();
+        let foreign_project = temp.path().join("other-project");
+        let foreign_entrypoint = admission.project_root.join("other.js");
+        let foreign_operator = temp.path().join("other-operator");
+        for (nonce, project, entrypoint, owner) in [
+            (
+                &foreign_nonce,
+                &admission.project_root,
+                &admission.entrypoint,
+                &operator,
+            ),
+            (
+                &admission.session_nonce,
+                &foreign_project,
+                &admission.entrypoint,
+                &operator,
+            ),
+            (
+                &admission.session_nonce,
+                &admission.project_root,
+                &foreign_entrypoint,
+                &operator,
+            ),
+            (
+                &admission.session_nonce,
+                &admission.project_root,
+                &admission.entrypoint,
+                &foreign_operator,
+            ),
+        ] {
+            assert!(
+                authenticate_native_session_outcome_at(&root, nonce, project, entrypoint, owner)
+                    .is_err()
+            );
+        }
+        for nonce in [
+            "../not-a-launch".to_owned(),
+            uuid::Uuid::nil().to_string(),
+            format!("{{{}}}", admission.session_nonce),
+        ] {
+            assert!(
+                authenticate_native_session_outcome_at(
+                    &root,
+                    &nonce,
+                    &admission.project_root,
+                    &admission.entrypoint,
+                    &operator,
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn launch_outcome_authentication_requires_both_receipts_and_rejects_forgery() {
+        for mutation in 0..5 {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("evidence");
+            let admission = fixture(&root, 114);
+            let guard = NativeSessionInventoryGuard::admit(&root, admission.clone(), 0).unwrap();
+            abandon_after_receipt(&root, guard, &terminal_outcome());
+            let admission_path = admission_receipt_path(&root, &admission.session_nonce);
+            let outcome_path = outcome_receipt_path(&root, &admission.session_nonce);
+            match mutation {
+                0 => {
+                    std::fs::rename(&admission_path, admission_path.with_extension("retained"))
+                        .unwrap();
+                }
+                1 => {
+                    std::fs::rename(&outcome_path, outcome_path.with_extension("retained"))
+                        .unwrap();
+                }
+                _ => {
+                    let mut receipt: NativeSessionOutcomeReceipt =
+                        serde_json::from_slice(&std::fs::read(&outcome_path).unwrap()).unwrap();
+                    match mutation {
+                        2 => receipt.outcome.kind = NativeSessionOutcomeKind::Completed,
+                        3 => receipt.signature_hex = "0".repeat(128),
+                        4 => {
+                            use ed25519_dalek::Signer as _;
+                            let foreign = ed25519_dalek::SigningKey::from_bytes(&[99; 32]);
+                            receipt.signature_hex =
+                                hex::encode(foreign.sign(&receipt.preimage().unwrap()).to_bytes());
+                        }
+                        _ => unreachable!(),
+                    }
+                    std::fs::write(&outcome_path, serde_json::to_vec(&receipt).unwrap()).unwrap();
+                }
+            }
+            assert!(
+                authenticate_native_session_outcome_at(
+                    &root,
+                    &admission.session_nonce,
+                    &admission.project_root,
+                    &admission.entrypoint,
+                    &admission.project_root,
+                )
+                .is_err(),
+                "mutation {mutation}"
+            );
+        }
+    }
+
+    #[test]
+    fn launch_outcome_authentication_refuses_unsigned_database_substitution() {
+        for change_admission in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("evidence");
+            let admission = fixture(&root, 115);
+            let guard = NativeSessionInventoryGuard::admit(&root, admission.clone(), 0).unwrap();
+            let signed = terminal_outcome();
+            abandon_after_receipt(&root, guard, &signed);
+            let connection = open_inventory(&root, false).unwrap().unwrap();
+            let mut tx = connection.transaction().unwrap();
+            if change_admission {
+                let mut substituted = admission.clone();
+                substituted
+                    .dependency_ids
+                    .push("unadmitted-dependency".into());
+                tx.execute_with_params(
+                    "UPDATE native_sessions SET admission_json = ?1 WHERE session_nonce = ?2;",
+                    &[
+                        SqliteValue::Text(serde_json::to_string(&substituted).unwrap().into()),
+                        SqliteValue::Text(admission.session_nonce.clone().into()),
+                    ],
+                )
+                .unwrap();
+            } else {
+                let mut substituted = signed;
+                substituted.kind = NativeSessionOutcomeKind::Completed;
+                tx.execute_with_params(
+                    "UPDATE native_sessions SET outcome_json = ?1 WHERE session_nonce = ?2;",
+                    &[
+                        SqliteValue::Text(serde_json::to_string(&substituted).unwrap().into()),
+                        SqliteValue::Text(admission.session_nonce.clone().into()),
+                    ],
+                )
+                .unwrap();
+            }
+            tx.commit().unwrap();
+            assert!(
+                authenticate_native_session_outcome_at(
+                    &root,
+                    &admission.session_nonce,
+                    &admission.project_root,
+                    &admission.entrypoint,
+                    &admission.project_root,
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn launch_outcome_authentication_preserves_effect_indeterminacy() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("evidence");
+        let admission = fixture(&root, 116);
+        let mut guard = NativeSessionInventoryGuard::admit(&root, admission.clone(), 0).unwrap();
+        guard.worker_started();
+        guard.worker_reaped();
+        guard.finish(
+            NativeSessionOutcomeKind::Panicked,
+            NativeSessionEffectObservation::Unknown,
+        );
+        let authenticated = authenticate_native_session_outcome_at(
+            &root,
+            &admission.session_nonce,
+            &admission.project_root,
+            &admission.entrypoint,
+            &admission.project_root,
+        )
+        .unwrap();
+        let outcome = authenticated.outcome.unwrap();
+        assert_eq!(outcome.kind, NativeSessionOutcomeKind::Panicked);
+        assert!(outcome.effects.unknown());
+        assert!(!terminal_outcome_observed(&admission, &outcome));
+    }
+
+    #[test]
+    fn no_effects_panic_observation_requires_reap_and_absent_process_authority() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("evidence");
+        let mut admission = fixture(&root, 117);
+        let mut outcome = NativeSessionOutcome {
+            observed_at: Utc::now(),
+            kind: NativeSessionOutcomeKind::Panicked,
+            process: NativeSessionProcessObservation::WorkerReaped,
+            containment_empty_observed: false,
+            effects: NativeSessionEffectObservation::NoAdmittedHostEffects,
+        };
+        validate_outcome(&admission, &outcome).unwrap();
+        assert!(terminal_outcome_observed(&admission, &outcome));
+        assert!(!outcome.effects.unknown());
+        for authority in [None, Some(true)] {
+            admission.process_spawn_authority_granted = authority;
+            assert!(validate_outcome(&admission, &outcome).is_err());
+            assert!(!terminal_outcome_observed(&admission, &outcome));
+        }
+        admission.process_spawn_authority_granted = Some(false);
+        outcome.process = NativeSessionProcessObservation::Unproven;
+        assert!(validate_outcome(&admission, &outcome).is_err());
+        outcome.process = NativeSessionProcessObservation::WorkerReaped;
+        for kind in [
+            NativeSessionOutcomeKind::Completed,
+            NativeSessionOutcomeKind::Interrupted,
+        ] {
+            outcome.kind = kind;
+            assert!(validate_outcome(&admission, &outcome).is_err());
+        }
+    }
+
+    #[test]
+    fn authenticated_no_effects_panic_can_drain_without_erasing_its_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("evidence");
+        let admission = fixture(&root, 118);
+        let mut guard = NativeSessionInventoryGuard::admit(&root, admission.clone(), 0).unwrap();
+        guard.worker_started();
+        guard.worker_reaped();
+        guard.finish(
+            NativeSessionOutcomeKind::Panicked,
+            NativeSessionEffectObservation::NoAdmittedHostEffects,
+        );
+        let checkpoint = actions(1);
+        begin_drain_at(
+            &root,
+            &admission.project_root,
+            "node-a",
+            "prod",
+            &checkpoint,
+        )
+        .unwrap();
+        let drained = finish_drain_at(
+            &root,
+            &admission.project_root,
+            "node-a",
+            "prod",
+            &checkpoint,
+        )
+        .unwrap();
+        assert_eq!(drained.checkpoint.admitted_sessions, 1);
+        assert_eq!(drained.checkpoint.terminal_sessions, 1);
+        assert_eq!(drained.checkpoint.indeterminate_sessions, 0);
+        assert!(drained.checkpoint.is_complete());
+        assert!(!drained.fleet_quiescence_certified);
+        let retained = authenticate_native_session_outcome_at(
+            &root,
+            &admission.session_nonce,
+            &admission.project_root,
+            &admission.entrypoint,
+            &admission.project_root,
+        )
+        .unwrap();
+        let observed = retained.outcome.unwrap();
+        assert_eq!(observed.kind, NativeSessionOutcomeKind::Panicked);
+        assert_eq!(
+            observed.effects,
+            NativeSessionEffectObservation::NoAdmittedHostEffects
+        );
     }
 
     #[test]
@@ -3047,8 +3479,7 @@ mod tests {
             maintenance_action("reference-hold-b", None),
         ];
         let checkpoint = fleet_application_checkpoint(&history, "prod").unwrap();
-        super::begin_drain_at(&root, &project, "node-a", "prod", &checkpoint, &history)
-            .unwrap();
+        super::begin_drain_at(&root, &project, "node-a", "prod", &checkpoint, &history).unwrap();
         let held = finish_drain_at(&root, &project, "node-a", "prod", &checkpoint).unwrap();
         assert!(held.checkpoint.fence_held);
         assert_eq!(held.maintenance_hold_ids.len(), 2);
@@ -3064,8 +3495,7 @@ mod tests {
             Some("reference-hold-a"),
         ));
         let checkpoint = fleet_application_checkpoint(&history, "prod").unwrap();
-        super::begin_drain_at(&root, &project, "node-a", "prod", &checkpoint, &history)
-            .unwrap();
+        super::begin_drain_at(&root, &project, "node-a", "prod", &checkpoint, &history).unwrap();
         let one_owner = finish_drain_at(&root, &project, "node-a", "prod", &checkpoint).unwrap();
         assert_eq!(one_owner.maintenance_hold_ids, vec!["reference-hold-b"]);
         assert!(enforce_reference_admission_at(&root, &nested).is_err());
@@ -3075,8 +3505,7 @@ mod tests {
             Some("reference-hold-b"),
         ));
         let checkpoint = fleet_application_checkpoint(&history, "prod").unwrap();
-        super::begin_drain_at(&root, &project, "node-a", "prod", &checkpoint, &history)
-            .unwrap();
+        super::begin_drain_at(&root, &project, "node-a", "prod", &checkpoint, &history).unwrap();
         assert!(
             enforce_reference_admission_at(&root, &nested).is_err(),
             "publishing a resume cannot skip successful action application"
@@ -3097,10 +3526,8 @@ mod tests {
         let _guard = NativeSessionInventoryGuard::admit(&root, admission, 0).unwrap();
         let history = vec![maintenance_action("malformed-reference-hold", None)];
         let checkpoint = fleet_application_checkpoint(&history, "prod").unwrap();
-        let drain = super::begin_drain_at(
-            &root, &project, "node-a", "prod", &checkpoint, &history,
-        )
-        .unwrap();
+        let drain = super::begin_drain_at(&root, &project, "node-a", "prod", &checkpoint, &history)
+            .unwrap();
         let connection = open_inventory(&root, false).unwrap().unwrap();
         let mut tx = connection.transaction().unwrap();
         tx.execute_with_params(
@@ -3112,8 +3539,7 @@ mod tests {
         )
         .unwrap();
         tx.commit().unwrap();
-        let error = enforce_reference_admission_at(&root, &project.join("nested"))
-            .unwrap_err();
+        let error = enforce_reference_admission_at(&root, &project.join("nested")).unwrap_err();
         assert!(format!("{error:#}").contains("decode native-session inventory record"));
     }
 

@@ -1183,6 +1183,28 @@ fn supervised_release_uses_admitted_policy_without_supervisor_environment_overri
 }
 
 #[test]
+#[cfg(target_os = "linux")]
+fn effect_free_native_panic_retains_a_terminal_authenticated_observation() {
+    let drill = Drill::new();
+    let release = drill.install("2.0.0", &crashing_v2());
+    let output = drill.cli(&release, &["run", "app.js", "--json"]);
+    assert!(!output.status.success());
+    let panic: Value = serde_json::from_slice(&output.stdout).expect("native panic report");
+    assert_eq!(panic["outcome"], "native_engine_panic", "{panic}");
+    assert_eq!(panic["cleanup_successful"], true, "{panic}");
+    let inventory = drill.sessions(&release);
+    let records = inventory["records"].as_array().expect("retained native sessions");
+    assert_eq!(records.len(), 1, "{inventory}");
+    assert_eq!(records[0]["admission"]["session_nonce"], panic["session_nonce"]);
+    assert_eq!(records[0]["outcome"]["kind"], "panicked");
+    assert_eq!(records[0]["outcome"]["process"], "worker_reaped");
+    assert_eq!(records[0]["outcome"]["effects"]["kind"], "no_admitted_host_effects");
+    assert_eq!(inventory["terminal_sessions"], 1);
+    assert_eq!(inventory["unknown_effect_sessions"], 0);
+    assert_eq!(inventory["quiescence_certified"], false);
+}
+
+#[test]
 fn crash_loop_rolls_back_to_the_healthy_release_and_resumes_it() {
     let drill = Drill::new();
     drill.install("1.0.0", HEALTHY_V1);

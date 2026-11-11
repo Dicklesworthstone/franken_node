@@ -1143,6 +1143,13 @@ snapshot does not cancel newly admitted work.
 Indeterminate effects currently have no automatic reconciliation path; restarting
 the agent cannot clear those retained obligations.
 
+A caught native panic can finish local drain accounting when its supervisor
+reconciles a complete, empty host-effect journal, observes successful cleanup and
+worker reap, and had explicitly withheld process-spawn authority. The signed
+outcome remains `panicked`, with `no_admitted_host_effects`; it is not a healthy
+run. Panics with any admitted host effect, incomplete evidence, uncertain cleanup
+or process authority retain unknown effects and continue to hold the fence.
+
 Agent restart resumes the retained snapshot and population. Later quarantine
 and revocation actions still apply while an older drain is unresolved; releases
 and subsequent policy transitions wait for their own snapshot. Lost, reordered,
