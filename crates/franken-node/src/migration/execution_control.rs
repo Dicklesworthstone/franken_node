@@ -7,8 +7,7 @@
 
 use super::{EntryData, Snapshot};
 use crate::runtime::safe_mode::{
-    AdmittedSafeModeProject, AdmittedSafeModeScope, MAX_SAFE_MODE_STATE_BYTES,
-    SafeModeController,
+    AdmittedSafeModeProject, AdmittedSafeModeScope, MAX_SAFE_MODE_STATE_BYTES, SafeModeController,
 };
 use anyhow::{Context, Result, ensure};
 use std::collections::BTreeSet;
@@ -47,15 +46,19 @@ impl ExecutionControl {
                         }
                     }
                 }
-                Some(Origin::Capsule(path)) => { capsules.insert(path.clone()); }
+                Some(Origin::Capsule(path)) => {
+                    capsules.insert(path.clone());
+                }
                 None => {}
             }
         }
         let mut scopes = Vec::new();
         for root in projects {
             let scope = AdmittedSafeModeProject::capture(&root)?;
-            ensure!(scope.root() == root,
-                "migration source scope moved or became an alias before execution");
+            ensure!(
+                scope.root() == root,
+                "migration source scope moved or became an alias before execution"
+            );
             scopes.push(Scope::Project(scope));
         }
         for path in capsules {
@@ -90,23 +93,39 @@ fn check_captured_controllers(snapshot: &Snapshot, tests: &[PathBuf]) -> Result<
         let mut present = true;
         for directory in [&metadata, &controller] {
             match snapshot.entries.get(directory) {
-                None => { present = false; break; }
-                Some(entry) => ensure!(matches!(entry.data, EntryData::Directory),
-                    "captured safe-mode container must be an ordinary directory: {}", directory.display()),
+                None => {
+                    present = false;
+                    break;
+                }
+                Some(entry) => ensure!(
+                    matches!(entry.data, EntryData::Directory),
+                    "captured safe-mode container must be an ordinary directory: {}",
+                    directory.display()
+                ),
             }
         }
-        if !present { continue; }
+        if !present {
+            continue;
+        }
         let state = controller.join("state.json");
         if let Some(entry) = snapshot.entries.get(&state) {
             let EntryData::File(bytes) = &entry.data else {
-                anyhow::bail!("captured safe-mode state must be a regular file: {}", state.display());
+                anyhow::bail!(
+                    "captured safe-mode state must be a regular file: {}",
+                    state.display()
+                );
             };
-            ensure!(bytes.len() as u64 <= MAX_SAFE_MODE_STATE_BYTES,
-                "captured safe-mode state exceeds the operator controller limit");
+            ensure!(
+                bytes.len() as u64 <= MAX_SAFE_MODE_STATE_BYTES,
+                "captured safe-mode state exceeds the operator controller limit"
+            );
             let controller: SafeModeController = serde_json::from_slice(bytes)
                 .with_context(|| format!("invalid captured safe-mode state {}", state.display()))?;
-            ensure!(!controller.is_active(),
-                "migration execution blocked by active captured safe mode at {}; recover and review new inputs", state.display());
+            ensure!(
+                !controller.is_active(),
+                "migration execution blocked by active captured safe mode at {}; recover and review new inputs",
+                state.display()
+            );
         }
     }
     Ok(())

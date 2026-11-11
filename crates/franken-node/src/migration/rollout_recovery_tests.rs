@@ -1,9 +1,9 @@
 //! Real filesystem integration tests for rollout -> native rewrite recovery.
 //! Forced progression in these tests isolates recovery, not lockstep certification.
 
-use super::*;
 use super::super::rewrite_transaction::{Edit, RewriteTransaction};
 use super::super::rollback::{self, RollbackStatus, TransactionState};
+use super::*;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
 fn applied_project() -> (tempfile::TempDir, String) {
@@ -11,25 +11,61 @@ fn applied_project() -> (tempfile::TempDir, String) {
     fs::write(root.path().join("a.js"), b"original-a").unwrap();
     fs::write(root.path().join("b.js"), b"original-b").unwrap();
     fs::set_permissions(root.path().join("a.js"), fs::Permissions::from_mode(0o755)).unwrap();
-    RewriteTransaction::open(root.path()).unwrap().apply(&[
-        Edit { path: "a.js", before: b"original-a", after: b"rewritten-a" },
-        Edit { path: "b.js", before: b"original-b", after: b"rewritten-b" },
-    ]).unwrap();
+    RewriteTransaction::open(root.path())
+        .unwrap()
+        .apply(&[
+            Edit {
+                path: "a.js",
+                before: b"original-a",
+                after: b"rewritten-a",
+            },
+            Edit {
+                path: "b.js",
+                before: b"original-b",
+                after: b"rewritten-b",
+            },
+        ])
+        .unwrap();
     let history = rollback::run(root.path(), None, false);
     assert_eq!(history.status, RollbackStatus::History, "{history:#?}");
-    let id = history.history.iter().find(|entry| entry.state == TransactionState::Applied)
-        .unwrap().transaction_id.clone();
+    let id = history
+        .history
+        .iter()
+        .find(|entry| entry.state == TransactionState::Applied)
+        .unwrap()
+        .transaction_id
+        .clone();
     (root, id)
 }
 
 fn forced() -> RolloutConfig {
-    RolloutConfig { force: true, ..RolloutConfig::default() }
+    RolloutConfig {
+        force: true,
+        ..RolloutConfig::default()
+    }
 }
 
 fn sources(root: &Path, original: bool) {
-    assert_eq!(fs::read(root.join("a.js")).unwrap(), if original { b"original-a".as_slice() } else { b"rewritten-a".as_slice() });
-    assert_eq!(fs::read(root.join("b.js")).unwrap(), if original { b"original-b".as_slice() } else { b"rewritten-b".as_slice() });
-    assert_eq!(fs::metadata(root.join("a.js")).unwrap().mode() & 0o777, 0o755);
+    assert_eq!(
+        fs::read(root.join("a.js")).unwrap(),
+        if original {
+            b"original-a".as_slice()
+        } else {
+            b"rewritten-a".as_slice()
+        }
+    );
+    assert_eq!(
+        fs::read(root.join("b.js")).unwrap(),
+        if original {
+            b"original-b".as_slice()
+        } else {
+            b"rewritten-b".as_slice()
+        }
+    );
+    assert_eq!(
+        fs::metadata(root.join("a.js")).unwrap().mode() & 0o777,
+        0o755
+    );
 }
 
 #[test]
@@ -39,8 +75,20 @@ fn binding_is_explicit_persistent_and_does_not_restore_sources() {
     let state = manager.load_or_init().unwrap();
     assert_eq!(state.rollback_plan_id.as_deref(), Some(id.as_str()));
     let preview = rollback::run(root.path(), Some(&id), false);
-    assert_eq!(state.rollback_journal_sha256.as_deref(), Some(preview.transaction.as_ref().unwrap().journal_sha256.as_str()));
-    let reopened = RolloutManager::new(root.path(), Some(&id)).load_or_init().unwrap();
+    assert_eq!(
+        state.rollback_journal_sha256.as_deref(),
+        Some(
+            preview
+                .transaction
+                .as_ref()
+                .unwrap()
+                .journal_sha256
+                .as_str()
+        )
+    );
+    let reopened = RolloutManager::new(root.path(), Some(&id))
+        .load_or_init()
+        .unwrap();
     assert_eq!(reopened, state);
     sources(root.path(), false);
 }
@@ -59,9 +107,20 @@ fn ordinary_migration_id_never_guesses_the_latest_transaction() {
 #[test]
 fn missing_or_completed_transaction_cannot_be_bound_for_promotion() {
     let (root, id) = applied_project();
-    assert!(RolloutManager::new(root.path(), Some("txn-missing")).load_or_init().is_err());
-    assert_eq!(rollback::run(root.path(), Some(&id), true).status, RollbackStatus::RolledBack);
-    assert!(RolloutManager::new(root.path(), Some(&id)).promote(&forced(), None, None).is_err());
+    assert!(
+        RolloutManager::new(root.path(), Some("txn-missing"))
+            .load_or_init()
+            .is_err()
+    );
+    assert_eq!(
+        rollback::run(root.path(), Some(&id), true).status,
+        RollbackStatus::RolledBack
+    );
+    assert!(
+        RolloutManager::new(root.path(), Some(&id))
+            .promote(&forced(), None, None)
+            .is_err()
+    );
     sources(root.path(), true);
 }
 
@@ -75,14 +134,28 @@ fn rollout_rollback_restores_sources_modes_and_records_exact_transaction() {
     sources(root.path(), true);
     assert_eq!(report.stage, RolloutStage::Aborted);
     assert_eq!(report.status, RolloutStatus::RolledBack);
-    assert!(report.source_rollback.as_ref().unwrap().restoration_recorded);
+    assert!(
+        report
+            .source_rollback
+            .as_ref()
+            .unwrap()
+            .restoration_recorded
+    );
     assert_eq!(report.source_rollback.as_ref().unwrap().transaction_id, id);
-    assert!(report.history.iter().any(|event| event.action == "rollback_started"));
+    assert!(
+        report
+            .history
+            .iter()
+            .any(|event| event.action == "rollback_started")
+    );
     assert_eq!(report.history.last().unwrap().action, "rollback");
     assert!(root.path().join(".migrate-backup/a.js").exists());
     let json = serde_json::to_string(&report).unwrap();
     assert!(!json.contains("original-a") && !json.contains("rewritten-a"));
-    assert_eq!(serde_json::from_str::<RolloutReport>(&json).unwrap(), report);
+    assert_eq!(
+        serde_json::from_str::<RolloutReport>(&json).unwrap(),
+        report
+    );
 }
 
 #[test]
@@ -93,10 +166,19 @@ fn confidence_failure_performs_source_restoration_not_just_a_state_change() {
     let mut state = manager.load_or_init().unwrap();
     state.confidence_score = 0.5;
     manager.persist(&state).unwrap();
-    let error = manager.promote(&RolloutConfig::default(), None, None).unwrap_err();
+    let error = manager
+        .promote(&RolloutConfig::default(), None, None)
+        .unwrap_err();
     assert!(error.contains("below minimum threshold"), "{error}");
     sources(root.path(), true);
-    assert!(manager.status().unwrap().source_rollback.unwrap().restoration_recorded);
+    assert!(
+        manager
+            .status()
+            .unwrap()
+            .source_rollback
+            .unwrap()
+            .restoration_recorded
+    );
 }
 
 #[test]
@@ -108,17 +190,26 @@ fn conflict_blocks_all_restoration_and_remains_failed_across_restart() {
     let error = manager.rollback("regression").unwrap_err();
     assert!(error.contains("preserving the user's edit"), "{error}");
     assert_eq!(fs::read(root.path().join("a.js")).unwrap(), b"rewritten-a");
-    assert_eq!(fs::read(root.path().join("b.js")).unwrap(), b"independent user work");
+    assert_eq!(
+        fs::read(root.path().join("b.js")).unwrap(),
+        b"independent user work"
+    );
     let reopened = RolloutManager::new(root.path(), Some(&id));
     let report = reopened.status().unwrap();
     assert!(!report.ok);
     assert_eq!(report.stage, RolloutStage::Aborted);
     assert_eq!(report.status, RolloutStatus::Failed);
     assert!(!report.source_rollback.unwrap().restoration_recorded);
-    assert!(reopened.promote(&forced(), Some(RolloutStage::Default), None).is_err());
+    assert!(
+        reopened
+            .promote(&forced(), Some(RolloutStage::Default), None)
+            .is_err()
+    );
     // Explicitly resolve the fixture's conflict; the rollback never does this.
     fs::write(root.path().join("b.js"), b"rewritten-b").unwrap();
-    reopened.rollback("retry same admitted transaction").unwrap();
+    reopened
+        .rollback("retry same admitted transaction")
+        .unwrap();
     sources(root.path(), true);
 }
 
@@ -131,8 +222,13 @@ fn automatic_rollback_errors_are_propagated_and_cannot_claim_success() {
     state.confidence_score = 0.1;
     manager.persist(&state).unwrap();
     fs::write(root.path().join("b.js"), b"user work").unwrap();
-    let error = manager.promote(&RolloutConfig::default(), None, None).unwrap_err();
-    assert!(error.contains("automatic rollback did not complete"), "{error}");
+    let error = manager
+        .promote(&RolloutConfig::default(), None, None)
+        .unwrap_err();
+    assert!(
+        error.contains("automatic rollback did not complete"),
+        "{error}"
+    );
     assert!(error.contains("preserving the user's edit"));
     assert_eq!(manager.status().unwrap().status, RolloutStatus::Failed);
     assert_eq!(fs::read(root.path().join("a.js")).unwrap(), b"rewritten-a");
@@ -145,7 +241,9 @@ fn completed_rollout_rollback_retry_does_not_touch_later_work_or_duplicate_histo
     manager.load_or_init().unwrap();
     let first = manager.rollback("regression").unwrap();
     fs::write(root.path().join("a.js"), b"later work").unwrap();
-    let second = RolloutManager::new(root.path(), Some(&id)).rollback("retry").unwrap();
+    let second = RolloutManager::new(root.path(), Some(&id))
+        .rollback("retry")
+        .unwrap();
     assert_eq!(second.history, first.history);
     assert_eq!(fs::read(root.path().join("a.js")).unwrap(), b"later work");
     assert!(second.message.contains("not changed or re-certified"));
@@ -158,7 +256,10 @@ fn an_external_restore_or_changed_source_refuses_even_forced_promotion() {
         let manager = RolloutManager::new(root.path(), Some(&id));
         manager.load_or_init().unwrap();
         if restored {
-            assert_eq!(rollback::run(root.path(), Some(&id), true).status, RollbackStatus::RolledBack);
+            assert_eq!(
+                rollback::run(root.path(), Some(&id), true).status,
+                RollbackStatus::RolledBack
+            );
         } else {
             fs::write(root.path().join("a.js"), b"changed source").unwrap();
         }
@@ -173,7 +274,11 @@ fn substituted_journal_cannot_redefine_the_bound_rollout_inventory() {
     let (root, id) = applied_project();
     let manager = RolloutManager::new(root.path(), Some(&id));
     manager.load_or_init().unwrap();
-    let path = root.path().join(".migrate-backup/.franken-rewrite").join(&id).join("applied.json");
+    let path = root
+        .path()
+        .join(".migrate-backup/.franken-rewrite")
+        .join(&id)
+        .join("applied.json");
     let original = fs::read(&path).unwrap();
     let mut changed: serde_json::Value = serde_json::from_slice(&original).unwrap();
     changed["records"].as_array_mut().unwrap().pop();
@@ -218,11 +323,25 @@ fn invalid_state_ids_confidence_and_ramp_configuration_fail_closed() {
         let mut changed = state.clone();
         changed.confidence_score = score;
         assert!(manager.persist(&changed).is_err());
-        let config = RolloutConfig { min_confidence_score: score, ..forced() };
+        let config = RolloutConfig {
+            min_confidence_score: score,
+            ..forced()
+        };
         assert!(manager.promote(&config, None, None).is_err());
     }
     for step in [0, 101, 255] {
-        assert!(manager.promote(&RolloutConfig { ramp_step_pct: step, ..forced() }, None, None).is_err());
+        assert!(
+            manager
+                .promote(
+                    &RolloutConfig {
+                        ramp_step_pct: step,
+                        ..forced()
+                    },
+                    None,
+                    None
+                )
+                .is_err()
+        );
     }
     assert_eq!(manager.load_or_init().unwrap(), state);
 }
@@ -231,14 +350,42 @@ fn invalid_state_ids_confidence_and_ramp_configuration_fail_closed() {
 fn promotion_cannot_skip_stages_regress_the_ramp_or_bypass_recovery() {
     let root = tempfile::tempdir().unwrap();
     let manager = RolloutManager::new(root.path(), Some("mig-stages"));
-    let config = RolloutConfig { require_lockstep_evidence: false, ..RolloutConfig::default() };
-    assert!(manager.promote(&config, Some(RolloutStage::Ramp), Some(90)).is_err());
+    let config = RolloutConfig {
+        require_lockstep_evidence: false,
+        ..RolloutConfig::default()
+    };
+    assert!(
+        manager
+            .promote(&config, Some(RolloutStage::Ramp), Some(90))
+            .is_err()
+    );
     manager.promote(&config, None, None).unwrap();
-    assert!(manager.promote(&config, Some(RolloutStage::Default), None).is_err());
+    assert!(
+        manager
+            .promote(&config, Some(RolloutStage::Default), None)
+            .is_err()
+    );
     manager.promote(&config, None, None).unwrap();
-    assert!(manager.promote(&config, Some(RolloutStage::Ramp), Some(25)).is_err());
-    assert!(manager.promote(&forced(), Some(RolloutStage::Aborted), None).is_err());
-    manager.promote(&RolloutConfig { ramp_step_pct: 100, ..config }, None, None).unwrap();
+    assert!(
+        manager
+            .promote(&config, Some(RolloutStage::Ramp), Some(25))
+            .is_err()
+    );
+    assert!(
+        manager
+            .promote(&forced(), Some(RolloutStage::Aborted), None)
+            .is_err()
+    );
+    manager
+        .promote(
+            &RolloutConfig {
+                ramp_step_pct: 100,
+                ..config
+            },
+            None,
+            None,
+        )
+        .unwrap();
     assert_eq!(manager.status().unwrap().ramp_pct, 100);
 }
 
@@ -285,9 +432,17 @@ fn process_exit_between_intent_restore_and_completion_is_restart_safe() {
         manager.load_or_init().unwrap();
         let path = module_path!().split_once("::").map_or("", |(_, path)| path);
         let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", &format!("{path}::process_exit_between_intent_restore_and_completion_is_restart_safe")])
-            .env(ROOT, root.path()).env(ID, &id).env(RESTORE, if restore { "yes" } else { "no" })
-            .output().unwrap();
+            .args([
+                "--exact",
+                &format!(
+                    "{path}::process_exit_between_intent_restore_and_completion_is_restart_safe"
+                ),
+            ])
+            .env(ROOT, root.path())
+            .env(ID, &id)
+            .env(RESTORE, if restore { "yes" } else { "no" })
+            .output()
+            .unwrap();
         assert_eq!(output.status.code(), Some(73), "{output:?}");
         assert_eq!(manager.status().unwrap().status, RolloutStatus::Failed);
         assert!(manager.promote(&forced(), None, None).is_err());
@@ -296,10 +451,15 @@ fn process_exit_between_intent_restore_and_completion_is_restart_safe() {
             // merely because rollout completion was interrupted.
             fs::write(root.path().join("a.js"), b"after crash user work").unwrap();
         }
-        let report = RolloutManager::new(root.path(), Some(&id)).rollback("recover").unwrap();
+        let report = RolloutManager::new(root.path(), Some(&id))
+            .rollback("recover")
+            .unwrap();
         assert!(report.source_rollback.unwrap().restoration_recorded);
         if restore {
-            assert_eq!(fs::read(root.path().join("a.js")).unwrap(), b"after crash user work");
+            assert_eq!(
+                fs::read(root.path().join("a.js")).unwrap(),
+                b"after crash user work"
+            );
         } else {
             sources(root.path(), true);
         }

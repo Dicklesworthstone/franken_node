@@ -17,18 +17,26 @@ fn put(root: &Path, name: &str, bytes: impl AsRef<[u8]>) {
 }
 
 fn manifest(root: &Path, files: serde_json::Value) {
-    put(root, MANIFEST_PATH, serde_json::json!({
-        "schema_version": MANIFEST_SCHEMA,
-        "tests": [TEST],
-        "expectations": {(TEST): {"files": files}}
-    }).to_string());
+    put(
+        root,
+        MANIFEST_PATH,
+        serde_json::json!({
+            "schema_version": MANIFEST_SCHEMA,
+            "tests": [TEST],
+            "expectations": {(TEST): {"files": files}}
+        })
+        .to_string(),
+    );
 }
 
 fn project(source: &str) -> tempfile::TempDir {
     let root = tempfile::tempdir().unwrap();
     put(root.path(), TEST, source);
     put(root.path(), "fixtures/result.bin", [0, 255, 10]);
-    manifest(root.path(), serde_json::json!({"out/result.bin": "fixtures/result.bin"}));
+    manifest(
+        root.path(),
+        serde_json::json!({"out/result.bin": "fixtures/result.bin"}),
+    );
     root
 }
 
@@ -38,7 +46,9 @@ fn capture(root: &Path) -> Snapshot {
 
 fn check(root: &Path, target: &str, expected: &[u8]) -> Result<()> {
     check_output_file(
-        &File::open(root).unwrap(), target, expected,
+        &File::open(root).unwrap(),
+        target,
+        expected,
         Instant::now() + Duration::from_secs(5),
     )
 }
@@ -46,10 +56,19 @@ fn check(root: &Path, target: &str, expected: &[u8]) -> Result<()> {
 fn pair(snapshot: &Snapshot) -> super::super::SuiteReport {
     let node = Invocation {
         executable: node_on_path().expect("real Node required"),
-        before: vec![], after: vec![],
+        before: vec![],
+        after: vec![],
     };
-    execute_suite_pair(snapshot, snapshot, &node, &node,
-        Instant::now() + Duration::from_secs(90), Duration::from_secs(5), false).unwrap()
+    execute_suite_pair(
+        snapshot,
+        snapshot,
+        &node,
+        &node,
+        Instant::now() + Duration::from_secs(90),
+        Duration::from_secs(5),
+        false,
+    )
+    .unwrap()
 }
 
 #[test]
@@ -64,35 +83,66 @@ fn newly_created_outputs_are_admitted_without_being_present_in_capture() {
 fn empty_null_ill_typed_and_duplicate_file_assertions_fail_closed() {
     let root = project("");
     for files in [
-        serde_json::json!({}), serde_json::json!(null), serde_json::json!([]),
+        serde_json::json!({}),
+        serde_json::json!(null),
+        serde_json::json!([]),
         serde_json::json!({"out/result.bin": null}),
         serde_json::json!({"out/result.bin": 42}),
     ] {
         manifest(root.path(), files);
         assert!(discover(&capture(root.path()).entries).is_err());
     }
-    put(root.path(), MANIFEST_PATH, format!(
-        r#"{{"schema_version":"{MANIFEST_SCHEMA}","tests":["{TEST}"],"expectations":{{"{TEST}":{{"files":{{"out/result.bin":"fixtures/result.bin","out/result.bin":"fixtures/result.bin"}}}}}}}}"#
-    ));
+    put(
+        root.path(),
+        MANIFEST_PATH,
+        format!(
+            r#"{{"schema_version":"{MANIFEST_SCHEMA}","tests":["{TEST}"],"expectations":{{"{TEST}":{{"files":{{"out/result.bin":"fixtures/result.bin","out/result.bin":"fixtures/result.bin"}}}}}}}}"#
+        ),
+    );
     assert!(discover(&capture(root.path()).entries).is_err());
 }
 
 #[test]
 fn file_targets_must_be_canonical_relative_and_outside_reserved_state() {
     let root = project("");
-    for target in ["", ".", "../escape", "/absolute", "./out/file", "out//file",
-        "out/../file", "out/file/", "out\\file", "out/f\nile",
-        ".franken-node/file", "node_modules/file", ".git/file", ".beads/file",
-        ".migrate-backup/file", ".franken-rewrite/file"] {
-        manifest(root.path(), serde_json::json!({(target): "fixtures/result.bin"}));
-        assert!(discover(&capture(root.path()).entries).is_err(), "{target:?}");
+    for target in [
+        "",
+        ".",
+        "../escape",
+        "/absolute",
+        "./out/file",
+        "out//file",
+        "out/../file",
+        "out/file/",
+        "out\\file",
+        "out/f\nile",
+        ".franken-node/file",
+        "node_modules/file",
+        ".git/file",
+        ".beads/file",
+        ".migrate-backup/file",
+        ".franken-rewrite/file",
+    ] {
+        manifest(
+            root.path(),
+            serde_json::json!({(target): "fixtures/result.bin"}),
+        );
+        assert!(
+            discover(&capture(root.path()).entries).is_err(),
+            "{target:?}"
+        );
     }
 }
 
 #[test]
 fn file_fixture_admission_and_file_count_are_bounded() {
     let root = project("");
-    for fixture in ["missing", "fixtures", "../result", ".franken-node/migration-tests.json"] {
+    for fixture in [
+        "missing",
+        "fixtures",
+        "../result",
+        ".franken-node/migration-tests.json",
+    ] {
         manifest(root.path(), serde_json::json!({"out/result.bin": fixture}));
         assert!(discover(&capture(root.path()).entries).is_err());
     }
@@ -114,10 +164,17 @@ fn candidate_cannot_change_artifact_goldens_or_assertion_targets() {
     let snapshot = capture(original.path());
     matched_tests(&snapshot, &capture(candidate.path())).unwrap();
     put(candidate.path(), "fixtures/result.bin", b"replacement");
-    assert!(matched_tests(&snapshot, &capture(candidate.path())).unwrap_err()
-        .to_string().contains("expectation bytes differ"));
+    assert!(
+        matched_tests(&snapshot, &capture(candidate.path()))
+            .unwrap_err()
+            .to_string()
+            .contains("expectation bytes differ")
+    );
     put(candidate.path(), "fixtures/result.bin", [0, 255, 10]);
-    manifest(candidate.path(), serde_json::json!({"out/other.bin": "fixtures/result.bin"}));
+    manifest(
+        candidate.path(),
+        serde_json::json!({"out/other.bin": "fixtures/result.bin"}),
+    );
     assert!(matched_tests(&snapshot, &capture(candidate.path())).is_err());
 }
 
@@ -133,7 +190,9 @@ fn exact_binary_empty_and_maximum_size_outputs_are_checked_without_normalization
         assert!(check(root.path(), "out/result", &expected).is_err());
     }
     put(root.path(), "out/result", b"43\n");
-    let error = check(root.path(), "out/result", b"42\n").unwrap_err().to_string();
+    let error = check(root.path(), "out/result", b"42\n")
+        .unwrap_err()
+        .to_string();
     assert!(error.contains("does not match"));
     assert!(!error.contains("43"));
     assert!(!error.contains("42"));
@@ -145,7 +204,13 @@ fn missing_directory_and_fifo_outputs_are_not_success_or_blocking_reads() {
     assert!(check(root.path(), "missing", b"").is_err());
     fs::create_dir(root.path().join("directory")).unwrap();
     assert!(check(root.path(), "directory", b"").is_err());
-    assert!(Command::new("mkfifo").arg(root.path().join("fifo")).status().unwrap().success());
+    assert!(
+        Command::new("mkfifo")
+            .arg(root.path().join("fifo"))
+            .status()
+            .unwrap()
+            .success()
+    );
     assert!(check(root.path(), "fifo", b"").is_err());
 }
 
@@ -178,7 +243,13 @@ fn pinned_workspace_does_not_follow_a_later_root_path_replacement() {
     let impostor = root.path().join("impostor");
     put(&impostor, "result", b"incorrect");
     symlink(&impostor, &original).unwrap();
-    check_output_file(&pinned, "result", b"correct", Instant::now() + Duration::from_secs(5)).unwrap();
+    check_output_file(
+        &pinned,
+        "result",
+        b"correct",
+        Instant::now() + Duration::from_secs(5),
+    )
+    .unwrap();
     assert!(expected.pin_workspace(&original).is_err());
 }
 
@@ -186,13 +257,24 @@ fn pinned_workspace_does_not_follow_a_later_root_path_replacement() {
 fn output_checks_respect_the_existing_leg_deadline_even_for_empty_files() {
     let root = tempfile::tempdir().unwrap();
     put(root.path(), "result", b"");
-    assert!(check_output_file(&File::open(root.path()).unwrap(), "result", b"", Instant::now())
-        .unwrap_err().to_string().contains("budget"));
+    assert!(
+        check_output_file(
+            &File::open(root.path()).unwrap(),
+            "result",
+            b"",
+            Instant::now()
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("budget")
+    );
 }
 
 #[test]
 fn real_node_pair_checks_generated_artifacts_without_full_delta_comparison() {
-    let root = project("const fs=require('fs');fs.mkdirSync('out');fs.writeFileSync('out/result.bin',Buffer.from([0,255,10]));");
+    let root = project(
+        "const fs=require('fs');fs.mkdirSync('out');fs.writeFileSync('out/result.bin',Buffer.from([0,255,10]));",
+    );
     let report = pair(&capture(root.path()));
     assert_eq!(report.verdict, "PASS", "{report:#?}");
     assert!(!report.filesystem_comparison);
@@ -202,31 +284,51 @@ fn real_node_pair_checks_generated_artifacts_without_full_delta_comparison() {
 
 #[test]
 fn identical_missing_or_wrong_artifacts_cannot_pass_by_runtime_agreement() {
-    for source in ["// both programs exit zero but produce nothing", "const fs=require('fs');fs.mkdirSync('out');fs.writeFileSync('out/result.bin','bad');"] {
+    for source in [
+        "// both programs exit zero but produce nothing",
+        "const fs=require('fs');fs.mkdirSync('out');fs.writeFileSync('out/result.bin','bad');",
+    ] {
         let root = project(source);
         let report = pair(&capture(root.path()));
         assert_eq!(report.verdict, "ERROR", "{report:#?}");
         assert_eq!(report.passed, 0);
-        assert!(report.cases[0].errors.iter().any(|error| error.contains("file output expectation")));
+        assert!(
+            report.cases[0]
+                .errors
+                .iter()
+                .any(|error| error.contains("file output expectation"))
+        );
     }
 }
 
 #[test]
 fn guest_mutation_of_artifact_goldens_cannot_change_the_captured_oracle() {
-    let root = project("const fs=require('fs');fs.mkdirSync('out');fs.writeFileSync('fixtures/result.bin','bad');fs.writeFileSync('out/result.bin','bad');");
+    let root = project(
+        "const fs=require('fs');fs.mkdirSync('out');fs.writeFileSync('fixtures/result.bin','bad');fs.writeFileSync('out/result.bin','bad');",
+    );
     let report = pair(&capture(root.path()));
     assert_eq!(report.verdict, "ERROR", "{report:#?}");
-    assert_eq!(fs::read(root.path().join("fixtures/result.bin")).unwrap(), [0, 255, 10]);
+    assert_eq!(
+        fs::read(root.path().join("fixtures/result.bin")).unwrap(),
+        [0, 255, 10]
+    );
 }
 
 #[test]
 fn artifact_paths_are_root_relative_even_with_a_harness_working_directory() {
-    let root = project("const fs=require('fs');fs.mkdirSync('../out');fs.writeFileSync('../out/result.bin',Buffer.from([0,255,10]));");
-    put(root.path(), MANIFEST_PATH, serde_json::json!({
-        "schema_version": MANIFEST_SCHEMA, "tests": [TEST],
-        "execution": {(TEST): {"cwd": "scripts"}},
-        "expectations": {(TEST): {"files": {"out/result.bin": "fixtures/result.bin"}}}
-    }).to_string());
+    let root = project(
+        "const fs=require('fs');fs.mkdirSync('../out');fs.writeFileSync('../out/result.bin',Buffer.from([0,255,10]));",
+    );
+    put(
+        root.path(),
+        MANIFEST_PATH,
+        serde_json::json!({
+            "schema_version": MANIFEST_SCHEMA, "tests": [TEST],
+            "execution": {(TEST): {"cwd": "scripts"}},
+            "expectations": {(TEST): {"files": {"out/result.bin": "fixtures/result.bin"}}}
+        })
+        .to_string(),
+    );
     let report = pair(&capture(root.path()));
     assert_eq!(report.verdict, "PASS", "{report:#?}");
 }

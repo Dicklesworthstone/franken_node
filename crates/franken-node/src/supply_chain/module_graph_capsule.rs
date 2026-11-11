@@ -370,22 +370,37 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         put(root.path(), "asset.node", b"\xff\0opaque bytes");
         std::fs::create_dir(root.path().join("nested")).unwrap();
-        put(root.path(), "app.mjs",
-            "import.meta.resolve('./asset.node'); import.meta.resolve('./nested/missing.css');");
+        put(
+            root.path(),
+            "app.mjs",
+            "import.meta.resolve('./asset.node'); import.meta.resolve('./nested/missing.css');",
+        );
         let graph = capture(root.path(), "app.mjs", GraphOptions::default()).unwrap();
         let capsule = encode(&graph).unwrap();
         let (header, _) = parse_frame(capsule.bytes()).unwrap();
-        assert!(header.inputs.iter().any(|input| input.path == "asset.node"
-            && matches!(input.content, Content::FileMetadata)));
+        assert!(
+            header.inputs.iter().any(|input| input.path == "asset.node"
+                && matches!(input.content, Content::FileMetadata))
+        );
         put(root.path(), "asset.node", b"different unparsed data");
         put(root.path(), "nested/missing.css", "now exists");
-        assert_eq!(replay(capsule.bytes(), capsule.digest()).unwrap().report(), graph.report());
-        let omitted = modify(&capsule, |header|
-            header.inputs.retain(|input| input.path != "nested/missing.css"));
+        assert_eq!(
+            replay(capsule.bytes(), capsule.digest()).unwrap().report(),
+            graph.report()
+        );
+        let omitted = modify(&capsule, |header| {
+            header
+                .inputs
+                .retain(|input| input.path != "nested/missing.css")
+        });
         assert_eq!(failure(&omitted), "ERR_MODULE_CAPSULE_INPUT_MISSING");
         let relabelled = modify(&capsule, |header| {
-            header.inputs.iter_mut().find(|input| input.path == "asset.node").unwrap().content =
-                Content::Missing;
+            header
+                .inputs
+                .iter_mut()
+                .find(|input| input.path == "asset.node")
+                .unwrap()
+                .content = Content::Missing;
         });
         assert_eq!(failure(&relabelled), "ERR_MODULE_CAPSULE_REPLAY_MISMATCH");
     }
@@ -393,7 +408,11 @@ mod tests {
     #[test]
     fn import_meta_resolve_capsule_metadata_cannot_satisfy_source_delivery() {
         let root = tempfile::tempdir().unwrap();
-        put(root.path(), "app.mjs", "import.meta.resolve('./dep.mjs'); import './dep.mjs';");
+        put(
+            root.path(),
+            "app.mjs",
+            "import.meta.resolve('./dep.mjs'); import './dep.mjs';",
+        );
         put(root.path(), "dep.mjs", "export const value=1;");
         let graph = capture(root.path(), "app.mjs", GraphOptions::default()).unwrap();
         let capsule = encode(&graph).unwrap();
@@ -412,7 +431,7 @@ mod tests {
             }
         }
         let (offset, count) = removed.unwrap();
-        let shortened = [&payload[..offset], &payload[offset+count..]].concat();
+        let shortened = [&payload[..offset], &payload[offset + count..]].concat();
         let bytes = frame(&header, &shortened).unwrap();
         assert_eq!(failure(&bytes), "ERR_MODULE_CAPSULE_INPUT_MISSING");
     }
@@ -446,33 +465,73 @@ mod tests {
     #[test]
     fn static_attributes_replay_from_raw_source_and_cannot_reuse_an_older_graph_pin() {
         let root = tempfile::tempdir().unwrap();
-        put(root.path(), "app.mjs", "import './bridge.mjs'; import data from './data.json' with {type:'json'};");
-        put(root.path(), "bridge.mjs", "export {default} from './data.json' with {'type':'json'};");
+        put(
+            root.path(),
+            "app.mjs",
+            "import './bridge.mjs'; import data from './data.json' with {type:'json'};",
+        );
+        put(
+            root.path(),
+            "bridge.mjs",
+            "export {default} from './data.json' with {'type':'json'};",
+        );
         put(root.path(), "data.json", "{\"answer\":42}");
         let graph = capture(root.path(), "app.mjs", GraphOptions::default()).unwrap();
         assert!(graph.report().fully_resolved);
-        assert_eq!(graph.report().schema_version, "franken-node/module-source-graph/v3");
+        assert_eq!(
+            graph.report().schema_version,
+            "franken-node/module-source-graph/v3"
+        );
         let encoded = encode(&graph).unwrap();
-        put(root.path(), "app.mjs", "import './bridge.mjs'; import data from './data.json' with {type:'text'};");
+        put(
+            root.path(),
+            "app.mjs",
+            "import './bridge.mjs'; import data from './data.json' with {type:'text'};",
+        );
         put(root.path(), "data.json", "{\"answer\":99}");
         let restored = replay(encoded.bytes(), encoded.digest()).unwrap();
         assert_eq!(restored.report(), graph.report());
-        assert_eq!(restored.report().edges.iter().filter(|edge|
-            edge.import_attributes.get("type").map(String::as_str) == Some("json")).count(), 2);
+        assert_eq!(
+            restored
+                .report()
+                .edges
+                .iter()
+                .filter(
+                    |edge| edge.import_attributes.get("type").map(String::as_str) == Some("json")
+                )
+                .count(),
+            2
+        );
         let changed = capture(root.path(), "app.mjs", GraphOptions::default()).unwrap();
         assert_ne!(changed.report().input_hash, graph.report().input_hash);
-        assert!(changed.report().edges.iter().any(|edge|
-            edge.import_attributes.get("type").map(String::as_str) == Some("text")));
-        let forged = modify(&encode(&changed).unwrap(), |header|
-            header.graph_hash = graph.report().input_hash.clone());
+        assert!(
+            changed.report().edges.iter().any(|edge| edge
+                .import_attributes
+                .get("type")
+                .map(String::as_str)
+                == Some("text"))
+        );
+        let forged = modify(&encode(&changed).unwrap(), |header| {
+            header.graph_hash = graph.report().input_hash.clone()
+        });
         assert_eq!(failure(&forged), "ERR_MODULE_CAPSULE_REPLAY_MISMATCH");
-        put(root.path(), "app.mjs", r#"import './data.json' with {type:'json','t\u0079pe':'json'};"#);
+        put(
+            root.path(),
+            "app.mjs",
+            r#"import './data.json' with {type:'json','t\u0079pe':'json'};"#,
+        );
         let duplicate = capture(root.path(), "app.mjs", GraphOptions::default()).unwrap();
         assert!(!duplicate.report().fully_resolved);
         let encoded = encode(&duplicate).unwrap();
         let replayed = replay(encoded.bytes(), encoded.digest()).unwrap();
         assert_eq!(replayed.report(), duplicate.report());
-        assert!(replayed.report().diagnostics.iter().any(|notice| notice.code == "INVALID_IMPORT_ATTRIBUTES"));
+        assert!(
+            replayed
+                .report()
+                .diagnostics
+                .iter()
+                .any(|notice| notice.code == "INVALID_IMPORT_ATTRIBUTES")
+        );
     }
 
     #[test]
@@ -560,7 +619,11 @@ mod tests {
     fn resolution_only_capsules_replay_opaque_files_and_require_search_observations() {
         let root = tempfile::tempdir().unwrap();
         put(root.path(), "src/app.cjs", "require.resolve('addon');");
-        put(root.path(), "node_modules/addon/package.json", r#"{"exports":"./addon.node"}"#);
+        put(
+            root.path(),
+            "node_modules/addon/package.json",
+            r#"{"exports":"./addon.node"}"#,
+        );
         let opaque = b"\x7fELF\xff\0private_native_bytes";
         put(root.path(), "node_modules/addon/addon.node", opaque);
         let graph = capture(root.path(), "src/app.cjs", GraphOptions::default()).unwrap();
@@ -569,28 +632,53 @@ mod tests {
         assert_eq!(graph.report().resolution_targets.len(), 1);
         let target = &graph.report().resolution_targets[0].id;
         assert!(graph.source_bytes(target).is_none());
-        assert!(graph.report().probes.iter().any(|probe|
-            probe.path == "src/node_modules"
-                && probe.kind == super::super::super::ProbeKind::Missing));
+        assert!(
+            graph
+                .report()
+                .probes
+                .iter()
+                .any(|probe| probe.path == "src/node_modules"
+                    && probe.kind == super::super::super::ProbeKind::Missing)
+        );
         let encoded = encode(&graph).unwrap();
-        put(root.path(), "node_modules/addon/addon.node", b"replaced binary");
-        put(root.path(), "src/node_modules/addon/index.js", "throw Error('new nearer package');");
+        put(
+            root.path(),
+            "node_modules/addon/addon.node",
+            b"replaced binary",
+        );
+        put(
+            root.path(),
+            "src/node_modules/addon/index.js",
+            "throw Error('new nearer package');",
+        );
         let replayed = replay(encoded.bytes(), encoded.digest()).unwrap();
         assert_eq!(replayed.report(), graph.report());
         assert!(replayed.source_bytes(target).is_none());
-        assert!(matches!(replayed.inputs.get(&target.path).unwrap().as_ref(),
-            Entry::File { bytes, .. } if bytes == opaque));
+        assert!(
+            matches!(replayed.inputs.get(&target.path).unwrap().as_ref(),
+            Entry::File { bytes, .. } if bytes == opaque)
+        );
         assert_eq!(encode(&replayed).unwrap().bytes(), encoded.bytes());
-        assert!(!serde_json::to_string(replayed.report()).unwrap().contains("private_native_bytes"));
+        assert!(
+            !serde_json::to_string(replayed.report())
+                .unwrap()
+                .contains("private_native_bytes")
+        );
 
         // A successful filename lookup still needs the captured negative
         // search path. Omission cannot mean absence or trigger live fallback.
         let omitted = modify(&encoded, |header| {
-            header.inputs.retain(|input| input.path != "src/node_modules");
+            header
+                .inputs
+                .retain(|input| input.path != "src/node_modules");
         });
         assert_eq!(failure(&omitted), "ERR_MODULE_CAPSULE_INPUT_MISSING");
         let changed_digest = modify(&encoded, |header| {
-            let input = header.inputs.iter_mut().find(|input| input.path == target.path).unwrap();
+            let input = header
+                .inputs
+                .iter_mut()
+                .find(|input| input.path == target.path)
+                .unwrap();
             let Content::File { sha256, .. } = &mut input.content else {
                 panic!("ordinary resolution target");
             };

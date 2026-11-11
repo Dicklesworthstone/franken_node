@@ -60,11 +60,21 @@ mod tests {
     #[test]
     fn accepts_json_grammar_without_constructing_host_values() {
         for source in [
-            "null", "true", "false", "-0", "1e400", "-1e400", "1e-4000",
-            "9007199254740993", "{\"a\":1,\"a\":2}",
+            "null",
+            "true",
+            "false",
+            "-0",
+            "1e400",
+            "-1e400",
+            "1e-4000",
+            "9007199254740993",
+            "{\"a\":1,\"a\":2}",
             "{\"__proto__\":{\"polluted\":true}}",
-            r#""\ud800""#, r#""\udfff""#, r#""\ud83d\ude00""#,
-            "\u{feff}{\"answer\":42}", "[{},[],\"[{}]\"]",
+            r#""\ud800""#,
+            r#""\udfff""#,
+            r#""\ud83d\ude00""#,
+            "\u{feff}{\"answer\":42}",
+            "[{},[],\"[{}]\"]",
             "{\"x\":\"quote: \\\" brackets: [ ]\"}",
         ] {
             assert!(valid(source.as_bytes()), "rejected fixture {source:?}");
@@ -74,10 +84,28 @@ mod tests {
     #[test]
     fn malformed_grammar_trailing_input_and_non_utf8_stay_rejected() {
         for source in [
-            "", " ", "[1,]", "{\"a\":1,}", "{a:1}", "01", "+1", "1.",
-            "1e", "1e+", "NaN", "Infinity", "null false", "{}[]", "/*x*/0",
-            "\u{feff}\u{feff}{}", " \u{feff}{}", "\"unterminated", "[}",
-            "\"literal\nnewline\"", r#""\uZZZZ""#, r#""\x00""#,
+            "",
+            " ",
+            "[1,]",
+            "{\"a\":1,}",
+            "{a:1}",
+            "01",
+            "+1",
+            "1.",
+            "1e",
+            "1e+",
+            "NaN",
+            "Infinity",
+            "null false",
+            "{}[]",
+            "/*x*/0",
+            "\u{feff}\u{feff}{}",
+            " \u{feff}{}",
+            "\"unterminated",
+            "[}",
+            "\"literal\nnewline\"",
+            r#""\uZZZZ""#,
+            r#""\x00""#,
         ] {
             assert!(!valid(source.as_bytes()), "accepted fixture {source:?}");
         }
@@ -87,7 +115,11 @@ mod tests {
     #[test]
     fn iterative_validation_keeps_the_previous_nesting_limit() {
         for (open, close) in [("[", "]"), ("{\"x\":", "}")] {
-            let boundary = format!("{}0{}", open.repeat(MAX_JSON_DEPTH), close.repeat(MAX_JSON_DEPTH));
+            let boundary = format!(
+                "{}0{}",
+                open.repeat(MAX_JSON_DEPTH),
+                close.repeat(MAX_JSON_DEPTH)
+            );
             assert!(valid(boundary.as_bytes()));
             assert!(!valid(format!("{open}{boundary}{close}").as_bytes()));
         }
@@ -134,26 +166,41 @@ mod engine_tests {
             r#"{"text":"\ud800","__proto__":{"safe":true},"x":1,"x":2}"#,
         ] {
             let root = tempfile::tempdir().unwrap();
-            std::fs::write(root.path().join("app.cjs"), "module.exports = require('./data.json');").unwrap();
+            std::fs::write(
+                root.path().join("app.cjs"),
+                "module.exports = require('./data.json');",
+            )
+            .unwrap();
             std::fs::write(root.path().join("data.json"), payload).unwrap();
             let graph = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
             assert!(graph.report().fully_resolved);
-            let json = graph.report().modules.iter()
-                .find(|m| m.source_language == SourceLanguage::Json).unwrap();
+            let json = graph
+                .report()
+                .modules
+                .iter()
+                .find(|m| m.source_language == SourceLanguage::Json)
+                .unwrap();
             assert_eq!(graph.source_bytes(&json.id).unwrap(), payload.as_bytes());
             let original_pin = json.content_sha256.clone();
             let pin = graph.report().input_hash.clone();
             let resolver = CapturedEngineResolver::new(graph, &pin).ok().unwrap();
-            let outcomes = resolver.resolve_chain(&resolver.entry_request(), &context(), &policy()).unwrap();
+            let outcomes = resolver
+                .resolve_chain(&resolver.entry_request(), &context(), &policy())
+                .unwrap();
             assert_eq!(outcomes.len(), 2);
-            let delivered = outcomes.iter()
-                .find(|o| o.module.record.syntax == ModuleSyntax::Json).unwrap();
+            let delivered = outcomes
+                .iter()
+                .find(|o| o.module.record.syntax == ModuleSyntax::Json)
+                .unwrap();
             assert_eq!(delivered.module.record.source, payload);
             assert_eq!(
                 hex::encode(Sha256::digest(delivered.module.record.source.as_bytes())),
                 original_pin
             );
-            assert_eq!(delivered.module.content_hash, delivered.module.record.canonical_hash());
+            assert_eq!(
+                delivered.module.content_hash,
+                delivered.module.record.canonical_hash()
+            );
             assert_eq!(resolver.summary().graph_input_hash, pin);
             assert_eq!(resolver.preparation_reports().count(), 0);
         }
@@ -167,7 +214,13 @@ mod engine_tests {
             std::fs::write(root.path().join("data.json"), payload).unwrap();
             let graph = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
             assert!(!graph.report().fully_resolved);
-            assert!(graph.report().diagnostics.iter().any(|d| d.code == "INVALID_JSON_MODULE"));
+            assert!(
+                graph
+                    .report()
+                    .diagnostics
+                    .iter()
+                    .any(|d| d.code == "INVALID_JSON_MODULE")
+            );
             let pin = graph.report().input_hash.clone();
             assert_eq!(
                 CapturedEngineResolver::new(graph, &pin).err().unwrap().code,
@@ -182,33 +235,47 @@ mod engine_tests {
         let package_dir = root.path().join("node_modules/fixture");
         std::fs::create_dir_all(&package_dir).unwrap();
         std::fs::write(package_dir.join("package.json"), r#"{"main":"index.cjs"}"#).unwrap();
-        std::fs::write(package_dir.join("index.cjs"), "module.exports = require('./data.json');").unwrap();
+        std::fs::write(
+            package_dir.join("index.cjs"),
+            "module.exports = require('./data.json');",
+        )
+        .unwrap();
         let payload = concat!(
             "\u{feff}",
             r#"{"large":1e400,"small":1e-4000,"negativeZero":-0,"text":"\ud800","__proto__":{"safe":true},"x":1,"x":2}"#
         );
         std::fs::write(package_dir.join("data.json"), payload).unwrap();
-        std::fs::write(root.path().join("app.cjs"), r#"
+        std::fs::write(
+            root.path().join("app.cjs"),
+            r#"
 const value = require('fixture');
 const again = require('fixture');
 console.log(value.large === Infinity, value.small === 0,
   1 / value.negativeZero === -Infinity, value.text.charCodeAt(0) === 55296,
   Object.prototype.hasOwnProperty.call(value, '__proto__'),
   value.__proto__.safe, value.x, value === again);
-"#).unwrap();
+"#,
+        )
+        .unwrap();
         let captured = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
         assert!(captured.report().fully_resolved);
         let pin = captured.report().input_hash.clone();
         let encoded = capsule::encode(&captured).unwrap();
         // Execution must not reopen either package code or JSON after capture.
-        std::fs::write(package_dir.join("index.cjs"), "throw new Error('live code reopened');").unwrap();
+        std::fs::write(
+            package_dir.join("index.cjs"),
+            "throw new Error('live code reopened');",
+        )
+        .unwrap();
         std::fs::write(package_dir.join("data.json"), "{\"x\":99}").unwrap();
         for lane in [LaneChoice::QuickJs, LaneChoice::V8] {
             let replayed = capsule::replay(encoded.bytes(), encoded.digest()).unwrap();
             assert_eq!(replayed.report(), captured.report());
             let resolver = Arc::new(CapturedEngineResolver::new(replayed, &pin).ok().unwrap());
             let policy = Arc::new(policy());
-            let entry = resolver.resolve(&resolver.entry_request(), &context(), policy.as_ref()).unwrap();
+            let entry = resolver
+                .resolve(&resolver.entry_request(), &context(), policy.as_ref())
+                .unwrap();
             let installed = resolver.execution_resolver(root.path(), policy).unwrap();
             let mut engine = ExecutionOrchestrator::try_new_lab_with_runtime_config(
                 OrchestratorConfig {
@@ -218,7 +285,8 @@ console.log(value.large === Infinity, value.small === 0,
                     ..OrchestratorConfig::default()
                 },
                 RuntimeConfig::default(),
-            ).unwrap();
+            )
+            .unwrap();
             let package = ExtensionPackage {
                 extension_id: "captured-json-semantics".into(),
                 source: "throw new Error('uncaptured entry executed');".into(),
@@ -228,10 +296,15 @@ console.log(value.large === Infinity, value.small === 0,
                 version: "1.0.0".into(),
                 metadata: BTreeMap::new(),
             };
-            let result = engine.execute_resolved_entry_with_resolver(&package, &entry, installed)
+            let result = engine
+                .execute_resolved_entry_with_resolver(&package, &entry, installed)
                 .expect("sibling engine executes the replayed npm JSON graph");
             assert_eq!(
-                result.console_output.iter().map(|line| line.message.as_str()).collect::<Vec<_>>(),
+                result
+                    .console_output
+                    .iter()
+                    .map(|line| line.message.as_str())
+                    .collect::<Vec<_>>(),
                 ["true true true true true true 2 true"],
                 "{lane:?}"
             );

@@ -366,16 +366,31 @@ mod concurrent_pairs {
         if let Some(concurrency) = concurrency {
             value["max_concurrent_tests"] = concurrency.into();
         }
-        write(root, ".franken-node/migration-tests.json", value.to_string());
+        write(
+            root,
+            ".franken-node/migration-tests.json",
+            value.to_string(),
+        );
     }
 
     fn role(name: &str) -> Invocation {
-        Invocation { after: vec![name.into()], ..node() }
+        Invocation {
+            after: vec![name.into()],
+            ..node()
+        }
     }
 
     fn run(snapshot: &Snapshot, timeout: Duration, filesystem: bool) -> SuiteReport {
-        execute_suite_pair(snapshot, snapshot, &role("reference"), &role("native"),
-            Instant::now() + Duration::from_secs(120), timeout, filesystem).unwrap()
+        execute_suite_pair(
+            snapshot,
+            snapshot,
+            &role("reference"),
+            &role("native"),
+            Instant::now() + Duration::from_secs(120),
+            timeout,
+            filesystem,
+        )
+        .unwrap()
     }
 
     #[test]
@@ -387,7 +402,11 @@ mod concurrent_pairs {
         let log = outside.path().join("runs");
         write(root.path(), "dependency", "captured");
         for name in ["a", "b"] {
-            write(root.path(), &format!("{name}.test.cjs"), format!(r#"
+            write(
+                root.path(),
+                &format!("{name}.test.cjs"),
+                format!(
+                    r#"
 const fs = require('fs');
 const role = process.argv[2];
 const marker = {} + '/' + role;
@@ -404,7 +423,11 @@ const marker = {} + '/' + role;
     fs.appendFileSync({}, '{name}:' + role + '\n');
     process.stdout.write(value);
 }})().catch(error => {{ console.error(error.message); process.exitCode = 1; }});
-"#, serde_json::to_string(outside.path()).unwrap(), serde_json::to_string(&log).unwrap()));
+"#,
+                    serde_json::to_string(outside.path()).unwrap(),
+                    serde_json::to_string(&log).unwrap()
+                ),
+            );
         }
         manifest(root.path(), &["a.test.cjs", "b.test.cjs"], Some(2));
         let deadline = Instant::now() + Duration::from_secs(120);
@@ -412,25 +435,57 @@ const marker = {} + '/' + role;
         // Selection and bytes are from capture, not this changed live tree.
         manifest(root.path(), &["a.test.cjs", "b.test.cjs"], Some(1));
         write(root.path(), "dependency", "later source");
-        let report = execute_suite_pair(&captured, &captured, &role("reference"),
-            &role("native"), deadline, Duration::from_secs(8), true).unwrap();
+        let report = execute_suite_pair(
+            &captured,
+            &captured,
+            &role("reference"),
+            &role("native"),
+            deadline,
+            Duration::from_secs(8),
+            true,
+        )
+        .unwrap();
         assert_eq!(report.verdict, "PASS", "{report:#?}");
         assert_eq!((report.passed, report.errored, report.skipped), (2, 0, 0));
-        assert_eq!(report.cases.iter().map(|row| row.test.as_str()).collect::<Vec<_>>(),
-            ["a.test.cjs", "b.test.cjs"]);
+        assert_eq!(
+            report
+                .cases
+                .iter()
+                .map(|row| row.test.as_str())
+                .collect::<Vec<_>>(),
+            ["a.test.cjs", "b.test.cjs"]
+        );
         let runs = fs::read_to_string(log).unwrap();
         assert_eq!(runs.lines().count(), 4);
         for name in ["a", "b"] {
-            assert_eq!(runs.lines().filter(|line| line.starts_with(name)).collect::<Vec<_>>(),
-                [format!("{name}:reference"), format!("{name}:native")]);
+            assert_eq!(
+                runs.lines()
+                    .filter(|line| line.starts_with(name))
+                    .collect::<Vec<_>>(),
+                [format!("{name}:reference"), format!("{name}:native")]
+            );
         }
         for row in &report.cases {
             assert_eq!(row.reference, row.native);
-            assert_eq!(row.reference.as_ref().unwrap().stdout.sha256,
-                hex::encode(Sha256::digest(b"captured")));
-            assert_eq!(row.native.as_ref().unwrap().workspace_delta.as_ref().unwrap().changed_paths, 2);
+            assert_eq!(
+                row.reference.as_ref().unwrap().stdout.sha256,
+                hex::encode(Sha256::digest(b"captured"))
+            );
+            assert_eq!(
+                row.native
+                    .as_ref()
+                    .unwrap()
+                    .workspace_delta
+                    .as_ref()
+                    .unwrap()
+                    .changed_paths,
+                2
+            );
         }
-        assert_eq!(fs::read(root.path().join("dependency")).unwrap(), b"later source");
+        assert_eq!(
+            fs::read(root.path().join("dependency")).unwrap(),
+            b"later source"
+        );
         assert!(!root.path().join("artifact").exists());
     }
 
@@ -440,29 +495,45 @@ const marker = {} + '/' + role;
         let outside = tempfile::tempdir().unwrap();
         let log = outside.path().join("runs");
         for name in ["a", "b"] {
-            write(root.path(), &format!("{name}.test.cjs"), format!(
-                "require('fs').appendFileSync({},'{name}:'+process.argv[2]+'\\n');console.log(42);",
-                serde_json::to_string(&log).unwrap()));
+            write(
+                root.path(),
+                &format!("{name}.test.cjs"),
+                format!(
+                    "require('fs').appendFileSync({},'{name}:'+process.argv[2]+'\\n');console.log(42);",
+                    serde_json::to_string(&log).unwrap()
+                ),
+            );
         }
         manifest(root.path(), &["b.test.cjs", "a.test.cjs"], None);
-        let snapshot = Snapshot::capture(root.path(), Instant::now() + Duration::from_secs(30)).unwrap();
+        let snapshot =
+            Snapshot::capture(root.path(), Instant::now() + Duration::from_secs(30)).unwrap();
         let report = run(&snapshot, Duration::from_secs(5), false);
         assert_eq!(report.verdict, "PASS");
-        assert_eq!(fs::read_to_string(log).unwrap(), "a:reference\na:native\nb:reference\nb:native\n");
+        assert_eq!(
+            fs::read_to_string(log).unwrap(),
+            "a:reference\na:native\nb:reference\nb:native\n"
+        );
     }
 
     #[test]
     fn serial_and_parallel_pairs_preserve_binary_requests_cwd_and_oracles() {
         let root = tempfile::tempdir().unwrap();
-        let tests = ["nested/a.test.cjs", "nested/b.test.cjs", "nested/c.test.cjs"];
+        let tests = [
+            "nested/a.test.cjs",
+            "nested/b.test.cjs",
+            "nested/c.test.cjs",
+        ];
         write(root.path(), "request.bin", [0, 255, 1, 10]);
         let mut value = serde_json::json!({
             "schema_version": "franken-node/migration-tests/v1", "tests": tests,
             "max_concurrent_tests": 1, "execution": {}, "expectations": {},
         });
         for test in tests {
-            write(root.path(), test,
-                "const fs=require('fs');if(process.env.APP_MODE!=='test'||require('path').basename(process.cwd())!=='nested'||JSON.stringify(process.argv.slice(2))!==JSON.stringify(['--literal','two words']))process.exit(9);const b=fs.readFileSync(0);fs.writeFileSync('result.bin',b);process.stdout.write(b);");
+            write(
+                root.path(),
+                test,
+                "const fs=require('fs');if(process.env.APP_MODE!=='test'||require('path').basename(process.cwd())!=='nested'||JSON.stringify(process.argv.slice(2))!==JSON.stringify(['--literal','two words']))process.exit(9);const b=fs.readFileSync(0);fs.writeFileSync('result.bin',b);process.stdout.write(b);",
+            );
             value["execution"][test] = serde_json::json!({
                 "cwd": "nested", "stdin": "request.bin", "stdin_mode": "pipe",
                 "environment": {"APP_MODE": "test"}, "arguments": ["--literal", "two words"],
@@ -474,53 +545,99 @@ const marker = {} + '/' + role;
         let mut cases = None;
         for concurrency in [1, 3] {
             value["max_concurrent_tests"] = concurrency.into();
-            write(root.path(), ".franken-node/migration-tests.json", value.to_string());
+            write(
+                root.path(),
+                ".franken-node/migration-tests.json",
+                value.to_string(),
+            );
             let report = measured(root.path(), root.path(), true);
             assert_eq!(report.verdict, "PASS", "{report:#?}");
             assert_eq!(report.passed, 3);
-            if let Some(expected) = &cases { assert_eq!(&report.cases, expected); }
+            if let Some(expected) = &cases {
+                assert_eq!(&report.cases, expected);
+            }
             cases = Some(report.cases);
         }
-        assert_eq!(fs::read(root.path().join("request.bin")).unwrap(), [0, 255, 1, 10]);
+        assert_eq!(
+            fs::read(root.path().join("request.bin")).unwrap(),
+            [0, 255, 1, 10]
+        );
         assert!(!root.path().join("nested/result.bin").exists());
     }
 
     #[test]
     fn failed_and_assertion_error_cases_do_not_erase_peers_or_stop_later_batches() {
         let root = tempfile::tempdir().unwrap();
-        write(root.path(), "a.test.cjs", "console.log(process.argv[2]==='native'?'wrong':'expected');");
+        write(
+            root.path(),
+            "a.test.cjs",
+            "console.log(process.argv[2]==='native'?'wrong':'expected');",
+        );
         write(root.path(), "b.test.cjs", "console.log('wrong golden');");
         write(root.path(), "c.test.cjs", "console.log('later pass');");
         write(root.path(), "d.test.cjs", "process.exit(7);");
         write(root.path(), "golden", "expected\n");
-        write(root.path(), ".franken-node/migration-tests.json", serde_json::json!({
-            "schema_version": "franken-node/migration-tests/v1",
-            "tests": ["a.test.cjs", "b.test.cjs", "c.test.cjs", "d.test.cjs"],
-            "max_concurrent_tests": 2,
-            "expectations": {"b.test.cjs": {"stdout": "golden"}},
-        }).to_string());
-        let snapshot = Snapshot::capture(root.path(), Instant::now() + Duration::from_secs(30)).unwrap();
+        write(
+            root.path(),
+            ".franken-node/migration-tests.json",
+            serde_json::json!({
+                "schema_version": "franken-node/migration-tests/v1",
+                "tests": ["a.test.cjs", "b.test.cjs", "c.test.cjs", "d.test.cjs"],
+                "max_concurrent_tests": 2,
+                "expectations": {"b.test.cjs": {"stdout": "golden"}},
+            })
+            .to_string(),
+        );
+        let snapshot =
+            Snapshot::capture(root.path(), Instant::now() + Duration::from_secs(30)).unwrap();
         let report = run(&snapshot, Duration::from_secs(5), true);
         assert_eq!(report.verdict, "ERROR", "{report:#?}");
-        assert_eq!((report.total_tests, report.passed, report.failed, report.errored, report.skipped),
-            (4, 1, 2, 1, 0));
-        assert_eq!(report.cases.iter().map(|row| row.status.as_str()).collect::<Vec<_>>(),
-            ["FAIL", "ERROR", "PASS", "FAIL"]);
+        assert_eq!(
+            (
+                report.total_tests,
+                report.passed,
+                report.failed,
+                report.errored,
+                report.skipped
+            ),
+            (4, 1, 2, 1, 0)
+        );
+        assert_eq!(
+            report
+                .cases
+                .iter()
+                .map(|row| row.status.as_str())
+                .collect::<Vec<_>>(),
+            ["FAIL", "ERROR", "PASS", "FAIL"]
+        );
         assert_eq!(report.cases[1].errors.len(), 2);
-        assert!(report.cases.iter().all(|row| row.reference.is_some() && row.native.is_some()));
+        assert!(
+            report
+                .cases
+                .iter()
+                .all(|row| row.reference.is_some() && row.native.is_some())
+        );
         assert!(report.errors.is_empty());
     }
 
     #[test]
     fn concurrent_timeout_preserves_peer_and_later_cases_without_a_fake_pass() {
         let root = tempfile::tempdir().unwrap();
-        write(root.path(), "a.test.cjs",
-            "console.log(42);if(process.argv[2]==='native')setInterval(()=>{},1000);");
+        write(
+            root.path(),
+            "a.test.cjs",
+            "console.log(42);if(process.argv[2]==='native')setInterval(()=>{},1000);",
+        );
         for test in ["b.test.cjs", "c.test.cjs"] {
             write(root.path(), test, "console.log(42);");
         }
-        manifest(root.path(), &["a.test.cjs", "b.test.cjs", "c.test.cjs"], Some(2));
-        let snapshot = Snapshot::capture(root.path(), Instant::now() + Duration::from_secs(30)).unwrap();
+        manifest(
+            root.path(),
+            &["a.test.cjs", "b.test.cjs", "c.test.cjs"],
+            Some(2),
+        );
+        let snapshot =
+            Snapshot::capture(root.path(), Instant::now() + Duration::from_secs(30)).unwrap();
         let report = run(&snapshot, Duration::from_secs(1), false);
         assert_eq!(report.verdict, "ERROR", "{report:#?}");
         assert_eq!((report.passed, report.errored, report.skipped), (2, 1, 0));
@@ -541,18 +658,36 @@ const marker = {} + '/' + role;
         manifest(root.path(), &["a.test.cjs", "b.test.cjs"], Some(2));
         // The explicitly failing executable exercises capsule/runner plumbing,
         // not successful native Franken compatibility.
-        let captured = native_replay::capture_project(root.path(), None, Path::new("/bin/false"), true).unwrap();
-        assert_eq!((captured.report.failed, captured.report.errored, captured.report.skipped), (2, 0, 0));
+        let captured =
+            native_replay::capture_project(root.path(), None, Path::new("/bin/false"), true)
+                .unwrap();
+        assert_eq!(
+            (
+                captured.report.failed,
+                captured.report.errored,
+                captured.report.skipped
+            ),
+            (2, 0, 0)
+        );
         let capsule = output.path().join("pair.json");
         let summary = captured.write_capsule(&capsule).unwrap();
         let bytes = fs::read(&capsule).unwrap();
         manifest(root.path(), &["a.test.cjs", "b.test.cjs"], Some(1));
         write(root.path(), "a.test.cjs", "process.exit(99);");
-        let replayed = native_replay::replay(&capsule, &summary.content_sha256, Path::new("/bin/false"), false).unwrap();
+        let replayed = native_replay::replay(
+            &capsule,
+            &summary.content_sha256,
+            Path::new("/bin/false"),
+            false,
+        )
+        .unwrap();
         assert_eq!(replayed.verdict, "REPRODUCED", "{replayed:#?}");
         assert_eq!(replayed.validation.cases, captured.report.cases);
         assert_eq!(replayed.validation.verdict, "FAIL");
         assert_eq!(fs::read(&capsule).unwrap(), bytes);
-        assert_eq!(fs::read_to_string(root.path().join("a.test.cjs")).unwrap(), "process.exit(99);");
+        assert_eq!(
+            fs::read_to_string(root.path().join("a.test.cjs")).unwrap(),
+            "process.exit(99);"
+        );
     }
 }

@@ -10,7 +10,8 @@
 //! every dependency route; dynamic JSON options require a separate contract.
 
 use super::super::{
-    Budget, EdgeState, ImportAttributes, LoadKind, ModuleId, SourceGraphReport, SourceLanguage, SourceModule, error, scan,
+    Budget, EdgeState, ImportAttributes, LoadKind, ModuleId, SourceGraphReport, SourceLanguage,
+    SourceModule, error, scan,
 };
 use super::{CaptureError, ModuleKind, RegisteredModule, RequestStyle};
 use frankenengine_engine::ast::ParseGoal;
@@ -131,11 +132,11 @@ impl SourcePreparer {
         if self.expected.is_none() {
             self.expected = Some(expected_routes(report)?);
         }
-        let index = self
-            .expected
-            .as_ref()
+        let index = self.expected.as_ref().ok_or_else(invalid_preparation)?;
+        let expected = index
+            .modules
+            .get(&module.id)
             .ok_or_else(invalid_preparation)?;
-        let expected = index.modules.get(&module.id).ok_or_else(invalid_preparation)?;
         if module.source_language == SourceLanguage::Json {
             if !index.json_admitted.contains(&module.id) || !expected.is_empty() {
                 return Err(error(
@@ -321,9 +322,13 @@ fn expected_routes(report: &SourceGraphReport) -> Result<ExpectedRoutes> {
     // Index incoming JSON modes together with outgoing routes once, rather
     // than rescanning all edges for every data file or alias. Never collapse
     // require and import based on a shared physical path or content hash.
-    let mut json_admitted: BTreeSet<_> = report.modules.iter()
-        .filter(|module| module.source_language == SourceLanguage::Json
-            && module.id != report.resolved_entrypoint)
+    let mut json_admitted: BTreeSet<_> = report
+        .modules
+        .iter()
+        .filter(|module| {
+            module.source_language == SourceLanguage::Json
+                && module.id != report.resolved_entrypoint
+        })
         .map(|module| module.id.clone())
         .collect();
     let mut required = BTreeSet::new();
@@ -335,8 +340,15 @@ fn expected_routes(report: &SourceGraphReport) -> Result<ExpectedRoutes> {
             .get_mut(&edge.importer)
             .ok_or_else(invalid_preparation)?;
         let specifier = edge.specifier.as_ref().ok_or_else(invalid_preparation)?;
-        importer.insert((specifier.clone(), request_style(edge.kind), edge.import_attributes.clone()));
-        if matches!(edge.kind, LoadKind::RequireResolve | LoadKind::ImportMetaResolve) {
+        importer.insert((
+            specifier.clone(),
+            request_style(edge.kind),
+            edge.import_attributes.clone(),
+        ));
+        if matches!(
+            edge.kind,
+            LoadKind::RequireResolve | LoadKind::ImportMetaResolve
+        ) {
             continue;
         }
         if let Some(target) = &edge.target {
@@ -352,7 +364,10 @@ fn expected_routes(report: &SourceGraphReport) -> Result<ExpectedRoutes> {
         }
     }
     json_admitted.retain(|id| required.contains(id));
-    Ok(ExpectedRoutes { modules: routes, json_admitted })
+    Ok(ExpectedRoutes {
+        modules: routes,
+        json_admitted,
+    })
 }
 
 fn request_style(kind: LoadKind) -> RequestStyle {
@@ -360,7 +375,9 @@ fn request_style(kind: LoadKind) -> RequestStyle {
         LoadKind::Require => RequestStyle::Require,
         LoadKind::RequireResolve => RequestStyle::RequireResolve,
         LoadKind::ImportMetaResolve => RequestStyle::ImportMetaResolve,
-        LoadKind::StaticImport | LoadKind::Reexport | LoadKind::DynamicImport => RequestStyle::Import,
+        LoadKind::StaticImport | LoadKind::Reexport | LoadKind::DynamicImport => {
+            RequestStyle::Import
+        }
     }
 }
 
@@ -421,7 +438,10 @@ pub fn detect_kind_with_options(
 }
 
 fn parser_failure(code: ParseErrorCode) -> CaptureError {
-    if matches!(code, ParseErrorCode::SourceTooLarge | ParseErrorCode::BudgetExceeded) {
+    if matches!(
+        code,
+        ParseErrorCode::SourceTooLarge | ParseErrorCode::BudgetExceeded
+    ) {
         return error(
             "ERR_MODULE_ENGINE_PARSE_LIMIT",
             "engine source-format detection exceeded its parser budget",
@@ -494,7 +514,11 @@ mod tests {
     fn unknown_scope_and_non_runtime_languages_cannot_enter_ts_preparation() {
         for (path, language, format) in [
             ("app.ts", SourceLanguage::TypeScript, "unknown"),
-            ("app.ts", SourceLanguage::TypeScript, "javascript_unspecified"),
+            (
+                "app.ts",
+                SourceLanguage::TypeScript,
+                "javascript_unspecified",
+            ),
             ("app.tsx", SourceLanguage::Tsx, "module"),
             ("app.d.ts", SourceLanguage::Declaration, "module"),
             ("app.json", SourceLanguage::Json, "module"),
@@ -665,8 +689,8 @@ mod tests {
 
     #[test]
     fn native_json_preserves_captured_text_without_reconstructing_values_or_code() {
-        use super::super::CapturedEngineResolver;
         use super::super::super::{GraphOptions, capture};
+        use super::super::CapturedEngineResolver;
         use frankenengine_engine::capability::RuntimeCapability;
         use frankenengine_engine::module_resolver::{
             CapabilityPolicyHook, ModuleResolver, ModuleSyntax, ResolutionContext,
@@ -676,7 +700,10 @@ mod tests {
         put_json_fixture(root.path(), "app.cjs", "require('./data.json');");
         let policy = CapabilityPolicyHook::new(BTreeSet::from([RuntimeCapability::ModuleLoad]));
         for text in [
-            "null", "false", "-0", "9007199254740993",
+            "null",
+            "false",
+            "-0",
+            "9007199254740993",
             r#"{"same":1,"same":2,"__proto__":{"value":7}}"#,
             r#"{"text":"\"); require('unseen'); //","type":"const x: number = 1"}"#,
             r#"["line\nfeed","slash\\","\u0000","\ud83d\ude00"]"#,
@@ -688,8 +715,13 @@ mod tests {
             assert!(graph.report().fully_resolved);
             let pin = graph.report().input_hash.clone();
             let resolver = CapturedEngineResolver::new(graph, &pin).ok().unwrap();
-            let outcomes = resolver.resolve_chain(&resolver.entry_request(),
-                &ResolutionContext::new("trace", "decision", "policy"), &policy).unwrap();
+            let outcomes = resolver
+                .resolve_chain(
+                    &resolver.entry_request(),
+                    &ResolutionContext::new("trace", "decision", "policy"),
+                    &policy,
+                )
+                .unwrap();
             assert_eq!(outcomes.len(), 2);
             let record = &outcomes[1].module.record;
             assert_eq!(record.syntax, ModuleSyntax::Json);
@@ -705,7 +737,8 @@ mod tests {
     #[test]
     fn native_data_kinds_cannot_enter_javascript_format_detection() {
         for kind in [ModuleKind::Json, ModuleKind::NativeBuiltin] {
-            let failure = detect_kind_with_options("{}", Some(kind), &source_budget(0)).unwrap_err();
+            let failure =
+                detect_kind_with_options("{}", Some(kind), &source_budget(0)).unwrap_err();
             assert_eq!(failure.code, "ERR_MODULE_REGISTRY_FORMAT");
         }
     }
@@ -718,33 +751,57 @@ mod tests {
 
     #[test]
     fn require_json_dependency_uses_engine_record_and_preserves_the_original_pin() {
-        use super::super::CapturedEngineResolver;
         use super::super::super::{GraphOptions, capture};
+        use super::super::CapturedEngineResolver;
         use frankenengine_engine::capability::RuntimeCapability;
-        use frankenengine_engine::module_resolver::{CapabilityPolicyHook, ModuleResolver, ModuleSyntax, ResolutionContext};
+        use frankenengine_engine::module_resolver::{
+            CapabilityPolicyHook, ModuleResolver, ModuleSyntax, ResolutionContext,
+        };
         use sha2::{Digest, Sha256};
 
         let root = tempfile::tempdir().unwrap();
-        put_json_fixture(root.path(), "app.cjs", "module.exports=require('./data.json');");
+        put_json_fixture(
+            root.path(),
+            "app.cjs",
+            "module.exports=require('./data.json');",
+        );
         let json = r#"{"answer":42}"#;
         put_json_fixture(root.path(), "data.json", json);
         let graph = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
         assert!(graph.report().fully_resolved);
         let pin = graph.report().input_hash.clone();
         let original_hash = hex::encode(Sha256::digest(json.as_bytes()));
-        assert_eq!(graph.report().modules.iter()
-            .find(|module| module.id.path == "data.json").unwrap().content_sha256, original_hash);
+        assert_eq!(
+            graph
+                .report()
+                .modules
+                .iter()
+                .find(|module| module.id.path == "data.json")
+                .unwrap()
+                .content_sha256,
+            original_hash
+        );
         let resolver = CapturedEngineResolver::new(graph, &pin).ok().unwrap();
         let policy = CapabilityPolicyHook::new(BTreeSet::from([RuntimeCapability::ModuleLoad]));
-        let outcomes = resolver.resolve_chain(&resolver.entry_request(),
-            &ResolutionContext::new("trace", "decision", "policy"), &policy).unwrap();
+        let outcomes = resolver
+            .resolve_chain(
+                &resolver.entry_request(),
+                &ResolutionContext::new("trace", "decision", "policy"),
+                &policy,
+            )
+            .unwrap();
         assert_eq!(outcomes.len(), 2);
         assert_eq!(outcomes[1].module.record.syntax, ModuleSyntax::Json);
         assert_eq!(outcomes[1].module.record.source, json);
-        assert_eq!(hex::encode(Sha256::digest(outcomes[1].module.record.source.as_bytes())),
-            original_hash);
+        assert_eq!(
+            hex::encode(Sha256::digest(outcomes[1].module.record.source.as_bytes())),
+            original_hash
+        );
         assert!(outcomes[1].module.record.dependencies.is_empty());
-        assert_eq!(outcomes[1].module.content_hash, outcomes[1].module.record.canonical_hash());
+        assert_eq!(
+            outcomes[1].module.content_hash,
+            outcomes[1].module.record.canonical_hash()
+        );
         assert_eq!(resolver.summary().graph_input_hash, pin);
         assert_eq!(resolver.preparation_reports().count(), 0);
         assert!(!resolver.summary().execution_performed);
@@ -753,8 +810,8 @@ mod tests {
 
     #[test]
     fn untyped_json_imports_or_entrypoints_cannot_borrow_an_admitted_route() {
-        use super::super::CapturedEngineResolver;
         use super::super::super::{GraphOptions, capture};
+        use super::super::CapturedEngineResolver;
 
         for source in [
             "import value from './data.json';",
@@ -775,32 +832,42 @@ mod tests {
             let graph = capture(root.path(), "app.mjs", GraphOptions::default()).unwrap();
             assert!(graph.report().fully_resolved, "{source}");
             let pin = graph.report().input_hash.clone();
-            assert_eq!(CapturedEngineResolver::new(graph, &pin).err().unwrap().code,
-                "ERR_MODULE_ENGINE_JSON_IMPORT", "{source}");
+            assert_eq!(
+                CapturedEngineResolver::new(graph, &pin).err().unwrap().code,
+                "ERR_MODULE_ENGINE_JSON_IMPORT",
+                "{source}"
+            );
         }
         let root = tempfile::tempdir().unwrap();
         put_json_fixture(root.path(), "data.json", "{}");
         let graph = capture(root.path(), "data.json", GraphOptions::default()).unwrap();
         let pin = graph.report().input_hash.clone();
-        assert_eq!(CapturedEngineResolver::new(graph, &pin).err().unwrap().code,
-            "ERR_MODULE_ENGINE_JSON_IMPORT");
+        assert_eq!(
+            CapturedEngineResolver::new(graph, &pin).err().unwrap().code,
+            "ERR_MODULE_ENGINE_JSON_IMPORT"
+        );
     }
 
     #[test]
     fn static_json_routes_survive_typescript_normalization_with_exact_attributes() {
-        use super::super::CapturedEngineResolver;
         use super::super::super::{GraphOptions, capture};
+        use super::super::CapturedEngineResolver;
         use frankenengine_engine::capability::RuntimeCapability;
-        use frankenengine_engine::module_resolver::{CapabilityPolicyHook, ModuleResolver,
-            ModuleSyntax, ResolutionContext};
+        use frankenengine_engine::module_resolver::{
+            CapabilityPolicyHook, ModuleResolver, ModuleSyntax, ResolutionContext,
+        };
 
         let root = tempfile::tempdir().unwrap();
-        put_json_fixture(root.path(), "app.mts", r#"
+        put_json_fixture(
+            root.path(),
+            "app.mts",
+            r#"
 import data from './data.json' with {type:'json'};
 export {default as forwarded} from './data.json' with {'type':'json'};
 const answer: number=data.answer;
 export {answer};
-"#);
+"#,
+        );
         let json = "\u{feff}{\"answer\":42}";
         put_json_fixture(root.path(), "data.json", json);
         let graph = capture(root.path(), "app.mts", GraphOptions::default()).unwrap();
@@ -808,17 +875,23 @@ export {answer};
         let pin = graph.report().input_hash.clone();
         let resolver = CapturedEngineResolver::new(graph, &pin).ok().unwrap();
         let policy = CapabilityPolicyHook::new(BTreeSet::from([RuntimeCapability::ModuleLoad]));
-        let records = resolver.resolve_chain(&resolver.entry_request(),
-            &ResolutionContext::new("trace", "decision", "policy"), &policy).unwrap();
+        let records = resolver
+            .resolve_chain(
+                &resolver.entry_request(),
+                &ResolutionContext::new("trace", "decision", "policy"),
+                &policy,
+            )
+            .unwrap();
         assert_eq!(records.len(), 2);
         let entry = &records[0].module.record;
         assert_eq!(entry.syntax, ModuleSyntax::EsModule);
         assert!(!entry.source.contains(": number"));
         assert!(entry.source.contains("with {type:'json'}"));
         assert!(entry.source.contains("with {'type':'json'}"));
-        assert!(entry.dependencies.iter().all(|dependency|
-            dependency.import_attributes.get("type") == Some("json")
-                && dependency.import_attributes.len() == 1));
+        assert!(entry.dependencies.iter().all(
+            |dependency| dependency.import_attributes.get("type") == Some("json")
+                && dependency.import_attributes.len() == 1
+        ));
         assert_eq!(entry.dependencies.len(), 1);
         assert_eq!(records[1].module.record.syntax, ModuleSyntax::Json);
         assert_eq!(records[1].module.record.source, json);
@@ -831,8 +904,8 @@ export {answer};
 
     #[test]
     fn invalid_json_and_transform_free_registry_keep_their_existing_barriers() {
-        use super::super::CapturedEngineResolver;
         use super::super::super::{GraphOptions, capture, registry::PinnedModuleRegistry};
+        use super::super::CapturedEngineResolver;
 
         let root = tempfile::tempdir().unwrap();
         put_json_fixture(root.path(), "app.cjs", "require('./data.json');");
@@ -841,20 +914,24 @@ export {answer};
             let graph = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
             assert!(!graph.report().fully_resolved);
             let pin = graph.report().input_hash.clone();
-            assert_eq!(CapturedEngineResolver::new(graph, &pin).err().unwrap().code,
-                "ERR_MODULE_REGISTRY_INCOMPLETE");
+            assert_eq!(
+                CapturedEngineResolver::new(graph, &pin).err().unwrap().code,
+                "ERR_MODULE_REGISTRY_INCOMPLETE"
+            );
         }
         put_json_fixture(root.path(), "data.json", "{}");
         let graph = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
         let pin = graph.report().input_hash.clone();
-        assert_eq!(PinnedModuleRegistry::new(graph, &pin).err().unwrap().code,
-            "ERR_MODULE_REGISTRY_FORMAT");
+        assert_eq!(
+            PinnedModuleRegistry::new(graph, &pin).err().unwrap().code,
+            "ERR_MODULE_REGISTRY_FORMAT"
+        );
     }
 
     mod json_graph {
-        use super::{put_json_fixture as put, *};
+        use super::super::super::super::{GraphOptions, capsule, capture};
         use super::super::super::CapturedEngineResolver;
-        use super::super::super::super::{GraphOptions, capture, capsule};
+        use super::{put_json_fixture as put, *};
         use frankenengine_engine::capability::RuntimeCapability;
         use frankenengine_engine::module_compatibility_matrix::CompatibilityMode;
         use frankenengine_engine::module_resolver::{
@@ -879,11 +956,23 @@ export {answer};
         fn npm_json_extension_index_main_and_manifest_routes_are_engine_loadable() {
             let root = tempfile::tempdir().unwrap();
             put(root.path(), "package.json", r#"{"type":"commonjs"}"#);
-            put(root.path(), "app.cjs", "require('./value'); require('./data-dir'); require('data-package'); require('./package.json');");
+            put(
+                root.path(),
+                "app.cjs",
+                "require('./value'); require('./data-dir'); require('data-package'); require('./package.json');",
+            );
             put(root.path(), "value.json", r#"{"source":"extension"}"#);
             put(root.path(), "data-dir/index.json", r#"{"source":"index"}"#);
-            put(root.path(), "node_modules/data-package/package.json", r#"{"main":"value.json"}"#);
-            put(root.path(), "node_modules/data-package/value.json", r#"{"source":"package"}"#);
+            put(
+                root.path(),
+                "node_modules/data-package/package.json",
+                r#"{"main":"value.json"}"#,
+            );
+            put(
+                root.path(),
+                "node_modules/data-package/value.json",
+                r#"{"source":"package"}"#,
+            );
             let resolver = resolver(root.path(), "app.cjs");
             for (request, expected) in [
                 ("./value", r#"{"source":"extension"}"#),
@@ -897,19 +986,31 @@ export {answer};
                 let outcome = resolver.resolve(&request, &context(), &granted()).unwrap();
                 assert_eq!(outcome.module.record.source, expected);
                 assert_eq!(outcome.module.record.syntax, ModuleSyntax::Json);
-                assert_eq!(outcome.module.content_hash, outcome.module.record.canonical_hash());
+                assert_eq!(
+                    outcome.module.content_hash,
+                    outcome.module.record.canonical_hash()
+                );
             }
             assert_eq!(resolver.preparation_reports().count(), 0);
         }
 
-        struct ChangingPolicy { allow: Cell<bool>, calls: Cell<usize> }
+        struct ChangingPolicy {
+            allow: Cell<bool>,
+            calls: Cell<usize>,
+        }
         impl ModulePolicyHook for ChangingPolicy {
-            fn authorize(&self, request: &ModuleRequest, record: &ModuleRecord,
-                context: &ResolutionContext) -> ResolutionResult<()> {
+            fn authorize(
+                &self,
+                request: &ModuleRequest,
+                record: &ModuleRecord,
+                context: &ResolutionContext,
+            ) -> ResolutionResult<()> {
                 self.calls.set(self.calls.get() + 1);
                 let capabilities = if self.allow.get() {
                     BTreeSet::from([RuntimeCapability::ModuleLoad])
-                } else { BTreeSet::new() };
+                } else {
+                    BTreeSet::new()
+                };
                 CapabilityPolicyHook::new(capabilities).authorize(request, record, context)
             }
         }
@@ -917,12 +1018,25 @@ export {answer};
         #[test]
         fn shared_json_in_a_cycle_retains_original_data_and_rechecks_each_load() {
             let root = tempfile::tempdir().unwrap();
-            put(root.path(), "app.cjs", "require('./dep.cjs'); require('./value.json'); require('./value');");
-            put(root.path(), "dep.cjs", "require('./app.cjs'); module.exports=require('./value.json');");
+            put(
+                root.path(),
+                "app.cjs",
+                "require('./dep.cjs'); require('./value.json'); require('./value');",
+            );
+            put(
+                root.path(),
+                "dep.cjs",
+                "require('./app.cjs'); module.exports=require('./value.json');",
+            );
             put(root.path(), "value.json", r#"{"private_label":42}"#);
             let resolver = resolver(root.path(), "app.cjs");
-            let policy = ChangingPolicy { allow: Cell::new(true), calls: Cell::new(0) };
-            let outputs = resolver.resolve_chain(&resolver.entry_request(), &context(), &policy).unwrap();
+            let policy = ChangingPolicy {
+                allow: Cell::new(true),
+                calls: Cell::new(0),
+            };
+            let outputs = resolver
+                .resolve_chain(&resolver.entry_request(), &context(), &policy)
+                .unwrap();
             assert_eq!(outputs.len(), 3);
             assert_eq!(policy.calls.get(), 6); // Entry plus five captured incoming routes.
             assert_eq!(resolver.preparation_reports().count(), 0);
@@ -933,8 +1047,13 @@ export {answer};
             let expected_hash = before.module.content_hash;
             before.module.record.source = "caller mutation".into();
             policy.allow.set(false);
-            assert_eq!(resolver.resolve(&request, &context(), &policy).unwrap_err().code,
-                ResolutionErrorCode::PolicyDenied);
+            assert_eq!(
+                resolver
+                    .resolve(&request, &context(), &policy)
+                    .unwrap_err()
+                    .code,
+                ResolutionErrorCode::PolicyDenied
+            );
             policy.allow.set(true);
             let now = ResolutionContext::new("new-trace", "new-decision", "new-policy");
             let after = resolver.resolve(&request, &now, &policy).unwrap();
@@ -963,17 +1082,29 @@ export {answer};
         fn contained_json_aliases_and_capsule_replay_preserve_physical_identity() {
             use super::super::super::super::super::SymlinkPolicy;
             let root = tempfile::tempdir().unwrap();
-            put(root.path(), "app.cjs", "require('./alias.json'); require('./value.json');");
+            put(
+                root.path(),
+                "app.cjs",
+                "require('./alias.json'); require('./value.json');",
+            );
             put(root.path(), "value.json", r#"{"original":true}"#);
             std::os::unix::fs::symlink("value.json", root.path().join("alias.json")).unwrap();
-            let graph = capture(root.path(), "app.cjs", GraphOptions {
-                symlink_policy: SymlinkPolicy::Contained, ..GraphOptions::default()
-            }).unwrap();
+            let graph = capture(
+                root.path(),
+                "app.cjs",
+                GraphOptions {
+                    symlink_policy: SymlinkPolicy::Contained,
+                    ..GraphOptions::default()
+                },
+            )
+            .unwrap();
             assert_eq!(graph.report().modules.len(), 2);
             let pin = graph.report().input_hash.clone();
             let encoded = capsule::encode(&graph).unwrap();
             let live = CapturedEngineResolver::new(graph, &pin).ok().unwrap();
-            let before = live.resolve_chain(&live.entry_request(), &context(), &granted()).unwrap();
+            let before = live
+                .resolve_chain(&live.entry_request(), &context(), &granted())
+                .unwrap();
             assert_eq!(before.len(), 2);
             assert_eq!(before[1].module.record.syntax, ModuleSyntax::Json);
             assert_eq!(before[1].module.record.source, r#"{"original":true}"#);
@@ -982,28 +1113,63 @@ export {answer};
             std::fs::rename(root.path().join("app.cjs"), root.path().join("moved.cjs")).unwrap();
             let graph = capsule::replay(encoded.bytes(), encoded.digest()).unwrap();
             let restored = CapturedEngineResolver::new(graph, &pin).ok().unwrap();
-            assert_eq!(before, restored.resolve_chain(&restored.entry_request(), &context(), &granted()).unwrap());
-            assert_eq!(live.preparation_reports().collect::<Vec<_>>(), restored.preparation_reports().collect::<Vec<_>>());
-            assert_eq!(before, live.resolve_chain(&live.entry_request(), &context(), &granted()).unwrap());
+            assert_eq!(
+                before,
+                restored
+                    .resolve_chain(&restored.entry_request(), &context(), &granted())
+                    .unwrap()
+            );
+            assert_eq!(
+                live.preparation_reports().collect::<Vec<_>>(),
+                restored.preparation_reports().collect::<Vec<_>>()
+            );
+            assert_eq!(
+                before,
+                live.resolve_chain(&live.entry_request(), &context(), &granted())
+                    .unwrap()
+            );
         }
 
         #[test]
         fn native_json_does_not_consume_javascript_preparation_budget() {
             let root = tempfile::tempdir().unwrap();
-            put(root.path(), "app.cjs", "require('./a.json'); require('./b.json');");
+            put(
+                root.path(),
+                "app.cjs",
+                "require('./a.json'); require('./b.json');",
+            );
             put(root.path(), "a.json", "{}");
             put(root.path(), "b.json", "[]");
             let graph = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
-            let a = graph.report().modules.iter().find(|module| module.id.path == "a.json").unwrap();
-            let b = graph.report().modules.iter().find(|module| module.id.path == "b.json").unwrap();
+            let a = graph
+                .report()
+                .modules
+                .iter()
+                .find(|module| module.id.path == "a.json")
+                .unwrap();
+            let b = graph
+                .report()
+                .modules
+                .iter()
+                .find(|module| module.id.path == "b.json")
+                .unwrap();
             let mut options = source_budget(2);
             options.budget.max_token_count = 0;
             options.budget.max_recursion_depth = 0;
             let mut preparer = SourcePreparer::with_parser_options(options);
             preparer.retained_bytes = MAX_PREPARED_SOURCE_BYTES;
-            assert_eq!(preparer.prepare(a, "{}", graph.report()).unwrap(), ModuleKind::Json);
-            assert_eq!(preparer.prepare(a, "{}", graph.report()).unwrap(), ModuleKind::Json);
-            assert_eq!(preparer.prepare(b, "[]", graph.report()).unwrap(), ModuleKind::Json);
+            assert_eq!(
+                preparer.prepare(a, "{}", graph.report()).unwrap(),
+                ModuleKind::Json
+            );
+            assert_eq!(
+                preparer.prepare(a, "{}", graph.report()).unwrap(),
+                ModuleKind::Json
+            );
+            assert_eq!(
+                preparer.prepare(b, "[]", graph.report()).unwrap(),
+                ModuleKind::Json
+            );
             assert!(preparer.prepared.modules.is_empty());
             assert_eq!(preparer.retained_bytes, MAX_PREPARED_SOURCE_BYTES);
             assert_eq!(preparer.finish().summaries().count(), 0);
@@ -1017,14 +1183,26 @@ export {answer};
             put(root.path(), "app.cjs", app);
             put(root.path(), "value.json", json);
             let mut resolver = resolver(root.path(), "app.cjs");
-            let outputs = resolver.resolve_chain(&resolver.entry_request(), &context(), &granted()).unwrap();
-            let delivered: usize = outputs.iter().map(|outcome| outcome.module.record.source.len()).sum();
+            let outputs = resolver
+                .resolve_chain(&resolver.entry_request(), &context(), &granted())
+                .unwrap();
+            let delivered: usize = outputs
+                .iter()
+                .map(|outcome| outcome.module.record.source.len())
+                .sum();
             assert_eq!(delivered, app.len() + json.len());
             resolver.chain_source_budget = delivered - 1;
-            let failure = resolver.resolve_chain(&resolver.entry_request(), &context(), &granted()).unwrap_err();
+            let failure = resolver
+                .resolve_chain(&resolver.entry_request(), &context(), &granted())
+                .unwrap_err();
             assert!(failure.message.contains("source budget"));
             resolver.chain_source_budget = delivered;
-            assert_eq!(outputs, resolver.resolve_chain(&resolver.entry_request(), &context(), &granted()).unwrap());
+            assert_eq!(
+                outputs,
+                resolver
+                    .resolve_chain(&resolver.entry_request(), &context(), &granted())
+                    .unwrap()
+            );
         }
 
         #[test]
@@ -1032,11 +1210,16 @@ export {answer};
             for entry in ["app.cts", "app.ts"] {
                 let root = tempfile::tempdir().unwrap();
                 put(root.path(), "package.json", r#"{"type":"commonjs"}"#);
-                put(root.path(), entry,
-                    "import type { Missing } from './absent.d.ts'; const data=require('./value.json'); const answer: number=data.answer; module.exports=answer;");
+                put(
+                    root.path(),
+                    entry,
+                    "import type { Missing } from './absent.d.ts'; const data=require('./value.json'); const answer: number=data.answer; module.exports=answer;",
+                );
                 put(root.path(), "value.json", r#"{"answer":42}"#);
                 let resolver = resolver(root.path(), entry);
-                let outputs = resolver.resolve_chain(&resolver.entry_request(), &context(), &granted()).unwrap();
+                let outputs = resolver
+                    .resolve_chain(&resolver.entry_request(), &context(), &granted())
+                    .unwrap();
                 assert_eq!(outputs.len(), 2);
                 assert_eq!(outputs[0].module.record.syntax, ModuleSyntax::CommonJs);
                 assert_eq!(outputs[1].module.record.syntax, ModuleSyntax::Json);
@@ -1044,7 +1227,10 @@ export {answer};
                 assert!(!outputs[0].module.record.source.contains("absent.d.ts"));
                 assert!(!outputs[0].module.record.source.contains(": number"));
                 assert_eq!(outputs[0].module.record.dependencies.len(), 1);
-                assert_eq!(outputs[0].module.record.dependencies[0].specifier, "./value.json");
+                assert_eq!(
+                    outputs[0].module.record.dependencies[0].specifier,
+                    "./value.json"
+                );
                 assert_eq!(resolver.preparation_reports().count(), 1);
             }
         }

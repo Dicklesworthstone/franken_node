@@ -7017,37 +7017,52 @@ registry_signing_key = "x8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8c="
 
         let (_dir, path) = security_baseline_file();
         let baseline = std::fs::read_to_string(&path).unwrap();
-        std::fs::write(&path, format!(
-            "{baseline}\n[runtime]\nfrozen_modules = true\nfrozen_module_symlinks = false\n\
+        std::fs::write(
+            &path,
+            format!(
+                "{baseline}\n[runtime]\nfrozen_modules = true\nfrozen_module_symlinks = false\n\
              [profiles.balanced.runtime]\nfrozen_module_symlinks = true\n",
-        )).unwrap();
+            ),
+        )
+        .unwrap();
         let profile = Config::resolve_with_env(
-            Some(&path), CliOverrides::default(), &map_lookup(BTreeMap::new()),
-        ).unwrap();
+            Some(&path),
+            CliOverrides::default(),
+            &map_lookup(BTreeMap::new()),
+        )
+        .unwrap();
         assert_eq!(profile.config.runtime.frozen_module_symlinks, Some(true));
         assert!(profile.decisions.iter().any(|decision| {
             decision.field == "runtime.frozen_module_symlinks"
                 && decision.stage == MergeStage::Profile
         }));
         let tightened = Config::resolve_with_env(
-            Some(&path), CliOverrides::default(), &map_lookup(BTreeMap::from([
-                ("FRANKEN_NODE_RUNTIME_FROZEN_MODULE_SYMLINKS".into(), "false".into()),
-            ])),
-        ).unwrap();
+            Some(&path),
+            CliOverrides::default(),
+            &map_lookup(BTreeMap::from([(
+                "FRANKEN_NODE_RUNTIME_FROZEN_MODULE_SYMLINKS".into(),
+                "false".into(),
+            )])),
+        )
+        .unwrap();
         assert_eq!(tightened.config.runtime.frozen_module_symlinks, Some(false));
         assert!(tightened.decisions.iter().any(|decision| {
-            decision.field == "runtime.frozen_module_symlinks"
-                && decision.stage == MergeStage::Env
+            decision.field == "runtime.frozen_module_symlinks" && decision.stage == MergeStage::Env
         }));
-        let decoded: Config = serde_json::from_str(
-            &serde_json::to_string(&tightened.config).unwrap(),
-        ).unwrap();
+        let decoded: Config =
+            serde_json::from_str(&serde_json::to_string(&tightened.config).unwrap()).unwrap();
         assert_eq!(decoded.runtime.frozen_module_symlinks, Some(false));
-        assert!(Config::resolve_with_env(
-            Some(&path), CliOverrides::default(), &map_lookup(BTreeMap::from([
-                ("FRANKEN_NODE_RUNTIME_FROZEN_MODULE_SYMLINKS".into(), "outside".into()),
-            ])),
-        ).is_err());
+        assert!(
+            Config::resolve_with_env(
+                Some(&path),
+                CliOverrides::default(),
+                &map_lookup(BTreeMap::from([(
+                    "FRANKEN_NODE_RUNTIME_FROZEN_MODULE_SYMLINKS".into(),
+                    "outside".into()
+                ),])),
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -7081,7 +7096,9 @@ registry_signing_key = "x8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8c="
         let mut invalid = resolved.config;
         invalid.runtime.environment_allowlist =
             BTreeSet::from(["FRANKEN_NODE_INTERNAL_CORPUS_AUTH_NONCE".to_string()]);
-        let error = invalid.validate().expect_err("private worker names are reserved");
+        let error = invalid
+            .validate()
+            .expect_err("private worker names are reserved");
         assert!(
             error.to_string().contains("runtime.environment_allowlist"),
             "{error}"

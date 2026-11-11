@@ -4,9 +4,10 @@
 //! are evidence only: execution always uses locally selected invocations.
 
 use super::{
-    CapturedInputs, Entry, EntryData, ExecutionControl, Invocation, LEG_TIMEOUT, MAX_ENTRIES, MAX_PATH_BYTES, Origin,
-    RuntimeIdentity, Snapshot, SuiteReport, TOTAL_TIMEOUT, budget, execute_suite_pair,
-    matched_tests, open_regular, runtime_invocations, same_file_version, workspace_effects,
+    CapturedInputs, Entry, EntryData, ExecutionControl, Invocation, LEG_TIMEOUT, MAX_ENTRIES,
+    MAX_PATH_BYTES, Origin, RuntimeIdentity, Snapshot, SuiteReport, TOTAL_TIMEOUT, budget,
+    execute_suite_pair, matched_tests, open_regular, runtime_invocations, same_file_version,
+    workspace_effects,
 };
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
@@ -635,11 +636,17 @@ impl Loaded {
 fn resolve_capsule_input(path: &Path, deadline: Instant) -> Result<PathBuf> {
     budget(deadline)?;
     let before = fs::symlink_metadata(path).context("inspect capsule input")?;
-    ensure!(before.file_type().is_file(),
-        "capsule input must be a regular file, not a symlink or directory");
-    let resolved = path.canonicalize().context("resolve capsule control scope")?;
-    ensure!(same_file_version(&before, &fs::symlink_metadata(&resolved)?),
-        "capsule input changed while resolving its operator scope");
+    ensure!(
+        before.file_type().is_file(),
+        "capsule input must be a regular file, not a symlink or directory"
+    );
+    let resolved = path
+        .canonicalize()
+        .context("resolve capsule control scope")?;
+    ensure!(
+        same_file_version(&before, &fs::symlink_metadata(&resolved)?),
+        "capsule input changed while resolving its operator scope"
+    );
     Ok(resolved)
 }
 
@@ -915,10 +922,12 @@ fn reexecute(
     if verify_fix {
         ensure!(
             expected.verdict == "FAIL"
-                && expected.cases.iter().all(|row| row
-                    .reference
-                    .as_ref()
-                    .is_some_and(|run| run.exit_code == Some(i32::from(row.expected_exit_code)) && run.signal.is_none())),
+                && expected
+                    .cases
+                    .iter()
+                    .all(|row| row.reference.as_ref().is_some_and(|run| run.exit_code
+                        == Some(i32::from(row.expected_exit_code))
+                        && run.signal.is_none())),
             "fix verification requires a captured failure with a successful reference for every case"
         );
     }
@@ -1012,7 +1021,9 @@ mod tests {
         write(root.path(), "case.test.js", source);
         fixture_project(root)
     }
-    fn fixture_project(root: tempfile::TempDir) -> (tempfile::TempDir, tempfile::TempDir, PathBuf, String) {
+    fn fixture_project(
+        root: tempfile::TempDir,
+    ) -> (tempfile::TempDir, tempfile::TempDir, PathBuf, String) {
         let out = tempfile::tempdir().unwrap();
         let original = Snapshot::capture(root.path(), deadline()).unwrap();
         let expected = execute_suite_pair(
@@ -1082,11 +1093,28 @@ mod tests {
         // The resolved operation keeps its original scope. A separate load
         // through the newly selected alias has its own independently checked
         // scope; the first operation never reads through that alias again.
-        let error = reexecute(load(&resolved, Some(&pin), deadline()).unwrap(),
-            &node(&[]), &node(&["candidate"]), false, deadline()).unwrap_err();
-        assert!(format!("{error:#}").contains("active safe mode"), "{error:#}");
-        assert_eq!(execute(&selected.join("capsule.json"), &pin, false, node(&["candidate"])).verdict,
-            "REPRODUCED");
+        let error = reexecute(
+            load(&resolved, Some(&pin), deadline()).unwrap(),
+            &node(&[]),
+            &node(&["candidate"]),
+            false,
+            deadline(),
+        )
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("active safe mode"),
+            "{error:#}"
+        );
+        assert_eq!(
+            execute(
+                &selected.join("capsule.json"),
+                &pin,
+                false,
+                node(&["candidate"])
+            )
+            .verdict,
+            "REPRODUCED"
+        );
         let leaf = alias_root.path().join("leaf.json");
         std::os::unix::fs::symlink(alternate_path, &leaf).unwrap();
         assert!(load(&leaf, Some(&pin), deadline()).is_err());
@@ -1098,16 +1126,27 @@ mod tests {
         let (root, out, path, pin) =
             fixture("console.log(process.argv.includes('candidate')?'wrong':'right');");
         fs::rename(root.path(), out.path().join("retired-source")).unwrap();
-        assert_eq!(execute(&path, &pin, false, node(&["candidate"])).verdict, "REPRODUCED");
+        assert_eq!(
+            execute(&path, &pin, false, node(&["candidate"])).verdict,
+            "REPRODUCED"
+        );
         persist(out.path(), &active_controller());
         assert_eq!(inspect(&path).unwrap().content_sha256, pin);
         let loaded = load(&path, Some(&pin), deadline()).unwrap();
-        let error = reexecute(loaded, &node(&[]), &node(&["candidate"]), false, deadline())
-            .unwrap_err();
-        assert!(format!("{error:#}").contains("active safe mode"), "{error:#}");
+        let error =
+            reexecute(loaded, &node(&[]), &node(&["candidate"]), false, deadline()).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("active safe mode"),
+            "{error:#}"
+        );
         let export = tempfile::tempdir().unwrap();
         export_inputs(&path, &pin, &export.path().join("reproducer")).unwrap();
-        assert!(export.path().join("reproducer/original/case.test.js").is_file());
+        assert!(
+            export
+                .path()
+                .join("reproducer/original/case.test.js")
+                .is_file()
+        );
     }
 
     #[test]
@@ -1116,43 +1155,86 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let out = tempfile::tempdir().unwrap();
         let marker = out.path().join("guest-count");
-        write(root.path(), "case.test.js", &format!(
-            "require('fs').appendFileSync({},'x');console.log('reference');",
-            serde_json::to_string(&marker).unwrap(),
-        ));
+        write(
+            root.path(),
+            "case.test.js",
+            &format!(
+                "require('fs').appendFileSync({},'x');console.log('reference');",
+                serde_json::to_string(&marker).unwrap(),
+            ),
+        );
         let captured = capture_project(root.path(), None, Path::new("/bin/false"), false).unwrap();
         let path = out.path().join("failure.json");
         let summary = captured.write_capsule(&path).unwrap();
         let before = fs::read(&marker).unwrap();
         persist(out.path(), &active_controller());
-        let error = replay(&path, &summary.content_sha256, Path::new("/bin/false"), false)
-            .unwrap_err();
-        assert!(format!("{error:#}").contains("active safe mode"), "{error:#}");
-        assert!(minimizer::minimize(&path, &summary.content_sha256, Path::new("/bin/false"),
-            &minimizer::Options { max_executions: 4, seconds: 10, ..Default::default() }).is_err());
+        let error = replay(
+            &path,
+            &summary.content_sha256,
+            Path::new("/bin/false"),
+            false,
+        )
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("active safe mode"),
+            "{error:#}"
+        );
+        assert!(
+            minimizer::minimize(
+                &path,
+                &summary.content_sha256,
+                Path::new("/bin/false"),
+                &minimizer::Options {
+                    max_executions: 4,
+                    seconds: 10,
+                    ..Default::default()
+                }
+            )
+            .is_err()
+        );
         assert_eq!(fs::read(&marker).unwrap(), before);
     }
 
     #[test]
     fn expected_error_exit_replays_from_captured_manifest_after_the_project_moves() {
         let root = tempfile::tempdir().unwrap();
-        write(root.path(), "case.test.js", "console.error('usage'); process.exit(7);");
-        write(root.path(), ".franken-node/migration-tests.json",
+        write(
+            root.path(),
+            "case.test.js",
+            "console.error('usage'); process.exit(7);",
+        );
+        write(
+            root.path(),
+            ".franken-node/migration-tests.json",
             &serde_json::json!({
                 "schema_version": "franken-node/migration-tests/v1",
                 "tests": ["case.test.js"],
                 "expectations": {"case.test.js": {"exit_code": 7}}
-            }).to_string());
+            })
+            .to_string(),
+        );
         let (root, out, path, pin) = fixture_project(root);
         fs::rename(root.path(), out.path().join("original-unavailable")).unwrap();
         let report = execute(&path, &pin, false, node(&["candidate"]));
         assert_eq!(report.verdict, "REPRODUCED");
         assert_eq!(report.validation.verdict, "PASS");
         assert_eq!(report.validation.cases[0].expected_exit_code, 7);
-        assert_eq!(report.validation.cases[0].native.as_ref().unwrap().exit_code, Some(7));
-        edit(&path, |capsule| capsule.payload.expected.cases[0].expected_exit_code = 0);
+        assert_eq!(
+            report.validation.cases[0]
+                .native
+                .as_ref()
+                .unwrap()
+                .exit_code,
+            Some(7)
+        );
+        edit(&path, |capsule| {
+            capsule.payload.expected.cases[0].expected_exit_code = 0
+        });
         let error = load(&path, None, deadline()).err().unwrap();
-        assert!(error.to_string().contains("inventory mismatch"), "{error:#}");
+        assert!(
+            error.to_string().contains("inventory mismatch"),
+            "{error:#}"
+        );
     }
 
     #[test]

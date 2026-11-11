@@ -42,7 +42,9 @@ pub struct CohortConfidence {
 
 fn digest(value: &str) -> bool {
     value.len() == 64
-        && value.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn interval(matched: u32, total: u32) -> Result<(f64, f64, f64), String> {
@@ -55,8 +57,16 @@ fn interval(matched: u32, total: u32) -> Result<(f64, f64, f64), String> {
     let denominator = 1.0 + z2 / n;
     let center = (p + z2 / (2.0 * n)) / denominator;
     let radius = Z_95 * (p * (1.0 - p) / n + z2 / (4.0 * n * n)).sqrt() / denominator;
-    let lower = if matched == 0 { 0.0 } else { (center - radius).max(0.0) };
-    let upper = if matched == total { 1.0 } else { (center + radius).min(1.0) };
+    let lower = if matched == 0 {
+        0.0
+    } else {
+        (center - radius).max(0.0)
+    };
+    let upper = if matched == total {
+        1.0
+    } else {
+        (center + radius).min(1.0)
+    };
     Ok((p, lower, upper))
 }
 
@@ -91,8 +101,11 @@ impl CohortConfidence {
                 (self.observed_match_rate, expected.0),
                 (self.wilson_lower_95, expected.1),
                 (self.wilson_upper_95, expected.2),
-            ].into_iter().any(|(actual, expected)| {
-                !actual.is_finite() || !(0.0..=1.0).contains(&actual)
+            ]
+            .into_iter()
+            .any(|(actual, expected)| {
+                !actual.is_finite()
+                    || !(0.0..=1.0).contains(&actual)
                     || (actual - expected).abs() > 1e-12
             })
         {
@@ -104,7 +117,11 @@ impl CohortConfidence {
     /// Bind all measured fields into the existing state digest, while retaining
     /// the distinction between an unkeyed digest and a signature.
     pub(super) fn update_digest(&self, hash: &mut Sha256) {
-        for field in [&self.schema_version, &self.evidence_sha256, &self.candidate_input_sha256] {
+        for field in [
+            &self.schema_version,
+            &self.evidence_sha256,
+            &self.candidate_input_sha256,
+        ] {
             hash.update((field.len() as u64).to_le_bytes());
             hash.update(field.as_bytes());
         }
@@ -137,7 +154,10 @@ pub fn assess(project: &Path, raw: &[u8]) -> Result<CohortConfidence, String> {
 /// This function performs no writes. Only the locked rollout controller may
 /// decide to restore its already-bound native transaction from this outcome.
 #[cfg(target_os = "linux")]
-pub(super) fn assess_for_rollout(project: &Path, raw: &[u8]) -> Result<super::LockstepEvidence, String> {
+pub(super) fn assess_for_rollout(
+    project: &Path,
+    raw: &[u8],
+) -> Result<super::LockstepEvidence, String> {
     use super::super::validation_suite::{
         native_replay::failure_capture::product::check_native_regression,
         product_oracle::ProductReport, rewrite_candidate::RewriteCandidate,
@@ -158,10 +178,19 @@ pub(super) fn assess_for_rollout(project: &Path, raw: &[u8]) -> Result<super::Lo
     let deadline = Instant::now() + Duration::from_secs(30);
     let captured = RewriteCandidate::capture(project, deadline)
         .map_err(|error| format!("cannot capture current rollout project: {error:#}"))?;
-    let tests = captured.expected_test_exits().map_err(|error| format!("{error:#}"))?;
+    let tests = captured
+        .expected_test_exits()
+        .map_err(|error| format!("{error:#}"))?;
     let regression = if report.verdict == "FAIL" {
-        Some(check_native_regression(&report, &report.input_sha256, captured.input_sha256(), &tests)
-            .map_err(|error| format!("cohort regression evidence refused: {error:#}"))?)
+        Some(
+            check_native_regression(
+                &report,
+                &report.input_sha256,
+                captured.input_sha256(),
+                &tests,
+            )
+            .map_err(|error| format!("cohort regression evidence refused: {error:#}"))?,
+        )
     } else {
         report.check_admission(&report.input_sha256, captured.input_sha256(), &tests)
             .map_err(|error| format!(
@@ -176,10 +205,12 @@ pub(super) fn assess_for_rollout(project: &Path, raw: &[u8]) -> Result<super::Lo
     {
         return Err("rollout cohort requires three distinct executable hashes".into());
     }
-    captured.ensure_source_unchanged()
+    captured
+        .ensure_source_unchanged()
         .map_err(|error| format!("project changed during cohort admission: {error:#}"))?;
     if attestation::project_key(project)
-        .map_err(|error| format!("cannot recheck cohort trust anchor: {error:#}"))? != trusted
+        .map_err(|error| format!("cannot recheck cohort trust anchor: {error:#}"))?
+        != trusted
     {
         return Err("cohort trust anchor changed during admission".into());
     }
@@ -188,7 +219,8 @@ pub(super) fn assess_for_rollout(project: &Path, raw: &[u8]) -> Result<super::Lo
         // Bind the signed envelope without embedding private guest bytes.
         return Ok(super::LockstepEvidence::AuthenticatedRegression(format!(
             "authenticated cohort FAIL: {failed}/{} native regressions with successful agreeing references; evidence sha256:{}",
-            tests.len(), hex::encode(Sha256::digest(raw))
+            tests.len(),
+            hex::encode(Sha256::digest(raw))
         )));
     }
     let total = u32::try_from(tests.len()).map_err(|_| "cohort test count overflow")?;
@@ -199,11 +231,15 @@ pub(super) fn assess_for_rollout(project: &Path, raw: &[u8]) -> Result<super::Lo
         captured.input_sha256().to_owned(),
         total,
         total,
-    ).map(super::LockstepEvidence::Measured)
+    )
+    .map(super::LockstepEvidence::Measured)
 }
 
 #[cfg(not(target_os = "linux"))]
-pub(super) fn assess_for_rollout(_project: &Path, _raw: &[u8]) -> Result<super::LockstepEvidence, String> {
+pub(super) fn assess_for_rollout(
+    _project: &Path,
+    _raw: &[u8],
+) -> Result<super::LockstepEvidence, String> {
     Err("captured project-cohort rollout admission is supported on Linux only".into())
 }
 
@@ -273,13 +309,13 @@ mod tests {
 
 #[cfg(all(test, target_os = "linux"))]
 mod admission_tests {
-    use super::*;
-    use super::super::{RolloutConfig, RolloutManager, RolloutStage};
     use super::super::super::validation_suite::{
         DeltaSummary, RunObservation, RuntimeIdentity, StreamObservation,
         product_oracle::{CaseOutcome, ProductCase, ProductReport},
         rewrite_candidate::RewriteCandidate,
     };
+    use super::super::{RolloutConfig, RolloutManager, RolloutStage};
+    use super::*;
     use std::fs;
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
@@ -287,10 +323,17 @@ mod admission_tests {
     fn project(n: usize) -> tempfile::TempDir {
         let root = tempfile::tempdir().unwrap();
         fs::create_dir_all(root.path().join(".franken-node/keys")).unwrap();
-        fs::write(root.path().join(attestation::PUBLIC_KEY_PATH),
-            hex::encode(signing_key().verifying_key().to_bytes())).unwrap();
+        fs::write(
+            root.path().join(attestation::PUBLIC_KEY_PATH),
+            hex::encode(signing_key().verifying_key().to_bytes()),
+        )
+        .unwrap();
         for index in 0..n {
-            fs::write(root.path().join(format!("case-{index:04}.test.js")), "console.log(42);\n").unwrap();
+            fs::write(
+                root.path().join(format!("case-{index:04}.test.js")),
+                "console.log(42);\n",
+            )
+            .unwrap();
         }
         root
     }
@@ -309,7 +352,8 @@ mod admission_tests {
     /// execution. Hash and inventory come from the real immutable capture API.
     /// The controller/recovery tests below use actual filesystem transactions.
     fn fixture(root: &Path) -> ProductReport {
-        let captured = RewriteCandidate::capture(root, Instant::now() + Duration::from_secs(30)).unwrap();
+        let captured =
+            RewriteCandidate::capture(root, Instant::now() + Duration::from_secs(30)).unwrap();
         let tests = captured.expected_test_exits().unwrap();
         let runtime = |name: &str, marker: &str| RuntimeIdentity {
             executable: PathBuf::from(format!("/trusted/{name}")),
@@ -318,37 +362,64 @@ mod admission_tests {
             arguments_after_test: Vec::new(),
         };
         let observation = RunObservation {
-            exit_code: Some(0), signal: None,
-            stdout: StreamObservation { bytes: 3, sha256: hex::encode(Sha256::digest(b"42\n")) },
-            stderr: StreamObservation { bytes: 0, sha256: hex::encode(Sha256::digest(b"")) },
+            exit_code: Some(0),
+            signal: None,
+            stdout: StreamObservation {
+                bytes: 3,
+                sha256: hex::encode(Sha256::digest(b"42\n")),
+            },
+            stderr: StreamObservation {
+                bytes: 0,
+                sha256: hex::encode(Sha256::digest(b"")),
+            },
             workspace_delta: Some(DeltaSummary {
-                sha256: hex::encode(Sha256::digest(b"[]")), changed_paths: 0,
-                changes: Vec::new(), details_truncated: false,
+                sha256: hex::encode(Sha256::digest(b"[]")),
+                changed_paths: 0,
+                changes: Vec::new(),
+                details_truncated: false,
             }),
         };
         ProductReport {
             schema_version: attestation::PRODUCT_SCHEMA.into(),
             scope: "captured-test-process-and-workspace-delta".into(),
-            oracle: "L1-node-bun-franken-node".into(), release_certification: false,
+            oracle: "L1-node-bun-franken-node".into(),
+            release_certification: false,
             input_sha256: captured.input_sha256().into(),
             candidate_input_sha256: captured.input_sha256().into(),
             filesystem_comparison: true,
             filesystem_exclusions: vec!["**/.git".into(), ".franken-node".into()],
-            node_runtime: runtime("node", "a"), bun_runtime: runtime("bun", "b"),
-            native_runtime: runtime("franken-node", "c"), distinct_reference_binaries: true,
-            total_tests: tests.len(), passed: tests.len(), failed: 0,
-            reference_failures: 0, reference_divergences: 0, native_divergences: 0,
-            errored: 0, skipped: 0, verdict: "PASS".into(),
-            cases: tests.into_iter().map(|(path, expected_exit_code)| {
-                let mut observation = observation.clone();
-                observation.exit_code = Some(i32::from(expected_exit_code));
-                ProductCase {
-                    test: path.to_str().unwrap().into(), expected_exit_code,
-                    outcome: CaseOutcome::Match,
-                    node: Some(observation.clone()), bun: Some(observation.clone()),
-                    native: Some(observation), divergences: Vec::new(), errors: Vec::new(),
-                }
-            }).collect(), errors: Vec::new(), failure_capture: None,
+            node_runtime: runtime("node", "a"),
+            bun_runtime: runtime("bun", "b"),
+            native_runtime: runtime("franken-node", "c"),
+            distinct_reference_binaries: true,
+            total_tests: tests.len(),
+            passed: tests.len(),
+            failed: 0,
+            reference_failures: 0,
+            reference_divergences: 0,
+            native_divergences: 0,
+            errored: 0,
+            skipped: 0,
+            verdict: "PASS".into(),
+            cases: tests
+                .into_iter()
+                .map(|(path, expected_exit_code)| {
+                    let mut observation = observation.clone();
+                    observation.exit_code = Some(i32::from(expected_exit_code));
+                    ProductCase {
+                        test: path.to_str().unwrap().into(),
+                        expected_exit_code,
+                        outcome: CaseOutcome::Match,
+                        node: Some(observation.clone()),
+                        bun: Some(observation.clone()),
+                        native: Some(observation),
+                        divergences: Vec::new(),
+                        errors: Vec::new(),
+                    }
+                })
+                .collect(),
+            errors: Vec::new(),
+            failure_capture: None,
         }
     }
 
@@ -362,12 +433,16 @@ mod admission_tests {
     fn signed_cohort_binds_nonzero_exit_expectations_and_reconstructs_native_regressions() {
         // Constructed signed wire evidence tests admission, not live runtimes.
         let root = project(1);
-        fs::write(root.path().join(".franken-node/migration-tests.json"),
+        fs::write(
+            root.path().join(".franken-node/migration-tests.json"),
             serde_json::json!({
                 "schema_version": "franken-node/migration-tests/v1",
                 "tests": ["case-0000.test.js"],
                 "expectations": {"case-0000.test.js": {"exit_code": 7}}
-            }).to_string()).unwrap();
+            })
+            .to_string(),
+        )
+        .unwrap();
         let report = fixture(root.path());
         let raw = signed(&serde_json::to_vec(&report).unwrap());
         assert_eq!(assess(root.path(), &raw).unwrap().matched_tests, 1);
@@ -392,11 +467,18 @@ mod admission_tests {
         regression.cases[0].native.as_mut().unwrap().exit_code = Some(8);
         regression.cases[0].divergences = vec!["native:unsuccessful_exit".into()];
         let raw = signed(&serde_json::to_vec(&regression).unwrap());
-        assert!(matches!(assess_for_rollout(root.path(), &raw).unwrap(),
-            super::super::LockstepEvidence::AuthenticatedRegression(_)));
+        assert!(matches!(
+            assess_for_rollout(root.path(), &raw).unwrap(),
+            super::super::LockstepEvidence::AuthenticatedRegression(_)
+        ));
         regression.cases[0].expected_exit_code = 8;
-        assert!(assess_for_rollout(root.path(),
-            &signed(&serde_json::to_vec(&regression).unwrap())).is_err());
+        assert!(
+            assess_for_rollout(
+                root.path(),
+                &signed(&serde_json::to_vec(&regression).unwrap())
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -407,10 +489,17 @@ mod admission_tests {
         assert_eq!(confidence.total_tests, 40);
         assert_eq!(confidence.matched_tests, 40);
         assert!(confidence.wilson_lower_95 > 0.90 && confidence.wilson_lower_95 < 1.0);
-        assert_eq!(confidence.evidence_sha256, hex::encode(Sha256::digest(&raw)));
+        assert_eq!(
+            confidence.evidence_sha256,
+            hex::encode(Sha256::digest(&raw))
+        );
         assert!(!confidence.independent_sampling_verified);
         fs::write(root.path().join("unmeasured-dependency.js"), "changed").unwrap();
-        assert!(assess(root.path(), &raw).unwrap_err().contains("does not match"));
+        assert!(
+            assess(root.path(), &raw)
+                .unwrap_err()
+                .contains("does not match")
+        );
     }
 
     #[test]
@@ -428,14 +517,23 @@ mod admission_tests {
                 5 => changed.filesystem_comparison = false,
                 6 => changed.filesystem_exclusions.push("**/*".into()),
                 7 => changed.cases[1] = changed.cases[0].clone(),
-                8 => { changed.cases.pop().unwrap(); }
+                8 => {
+                    changed.cases.pop().unwrap();
+                }
                 9 => changed.release_certification = true,
-                10 => changed.cases[0].errors.push("golden output mismatch".into()),
+                10 => changed.cases[0]
+                    .errors
+                    .push("golden output mismatch".into()),
                 11 => changed.passed = 1,
                 _ => unreachable!(),
             }
             let authenticated = signed(&serde_json::to_vec(&changed).unwrap());
-            assert!(assess(root.path(), &authenticated).unwrap_err().contains("cohort admission refused"), "{mutation}");
+            assert!(
+                assess(root.path(), &authenticated)
+                    .unwrap_err()
+                    .contains("cohort admission refused"),
+                "{mutation}"
+            );
         }
     }
 
@@ -446,8 +544,11 @@ mod admission_tests {
         for alias in ["a", "b"] {
             let mut changed = original.clone();
             changed.native_runtime.sha256 = alias.repeat(64);
-            assert!(assess(root.path(), &signed(&serde_json::to_vec(&changed).unwrap()))
-                .unwrap_err().contains("three distinct executable hashes"));
+            assert!(
+                assess(root.path(), &signed(&serde_json::to_vec(&changed).unwrap()))
+                    .unwrap_err()
+                    .contains("three distinct executable hashes")
+            );
         }
         let mut raw = serde_json::to_value(original).unwrap();
         raw["confidence_score"] = 1.0.into();
@@ -474,7 +575,10 @@ mod admission_tests {
         assert!(confidence.wilson_lower_95 > 0.9);
         assert!(canary.render_human().contains("conditional Wilson"));
         let restarted = RolloutManager::new(root.path(), Some("cohort-promotion"));
-        assert_eq!(restarted.status().unwrap().validation_confidence, canary.validation_confidence);
+        assert_eq!(
+            restarted.status().unwrap().validation_confidence,
+            canary.validation_confidence
+        );
         assert!(restarted.promote(&config, None, None).is_err());
         assert_eq!(restarted.status().unwrap().stage, RolloutStage::Canary);
         write_report(&fixture(root.path()), output.path());
@@ -489,9 +593,14 @@ mod admission_tests {
         use super::super::super::rollback;
         let root = project(1);
         fs::write(root.path().join("app.js"), b"original").unwrap();
-        RewriteTransaction::open(root.path()).unwrap().apply(&[
-            Edit { path: "app.js", before: b"original", after: b"candidate" },
-        ]).unwrap();
+        RewriteTransaction::open(root.path())
+            .unwrap()
+            .apply(&[Edit {
+                path: "app.js",
+                before: b"original",
+                after: b"candidate",
+            }])
+            .unwrap();
         let history = rollback::run(root.path(), None, false);
         let id = &history.history[0].transaction_id;
         let manager = RolloutManager::new(root.path(), Some(id));
@@ -522,10 +631,23 @@ mod admission_tests {
         assert!(report.validation_confidence.unwrap().wilson_lower_95 < 0.21);
         let before = manager.load_or_init().unwrap();
         let mut forged = before.clone();
-        forged.validation_confidence.as_mut().unwrap().wilson_lower_95 = 1.0;
+        forged
+            .validation_confidence
+            .as_mut()
+            .unwrap()
+            .wilson_lower_95 = 1.0;
         assert!(manager.persist(&forged).is_err());
         assert_eq!(manager.load_or_init().unwrap(), before);
-        let unverified = manager.promote(&RolloutConfig { force: true, ..RolloutConfig::default() }, None, None).unwrap();
+        let unverified = manager
+            .promote(
+                &RolloutConfig {
+                    force: true,
+                    ..RolloutConfig::default()
+                },
+                None,
+                None,
+            )
+            .unwrap();
         assert!(unverified.validation_confidence.is_none());
         assert!(!unverified.lockstep_verified);
     }
@@ -559,7 +681,13 @@ mod admission_tests {
             lockstep_report: Some(write_report(&fixture(root.path()), output.path())),
             ..RolloutConfig::default()
         };
-        assert!(manager.promote(&config, None, None).unwrap().validation_confidence.is_some());
+        assert!(
+            manager
+                .promote(&config, None, None)
+                .unwrap()
+                .validation_confidence
+                .is_some()
+        );
         let aborted = manager.rollback("operator abort").unwrap();
         assert!(!aborted.lockstep_verified);
         assert!(aborted.validation_confidence.is_none());
@@ -575,13 +703,27 @@ mod admission_tests {
         let raw = serde_json::to_vec(&fixture(root.path())).unwrap();
         let attacker = ed25519_dalek::SigningKey::from_bytes(&[8; 32]);
         for bytes in [raw.clone(), attestation::seal(&raw, &attacker).unwrap()] {
-            assert!(assess(root.path(), &bytes).unwrap_err().contains("authentication refused"));
+            assert!(
+                assess(root.path(), &bytes)
+                    .unwrap_err()
+                    .contains("authentication refused")
+            );
             let path = output.path().join("untrusted.json");
             fs::write(&path, &bytes).unwrap();
             for force in [false, true] {
-                assert!(manager.promote(&RolloutConfig {
-                    force, lockstep_report: Some(path.clone()), ..RolloutConfig::default()
-                }, None, None).is_err());
+                assert!(
+                    manager
+                        .promote(
+                            &RolloutConfig {
+                                force,
+                                lockstep_report: Some(path.clone()),
+                                ..RolloutConfig::default()
+                            },
+                            None,
+                            None
+                        )
+                        .is_err()
+                );
                 assert_eq!(manager.load_or_init().unwrap(), before);
             }
         }
@@ -593,27 +735,47 @@ mod admission_tests {
         use super::super::super::rollback;
         let root = project(40);
         fs::write(root.path().join("app.js"), b"original").unwrap();
-        RewriteTransaction::open(root.path()).unwrap().apply(&[
-            Edit { path: "app.js", before: b"original", after: b"candidate" },
-        ]).unwrap();
+        RewriteTransaction::open(root.path())
+            .unwrap()
+            .apply(&[Edit {
+                path: "app.js",
+                before: b"original",
+                after: b"candidate",
+            }])
+            .unwrap();
         let history = rollback::run(root.path(), None, false);
         let manager = RolloutManager::new(root.path(), Some(&history.history[0].transaction_id));
         let before = manager.load_or_init().unwrap();
         let original = signed(&serde_json::to_vec(&fixture(root.path())).unwrap());
         let mut tampered: serde_json::Value = serde_json::from_slice(&original).unwrap();
-        let mut payload: serde_json::Value = serde_json::from_str(tampered["report_json"].as_str().unwrap()).unwrap();
+        let mut payload: serde_json::Value =
+            serde_json::from_str(tampered["report_json"].as_str().unwrap()).unwrap();
         payload["verdict"] = "FAIL".into();
         tampered["report_json"] = serde_json::to_string(&payload).unwrap().into();
         let output = tempfile::tempdir().unwrap();
         let path = output.path().join("tampered.json");
         fs::write(&path, serde_json::to_vec(&tampered).unwrap()).unwrap();
-        let error = manager.promote(&RolloutConfig {
-            lockstep_report: Some(path), ..RolloutConfig::default()
-        }, None, None).unwrap_err();
+        let error = manager
+            .promote(
+                &RolloutConfig {
+                    lockstep_report: Some(path),
+                    ..RolloutConfig::default()
+                },
+                None,
+                None,
+            )
+            .unwrap_err();
         assert!(error.contains("signature verification failed"), "{error}");
         assert_eq!(manager.load_or_init().unwrap(), before);
         assert_eq!(fs::read(root.path().join("app.js")).unwrap(), b"candidate");
-        assert!(!manager.status().unwrap().source_rollback.unwrap().restoration_recorded);
+        assert!(
+            !manager
+                .status()
+                .unwrap()
+                .source_rollback
+                .unwrap()
+                .restoration_recorded
+        );
     }
 
     #[test]
@@ -623,17 +785,34 @@ mod admission_tests {
         let anchor = root.path().join(attestation::PUBLIC_KEY_PATH);
         let retained = tempfile::tempdir().unwrap();
         fs::rename(&anchor, retained.path().join("original-anchor")).unwrap();
-        assert!(assess(root.path(), &raw).unwrap_err().contains("trust anchor unavailable"));
+        assert!(
+            assess(root.path(), &raw)
+                .unwrap_err()
+                .contains("trust anchor unavailable")
+        );
         assert!(!anchor.exists());
-        fs::write(&anchor, hex::encode(ed25519_dalek::SigningKey::from_bytes(&[8; 32]).verifying_key().to_bytes())).unwrap();
-        assert!(assess(root.path(), &raw).unwrap_err().contains("independently trusted validation key"));
+        fs::write(
+            &anchor,
+            hex::encode(
+                ed25519_dalek::SigningKey::from_bytes(&[8; 32])
+                    .verifying_key()
+                    .to_bytes(),
+            ),
+        )
+        .unwrap();
+        assert!(
+            assess(root.path(), &raw)
+                .unwrap_err()
+                .contains("independently trusted validation key")
+        );
     }
 
     #[test]
     fn signature_failure_precedes_report_interpretation_and_project_capture() {
         let root = project(0);
         let valid_json = format!(r#"{{"schema_version":"{}"}}"#, attestation::PRODUCT_SCHEMA);
-        let mut envelope: serde_json::Value = serde_json::from_slice(&signed(valid_json.as_bytes())).unwrap();
+        let mut envelope: serde_json::Value =
+            serde_json::from_slice(&signed(valid_json.as_bytes())).unwrap();
         envelope["report_json"] = "not even JSON".into();
         let error = assess(root.path(), &serde_json::to_vec(&envelope).unwrap()).unwrap_err();
         assert!(error.contains("signature verification failed"), "{error}");
@@ -647,13 +826,33 @@ mod admission_tests {
         for name in ["a.js", "b.js"] {
             fs::write(root.path().join(name), b"original").unwrap();
         }
-        RewriteTransaction::open(root.path()).unwrap().apply(&[
-            Edit { path: "a.js", before: b"original", after: b"candidate" },
-            Edit { path: "b.js", before: b"original", after: b"candidate" },
-        ]).unwrap();
+        RewriteTransaction::open(root.path())
+            .unwrap()
+            .apply(&[
+                Edit {
+                    path: "a.js",
+                    before: b"original",
+                    after: b"candidate",
+                },
+                Edit {
+                    path: "b.js",
+                    before: b"original",
+                    after: b"candidate",
+                },
+            ])
+            .unwrap();
         let history = rollback::run(root.path(), None, false);
         let manager = RolloutManager::new(root.path(), Some(&history.history[0].transaction_id));
-        manager.promote(&RolloutConfig { force: true, ..RolloutConfig::default() }, None, None).unwrap();
+        manager
+            .promote(
+                &RolloutConfig {
+                    force: true,
+                    ..RolloutConfig::default()
+                },
+                None,
+                None,
+            )
+            .unwrap();
         (root, manager)
     }
 
@@ -676,10 +875,21 @@ mod admission_tests {
         let output = tempfile::tempdir().unwrap();
         let path = write_report(&regression_fixture(root.path()), output.path());
         let evidence = hex::encode(Sha256::digest(fs::read(&path).unwrap()));
-        let error = manager.promote(&RolloutConfig {
-            lockstep_report: Some(path), ..RolloutConfig::default()
-        }, None, None).unwrap_err();
-        assert!(error.contains("authenticated cohort FAIL") && error.contains("Restored native rewrite"), "{error}");
+        let error = manager
+            .promote(
+                &RolloutConfig {
+                    lockstep_report: Some(path),
+                    ..RolloutConfig::default()
+                },
+                None,
+                None,
+            )
+            .unwrap_err();
+        assert!(
+            error.contains("authenticated cohort FAIL")
+                && error.contains("Restored native rewrite"),
+            "{error}"
+        );
         let state = manager.load_or_init().unwrap();
         assert_eq!(state.current_stage, RolloutStage::Aborted);
         assert_eq!(state.status, RolloutStatus::RolledBack);
@@ -691,7 +901,9 @@ mod admission_tests {
         }
         fs::write(root.path().join("a.js"), b"later work").unwrap();
         let reopened = RolloutManager::new(root.path(), Some(&state.migration_id));
-        reopened.rollback("retry completed negative-evidence recovery").unwrap();
+        reopened
+            .rollback("retry completed negative-evidence recovery")
+            .unwrap();
         assert_eq!(reopened.load_or_init().unwrap().history, state.history);
         assert_eq!(fs::read(root.path().join("a.js")).unwrap(), b"later work");
     }
@@ -719,10 +931,20 @@ mod admission_tests {
                 11 => report.cases[0].errors.push("incomplete output".into()),
                 _ => unreachable!(),
             }
-            let error = manager.promote(&RolloutConfig {
-                lockstep_report: Some(write_report(&report, output.path())), ..RolloutConfig::default()
-            }, None, None).unwrap_err();
-            assert!(error.contains("cohort regression evidence refused"), "{mutation}: {error}");
+            let error = manager
+                .promote(
+                    &RolloutConfig {
+                        lockstep_report: Some(write_report(&report, output.path())),
+                        ..RolloutConfig::default()
+                    },
+                    None,
+                    None,
+                )
+                .unwrap_err();
+            assert!(
+                error.contains("cohort regression evidence refused"),
+                "{mutation}: {error}"
+            );
             assert_eq!(manager.load_or_init().unwrap(), before);
             for name in ["a.js", "b.js"] {
                 assert_eq!(fs::read(root.path().join(name)).unwrap(), b"candidate");
@@ -737,14 +959,25 @@ mod admission_tests {
         let mut report = regression_fixture(root.path());
         report.cases[0].bun.as_mut().unwrap().stdout.sha256 = "d".repeat(64);
         report.cases[0].outcome = CaseOutcome::ReferenceDivergence;
-        report.cases[0].divergences.push("node/bun:stdout:byte_mismatch".into());
+        report.cases[0]
+            .divergences
+            .push("node/bun:stdout:byte_mismatch".into());
         report.native_divergences = 0;
         report.reference_divergences = 1;
         report.verdict = "INCONCLUSIVE".into();
         let output = tempfile::tempdir().unwrap();
-        assert!(manager.promote(&RolloutConfig {
-            lockstep_report: Some(write_report(&report, output.path())), ..RolloutConfig::default()
-        }, None, None).is_err());
+        assert!(
+            manager
+                .promote(
+                    &RolloutConfig {
+                        lockstep_report: Some(write_report(&report, output.path())),
+                        ..RolloutConfig::default()
+                    },
+                    None,
+                    None
+                )
+                .is_err()
+        );
         assert_eq!(manager.load_or_init().unwrap(), before);
         assert_eq!(fs::read(root.path().join("a.js")).unwrap(), b"candidate");
     }
@@ -755,11 +988,21 @@ mod admission_tests {
             let (root, manager) = applied_regression_project();
             let before = manager.load_or_init().unwrap();
             let output = tempfile::tempdir().unwrap();
-            let error = manager.promote(&RolloutConfig {
-                force, auto_rollback_on_failure: force,
-                lockstep_report: Some(write_report(&regression_fixture(root.path()), output.path())),
-                ..RolloutConfig::default()
-            }, None, None).unwrap_err();
+            let error = manager
+                .promote(
+                    &RolloutConfig {
+                        force,
+                        auto_rollback_on_failure: force,
+                        lockstep_report: Some(write_report(
+                            &regression_fixture(root.path()),
+                            output.path(),
+                        )),
+                        ..RolloutConfig::default()
+                    },
+                    None,
+                    None,
+                )
+                .unwrap_err();
             assert!(error.contains("authenticated cohort FAIL"), "{error}");
             assert_eq!(manager.load_or_init().unwrap(), before);
             assert_eq!(fs::read(root.path().join("a.js")).unwrap(), b"candidate");
@@ -775,20 +1018,46 @@ mod admission_tests {
         // pinned recovery journal still refuses to overwrite this user edit.
         let report = regression_fixture(root.path());
         let output = tempfile::tempdir().unwrap();
-        let error = manager.promote(&RolloutConfig {
-            lockstep_report: Some(write_report(&report, output.path())), ..RolloutConfig::default()
-        }, None, None).unwrap_err();
-        assert!(error.contains("automatic rollback did not complete"), "{error}");
+        let error = manager
+            .promote(
+                &RolloutConfig {
+                    lockstep_report: Some(write_report(&report, output.path())),
+                    ..RolloutConfig::default()
+                },
+                None,
+                None,
+            )
+            .unwrap_err();
+        assert!(
+            error.contains("automatic rollback did not complete"),
+            "{error}"
+        );
         let state = manager.load_or_init().unwrap();
         assert_eq!(state.current_stage, RolloutStage::Aborted);
         assert_eq!(state.status, RolloutStatus::Failed);
         assert_eq!(fs::read(root.path().join("a.js")).unwrap(), b"candidate");
-        assert_eq!(fs::read(root.path().join("b.js")).unwrap(), b"independent user work");
+        assert_eq!(
+            fs::read(root.path().join("b.js")).unwrap(),
+            b"independent user work"
+        );
         let reopened = RolloutManager::new(root.path(), Some(&state.migration_id));
-        assert!(reopened.promote(&RolloutConfig { force: true, ..RolloutConfig::default() }, None, None).is_err());
+        assert!(
+            reopened
+                .promote(
+                    &RolloutConfig {
+                        force: true,
+                        ..RolloutConfig::default()
+                    },
+                    None,
+                    None
+                )
+                .is_err()
+        );
         // Explicit operator conflict resolution, never performed by recovery.
         fs::write(root.path().join("b.js"), b"candidate").unwrap();
-        reopened.rollback("operator resolved conflict; retry exact transaction").unwrap();
+        reopened
+            .rollback("operator resolved conflict; retry exact transaction")
+            .unwrap();
         assert_eq!(fs::read(root.path().join("a.js")).unwrap(), b"original");
         assert_eq!(fs::read(root.path().join("b.js")).unwrap(), b"original");
     }
@@ -802,16 +1071,39 @@ mod admission_tests {
         let mut before = manager.load_or_init().unwrap();
         before.confidence_score = 0.99;
         manager.persist(&before).unwrap();
-        assert!(manager.promote(&RolloutConfig {
-            lockstep_report: Some(path.clone()), ..RolloutConfig::default()
-        }, None, None).is_err());
+        assert!(
+            manager
+                .promote(
+                    &RolloutConfig {
+                        lockstep_report: Some(path.clone()),
+                        ..RolloutConfig::default()
+                    },
+                    None,
+                    None
+                )
+                .is_err()
+        );
         assert_eq!(manager.load_or_init().unwrap(), before);
         let report = regression_fixture(root.path());
-        fs::write(&path, attestation::seal(&serde_json::to_vec(&report).unwrap(),
-            &ed25519_dalek::SigningKey::from_bytes(&[8; 32])).unwrap()).unwrap();
-        let error = manager.promote(&RolloutConfig {
-            lockstep_report: Some(path), ..RolloutConfig::default()
-        }, None, None).unwrap_err();
+        fs::write(
+            &path,
+            attestation::seal(
+                &serde_json::to_vec(&report).unwrap(),
+                &ed25519_dalek::SigningKey::from_bytes(&[8; 32]),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let error = manager
+            .promote(
+                &RolloutConfig {
+                    lockstep_report: Some(path),
+                    ..RolloutConfig::default()
+                },
+                None,
+                None,
+            )
+            .unwrap_err();
         assert!(error.contains("authentication refused"), "{error}");
         assert_eq!(manager.load_or_init().unwrap(), before);
         assert_eq!(fs::read(root.path().join("a.js")).unwrap(), b"candidate");
@@ -822,21 +1114,40 @@ mod admission_tests {
         use super::super::super::validation_suite::ApprovedInputs;
         let (root, manager) = applied_regression_project();
         for index in 0..2 {
-            fs::write(root.path().join(format!("case-{index:04}.test.js")), "globalThis.answer = 42;\n").unwrap();
+            fs::write(
+                root.path().join(format!("case-{index:04}.test.js")),
+                "globalThis.answer = 42;\n",
+            )
+            .unwrap();
         }
-        let captured = RewriteCandidate::capture(root.path(), Instant::now() + Duration::from_secs(30)).unwrap();
+        let captured =
+            RewriteCandidate::capture(root.path(), Instant::now() + Duration::from_secs(30))
+                .unwrap();
         let pin = captured.input_sha256();
         // Real process/capture/signature/recovery pipeline. true and false are
         // deliberately selected test executables, NOT native/Bun parity proof.
-        let report = ApprovedInputs::capture(root.path(), None, pin, pin).unwrap()
-            .run_product(Path::new("/bin/false"), Path::new("/bin/true"), true).unwrap();
+        let report = ApprovedInputs::capture(root.path(), None, pin, pin)
+            .unwrap()
+            .run_product(Path::new("/bin/false"), Path::new("/bin/true"), true)
+            .unwrap();
         assert_eq!(report.verdict, "FAIL");
         assert_eq!(report.native_divergences, 2);
         let output = tempfile::tempdir().unwrap();
-        let error = manager.promote(&RolloutConfig {
-            lockstep_report: Some(write_report(&report, output.path())), ..RolloutConfig::default()
-        }, None, None).unwrap_err();
-        assert!(error.contains("authenticated cohort FAIL") && error.contains("Restored native rewrite"), "{error}");
+        let error = manager
+            .promote(
+                &RolloutConfig {
+                    lockstep_report: Some(write_report(&report, output.path())),
+                    ..RolloutConfig::default()
+                },
+                None,
+                None,
+            )
+            .unwrap_err();
+        assert!(
+            error.contains("authenticated cohort FAIL")
+                && error.contains("Restored native rewrite"),
+            "{error}"
+        );
         assert_eq!(fs::read(root.path().join("a.js")).unwrap(), b"original");
         assert_eq!(fs::read(root.path().join("b.js")).unwrap(), b"original");
     }
@@ -845,8 +1156,16 @@ mod admission_tests {
     fn completed_stage_checks_supplied_evidence_without_repeating_a_passing_transition() {
         use super::super::RolloutStatus;
         let (root, manager) = applied_regression_project();
-        manager.promote(&RolloutConfig { force: true, ..RolloutConfig::default() },
-            Some(RolloutStage::Default), None).unwrap();
+        manager
+            .promote(
+                &RolloutConfig {
+                    force: true,
+                    ..RolloutConfig::default()
+                },
+                Some(RolloutStage::Default),
+                None,
+            )
+            .unwrap();
         let completed = manager.load_or_init().unwrap();
         let output = tempfile::tempdir().unwrap();
         let passing = RolloutConfig {
@@ -856,10 +1175,19 @@ mod admission_tests {
         };
         manager.promote(&passing, None, None).unwrap();
         assert_eq!(manager.load_or_init().unwrap(), completed);
-        let error = manager.promote(&RolloutConfig {
-            lockstep_report: Some(write_report(&regression_fixture(root.path()), output.path())),
-            ..RolloutConfig::default()
-        }, None, None).unwrap_err();
+        let error = manager
+            .promote(
+                &RolloutConfig {
+                    lockstep_report: Some(write_report(
+                        &regression_fixture(root.path()),
+                        output.path(),
+                    )),
+                    ..RolloutConfig::default()
+                },
+                None,
+                None,
+            )
+            .unwrap_err();
         assert!(error.contains("authenticated cohort FAIL"), "{error}");
         assert_eq!(manager.status().unwrap().status, RolloutStatus::RolledBack);
         assert_eq!(fs::read(root.path().join("a.js")).unwrap(), b"original");

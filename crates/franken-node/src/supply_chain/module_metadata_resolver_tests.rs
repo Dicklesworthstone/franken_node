@@ -1,7 +1,7 @@
 //! Bound metadata resolvers must retain their importer and never acquire load authority.
 
-use super::*;
 use super::registry::{PinnedModuleRegistry, RequestStyle};
+use super::*;
 
 fn scan_source(source: &str, language: SourceLanguage) -> Scan {
     scan(
@@ -96,7 +96,8 @@ fn extracted_resolvers_capture_exact_origins_and_alias_chains() {
         let (loads, notices, analyzed) = scan_source(source, language);
         assert!(analyzed, "{source}");
         assert!(notices.is_empty(), "{source}: {notices:?}");
-        let requests: Vec<_> = loads.iter()
+        let requests: Vec<_> = loads
+            .iter()
             .filter(|load| load.specifier.as_deref() == Some("./asset"))
             .collect();
         assert_eq!(requests.len(), 1, "{source}: {loads:?}");
@@ -113,9 +114,17 @@ fn extracted_resolvers_keep_load_and_metadata_purposes_distinct() {
     assert!(notices.is_empty(), "{notices:?}");
     assert_eq!(
         loads.iter().map(|load| load.kind).collect::<Vec<_>>(),
-        [LoadKind::RequireResolve, LoadKind::ImportMetaResolve, LoadKind::Require],
+        [
+            LoadKind::RequireResolve,
+            LoadKind::ImportMetaResolve,
+            LoadKind::Require
+        ],
     );
-    assert!(loads.iter().all(|load| load.specifier.as_deref() == Some("pkg")));
+    assert!(
+        loads
+            .iter()
+            .all(|load| load.specifier.as_deref() == Some("pkg"))
+    );
 }
 
 #[test]
@@ -151,7 +160,10 @@ fn extracted_resolvers_require_immutable_unshadowed_non_escaping_bindings() {
             let source = format!("const lookup={origin}; {body} lookup('./asset');");
             let (_, notices, analyzed) = scan_source(&source, SourceLanguage::JavaScript);
             assert!(analyzed, "{source}: {notices:?}");
-            assert!(!notices.is_empty(), "unproved alias became complete: {source}");
+            assert!(
+                !notices.is_empty(),
+                "unproved alias became complete: {source}"
+            );
         }
     }
 }
@@ -186,7 +198,10 @@ fn extracted_resolvers_reject_unproved_origins_and_forward_initialization() {
     ] {
         let (_, notices, analyzed) = scan_source(source, SourceLanguage::JavaScript);
         assert!(analyzed, "{source}: {notices:?}");
-        assert!(!notices.is_empty(), "unproved origin became complete: {source}");
+        assert!(
+            !notices.is_empty(),
+            "unproved origin became complete: {source}"
+        );
     }
 }
 
@@ -202,15 +217,25 @@ fn extracted_resolvers_with_mutable_syntax_need_the_initialization_prelude() {
             assert!(notices.is_empty(), "{source}: {notices:?}");
             assert_eq!(loads.len(), 1);
             for source in [
-                format!("invoke(); {declaration} lookup={origin}; function invoke(){{lookup('./asset');}}"),
-                format!("const unknown=invoke(); {declaration} lookup={origin}; function invoke(){{lookup('./asset');}}"),
-                format!("{declaration} lookup={origin}, unknown=invoke(); function invoke(){{lookup('./asset');}}"),
+                format!(
+                    "invoke(); {declaration} lookup={origin}; function invoke(){{lookup('./asset');}}"
+                ),
+                format!(
+                    "const unknown=invoke(); {declaration} lookup={origin}; function invoke(){{lookup('./asset');}}"
+                ),
+                format!(
+                    "{declaration} lookup={origin}, unknown=invoke(); function invoke(){{lookup('./asset');}}"
+                ),
                 format!("lookup('./asset'); {declaration} lookup={origin};"),
             ] {
                 let (_, notices, analyzed) = scan_source(&source, SourceLanguage::JavaScript);
                 assert!(analyzed, "{source}: {notices:?}");
-                assert!(notices.iter().any(|notice|
-                    notice.code == "UNPROVED_LOADER_INITIALIZATION"), "{source}: {notices:?}");
+                assert!(
+                    notices
+                        .iter()
+                        .any(|notice| notice.code == "UNPROVED_LOADER_INITIALIZATION"),
+                    "{source}: {notices:?}"
+                );
             }
         }
     }
@@ -230,8 +255,12 @@ fn commonjs_resolver_extraction_rejects_wrapper_argument_mutation() {
             let source = format!("{body} const lookup={origin}; lookup('./asset');");
             let (_, notices, analyzed) = scan_source(&source, SourceLanguage::JavaScript);
             assert!(analyzed, "{source}");
-            assert!(notices.iter().any(|notice| notice.code == "MUTABLE_REQUIRE_ORIGIN"),
-                "{source}: {notices:?}");
+            assert!(
+                notices
+                    .iter()
+                    .any(|notice| notice.code == "MUTABLE_REQUIRE_ORIGIN"),
+                "{source}: {notices:?}"
+            );
         }
     }
     let source = "const lookup=require.resolve; function ownArguments(){return arguments[0];} lookup('./asset');";
@@ -250,7 +279,11 @@ fn resolver_aliases_preserve_options_refusals_and_nested_argument_loads() {
     assert!(loads[0].specifier.is_none());
     assert_eq!(loads[1].kind, LoadKind::Require);
     assert_eq!(loads[1].specifier.as_deref(), Some("./options.cjs"));
-    assert!(notices.iter().any(|notice| notice.code == "REQUIRE_RESOLVE_OPTIONS"));
+    assert!(
+        notices
+            .iter()
+            .any(|notice| notice.code == "REQUIRE_RESOLVE_OPTIONS")
+    );
 
     let source = "const locate=import.meta.resolve; locate('./missing',import('./options.mjs'));";
     let (loads, notices, analyzed) = scan_source(source, SourceLanguage::JavaScript);
@@ -269,14 +302,19 @@ fn resolver_aliases_reuse_finite_request_proofs_and_shared_binding_limits() {
     let (loads, notices, analyzed) = scan_source(source, SourceLanguage::JavaScript);
     assert!(analyzed);
     assert!(notices.is_empty(), "{notices:?}");
-    assert_eq!(loads.iter().map(|load| (load.kind, load.specifier.as_deref())).collect::<Vec<_>>(),
+    assert_eq!(
+        loads
+            .iter()
+            .map(|load| (load.kind, load.specifier.as_deref()))
+            .collect::<Vec<_>>(),
         [
             (LoadKind::RequireResolve, Some("./one")),
             (LoadKind::RequireResolve, Some("./two")),
             (LoadKind::ImportMetaResolve, Some("./one")),
             (LoadKind::ImportMetaResolve, Some("./two")),
             (LoadKind::RequireResolve, None),
-        ]);
+        ]
+    );
 
     let mut source = String::from("const load=require;");
     for index in 0..MAX_SITES {
@@ -287,7 +325,8 @@ fn resolver_aliases_reuse_finite_request_proofs_and_shared_binding_limits() {
         source.as_bytes(),
         SourceLanguage::JavaScript,
         &mut Budget::default(),
-    ).unwrap_err();
+    )
+    .unwrap_err();
     assert_eq!(failure.code, "ERR_MODULE_GRAPH_LIMIT");
 }
 
@@ -295,18 +334,43 @@ fn resolver_aliases_reuse_finite_request_proofs_and_shared_binding_limits() {
 fn resolver_alias_capsules_keep_purpose_and_importer_authority_after_relocation() {
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path().join("project");
-    put(&root, "app.mjs", "import './child/paths.mjs'; import './child/paths.cjs';");
-    put(&root, "child/paths.mjs",
-        "const locate=import.meta.resolve; const next=locate; next('dual'); next('./missing.json?x#y');");
-    put(&root, "child/paths.cjs",
-        "const {resolve:lookup}=require; const next=lookup; next('dual'); next('./asset.bin');");
-    put(&root, "node_modules/dual/package.json",
-        r#"{"exports":{"import":"./import.bin","require":"./require.bin"}}"#);
-    put(&root, "node_modules/dual/import.bin", "unparsed import bytes");
-    put(&root, "node_modules/dual/require.bin", "unparsed require bytes");
+    put(
+        &root,
+        "app.mjs",
+        "import './child/paths.mjs'; import './child/paths.cjs';",
+    );
+    put(
+        &root,
+        "child/paths.mjs",
+        "const locate=import.meta.resolve; const next=locate; next('dual'); next('./missing.json?x#y');",
+    );
+    put(
+        &root,
+        "child/paths.cjs",
+        "const {resolve:lookup}=require; const next=lookup; next('dual'); next('./asset.bin');",
+    );
+    put(
+        &root,
+        "node_modules/dual/package.json",
+        r#"{"exports":{"import":"./import.bin","require":"./require.bin"}}"#,
+    );
+    put(
+        &root,
+        "node_modules/dual/import.bin",
+        "unparsed import bytes",
+    );
+    put(
+        &root,
+        "node_modules/dual/require.bin",
+        "unparsed require bytes",
+    );
     put(&root, "child/asset.bin", "unparsed local bytes");
     let graph = capture(&root, "app.mjs", GraphOptions::default()).unwrap();
-    assert!(graph.report().fully_resolved, "{:?}", graph.report().diagnostics);
+    assert!(
+        graph.report().fully_resolved,
+        "{:?}",
+        graph.report().diagnostics
+    );
     assert_eq!(graph.report().modules.len(), 3);
     assert_eq!(graph.report().resolution_targets.len(), 2);
     let pin = graph.report().input_hash.clone();
@@ -316,21 +380,58 @@ fn resolver_alias_capsules_keep_purpose_and_importer_authority_after_relocation(
     let replayed = capsule::replay(encoded.bytes(), encoded.digest()).unwrap();
     assert_eq!(replayed.report(), graph.report());
     let registry = PinnedModuleRegistry::new(replayed, &pin).unwrap();
-    let esm = registry.modules().find(|module| module.origin().path == "child/paths.mjs").unwrap();
-    let cjs = registry.modules().find(|module| module.origin().path == "child/paths.cjs").unwrap();
-    assert_eq!(registry.lookup_url_resolution(Some(esm.id()), "dual").unwrap().target(),
-        &ResolutionUrl::File { id: ModuleId {
-            path: "node_modules/dual/import.bin".into(),
-            url_suffix: String::new(),
-        } });
-    assert_eq!(registry.lookup_resolution(Some(cjs.id()), "dual").unwrap().origin().path,
-        "node_modules/dual/require.bin");
-    assert_eq!(registry.lookup_resolution(Some(cjs.id()), "./asset.bin").unwrap().origin().path,
-        "child/asset.bin");
+    let esm = registry
+        .modules()
+        .find(|module| module.origin().path == "child/paths.mjs")
+        .unwrap();
+    let cjs = registry
+        .modules()
+        .find(|module| module.origin().path == "child/paths.cjs")
+        .unwrap();
+    assert_eq!(
+        registry
+            .lookup_url_resolution(Some(esm.id()), "dual")
+            .unwrap()
+            .target(),
+        &ResolutionUrl::File {
+            id: ModuleId {
+                path: "node_modules/dual/import.bin".into(),
+                url_suffix: String::new(),
+            }
+        }
+    );
+    assert_eq!(
+        registry
+            .lookup_resolution(Some(cjs.id()), "dual")
+            .unwrap()
+            .origin()
+            .path,
+        "node_modules/dual/require.bin"
+    );
+    assert_eq!(
+        registry
+            .lookup_resolution(Some(cjs.id()), "./asset.bin")
+            .unwrap()
+            .origin()
+            .path,
+        "child/asset.bin"
+    );
     assert!(registry.lookup_resolution(Some(esm.id()), "dual").is_err());
-    assert!(registry.lookup_url_resolution(Some(cjs.id()), "dual").is_err());
-    assert!(registry.lookup_resolution(Some(registry.entrypoint()), "dual").is_err());
-    assert!(registry.lookup_url_resolution(Some(registry.entrypoint()), "dual").is_err());
+    assert!(
+        registry
+            .lookup_url_resolution(Some(cjs.id()), "dual")
+            .is_err()
+    );
+    assert!(
+        registry
+            .lookup_resolution(Some(registry.entrypoint()), "dual")
+            .is_err()
+    );
+    assert!(
+        registry
+            .lookup_url_resolution(Some(registry.entrypoint()), "dual")
+            .is_err()
+    );
     for importer in [esm.id(), cjs.id()] {
         for style in [RequestStyle::Require, RequestStyle::Import] {
             assert!(registry.lookup(Some(importer), "dual", style).is_err());

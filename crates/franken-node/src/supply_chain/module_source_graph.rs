@@ -256,8 +256,7 @@ impl GraphOptions {
                 "at most 62 additional package conditions are supported",
             ));
         }
-        self.additional_conditions =
-            Resolver::canonical_conditions(&self.additional_conditions)?;
+        self.additional_conditions = Resolver::canonical_conditions(&self.additional_conditions)?;
         // Validate the combined envelope even for graphs without load sites.
         self.active_conditions(ResolutionMode::Import)?;
         self.active_conditions(ResolutionMode::Require)?;
@@ -527,7 +526,9 @@ fn build(
                 deferred_or_conditional: !load.type_only
                     && matches!(
                         load.kind,
-                        LoadKind::Require | LoadKind::RequireResolve | LoadKind::ImportMetaResolve
+                        LoadKind::Require
+                            | LoadKind::RequireResolve
+                            | LoadKind::ImportMetaResolve
                             | LoadKind::DynamicImport
                     ),
                 specifier: load.specifier,
@@ -550,8 +551,11 @@ fn build(
                     match resolver.resolve_url(parent(&id.path), request) {
                         Ok(url) => {
                             let fresh = match &url {
-                                ResolutionUrl::File { id } => !sources.contains_key(id)
-                                    && !resolution_targets.contains_key(id) && !url_files.contains(id),
+                                ResolutionUrl::File { id } => {
+                                    !sources.contains_key(id)
+                                        && !resolution_targets.contains_key(id)
+                                        && !url_files.contains(id)
+                                }
                                 ResolutionUrl::Absolute { url } => !absolute_urls.contains(url),
                             };
                             if fresh {
@@ -561,8 +565,12 @@ fn build(
                                 target_count += 1;
                             }
                             match &url {
-                                ResolutionUrl::File { id } => { url_files.insert(id.clone()); }
-                                ResolutionUrl::Absolute { url } => { absolute_urls.insert(url.clone()); }
+                                ResolutionUrl::File { id } => {
+                                    url_files.insert(id.clone());
+                                }
+                                ResolutionUrl::Absolute { url } => {
+                                    absolute_urls.insert(url.clone());
+                                }
                             }
                             edge.state = EdgeState::Resolved;
                             edge.resolved_url = Some(url);
@@ -639,11 +647,13 @@ fn build(
     // import or erasing it from the captured dependency surface.
     if !require_extension_fallbacks.is_empty() {
         for edge in &edges {
-            if !matches!(edge.kind, LoadKind::Require | LoadKind::RequireResolve | LoadKind::ImportMetaResolve)
-                && edge
-                    .target
-                    .as_ref()
-                    .is_some_and(|target| require_extension_fallbacks.contains(target))
+            if !matches!(
+                edge.kind,
+                LoadKind::Require | LoadKind::RequireResolve | LoadKind::ImportMetaResolve
+            ) && edge
+                .target
+                .as_ref()
+                .is_some_and(|target| require_extension_fallbacks.contains(target))
             {
                 budget.site()?;
                 let diagnostic = SourceDiagnostic {
@@ -858,7 +868,11 @@ impl<'source> CreateRequireBindings<'source> {
                             let Some(imported) = specifier.child_by_field_name("name") else {
                                 continue;
                             };
-                            let function = if origin_converter { "fileURLToPath" } else { "createRequire" };
+                            let function = if origin_converter {
+                                "fileURLToPath"
+                            } else {
+                                "createRequire"
+                            };
                             if imported.kind() == "identifier"
                                 && imported.utf8_text(source.as_bytes()) == Ok(function)
                             {
@@ -922,7 +936,8 @@ impl<'source> CreateRequireBindings<'source> {
                 let mut arguments = arguments
                     .named_children(&mut children)
                     .filter(|node| node.kind() != "comment");
-                let commonjs = factory.utf8_text(source.as_bytes())
+                let commonjs = factory
+                    .utf8_text(source.as_bytes())
                     .is_ok_and(|name| bindings.commonjs_factories.contains_key(name));
                 let own_origin = arguments.next().is_some_and(|argument| {
                     let argument = runtime_operand(argument);
@@ -1213,11 +1228,7 @@ impl<'source> CreateRequireBindings<'source> {
     /// the ordinary scan rejects mutation, shadowing and every other escape.
     /// Loader discovery has already visited the whole source, so keep a separate
     /// ordered set here: a later loader must not authenticate an earlier read.
-    fn discover_metadata_resolvers(
-        &mut self,
-        root: Node<'_>,
-        source: &'source str,
-    ) -> Result<()> {
+    fn discover_metadata_resolvers(&mut self, root: Node<'_>, source: &'source str) -> Result<()> {
         let mut available_loaders = BTreeSet::new();
         let mut statements = root.walk();
         for statement in root.named_children(&mut statements) {
@@ -1499,8 +1510,7 @@ impl<'source> CreateRequireBindings<'source> {
 
     fn initialized_use(&self, node: Node<'_>, spelling: &str) -> bool {
         self.metadata_resolvers.get(spelling).is_none_or(|binding| {
-            binding.declaration_name == node.id()
-                || node.start_byte() >= binding.available_after
+            binding.declaration_name == node.id() || node.start_byte() >= binding.available_after
         }) && self.mutable_bindings.get(spelling).is_none_or(|binding| {
             binding.in_prelude
                 && (binding.declaration_name == node.id()
@@ -1960,8 +1970,14 @@ fn scan(
             Ok(None) => {}
             Err(failure) if failure.code == "ERR_MODULE_GRAPH_IMPORT_ATTRIBUTES" => {
                 budget.site()?;
-                return Ok((Vec::new(), vec![notice("INVALID_IMPORT_ATTRIBUTES",
-                    "static import attributes are malformed, duplicated or exceed their bounds")], false));
+                return Ok((
+                    Vec::new(),
+                    vec![notice(
+                        "INVALID_IMPORT_ATTRIBUTES",
+                        "static import attributes are malformed, duplicated or exceed their bounds",
+                    )],
+                    false,
+                ));
             }
             Err(failure) => return Err(failure),
         }
@@ -2093,14 +2109,16 @@ fn scan(
                         "MUTABLE_REQUIRE_ORIGIN",
                         "CommonJS wrapper arguments may replace the aliased require binding",
                     ));
-                } else if bindings.filename_origin && spelling == "arguments"
+                } else if bindings.filename_origin
+                    && spelling == "arguments"
                     && commonjs_wrapper_arguments(node)
                 {
                     issue = Some((
                         "MUTABLE_CREATE_REQUIRE_ORIGIN",
                         "CommonJS wrapper arguments may alias the createRequire __filename origin",
                     ));
-                } else if bindings.filename_origin && spelling == "__filename"
+                } else if bindings.filename_origin
+                    && spelling == "__filename"
                     && !immutable_filename_use(node)
                 {
                     issue = Some((
@@ -2139,7 +2157,9 @@ fn scan(
                     ));
                 } else if bindings.used_filename_aliases.contains(spelling)
                     && (!const_string_read(node)
-                        || bindings.filename_aliases.get(spelling)
+                        || bindings
+                            .filename_aliases
+                            .get(spelling)
                             .is_some_and(|origin| node.start_byte() < origin.available_after))
                 {
                     issue = Some((
@@ -2228,7 +2248,8 @@ fn scan(
                 if !erased
                     && node.parent().is_some_and(|parent| {
                         parent.kind() == "variable_declarator"
-                            && parent.child_by_field_name("value")
+                            && parent
+                                .child_by_field_name("value")
                                 .is_some_and(|value| commonjs_module_source(value, text))
                     }) =>
             {
@@ -2310,8 +2331,10 @@ fn scan(
                 match import_attributes::capture(node, text, budget) {
                     Ok(attributes) => attributes,
                     Err(failure) if failure.code == "ERR_MODULE_GRAPH_IMPORT_ATTRIBUTES" => {
-                        issue = Some(("INVALID_IMPORT_ATTRIBUTES",
-                            "static import attributes are malformed, duplicated or exceed their bounds"));
+                        issue = Some((
+                            "INVALID_IMPORT_ATTRIBUTES",
+                            "static import attributes are malformed, duplicated or exceed their bounds",
+                        ));
                         ImportAttributes::new()
                     }
                     Err(failure) => return Err(failure),
@@ -2796,7 +2819,9 @@ fn is_import_meta_resolve(node: Node<'_>, source: &str) -> bool {
 
 fn direct_import_meta_resolve_use(mut node: Node<'_>, source: &str) -> bool {
     for _ in 0..MAX_STRING_EXPRESSION_DEPTH {
-        let Some(parent) = node.parent() else { return false; };
+        let Some(parent) = node.parent() else {
+            return false;
+        };
         if wrapper_operand(parent).is_some_and(|operand| operand.id() == node.id()) {
             node = parent;
             continue;
@@ -3299,13 +3324,27 @@ mod tests {
     #[test]
     fn import_meta_resolve_captures_urls_without_asset_bytes_or_source_routes() {
         let root = tempfile::tempdir().unwrap();
-        put(root.path(), "package.json", r##"{"imports":{"#asset":"assets/style.css"}}"##);
-        put(root.path(), "node_modules/assets/package.json",
-            r#"{"exports":{"./*":{"import":"./files/*","require":"./wrong/*"}}}"#);
-        put(root.path(), "node_modules/assets/files/style.css", "not JavaScript: }");
+        put(
+            root.path(),
+            "package.json",
+            r##"{"imports":{"#asset":"assets/style.css"}}"##,
+        );
+        put(
+            root.path(),
+            "node_modules/assets/package.json",
+            r#"{"exports":{"./*":{"import":"./files/*","require":"./wrong/*"}}}"#,
+        );
+        put(
+            root.path(),
+            "node_modules/assets/files/style.css",
+            "not JavaScript: }",
+        );
         put(root.path(), "broken.json", "{invalid JSON");
         std::fs::create_dir(root.path().join("dir")).unwrap();
-        put(root.path(), "app.mjs", r#"
+        put(
+            root.path(),
+            "app.mjs",
+            r#"
 import.meta.resolve('./missing.js?rev=1#view');
 import /* origin */ . meta['resolve']('./dir/');
 import.meta.resolve('assets/style.css');
@@ -3316,38 +3355,94 @@ import.meta.resolve('https://EXAMPLE.com/a b?query=1#view');
 import.meta.resolve('data:text/plain,hello');
 import.meta.resolve('./broken.json');
 if (false) { import.meta.resolve('./unused.node'); }
-"#);
+"#,
+        );
         let captured = graph(root.path());
-        assert!(captured.report.fully_resolved, "{:?}", captured.report.diagnostics);
+        assert!(
+            captured.report.fully_resolved,
+            "{:?}",
+            captured.report.diagnostics
+        );
         assert_eq!(paths(&captured), ["app.mjs"]);
         assert!(captured.report.resolution_targets.is_empty());
         assert_eq!(captured.report.edges.len(), 10);
-        assert!(captured.report.edges.iter().all(|edge|
-            edge.kind == LoadKind::ImportMetaResolve && edge.target.is_none()
-                && edge.resolved_url.is_some() && edge.deferred_or_conditional
-                && edge.conditions == ["node", "import"]));
-        let edge = |name: &str| captured.report.edges.iter()
-            .find(|edge| edge.specifier.as_deref() == Some(name)).unwrap();
-        assert_eq!(edge("./missing.js?rev=1#view").resolved_url,
-            Some(ResolutionUrl::File { id: ModuleId {
-                path: "missing.js".into(), url_suffix: "?rev=1#view".into(),
-            } }));
-        assert_eq!(edge("#asset").resolved_url, edge("assets/style.css").resolved_url);
+        assert!(
+            captured
+                .report
+                .edges
+                .iter()
+                .all(|edge| edge.kind == LoadKind::ImportMetaResolve
+                    && edge.target.is_none()
+                    && edge.resolved_url.is_some()
+                    && edge.deferred_or_conditional
+                    && edge.conditions == ["node", "import"])
+        );
+        let edge = |name: &str| {
+            captured
+                .report
+                .edges
+                .iter()
+                .find(|edge| edge.specifier.as_deref() == Some(name))
+                .unwrap()
+        };
+        assert_eq!(
+            edge("./missing.js?rev=1#view").resolved_url,
+            Some(ResolutionUrl::File {
+                id: ModuleId {
+                    path: "missing.js".into(),
+                    url_suffix: "?rev=1#view".into(),
+                }
+            })
+        );
+        assert_eq!(
+            edge("#asset").resolved_url,
+            edge("assets/style.css").resolved_url
+        );
         assert_eq!(edge("#asset").mappings.len(), 2);
-        assert_eq!(edge("fs").resolved_url,
-            Some(ResolutionUrl::Absolute { url: "node:fs".into() }));
-        assert_eq!(edge("node:fake").resolved_url,
-            Some(ResolutionUrl::Absolute { url: "node:fake".into() }));
-        assert_eq!(edge("https://EXAMPLE.com/a b?query=1#view").resolved_url,
-            Some(ResolutionUrl::Absolute { url: "https://example.com/a%20b?query=1#view".into() }));
+        assert_eq!(
+            edge("fs").resolved_url,
+            Some(ResolutionUrl::Absolute {
+                url: "node:fs".into()
+            })
+        );
+        assert_eq!(
+            edge("node:fake").resolved_url,
+            Some(ResolutionUrl::Absolute {
+                url: "node:fake".into()
+            })
+        );
+        assert_eq!(
+            edge("https://EXAMPLE.com/a b?query=1#view").resolved_url,
+            Some(ResolutionUrl::Absolute {
+                url: "https://example.com/a%20b?query=1#view".into()
+            })
+        );
         for name in ["broken.json", "node_modules/assets/files/style.css"] {
-            let probe = captured.report.probes.iter().find(|probe| probe.path == name).unwrap();
+            let probe = captured
+                .report
+                .probes
+                .iter()
+                .find(|probe| probe.path == name)
+                .unwrap();
             assert_eq!(probe.kind, super::super::ProbeKind::FileMetadata);
             assert_eq!(probe.bytes, None);
             assert_eq!(probe.sha256, None);
-            assert!(captured.source_bytes(&ModuleId { path: name.into(), url_suffix: String::new() }).is_none());
+            assert!(
+                captured
+                    .source_bytes(&ModuleId {
+                        path: name.into(),
+                        url_suffix: String::new()
+                    })
+                    .is_none()
+            );
         }
-        assert!(!captured.report.probes.iter().any(|probe| probe.path.contains("/wrong/")));
+        assert!(
+            !captured
+                .report
+                .probes
+                .iter()
+                .any(|probe| probe.path.contains("/wrong/"))
+        );
     }
 
     #[test]
@@ -3359,25 +3454,49 @@ if (false) { import.meta.resolve('./unused.node'); }
         symlink("real", root.path().join("linkdir")).unwrap();
         symlink("real/file.css", root.path().join("linkfile")).unwrap();
         let cases = [
-            ("./linkdir", "linkdir"), ("./linkdir/", "linkdir/"),
+            ("./linkdir", "linkdir"),
+            ("./linkdir/", "linkdir/"),
             ("./linkdir/missing", "linkdir/missing"),
             ("./linkdir/file.css", "real/file.css"),
-            ("./linkfile/", "linkfile/"), ("./a//missing", "a//missing"),
-            ("./a//", "a//"), ("./a//../missing", "a/missing"), ("./", ""),
+            ("./linkfile/", "linkfile/"),
+            ("./a//missing", "a//missing"),
+            ("./a//", "a//"),
+            ("./a//../missing", "a/missing"),
+            ("./", ""),
             ("./missing%3Fname%23piece", "missing?name#piece"),
         ];
-        let source = cases.iter().map(|(request, _)|
-            format!("import.meta.resolve({});\n", serde_json::to_string(request).unwrap())
-        ).collect::<String>();
+        let source = cases
+            .iter()
+            .map(|(request, _)| {
+                format!(
+                    "import.meta.resolve({});\n",
+                    serde_json::to_string(request).unwrap()
+                )
+            })
+            .collect::<String>();
         put(root.path(), "app.mjs", &source);
-        let captured = capture(root.path(), "app.mjs", GraphOptions {
-            symlink_policy: SymlinkPolicy::Contained, ..GraphOptions::default()
-        }).unwrap();
+        let captured = capture(
+            root.path(),
+            "app.mjs",
+            GraphOptions {
+                symlink_policy: SymlinkPolicy::Contained,
+                ..GraphOptions::default()
+            },
+        )
+        .unwrap();
         assert!(captured.report.fully_resolved);
         for (edge, (_, expected)) in captured.report.edges.iter().zip(cases) {
-            assert_eq!(edge.resolved_url, Some(ResolutionUrl::File { id: ModuleId {
-                path: expected.into(), url_suffix: String::new(),
-            } }), "{:?}", edge.specifier);
+            assert_eq!(
+                edge.resolved_url,
+                Some(ResolutionUrl::File {
+                    id: ModuleId {
+                        path: expected.into(),
+                        url_suffix: String::new(),
+                    }
+                }),
+                "{:?}",
+                edge.specifier
+            );
         }
         let capsule = capsule::encode(&captured).unwrap();
         let replayed = capsule::replay(capsule.bytes(), capsule.digest()).unwrap();
@@ -3397,18 +3516,30 @@ if (false) { import.meta.resolve('./unused.node'); }
             put(root.path(), "app.mjs", source);
             let captured = graph(root.path());
             assert!(!captured.report.fully_resolved, "{source}");
-            assert!(captured.report.diagnostics.iter().any(|notice|
-                notice.code == "UNPROVED_IMPORT_META_ACCESS"), "{source}");
+            assert!(
+                captured
+                    .report
+                    .diagnostics
+                    .iter()
+                    .any(|notice| notice.code == "UNPROVED_IMPORT_META_ACCESS"),
+                "{source}"
+            );
         }
         put(root.path(), "app.mjs", "import.meta.resolve(runtimeName);");
         let captured = graph(root.path());
         assert_eq!(captured.report.edges[0].kind, LoadKind::ImportMetaResolve);
         assert_eq!(captured.report.edges[0].state, EdgeState::NonLiteral);
         for request in ["file:///outside.js", "/outside.js"] {
-            put(root.path(), "app.mjs", &format!("import.meta.resolve({request:?});"));
+            put(
+                root.path(),
+                "app.mjs",
+                &format!("import.meta.resolve({request:?});"),
+            );
             let captured = graph(root.path());
-            assert_eq!(captured.report.edges[0].error.as_ref().unwrap().code,
-                "ERR_UNSUPPORTED_MODULE_SPECIFIER");
+            assert_eq!(
+                captured.report.edges[0].error.as_ref().unwrap().code,
+                "ERR_UNSUPPORTED_MODULE_SPECIFIER"
+            );
             assert!(captured.report.edges[0].resolved_url.is_none());
         }
     }
@@ -3421,9 +3552,19 @@ if (false) { import.meta.resolve('./unused.node'); }
             "./%2e%2e/__franken_node_captured_project__/asset",
             "./a/../../__franken_node_captured_project__/asset",
         ] {
-            put(root.path(), "app.mjs", &format!("import.meta.resolve({request:?});"));
-            assert_eq!(capture(root.path(), "app.mjs", GraphOptions::default()).err().unwrap().code,
-                "ERR_MODULE_OUTSIDE_PROJECT", "{request}");
+            put(
+                root.path(),
+                "app.mjs",
+                &format!("import.meta.resolve({request:?});"),
+            );
+            assert_eq!(
+                capture(root.path(), "app.mjs", GraphOptions::default())
+                    .err()
+                    .unwrap()
+                    .code,
+                "ERR_MODULE_OUTSIDE_PROJECT",
+                "{request}"
+            );
         }
     }
 
@@ -3437,9 +3578,18 @@ if (false) { import.meta.resolve('./unused.node'); }
         assert!(captured.report.fully_resolved);
         assert_eq!(paths(&captured), ["app.mjs"]);
         assert!(capsule::encode(&captured).unwrap().bytes().len() < 8192);
-        put(root.path(), "app.mjs", "import.meta.resolve('./large.js'); import './large.js';");
-        assert_eq!(capture(root.path(), "app.mjs", GraphOptions::default()).err().unwrap().code,
-            "ERR_MODULE_RESOLUTION_LIMIT");
+        put(
+            root.path(),
+            "app.mjs",
+            "import.meta.resolve('./large.js'); import './large.js';",
+        );
+        assert_eq!(
+            capture(root.path(), "app.mjs", GraphOptions::default())
+                .err()
+                .unwrap()
+                .code,
+            "ERR_MODULE_RESOLUTION_LIMIT"
+        );
         for source in [
             "import.meta.resolve('./value.mjs'); import './value.mjs';",
             "import './value.mjs'; import.meta.resolve('./value.mjs');",
@@ -3449,25 +3599,48 @@ if (false) { import.meta.resolve('./unused.node'); }
             let captured = graph(root.path());
             assert!(captured.report.fully_resolved);
             assert_eq!(paths(&captured), ["app.mjs", "value.mjs"]);
-            let probe = captured.report.probes.iter().find(|probe| probe.path == "value.mjs").unwrap();
+            let probe = captured
+                .report
+                .probes
+                .iter()
+                .find(|probe| probe.path == "value.mjs")
+                .unwrap();
             assert_eq!(probe.kind, super::super::ProbeKind::File);
             let capsule = capsule::encode(&captured).unwrap();
-            assert_eq!(captured.report, capsule::replay(capsule.bytes(), capsule.digest()).unwrap().report);
+            assert_eq!(
+                captured.report,
+                capsule::replay(capsule.bytes(), capsule.digest())
+                    .unwrap()
+                    .report
+            );
         }
     }
 
     #[test]
     fn import_meta_resolve_shares_the_existing_total_target_bound() {
         let root = tempfile::tempdir().unwrap();
-        let urls = (0..MAX_MODULES-2).map(|index|
-            format!("import.meta.resolve('node:opaque{index}');\n")
-        ).collect::<String>();
+        let urls = (0..MAX_MODULES - 2)
+            .map(|index| format!("import.meta.resolve('node:opaque{index}');\n"))
+            .collect::<String>();
         put(root.path(), "dep.mjs", "export const value=1;");
-        put(root.path(), "app.mjs", &format!("{urls}import './dep.mjs'; import.meta.resolve('./dep.mjs');"));
+        put(
+            root.path(),
+            "app.mjs",
+            &format!("{urls}import './dep.mjs'; import.meta.resolve('./dep.mjs');"),
+        );
         assert!(graph(root.path()).report.fully_resolved);
-        put(root.path(), "app.mjs", &format!("{urls}import './dep.mjs'; import.meta.resolve('./missing');"));
-        assert_eq!(capture(root.path(), "app.mjs", GraphOptions::default()).err().unwrap().code,
-            "ERR_MODULE_GRAPH_LIMIT");
+        put(
+            root.path(),
+            "app.mjs",
+            &format!("{urls}import './dep.mjs'; import.meta.resolve('./missing');"),
+        );
+        assert_eq!(
+            capture(root.path(), "app.mjs", GraphOptions::default())
+                .err()
+                .unwrap()
+                .code,
+            "ERR_MODULE_GRAPH_LIMIT"
+        );
     }
 
     #[test]
@@ -3764,13 +3937,20 @@ if (false) { import.meta.resolve('./unused.node'); }
         exact.retain(&value).unwrap();
         assert_eq!(exact.evidence_bytes, MAX_EVIDENCE_BYTES);
         assert_eq!((exact.sites, exact.ast_nodes), (17, 31));
-        for before in [MAX_EVIDENCE_BYTES - bytes + 1, MAX_EVIDENCE_BYTES, usize::MAX] {
+        for before in [
+            MAX_EVIDENCE_BYTES - bytes + 1,
+            MAX_EVIDENCE_BYTES,
+            usize::MAX,
+        ] {
             let mut budget = Budget {
                 sites: 17,
                 ast_nodes: 31,
                 evidence_bytes: before,
             };
-            assert_eq!(budget.retain(&value).unwrap_err().code, "ERR_MODULE_GRAPH_LIMIT");
+            assert_eq!(
+                budget.retain(&value).unwrap_err().code,
+                "ERR_MODULE_GRAPH_LIMIT"
+            );
             assert_eq!(
                 (budget.sites, budget.ast_nodes, budget.evidence_bytes),
                 (17, 31, before)
@@ -3841,7 +4021,10 @@ if (false) { import.meta.resolve('./unused.node'); }
         let mut hash = Sha256::new();
         hash.update(HASH_DOMAIN);
         hash.update(&encoded);
-        assert_eq!(actual_pin, format!("sha256:{}", hex::encode(hash.finalize())));
+        assert_eq!(
+            actual_pin,
+            format!("sha256:{}", hex::encode(hash.finalize()))
+        );
         let mut streamed = Vec::new();
         serialize_evidence(&report, MAX_EVIDENCE_BYTES, |bytes| {
             streamed.extend_from_slice(bytes);
@@ -3851,7 +4034,11 @@ if (false) { import.meta.resolve('./unused.node'); }
 
         let capsule = super::capsule::encode(&captured).unwrap();
         put(root.path(), "café.mjs", "export const value = 'changed';");
-        put(root.path(), "missing.mjs", "export const newlyPresent = true;");
+        put(
+            root.path(),
+            "missing.mjs",
+            "export const newlyPresent = true;",
+        );
         assert_ne!(graph(root.path()).report().input_hash, actual_pin);
         let replayed = super::capsule::replay(capsule.bytes(), capsule.digest()).unwrap();
         assert_eq!(replayed.report(), captured.report());
@@ -3992,7 +4179,11 @@ if (false) { import.meta.resolve('./unused.node'); }
     #[test]
     fn additional_conditions_preserve_import_require_branches_and_offline_identity() {
         let root = tempfile::tempdir().unwrap();
-        put(root.path(), "app.mjs", "import 'dual'; import './bridge.cjs';");
+        put(
+            root.path(),
+            "app.mjs",
+            "import 'dual'; import './bridge.cjs';",
+        );
         put(root.path(), "bridge.cjs", "module.exports=require('dual');");
         put(
             root.path(),
@@ -4004,22 +4195,41 @@ if (false) { import.meta.resolve('./unused.node'); }
         }
         let default = graph(root.path());
         let default_options = serde_json::to_string(&default.report.options).unwrap();
-        assert_eq!(default_options, r#"{"symlink_policy":"reject","conditions":null}"#);
+        assert_eq!(
+            default_options,
+            r#"{"symlink_policy":"reject","conditions":null}"#
+        );
         assert!(paths(&default).contains(&"node_modules/dual/prod.mjs"));
         assert!(paths(&default).contains(&"node_modules/dual/prod.cjs"));
 
-        let custom = capture(root.path(), "app.mjs", GraphOptions {
-            additional_conditions: vec!["unused".into(), "development".into(), "development".into()],
-            ..GraphOptions::default()
-        }).unwrap();
-        assert_eq!(custom.report.options.additional_conditions, ["development", "unused"]);
+        let custom = capture(
+            root.path(),
+            "app.mjs",
+            GraphOptions {
+                additional_conditions: vec![
+                    "unused".into(),
+                    "development".into(),
+                    "development".into(),
+                ],
+                ..GraphOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            custom.report.options.additional_conditions,
+            ["development", "unused"]
+        );
         assert_ne!(custom.report.input_hash, default.report.input_hash);
         assert!(paths(&custom).contains(&"node_modules/dual/dev.mjs"));
         assert!(paths(&custom).contains(&"node_modules/dual/dev.cjs"));
         assert!(!paths(&custom).contains(&"node_modules/dual/prod.mjs"));
         for edge in &custom.report.edges {
             assert!(edge.conditions.iter().any(|condition| condition == "node"));
-            assert!(edge.conditions.iter().any(|condition| condition == "development"));
+            assert!(
+                edge.conditions
+                    .iter()
+                    .any(|condition| condition == "development")
+            );
             let (present, absent) = if edge.kind == LoadKind::Require {
                 ("require", "import")
             } else {
@@ -4028,13 +4238,22 @@ if (false) { import.meta.resolve('./unused.node'); }
             assert!(edge.conditions.iter().any(|condition| condition == present));
             assert!(!edge.conditions.iter().any(|condition| condition == absent));
         }
-        let canonical = capture(root.path(), "app.mjs", GraphOptions {
-            additional_conditions: vec!["development".into(), "unused".into()],
-            ..GraphOptions::default()
-        }).unwrap();
+        let canonical = capture(
+            root.path(),
+            "app.mjs",
+            GraphOptions {
+                additional_conditions: vec!["development".into(), "unused".into()],
+                ..GraphOptions::default()
+            },
+        )
+        .unwrap();
         assert_eq!(custom.report(), canonical.report());
         let encoded = capsule::encode(&custom).unwrap();
-        put(root.path(), "node_modules/dual/package.json", r#"{"exports":"./prod.mjs"}"#);
+        put(
+            root.path(),
+            "node_modules/dual/package.json",
+            r#"{"exports":"./prod.mjs"}"#,
+        );
         let restored = capsule::replay(encoded.bytes(), encoded.digest()).unwrap();
         assert_eq!(custom.report(), restored.report());
     }
@@ -4049,10 +4268,16 @@ if (false) { import.meta.resolve('./unused.node'); }
             vec!["x".repeat(129)],
             vec!["condition".into(); 63],
         ] {
-            let error = capture(root.path(), "app.mjs", GraphOptions {
-                additional_conditions,
-                ..GraphOptions::default()
-            }).err().unwrap();
+            let error = capture(
+                root.path(),
+                "app.mjs",
+                GraphOptions {
+                    additional_conditions,
+                    ..GraphOptions::default()
+                },
+            )
+            .err()
+            .unwrap();
             assert_eq!(error.code, "ERR_INVALID_PACKAGE_CONDITIONS");
         }
     }
@@ -4128,7 +4353,14 @@ if (false) { import.meta.resolve('./unused.node'); }
             (
                 "const prefix=<string>'./'; const leaf=<string>(flag?'one.cjs':'two.cjs'); const target=<string>(prefix+leaf); require(<string>target); require.resolve(<string>target); import(<string>target);",
                 SourceLanguage::TypeScript,
-                vec!["./one.cjs", "./two.cjs", "./one.cjs", "./two.cjs", "./one.cjs", "./two.cjs"],
+                vec![
+                    "./one.cjs",
+                    "./two.cjs",
+                    "./one.cjs",
+                    "./two.cjs",
+                    "./one.cjs",
+                    "./two.cjs",
+                ],
             ),
             (
                 "const high='\\uD83D', low='\\uDE00'; const target='./'+high+low+'.cjs'; require(target);",
@@ -4193,7 +4425,10 @@ if (false) { import.meta.resolve('./unused.node'); }
         ] {
             assert_eq!(
                 scan_source_requests(source, language),
-                expected.into_iter().map(|value| Some(value.to_owned())).collect::<Vec<_>>(),
+                expected
+                    .into_iter()
+                    .map(|value| Some(value.to_owned()))
+                    .collect::<Vec<_>>(),
                 "{source}",
             );
         }
@@ -4529,8 +4764,16 @@ if (false) { import.meta.resolve('./unused.node'); }
         use super::registry::{PinnedModuleRegistry, RequestStyle};
 
         let root = tempfile::tempdir().unwrap();
-        put(root.path(), "app.cjs", "module.exports=require('scoped-fixture');");
-        put(root.path(), "node_modules/scoped-fixture/package.json", r#"{"main":"index.cjs"}"#);
+        put(
+            root.path(),
+            "app.cjs",
+            "module.exports=require('scoped-fixture');",
+        );
+        put(
+            root.path(),
+            "node_modules/scoped-fixture/package.json",
+            r#"{"main":"index.cjs"}"#,
+        );
         let package_source = r#"
 const prefix='./';
 function load(flag) {
@@ -4544,43 +4787,99 @@ function optional() {
 }
 module.exports={load,lookup,optional};
 "#;
-        put(root.path(), "node_modules/scoped-fixture/index.cjs", package_source);
-        put(root.path(), "node_modules/scoped-fixture/one.cjs", "module.exports=41;");
-        put(root.path(), "node_modules/scoped-fixture/two.cjs", "module.exports=42;");
+        put(
+            root.path(),
+            "node_modules/scoped-fixture/index.cjs",
+            package_source,
+        );
+        put(
+            root.path(),
+            "node_modules/scoped-fixture/one.cjs",
+            "module.exports=41;",
+        );
+        put(
+            root.path(),
+            "node_modules/scoped-fixture/two.cjs",
+            "module.exports=42;",
+        );
         let captured = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
         assert!(captured.report().diagnostics.is_empty());
         assert_eq!(captured.report().modules.len(), 4);
         assert_eq!(captured.report().edges.len(), 5);
-        assert!(!captured.report().fully_resolved, "optional absence remains explicit");
+        assert!(
+            !captured.report().fully_resolved,
+            "optional absence remains explicit"
+        );
         let pin = captured.report().input_hash.clone();
         let encoded = super::capsule::encode(&captured).unwrap();
-        std::fs::rename(root.path().join("node_modules"), root.path().join("original_packages")).unwrap();
-        put(root.path(), "node_modules/scoped-fixture/index.js", "throw new Error('live package');");
-        put(root.path(), "node_modules/optional-addon/index.js", "module.exports=999;");
+        std::fs::rename(
+            root.path().join("node_modules"),
+            root.path().join("original_packages"),
+        )
+        .unwrap();
+        put(
+            root.path(),
+            "node_modules/scoped-fixture/index.js",
+            "throw new Error('live package');",
+        );
+        put(
+            root.path(),
+            "node_modules/optional-addon/index.js",
+            "module.exports=999;",
+        );
 
         let replayed = super::capsule::replay(encoded.bytes(), encoded.digest()).unwrap();
         assert_eq!(replayed.report(), captured.report());
         let registry = PinnedModuleRegistry::new(replayed, &pin).unwrap();
         assert_eq!(registry.summary().routes, 4);
         assert_eq!(registry.summary().missing_routes, 1);
-        let package = registry.lookup(Some(registry.entrypoint()), "scoped-fixture", RequestStyle::Require).unwrap();
+        let package = registry
+            .lookup(
+                Some(registry.entrypoint()),
+                "scoped-fixture",
+                RequestStyle::Require,
+            )
+            .unwrap();
         assert_eq!(package.source(), package_source);
-        for (request, expected) in [("./one.cjs", "module.exports=41;"), ("./two.cjs", "module.exports=42;")] {
-            assert_eq!(registry.lookup(Some(package.id()), request, RequestStyle::Require).unwrap().source(), expected);
+        for (request, expected) in [
+            ("./one.cjs", "module.exports=41;"),
+            ("./two.cjs", "module.exports=42;"),
+        ] {
+            assert_eq!(
+                registry
+                    .lookup(Some(package.id()), request, RequestStyle::Require)
+                    .unwrap()
+                    .source(),
+                expected
+            );
         }
-        assert_eq!(registry.lookup(Some(package.id()), "optional-addon", RequestStyle::Require).err().unwrap().code,
-            "MODULE_NOT_FOUND");
+        assert_eq!(
+            registry
+                .lookup(Some(package.id()), "optional-addon", RequestStyle::Require)
+                .err()
+                .unwrap()
+                .code,
+            "MODULE_NOT_FOUND"
+        );
         for (importer, request, style) in [
             (registry.entrypoint(), "./one.cjs", RequestStyle::Require),
             (package.id(), "./one.cjs", RequestStyle::Import),
             (package.id(), "./extra.cjs", RequestStyle::Require),
         ] {
-            assert_eq!(registry.lookup(Some(importer), request, style).err().unwrap().code,
-                "ERR_MODULE_REGISTRY_ROUTE");
+            assert_eq!(
+                registry
+                    .lookup(Some(importer), request, style)
+                    .err()
+                    .unwrap()
+                    .code,
+                "ERR_MODULE_REGISTRY_ROUTE"
+            );
         }
         let changed = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
-        assert_eq!(PinnedModuleRegistry::new(changed, &pin).err().unwrap().code,
-            "ERR_MODULE_REGISTRY_PIN_MISMATCH");
+        assert_eq!(
+            PinnedModuleRegistry::new(changed, &pin).err().unwrap().code,
+            "ERR_MODULE_REGISTRY_PIN_MISMATCH"
+        );
     }
 
     #[test]
@@ -4617,7 +4916,10 @@ module.exports={load,lookup,optional};
             assert!(analyzed, "{source}: {notices:?}");
             assert!(notices.is_empty(), "{source}: {notices:?}");
             assert_eq!(loads.len(), 2, "{source}: {loads:?}");
-            for (load, kind) in loads.into_iter().zip([LoadKind::Require, LoadKind::RequireResolve]) {
+            for (load, kind) in loads
+                .into_iter()
+                .zip([LoadKind::Require, LoadKind::RequireResolve])
+            {
                 assert_eq!(load.kind, kind, "{source}");
                 assert_eq!(load.specifier.as_deref(), Some("./dep.cjs"), "{source}");
                 assert!(!load.type_only);
@@ -4672,8 +4974,20 @@ module.exports={load,lookup,optional};
                 .collect();
             assert_eq!(requests.len(), 2, "{source}: {loads:?}");
             assert!(requests.iter().all(|load| !load.type_only));
-            assert_eq!(requests.iter().filter(|load| load.kind == LoadKind::Require).count(), 1);
-            assert_eq!(requests.iter().filter(|load| load.kind == LoadKind::RequireResolve).count(), 1);
+            assert_eq!(
+                requests
+                    .iter()
+                    .filter(|load| load.kind == LoadKind::Require)
+                    .count(),
+                1
+            );
+            assert_eq!(
+                requests
+                    .iter()
+                    .filter(|load| load.kind == LoadKind::RequireResolve)
+                    .count(),
+                1
+            );
         }
     }
 
@@ -4872,8 +5186,10 @@ module.exports={load,lookup,optional};
                 _ => Err(error("ERR_TEST_MODULE_KIND", "unexpected fixture format")),
             },
             |specifier, style| {
-                Ok((specifier == "node:module" && style == RequestStyle::Import)
-                    .then_some("node:module"))
+                Ok(
+                    (specifier == "node:module" && style == RequestStyle::Import)
+                        .then_some("node:module"),
+                )
             },
         )
         .unwrap();
@@ -5027,8 +5343,10 @@ module.exports={load,lookup,optional};
         assert!(analyzed);
         assert!(notices.is_empty(), "{notices:?}");
         assert_eq!(loads.len(), 2);
-        assert_eq!(loads.iter().map(|load| load.kind).collect::<Vec<_>>(),
-            [LoadKind::Require, LoadKind::RequireResolve]);
+        assert_eq!(
+            loads.iter().map(|load| load.kind).collect::<Vec<_>>(),
+            [LoadKind::Require, LoadKind::RequireResolve]
+        );
         assert!(loads.iter().all(|load| load.specifier.is_none()));
 
         let root = tempfile::tempdir().unwrap();
@@ -5212,7 +5530,10 @@ module.exports={load,lookup,optional};
             assert!(notices.is_empty(), "{source}: {notices:?}");
             assert_eq!(loads.len(), 3, "{source}: {loads:?}");
             assert_eq!(loads[0].kind, LoadKind::StaticImport);
-            for (load, kind) in loads[1..].iter().zip([LoadKind::Require, LoadKind::RequireResolve]) {
+            for (load, kind) in loads[1..]
+                .iter()
+                .zip([LoadKind::Require, LoadKind::RequireResolve])
+            {
                 assert_eq!(load.kind, kind, "{source}");
                 assert_eq!(load.specifier.as_deref(), Some("./dep.cjs"), "{source}");
                 assert!(!load.type_only);
@@ -5443,7 +5764,9 @@ module.exports={load,lookup,optional};
                 Some("module" | "node:module")
             ));
             for (load, kind) in loads.iter().zip([
-                LoadKind::Require, LoadKind::Require, LoadKind::RequireResolve,
+                LoadKind::Require,
+                LoadKind::Require,
+                LoadKind::RequireResolve,
             ]) {
                 assert_eq!(load.kind, kind, "{source}");
                 assert!(!load.type_only);
@@ -5700,7 +6023,11 @@ module.exports={load,lookup,optional};
                         .is_some_and(|target| target.path == "nested/asset.cjs")
             }));
             assert_eq!(captured.report().resolution_targets.len(), 1);
-            assert!(captured.source_bytes(&captured.report().resolution_targets[0].id).is_none());
+            assert!(
+                captured
+                    .source_bytes(&captured.report().resolution_targets[0].id)
+                    .is_none()
+            );
             assert!(
                 !captured
                     .report()
@@ -5850,8 +6177,10 @@ module.exports={load,lookup,optional};
         .unwrap();
         assert!(notices.is_empty());
         assert_eq!(loads.len(), 3);
-        assert_eq!(loads[1..].iter().map(|load| load.kind).collect::<Vec<_>>(),
-            [LoadKind::Require, LoadKind::RequireResolve]);
+        assert_eq!(
+            loads[1..].iter().map(|load| load.kind).collect::<Vec<_>>(),
+            [LoadKind::Require, LoadKind::RequireResolve]
+        );
         assert!(loads[1..].iter().all(|load| load.specifier.is_none()));
 
         let factories = (0..MAX_SITES)
@@ -5924,8 +6253,15 @@ module.exports={load,lookup,optional};
                 .count(),
             2
         );
-        assert_eq!(captured.report().edges.iter()
-            .filter(|edge| edge.kind == LoadKind::RequireResolve).count(), 2);
+        assert_eq!(
+            captured
+                .report()
+                .edges
+                .iter()
+                .filter(|edge| edge.kind == LoadKind::RequireResolve)
+                .count(),
+            2
+        );
         assert_eq!(captured.report().resolution_targets.len(), 1);
         assert!(!captured.report().execution_performed);
         let pin = captured.report().input_hash.clone();
@@ -5962,10 +6298,12 @@ module.exports={load,lookup,optional};
                     ModuleKind::EsModule
                 })
             },
-            |specifier, _| Ok(match specifier {
-                "module" | "node:module" => Some("node:module"),
-                _ => None,
-            }),
+            |specifier, _| {
+                Ok(match specifier {
+                    "module" | "node:module" => Some("node:module"),
+                    _ => None,
+                })
+            },
         )
         .ok()
         .unwrap();
@@ -5998,8 +6336,11 @@ module.exports={load,lookup,optional};
                 .lookup_resolution(Some(loaded.id()), "./asset.cjs")
                 .unwrap();
             assert_eq!(asset.origin().path, "asset.cjs");
-            assert!(registry.lookup(Some(loaded.id()), "./asset.cjs", RequestStyle::Require)
-                .is_err());
+            assert!(
+                registry
+                    .lookup(Some(loaded.id()), "./asset.cjs", RequestStyle::Require)
+                    .is_err()
+            );
             assert!(
                 registry
                     .lookup(Some(loaded.id()), "dual", RequestStyle::Import)
@@ -6215,7 +6556,11 @@ const fromPackage = require('string-' + 'fixture');
                 .collect::<Vec<_>>(),
             vec![
                 (LoadKind::Require, Some("./dep.cjs"), EdgeState::Resolved),
-                (LoadKind::RequireResolve, Some("./dep.cjs"), EdgeState::Resolved),
+                (
+                    LoadKind::RequireResolve,
+                    Some("./dep.cjs"),
+                    EdgeState::Resolved
+                ),
                 (
                     LoadKind::DynamicImport,
                     Some("./dep.cjs"),
@@ -7397,7 +7742,11 @@ if (typeof module.require === 'function') { module.require('./other.cjs'); }
         );
         let pin = captured.report().input_hash.clone();
         let capsule = capsule::encode(&captured).unwrap();
-        put(root.path(), "state.mjs", "throw new Error('source changed');");
+        put(
+            root.path(),
+            "state.mjs",
+            "throw new Error('source changed');",
+        );
         let replayed = capsule::replay(capsule.bytes(), capsule.digest()).unwrap();
         assert_eq!(captured.report(), replayed.report());
         let registry = registry::PinnedModuleRegistry::new(replayed, &pin).unwrap();
@@ -7424,7 +7773,7 @@ if (typeof module.require === 'function') { module.require('./other.cjs'); }
             .unwrap();
         assert_eq!(first.id(), alias.id());
         assert_ne!(first.id(), distinct.id());
-        assert_eq!(first.source(), "export const state = {};" );
+        assert_eq!(first.source(), "export const state = {};");
         assert_eq!(registry.summary().modules, 3);
         assert_eq!(registry.summary().routes, 3);
     }
@@ -8312,8 +8661,13 @@ require!('./dep.cjs');
                 .filter(|load| load.specifier.as_deref() == Some("./dep.cjs"))
                 .collect();
             assert_eq!(dependencies.len(), 2, "{source}: {loads:?}");
-            assert_eq!(dependencies.iter().map(|load| load.kind).collect::<Vec<_>>(),
-                [LoadKind::Require, LoadKind::RequireResolve]);
+            assert_eq!(
+                dependencies
+                    .iter()
+                    .map(|load| load.kind)
+                    .collect::<Vec<_>>(),
+                [LoadKind::Require, LoadKind::RequireResolve]
+            );
             assert!(dependencies.iter().all(|load| !load.type_only));
         }
     }
@@ -8382,8 +8736,10 @@ require!('./dep.cjs');
             .filter(|load| matches!(load.kind, LoadKind::Require | LoadKind::RequireResolve))
             .collect();
         assert_eq!(requests.len(), 2);
-        assert_eq!(requests.iter().map(|load| load.kind).collect::<Vec<_>>(),
-            [LoadKind::Require, LoadKind::RequireResolve]);
+        assert_eq!(
+            requests.iter().map(|load| load.kind).collect::<Vec<_>>(),
+            [LoadKind::Require, LoadKind::RequireResolve]
+        );
         assert!(requests.iter().all(|load| load.specifier.is_none()));
 
         let mut source = String::from(
@@ -8457,10 +8813,12 @@ require!('./dep.cjs');
                     ModuleKind::EsModule
                 })
             },
-            |specifier, _| Ok(match specifier {
-                "module" | "node:module" => Some("node:module"),
-                _ => None,
-            }),
+            |specifier, _| {
+                Ok(match specifier {
+                    "module" | "node:module" => Some("node:module"),
+                    _ => None,
+                })
+            },
         )
         .unwrap();
         let entry = registry

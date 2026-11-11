@@ -9,9 +9,9 @@
 //! process evidence, not proof of engine-level clean completion or release certification.
 
 use super::{
-    CapturedInputs, DRAIN_TIMEOUT, ExecutionControl, Invocation, LEG_TIMEOUT, RunObservation, RuntimeIdentity,
-    Snapshot, TOTAL_TIMEOUT, budget, matched_tests, observe, runtime_invocations, test_inventory,
-    workspace_effects,
+    CapturedInputs, DRAIN_TIMEOUT, ExecutionControl, Invocation, LEG_TIMEOUT, RunObservation,
+    RuntimeIdentity, Snapshot, TOTAL_TIMEOUT, budget, matched_tests, observe, runtime_invocations,
+    test_inventory, workspace_effects,
 };
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
@@ -231,8 +231,13 @@ pub(super) fn run_captured(
     compare_filesystem: bool,
 ) -> Result<ProductReport> {
     run_captured_cancellable(
-        projects, snapshots, native_executable, bun_executable,
-        deadline, compare_filesystem, None,
+        projects,
+        snapshots,
+        native_executable,
+        bun_executable,
+        deadline,
+        compare_filesystem,
+        None,
     )
 }
 
@@ -329,8 +334,8 @@ fn measure(
             .context("initial workspace observation failed")?;
         budget(deadline)?;
         let timeout = leg_timeout.min(deadline.saturating_duration_since(Instant::now()));
-        let (output, check_error) = test_inventory::retain_completed_output(
-            test_inventory::run_test_guarded(
+        let (output, check_error) =
+            test_inventory::retain_completed_output(test_inventory::run_test_guarded(
                 snapshot,
                 invocation,
                 test,
@@ -339,9 +344,8 @@ fn measure(
                 (timeout, DRAIN_TIMEOUT),
                 cancellation,
                 control,
-            ),
-        )
-        .context("execution failed")?;
+            ))
+            .context("execution failed")?;
         // Keep completed evidence even when assertions or later collection
         // fail. The check remains a blocking error, never a passing observation.
         leg.observation = Some(observe(&output));
@@ -462,7 +466,13 @@ pub(super) fn execute(
     filesystem: bool,
 ) -> Result<ProductReport> {
     execute_cancellable(
-        original, candidate, runtimes, identities, (deadline, leg_timeout), filesystem, None,
+        original,
+        candidate,
+        runtimes,
+        identities,
+        (deadline, leg_timeout),
+        filesystem,
+        None,
     )
 }
 
@@ -587,7 +597,9 @@ fn execute_cancellable(
         report.errors.push(error.to_string());
     }
     if let Err(error) = control.enforce() {
-        report.errors.push(format!("execution control recheck failed: {error:#}"));
+        report
+            .errors
+            .push(format!("execution control recheck failed: {error:#}"));
     }
     report.verdict = if report.errored > 0 || report.skipped > 0 || !report.errors.is_empty() {
         "ERROR"
@@ -657,12 +669,21 @@ mod tests {
         // Actual Node processes in all three roles test process orchestration,
         // not independent Bun/Franken compatibility or engine completion.
         let root = tempfile::tempdir().unwrap();
-        write(root.path(), ".franken-node/migration-tests.json", &serde_json::json!({
-            "schema_version": "franken-node/migration-tests/v1",
-            "tests": ["case.test.js"],
-            "expectations": {"case.test.js": {"exit_code": 7}}
-        }).to_string());
-        write(root.path(), "case.test.js", "console.error('usage'); process.exit(7);");
+        write(
+            root.path(),
+            ".franken-node/migration-tests.json",
+            &serde_json::json!({
+                "schema_version": "franken-node/migration-tests/v1",
+                "tests": ["case.test.js"],
+                "expectations": {"case.test.js": {"exit_code": 7}}
+            })
+            .to_string(),
+        );
+        write(
+            root.path(),
+            "case.test.js",
+            "console.error('usage'); process.exit(7);",
+        );
         let report = measured(root.path(), None, true);
         assert_eq!(report.verdict, "PASS", "{report:#?}");
         let row = &report.cases[0];
@@ -671,12 +692,16 @@ mod tests {
             assert_eq!(observed.as_ref().unwrap().exit_code, Some(7));
             assert_eq!(observed.as_ref().unwrap().signal, None);
         }
-        for (role, verdict, native_divergences, reference_failures) in [
-            ("native", "FAIL", 1, 0), ("bun", "INCONCLUSIVE", 0, 1),
-        ] {
-            write(root.path(), "case.test.js", &format!(
-                "console.error('usage'); process.exit(process.argv[2] === '{role}' ? 8 : 7);"
-            ));
+        for (role, verdict, native_divergences, reference_failures) in
+            [("native", "FAIL", 1, 0), ("bun", "INCONCLUSIVE", 0, 1)]
+        {
+            write(
+                root.path(),
+                "case.test.js",
+                &format!(
+                    "console.error('usage'); process.exit(process.argv[2] === '{role}' ? 8 : 7);"
+                ),
+            );
             let report = measured(root.path(), None, true);
             assert_eq!(report.verdict, verdict, "{report:#?}");
             assert_eq!(report.native_divergences, native_divergences);
@@ -685,27 +710,44 @@ mod tests {
     }
 
     fn concurrent_manifest(root: &Path, tests: &[&str], limit: usize) {
-        write(root, ".franken-node/migration-tests.json", &serde_json::json!({
-            "schema_version": "franken-node/migration-tests/v1",
-            "tests": tests,
-            "max_concurrent_tests": limit,
-        }).to_string());
+        write(
+            root,
+            ".franken-node/migration-tests.json",
+            &serde_json::json!({
+                "schema_version": "franken-node/migration-tests/v1",
+                "tests": tests,
+                "max_concurrent_tests": limit,
+            })
+            .to_string(),
+        );
     }
 
     #[test]
     fn precancelled_product_request_never_discovers_or_launches_runtimes() {
         let root = tempfile::tempdir().unwrap();
-        write(root.path(), "case.test.js", "throw new Error('must not run');");
+        write(
+            root.path(),
+            "case.test.js",
+            "throw new Error('must not run');",
+        );
         let deadline = Instant::now() + Duration::from_secs(30);
         let inputs = CapturedInputs::capture(root.path(), None, deadline).unwrap();
         let cancellation = CancellationToken::default();
         cancellation.cancel();
         let error = run_captured_cancellable(
-            [root.path(), root.path()], [&inputs.reference, &inputs.reference],
-            Path::new("/missing-native"), Path::new("/missing-bun"), deadline,
-            true, Some(&cancellation),
-        ).unwrap_err();
-        assert!(error.to_string().contains("MIGRATION_CANCELLED"), "{error:#}");
+            [root.path(), root.path()],
+            [&inputs.reference, &inputs.reference],
+            Path::new("/missing-native"),
+            Path::new("/missing-bun"),
+            deadline,
+            true,
+            Some(&cancellation),
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("MIGRATION_CANCELLED"),
+            "{error:#}"
+        );
     }
 
     #[test]
@@ -716,54 +758,94 @@ mod tests {
             let external = tempfile::tempdir().unwrap();
             let ready = external.path();
             let later = external.path().join("later");
-            let source = format!(r#"
+            let source = format!(
+                r#"
 if (process.argv[2] === 'bun') {{
     require('fs').writeFileSync({} + '/' + require('path').basename(__filename), 'ready');
     setInterval(() => {{}}, 1000);
 }} else console.log(42);
-"#, serde_json::to_string(&ready).unwrap());
+"#,
+                serde_json::to_string(&ready).unwrap()
+            );
             write(root.path(), "a.test.js", &source);
             write(root.path(), "b.test.js", &source);
-            write(root.path(), "c.test.js", &format!("require('fs').writeFileSync({}, 'ran');",
-                serde_json::to_string(&later).unwrap()));
-            concurrent_manifest(root.path(), &["a.test.js", "b.test.js", "c.test.js"], concurrency);
+            write(
+                root.path(),
+                "c.test.js",
+                &format!(
+                    "require('fs').writeFileSync({}, 'ran');",
+                    serde_json::to_string(&later).unwrap()
+                ),
+            );
+            concurrent_manifest(
+                root.path(),
+                &["a.test.js", "b.test.js", "c.test.js"],
+                concurrency,
+            );
             let deadline = Instant::now() + Duration::from_secs(60);
             let inputs = CapturedInputs::capture(root.path(), None, deadline).unwrap();
             let node = invocation("node");
             let bun = invocation("bun");
             let native = invocation("native");
-            let identities = [node.identity(deadline).unwrap(), bun.identity(deadline).unwrap(),
-                native.identity(deadline).unwrap()];
+            let identities = [
+                node.identity(deadline).unwrap(),
+                bun.identity(deadline).unwrap(),
+                native.identity(deadline).unwrap(),
+            ];
             let cancellation = CancellationToken::default();
             let report = std::thread::scope(|scope| {
                 let cancel = &cancellation;
                 let ready = &ready;
                 let trigger = scope.spawn(move || {
                     let end = Instant::now() + Duration::from_secs(15);
-                    let reached = || ready.join("a.test.js").exists()
-                        && (concurrency == 1 || ready.join("b.test.js").exists());
+                    let reached = || {
+                        ready.join("a.test.js").exists()
+                            && (concurrency == 1 || ready.join("b.test.js").exists())
+                    };
                     while !reached() && Instant::now() < end {
                         std::thread::sleep(Duration::from_millis(5));
                     }
                     let observed = reached();
                     cancel.cancel();
-                    assert!(observed, "reference guest never reached its cancellation barrier");
+                    assert!(
+                        observed,
+                        "reference guest never reached its cancellation barrier"
+                    );
                 });
-                let report = execute_cancellable(&inputs.reference, &inputs.reference,
-                    [&node, &bun, &native], identities, (deadline, Duration::from_secs(20)),
-                    true, Some(&cancellation)).unwrap();
+                let report = execute_cancellable(
+                    &inputs.reference,
+                    &inputs.reference,
+                    [&node, &bun, &native],
+                    identities,
+                    (deadline, Duration::from_secs(20)),
+                    true,
+                    Some(&cancellation),
+                )
+                .unwrap();
                 trigger.join().unwrap();
                 report
             });
             assert_eq!(report.verdict, "ERROR", "{report:#?}");
             assert!(report.skipped > 0);
             assert_eq!(report.native_divergences, 0);
-            assert!(report.errors.iter().any(|error| error.contains("MIGRATION_CANCELLED")));
+            assert!(
+                report
+                    .errors
+                    .iter()
+                    .any(|error| error.contains("MIGRATION_CANCELLED"))
+            );
             assert!(report.cases[0].node.is_some());
             assert!(report.cases.iter().all(|row| row.native.is_none()));
             assert!(!later.exists(), "a later test launched after cancellation");
-            assert!(report.check_admission(&report.input_sha256, &report.candidate_input_sha256,
-                &test_inventory::expected_exit_codes(&inputs.reference).unwrap()).is_err());
+            assert!(
+                report
+                    .check_admission(
+                        &report.input_sha256,
+                        &report.candidate_input_sha256,
+                        &test_inventory::expected_exit_codes(&inputs.reference).unwrap()
+                    )
+                    .is_err()
+            );
         }
     }
 
@@ -776,7 +858,11 @@ if (process.argv[2] === 'bun') {{
         let log = outside.path().join("runs");
         write(root.path(), "dependency", "captured");
         for name in ["a", "b"] {
-            write(root.path(), &format!("{name}.test.js"), &format!(r#"
+            write(
+                root.path(),
+                &format!("{name}.test.js"),
+                &format!(
+                    r#"
 const fs = require('fs');
 const role = process.argv[2];
 const marker = {} + '/' + role;
@@ -793,7 +879,11 @@ const marker = {} + '/' + role;
     fs.appendFileSync({}, '{name}:' + role + '\n');
     process.stdout.write(value);
 }})().catch(error => {{ console.error(error.message); process.exitCode = 1; }});
-"#, serde_json::to_string(outside.path()).unwrap(), serde_json::to_string(&log).unwrap()));
+"#,
+                    serde_json::to_string(outside.path()).unwrap(),
+                    serde_json::to_string(&log).unwrap()
+                ),
+            );
         }
         concurrent_manifest(root.path(), &["a.test.js", "b.test.js"], 2);
         let deadline = Instant::now() + Duration::from_secs(120);
@@ -803,40 +893,82 @@ const marker = {} + '/' + role;
         let report = measured_inputs(&inputs, true, deadline, Duration::from_secs(8));
         assert_eq!(report.verdict, "PASS", "{report:#?}");
         assert_eq!((report.passed, report.errored, report.skipped), (2, 0, 0));
-        assert_eq!(report.cases.iter().map(|row| row.test.as_str()).collect::<Vec<_>>(),
-            ["a.test.js", "b.test.js"]);
+        assert_eq!(
+            report
+                .cases
+                .iter()
+                .map(|row| row.test.as_str())
+                .collect::<Vec<_>>(),
+            ["a.test.js", "b.test.js"]
+        );
         let runs = fs::read_to_string(log).unwrap();
         assert_eq!(runs.lines().count(), 6);
         for name in ["a", "b"] {
-            assert_eq!(runs.lines().filter(|line| line.starts_with(name)).collect::<Vec<_>>(),
-                [format!("{name}:node"), format!("{name}:bun"), format!("{name}:native")]);
+            assert_eq!(
+                runs.lines()
+                    .filter(|line| line.starts_with(name))
+                    .collect::<Vec<_>>(),
+                [
+                    format!("{name}:node"),
+                    format!("{name}:bun"),
+                    format!("{name}:native")
+                ]
+            );
         }
         for row in &report.cases {
             assert_eq!(row.node, row.bun);
             assert_eq!(row.node, row.native);
             assert_eq!(row.node.as_ref().unwrap().stdout.bytes, 8);
         }
-        assert_eq!(fs::read(root.path().join("dependency")).unwrap(), b"later source");
+        assert_eq!(
+            fs::read(root.path().join("dependency")).unwrap(),
+            b"later source"
+        );
         assert!(!root.path().join("artifact").exists());
     }
 
     #[test]
     fn concurrent_failures_keep_all_reference_native_and_error_classifications() {
         let root = tempfile::tempdir().unwrap();
-        write(root.path(), "a.test.js", "console.log(process.argv.includes('native')?'bad':'ok');");
-        write(root.path(), "b.test.js", "console.log(process.argv.includes('bun')?'bad':'ok');");
-        write(root.path(), "c.test.js", "console.log('not the expected bytes');");
+        write(
+            root.path(),
+            "a.test.js",
+            "console.log(process.argv.includes('native')?'bad':'ok');",
+        );
+        write(
+            root.path(),
+            "b.test.js",
+            "console.log(process.argv.includes('bun')?'bad':'ok');",
+        );
+        write(
+            root.path(),
+            "c.test.js",
+            "console.log('not the expected bytes');",
+        );
         write(root.path(), "expected.txt", "ok\n");
-        write(root.path(), ".franken-node/migration-tests.json", &serde_json::json!({
-            "schema_version": "franken-node/migration-tests/v1",
-            "tests": ["a.test.js", "b.test.js", "c.test.js"],
-            "max_concurrent_tests": 3,
-            "expectations": {"c.test.js": {"stdout": "expected.txt"}},
-        }).to_string());
+        write(
+            root.path(),
+            ".franken-node/migration-tests.json",
+            &serde_json::json!({
+                "schema_version": "franken-node/migration-tests/v1",
+                "tests": ["a.test.js", "b.test.js", "c.test.js"],
+                "max_concurrent_tests": 3,
+                "expectations": {"c.test.js": {"stdout": "expected.txt"}},
+            })
+            .to_string(),
+        );
         let report = measured(root.path(), None, true);
         assert_eq!(report.verdict, "ERROR", "{report:#?}");
-        assert_eq!((report.passed, report.native_divergences, report.reference_divergences,
-            report.errored, report.skipped), (0, 1, 1, 1, 0));
+        assert_eq!(
+            (
+                report.passed,
+                report.native_divergences,
+                report.reference_divergences,
+                report.errored,
+                report.skipped
+            ),
+            (0, 1, 1, 1, 0)
+        );
         assert_eq!(report.cases[0].outcome, CaseOutcome::NativeDivergence);
         assert_eq!(report.cases[1].outcome, CaseOutcome::ReferenceDivergence);
         assert_eq!(report.cases[2].outcome, CaseOutcome::Error);
@@ -846,9 +978,18 @@ const marker = {} + '/' + role;
         // Completed output is diagnostic evidence, not a successful assertion.
         // Each role retains its check error without claiming it never executed.
         assert_eq!(report.cases[2].errors.len(), 3);
-        assert!(report.cases[2].errors.iter().all(|error|
-            error.contains("test checks failed") && !error.contains("incomplete observation")));
-        for observation in [&report.cases[2].node, &report.cases[2].bun, &report.cases[2].native] {
+        assert!(
+            report.cases[2]
+                .errors
+                .iter()
+                .all(|error| error.contains("test checks failed")
+                    && !error.contains("incomplete observation"))
+        );
+        for observation in [
+            &report.cases[2].node,
+            &report.cases[2].bun,
+            &report.cases[2].native,
+        ] {
             let observation = observation.as_ref().unwrap();
             assert_eq!(observation.exit_code, Some(0));
             assert!(observation.workspace_delta.is_some());
@@ -858,8 +999,11 @@ const marker = {} + '/' + role;
     #[test]
     fn a_concurrent_timeout_keeps_peer_cases_and_other_runtime_observations() {
         let root = tempfile::tempdir().unwrap();
-        write(root.path(), "a.test.js",
-            "if(process.argv.includes('bun'))setInterval(()=>{},1000);else console.log(42);");
+        write(
+            root.path(),
+            "a.test.js",
+            "if(process.argv.includes('bun'))setInterval(()=>{},1000);else console.log(42);",
+        );
         write(root.path(), "b.test.js", "console.log(42);");
         concurrent_manifest(root.path(), &["a.test.js", "b.test.js"], 2);
         let deadline = Instant::now() + Duration::from_secs(120);
@@ -879,8 +1023,11 @@ const marker = {} + '/' + role;
         fs::create_dir(root.path().join("nested")).unwrap();
         fs::write(root.path().join("request.bin"), [0, 255, 1, 10]).unwrap();
         for name in ["a", "b", "c"] {
-            write(root.path(), &format!("{name}.test.js"),
-                "const fs=require('fs');const b=fs.readFileSync(0);fs.writeFileSync('result.bin',b);process.stdout.write(b);");
+            write(
+                root.path(),
+                &format!("{name}.test.js"),
+                "const fs=require('fs');const b=fs.readFileSync(0);fs.writeFileSync('result.bin',b);process.stdout.write(b);",
+            );
         }
         let mut manifest = serde_json::json!({
             "schema_version": "franken-node/migration-tests/v1",
@@ -896,16 +1043,27 @@ const marker = {} + '/' + role;
                 "stdout": "request.bin", "files": {"nested/result.bin": "request.bin"},
             });
         }
-        write(root.path(), ".franken-node/migration-tests.json", &manifest.to_string());
+        write(
+            root.path(),
+            ".franken-node/migration-tests.json",
+            &manifest.to_string(),
+        );
         let serial = measured(root.path(), None, true);
         manifest["max_concurrent_tests"] = 3.into();
-        write(root.path(), ".franken-node/migration-tests.json", &manifest.to_string());
+        write(
+            root.path(),
+            ".franken-node/migration-tests.json",
+            &manifest.to_string(),
+        );
         let parallel = measured(root.path(), None, true);
         assert_eq!(serial.verdict, "PASS", "{serial:#?}");
         assert_eq!(parallel.verdict, "PASS", "{parallel:#?}");
         assert_eq!(serial.cases, parallel.cases);
         assert_ne!(serial.input_sha256, parallel.input_sha256);
-        assert_eq!(fs::read(root.path().join("request.bin")).unwrap(), [0, 255, 1, 10]);
+        assert_eq!(
+            fs::read(root.path().join("request.bin")).unwrap(),
+            [0, 255, 1, 10]
+        );
         assert!(!root.path().join("nested/result.bin").exists());
     }
 

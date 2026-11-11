@@ -67,15 +67,24 @@ fn change_path(value: &str) -> Result<&Path> {
             && value.len() <= super::MAX_PATH_BYTES
             && !value.contains(['\\', '\0'])
             && !value.chars().any(char::is_control)
-            && path.components().all(|part| matches!(part, Component::Normal(_)))
-            && path.components().map(|part| part.as_os_str().to_string_lossy())
-                .collect::<Vec<_>>().join("/") == value,
+            && path
+                .components()
+                .all(|part| matches!(part, Component::Normal(_)))
+            && path
+                .components()
+                .map(|part| part.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/")
+                == value,
         "checked rewrite requires canonical relative replacement paths"
     );
     ensure!(
         !path.components().any(|part| part.as_os_str() == ".git")
             && ![".migrate-backup", ".franken-node", ".franken-rewrite"]
-                .iter().any(|reserved| path.components().next()
+                .iter()
+                .any(|reserved| path
+                    .components()
+                    .next()
                     .is_some_and(|part| part.as_os_str() == *reserved)),
         "checked rewrite cannot replace reserved metadata"
     );
@@ -145,10 +154,14 @@ impl RewriteCandidate {
         self.candidate_project = None;
         ensure!(
             expected_sha256.len() == 64
-                && expected_sha256.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+                && expected_sha256
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
             "candidate approval must be 64 lowercase hexadecimal characters"
         );
-        let project = project.canonicalize().context("resolve proposed migration")?;
+        let project = project
+            .canonicalize()
+            .context("resolve proposed migration")?;
         ensure!(
             project != self.project
                 && !project.starts_with(&self.project)
@@ -156,40 +169,72 @@ impl RewriteCandidate {
             "original and proposed migration must be separate, non-nested directories"
         );
         let proposed = Snapshot::capture(&project, self.deadline)?;
-        ensure!(proposed.digest == expected_sha256, "proposed migration does not match reviewed candidate hash");
         ensure!(
-            self.original.entries.keys().all(|path| proposed.entries.contains_key(path)),
+            proposed.digest == expected_sha256,
+            "proposed migration does not match reviewed candidate hash"
+        );
+        ensure!(
+            self.original
+                .entries
+                .keys()
+                .all(|path| proposed.entries.contains_key(path)),
             "migration installation cannot remove or rename original entries"
         );
         let mut owned = Vec::new();
         for (path, before) in &self.original.entries {
             budget(self.deadline)?;
             let after = &proposed.entries[path];
-            ensure!(before.mode == after.mode, "migration installation cannot change entry modes: {}", path.display());
+            ensure!(
+                before.mode == after.mode,
+                "migration installation cannot change entry modes: {}",
+                path.display()
+            );
             match (&before.data, &after.data) {
                 (EntryData::File(before), EntryData::File(after)) => {
                     if before != after {
-                        owned.push((path.to_str().context("migration path is not UTF-8")?.to_owned(),
-                            before.clone(), after.as_slice()));
+                        owned.push((
+                            path.to_str()
+                                .context("migration path is not UTF-8")?
+                                .to_owned(),
+                            before.clone(),
+                            after.as_slice(),
+                        ));
                     }
                 }
                 (EntryData::Directory, EntryData::Directory) => {}
                 (EntryData::Link(before), EntryData::Link(after)) if before == after => {}
-                _ => anyhow::bail!("migration installation cannot change entry kinds or links: {}", path.display()),
+                _ => anyhow::bail!(
+                    "migration installation cannot change entry kinds or links: {}",
+                    path.display()
+                ),
             }
         }
-        let replacements: Vec<_> = owned.iter().map(|(path, before, after)| Replacement {
-            path, before, after,
-        }).collect();
+        let replacements: Vec<_> = owned
+            .iter()
+            .map(|(path, before, after)| Replacement {
+                path,
+                before,
+                after,
+            })
+            .collect();
         let mut additions = Vec::new();
         let mut directories = Vec::new();
         for (path, entry) in &proposed.entries {
             if !self.original.entries.contains_key(path) {
                 let path = path.to_str().context("migration path is not UTF-8")?;
                 match &entry.data {
-                    EntryData::File(after) => additions.push(Addition { path, after, mode: entry.mode }),
-                    EntryData::Directory => directories.push(DirectoryAddition { path, mode: entry.mode }),
-                    EntryData::Link(_) => anyhow::bail!("migration additions cannot introduce links: {path}"),
+                    EntryData::File(after) => additions.push(Addition {
+                        path,
+                        after,
+                        mode: entry.mode,
+                    }),
+                    EntryData::Directory => directories.push(DirectoryAddition {
+                        path,
+                        mode: entry.mode,
+                    }),
+                    EntryData::Link(_) => {
+                        anyhow::bail!("migration additions cannot introduce links: {path}")
+                    }
                 }
             }
         }
@@ -199,8 +244,12 @@ impl RewriteCandidate {
             anyhow::bail!("prepared migration differs from the complete reviewed candidate");
         }
         self.candidate_project = Some(project);
-        self.candidate.as_mut().expect("candidate was prepared").origin =
-            Some(super::Origin::Project(self.candidate_project.as_ref().unwrap().clone()));
+        self.candidate
+            .as_mut()
+            .expect("candidate was prepared")
+            .origin = Some(super::Origin::Project(
+            self.candidate_project.as_ref().unwrap().clone(),
+        ));
         Ok(())
     }
 
@@ -211,10 +260,15 @@ impl RewriteCandidate {
     /// Reject edits to an external proposal made while its captured version ran.
     /// This is a freshness check, never replacement of already measured bytes.
     pub fn ensure_candidate_source_unchanged(&self) -> Result<()> {
-        let candidate = self.candidate.as_ref().context("checked rewrite candidate is not prepared")?;
+        let candidate = self
+            .candidate
+            .as_ref()
+            .context("checked rewrite candidate is not prepared")?;
         if let Some(project) = &self.candidate_project {
-            ensure!(Snapshot::capture(project, self.deadline)?.digest == candidate.digest,
-                "proposed migration changed during validation; refusing installation");
+            ensure!(
+                Snapshot::capture(project, self.deadline)?.digest == candidate.digest,
+                "proposed migration changed during validation; refusing installation"
+            );
         }
         Ok(())
     }
@@ -224,8 +278,10 @@ impl RewriteCandidate {
     /// Replacement-only consumers must not silently omit files or empty trees.
     pub fn replacements(&self) -> Result<Vec<Replacement<'_>>> {
         let changes = self.changes()?;
-        ensure!(changes.additions.is_empty() && changes.trees.is_empty(),
-            "candidate creates files or directory trees; consume the complete changes plan, not replacements alone");
+        ensure!(
+            changes.additions.is_empty() && changes.trees.is_empty(),
+            "candidate creates files or directory trees; consume the complete changes plan, not replacements alone"
+        );
         Ok(changes.replacements)
     }
 
@@ -239,7 +295,10 @@ impl RewriteCandidate {
 
     fn replacement_images(&self) -> Result<Vec<Replacement<'_>>> {
         budget(self.deadline)?;
-        let candidate = self.candidate.as_ref().context("checked rewrite candidate is not prepared")?;
+        let candidate = self
+            .candidate
+            .as_ref()
+            .context("checked rewrite candidate is not prepared")?;
         let mut result = Vec::new();
         for (path, before) in &self.original.entries {
             if let (EntryData::File(before), EntryData::File(after)) =
@@ -260,12 +319,16 @@ impl RewriteCandidate {
     /// from the on-disk candidate or a caller-supplied validation report.
     fn additions(&self) -> Result<Vec<Addition<'_>>> {
         budget(self.deadline)?;
-        let candidate = self.candidate.as_ref().context("checked rewrite candidate is not prepared")?;
+        let candidate = self
+            .candidate
+            .as_ref()
+            .context("checked rewrite candidate is not prepared")?;
         let mut result = Vec::new();
         for (path, entry) in &candidate.entries {
             if !self.original.entries.contains_key(path)
-                && path.parent().is_none_or(|parent| parent.as_os_str().is_empty()
-                    || self.original.entries.contains_key(parent))
+                && path.parent().is_none_or(|parent| {
+                    parent.as_os_str().is_empty() || self.original.entries.contains_key(parent)
+                })
             {
                 if matches!(&entry.data, EntryData::Directory) {
                     continue;
@@ -285,15 +348,22 @@ impl RewriteCandidate {
 
     fn trees(&self) -> Result<Vec<TreeAddition<'_>>> {
         budget(self.deadline)?;
-        let candidate = self.candidate.as_ref().context("checked rewrite candidate is not prepared")?;
-        let added: Vec<_> = candidate.entries.iter()
-            .filter(|(path, _)| !self.original.entries.contains_key(*path)).collect();
+        let candidate = self
+            .candidate
+            .as_ref()
+            .context("checked rewrite candidate is not prepared")?;
+        let added: Vec<_> = candidate
+            .entries
+            .iter()
+            .filter(|(path, _)| !self.original.entries.contains_key(*path))
+            .collect();
         let mut trees = Vec::new();
         for (root, entry) in &added {
             budget(self.deadline)?;
             if !matches!(&entry.data, EntryData::Directory)
-                || root.parent().is_some_and(|parent| !parent.as_os_str().is_empty()
-                    && !self.original.entries.contains_key(parent))
+                || root.parent().is_some_and(|parent| {
+                    !parent.as_os_str().is_empty() && !self.original.entries.contains_key(parent)
+                })
             {
                 continue;
             }
@@ -308,7 +378,10 @@ impl RewriteCandidate {
                     EntryData::Link(_) => anyhow::bail!("prepared tree contains a link"),
                 };
                 entries.push(TreeEntry {
-                    path: path.strip_prefix(root)?.to_str().context("tree path is not UTF-8")?,
+                    path: path
+                        .strip_prefix(root)?
+                        .to_str()
+                        .context("tree path is not UTF-8")?,
                     contents,
                     mode: entry.mode,
                 });
@@ -330,19 +403,27 @@ impl RewriteCandidate {
         self.prepare_changes(replacements, &[])
     }
 
-    fn prepare_changes(&mut self, replacements: &[Replacement<'_>], additions: &[Addition<'_>]) -> Result<()> {
+    fn prepare_changes(
+        &mut self,
+        replacements: &[Replacement<'_>],
+        additions: &[Addition<'_>],
+    ) -> Result<()> {
         self.prepare_changes_with_directories(replacements, additions, &[])
     }
 
     fn prepare_changes_with_directories(
-        &mut self, replacements: &[Replacement<'_>], additions: &[Addition<'_>],
+        &mut self,
+        replacements: &[Replacement<'_>],
+        additions: &[Addition<'_>],
         directories: &[DirectoryAddition<'_>],
     ) -> Result<()> {
         // A failed second preparation cannot leave an earlier candidate usable.
         self.candidate = None;
         self.candidate_project = None;
         ensure!(
-            replacements.len().checked_add(additions.len())
+            replacements
+                .len()
+                .checked_add(additions.len())
                 .and_then(|count| count.checked_add(directories.len()))
                 .is_some_and(|count| count <= 1_000),
             "checked rewrite replacement count exceeded"
@@ -353,10 +434,18 @@ impl RewriteCandidate {
         for directory in directories {
             budget(self.deadline)?;
             let path = change_path(directory.path)?;
-            ensure!(seen.insert(directory.path), "duplicate checked rewrite target");
-            ensure!(!self.original.entries.contains_key(path), "directory addition replaces an original entry");
-            ensure!(directory.mode <= 0o777 && directory.mode & 0o500 == 0o500,
-                "new directories require ordinary owner-readable and searchable permissions");
+            ensure!(
+                seen.insert(directory.path),
+                "duplicate checked rewrite target"
+            );
+            ensure!(
+                !self.original.entries.contains_key(path),
+                "directory addition replaces an original entry"
+            );
+            ensure!(
+                directory.mode <= 0o777 && directory.mode & 0o500 == 0o500,
+                "new directories require ordinary owner-readable and searchable permissions"
+            );
             directory_modes.insert(directory.path, directory.mode);
         }
         for edit in replacements {
@@ -390,22 +479,45 @@ impl RewriteCandidate {
         for addition in additions {
             budget(self.deadline)?;
             let path = change_path(addition.path)?;
-            ensure!(seen.insert(addition.path), "duplicate checked rewrite target");
-            ensure!(!self.original.entries.contains_key(path), "addition replaces an original entry");
-            ensure!(addition.mode <= 0o777 && addition.mode & 0o400 != 0,
-                "new files require ordinary owner-readable permissions");
-            total = total.checked_add(addition.after.len()).context("checked rewrite byte count overflow")?;
-            ensure!(total <= super::MAX_PROJECT_BYTES && addition.after.len() <= 10 * 1024 * 1024,
-                "checked rewrite addition byte limit exceeded");
+            ensure!(
+                seen.insert(addition.path),
+                "duplicate checked rewrite target"
+            );
+            ensure!(
+                !self.original.entries.contains_key(path),
+                "addition replaces an original entry"
+            );
+            ensure!(
+                addition.mode <= 0o777 && addition.mode & 0o400 != 0,
+                "new files require ordinary owner-readable permissions"
+            );
+            total = total
+                .checked_add(addition.after.len())
+                .context("checked rewrite byte count overflow")?;
+            ensure!(
+                total <= super::MAX_PROJECT_BYTES && addition.after.len() <= 10 * 1024 * 1024,
+                "checked rewrite addition byte limit exceeded"
+            );
         }
-        for path in additions.iter().map(|entry| entry.path)
+        for path in additions
+            .iter()
+            .map(|entry| entry.path)
             .chain(directories.iter().map(|entry| entry.path))
         {
-            for parent in Path::new(path).ancestors().skip(1).filter(|parent| !parent.as_os_str().is_empty()) {
-                ensure!(self.original.entries.get(parent)
-                    .is_some_and(|entry| matches!(&entry.data, EntryData::Directory))
-                    || directory_modes.contains_key(parent.to_str().context("new parent is not UTF-8")?),
-                    "new entry parents must be existing captured or explicitly added directories");
+            for parent in Path::new(path)
+                .ancestors()
+                .skip(1)
+                .filter(|parent| !parent.as_os_str().is_empty())
+            {
+                ensure!(
+                    self.original
+                        .entries
+                        .get(parent)
+                        .is_some_and(|entry| matches!(&entry.data, EntryData::Directory))
+                        || directory_modes
+                            .contains_key(parent.to_str().context("new parent is not UTF-8")?),
+                    "new entry parents must be existing captured or explicitly added directories"
+                );
             }
         }
         // Preserve each source file's mode inside an owner-only parent. The
@@ -445,8 +557,12 @@ impl RewriteCandidate {
                 target.parent().context("addition parent missing")?,
             )?;
             staged.write_all(addition.after)?;
-            staged.as_file().set_permissions(fs::Permissions::from_mode(addition.mode))?;
-            staged.persist_noclobber(&target).map_err(|error| error.error)?;
+            staged
+                .as_file()
+                .set_permissions(fs::Permissions::from_mode(addition.mode))?;
+            staged
+                .persist_noclobber(&target)
+                .map_err(|error| error.error)?;
         }
         for (path, mode) in directory_modes.iter().rev() {
             budget(self.deadline)?;
@@ -463,7 +579,10 @@ impl RewriteCandidate {
     /// writer and again at its final boundary. Inspection remains read-only.
     pub fn ensure_execution_allowed(&self) -> Result<()> {
         budget(self.deadline)?;
-        let candidate = self.candidate.as_ref().context("checked rewrite candidate is not prepared")?;
+        let candidate = self
+            .candidate
+            .as_ref()
+            .context("checked rewrite candidate is not prepared")?;
         super::ExecutionControl::admit(&[&self.original, candidate])?.enforce()
     }
 
@@ -610,7 +729,10 @@ impl RewriteCandidate {
         cancellation: &product_oracle::CancellationToken,
     ) -> Result<ProductReport> {
         self.validate_product_controlled(
-            native_executable, bun_executable, || Ok(None), Some(cancellation),
+            native_executable,
+            bun_executable,
+            || Ok(None),
+            Some(cancellation),
         )
     }
 
@@ -763,20 +885,30 @@ mod tests {
     fn checked_error_path_rewrite_binds_expected_exit_to_the_captured_manifest() {
         // Live Node/Node execution checks the installation boundary only.
         let root = project();
-        fs::write(root.path().join("case.test.js"), "console.log(42); process.exit(7);").unwrap();
+        fs::write(
+            root.path().join("case.test.js"),
+            "console.log(42); process.exit(7);",
+        )
+        .unwrap();
         fs::create_dir(root.path().join(".franken-node")).unwrap();
-        fs::write(root.path().join(".franken-node/migration-tests.json"),
+        fs::write(
+            root.path().join(".franken-node/migration-tests.json"),
             serde_json::json!({
                 "schema_version": "franken-node/migration-tests/v1",
                 "tests": ["case.test.js"],
                 "expectations": {"case.test.js": {"exit_code": 7}}
-            }).to_string()).unwrap();
+            })
+            .to_string(),
+        )
+        .unwrap();
         let mut candidate = capture(root.path());
-        candidate.prepare(&[Replacement {
-            path: "case.test.js",
-            before: b"console.log(42); process.exit(7);",
-            after: b"console.log(6*7); process.exit(3+4);",
-        }]).unwrap();
+        candidate
+            .prepare(&[Replacement {
+                path: "case.test.js",
+                before: b"console.log(42); process.exit(7);",
+                after: b"console.log(6*7); process.exit(3+4);",
+            }])
+            .unwrap();
         let report = candidate.validate_node_pair().unwrap();
         assert_eq!(report.verdict, "PASS", "{report:#?}");
         candidate.check_validation(&report).unwrap();
@@ -1383,12 +1515,14 @@ mod reviewed_directory_tests {
             fs::create_dir(path).unwrap();
             fs::write(path.join("case.test.cjs"), "console.log(40 + 2);\n").unwrap();
             fs::write(path.join("config.json"), "{}\n").unwrap();
-            fs::set_permissions(path.join("config.json"), fs::Permissions::from_mode(0o644)).unwrap();
+            fs::set_permissions(path.join("config.json"), fs::Permissions::from_mode(0o644))
+                .unwrap();
         }
         (root, original, proposed)
     }
     fn capture(path: &Path) -> RewriteCandidate {
-        RewriteCandidate::capture(path, Instant::now() + std::time::Duration::from_secs(30)).unwrap()
+        RewriteCandidate::capture(path, Instant::now() + std::time::Duration::from_secs(30))
+            .unwrap()
     }
     fn pin(path: &Path) -> String {
         capture(path).input_sha256().into()
@@ -1405,7 +1539,10 @@ mod reviewed_directory_tests {
         assert_eq!(edits[0].path, "case.test.cjs");
         assert_eq!(edits[0].before, b"console.log(40 + 2);\n");
         assert_eq!(edits[0].after, b"console.log(42);\n");
-        assert_eq!(fs::read(original.join("case.test.cjs")).unwrap(), edits[0].before);
+        assert_eq!(
+            fs::read(original.join("case.test.cjs")).unwrap(),
+            edits[0].before
+        );
         fs::write(proposed.join("case.test.cjs"), "process.exit(99);").unwrap();
         assert_eq!(plan.replacements().unwrap()[0].after, b"console.log(42);\n");
         assert!(plan.ensure_candidate_source_unchanged().is_err());
@@ -1428,7 +1565,11 @@ mod reviewed_directory_tests {
         symlink(&original, &alias).unwrap();
         let mut plan = capture(&original);
         let expected = pin(&proposed);
-        for (path, bad_pin) in [(&proposed, "bad".to_owned()), (&proposed, "0".repeat(64)), (&alias, expected.clone())] {
+        for (path, bad_pin) in [
+            (&proposed, "bad".to_owned()),
+            (&proposed, "0".repeat(64)),
+            (&alias, expected.clone()),
+        ] {
             plan.prepare_project(&proposed, &expected).unwrap();
             assert!(plan.prepare_project(path, &bad_pin).is_err());
             assert!(plan.replacements().is_err());
@@ -1445,8 +1586,15 @@ mod reviewed_directory_tests {
                     fs::rename(proposed.join("config.json"), proposed.join("saved.json")).unwrap();
                     fs::create_dir(proposed.join("config.json")).unwrap();
                 }
-                1 => { fs::rename(proposed.join("config.json"), proposed.join("renamed.json")).unwrap(); }
-                2 => fs::set_permissions(proposed.join("config.json"), fs::Permissions::from_mode(0o600)).unwrap(),
+                1 => {
+                    fs::rename(proposed.join("config.json"), proposed.join("renamed.json"))
+                        .unwrap();
+                }
+                2 => fs::set_permissions(
+                    proposed.join("config.json"),
+                    fs::Permissions::from_mode(0o600),
+                )
+                .unwrap(),
                 3 => {
                     fs::rename(proposed.join("config.json"), proposed.join("saved.json")).unwrap();
                     symlink("saved.json", proposed.join("config.json")).unwrap();
@@ -1457,9 +1605,15 @@ mod reviewed_directory_tests {
                 }
             }
             let mut plan = capture(&original);
-            assert!(plan.prepare_project(&proposed, &pin(&proposed)).is_err(), "mutation {mutation}");
+            assert!(
+                plan.prepare_project(&proposed, &pin(&proposed)).is_err(),
+                "mutation {mutation}"
+            );
             assert!(plan.replacements().is_err());
-            assert_eq!(fs::read(original.join("case.test.cjs")).unwrap(), b"console.log(40 + 2);\n");
+            assert_eq!(
+                fs::read(original.join("case.test.cjs")).unwrap(),
+                b"console.log(40 + 2);\n"
+            );
         }
     }
 
@@ -1471,10 +1625,18 @@ mod reviewed_directory_tests {
                 fs::create_dir(path.join(".franken-node")).unwrap();
                 fs::write(path.join(".franken-node/migration-tests.json"),
                     r#"{"schema_version":"franken-node/migration-tests/v1","tests":["case.test.cjs"],"expectations":{"case.test.cjs":{"stdout":"expected.txt"}}}"#).unwrap();
-                fs::write(path.join(".franken-node/authority.txt"), "original authority").unwrap();
+                fs::write(
+                    path.join(".franken-node/authority.txt"),
+                    "original authority",
+                )
+                .unwrap();
                 fs::write(path.join("expected.txt"), "42\n").unwrap();
             }
-            let target = if change_metadata { ".franken-node/authority.txt" } else { "expected.txt" };
+            let target = if change_metadata {
+                ".franken-node/authority.txt"
+            } else {
+                "expected.txt"
+            };
             fs::write(proposed.join(target), "redefined").unwrap();
             let mut plan = capture(&original);
             assert!(plan.prepare_project(&proposed, &pin(&proposed)).is_err());
@@ -1489,7 +1651,9 @@ mod reviewed_directory_tests {
         plan.prepare_project(&proposed, &pin(&proposed)).unwrap();
         let runtime = proposed.join("native-runtime");
         fs::copy("/bin/true", &runtime).unwrap();
-        let error = plan.validate_product(&runtime, Path::new("/bin/false")).unwrap_err();
+        let error = plan
+            .validate_product(&runtime, Path::new("/bin/false"))
+            .unwrap_err();
         assert!(format!("{error:#}").contains("outside both"), "{error:#}");
     }
 
@@ -1497,8 +1661,16 @@ mod reviewed_directory_tests {
     fn new_helper_executes_from_the_reviewed_capture_and_retains_its_exact_mode() {
         let (_root, original, proposed) = pair();
         fs::write(proposed.join("helper.cjs"), b"module.exports = 42;\n").unwrap();
-        fs::set_permissions(proposed.join("helper.cjs"), fs::Permissions::from_mode(0o640)).unwrap();
-        fs::write(proposed.join("case.test.cjs"), b"console.log(require('./helper.cjs'));\n").unwrap();
+        fs::set_permissions(
+            proposed.join("helper.cjs"),
+            fs::Permissions::from_mode(0o640),
+        )
+        .unwrap();
+        fs::write(
+            proposed.join("case.test.cjs"),
+            b"console.log(require('./helper.cjs'));\n",
+        )
+        .unwrap();
         let expected = pin(&proposed);
         let mut plan = capture(&original);
         plan.prepare_project(&proposed, &expected).unwrap();
@@ -1511,7 +1683,11 @@ mod reviewed_directory_tests {
         assert_eq!(plan.changes().unwrap().replacements.len(), 1);
         assert!(plan.replacements().is_err()); // No partial plan for an old consumer.
         // This explicit Node/Node path tests orchestration, not Franken parity.
-        fs::write(proposed.join("helper.cjs"), b"throw new Error('later edit');\n").unwrap();
+        fs::write(
+            proposed.join("helper.cjs"),
+            b"throw new Error('later edit');\n",
+        )
+        .unwrap();
         let report = plan.validate_node_pair().unwrap();
         assert_eq!(report.verdict, "PASS", "{report:?}");
         plan.check_validation(&report).unwrap();
@@ -1525,7 +1701,11 @@ mod reviewed_directory_tests {
     fn creation_only_and_empty_additions_are_not_empty_replacement_preimages() {
         let (_root, original, proposed) = pair();
         fs::write(proposed.join("empty.dat"), b"").unwrap();
-        fs::set_permissions(proposed.join("empty.dat"), fs::Permissions::from_mode(0o400)).unwrap();
+        fs::set_permissions(
+            proposed.join("empty.dat"),
+            fs::Permissions::from_mode(0o400),
+        )
+        .unwrap();
         let mut plan = capture(&original);
         plan.prepare_project(&proposed, &pin(&proposed)).unwrap();
         assert!(plan.changes().unwrap().replacements.is_empty());
@@ -1535,7 +1715,14 @@ mod reviewed_directory_tests {
         assert_eq!(additions[0].path, "empty.dat");
         assert!(additions[0].after.is_empty());
         assert_eq!(additions[0].mode, 0o400);
-        assert!(plan.prepare(&[Replacement { path: "empty.dat", before: b"", after: b"new" }]).is_err());
+        assert!(
+            plan.prepare(&[Replacement {
+                path: "empty.dat",
+                before: b"",
+                after: b"new"
+            }])
+            .is_err()
+        );
         assert!(plan.additions().is_err());
         assert!(!original.join("empty.dat").exists());
     }
@@ -1558,10 +1745,16 @@ mod reviewed_directory_tests {
             }
             let mut plan = capture(&original);
             plan.prepare(&[]).unwrap();
-            assert!(plan.prepare_project(&proposed, &pin(&proposed)).is_err(), "{mutation}");
+            assert!(
+                plan.prepare_project(&proposed, &pin(&proposed)).is_err(),
+                "{mutation}"
+            );
             assert!(plan.additions().is_err());
             assert!(plan.replacements().is_err());
-            assert_eq!(fs::read(original.join("case.test.cjs")).unwrap(), b"console.log(40 + 2);\n");
+            assert_eq!(
+                fs::read(original.join("case.test.cjs")).unwrap(),
+                b"console.log(40 + 2);\n"
+            );
         }
     }
 
@@ -1569,19 +1762,71 @@ mod reviewed_directory_tests {
     fn direct_addition_preparation_checks_absence_parent_paths_modes_and_limits() {
         let (_root, original, _) = pair();
         let mut plan = capture(&original);
-        for path in ["config.json", "../helper.cjs", "/helper.cjs", "a//b", ".franken-node/new", "missing/helper.cjs"] {
-            assert!(plan.prepare_changes(&[], &[Addition { path, after: b"new", mode: 0o600 }]).is_err(), "{path}");
+        for path in [
+            "config.json",
+            "../helper.cjs",
+            "/helper.cjs",
+            "a//b",
+            ".franken-node/new",
+            "missing/helper.cjs",
+        ] {
+            assert!(
+                plan.prepare_changes(
+                    &[],
+                    &[Addition {
+                        path,
+                        after: b"new",
+                        mode: 0o600
+                    }]
+                )
+                .is_err(),
+                "{path}"
+            );
             assert!(plan.additions().is_err());
         }
         for mode in [0, 0o200, 0o4644] {
-            assert!(plan.prepare_changes(&[], &[Addition { path: "helper.cjs", after: b"new", mode }]).is_err());
+            assert!(
+                plan.prepare_changes(
+                    &[],
+                    &[Addition {
+                        path: "helper.cjs",
+                        after: b"new",
+                        mode
+                    }]
+                )
+                .is_err()
+            );
         }
         let oversized = vec![0; 10 * 1024 * 1024 + 1];
-        assert!(plan.prepare_changes(&[], &[Addition { path: "helper.cjs", after: &oversized, mode: 0o600 }]).is_err());
-        assert!(plan.prepare_changes(&[], &[
-            Addition { path: "helper.cjs", after: b"one", mode: 0o600 },
-            Addition { path: "helper.cjs", after: b"two", mode: 0o600 },
-        ]).is_err());
+        assert!(
+            plan.prepare_changes(
+                &[],
+                &[Addition {
+                    path: "helper.cjs",
+                    after: &oversized,
+                    mode: 0o600
+                }]
+            )
+            .is_err()
+        );
+        assert!(
+            plan.prepare_changes(
+                &[],
+                &[
+                    Addition {
+                        path: "helper.cjs",
+                        after: b"one",
+                        mode: 0o600
+                    },
+                    Addition {
+                        path: "helper.cjs",
+                        after: b"two",
+                        mode: 0o600
+                    },
+                ]
+            )
+            .is_err()
+        );
         assert!(!original.join("helper.cjs").exists());
         assert!(!original.join(".migrate-backup").exists());
     }
@@ -1597,11 +1842,22 @@ mod reviewed_directory_tests {
         }
         let helper = b"module.exports = 42;\n";
         fs::write(proposed.join("compat/deep/answer.cjs"), helper).unwrap();
-        fs::write(proposed.join("existing/direct.cjs"), b"module.exports = 'direct';\n").unwrap();
-        fs::write(proposed.join("case.test.cjs"), b"console.log(require('./compat/deep/answer.cjs'));\n").unwrap();
-        for (path, mode) in [("compat", 0o750), ("compat/deep", 0o500),
-            ("compat/deep/answer.cjs", 0o640), ("compat/empty", 0o700)]
-        {
+        fs::write(
+            proposed.join("existing/direct.cjs"),
+            b"module.exports = 'direct';\n",
+        )
+        .unwrap();
+        fs::write(
+            proposed.join("case.test.cjs"),
+            b"console.log(require('./compat/deep/answer.cjs'));\n",
+        )
+        .unwrap();
+        for (path, mode) in [
+            ("compat", 0o750),
+            ("compat/deep", 0o500),
+            ("compat/deep/answer.cjs", 0o640),
+            ("compat/empty", 0o700),
+        ] {
             fs::set_permissions(proposed.join(path), fs::Permissions::from_mode(mode)).unwrap();
         }
         let expected = pin(&proposed);
@@ -1611,17 +1867,36 @@ mod reviewed_directory_tests {
         assert_eq!(changes.replacements.len(), 1);
         assert_eq!(changes.additions.len(), 1);
         assert_eq!(changes.additions[0].path, "existing/direct.cjs");
-        assert_eq!(changes.trees.iter().map(|tree| tree.path).collect::<Vec<_>>(),
-            ["compat", "existing/adapters", "unused"]);
+        assert_eq!(
+            changes
+                .trees
+                .iter()
+                .map(|tree| tree.path)
+                .collect::<Vec<_>>(),
+            ["compat", "existing/adapters", "unused"]
+        );
         let tree = &changes.trees[0];
         assert_eq!(tree.mode, 0o750);
-        assert_eq!(tree.entries.iter().map(|entry| (entry.path, entry.mode)).collect::<Vec<_>>(),
-            [("deep", 0o500), ("deep/answer.cjs", 0o640), ("empty", 0o700)]);
+        assert_eq!(
+            tree.entries
+                .iter()
+                .map(|entry| (entry.path, entry.mode))
+                .collect::<Vec<_>>(),
+            [
+                ("deep", 0o500),
+                ("deep/answer.cjs", 0o640),
+                ("empty", 0o700)
+            ]
+        );
         assert!(tree.entries[0].contents.is_none() && tree.entries[2].contents.is_none());
         assert_eq!(tree.entries[1].contents, Some(helper.as_slice()));
         assert!(changes.trees[1].entries.is_empty() && changes.trees[2].entries.is_empty());
         assert!(plan.replacements().is_err());
-        fs::write(proposed.join("compat/deep/answer.cjs"), b"throw new Error('later edit');\n").unwrap();
+        fs::write(
+            proposed.join("compat/deep/answer.cjs"),
+            b"throw new Error('later edit');\n",
+        )
+        .unwrap();
         // Explicit Node/Node execution proves use of the captured nested helper,
         // not native Franken or Bun compatibility.
         let report = plan.validate_node_pair().unwrap();
@@ -1654,24 +1929,78 @@ mod reviewed_directory_tests {
     fn tree_preparation_requires_absent_safe_directories_and_counts_every_descendant() {
         let (_root, original, _) = pair();
         let mut plan = capture(&original);
-        for path in ["config.json", "../compat", "/compat", "a//b", ".franken-node/compat",
-            ".migrate-backup", ".franken-rewrite", "compat/.git", "missing/compat"]
-        {
-            assert!(plan.prepare_changes_with_directories(&[], &[],
-                &[DirectoryAddition { path, mode: 0o700 }]).is_err(), "{path}");
+        for path in [
+            "config.json",
+            "../compat",
+            "/compat",
+            "a//b",
+            ".franken-node/compat",
+            ".migrate-backup",
+            ".franken-rewrite",
+            "compat/.git",
+            "missing/compat",
+        ] {
+            assert!(
+                plan.prepare_changes_with_directories(
+                    &[],
+                    &[],
+                    &[DirectoryAddition { path, mode: 0o700 }]
+                )
+                .is_err(),
+                "{path}"
+            );
             assert!(plan.changes().is_err());
         }
         for mode in [0, 0o400, 0o100, 0o4755] {
-            assert!(plan.prepare_changes_with_directories(&[], &[],
-                &[DirectoryAddition { path: "compat", mode }]).is_err());
+            assert!(
+                plan.prepare_changes_with_directories(
+                    &[],
+                    &[],
+                    &[DirectoryAddition {
+                        path: "compat",
+                        mode
+                    }]
+                )
+                .is_err()
+            );
         }
-        assert!(plan.prepare_changes_with_directories(&[],
-            &[Addition { path: "compat", after: b"file", mode: 0o600 }],
-            &[DirectoryAddition { path: "compat", mode: 0o700 }]).is_err());
-        let paths: Vec<_> = (0..1_000).map(|index| format!("compat/entry-{index:04}")).collect();
-        let files: Vec<_> = paths.iter().map(|path| Addition { path, after: b"", mode: 0o600 }).collect();
-        assert!(plan.prepare_changes_with_directories(&[], &files,
-            &[DirectoryAddition { path: "compat", mode: 0o700 }]).is_err());
+        assert!(
+            plan.prepare_changes_with_directories(
+                &[],
+                &[Addition {
+                    path: "compat",
+                    after: b"file",
+                    mode: 0o600
+                }],
+                &[DirectoryAddition {
+                    path: "compat",
+                    mode: 0o700
+                }]
+            )
+            .is_err()
+        );
+        let paths: Vec<_> = (0..1_000)
+            .map(|index| format!("compat/entry-{index:04}"))
+            .collect();
+        let files: Vec<_> = paths
+            .iter()
+            .map(|path| Addition {
+                path,
+                after: b"",
+                mode: 0o600,
+            })
+            .collect();
+        assert!(
+            plan.prepare_changes_with_directories(
+                &[],
+                &files,
+                &[DirectoryAddition {
+                    path: "compat",
+                    mode: 0o700
+                }]
+            )
+            .is_err()
+        );
         assert!(plan.changes().is_err());
         assert!(!original.join("compat").exists() && !original.join(".migrate-backup").exists());
     }
@@ -1681,14 +2010,22 @@ mod reviewed_directory_tests {
         for mutation in 0..3 {
             let (_root, original, proposed) = pair();
             fs::create_dir(proposed.join("compat")).unwrap();
-            fs::set_permissions(proposed.join("compat"), fs::Permissions::from_mode(0o700)).unwrap();
-            fs::write(proposed.join("compat/helper.cjs"), b"module.exports = 42;\n").unwrap();
+            fs::set_permissions(proposed.join("compat"), fs::Permissions::from_mode(0o700))
+                .unwrap();
+            fs::write(
+                proposed.join("compat/helper.cjs"),
+                b"module.exports = 42;\n",
+            )
+            .unwrap();
             let expected = pin(&proposed);
             let mut plan = capture(&original);
             plan.prepare_project(&proposed, &expected).unwrap();
             match mutation {
                 0 => symlink("helper.cjs", proposed.join("compat/alias.cjs")).unwrap(),
-                1 => fs::set_permissions(proposed.join("compat"), fs::Permissions::from_mode(0o750)).unwrap(),
+                1 => {
+                    fs::set_permissions(proposed.join("compat"), fs::Permissions::from_mode(0o750))
+                        .unwrap()
+                }
                 _ => fs::create_dir(proposed.join("compat/unreviewed-empty")).unwrap(),
             }
             assert!(plan.prepare_project(&proposed, &expected).is_err());

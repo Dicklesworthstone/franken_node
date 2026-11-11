@@ -98,9 +98,19 @@ fn byte_exact_stream_assertions_support_binary_data_and_empty_stderr() {
     let snapshot = capture(root.path());
     let tests = inventory(&snapshot.entries).unwrap();
     let expected = &tests.tests[Path::new("scripts/check.js")].expectations;
-    expected.check(&snapshot, &output(&[0, 255, 10, 13], b"")).unwrap();
-    assert!(expected.check(&snapshot, &output(&[0, 255, 10], b"")).is_err());
-    assert!(expected.check(&snapshot, &output(&[0, 255, 10, 13], b"warning")).is_err());
+    expected
+        .check(&snapshot, &output(&[0, 255, 10, 13], b""))
+        .unwrap();
+    assert!(
+        expected
+            .check(&snapshot, &output(&[0, 255, 10], b""))
+            .is_err()
+    );
+    assert!(
+        expected
+            .check(&snapshot, &output(&[0, 255, 10, 13], b"warning"))
+            .is_err()
+    );
 }
 
 #[test]
@@ -168,7 +178,12 @@ fn duplicate_expectation_test_keys_and_duplicate_stream_fields_are_rejected() {
 #[test]
 fn expectation_keys_must_be_selected_and_canonically_spelled() {
     let root = project("");
-    for name in ["scripts/other.js", "scripts/./check.js", "./scripts/check.js", "scripts//check.js"] {
+    for name in [
+        "scripts/other.js",
+        "scripts/./check.js",
+        "./scripts/check.js",
+        "scripts//check.js",
+    ] {
         write(
             root.path(),
             MANIFEST_PATH,
@@ -187,11 +202,23 @@ fn expectation_keys_must_be_selected_and_canonically_spelled() {
 fn fixtures_cannot_escape_select_reserved_paths_or_use_noncanonical_names() {
     let root = project("");
     for name in [
-        "", "../outside", "/tmp/outside", "./fixtures/stdout.bin",
-        "fixtures//stdout.bin", "fixtures/stdout.bin/", "fixtures/../stdout.bin",
-        "fixtures\\stdout.bin", "fixtures/out\n.bin", "missing.bin", "fixtures",
-        "node_modules/result.bin", ".git/result.bin", ".franken-node/result.bin",
-        ".migrate-backup/result.bin", ".franken-rewrite/result.bin", ".beads/result.bin",
+        "",
+        "../outside",
+        "/tmp/outside",
+        "./fixtures/stdout.bin",
+        "fixtures//stdout.bin",
+        "fixtures/stdout.bin/",
+        "fixtures/../stdout.bin",
+        "fixtures\\stdout.bin",
+        "fixtures/out\n.bin",
+        "missing.bin",
+        "fixtures",
+        "node_modules/result.bin",
+        ".git/result.bin",
+        ".franken-node/result.bin",
+        ".migrate-backup/result.bin",
+        ".franken-rewrite/result.bin",
+        ".beads/result.bin",
     ] {
         manifest(root.path(), serde_json::json!({"stdout": name}));
         assert!(discover(&capture(root.path()).entries).is_err(), "{name:?}");
@@ -212,10 +239,20 @@ fn symlink_fixtures_and_symlink_directory_parents_are_refused() {
 #[test]
 fn fixture_size_limit_is_inclusive_and_oversize_fails_before_execution() {
     let root = project("");
-    write(root.path(), "fixtures/stdout.bin", vec![0; MAX_EXPECTATION_BYTES]);
+    write(
+        root.path(),
+        "fixtures/stdout.bin",
+        vec![0; MAX_EXPECTATION_BYTES],
+    );
     assert!(discover(&capture(root.path()).entries).is_ok());
-    write(root.path(), "fixtures/stdout.bin", vec![0; MAX_EXPECTATION_BYTES + 1]);
-    let error = discover(&capture(root.path()).entries).unwrap_err().to_string();
+    write(
+        root.path(),
+        "fixtures/stdout.bin",
+        vec![0; MAX_EXPECTATION_BYTES + 1],
+    );
+    let error = discover(&capture(root.path()).entries)
+        .unwrap_err()
+        .to_string();
     assert!(error.contains("1 MiB"), "{error}");
 }
 
@@ -234,12 +271,18 @@ fn candidate_cannot_change_expected_bytes_while_preserving_fixture_paths() {
 fn candidate_cannot_drop_or_redirect_an_assertion() {
     let original = project("");
     let candidate = project("");
-    manifest(candidate.path(), serde_json::json!({"stdout": "fixtures/stdout.bin"}));
+    manifest(
+        candidate.path(),
+        serde_json::json!({"stdout": "fixtures/stdout.bin"}),
+    );
     assert!(matched_tests(&capture(original.path()), &capture(candidate.path())).is_err());
     write(candidate.path(), "fixtures/other.bin", b"42\n");
-    manifest(candidate.path(), serde_json::json!({
-        "stdout": "fixtures/other.bin", "stderr": "fixtures/stderr.bin"
-    }));
+    manifest(
+        candidate.path(),
+        serde_json::json!({
+            "stdout": "fixtures/other.bin", "stderr": "fixtures/stderr.bin"
+        }),
+    );
     assert!(matched_tests(&capture(original.path()), &capture(candidate.path())).is_err());
 }
 
@@ -257,7 +300,8 @@ fn mutable_source_tree_cannot_rewrite_the_captured_oracle() {
 
 #[test]
 fn real_node_pair_passes_only_when_both_streams_match_captured_binary_fixtures() {
-    let root = project("process.stdout.write(Buffer.from([0,255,10]));process.stderr.write('warn\\n');");
+    let root =
+        project("process.stdout.write(Buffer.from([0,255,10]));process.stderr.write('warn\\n');");
     write(root.path(), "fixtures/stdout.bin", [0, 255, 10]);
     write(root.path(), "fixtures/stderr.bin", b"warn\n");
     let report = run_pair(&capture(root.path()));
@@ -273,7 +317,12 @@ fn identical_wrong_successful_outputs_cannot_produce_a_green_verdict() {
     assert_eq!(report.verdict, "ERROR", "{report:#?}");
     assert_eq!(report.passed, 0);
     assert_eq!(report.errored, 1);
-    assert!(report.cases[0].errors.iter().any(|error| error.contains("stdout")));
+    assert!(
+        report.cases[0]
+            .errors
+            .iter()
+            .any(|error| error.contains("stdout"))
+    );
 }
 
 #[test]
@@ -281,13 +330,18 @@ fn matched_goldens_never_turn_a_nonzero_process_exit_into_success() {
     let root = project("console.log(42);process.exitCode=7;");
     let report = run_pair(&capture(root.path()));
     assert_eq!(report.verdict, "FAIL", "{report:#?}");
-    assert_eq!(report.cases[0].reference.as_ref().unwrap().exit_code, Some(7));
+    assert_eq!(
+        report.cases[0].reference.as_ref().unwrap().exit_code,
+        Some(7)
+    );
     assert_eq!(report.cases[0].native.as_ref().unwrap().exit_code, Some(7));
 }
 
 #[test]
 fn guest_cannot_replace_its_workspace_fixture_to_bless_wrong_output() {
-    let root = project("require('fs').writeFileSync('fixtures/stdout.bin','wrong\\n');console.log('wrong');");
+    let root = project(
+        "require('fs').writeFileSync('fixtures/stdout.bin','wrong\\n');console.log('wrong');",
+    );
     let report = run_pair(&capture(root.path()));
     assert_eq!(report.verdict, "ERROR", "{report:#?}");
     assert_eq!(report.passed, 0);
@@ -297,14 +351,23 @@ fn guest_cannot_replace_its_workspace_fixture_to_bless_wrong_output() {
 fn explicit_exit_expectations_admit_real_normal_error_paths_without_rewriting_status() {
     for code in [0, 1, 7, 255] {
         let root = project(&format!("console.log(42); process.exit({code});"));
-        manifest(root.path(), serde_json::json!({
-            "exit_code": code, "stdout": "fixtures/stdout.bin", "stderr": "fixtures/stderr.bin"
-        }));
+        manifest(
+            root.path(),
+            serde_json::json!({
+                "exit_code": code, "stdout": "fixtures/stdout.bin", "stderr": "fixtures/stderr.bin"
+            }),
+        );
         let report = run_pair(&capture(root.path()));
         assert_eq!(report.verdict, "PASS", "{report:#?}");
         assert_eq!(i32::from(report.cases[0].expected_exit_code), code);
-        assert_eq!(report.cases[0].reference.as_ref().unwrap().exit_code, Some(code));
-        assert_eq!(report.cases[0].native.as_ref().unwrap().exit_code, Some(code));
+        assert_eq!(
+            report.cases[0].reference.as_ref().unwrap().exit_code,
+            Some(code)
+        );
+        assert_eq!(
+            report.cases[0].native.as_ref().unwrap().exit_code,
+            Some(code)
+        );
         assert!(!report.release_certification);
     }
 }
@@ -313,29 +376,44 @@ fn explicit_exit_expectations_admit_real_normal_error_paths_without_rewriting_st
 fn exit_expectations_require_bounded_integers_and_identical_captured_declarations() {
     let root = project("");
     for value in [
-        serde_json::json!(null), serde_json::json!(-1), serde_json::json!(256),
-        serde_json::json!(true), serde_json::json!("7"), serde_json::json!(1.5),
+        serde_json::json!(null),
+        serde_json::json!(-1),
+        serde_json::json!(256),
+        serde_json::json!(true),
+        serde_json::json!("7"),
+        serde_json::json!(1.5),
     ] {
         manifest(root.path(), serde_json::json!({"exit_code": value}));
         assert!(discover(&capture(root.path()).entries).is_err());
     }
     manifest(root.path(), serde_json::json!({"exit_code": 7}));
     let original = capture(root.path());
-    assert_eq!(expected_exit_codes(&original).unwrap()[Path::new("scripts/check.js")], 7);
-    for value in [serde_json::json!({"exit_code": 8}),
-                  serde_json::json!({"stdout": "fixtures/stdout.bin"})] {
+    assert_eq!(
+        expected_exit_codes(&original).unwrap()[Path::new("scripts/check.js")],
+        7
+    );
+    for value in [
+        serde_json::json!({"exit_code": 8}),
+        serde_json::json!({"stdout": "fixtures/stdout.bin"}),
+    ] {
         manifest(root.path(), value);
         assert!(matched_tests(&original, &capture(root.path())).is_err());
     }
-    write(root.path(), MANIFEST_PATH,
-        r#"{"schema_version":"franken-node/migration-tests/v1","tests":["scripts/check.js"],"expectations":{"scripts/check.js":{"exit_code":7,"exit_code":7}}}"#);
+    write(
+        root.path(),
+        MANIFEST_PATH,
+        r#"{"schema_version":"franken-node/migration-tests/v1","tests":["scripts/check.js"],"expectations":{"scripts/check.js":{"exit_code":7,"exit_code":7}}}"#,
+    );
     assert!(discover(&capture(root.path()).entries).is_err());
 }
 
 #[test]
 fn expected_nonzero_never_accepts_a_zero_different_code_signal_or_timeout() {
-    for source in ["process.exit(0);", "process.exit(8);",
-                   "process.kill(process.pid, 'SIGTERM');"] {
+    for source in [
+        "process.exit(0);",
+        "process.exit(8);",
+        "process.kill(process.pid, 'SIGTERM');",
+    ] {
         let root = project(source);
         manifest(root.path(), serde_json::json!({"exit_code": 7}));
         let report = run_pair(&capture(root.path()));
@@ -349,16 +427,28 @@ fn expected_nonzero_never_accepts_a_zero_different_code_signal_or_timeout() {
     let root = project("setInterval(() => {}, 1000);");
     manifest(root.path(), serde_json::json!({"exit_code": 7}));
     let snapshot = capture(root.path());
-    let node = Invocation { executable: node_on_path().unwrap(), before: vec![], after: vec![] };
-    let report = execute_suite_pair(&snapshot, &snapshot, &node, &node,
-        Instant::now() + Duration::from_secs(10), Duration::from_millis(100), false).unwrap();
+    let node = Invocation {
+        executable: node_on_path().unwrap(),
+        before: vec![],
+        after: vec![],
+    };
+    let report = execute_suite_pair(
+        &snapshot,
+        &snapshot,
+        &node,
+        &node,
+        Instant::now() + Duration::from_secs(10),
+        Duration::from_millis(100),
+        false,
+    )
+    .unwrap();
     assert_ne!(report.verdict, "PASS", "{report:#?}");
     assert!(report.errored > 0);
 }
 
 mod retained_output_tests {
-    use super::super::*;
     use super::super::super::{execute_suite_pair, native_replay, node_on_path, product_oracle};
+    use super::super::*;
     use std::fs;
 
     fn deadline() -> Instant {
@@ -379,19 +469,32 @@ mod retained_output_tests {
         fs::write(root.path().join("a.test.cjs"), source).unwrap();
         fs::write(root.path().join("z.test.cjs"), "console.log('later case');").unwrap();
         fs::write(root.path().join("golden"), "expected\n").unwrap();
-        fs::write(root.path().join(MANIFEST_PATH), serde_json::to_vec(&serde_json::json!({
-            "schema_version": MANIFEST_SCHEMA,
-            "tests": ["a.test.cjs", "z.test.cjs"],
-            "expectations": {"a.test.cjs": expectations},
-        })).unwrap()).unwrap();
+        fs::write(
+            root.path().join(MANIFEST_PATH),
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version": MANIFEST_SCHEMA,
+                "tests": ["a.test.cjs", "z.test.cjs"],
+                "expectations": {"a.test.cjs": expectations},
+            }))
+            .unwrap(),
+        )
+        .unwrap();
         root
     }
 
     fn pair(root: &Path, filesystem: bool) -> super::super::super::SuiteReport {
         let deadline = deadline();
         let snapshot = Snapshot::capture(root, deadline).unwrap();
-        execute_suite_pair(&snapshot, &snapshot, &node("reference"), &node("native"),
-            deadline, Duration::from_secs(5), filesystem).unwrap()
+        execute_suite_pair(
+            &snapshot,
+            &snapshot,
+            &node("reference"),
+            &node("native"),
+            deadline,
+            Duration::from_secs(5),
+            filesystem,
+        )
+        .unwrap()
     }
 
     #[test]
@@ -407,16 +510,27 @@ mod retained_output_tests {
         let snapshot = Snapshot::capture(root.path(), deadline).unwrap();
         let staged = outside.path().join("project");
         snapshot.stage(&staged, deadline).unwrap();
-        let error = run_test(&snapshot, &node("reference"), Path::new("a.test.cjs"),
-            &staged, &std::env::vars_os().collect(),
-            (Duration::from_secs(5), Duration::from_secs(1))).unwrap_err();
+        let error = run_test(
+            &snapshot,
+            &node("reference"),
+            Path::new("a.test.cjs"),
+            &staged,
+            &std::env::vars_os().collect(),
+            (Duration::from_secs(5), Duration::from_secs(1)),
+        )
+        .unwrap_err();
         assert!(!format!("{error:#}").contains("private-stdout"));
         assert!(!format!("{error:#?}").contains("private-stderr"));
         let (output, check_error) = retain_completed_output(Err(error)).unwrap();
         assert_eq!(output.status.code(), Some(0));
         assert_eq!(output.stdout, b"private-stdout\n");
         assert_eq!(output.stderr, b"private-stderr\n");
-        assert!(check_error.unwrap().to_string().contains("captured output expectation"));
+        assert!(
+            check_error
+                .unwrap()
+                .to_string()
+                .contains("captured output expectation")
+        );
         assert_eq!(fs::read_to_string(marker).unwrap(), "once\n");
     }
 
@@ -428,16 +542,37 @@ mod retained_output_tests {
         );
         let report = pair(root.path(), true);
         assert_eq!(report.verdict, "ERROR");
-        assert_eq!((report.total_tests, report.passed, report.errored, report.skipped), (2, 1, 1, 0));
+        assert_eq!(
+            (
+                report.total_tests,
+                report.passed,
+                report.errored,
+                report.skipped
+            ),
+            (2, 1, 1, 0)
+        );
         let row = &report.cases[0];
         assert_eq!(row.status, "ERROR");
         assert_eq!(row.errors.len(), 2);
         assert!(row.divergences.is_empty());
         assert_eq!(row.reference, row.native);
         assert_eq!(row.native.as_ref().unwrap().exit_code, Some(0));
-        assert_eq!(row.native.as_ref().unwrap().workspace_delta.as_ref().unwrap().changed_paths, 1);
+        assert_eq!(
+            row.native
+                .as_ref()
+                .unwrap()
+                .workspace_delta
+                .as_ref()
+                .unwrap()
+                .changed_paths,
+            1
+        );
         assert_eq!(report.cases[1].status, "PASS");
-        assert!(!serde_json::to_string(&report).unwrap().contains("private-wrong"));
+        assert!(
+            !serde_json::to_string(&report)
+                .unwrap()
+                .contains("private-wrong")
+        );
         assert!(!root.path().join("artifact").exists());
     }
 
@@ -453,7 +588,10 @@ mod retained_output_tests {
         assert_eq!(row.errors.len(), 1);
         assert!(row.errors[0].starts_with("native test checks failed"));
         assert!(row.divergences.iter().any(|s| s == "stdout:byte_mismatch"));
-        assert_ne!(row.reference.as_ref().unwrap().stdout, row.native.as_ref().unwrap().stdout);
+        assert_ne!(
+            row.reference.as_ref().unwrap().stdout,
+            row.native.as_ref().unwrap().stdout
+        );
         assert_eq!(row.reference.as_ref().unwrap().exit_code, Some(0));
         assert_eq!(row.native.as_ref().unwrap().exit_code, Some(0));
     }
@@ -471,41 +609,79 @@ mod retained_output_tests {
         assert!(row.errors[0].contains("file output expectation failed"));
         assert_eq!(row.reference.as_ref().unwrap().stdout.bytes, 0);
         assert_eq!(row.native.as_ref().unwrap().stdout.bytes, 0);
-        assert_ne!(row.reference.as_ref().unwrap().workspace_delta,
-            row.native.as_ref().unwrap().workspace_delta);
-        assert!(row.divergences.iter().any(|s| s == "filesystem:workspace_delta_mismatch"));
+        assert_ne!(
+            row.reference.as_ref().unwrap().workspace_delta,
+            row.native.as_ref().unwrap().workspace_delta
+        );
+        assert!(
+            row.divergences
+                .iter()
+                .any(|s| s == "filesystem:workspace_delta_mismatch")
+        );
     }
 
     #[test]
     fn product_keeps_three_completed_legs_and_later_cases_after_assertion_errors() {
         // Three explicitly named real Node processes exercise orchestration.
         // This test does not substitute Node for Bun/Franken in production.
-        let root = project("console.log(process.argv[2]);",
-            serde_json::json!({"stdout": "golden"}));
+        let root = project(
+            "console.log(process.argv[2]);",
+            serde_json::json!({"stdout": "golden"}),
+        );
         let deadline = deadline();
         let snapshot = Snapshot::capture(root.path(), deadline).unwrap();
         let reference = node("node");
         let second = node("second");
         let native = node("native");
-        let identities = [reference.identity(deadline).unwrap(), second.identity(deadline).unwrap(),
-            native.identity(deadline).unwrap()];
-        let report = product_oracle::execute(&snapshot, &snapshot, [&reference, &second, &native],
-            identities, deadline, Duration::from_secs(5), true).unwrap();
+        let identities = [
+            reference.identity(deadline).unwrap(),
+            second.identity(deadline).unwrap(),
+            native.identity(deadline).unwrap(),
+        ];
+        let report = product_oracle::execute(
+            &snapshot,
+            &snapshot,
+            [&reference, &second, &native],
+            identities,
+            deadline,
+            Duration::from_secs(5),
+            true,
+        )
+        .unwrap();
         assert_eq!(report.verdict, "ERROR");
         assert_eq!((report.passed, report.errored, report.skipped), (1, 1, 0));
         let row = &report.cases[0];
         assert_eq!(row.outcome, product_oracle::CaseOutcome::Error);
         assert_eq!(row.errors.len(), 3);
-        assert!(row.errors.iter().all(|s| !s.contains("incomplete observation")));
+        assert!(
+            row.errors
+                .iter()
+                .all(|s| !s.contains("incomplete observation"))
+        );
         for observation in [&row.node, &row.bun, &row.native] {
             let observation = observation.as_ref().unwrap();
             assert_eq!(observation.exit_code, Some(0));
             assert!(observation.workspace_delta.is_some());
         }
-        assert!(row.divergences.iter().any(|s| s == "node/bun:stdout:byte_mismatch"));
-        assert!(row.divergences.iter().any(|s| s == "node/native:stdout:byte_mismatch"));
-        assert!(report.check_admission(&report.input_sha256, &report.candidate_input_sha256,
-            &expected_exit_codes(&snapshot).unwrap()).is_err());
+        assert!(
+            row.divergences
+                .iter()
+                .any(|s| s == "node/bun:stdout:byte_mismatch")
+        );
+        assert!(
+            row.divergences
+                .iter()
+                .any(|s| s == "node/native:stdout:byte_mismatch")
+        );
+        assert!(
+            report
+                .check_admission(
+                    &report.input_sha256,
+                    &report.candidate_input_sha256,
+                    &expected_exit_codes(&snapshot).unwrap()
+                )
+                .is_err()
+        );
     }
 
     #[test]
@@ -525,9 +701,14 @@ mod retained_output_tests {
 
     #[test]
     fn retained_assertion_errors_are_not_promoted_into_replayable_capsules() {
-        let root = project("console.log('wrong');", serde_json::json!({"stdout": "golden"}));
+        let root = project(
+            "console.log('wrong');",
+            serde_json::json!({"stdout": "golden"}),
+        );
         let outputs = tempfile::tempdir().unwrap();
-        let captured = native_replay::capture_project(root.path(), None, Path::new("/bin/false"), true).unwrap();
+        let captured =
+            native_replay::capture_project(root.path(), None, Path::new("/bin/false"), true)
+                .unwrap();
         assert_eq!(captured.report.verdict, "ERROR");
         assert!(captured.report.cases[0].reference.is_some());
         assert!(captured.report.cases[0].native.is_some());

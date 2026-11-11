@@ -44,7 +44,10 @@ pub(super) fn version_review(
     request: Option<&str>,
     locked_version: Option<&str>,
 ) -> Option<(&'static str, &'static str)> {
-    match request.zip(locked_version).and_then(|(request, version)| versions::matches(request, version)) {
+    match request
+        .zip(locked_version)
+        .and_then(|(request, version)| versions::matches(request, version))
+    {
         Some(true) => None,
         Some(false) => Some((
             "dependency_version_mismatch",
@@ -95,7 +98,9 @@ impl Admission<'_> {
         let selected = nearest_package(self.packages, &source, edge.installed_as);
         let private_peer = edge.peer
             && selected.is_some_and(|package| {
-                package.path.starts_with(&format!("{}/node_modules/", edge.consumer))
+                package
+                    .path
+                    .starts_with(&format!("{}/node_modules/", edge.consumer))
             });
         let overridden_link =
             request != edge.request && selected.is_some_and(|package| package.linked);
@@ -114,8 +119,13 @@ impl Admission<'_> {
         let native =
             native_addon(declared.0) || native_addon(actual) || native_addon(edge.installed_as);
         let version_issue = if represented {
-            version_review(requirement, selected.and_then(|package| package.version.as_deref()))
-        } else { None };
+            version_review(
+                requirement,
+                selected.and_then(|package| package.version.as_deref()),
+            )
+        } else {
+            None
+        };
         if !represented || native || version_issue.is_some() {
             let (code, detail) = if native {
                 (
@@ -162,7 +172,9 @@ impl Admission<'_> {
         for (installed_as, metadata) in peer_meta {
             time_remaining(self.deadline)?;
             name(installed_as)?;
-            let metadata = metadata.as_object().context("peer dependency metadata must be an object")?;
+            let metadata = metadata
+                .as_object()
+                .context("peer dependency metadata must be an object")?;
             flag(metadata, "optional")?;
         }
         for (section_name, declarations) in [
@@ -187,7 +199,8 @@ impl Admission<'_> {
                 {
                     continue;
                 }
-                let peer_optional = peer_meta.get(installed_as)
+                let peer_optional = peer_meta
+                    .get(installed_as)
                     .and_then(Value::as_object)
                     .map(|metadata| flag(metadata, "optional"))
                     .transpose()?
@@ -214,7 +227,9 @@ fn section<'a>(
 ) -> Result<&'a Map<String, Value>> {
     match record.get(key) {
         None => Ok(empty),
-        Some(value) => value.as_object().with_context(|| format!("transitive {key} must be an object")),
+        Some(value) => value
+            .as_object()
+            .with_context(|| format!("transitive {key} must be an object")),
     }
 }
 
@@ -227,7 +242,9 @@ pub(super) fn inspect(
     deadline: Instant,
 ) -> Result<()> {
     time_remaining(deadline)?;
-    let Some(lock) = lock else { return Ok(()); };
+    let Some(lock) = lock else {
+        return Ok(());
+    };
     let mut admission = Admission {
         packages,
         source,
@@ -238,7 +255,9 @@ pub(super) fn inspect(
     };
     match lock.get("lockfileVersion").and_then(Value::as_u64) {
         Some(2 | 3) => {
-            let records = lock.get("packages").and_then(Value::as_object)
+            let records = lock
+                .get("packages")
+                .and_then(Value::as_object)
                 .context("modern dependency graph requires packages")?;
             let mut visited = BTreeSet::new();
             for package in packages.values() {
@@ -248,21 +267,33 @@ pub(super) fn inspect(
                 // repeated work, so a changed alias flag/version cannot hide
                 // behind the first observation. Ordinary lock maps point to
                 // themselves and preserve their previous behavior.
-                let canonical = packages.get(&package.path)
+                let canonical = packages
+                    .get(&package.path)
                     .context("dependency alias has no canonical physical identity")?;
-                ensure!(canonical.path == package.path && canonical.name == package.name
-                    && canonical.version == package.version && canonical.linked == package.linked
-                    && canonical.install == package.install && canonical.unresolved == package.unresolved,
-                    "dependency alias conflicts with its canonical physical identity");
+                ensure!(
+                    canonical.path == package.path
+                        && canonical.name == package.name
+                        && canonical.version == package.version
+                        && canonical.linked == package.linked
+                        && canonical.install == package.install
+                        && canonical.unresolved == package.unresolved,
+                    "dependency alias conflicts with its canonical physical identity"
+                );
                 // Linked workspaces are already assessed from captured REAL
                 // manifests by the caller, not the link placeholder or a stale
                 // lockfile projection. Unbound links already require review.
-                if package.linked { continue; }
+                if package.linked {
+                    continue;
+                }
                 // Keep every alias in `packages` for every incoming lookup;
                 // only outgoing declaration validation is deduplicated. The
                 // physical path, NOT name/version, distinguishes peer contexts.
-                if !visited.insert(package.path.as_str()) { continue; }
-                let record = records.get(&package.path).and_then(Value::as_object)
+                if !visited.insert(package.path.as_str()) {
+                    continue;
+                }
+                let record = records
+                    .get(&package.path)
+                    .and_then(Value::as_object)
                     .context("recorded package missing from dependency graph")?;
                 overrides.review_context(record, source, Some(&package.path), admission.report)?;
                 admission.modern_record(&package.path, record)?;
@@ -270,22 +301,38 @@ pub(super) fn inspect(
         }
         Some(1) => {
             let empty = Map::new();
-            let root = lock.as_object().context("legacy dependency graph requires an object")?;
+            let root = lock
+                .as_object()
+                .context("legacy dependency graph requires an object")?;
             let root = section(root, "dependencies", &empty)?;
             let mut pending = vec![(String::new(), root, 0_usize)];
             let mut visited = 0_usize;
             while let Some((parent, children, depth)) = pending.pop() {
                 time_remaining(deadline)?;
-                ensure!(depth <= MAX_DEPTH, "legacy dependency graph nesting exceeds limit");
+                ensure!(
+                    depth <= MAX_DEPTH,
+                    "legacy dependency graph nesting exceeds limit"
+                );
                 for (installed_as, value) in children {
                     time_remaining(deadline)?;
                     visited += 1;
-                    ensure!(visited <= MAX_PACKAGES, "legacy dependency graph package limit exceeded");
+                    ensure!(
+                        visited <= MAX_PACKAGES,
+                        "legacy dependency graph package limit exceeded"
+                    );
                     name(installed_as)?;
-                    let path = if parent.is_empty() { format!("node_modules/{installed_as}") }
-                        else { format!("{parent}/node_modules/{installed_as}") };
-                    ensure!(packages.contains_key(&path), "legacy dependency graph inventory mismatch");
-                    let record = value.as_object().context("invalid legacy dependency graph record")?;
+                    let path = if parent.is_empty() {
+                        format!("node_modules/{installed_as}")
+                    } else {
+                        format!("{parent}/node_modules/{installed_as}")
+                    };
+                    ensure!(
+                        packages.contains_key(&path),
+                        "legacy dependency graph inventory mismatch"
+                    );
+                    let record = value
+                        .as_object()
+                        .context("invalid legacy dependency graph record")?;
                     overrides.review_context(record, source, Some(&path), admission.report)?;
                     for (dependency, request) in section(record, "requires", &empty)? {
                         name(dependency)?;
@@ -299,7 +346,9 @@ pub(super) fn inspect(
                         })?;
                     }
                     let nested = section(record, "dependencies", &empty)?;
-                    if !nested.is_empty() { pending.push((path, nested, depth + 1)); }
+                    if !nested.is_empty() {
+                        pending.push((path, nested, depth + 1));
+                    }
                 }
             }
         }
@@ -315,12 +364,17 @@ mod tests {
     use std::fs;
     use std::time::Duration;
 
-    fn deadline() -> Instant { Instant::now() + Duration::from_secs(10) }
+    fn deadline() -> Instant {
+        Instant::now() + Duration::from_secs(10)
+    }
 
     fn assess(lock: Value) -> Result<DependencyAdmission> {
         let root = tempfile::tempdir()?;
         fs::write(root.path().join("package.json"), "{}")?;
-        fs::write(root.path().join("package-lock.json"), serde_json::to_vec(&lock)?)?;
+        fs::write(
+            root.path().join("package-lock.json"),
+            serde_json::to_vec(&lock)?,
+        )?;
         let report = super::super::inspect(root.path(), deadline());
         assert!(!root.path().join("node_modules").exists());
         report
@@ -334,13 +388,17 @@ mod tests {
     fn missing_transitive_dependency_reaches_the_live_admission_barrier() {
         let report = modern(json!({
             "node_modules/app":{"version":"1.0.0","dependencies":{"missing":"^1"}}
-        })).unwrap();
+        }))
+        .unwrap();
         assert!(report.requires_review());
         assert_eq!(report.findings.len(), 1);
         let finding = &report.findings[0];
         assert_eq!(finding.code, "unresolved_transitive_dependency");
         assert_eq!(finding.package, "missing");
-        assert_eq!(finding.source, "package-lock.json#node_modules/app#dependencies");
+        assert_eq!(
+            finding.source,
+            "package-lock.json#node_modules/app#dependencies"
+        );
         assert!(finding.package_path.is_none());
     }
 
@@ -349,7 +407,8 @@ mod tests {
         let report = modern(json!({
             "node_modules/a":{"version":"1.0.0","dependencies":{"b":"1"}},
             "node_modules/b":{"version":"1.0.0","dependencies":{"a":"1"}}
-        })).unwrap();
+        }))
+        .unwrap();
         assert!(!report.requires_review(), "{report:?}");
         assert_eq!(report.packages_scanned, 2);
     }
@@ -360,10 +419,14 @@ mod tests {
             "node_modules/a":{"version":"1.0.0","dependencies":{"alias":"npm:actual@1"}},
             "node_modules/alias":{"name":"actual","version":"1.0.0"},
             "node_modules/a/node_modules/alias":{"name":"wrong","version":"1.0.0"}
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(report.findings.len(), 1);
         assert_eq!(report.findings[0].package, "actual");
-        assert_eq!(report.findings[0].package_path.as_deref(), Some("node_modules/a/node_modules/alias"));
+        assert_eq!(
+            report.findings[0].package_path.as_deref(),
+            Some("node_modules/a/node_modules/alias")
+        );
     }
 
     #[test]
@@ -371,7 +434,8 @@ mod tests {
         let report = modern(json!({
             "node_modules/a":{"version":"1.0.0","dependencies":{"b":"1"}},
             "node_modules/node_modules/b":{"version":"1.0.0"}
-        })).unwrap();
+        }))
+        .unwrap();
         assert!(report.requires_review());
         assert_eq!(report.findings[0].code, "unresolved_transitive_dependency");
     }
@@ -393,12 +457,14 @@ mod tests {
                 "dependencies":{"alias":"npm:old@1"},
                 "optionalDependencies":{"alias":"npm:new@2","platform-only":"1"}},
             "node_modules/alias":{"name":"new","version":"2.0.0"}
-        })).unwrap();
+        }))
+        .unwrap();
         assert!(!report.requires_review(), "{report:?}");
         let report = modern(json!({
             "node_modules/a":{"version":"1.0.0","optionalDependencies":{"alias":"npm:new@2"}},
             "node_modules/alias":{"name":"wrong","version":"2.0.0"}
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(report.findings[0].code, "unresolved_transitive_dependency");
     }
 
@@ -445,14 +511,16 @@ mod tests {
         let report = modern(json!({
             "node_modules/a":{"version":"1.0.0","peerDependencies":{"required":"1","optional":"1"},
                 "peerDependenciesMeta":{"optional":{"optional":true}}}
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(report.findings.len(), 1);
         assert_eq!(report.findings[0].package, "required");
         let report = modern(json!({
             "node_modules/a":{"version":"1.0.0","peerDependencies":{"peer":"1"}},
             "node_modules/a/node_modules/peer":{"version":"1.0.0"},
             "node_modules/peer":{"version":"1.0.0"}
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(report.findings[0].code, "invalid_peer_placement");
     }
 
@@ -460,7 +528,8 @@ mod tests {
     fn package_development_dependencies_are_not_installed_runtime_edges() {
         let report = modern(json!({
             "node_modules/a":{"version":"1.0.0","devDependencies":{"uninstalled-test-tool":"1"}}
-        })).unwrap();
+        }))
+        .unwrap();
         assert!(!report.requires_review());
     }
 
@@ -470,19 +539,32 @@ mod tests {
             "node_modules/a":{"version":"1.0.0","dependencies":{"b":"^2"}},
             "node_modules/a/node_modules/b":{"version":"1.9.9"},
             "node_modules/b":{"version":"2.1.0"}
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(report.findings.len(), 1);
         assert_eq!(report.findings[0].code, "dependency_version_mismatch");
-        assert_eq!(report.findings[0].package_path.as_deref(), Some("node_modules/a/node_modules/b"));
+        assert_eq!(
+            report.findings[0].package_path.as_deref(),
+            Some("node_modules/a/node_modules/b")
+        );
     }
 
     #[test]
     fn root_declarations_share_the_actual_version_admission_not_just_graph_checks() {
         let root = tempfile::tempdir().unwrap();
-        fs::write(root.path().join("package.json"), r#"{"dependencies":{"a":"^2"}}"#).unwrap();
-        fs::write(root.path().join("package-lock.json"), serde_json::to_vec(&json!({
-            "lockfileVersion":3,"packages":{"node_modules/a":{"version":"1.0.0"}}
-        })).unwrap()).unwrap();
+        fs::write(
+            root.path().join("package.json"),
+            r#"{"dependencies":{"a":"^2"}}"#,
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("package-lock.json"),
+            serde_json::to_vec(&json!({
+                "lockfileVersion":3,"packages":{"node_modules/a":{"version":"1.0.0"}}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
         let report = super::super::inspect(root.path(), deadline()).unwrap();
         assert_eq!(report.findings.len(), 1);
         assert_eq!(report.findings[0].code, "dependency_version_mismatch");
@@ -495,14 +577,19 @@ mod tests {
         let report = assess(json!({"lockfileVersion":1,"dependencies":{
             "a":{"version":"1.0.0","requires":{"alias":"npm:actual@^2"}},
             "alias":{"version":"npm:actual@1.0.0"}
-        }})).unwrap();
+        }}))
+        .unwrap();
         assert_eq!(report.findings[0].code, "dependency_version_mismatch");
         for request in ["latest", "npm:actual", "https://example.invalid/actual.tgz"] {
             let report = modern(json!({
                 "node_modules/a":{"version":"1.0.0","dependencies":{"actual":request}},
                 "node_modules/actual":{"version":"1.0.0"}
-            })).unwrap();
-            assert_eq!(report.findings[0].code, "unverifiable_dependency_version", "{request}");
+            }))
+            .unwrap();
+            assert_eq!(
+                report.findings[0].code, "unverifiable_dependency_version",
+                "{request}"
+            );
         }
     }
 
@@ -513,8 +600,12 @@ mod tests {
             record[section] = json!({"b":"^2"});
             let report = modern(json!({
                 "node_modules/a":record,"node_modules/b":{"version":"1.0.0"}
-            })).unwrap();
-            assert_eq!(report.findings[0].code, "dependency_version_mismatch", "{section}");
+            }))
+            .unwrap();
+            assert_eq!(
+                report.findings[0].code, "dependency_version_mismatch",
+                "{section}"
+            );
         }
     }
 
@@ -524,11 +615,15 @@ mod tests {
             "a":{"version":"1.0.0","requires":{"alias":"npm:actual@1"},
                 "dependencies":{"alias":{"version":"npm:wrong@1.0.0"}}},
             "alias":{"version":"npm:actual@1.0.0"}
-        }})).unwrap();
+        }}))
+        .unwrap();
         assert_eq!(report.findings.len(), 1);
         assert_eq!(report.findings[0].package, "actual");
         assert!(report.findings[0].source.ends_with("#requires"));
-        assert_eq!(report.findings[0].package_path.as_deref(), Some("node_modules/a/node_modules/alias"));
+        assert_eq!(
+            report.findings[0].package_path.as_deref(),
+            Some("node_modules/a/node_modules/alias")
+        );
     }
 
     #[test]
@@ -536,7 +631,8 @@ mod tests {
         let report = modern(json!({
             "node_modules/a":{"version":"1.0.0","dependencies":{"image":"npm:sharp@1"}},
             "node_modules/image":{"name":"ordinary","version":"1.0.0"}
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(report.findings[0].code, "native_addon");
         assert_eq!(report.findings[0].package, "sharp");
     }
@@ -552,28 +648,50 @@ mod tests {
         ] {
             assert!(modern(json!({"node_modules/a":record})).is_err());
         }
-        assert!(assess(json!({"lockfileVersion":1,"dependencies":{
-            "a":{"version":"1.0.0","requires":true}
-        }})).is_err());
+        assert!(
+            assess(json!({"lockfileVersion":1,"dependencies":{
+                "a":{"version":"1.0.0","requires":true}
+            }}))
+            .is_err()
+        );
     }
 
     #[test]
     fn bounded_edge_and_deadline_failures_never_return_partial_approval() {
         let mut report = DependencyAdmission {
-            schema_version: String::new(), scope: String::new(), packages_scanned: 0,
-            manifests_scanned: 0, inputs: Vec::new(), findings: Vec::new(),
-            installation_checked: false, installed_packages_scanned: 0,
+            schema_version: String::new(),
+            scope: String::new(),
+            packages_scanned: 0,
+            manifests_scanned: 0,
+            inputs: Vec::new(),
+            findings: Vec::new(),
+            installation_checked: false,
+            installed_packages_scanned: 0,
         };
         let packages = BTreeMap::new();
         let overrides = Overrides::default();
         let mut admission = Admission {
-            packages: &packages, source: "package-lock.json", overrides: &overrides, report: &mut report,
-            deadline: deadline(), edges: MAX_DEPENDENCY_EDGES,
+            packages: &packages,
+            source: "package-lock.json",
+            overrides: &overrides,
+            report: &mut report,
+            deadline: deadline(),
+            edges: MAX_DEPENDENCY_EDGES,
         };
-        assert!(admission.edge(Edge {
-            consumer: "node_modules/a", section: "optionalDependencies", installed_as: "b",
-            request: "1", optional: true, peer: false,
-        }).unwrap_err().to_string().contains("edge limit"));
+        assert!(
+            admission
+                .edge(Edge {
+                    consumer: "node_modules/a",
+                    section: "optionalDependencies",
+                    installed_as: "b",
+                    request: "1",
+                    optional: true,
+                    peer: false,
+                })
+                .unwrap_err()
+                .to_string()
+                .contains("edge limit")
+        );
         assert!(
             inspect(
                 None,
@@ -589,16 +707,26 @@ mod tests {
 
     fn physical_pin(package: &str, version: &str, path: &str) -> LockedPackage {
         LockedPackage {
-            name: package.into(), installed_as: package.into(), version: Some(version.into()),
-            path: path.into(), install: false, linked: false, unresolved: false,
+            name: package.into(),
+            installed_as: package.into(),
+            version: Some(version.into()),
+            path: path.into(),
+            install: false,
+            linked: false,
+            unresolved: false,
         }
     }
 
     fn empty_report() -> DependencyAdmission {
         DependencyAdmission {
-            schema_version: String::new(), scope: String::new(), packages_scanned: 0,
-            manifests_scanned: 0, inputs: Vec::new(), findings: Vec::new(),
-            installation_checked: false, installed_packages_scanned: 0,
+            schema_version: String::new(),
+            scope: String::new(),
+            packages_scanned: 0,
+            manifests_scanned: 0,
+            inputs: Vec::new(),
+            findings: Vec::new(),
+            installation_checked: false,
+            installed_packages_scanned: 0,
         }
     }
 
@@ -607,7 +735,10 @@ mod tests {
         let path = "node_modules/.bun/a@1.0.0/node_modules/a";
         let mut packages = BTreeMap::from([(path.into(), physical_pin("a", "1.0.0", path))]);
         for index in 0..2_000 {
-            packages.insert(format!("consumers/{index}/node_modules/a"), physical_pin("a", "1.0.0", path));
+            packages.insert(
+                format!("consumers/{index}/node_modules/a"),
+                physical_pin("a", "1.0.0", path),
+            );
         }
         let lock = json!({"lockfileVersion":3,"packages":{
             (path):{"name":"a","version":"1.0.0","dependencies":{"missing":"1"}}
@@ -633,10 +764,14 @@ mod tests {
         let path = "node_modules/.bun/a@1.0.0/node_modules/a";
         let mut packages = BTreeMap::from([(path.into(), physical_pin("a", "1.0.0", path))]);
         for index in 0..1_024 {
-            packages.insert(format!("consumers/{index}/node_modules/a"), physical_pin("a", "1.0.0", path));
+            packages.insert(
+                format!("consumers/{index}/node_modules/a"),
+                physical_pin("a", "1.0.0", path),
+            );
         }
         let optional: Map<String, Value> = (0..256)
-            .map(|index| (format!("optional-{index}"), json!("1"))).collect();
+            .map(|index| (format!("optional-{index}"), json!("1")))
+            .collect();
         let lock = json!({"lockfileVersion":3,"packages":{
             (path):{"name":"a","version":"1.0.0","optionalDependencies":optional}
         }});
@@ -662,7 +797,9 @@ mod tests {
         let lock = json!({"lockfileVersion":3,"packages":{(path):{}}});
         for corruption in 0..6 {
             let mut packages = BTreeMap::new();
-            if corruption != 0 { packages.insert(path.into(), physical_pin("a", "1.0.0", path)); }
+            if corruption != 0 {
+                packages.insert(path.into(), physical_pin("a", "1.0.0", path));
+            }
             let mut alias = physical_pin("a", "1.0.0", path);
             match corruption {
                 1 => alias.name = "wrong".into(),
@@ -673,8 +810,19 @@ mod tests {
                 _ => {}
             }
             packages.insert("node_modules/a".into(), alias);
-            let error = inspect(Some(&lock), &packages, "test", &Overrides::default(), &mut empty_report(), deadline()).unwrap_err();
-            assert!(error.to_string().contains("canonical physical identity"), "{error}");
+            let error = inspect(
+                Some(&lock),
+                &packages,
+                "test",
+                &Overrides::default(),
+                &mut empty_report(),
+                deadline(),
+            )
+            .unwrap_err();
+            assert!(
+                error.to_string().contains("canonical physical identity"),
+                "{error}"
+            );
         }
     }
 
@@ -690,8 +838,14 @@ mod tests {
             (b1.into(), physical_pin("b", "1.0.0", b1)),
             (b2.into(), physical_pin("b", "2.0.0", b2)),
         ]);
-        packages.insert("node_modules/.bun/a-peer-one/node_modules/b".into(), physical_pin("b", "1.0.0", b1));
-        packages.insert("node_modules/.bun/a-peer-two/node_modules/b".into(), physical_pin("b", "2.0.0", b2));
+        packages.insert(
+            "node_modules/.bun/a-peer-one/node_modules/b".into(),
+            physical_pin("b", "1.0.0", b1),
+        );
+        packages.insert(
+            "node_modules/.bun/a-peer-two/node_modules/b".into(),
+            physical_pin("b", "2.0.0", b2),
+        );
         let lock = json!({"lockfileVersion":3,"packages":{
             (a1):{"peerDependencies":{"b":"1"}},
             (a2):{"peerDependencies":{"b":"1"}},
@@ -717,7 +871,8 @@ mod tests {
     fn bound_bun_workspace_can_use_project_local_isolated_registry_dependencies() {
         let root = tempfile::tempdir().unwrap();
         let member = json!({"name":"local","version":"1.0.0","dependencies":{"a":"1"}});
-        let root_manifest = json!({"workspaces":["packages/*"],"dependencies":{"local":"workspace:*"}});
+        let root_manifest =
+            json!({"workspaces":["packages/*"],"dependencies":{"local":"workspace:*"}});
         let lock = json!({"lockfileVersion":2,"configVersion":1,
             "workspaces":{"":{"dependencies":{"local":"workspace:*"}},"packages/local":member},
             "packages":{"local":["local@workspace:packages/local"],"a":["a@1.0.0","",{},""]}
@@ -725,24 +880,45 @@ mod tests {
         for (path, bytes) in [
             ("package.json", serde_json::to_vec(&root_manifest).unwrap()),
             ("bun.lock", serde_json::to_vec(&lock).unwrap()),
-            ("packages/local/package.json", serde_json::to_vec(&member).unwrap()),
-            ("packages/local/index.js", b"throw Error('must not execute');".to_vec()),
-            ("node_modules/.bun/a@1.0.0/node_modules/a/package.json", br#"{"name":"a","version":"1.0.0"}"#.to_vec()),
-            ("node_modules/.bun/a@1.0.0/node_modules/a/index.js", b"throw Error('must not execute');".to_vec()),
+            (
+                "packages/local/package.json",
+                serde_json::to_vec(&member).unwrap(),
+            ),
+            (
+                "packages/local/index.js",
+                b"throw Error('must not execute');".to_vec(),
+            ),
+            (
+                "node_modules/.bun/a@1.0.0/node_modules/a/package.json",
+                br#"{"name":"a","version":"1.0.0"}"#.to_vec(),
+            ),
+            (
+                "node_modules/.bun/a@1.0.0/node_modules/a/index.js",
+                b"throw Error('must not execute');".to_vec(),
+            ),
         ] {
             let path = root.path().join(path);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(path, bytes).unwrap();
         }
         fs::create_dir_all(root.path().join("packages/local/node_modules")).unwrap();
-        std::os::unix::fs::symlink("../packages/local", root.path().join("node_modules/local")).unwrap();
-        std::os::unix::fs::symlink("../../../node_modules/.bun/a@1.0.0/node_modules/a",
-            root.path().join("packages/local/node_modules/a")).unwrap();
+        std::os::unix::fs::symlink("../packages/local", root.path().join("node_modules/local"))
+            .unwrap();
+        std::os::unix::fs::symlink(
+            "../../../node_modules/.bun/a@1.0.0/node_modules/a",
+            root.path().join("packages/local/node_modules/a"),
+        )
+        .unwrap();
         let report = super::super::inspect_for_execution(root.path(), deadline()).unwrap();
         assert!(!report.requires_review(), "{report:#?}");
         assert!(report.installation_checked);
         assert!(report.scope.contains("isolated"));
         assert_eq!(report.manifests_scanned, 3);
-        assert!(report.inputs.iter().any(|input| input.path == "packages/local/node_modules/a"));
+        assert!(
+            report
+                .inputs
+                .iter()
+                .any(|input| input.path == "packages/local/node_modules/a")
+        );
     }
 }

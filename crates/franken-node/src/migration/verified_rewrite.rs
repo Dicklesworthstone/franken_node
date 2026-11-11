@@ -188,7 +188,9 @@ fn run_with_evidence(
         prerequisites.project_path.clone_from(&report.project_path);
         let prerequisites_passed = prerequisites.is_pass();
         let dependency_error = prerequisites.dependency_admission_error.clone();
-        let dependency_reviews = prerequisites.dependency_admission.as_ref()
+        let dependency_reviews = prerequisites
+            .dependency_admission
+            .as_ref()
             .map_or(0, |admission| admission.findings.len());
         report.dependency_admission = prerequisites.dependency_admission.clone();
         report.static_validation = Some(prerequisites);
@@ -343,8 +345,7 @@ pub fn render(report: &CheckedRewriteReport) -> String {
         let _ = writeln!(
             text,
             "dependency_installation_checked={} installed_packages={}",
-            dependencies.installation_checked,
-            dependencies.installed_packages_scanned
+            dependencies.installation_checked, dependencies.installed_packages_scanned
         );
         for finding in &dependencies.findings {
             let _ = writeln!(
@@ -406,11 +407,11 @@ pub fn render(report: &CheckedRewriteReport) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::{
-        AuditOutputFormat, MigrationCategory, MigrationSeverity, render_audit_report,
-        run_audit, run_one_command_report,
+        AuditOutputFormat, MigrationCategory, MigrationSeverity, render_audit_report, run_audit,
+        run_one_command_report,
     };
+    use super::*;
     use sha2::{Digest, Sha256};
     use std::fs;
 
@@ -457,15 +458,25 @@ mod tests {
             admission.installation_checked,
             "metadata findings fail static validation; installed findings follow clean static prerequisites"
         );
-        assert!(admission.findings.iter().any(|finding| finding.code == code));
+        assert!(
+            admission
+                .findings
+                .iter()
+                .any(|finding| finding.code == code)
+        );
         assert!(report.rewrite.is_none());
         assert!(report.validation.is_none() && report.product_validation.is_none());
         assert_eq!(source(root), original);
         assert!(!root.join(".migrate-backup/helper.mjs").exists());
         let json = serde_json::to_value(&report).unwrap();
         assert_eq!(json["status"], "REJECTED");
-        assert!(json["dependency_admission"]["findings"].as_array().unwrap().iter()
-            .any(|finding| finding["code"] == code));
+        assert!(
+            json["dependency_admission"]["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|finding| finding["code"] == code)
+        );
         let text = render(&report);
         assert!(text.contains(&format!("dependency_review={code}")));
         assert!(text.contains("no runtime or new rewrite installation attempted"));
@@ -477,17 +488,29 @@ mod tests {
         let root = project();
         let nested = root.path().join("nested");
         fs::create_dir(&nested).unwrap();
-        fs::rename(root.path().join("case.test.mjs"), nested.join("case.test.mjs")).unwrap();
+        fs::rename(
+            root.path().join("case.test.mjs"),
+            nested.join("case.test.mjs"),
+        )
+        .unwrap();
         let mut controller = SafeModeController::with_default_config();
-        controller.enter_safe_mode(SafeModeEntryReason::ExplicitFlag,
-            "2026-11-11T00:00:00Z", "trusted", Vec::new());
+        controller.enter_safe_mode(
+            SafeModeEntryReason::ExplicitFlag,
+            "2026-11-11T00:00:00Z",
+            "trusted",
+            Vec::new(),
+        );
         let state = nested.join(".franken-node/safe-mode/state.json");
         fs::create_dir_all(state.parent().unwrap()).unwrap();
         fs::write(&state, serde_json::to_vec(&controller).unwrap()).unwrap();
         let before = source(root.path());
-        let report = run_with_evidence(root.path(), |_| panic!("safe mode must prevent validation"));
+        let report =
+            run_with_evidence(root.path(), |_| panic!("safe mode must prevent validation"));
         assert_eq!(report.status, CheckedRewriteStatus::Error, "{report:#?}");
-        assert!(report.errors.iter().any(|message| message.contains("safe")), "{report:#?}");
+        assert!(
+            report.errors.iter().any(|message| message.contains("safe")),
+            "{report:#?}"
+        );
         assert_eq!(source(root.path()), before);
         assert!(!root.path().join(".migrate-backup").exists());
     }
@@ -495,31 +518,43 @@ mod tests {
     #[test]
     fn native_dependency_admission_blocks_nested_native_addons_before_execution() {
         let root = project();
-        fs::write(root.path().join("package-lock.json"), r#"{
+        fs::write(
+            root.path().join("package-lock.json"),
+            r#"{
             "lockfileVersion":3,"packages":{
                 "":{},"node_modules/ordinary":{"version":"1.0.0"},
                 "node_modules/ordinary/node_modules/sharp":{"version":"0.33.0","optional":true}
-            }}"#).unwrap();
+            }}"#,
+        )
+        .unwrap();
         assert_dependency_rejection(root.path(), "native_addon");
     }
 
     #[test]
     fn native_dependency_admission_blocks_recorded_install_scripts_before_execution() {
         let root = project();
-        fs::write(root.path().join("package-lock.json"), r#"{
+        fs::write(
+            root.path().join("package-lock.json"),
+            r#"{
             "lockfileVersion":3,"packages":{
                 "":{},"node_modules/ordinary":{"version":"1.0.0","hasInstallScript":true}
-            }}"#).unwrap();
+            }}"#,
+        )
+        .unwrap();
         assert_dependency_rejection(root.path(), "install_script");
     }
 
     #[test]
     fn native_dependency_admission_blocks_unrepresented_peer_declarations() {
         let root = project();
-        fs::write(root.path().join("package.json"), r#"{
+        fs::write(
+            root.path().join("package.json"),
+            r#"{
             "name":"checked","type":"module","engines":{"node":">=20"},
             "peerDependencies":{"ordinary":"^1"}
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
         assert_dependency_rejection(root.path(), "unresolved_declaration");
     }
 
@@ -535,9 +570,18 @@ mod tests {
             panic!("ambiguous dependency metadata must not execute")
         });
         assert_eq!(report.status, CheckedRewriteStatus::Rejected, "{report:#?}");
-        assert!(report.errors.iter().any(|error| error.contains("duplicate dependency JSON member")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("duplicate dependency JSON member"))
+        );
         assert!(!report.static_validation.as_ref().unwrap().is_pass());
-        assert!(report.rewrite.is_none() && report.validation.is_none() && report.product_validation.is_none());
+        assert!(
+            report.rewrite.is_none()
+                && report.validation.is_none()
+                && report.product_validation.is_none()
+        );
         assert!(report.dependency_admission.is_none());
         assert_eq!(source(root.path()), original);
         assert!(!root.path().join(".migrate-backup/helper.mjs").exists());
@@ -546,15 +590,29 @@ mod tests {
     #[test]
     fn native_dependency_admission_is_shared_by_public_pair_and_product_entrypoints() {
         let root = project();
-        fs::write(root.path().join("package-lock.json"), r#"{
+        fs::write(
+            root.path().join("package-lock.json"),
+            r#"{
             "lockfileVersion":3,"packages":{"node_modules/sharp":{"version":"0.33.0"}}}
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         for report in [
             run_selected(root.path(), Path::new("/absent/native"), None, false),
-            run_product(root.path(), Path::new("/absent/native"), Path::new("/absent/bun")),
+            run_product(
+                root.path(),
+                Path::new("/absent/native"),
+                Path::new("/absent/bun"),
+            ),
         ] {
             assert_eq!(report.status, CheckedRewriteStatus::Rejected, "{report:#?}");
-            assert!(report.dependency_admission.as_ref().unwrap().requires_review());
+            assert!(
+                report
+                    .dependency_admission
+                    .as_ref()
+                    .unwrap()
+                    .requires_review()
+            );
             assert!(report.rewrite.is_none());
             assert!(report.validation.is_none() && report.product_validation.is_none());
         }
@@ -568,7 +626,9 @@ mod tests {
                 Some("installed_identity_mismatch"),
             ),
             (
-                Some(r#"{"name":"ordinary","version":"1.2.3","scripts":{"postinstall":"never-execute-this-hook"}}"#),
+                Some(
+                    r#"{"name":"ordinary","version":"1.2.3","scripts":{"postinstall":"never-execute-this-hook"}}"#,
+                ),
                 Some("install_script"),
             ),
             (None, Some("missing_installed_dependency")),
@@ -608,12 +668,23 @@ mod tests {
             });
             let static_report = report.static_validation.as_ref().unwrap();
             assert!(static_report.is_pass(), "{report:#?}");
-            assert!(!static_report.dependency_admission.as_ref().unwrap().installation_checked);
+            assert!(
+                !static_report
+                    .dependency_admission
+                    .as_ref()
+                    .unwrap()
+                    .installation_checked
+            );
             let installed = report.dependency_admission.as_ref().unwrap();
             assert!(installed.installation_checked, "{report:#?}");
             if let Some(code) = code {
                 assert_eq!(report.status, CheckedRewriteStatus::Rejected, "{report:#?}");
-                assert!(installed.findings.iter().any(|finding| finding.code == code));
+                assert!(
+                    installed
+                        .findings
+                        .iter()
+                        .any(|finding| finding.code == code)
+                );
                 assert!(report.rewrite.is_none());
             } else {
                 assert_eq!(report.status, CheckedRewriteStatus::Error, "{report:#?}");
@@ -622,9 +693,11 @@ mod tests {
                 }));
                 assert!(!installed.requires_review());
                 assert_eq!(installed.installed_packages_scanned, 1);
-                let input = installed.inputs.iter().find(|input| {
-                    input.path == "node_modules/ordinary/package.json"
-                }).unwrap();
+                let input = installed
+                    .inputs
+                    .iter()
+                    .find(|input| input.path == "node_modules/ordinary/package.json")
+                    .unwrap();
                 let bytes = installed_manifest.unwrap().as_bytes();
                 assert_eq!(input.bytes, bytes.len());
                 assert_eq!(input.sha256, hex::encode(Sha256::digest(bytes)));
@@ -640,18 +713,26 @@ mod tests {
     fn native_dependency_admission_keeps_exact_staged_metadata_evidence() {
         let root = project();
         let original = source(root.path());
-        let lock = br#"{"lockfileVersion":3,"packages":{"node_modules/ordinary":{"version":"1.0.0"}}}"#;
+        let lock =
+            br#"{"lockfileVersion":3,"packages":{"node_modules/ordinary":{"version":"1.0.0"}}}"#;
         fs::write(root.path().join("package-lock.json"), lock).unwrap();
         let report = run_with_evidence(root.path(), |_| {
             // A clean admission reaches the selected executor, but does not
             // turn absence of a measurement into a successful installation.
-            fs::write(root.path().join("package-lock.json"), "changed after capture")?;
+            fs::write(
+                root.path().join("package-lock.json"),
+                "changed after capture",
+            )?;
             anyhow::bail!("validator intentionally stopped after dependency admission")
         });
         assert_eq!(report.status, CheckedRewriteStatus::Error, "{report:#?}");
         let admission = report.dependency_admission.as_ref().unwrap();
         assert!(!admission.requires_review());
-        let captured = admission.inputs.iter().find(|input| input.path == "package-lock.json").unwrap();
+        let captured = admission
+            .inputs
+            .iter()
+            .find(|input| input.path == "package-lock.json")
+            .unwrap();
         assert_eq!(captured.bytes, lock.len());
         assert_eq!(captured.sha256, hex::encode(Sha256::digest(lock)));
         assert_eq!(report.rewrite.as_ref().unwrap().rewrites_applied, 0);
@@ -685,7 +766,11 @@ mod tests {
             ("package.json", manifest.as_slice()),
             ("package-lock.json", lock.as_slice()),
         ] {
-            let input = admission.inputs.iter().find(|input| input.path == path).unwrap();
+            let input = admission
+                .inputs
+                .iter()
+                .find(|input| input.path == path)
+                .unwrap();
             assert_eq!(input.bytes, bytes.len());
             assert_eq!(input.sha256, hex::encode(Sha256::digest(bytes)));
         }
@@ -694,35 +779,61 @@ mod tests {
         assert_eq!(validation.dependency_admission.as_ref(), Some(admission));
         assert!(validation.test_suite.is_none());
         assert!(!root.path().join("node_modules").exists());
-        assert_eq!(fs::read(root.path().join("package.json")).unwrap(), manifest);
-        assert_eq!(fs::read(root.path().join("package-lock.json")).unwrap(), lock);
+        assert_eq!(
+            fs::read(root.path().join("package.json")).unwrap(),
+            manifest
+        );
+        assert_eq!(
+            fs::read(root.path().join("package-lock.json")).unwrap(),
+            lock
+        );
     }
 
     #[test]
     fn primary_validation_blocks_transitive_risk_and_incomplete_graphs_before_smoke_or_suite() {
         let cases = [
-            ("native_addon", r#"{"lockfileVersion":3,"packages":{
+            (
+                "native_addon",
+                r#"{"lockfileVersion":3,"packages":{
                 "node_modules/ordinary":{"version":"1.0.0"},
                 "node_modules/ordinary/node_modules/sharp":{"version":"0.33.0","optional":true}
-            }}"#),
-            ("install_script", r#"{"lockfileVersion":3,"packages":{
+            }}"#,
+            ),
+            (
+                "install_script",
+                r#"{"lockfileVersion":3,"packages":{
                 "node_modules/ordinary":{"version":"1.0.0","hasInstallScript":true}
-            }}"#),
-            ("unresolved_transitive_dependency", r#"{"lockfileVersion":3,"packages":{
+            }}"#,
+            ),
+            (
+                "unresolved_transitive_dependency",
+                r#"{"lockfileVersion":3,"packages":{
                 "node_modules/ordinary":{"version":"1.0.0","dependencies":{"absent":"^1"}}
-            }}"#),
-            ("dependency_version_mismatch", r#"{"lockfileVersion":3,"packages":{
+            }}"#,
+            ),
+            (
+                "dependency_version_mismatch",
+                r#"{"lockfileVersion":3,"packages":{
                 "node_modules/ordinary":{"version":"1.0.0","dependencies":{"safe":"^3"}},
                 "node_modules/safe":{"version":"2.0.0"}
-            }}"#),
+            }}"#,
+            ),
         ];
         for (code, lock) in cases {
             let root = project();
             let original = source(root.path());
             fs::write(root.path().join("package-lock.json"), lock).unwrap();
             let audit = run_audit(root.path()).unwrap();
-            assert!(audit.dependency_admission.as_ref().unwrap().findings.iter()
-                .any(|finding| finding.code == code), "{code}: {audit:#?}");
+            assert!(
+                audit
+                    .dependency_admission
+                    .as_ref()
+                    .unwrap()
+                    .findings
+                    .iter()
+                    .any(|finding| finding.code == code),
+                "{code}: {audit:#?}"
+            );
             assert!(audit.findings.iter().any(|finding| {
                 finding.category == MigrationCategory::Dependencies
                     && finding.severity == MigrationSeverity::High
@@ -732,18 +843,28 @@ mod tests {
                 let validation = run_validate(root.path(), static_only).unwrap();
                 assert!(!validation.is_pass(), "{code}: {validation:#?}");
                 assert!(validation.test_suite.is_none());
-                assert!(validation.checks.iter()
-                    .any(|check| check.id == "mig-validate-004" && !check.passed));
+                assert!(
+                    validation
+                        .checks
+                        .iter()
+                        .any(|check| check.id == "mig-validate-004" && !check.passed)
+                );
                 if !static_only {
                     assert!(validation.checks.iter().any(|check| {
-                        check.id == "mig-validate-005" && !check.passed
-                            && check.message.contains("skipped because static validation checks failed")
+                        check.id == "mig-validate-005"
+                            && !check.passed
+                            && check
+                                .message
+                                .contains("skipped because static validation checks failed")
                     }));
                 }
                 assert_eq!(validation.dependency_admission, audit.dependency_admission);
             }
             assert_eq!(source(root.path()), original);
-            assert_eq!(fs::read_to_string(root.path().join("package-lock.json")).unwrap(), lock);
+            assert_eq!(
+                fs::read_to_string(root.path().join("package-lock.json")).unwrap(),
+                lock
+            );
             assert!(!root.path().join(".migrate-backup").exists());
         }
     }
@@ -767,32 +888,52 @@ mod tests {
             }));
             let validation = run_validate(root.path(), false).unwrap();
             assert!(!validation.is_pass());
-            assert_eq!(validation.dependency_admission_error, audit.dependency_admission_error);
+            assert_eq!(
+                validation.dependency_admission_error,
+                audit.dependency_admission_error
+            );
             assert!(validation.test_suite.is_none());
             assert!(validation.checks.iter().any(|check| {
-                check.id == "mig-validate-005" && !check.passed
-                    && check.message.contains("skipped because static validation checks failed")
+                check.id == "mig-validate-005"
+                    && !check.passed
+                    && check
+                        .message
+                        .contains("skipped because static validation checks failed")
             }));
-            assert_eq!(fs::read_to_string(root.path().join("package-lock.json")).unwrap(), lock);
+            assert_eq!(
+                fs::read_to_string(root.path().join("package-lock.json")).unwrap(),
+                lock
+            );
         }
     }
 
     #[test]
     fn primary_audit_reports_non_npm_dependencies_as_unresolved_without_inventing_a_graph() {
         let root = tempfile::tempdir().unwrap();
-        fs::write(root.path().join("package.json"), r#"{
+        fs::write(
+            root.path().join("package.json"),
+            r#"{
             "name":"non-npm","engines":{"node":">=20"},"dependencies":{"ordinary":"^1"}
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
         fs::write(root.path().join("yarn.lock"), "# yarn lockfile v1\n").unwrap();
         let audit = run_audit(root.path()).unwrap();
         assert_eq!(audit.summary.lockfiles, ["yarn.lock"]);
         let admission = audit.dependency_admission.as_ref().unwrap();
         assert_eq!(admission.packages_scanned, 0);
         assert_eq!(admission.inputs.len(), 1);
-        assert!(admission.findings.iter()
-            .any(|finding| finding.code == "unresolved_declaration"));
+        assert!(
+            admission
+                .findings
+                .iter()
+                .any(|finding| finding.code == "unresolved_declaration")
+        );
         assert!(!run_validate(root.path(), true).unwrap().is_pass());
-        assert_eq!(fs::read_to_string(root.path().join("yarn.lock")).unwrap(), "# yarn lockfile v1\n");
+        assert_eq!(
+            fs::read_to_string(root.path().join("yarn.lock")).unwrap(),
+            "# yarn lockfile v1\n"
+        );
     }
 
     #[test]
@@ -800,35 +941,69 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let app = root.path().join("app");
         fs::create_dir_all(app.join("a")).unwrap();
-        fs::write(app.join("package.json"), r#"{
+        fs::write(
+            app.join("package.json"),
+            r#"{
             "name":"outer","engines":{"node":">=20"},"workspaces":["a"]
-        }"#).unwrap();
-        fs::write(app.join("a/package.json"), r#"{"name":"a","version":"1.0.0"}"#).unwrap();
-        fs::write(app.join("package-lock.json"), r#"{"lockfileVersion":3,"packages":{
+        }"#,
+        )
+        .unwrap();
+        fs::write(
+            app.join("a/package.json"),
+            r#"{"name":"a","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        fs::write(
+            app.join("package-lock.json"),
+            r#"{"lockfileVersion":3,"packages":{
             "":{},"a":{"name":"a","version":"1.0.0"},
             "node_modules/a":{"resolved":"a","link":true}
-        }}"#).unwrap();
+        }}"#,
+        )
+        .unwrap();
         let audit = run_audit(root.path()).unwrap();
         let admission = audit.dependency_admission.as_ref().unwrap();
         assert_eq!(admission.manifests_scanned, 2);
         assert_eq!(admission.packages_scanned, 1);
         assert!(admission.findings.is_empty(), "{admission:#?}");
-        let paths: Vec<_> = admission.inputs.iter().map(|input| input.path.as_str()).collect();
-        assert_eq!(paths, ["app/a/package.json", "app/package-lock.json", "app/package.json"]);
+        let paths: Vec<_> = admission
+            .inputs
+            .iter()
+            .map(|input| input.path.as_str())
+            .collect();
+        assert_eq!(
+            paths,
+            [
+                "app/a/package.json",
+                "app/package-lock.json",
+                "app/package.json"
+            ]
+        );
         assert!(run_validate(root.path(), true).unwrap().is_pass());
 
         fs::create_dir(root.path().join("other")).unwrap();
-        fs::write(root.path().join("other/package.json"), r#"{"name":"other"}"#).unwrap();
+        fs::write(
+            root.path().join("other/package.json"),
+            r#"{"name":"other"}"#,
+        )
+        .unwrap();
         let ambiguous = run_audit(root.path()).unwrap();
         assert!(ambiguous.dependency_admission.is_none());
-        assert!(ambiguous.dependency_admission_error.as_deref()
-            .is_some_and(|error| error.contains("multiple independent package roots")));
+        assert!(
+            ambiguous
+                .dependency_admission_error
+                .as_deref()
+                .is_some_and(|error| error.contains("multiple independent package roots"))
+        );
         let validation = run_validate(root.path(), false).unwrap();
         assert!(!validation.is_pass());
         assert!(validation.test_suite.is_none());
         assert!(validation.checks.iter().any(|check| {
-            check.id == "mig-validate-005" && !check.passed
-                && check.message.contains("skipped because static validation checks failed")
+            check.id == "mig-validate-005"
+                && !check.passed
+                && check
+                    .message
+                    .contains("skipped because static validation checks failed")
         }));
     }
 
@@ -837,21 +1012,35 @@ mod tests {
         let container = tempfile::tempdir().unwrap();
         let app = container.path().join("app");
         fs::create_dir(&app).unwrap();
-        fs::write(app.join("package.json"),
-            r#"{"name":"checked","type":"module","engines":{"node":">=20"}}"#).unwrap();
-        fs::write(app.join("package-lock.json"),
-            r#"{"lockfileVersion":3,"packages":{"":{}}}"#).unwrap();
-        let helper = "import { basename } from 'path';\nexport const value = basename('/tmp/42');\n";
+        fs::write(
+            app.join("package.json"),
+            r#"{"name":"checked","type":"module","engines":{"node":">=20"}}"#,
+        )
+        .unwrap();
+        fs::write(
+            app.join("package-lock.json"),
+            r#"{"lockfileVersion":3,"packages":{"":{}}}"#,
+        )
+        .unwrap();
+        let helper =
+            "import { basename } from 'path';\nexport const value = basename('/tmp/42');\n";
         fs::write(app.join("helper.mjs"), helper).unwrap();
-        fs::write(app.join("case.test.mjs"),
-            "import { value } from './helper.mjs';\nconsole.log(value);\n").unwrap();
+        fs::write(
+            app.join("case.test.mjs"),
+            "import { value } from './helper.mjs';\nconsole.log(value);\n",
+        )
+        .unwrap();
         let outside = "throw new Error('outside admitted package');\n";
         fs::write(container.path().join("outside.test.mjs"), outside).unwrap();
 
         let rejected = run_with_evidence(container.path(), |_| {
             panic!("a nested package cannot authorize execution or rewrite of its container")
         });
-        assert_eq!(rejected.status, CheckedRewriteStatus::Error, "{rejected:#?}");
+        assert_eq!(
+            rejected.status,
+            CheckedRewriteStatus::Error,
+            "{rejected:#?}"
+        );
         assert!(rejected.errors.iter().any(|error| error.contains(
             "checked rewrite requires a regular package.json at the selected project root"
         )));
@@ -866,15 +1055,31 @@ mod tests {
         let selected = run_with_evidence(&app, |_| {
             anyhow::bail!("explicit selected package reached validation")
         });
-        assert_eq!(selected.status, CheckedRewriteStatus::Error, "{selected:#?}");
-        assert!(selected.errors.iter().any(|error| {
-            error.contains("explicit selected package reached validation")
-        }));
+        assert_eq!(
+            selected.status,
+            CheckedRewriteStatus::Error,
+            "{selected:#?}"
+        );
+        assert!(
+            selected
+                .errors
+                .iter()
+                .any(|error| { error.contains("explicit selected package reached validation") })
+        );
         assert!(selected.static_validation.as_ref().unwrap().is_pass());
-        assert!(!selected.dependency_admission.as_ref().unwrap().requires_review());
+        assert!(
+            !selected
+                .dependency_admission
+                .as_ref()
+                .unwrap()
+                .requires_review()
+        );
         assert!(selected.rewrite.is_some() && selected.validation.is_none());
         assert_eq!(source(&app), helper);
-        assert_eq!(fs::read_to_string(container.path().join("outside.test.mjs")).unwrap(), outside);
+        assert_eq!(
+            fs::read_to_string(container.path().join("outside.test.mjs")).unwrap(),
+            outside
+        );
         assert!(!app.join(".migrate-backup/helper.mjs").exists());
     }
 
@@ -882,38 +1087,64 @@ mod tests {
     fn primary_dependency_evidence_reaches_text_sarif_and_the_one_command_report() {
         let root = project();
         let original = source(root.path());
-        fs::write(root.path().join("package-lock.json"), r#"{
+        fs::write(
+            root.path().join("package-lock.json"),
+            r#"{
             "lockfileVersion":3,"packages":{"node_modules/sharp":{"version":"0.33.0"}}
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
         let audit = run_audit(root.path()).unwrap();
         let text = render_audit_report(&audit, AuditOutputFormat::Text).unwrap();
         assert!(text.contains("npm dependencies: packages=1"));
         assert!(text.contains("npm dependency review [native_addon]"));
         assert!(text.contains("node_modules/sharp"));
-        let sarif: serde_json::Value = serde_json::from_str(
-            &render_audit_report(&audit, AuditOutputFormat::Sarif).unwrap()
-        ).unwrap();
-        assert!(sarif["runs"][0]["results"].as_array().unwrap().iter()
-            .any(|result| result["message"]["text"].as_str().unwrap().contains("native_addon")));
+        let sarif: serde_json::Value =
+            serde_json::from_str(&render_audit_report(&audit, AuditOutputFormat::Sarif).unwrap())
+                .unwrap();
+        assert!(
+            sarif["runs"][0]["results"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|result| result["message"]["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("native_addon"))
+        );
         let report = run_one_command_report(root.path()).unwrap();
         assert_eq!(report.executive_summary.go_no_go, "no_go");
-        assert_eq!(report.audit.dependency_admission, audit.dependency_admission);
-        assert_eq!(report.validation.dependency_admission, audit.dependency_admission);
+        assert_eq!(
+            report.audit.dependency_admission,
+            audit.dependency_admission
+        );
+        assert_eq!(
+            report.validation.dependency_admission,
+            audit.dependency_admission
+        );
         assert!(!report.validation.is_pass());
         assert_eq!(source(root.path()), original);
         assert!(!root.path().join(".migrate-backup").exists());
     }
 
     fn declare_installed_dependency(root: &Path) {
-        fs::write(root.join("package.json"), r#"{
+        fs::write(
+            root.join("package.json"),
+            r#"{
             "name":"checked","type":"module","engines":{"node":">=20"},
             "dependencies":{"ordinary":"^1"}
-        }"#).unwrap();
-        fs::write(root.join("package-lock.json"), r#"{
+        }"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join("package-lock.json"),
+            r#"{
             "lockfileVersion":3,"packages":{
                 "":{},"node_modules/ordinary":{"version":"1.0.0"}
             }
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
     }
 
     fn installed_project() -> tempfile::TempDir {
@@ -921,9 +1152,13 @@ mod tests {
         declare_installed_dependency(root.path());
         let package = root.path().join("node_modules/ordinary");
         fs::create_dir_all(&package).unwrap();
-        fs::write(package.join("package.json"), r#"{
+        fs::write(
+            package.join("package.json"),
+            r#"{
             "name":"ordinary","version":"1.0.0","type":"module","exports":"./index.mjs"
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
         fs::write(package.join("index.mjs"), "export const answer = 42;\n").unwrap();
         fs::write(root.path().join("case.test.mjs"),
             "import {value} from './helper.mjs';\nimport {answer} from 'ordinary';\nif(value !== '42' || answer !== 42) throw new Error('incorrect dependency result');\nconsole.log(answer);\n"
@@ -938,14 +1173,27 @@ mod tests {
         assert_dependency_rejection(root.path(), "missing_installed_dependency");
         for report in [
             run_selected(root.path(), Path::new("/absent/native"), None, false),
-            run_product(root.path(), Path::new("/absent/native"), Path::new("/absent/bun")),
+            run_product(
+                root.path(),
+                Path::new("/absent/native"),
+                Path::new("/absent/bun"),
+            ),
         ] {
             assert_eq!(report.status, CheckedRewriteStatus::Rejected, "{report:#?}");
             let admission = report.dependency_admission.as_ref().unwrap();
             assert!(admission.installation_checked);
             assert_eq!(admission.installed_packages_scanned, 0);
-            assert!(admission.findings.iter().any(|f| f.code == "missing_installed_dependency"));
-            assert!(report.rewrite.is_none() && report.validation.is_none() && report.product_validation.is_none());
+            assert!(
+                admission
+                    .findings
+                    .iter()
+                    .any(|f| f.code == "missing_installed_dependency")
+            );
+            assert!(
+                report.rewrite.is_none()
+                    && report.validation.is_none()
+                    && report.product_validation.is_none()
+            );
             assert!(!root.path().join("node_modules").exists());
         }
     }
@@ -953,13 +1201,33 @@ mod tests {
     #[test]
     fn actual_package_identity_and_undeclared_dependencies_block_checked_apply() {
         for (manifest, code) in [
-            (r#"{"name":"different","version":"1.0.0"}"#, "installed_identity_mismatch"),
-            (r#"{"name":"ordinary","version":"1.9.0"}"#, "installed_identity_mismatch"),
-            (r#"{"name":"ordinary","version":"1.0.0","dependencies":{"hidden":"1"}}"#, "installed_dependency_metadata_mismatch"),
+            (
+                r#"{"name":"different","version":"1.0.0"}"#,
+                "installed_identity_mismatch",
+            ),
+            (
+                r#"{"name":"ordinary","version":"1.9.0"}"#,
+                "installed_identity_mismatch",
+            ),
+            (
+                r#"{"name":"ordinary","version":"1.0.0","dependencies":{"hidden":"1"}}"#,
+                "installed_dependency_metadata_mismatch",
+            ),
         ] {
             let root = installed_project();
-            fs::write(root.path().join("node_modules/ordinary/package.json"), manifest).unwrap();
-            assert!(!dependency_admission::inspect(root.path(), Instant::now() + Duration::from_secs(15)).unwrap().requires_review());
+            fs::write(
+                root.path().join("node_modules/ordinary/package.json"),
+                manifest,
+            )
+            .unwrap();
+            assert!(
+                !dependency_admission::inspect(
+                    root.path(),
+                    Instant::now() + Duration::from_secs(15)
+                )
+                .unwrap()
+                .requires_review()
+            );
             assert_dependency_rejection(root.path(), code);
         }
     }
@@ -967,9 +1235,13 @@ mod tests {
     #[test]
     fn installed_lifecycle_and_native_payloads_block_execution_even_when_the_lock_is_clean() {
         let root = installed_project();
-        fs::write(root.path().join("node_modules/ordinary/package.json"), r#"{
+        fs::write(
+            root.path().join("node_modules/ordinary/package.json"),
+            r#"{
             "name":"ordinary","version":"1.0.0","scripts":{"postinstall":"never execute me"}
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
         assert_dependency_rejection(root.path(), "install_script");
         for marker in ["binding.gyp", "build/Release/custom.node"] {
             let root = installed_project();
@@ -985,7 +1257,11 @@ mod tests {
         let root = installed_project();
         let shadow = root.path().join("src/node_modules/ordinary");
         fs::create_dir_all(&shadow).unwrap();
-        fs::write(shadow.join("package.json"), r#"{"name":"ordinary","version":"1.0.0"}"#).unwrap();
+        fs::write(
+            shadow.join("package.json"),
+            r#"{"name":"ordinary","version":"1.0.0"}"#,
+        )
+        .unwrap();
         fs::write(shadow.join("index.js"), "module.exports=99;\n").unwrap();
         assert_dependency_rejection(root.path(), "unrecorded_installed_package");
     }
@@ -994,12 +1270,26 @@ mod tests {
     fn malformed_installed_manifest_is_an_error_not_execution_permission() {
         let root = installed_project();
         let original = source(root.path());
-        fs::write(root.path().join("node_modules/ordinary/package.json"),
-            r#"{"name":"ordinary","version":"1.0.0","version":"2.0.0"}"#).unwrap();
-        let report = run_with_evidence(root.path(), |_| panic!("ambiguous installed metadata must not execute"));
+        fs::write(
+            root.path().join("node_modules/ordinary/package.json"),
+            r#"{"name":"ordinary","version":"1.0.0","version":"2.0.0"}"#,
+        )
+        .unwrap();
+        let report = run_with_evidence(root.path(), |_| {
+            panic!("ambiguous installed metadata must not execute")
+        });
         assert_eq!(report.status, CheckedRewriteStatus::Error, "{report:#?}");
-        assert!(report.errors.iter().any(|e| e.contains("duplicate dependency JSON member")));
-        assert!(report.rewrite.is_none() && report.validation.is_none() && report.product_validation.is_none());
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.contains("duplicate dependency JSON member"))
+        );
+        assert!(
+            report.rewrite.is_none()
+                && report.validation.is_none()
+                && report.product_validation.is_none()
+        );
         assert_eq!(source(root.path()), original);
         assert!(!root.path().join(".migrate-backup/helper.mjs").exists());
     }
@@ -1017,16 +1307,27 @@ mod tests {
         let admission = report.dependency_admission.as_ref().unwrap();
         assert!(admission.installation_checked && !admission.requires_review());
         assert_eq!(admission.installed_packages_scanned, 1);
-        let input = admission.inputs.iter().find(|i| i.path == "node_modules/ordinary/package.json").unwrap();
+        let input = admission
+            .inputs
+            .iter()
+            .find(|i| i.path == "node_modules/ordinary/package.json")
+            .unwrap();
         assert_eq!(input.sha256, hex::encode(Sha256::digest(&manifest)));
         assert_eq!(fs::read(manifest_path).unwrap(), manifest);
         let measured = report.validation.as_ref().unwrap();
         assert_eq!(measured.passed, 1);
-        assert_eq!(measured.cases[0].reference.as_ref().unwrap().stdout.sha256,
-            hex::encode(Sha256::digest(b"42\n")));
+        assert_eq!(
+            measured.cases[0].reference.as_ref().unwrap().stdout.sha256,
+            hex::encode(Sha256::digest(b"42\n"))
+        );
         assert!(source(root.path()).contains("node:path"));
-        assert_eq!(fs::read_to_string(root.path().join(".migrate-backup/helper.mjs")).unwrap(), original);
-        assert!(render(&report).contains("dependency_installation_checked=true installed_packages=1"));
+        assert_eq!(
+            fs::read_to_string(root.path().join(".migrate-backup/helper.mjs")).unwrap(),
+            original
+        );
+        assert!(
+            render(&report).contains("dependency_installation_checked=true installed_packages=1")
+        );
         let json = serde_json::to_value(&report).unwrap();
         assert_eq!(json["dependency_admission"]["installation_checked"], true);
         assert!(!report.release_certification);
@@ -1049,7 +1350,11 @@ mod tests {
         assert!(report.errors.iter().any(|e| e.contains("project changed")));
         let admission = report.dependency_admission.as_ref().unwrap();
         assert!(admission.installation_checked);
-        let input = admission.inputs.iter().find(|i| i.path == "node_modules/ordinary/package.json").unwrap();
+        let input = admission
+            .inputs
+            .iter()
+            .find(|i| i.path == "node_modules/ordinary/package.json")
+            .unwrap();
         assert_eq!(input.sha256, hex::encode(Sha256::digest(&captured)));
         assert_eq!(source(root.path()), original);
         assert!(!root.path().join(".migrate-backup/helper.mjs").exists());

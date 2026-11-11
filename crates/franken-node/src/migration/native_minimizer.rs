@@ -183,13 +183,18 @@ fn require_seed(report: &SuiteReport) -> Result<()> {
         "reduction requires a captured failing migration"
     );
     ensure!(
-        report.cases.iter().all(|row| row
-            .reference
-            .as_ref()
-            .is_some_and(|run| run.exit_code == Some(i32::from(row.expected_exit_code)) && run.signal.is_none())
-            && row.native.as_ref().is_some_and(
-                |run| run.exit_code.is_some_and(|code| code >= 0) && run.signal.is_none()
-            )),
+        report
+            .cases
+            .iter()
+            .all(|row| row.reference.as_ref().is_some_and(|run| run.exit_code
+                == Some(i32::from(row.expected_exit_code))
+                && run.signal.is_none())
+                && row
+                    .native
+                    .as_ref()
+                    .is_some_and(
+                        |run| run.exit_code.is_some_and(|code| code >= 0) && run.signal.is_none()
+                    )),
         "reduction requires successful reference runs and ordinary, non-signal candidate exits"
     );
     Ok(())
@@ -314,7 +319,10 @@ impl Inputs {
         entry.data = EntryData::File(bytes);
         Ok(Self {
             original: self.original.with_entries(original),
-            candidate: self.candidate.as_ref().zip(candidate)
+            candidate: self
+                .candidate
+                .as_ref()
+                .zip(candidate)
                 .map(|(snapshot, entries)| snapshot.with_entries(entries)),
         })
     }
@@ -794,8 +802,12 @@ mod tests {
     fn seed(root: &Path, candidate: Option<&Path>) -> Loaded {
         seed_with_runtimes(root, candidate, &node(false), &node(true))
     }
-    fn seed_with_runtimes(root: &Path, candidate: Option<&Path>, reference: &Invocation,
-        native: &Invocation) -> Loaded {
+    fn seed_with_runtimes(
+        root: &Path,
+        candidate: Option<&Path>,
+        reference: &Invocation,
+        native: &Invocation,
+    ) -> Loaded {
         let original = Snapshot::capture(root, deadline()).unwrap();
         let candidate = candidate.map(|p| Snapshot::capture(p, deadline()).unwrap());
         let expected = execute_suite_pair(
@@ -1433,38 +1445,75 @@ mod tests {
         let candidate = tempfile::tempdir().unwrap();
         let output = tempfile::tempdir().unwrap();
         for (root, answer) in [(original.path(), 42), (candidate.path(), 43)] {
-            put(root, "case.test.cjs", "console.log(require('./helper.cts'));");
-            put(root, "passing.test.cjs", "console.log('unchanged passing case');");
-            put(root, "helper.cts", &format!(
-                "const discarded:number=12345;const answer:number={answer};module.exports=answer;"));
-            fs::set_permissions(root.join("helper.cts"), fs::Permissions::from_mode(0o640)).unwrap();
+            put(
+                root,
+                "case.test.cjs",
+                "console.log(require('./helper.cts'));",
+            );
+            put(
+                root,
+                "passing.test.cjs",
+                "console.log('unchanged passing case');",
+            );
+            put(
+                root,
+                "helper.cts",
+                &format!(
+                    "const discarded:number=12345;const answer:number={answer};module.exports=answer;"
+                ),
+            );
+            fs::set_permissions(root.join("helper.cts"), fs::Permissions::from_mode(0o640))
+                .unwrap();
         }
         let reference = typed_node(false);
         let native = typed_node(false);
-        let loaded = seed_with_runtimes(original.path(), Some(candidate.path()), &reference, &native);
+        let loaded =
+            seed_with_runtimes(original.path(), Some(candidate.path()), &reference, &native);
         assert_eq!(loaded.capsule.payload.expected.verdict, "FAIL");
         let expected = loaded.capsule.payload.expected.cases.clone();
-        let options = Options { source_files: vec!["helper.cts".into()], max_executions: 96, ..options() };
-        let reduced = minimize_loaded(loaded, &reference, &native, &options, Instant::now()).unwrap();
+        let options = Options {
+            source_files: vec!["helper.cts".into()],
+            max_executions: 96,
+            ..options()
+        };
+        let reduced =
+            minimize_loaded(loaded, &reference, &native, &options, Instant::now()).unwrap();
         assert_eq!(reduced.report.verdict, "REDUCED");
         assert_eq!(reduced.report.validation.cases, expected);
         assert_eq!(reduced.report.validation.passed, 1);
         assert_eq!(reduced.report.selected_sources.len(), 2);
         assert!(reduced.report.statistics.syntax.accepted > 0);
-        assert!(reduced.report.statistics.syntax.grammar_passes.get("typescript").is_some_and(|passes| *passes > 0));
+        assert!(
+            reduced
+                .report
+                .statistics
+                .syntax
+                .grammar_passes
+                .get("typescript")
+                .is_some_and(|passes| *passes > 0)
+        );
         assert!(reduced.report.statistics.executions <= options.max_executions);
         let path = output.path().join("typed.json");
         let pin = reduced.write_capsule(&path).unwrap().content_sha256;
         let loaded = load(&path, Some(&pin), deadline()).unwrap();
         for snapshot in [&loaded.original, loaded.candidate()] {
             assert_eq!(snapshot.entries[Path::new("helper.cts")].mode, 0o640);
-            assert!(!std::str::from_utf8(source(snapshot, Path::new("helper.cts")).unwrap()).unwrap().contains("discarded"));
+            assert!(
+                !std::str::from_utf8(source(snapshot, Path::new("helper.cts")).unwrap())
+                    .unwrap()
+                    .contains("discarded")
+            );
         }
-        let replayed = super::super::reexecute(loaded, &reference, &native, false, deadline()).unwrap();
+        let replayed =
+            super::super::reexecute(loaded, &reference, &native, false, deadline()).unwrap();
         assert_eq!(replayed.verdict, "REPRODUCED");
         assert_eq!(replayed.validation.cases, expected);
         for root in [original.path(), candidate.path()] {
-            assert!(fs::read_to_string(root.join("helper.cts")).unwrap().contains("discarded"));
+            assert!(
+                fs::read_to_string(root.join("helper.cts"))
+                    .unwrap()
+                    .contains("discarded")
+            );
             assert!(!root.join(".migrate-backup").exists());
         }
     }
@@ -1480,17 +1529,37 @@ mod tests {
         let loaded = seed_with_runtimes(root.path(), None, &reference, &native);
         assert_eq!(loaded.capsule.payload.expected.verdict, "FAIL");
         let expected = loaded.capsule.payload.expected.cases.clone();
-        let reduced = minimize_loaded(loaded, &reference, &native,
-            &Options { max_executions: 96, ..options() }, Instant::now()).unwrap();
+        let reduced = minimize_loaded(
+            loaded,
+            &reference,
+            &native,
+            &Options {
+                max_executions: 96,
+                ..options()
+            },
+            Instant::now(),
+        )
+        .unwrap();
         assert_eq!(reduced.report.verdict, "REDUCED");
         assert!(reduced.report.statistics.syntax.accepted > 0);
         assert_eq!(reduced.report.validation.cases, expected);
         let path = out.path().join("mts.json");
         let pin = reduced.write_capsule(&path).unwrap().content_sha256;
         let loaded = load(&path, Some(&pin), deadline()).unwrap();
-        let reduced_source = std::str::from_utf8(super::source(&loaded.original, Path::new("case.test.mts")).unwrap()).unwrap();
+        let reduced_source = std::str::from_utf8(
+            super::source(&loaded.original, Path::new("case.test.mts")).unwrap(),
+        )
+        .unwrap();
         assert!(!reduced_source.contains("discarded"));
-        assert_eq!(super::super::reexecute(loaded, &reference, &native, false, deadline()).unwrap().verdict, "REPRODUCED");
-        assert_eq!(fs::read_to_string(root.path().join("case.test.mts")).unwrap(), source);
+        assert_eq!(
+            super::super::reexecute(loaded, &reference, &native, false, deadline())
+                .unwrap()
+                .verdict,
+            "REPRODUCED"
+        );
+        assert_eq!(
+            fs::read_to_string(root.path().join("case.test.mts")).unwrap(),
+            source
+        );
     }
 }

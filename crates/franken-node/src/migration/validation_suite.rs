@@ -692,8 +692,8 @@ fn execute_suite_pair(
                 };
                 budget(deadline)?;
                 let timeout = leg_timeout.min(deadline.saturating_duration_since(Instant::now()));
-                let (output, check_error) = test_inventory::retain_completed_output(
-                    test_inventory::run_test_guarded(
+                let (output, check_error) =
+                    test_inventory::retain_completed_output(test_inventory::run_test_guarded(
                         snapshot,
                         invocation,
                         test,
@@ -702,9 +702,8 @@ fn execute_suite_pair(
                         (timeout, DRAIN_TIMEOUT),
                         None,
                         &control,
-                    ),
-                )
-                .with_context(|| format!("{name} execution failed"))?;
+                    ))
+                    .with_context(|| format!("{name} execution failed"))?;
                 let observation = if name == "reference" {
                     &mut row.reference
                 } else {
@@ -714,7 +713,8 @@ fn execute_suite_pair(
                 // unreadable/oversized output cannot erase completed execution.
                 let observation = observation.insert(observe(&output));
                 if let Some(error) = check_error {
-                    row.errors.push(format!("{name} test checks failed: {error:#}"));
+                    row.errors
+                        .push(format!("{name} test checks failed: {error:#}"));
                 }
                 if output.status.code() != Some(i32::from(row.expected_exit_code)) {
                     row.divergences.push(format!("{name}:unsuccessful_exit"));
@@ -781,7 +781,9 @@ fn execute_suite_pair(
         }
     }
     if let Err(error) = control.enforce() {
-        report.errors.push(format!("execution control recheck failed: {error:#}"));
+        report
+            .errors
+            .push(format!("execution control recheck failed: {error:#}"));
     }
     report.verdict = if report.errored > 0 || report.skipped > 0 || !report.errors.is_empty() {
         "ERROR"
@@ -1191,9 +1193,8 @@ mod tests {
     }
 
     fn admitted_dependency_inputs(root: &Path) -> Vec<MetadataInput> {
-        let report =
-            dependency_admission::inspect(root, Instant::now() + Duration::from_secs(20))
-                .expect("capture admitted dependency metadata");
+        let report = dependency_admission::inspect(root, Instant::now() + Duration::from_secs(20))
+            .expect("capture admitted dependency metadata");
         assert!(!report.requires_review(), "{report:#?}");
         report.inputs
     }
@@ -1206,7 +1207,9 @@ mod tests {
                 "installed_identity_mismatch",
             ),
             (
-                Some(r#"{"name":"ordinary","version":"1.2.3","scripts":{"postinstall":"never-execute-this-hook"}}"#),
+                Some(
+                    r#"{"name":"ordinary","version":"1.2.3","scripts":{"postinstall":"never-execute-this-hook"}}"#,
+                ),
                 "install_script",
             ),
             (None, "missing_installed_dependency"),
@@ -1248,7 +1251,11 @@ mod tests {
                 }
                 write(
                     project.path(),
-                    if has_suite { "case.test.js" } else { "index.js" },
+                    if has_suite {
+                        "case.test.js"
+                    } else {
+                        "index.js"
+                    },
                     "throw new Error('unadmitted installation must not execute');",
                 );
                 // Static metadata is still exactly the audited clean graph.
@@ -1262,18 +1269,16 @@ mod tests {
                     )
                     .unwrap_err()
                 } else {
-                    with_captured_dependency_inputs(
-                        project.path(),
-                        &expected,
-                        |_| -> Result<()> {
-                            panic!("installed admission must precede smoke execution")
-                        },
-                    )
+                    with_captured_dependency_inputs(project.path(), &expected, |_| -> Result<()> {
+                        panic!("installed admission must precede smoke execution")
+                    })
                     .unwrap_err()
                 };
                 assert!(error.to_string().contains(code), "{has_suite}: {error:#}");
                 assert!(
-                    error.to_string().contains("no runtime was resolved or executed"),
+                    error
+                        .to_string()
+                        .contains("no runtime was resolved or executed"),
                     "{error:#}",
                 );
                 if let Some(installed_manifest) = installed_manifest {
@@ -1439,11 +1444,9 @@ mod tests {
             "case.test.js",
             "throw new Error('new test cannot be hidden by smoke');",
         );
-        let error = with_captured_dependency_inputs(
-            project.path(),
-            &expected,
-            |_| -> Result<()> { panic!("new test inventory must precede smoke execution") },
-        )
+        let error = with_captured_dependency_inputs(project.path(), &expected, |_| -> Result<()> {
+            panic!("new test inventory must precede smoke execution")
+        })
         .unwrap_err();
         assert!(
             error

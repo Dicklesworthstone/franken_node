@@ -123,14 +123,28 @@ mod tests {
         let mut budget = Budget::default();
         cache.observe_module("shared.mjs");
         let first = cache
-            .scan(&mut parser, "shared.mjs", &source, SourceLanguage::JavaScript, &mut budget)
+            .scan(
+                &mut parser,
+                "shared.mjs",
+                &source,
+                SourceLanguage::JavaScript,
+                &mut budget,
+            )
             .unwrap();
         assert!(first.2);
         assert!(cache.entries.is_empty());
         cache.observe_module("shared.mjs");
         for _ in 0..3 {
             assert_eq!(
-                cache.scan(&mut parser, "shared.mjs", &source, SourceLanguage::JavaScript, &mut budget).unwrap(),
+                cache
+                    .scan(
+                        &mut parser,
+                        "shared.mjs",
+                        &source,
+                        SourceLanguage::JavaScript,
+                        &mut budget
+                    )
+                    .unwrap(),
                 first
             );
         }
@@ -141,18 +155,51 @@ mod tests {
     #[test]
     fn cached_results_match_uncached_scans_including_diagnostics_and_budgets() {
         for (text, language) in [
-            ("import './child.mjs'; export const n = 42;", SourceLanguage::JavaScript),
-            ("import data from './data.json' with {type:'json'};", SourceLanguage::JavaScript),
-            ("export {default} from './data.json' with {type:'json'};", SourceLanguage::JavaScript),
-            ("import type {T} from 'types'; const x: number = 1;", SourceLanguage::TypeScript),
+            (
+                "import './child.mjs'; export const n = 42;",
+                SourceLanguage::JavaScript,
+            ),
+            (
+                "import data from './data.json' with {type:'json'};",
+                SourceLanguage::JavaScript,
+            ),
+            (
+                "export {default} from './data.json' with {type:'json'};",
+                SourceLanguage::JavaScript,
+            ),
+            (
+                "import type {T} from 'types'; const x: number = 1;",
+                SourceLanguage::TypeScript,
+            ),
             ("export const = ;", SourceLanguage::JavaScript),
-            ("const load = require; load('hidden');", SourceLanguage::JavaScript),
-            ("require(flag ? './one.cjs' : './two.cjs');", SourceLanguage::JavaScript),
-            ("import(`./${flag ? 'one' : 'two'}.mjs`);", SourceLanguage::JavaScript),
-            ("require(flag ? './one.cjs' : unknown);", SourceLanguage::JavaScript),
-            ("const prefix='./'; const name=flag?'one':'two'; const target=`${prefix}${name}.cjs`; require(target);", SourceLanguage::JavaScript),
-            ("const name='./one.cjs'; function shadow(name){require(name);}", SourceLanguage::JavaScript),
-            ("import {createRequire} from 'node:module'; const local=createRequire(import.meta.url); const alias=local; const target='./one.cjs'; alias(target);", SourceLanguage::JavaScript),
+            (
+                "const load = require; load('hidden');",
+                SourceLanguage::JavaScript,
+            ),
+            (
+                "require(flag ? './one.cjs' : './two.cjs');",
+                SourceLanguage::JavaScript,
+            ),
+            (
+                "import(`./${flag ? 'one' : 'two'}.mjs`);",
+                SourceLanguage::JavaScript,
+            ),
+            (
+                "require(flag ? './one.cjs' : unknown);",
+                SourceLanguage::JavaScript,
+            ),
+            (
+                "const prefix='./'; const name=flag?'one':'two'; const target=`${prefix}${name}.cjs`; require(target);",
+                SourceLanguage::JavaScript,
+            ),
+            (
+                "const name='./one.cjs'; function shadow(name){require(name);}",
+                SourceLanguage::JavaScript,
+            ),
+            (
+                "import {createRequire} from 'node:module'; const local=createRequire(import.meta.url); const alias=local; const target='./one.cjs'; alias(target);",
+                SourceLanguage::JavaScript,
+            ),
             ("{\"text\":\"require('not-a-load')\"}", SourceLanguage::Json),
             ("{bad json}", SourceLanguage::Json),
             ("export interface T {}", SourceLanguage::Declaration),
@@ -163,8 +210,11 @@ mod tests {
             let mut cached_budget = Budget::default();
             let mut direct_budget = Budget::default();
             for _ in 0..3 {
-                let expected = scan(&mut parser, text.as_bytes(), language, &mut direct_budget).unwrap();
-                let actual = cache.scan(&mut parser, "shared", &source, language, &mut cached_budget).unwrap();
+                let expected =
+                    scan(&mut parser, text.as_bytes(), language, &mut direct_budget).unwrap();
+                let actual = cache
+                    .scan(&mut parser, "shared", &source, language, &mut cached_budget)
+                    .unwrap();
                 assert_eq!(actual, expected, "{text}");
                 assert_eq!(cached_budget.sites, direct_budget.sites, "{text}");
                 assert_eq!(cached_budget.ast_nodes, direct_budget.ast_nodes, "{text}");
@@ -179,11 +229,27 @@ mod tests {
         let mut parser = Parser::new();
         let mut budget = Budget::default();
         let mut cache = variants("shared.mjs");
-        let mut first = cache.scan(&mut parser, "shared.mjs", &source, SourceLanguage::JavaScript, &mut budget).unwrap();
+        let mut first = cache
+            .scan(
+                &mut parser,
+                "shared.mjs",
+                &source,
+                SourceLanguage::JavaScript,
+                &mut budget,
+            )
+            .unwrap();
         let expected = first.clone();
         first.0[0].specifier = Some("./injected.mjs".into());
         first.1.clear();
-        let second = cache.scan(&mut parser, "shared.mjs", &source, SourceLanguage::JavaScript, &mut budget).unwrap();
+        let second = cache
+            .scan(
+                &mut parser,
+                "shared.mjs",
+                &source,
+                SourceLanguage::JavaScript,
+                &mut budget,
+            )
+            .unwrap();
         assert_eq!(second, expected);
         assert_eq!(cache.scans, 1);
     }
@@ -193,12 +259,40 @@ mod tests {
         let source = source("import './child.mjs';");
         let mut parser = Parser::new();
         let mut cache = variants("shared.mjs");
-        cache.scan(&mut parser, "shared.mjs", &source, SourceLanguage::JavaScript, &mut Budget::default()).unwrap();
-        for (sites, ast_nodes) in [(MAX_SITES, 0), (0, MAX_AST_NODES), (usize::MAX, 0), (0, usize::MAX)] {
-            let mut budget = Budget { sites, ast_nodes, evidence_bytes: 123 };
-            let error = cache.scan(&mut parser, "shared.mjs", &source, SourceLanguage::JavaScript, &mut budget).unwrap_err();
+        cache
+            .scan(
+                &mut parser,
+                "shared.mjs",
+                &source,
+                SourceLanguage::JavaScript,
+                &mut Budget::default(),
+            )
+            .unwrap();
+        for (sites, ast_nodes) in [
+            (MAX_SITES, 0),
+            (0, MAX_AST_NODES),
+            (usize::MAX, 0),
+            (0, usize::MAX),
+        ] {
+            let mut budget = Budget {
+                sites,
+                ast_nodes,
+                evidence_bytes: 123,
+            };
+            let error = cache
+                .scan(
+                    &mut parser,
+                    "shared.mjs",
+                    &source,
+                    SourceLanguage::JavaScript,
+                    &mut budget,
+                )
+                .unwrap_err();
             assert_eq!(error.code, "ERR_MODULE_GRAPH_LIMIT");
-            assert_eq!((budget.sites, budget.ast_nodes, budget.evidence_bytes), (sites, ast_nodes, 123));
+            assert_eq!(
+                (budget.sites, budget.ast_nodes, budget.evidence_bytes),
+                (sites, ast_nodes, 123)
+            );
         }
     }
 
@@ -209,10 +303,24 @@ mod tests {
         let mut parser = Parser::new();
         let mut cache = variants("shared.mjs");
         let mut budget = Budget::default();
-        cache.scan(&mut parser, "shared.mjs", &first, SourceLanguage::JavaScript, &mut budget).unwrap();
-        for (source, language) in [(&changed, SourceLanguage::JavaScript), (&first, SourceLanguage::TypeScript)] {
+        cache
+            .scan(
+                &mut parser,
+                "shared.mjs",
+                &first,
+                SourceLanguage::JavaScript,
+                &mut budget,
+            )
+            .unwrap();
+        for (source, language) in [
+            (&changed, SourceLanguage::JavaScript),
+            (&first, SourceLanguage::TypeScript),
+        ] {
             assert_eq!(
-                cache.scan(&mut parser, "shared.mjs", source, language, &mut budget).unwrap_err().code,
+                cache
+                    .scan(&mut parser, "shared.mjs", source, language, &mut budget)
+                    .unwrap_err()
+                    .code,
                 "ERR_MODULE_INPUT_CHANGED"
             );
         }
@@ -222,28 +330,60 @@ mod tests {
     fn fatal_scan_errors_are_never_retained() {
         let source = source("import './child.mjs';");
         let mut cache = variants("shared.mjs");
-        let mut budget = Budget { sites: MAX_SITES, ..Budget::default() };
-        assert!(cache.scan(&mut Parser::new(), "shared.mjs", &source, SourceLanguage::JavaScript, &mut budget).is_err());
+        let mut budget = Budget {
+            sites: MAX_SITES,
+            ..Budget::default()
+        };
+        assert!(
+            cache
+                .scan(
+                    &mut Parser::new(),
+                    "shared.mjs",
+                    &source,
+                    SourceLanguage::JavaScript,
+                    &mut budget
+                )
+                .is_err()
+        );
         assert!(cache.entries.is_empty());
     }
 
     #[test]
     fn physical_source_reuse_preserves_url_identity_edges_and_replay() {
         let root = tempfile::tempdir().unwrap();
-        std::fs::write(root.path().join("app.mjs"), "import './shared.mjs?one'; import './shared.mjs?two';").unwrap();
-        std::fs::write(root.path().join("shared.mjs"), "import './child.mjs'; export const answer = 42;").unwrap();
+        std::fs::write(
+            root.path().join("app.mjs"),
+            "import './shared.mjs?one'; import './shared.mjs?two';",
+        )
+        .unwrap();
+        std::fs::write(
+            root.path().join("shared.mjs"),
+            "import './child.mjs'; export const answer = 42;",
+        )
+        .unwrap();
         std::fs::write(root.path().join("child.mjs"), "export const child = 1;").unwrap();
         let graph = capture(root.path(), "app.mjs", GraphOptions::default()).unwrap();
         let report = graph.report();
         assert!(report.fully_resolved);
         assert_eq!(report.modules.len(), 4);
         assert_eq!(report.edges.len(), 4);
-        let children = report.edges.iter().filter(|e| e.importer.path == "shared.mjs").collect::<Vec<_>>();
+        let children = report
+            .edges
+            .iter()
+            .filter(|e| e.importer.path == "shared.mjs")
+            .collect::<Vec<_>>();
         assert_eq!(children.len(), 2);
-        assert!(children.iter().all(|e| e.state == EdgeState::Resolved && e.target.as_ref().unwrap().path == "child.mjs"));
+        assert!(
+            children.iter().all(|e| e.state == EdgeState::Resolved
+                && e.target.as_ref().unwrap().path == "child.mjs")
+        );
         assert_ne!(children[0].importer, children[1].importer);
         let encoded = super::super::capsule::encode(&graph).unwrap();
-        std::fs::write(root.path().join("shared.mjs"), "throw new Error('live drift');").unwrap();
+        std::fs::write(
+            root.path().join("shared.mjs"),
+            "throw new Error('live drift');",
+        )
+        .unwrap();
         let replayed = super::super::capsule::replay(encoded.bytes(), encoded.digest()).unwrap();
         assert_eq!(report, replayed.report());
     }
@@ -251,13 +391,22 @@ mod tests {
     #[test]
     fn every_url_instance_keeps_its_own_rejection_diagnostic() {
         let root = tempfile::tempdir().unwrap();
-        std::fs::write(root.path().join("app.mjs"), "import './broken.mjs?one'; import './broken.mjs?two';").unwrap();
+        std::fs::write(
+            root.path().join("app.mjs"),
+            "import './broken.mjs?one'; import './broken.mjs?two';",
+        )
+        .unwrap();
         std::fs::write(root.path().join("broken.mjs"), "export const = ;").unwrap();
         let graph = capture(root.path(), "app.mjs", GraphOptions::default()).unwrap();
         let report = graph.report();
         assert!(!report.fully_resolved);
         assert_eq!(report.diagnostics.len(), 2);
         assert_ne!(report.diagnostics[0].module, report.diagnostics[1].module);
-        assert!(report.diagnostics.iter().all(|d| d.code == "JAVASCRIPT_PARSE_ERROR"));
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .all(|d| d.code == "JAVASCRIPT_PARSE_ERROR")
+        );
     }
 }

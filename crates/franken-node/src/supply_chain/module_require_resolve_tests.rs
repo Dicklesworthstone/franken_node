@@ -1,8 +1,8 @@
 //! Product capture -> sealed registry -> sibling-engine require.resolve.
 //! Node's public require.resolve is the reference, not an alternate executor.
 
-use super::*;
 use super::registry::{PinnedModuleRegistry, RequestStyle};
+use super::*;
 
 fn put(root: &Path, path: &str, source: &str) {
     let path = root.join(path);
@@ -24,16 +24,43 @@ fn scan_source(source: &str, language: SourceLanguage) -> Scan {
 fn direct_resolve_spellings_and_typed_wrappers_capture_resolution_only_requests() {
     for (language, source) in [
         (SourceLanguage::JavaScript, "require.resolve('./dep.cjs');"),
-        (SourceLanguage::JavaScript, "(require.resolve)('./dep.cjs');"),
-        (SourceLanguage::JavaScript, "(require).resolve(/* before */ './dep.cjs', /* after */);"),
-        (SourceLanguage::JavaScript, "require['resolve']('./dep.cjs');"),
-        (SourceLanguage::JavaScript, "require['res' + 'olve']('./dep.cjs');"),
-        (SourceLanguage::JavaScript, "require[`resolve`](`./dep.cjs`);"),
-        (SourceLanguage::JavaScript, r#"require['res\u006flve']('./dep.cjs');"#),
-        (SourceLanguage::TypeScript, "(require.resolve as Resolver)('./dep.cjs');"),
-        (SourceLanguage::TypeScript, "(require as Loader).resolve('./dep.cjs');"),
+        (
+            SourceLanguage::JavaScript,
+            "(require.resolve)('./dep.cjs');",
+        ),
+        (
+            SourceLanguage::JavaScript,
+            "(require).resolve(/* before */ './dep.cjs', /* after */);",
+        ),
+        (
+            SourceLanguage::JavaScript,
+            "require['resolve']('./dep.cjs');",
+        ),
+        (
+            SourceLanguage::JavaScript,
+            "require['res' + 'olve']('./dep.cjs');",
+        ),
+        (
+            SourceLanguage::JavaScript,
+            "require[`resolve`](`./dep.cjs`);",
+        ),
+        (
+            SourceLanguage::JavaScript,
+            r#"require['res\u006flve']('./dep.cjs');"#,
+        ),
+        (
+            SourceLanguage::TypeScript,
+            "(require.resolve as Resolver)('./dep.cjs');",
+        ),
+        (
+            SourceLanguage::TypeScript,
+            "(require as Loader).resolve('./dep.cjs');",
+        ),
         (SourceLanguage::TypeScript, "require.resolve!('./dep.cjs');"),
-        (SourceLanguage::TypeScript, "(require.resolve satisfies Resolver)('./dep.cjs');"),
+        (
+            SourceLanguage::TypeScript,
+            "(require.resolve satisfies Resolver)('./dep.cjs');",
+        ),
     ] {
         let (loads, notices, analyzed) = scan_source(source, language);
         assert!(analyzed, "{source}");
@@ -56,15 +83,30 @@ fn resolve_options_are_not_silently_resolved_from_the_importer_directory() {
     ] {
         put(root.path(), "app.cjs", source);
         // Even an existing first-argument target must not acquire a guessed route.
-        put(root.path(), "dep.cjs", "throw new Error('not a default-path request');");
+        put(
+            root.path(),
+            "dep.cjs",
+            "throw new Error('not a default-path request');",
+        );
         let captured = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
         assert!(!captured.report().fully_resolved, "{source}");
         assert_eq!(captured.report().edges.len(), 1);
         assert_eq!(captured.report().edges[0].state, EdgeState::NonLiteral);
         assert!(captured.report().edges[0].specifier.is_none());
-        assert!(captured.report().diagnostics.iter()
-            .any(|notice| notice.code == "REQUIRE_RESOLVE_OPTIONS"));
-        assert!(!captured.report().probes.iter().any(|probe| probe.path == "dep.cjs"));
+        assert!(
+            captured
+                .report()
+                .diagnostics
+                .iter()
+                .any(|notice| notice.code == "REQUIRE_RESOLVE_OPTIONS")
+        );
+        assert!(
+            !captured
+                .report()
+                .probes
+                .iter()
+                .any(|probe| probe.path == "dep.cjs")
+        );
     }
     let (loads, notices, _) = scan_source(
         "require.resolve('./dep.cjs', require('./options.cjs'));",
@@ -92,10 +134,18 @@ fn indirect_or_mutated_resolve_members_and_shadowed_loaders_stay_incomplete() {
     ] {
         let (_, notices, analyzed) = scan_source(source, SourceLanguage::JavaScript);
         assert!(analyzed, "{source}");
-        assert!(notices.iter().any(|notice| notice.code == "INDIRECT_REQUIRE"),
-            "must not infer loader identity for {source}: {notices:?}");
+        assert!(
+            notices
+                .iter()
+                .any(|notice| notice.code == "INDIRECT_REQUIRE"),
+            "must not infer loader identity for {source}: {notices:?}"
+        );
     }
-    for source in ["require.resolve(name);", "require.resolve();", "require.resolve(...names);"] {
+    for source in [
+        "require.resolve(name);",
+        "require.resolve();",
+        "require.resolve(...names);",
+    ] {
         let (loads, _, analyzed) = scan_source(source, SourceLanguage::JavaScript);
         assert!(analyzed, "{source}");
         assert_eq!(loads.len(), 1);
@@ -106,52 +156,130 @@ fn indirect_or_mutated_resolve_members_and_shadowed_loaders_stay_incomplete() {
 #[test]
 fn resolve_routes_preserve_conditions_encapsulation_pins_and_capsule_replay() {
     let root = tempfile::tempdir().unwrap();
-    put(root.path(), "app.cjs", "require.resolve('dual'); require('dual'); require.resolve('./dep.cjs');");
+    put(
+        root.path(),
+        "app.cjs",
+        "require.resolve('dual'); require('dual'); require.resolve('./dep.cjs');",
+    );
     put(root.path(), "dep.cjs", "module.exports=7;");
-    put(root.path(), "node_modules/dual/package.json",
-        r#"{"exports":{"import":"./wrong.mjs","require":"./right.cjs"}}"#);
-    put(root.path(), "node_modules/dual/right.cjs", "module.exports=42;");
-    put(root.path(), "node_modules/dual/wrong.mjs", "export default 0;");
+    put(
+        root.path(),
+        "node_modules/dual/package.json",
+        r#"{"exports":{"import":"./wrong.mjs","require":"./right.cjs"}}"#,
+    );
+    put(
+        root.path(),
+        "node_modules/dual/right.cjs",
+        "module.exports=42;",
+    );
+    put(
+        root.path(),
+        "node_modules/dual/wrong.mjs",
+        "export default 0;",
+    );
     let captured = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
     assert!(captured.report().fully_resolved);
     assert_eq!(captured.report().edges.len(), 3);
     assert_eq!(captured.report().modules.len(), 2);
     assert_eq!(captured.report().resolution_targets.len(), 2);
-    assert_eq!(captured.report().edges[0].target, captured.report().edges[1].target);
-    assert_eq!(captured.report().edges.iter().map(|edge| edge.kind).collect::<Vec<_>>(),
-        [LoadKind::RequireResolve, LoadKind::Require, LoadKind::RequireResolve]);
-    assert!(captured.report().edges.iter().all(|edge| edge.deferred_or_conditional
-        && edge.conditions == ResolutionMode::Require.default_conditions()));
-    assert!(!captured.report().probes.iter().any(|probe| probe.path.ends_with("wrong.mjs")));
+    assert_eq!(
+        captured.report().edges[0].target,
+        captured.report().edges[1].target
+    );
+    assert_eq!(
+        captured
+            .report()
+            .edges
+            .iter()
+            .map(|edge| edge.kind)
+            .collect::<Vec<_>>(),
+        [
+            LoadKind::RequireResolve,
+            LoadKind::Require,
+            LoadKind::RequireResolve
+        ]
+    );
+    assert!(
+        captured
+            .report()
+            .edges
+            .iter()
+            .all(|edge| edge.deferred_or_conditional
+                && edge.conditions == ResolutionMode::Require.default_conditions())
+    );
+    assert!(
+        !captured
+            .report()
+            .probes
+            .iter()
+            .any(|probe| probe.path.ends_with("wrong.mjs"))
+    );
     let pin = captured.report().input_hash.clone();
     let capsule = capsule::encode(&captured).unwrap();
-    put(root.path(), "node_modules/dual/right.cjs", "throw new Error('live bytes');");
+    put(
+        root.path(),
+        "node_modules/dual/right.cjs",
+        "throw new Error('live bytes');",
+    );
     let replayed = capsule::replay(capsule.bytes(), capsule.digest()).unwrap();
     assert_eq!(replayed.report(), captured.report());
     let registry = PinnedModuleRegistry::new(replayed, &pin).unwrap();
     assert_eq!(registry.summary().routes, 1);
     assert_eq!(registry.summary().resolution_routes, 2);
-    let target = registry.lookup(Some(registry.entrypoint()), "dual", RequestStyle::Require).unwrap();
+    let target = registry
+        .lookup(Some(registry.entrypoint()), "dual", RequestStyle::Require)
+        .unwrap();
     assert_eq!(target.origin().path, "node_modules/dual/right.cjs");
     assert_eq!(target.source(), "module.exports=42;");
-    assert_eq!(registry.lookup_resolution(Some(registry.entrypoint()), "dual").unwrap().id(),
-        target.id());
-    let metadata = registry.lookup_resolution(Some(registry.entrypoint()), "./dep.cjs").unwrap();
+    assert_eq!(
+        registry
+            .lookup_resolution(Some(registry.entrypoint()), "dual")
+            .unwrap()
+            .id(),
+        target.id()
+    );
+    let metadata = registry
+        .lookup_resolution(Some(registry.entrypoint()), "./dep.cjs")
+        .unwrap();
     assert_eq!(metadata.origin().path, "dep.cjs");
-    assert!(registry.lookup(Some(registry.entrypoint()), "./dep.cjs", RequestStyle::Require).is_err());
-    assert!(registry.lookup(Some(registry.entrypoint()), "dual", RequestStyle::RequireResolve).is_err());
+    assert!(
+        registry
+            .lookup(
+                Some(registry.entrypoint()),
+                "./dep.cjs",
+                RequestStyle::Require
+            )
+            .is_err()
+    );
+    assert!(
+        registry
+            .lookup(
+                Some(registry.entrypoint()),
+                "dual",
+                RequestStyle::RequireResolve
+            )
+            .is_err()
+    );
     for (specifier, style) in [
         ("dual", RequestStyle::Import),
         ("node_modules/dual/right.cjs", RequestStyle::Require),
         (target.id(), RequestStyle::Require),
         ("./not-captured.cjs", RequestStyle::Require),
     ] {
-        assert_eq!(registry.lookup(Some(registry.entrypoint()), specifier, style)
-            .err().unwrap().code, "ERR_MODULE_REGISTRY_ROUTE");
+        assert_eq!(
+            registry
+                .lookup(Some(registry.entrypoint()), specifier, style)
+                .err()
+                .unwrap()
+                .code,
+            "ERR_MODULE_REGISTRY_ROUTE"
+        );
     }
     let changed = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
-    assert_eq!(PinnedModuleRegistry::new(changed, &pin).err().unwrap().code,
-        "ERR_MODULE_REGISTRY_PIN_MISMATCH");
+    assert_eq!(
+        PinnedModuleRegistry::new(changed, &pin).err().unwrap().code,
+        "ERR_MODULE_REGISTRY_PIN_MISMATCH"
+    );
 }
 
 #[test]
@@ -165,15 +293,43 @@ fn resolve_requests_keep_missing_target_path_safety_and_resource_failures() {
     let registry = PinnedModuleRegistry::new(captured, &pin).unwrap();
     assert_eq!(registry.summary().missing_routes, 0);
     assert_eq!(registry.summary().missing_resolution_routes, 1);
-    assert_eq!(registry.lookup_resolution(Some(registry.entrypoint()), "./missing.cjs")
-        .err().unwrap().code, "MODULE_NOT_FOUND");
-    assert!(registry.lookup(Some(registry.entrypoint()), "./missing.cjs", RequestStyle::Require).is_err());
+    assert_eq!(
+        registry
+            .lookup_resolution(Some(registry.entrypoint()), "./missing.cjs")
+            .err()
+            .unwrap()
+            .code,
+        "MODULE_NOT_FOUND"
+    );
+    assert!(
+        registry
+            .lookup(
+                Some(registry.entrypoint()),
+                "./missing.cjs",
+                RequestStyle::Require
+            )
+            .is_err()
+    );
     put(root.path(), "app.cjs", "require.resolve('../outside.cjs');");
-    assert_eq!(capture(root.path(), "app.cjs", GraphOptions::default()).err().unwrap().code,
-        "ERR_MODULE_OUTSIDE_PROJECT");
+    assert_eq!(
+        capture(root.path(), "app.cjs", GraphOptions::default())
+            .err()
+            .unwrap()
+            .code,
+        "ERR_MODULE_OUTSIDE_PROJECT"
+    );
     let source = "require.resolve('./dep.cjs');".repeat(MAX_SITES + 1);
-    assert_eq!(scan(&mut Parser::new(), source.as_bytes(), SourceLanguage::JavaScript,
-        &mut Budget::default()).unwrap_err().code, "ERR_MODULE_GRAPH_LIMIT");
+    assert_eq!(
+        scan(
+            &mut Parser::new(),
+            source.as_bytes(),
+            SourceLanguage::JavaScript,
+            &mut Budget::default()
+        )
+        .unwrap_err()
+        .code,
+        "ERR_MODULE_GRAPH_LIMIT"
+    );
 }
 
 #[test]
@@ -186,7 +342,10 @@ fn resolve_only_assets_keep_bytes_pinned_without_parsing_or_dependency_traversal
         ("invalid.json", b"{invalid JSON"),
         ("invalid.cjs", b"function { invalid JavaScript"),
         ("types.d.ts", b"interface Value { answer: number }"),
-        ("transitive.cjs", b"require('../outside.cjs'); require('not-installed');"),
+        (
+            "transitive.cjs",
+            b"require('../outside.cjs'); require('not-installed');",
+        ),
     ];
     let mut source = String::from("const load=require;\n");
     for (name, bytes) in assets {
@@ -200,13 +359,28 @@ fn resolve_only_assets_keep_bytes_pinned_without_parsing_or_dependency_traversal
     assert_eq!(captured.report().modules.len(), 1);
     assert_eq!(captured.report().resolution_targets.len(), assets.len());
     assert_eq!(captured.report().edges.len(), assets.len() + 1);
-    assert!(captured.report().edges.iter().all(|edge|
-        edge.kind == LoadKind::RequireResolve && edge.state == EdgeState::Resolved
-        && edge.deferred_or_conditional));
-    assert!(!captured.report().probes.iter().any(|probe|
-        probe.path.contains("node_modules") || probe.path.contains("outside.cjs")));
+    assert!(
+        captured
+            .report()
+            .edges
+            .iter()
+            .all(|edge| edge.kind == LoadKind::RequireResolve
+                && edge.state == EdgeState::Resolved
+                && edge.deferred_or_conditional)
+    );
+    assert!(
+        !captured
+            .report()
+            .probes
+            .iter()
+            .any(|probe| probe.path.contains("node_modules") || probe.path.contains("outside.cjs"))
+    );
     for target in &captured.report().resolution_targets {
-        let original = assets.iter().find(|(name, _)| *name == target.id.path).unwrap().1;
+        let original = assets
+            .iter()
+            .find(|(name, _)| *name == target.id.path)
+            .unwrap()
+            .1;
         assert_eq!(target.content_bytes, original.len());
         assert_eq!(target.content_sha256, hex::encode(Sha256::digest(original)));
         assert!(captured.source_bytes(&target.id).is_none());
@@ -216,7 +390,13 @@ fn resolve_only_assets_keep_bytes_pinned_without_parsing_or_dependency_traversal
     for (name, _) in assets {
         std::fs::write(root.path().join(name), b"changed after capture").unwrap();
     }
-    assert_ne!(capture(root.path(), "app.cjs", GraphOptions::default()).unwrap().report().input_hash, pin);
+    assert_ne!(
+        capture(root.path(), "app.cjs", GraphOptions::default())
+            .unwrap()
+            .report()
+            .input_hash,
+        pin
+    );
     let replayed = capsule::replay(encoded.bytes(), encoded.digest()).unwrap();
     assert_eq!(replayed.report(), captured.report());
     assert_eq!(capsule::encode(&replayed).unwrap().bytes(), encoded.bytes());
@@ -225,46 +405,88 @@ fn resolve_only_assets_keep_bytes_pinned_without_parsing_or_dependency_traversal
     assert_eq!(registry.resolutions().count(), assets.len());
     for (name, _) in assets {
         let request = format!("./{name}");
-        let target = registry.lookup_resolution(Some(registry.entrypoint()), &request).unwrap();
+        let target = registry
+            .lookup_resolution(Some(registry.entrypoint()), &request)
+            .unwrap();
         assert_eq!(target.origin().path, *name);
-        assert!(registry.lookup(Some(registry.entrypoint()), &request, RequestStyle::Require).is_err());
-        assert!(registry.lookup_resolution(Some(registry.entrypoint()), target.id()).is_err());
+        assert!(
+            registry
+                .lookup(Some(registry.entrypoint()), &request, RequestStyle::Require)
+                .is_err()
+        );
+        assert!(
+            registry
+                .lookup_resolution(Some(registry.entrypoint()), target.id())
+                .is_err()
+        );
     }
 }
 
 #[test]
 fn resolution_only_files_do_not_read_package_format_or_grant_dynamic_loads() {
     let root = tempfile::tempdir().unwrap();
-    put(root.path(), "app.cjs", "require.resolve('./nested/asset.js');");
-    put(root.path(), "nested/package.json", "{invalid package config");
+    put(
+        root.path(),
+        "app.cjs",
+        "require.resolve('./nested/asset.js');",
+    );
+    put(
+        root.path(),
+        "nested/package.json",
+        "{invalid package config",
+    );
     put(root.path(), "nested/asset.js", "not JavaScript");
     let captured = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
     assert!(captured.report().fully_resolved);
     assert_eq!(captured.report().modules.len(), 1);
     assert_eq!(captured.report().resolution_targets.len(), 1);
-    assert!(!captured.report().probes.iter().any(|probe| probe.path == "nested/package.json"));
+    assert!(
+        !captured
+            .report()
+            .probes
+            .iter()
+            .any(|probe| probe.path == "nested/package.json")
+    );
 
     // Resolve's returned filename is not a new literal/importer route permit.
-    let (loads, _, _) = scan_source("require(require.resolve('./dep.cjs'));", SourceLanguage::JavaScript);
+    let (loads, _, _) = scan_source(
+        "require(require.resolve('./dep.cjs'));",
+        SourceLanguage::JavaScript,
+    );
     assert_eq!(loads.len(), 2);
     assert_eq!(loads[0].kind, LoadKind::Require);
     assert!(loads[0].specifier.is_none());
     assert_eq!(loads[1].kind, LoadKind::RequireResolve);
     assert_eq!(loads[1].specifier.as_deref(), Some("./dep.cjs"));
-    put(root.path(), "app.cjs", "require(require.resolve('./nested/asset.js'));");
+    put(
+        root.path(),
+        "app.cjs",
+        "require(require.resolve('./nested/asset.js'));",
+    );
     let dynamic = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
     assert_eq!(dynamic.report().resolution_targets.len(), 1);
-    assert!(dynamic.report().edges.iter().any(|edge|
-        edge.kind == LoadKind::Require && edge.state == EdgeState::NonLiteral));
+    assert!(
+        dynamic
+            .report()
+            .edges
+            .iter()
+            .any(|edge| edge.kind == LoadKind::Require && edge.state == EdgeState::NonLiteral)
+    );
     let pin = dynamic.report().input_hash.clone();
-    assert_eq!(PinnedModuleRegistry::new(dynamic, &pin).err().unwrap().code,
-        "ERR_MODULE_REGISTRY_INCOMPLETE");
+    assert_eq!(
+        PinnedModuleRegistry::new(dynamic, &pin).err().unwrap().code,
+        "ERR_MODULE_REGISTRY_INCOMPLETE"
+    );
 }
 
 #[test]
 fn resolution_and_loading_have_independent_order_invariant_source_authority() {
     let root = tempfile::tempdir().unwrap();
-    put(root.path(), "shared.custom", "module.exports=require('./leaf.cjs');");
+    put(
+        root.path(),
+        "shared.custom",
+        "module.exports=require('./leaf.cjs');",
+    );
     put(root.path(), "leaf.cjs", "module.exports=42;");
     for source in [
         "require.resolve('./shared.custom'); require('./shared.custom');",
@@ -277,9 +499,18 @@ fn resolution_and_loading_have_independent_order_invariant_source_authority() {
         assert_eq!(captured.report().resolution_targets.len(), 1);
         let target = &captured.report().resolution_targets[0];
         assert_eq!(target.id.path, "shared.custom");
-        assert_eq!(captured.source_bytes(&target.id), Some(b"module.exports=require('./leaf.cjs');".as_slice()));
-        assert!(captured.report().edges.iter().any(|edge|
-            edge.importer == target.id && edge.specifier.as_deref() == Some("./leaf.cjs")));
+        assert_eq!(
+            captured.source_bytes(&target.id),
+            Some(b"module.exports=require('./leaf.cjs');".as_slice())
+        );
+        assert!(
+            captured
+                .report()
+                .edges
+                .iter()
+                .any(|edge| edge.importer == target.id
+                    && edge.specifier.as_deref() == Some("./leaf.cjs"))
+        );
     }
     for source in [
         "require.resolve('./addon.node'); require('./addon.node');",
@@ -290,8 +521,13 @@ fn resolution_and_loading_have_independent_order_invariant_source_authority() {
         let captured = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
         assert!(!captured.report().fully_resolved);
         assert_eq!(captured.report().resolution_targets.len(), 1);
-        assert!(captured.report().diagnostics.iter().any(|notice|
-            notice.code == "UNSUPPORTED_MODULE_FORMAT"));
+        assert!(
+            captured
+                .report()
+                .diagnostics
+                .iter()
+                .any(|notice| notice.code == "UNSUPPORTED_MODULE_FORMAT")
+        );
     }
 }
 
@@ -313,15 +549,20 @@ fn metadata_and_loaded_targets_share_the_existing_module_bound() {
     put(root.path(), "extra.cjs", "module.exports=2;");
     for extra in ["require('./extra.cjs');", "require.resolve('./extra.cjs');"] {
         put(root.path(), "app.cjs", &format!("{source}{extra}"));
-        assert_eq!(capture(root.path(), "app.cjs", GraphOptions::default()).err().unwrap().code,
-            "ERR_MODULE_GRAPH_LIMIT");
+        assert_eq!(
+            capture(root.path(), "app.cjs", GraphOptions::default())
+                .err()
+                .unwrap()
+                .code,
+            "ERR_MODULE_GRAPH_LIMIT"
+        );
     }
 }
 
 #[cfg(feature = "engine")]
 mod native {
-    use super::*;
     use super::super::engine_resolver::CapturedEngineResolver;
+    use super::*;
     use frankenengine_engine::ast::ParseGoal;
     use frankenengine_engine::baseline_interpreter::LaneChoice;
     use frankenengine_engine::capability::RuntimeCapability;
@@ -329,8 +570,8 @@ mod native {
         ExecutionOrchestrator, ExtensionPackage, OrchestratorConfig,
     };
     use frankenengine_engine::module_resolver::{
-        CapabilityPolicyHook, ModuleMetadata, ModulePolicyHook, ModuleRecord, ModuleRequest, ModuleResolver,
-        ResolutionContext, ResolutionResult,
+        CapabilityPolicyHook, ModuleMetadata, ModulePolicyHook, ModuleRecord, ModuleRequest,
+        ModuleResolver, ResolutionContext, ResolutionResult,
     };
     use frankenengine_engine::runtime_config::RuntimeConfig;
     use std::collections::{BTreeMap, BTreeSet};
@@ -339,7 +580,8 @@ mod native {
 
     fn policy() -> CapabilityPolicyHook {
         CapabilityPolicyHook::new(BTreeSet::from([
-            RuntimeCapability::ModuleLoad, RuntimeCapability::Builtin,
+            RuntimeCapability::ModuleLoad,
+            RuntimeCapability::Builtin,
         ]))
     }
 
@@ -350,11 +592,14 @@ mod native {
     fn engine(lane: LaneChoice) -> ExecutionOrchestrator {
         ExecutionOrchestrator::try_new_lab_with_runtime_config(
             OrchestratorConfig {
-                force_lane: Some(lane), parse_goal: ParseGoal::Script, commonjs_entry: true,
+                force_lane: Some(lane),
+                parse_goal: ParseGoal::Script,
+                commonjs_entry: true,
                 ..OrchestratorConfig::default()
             },
             RuntimeConfig::default(),
-        ).unwrap()
+        )
+        .unwrap()
     }
 
     fn package() -> ExtensionPackage {
@@ -364,7 +609,8 @@ mod native {
             source_file: Some("/unopened/resolve-entry.cjs".into()),
             module_root: None,
             capabilities: vec!["module_load".into(), "builtin".into()],
-            version: "1.0.0".into(), metadata: BTreeMap::new(),
+            version: "1.0.0".into(),
+            metadata: BTreeMap::new(),
         }
     }
 
@@ -389,14 +635,36 @@ module.exports = { answer: 42 };
         let parent = tempfile::tempdir().unwrap();
         let root = parent.path().join("project with spaces");
         put(&root, "app.cjs", ENTRY);
-        put(&root, "node_modules/fixture/package.json", r#"{"main":"index.cjs"}"#);
+        put(
+            &root,
+            "node_modules/fixture/package.json",
+            r#"{"main":"index.cjs"}"#,
+        );
         put(&root, "node_modules/fixture/index.cjs", FIXTURE);
-        put(&root, "node_modules/fixture/payload.json", r#"{"answer":42}"#);
-        for base in ["node_modules/dual", "node_modules/fixture/node_modules/dual"] {
-            put(&root, &format!("{base}/package.json"),
-                r#"{"exports":{"import":"./wrong.mjs","require":"./right.cjs"}}"#);
-            put(&root, &format!("{base}/right.cjs"), "throw new Error('resolve must not evaluate');");
-            put(&root, &format!("{base}/wrong.mjs"), "throw new Error('wrong conditions');");
+        put(
+            &root,
+            "node_modules/fixture/payload.json",
+            r#"{"answer":42}"#,
+        );
+        for base in [
+            "node_modules/dual",
+            "node_modules/fixture/node_modules/dual",
+        ] {
+            put(
+                &root,
+                &format!("{base}/package.json"),
+                r#"{"exports":{"import":"./wrong.mjs","require":"./right.cjs"}}"#,
+            );
+            put(
+                &root,
+                &format!("{base}/right.cjs"),
+                "throw new Error('resolve must not evaluate');",
+            );
+            put(
+                &root,
+                &format!("{base}/wrong.mjs"),
+                "throw new Error('wrong conditions');",
+            );
         }
         let captured = capture(&root, "app.cjs", GraphOptions::default()).unwrap();
         // Builtin terminal requirements remain explicit capture evidence.
@@ -405,26 +673,57 @@ module.exports = { answer: 42 };
         let pin = captured.report().input_hash.clone();
         let encoded = capsule::encode(&captured).unwrap();
         std::fs::rename(root.join("node_modules"), root.join("hidden_packages")).unwrap();
-        put(&root, "node_modules/fixture/index.cjs", "throw new Error('live files reopened');");
+        put(
+            &root,
+            "node_modules/fixture/index.cjs",
+            "throw new Error('live files reopened');",
+        );
         for lane in [LaneChoice::QuickJs, LaneChoice::V8] {
             let replayed = capsule::replay(encoded.bytes(), encoded.digest()).unwrap();
             assert_eq!(captured.report(), replayed.report());
             let resolver = Arc::new(CapturedEngineResolver::new(replayed, &pin).ok().unwrap());
             let policy = Arc::new(policy());
-            let entry = resolver.resolve(&resolver.entry_request(), &context(), policy.as_ref()).unwrap();
+            let entry = resolver
+                .resolve(&resolver.entry_request(), &context(), policy.as_ref())
+                .unwrap();
             let installed = resolver.execution_resolver(&root, policy).unwrap();
-            let result = engine(lane).execute_resolved_entry_with_resolver(&package(), &entry, installed)
+            let result = engine(lane)
+                .execute_resolved_entry_with_resolver(&package(), &entry, installed)
                 .expect("real sibling engine resolves the product-captured npm graph");
-            assert_eq!(result.console_output.iter().map(|line| line.message.clone()).collect::<Vec<_>>(), [
-                format!("resolved {}", root.join("node_modules/fixture/index.cjs").display()),
-                "still-unloaded".into(),
-                format!("root {}", root.join("node_modules/dual/right.cjs").display()),
-                format!("package-origin {}", root.join("node_modules/fixture/index.cjs").display()),
-                format!("nested {}", root.join("node_modules/fixture/node_modules/dual/right.cjs").display()),
-                format!("json {}", root.join("node_modules/fixture/payload.json").display()),
-                "same true 42".into(),
-                "builtin buffer node:buffer".into(),
-            ], "{lane:?}");
+            assert_eq!(
+                result
+                    .console_output
+                    .iter()
+                    .map(|line| line.message.clone())
+                    .collect::<Vec<_>>(),
+                [
+                    format!(
+                        "resolved {}",
+                        root.join("node_modules/fixture/index.cjs").display()
+                    ),
+                    "still-unloaded".into(),
+                    format!(
+                        "root {}",
+                        root.join("node_modules/dual/right.cjs").display()
+                    ),
+                    format!(
+                        "package-origin {}",
+                        root.join("node_modules/fixture/index.cjs").display()
+                    ),
+                    format!(
+                        "nested {}",
+                        root.join("node_modules/fixture/node_modules/dual/right.cjs")
+                            .display()
+                    ),
+                    format!(
+                        "json {}",
+                        root.join("node_modules/fixture/payload.json").display()
+                    ),
+                    "same true 42".into(),
+                    "builtin buffer node:buffer".into(),
+                ],
+                "{lane:?}"
+            );
         }
     }
 
@@ -432,14 +731,25 @@ module.exports = { answer: 42 };
     fn native_optional_package_fallbacks_match_node_and_keep_captured_absence() {
         let root = tempfile::tempdir().unwrap();
         let root = root.path();
-        put(root, "app.cjs", r#"
+        put(
+            root,
+            "app.cjs",
+            r#"
 const fixture = require('fallback-fixture');
 console.log('value', fixture.value, fixture.lookup, fixture.resolved);
 if (false) { require('unused-missing'); }
 console.log('done');
-"#);
-        put(root, "node_modules/fallback-fixture/package.json", r#"{"main":"index.cjs"}"#);
-        put(root, "node_modules/fallback-fixture/index.cjs", r#"
+"#,
+        );
+        put(
+            root,
+            "node_modules/fallback-fixture/package.json",
+            r#"{"main":"index.cjs"}"#,
+        );
+        put(
+            root,
+            "node_modules/fallback-fixture/index.cjs",
+            r#"
 let value;
 let lookup;
 let resolved;
@@ -452,21 +762,48 @@ catch (error) {
 try { require.resolve('optional-addon'); }
 catch (error) { resolved = error.code; }
 module.exports = { value: value, lookup: lookup, resolved: resolved };
-"#);
-        put(root, "node_modules/fallback-fixture/fallback.cjs", "module.exports = 42;");
-        let reference = std::process::Command::new("node").arg("app.cjs").current_dir(root)
-            .output().expect("Node supplies the optional-package reference result");
-        assert!(reference.status.success(), "{}", String::from_utf8_lossy(&reference.stderr));
-        assert_eq!(reference.stdout, b"value 42 MODULE_NOT_FOUND MODULE_NOT_FOUND\ndone\n");
+"#,
+        );
+        put(
+            root,
+            "node_modules/fallback-fixture/fallback.cjs",
+            "module.exports = 42;",
+        );
+        let reference = std::process::Command::new("node")
+            .arg("app.cjs")
+            .current_dir(root)
+            .output()
+            .expect("Node supplies the optional-package reference result");
+        assert!(
+            reference.status.success(),
+            "{}",
+            String::from_utf8_lossy(&reference.stderr)
+        );
+        assert_eq!(
+            reference.stdout,
+            b"value 42 MODULE_NOT_FOUND MODULE_NOT_FOUND\ndone\n"
+        );
         let captured = capture(root, "app.cjs", GraphOptions::default()).unwrap();
         assert!(!captured.report().fully_resolved);
         assert!(captured.report().diagnostics.is_empty());
         let pin = captured.report().input_hash.clone();
         let encoded = capsule::encode(&captured).unwrap();
         // Neither a later install nor a changed fallback can alter a replay.
-        put(root, "node_modules/optional-addon/package.json", r#"{"main":"index.cjs"}"#);
-        put(root, "node_modules/optional-addon/index.cjs", "module.exports = 999;");
-        put(root, "node_modules/fallback-fixture/fallback.cjs", "throw new Error('live fallback reopened');");
+        put(
+            root,
+            "node_modules/optional-addon/package.json",
+            r#"{"main":"index.cjs"}"#,
+        );
+        put(
+            root,
+            "node_modules/optional-addon/index.cjs",
+            "module.exports = 999;",
+        );
+        put(
+            root,
+            "node_modules/fallback-fixture/fallback.cjs",
+            "throw new Error('live fallback reopened');",
+        );
         for lane in [LaneChoice::QuickJs, LaneChoice::V8] {
             let replayed = capsule::replay(encoded.bytes(), encoded.digest()).unwrap();
             assert_eq!(replayed.report(), captured.report());
@@ -474,12 +811,20 @@ module.exports = { value: value, lookup: lookup, resolved: resolved };
             assert_eq!(resolver.summary().missing_routes, 2);
             assert_eq!(resolver.summary().missing_resolution_routes, 1);
             let policy = Arc::new(policy());
-            let entry = resolver.resolve(&resolver.entry_request(), &context(), policy.as_ref()).unwrap();
+            let entry = resolver
+                .resolve(&resolver.entry_request(), &context(), policy.as_ref())
+                .unwrap();
             let installed = resolver.execution_resolver(root, policy).unwrap();
-            let result = engine(lane).execute_resolved_entry_with_resolver(&package(), &entry, installed)
+            let result = engine(lane)
+                .execute_resolved_entry_with_resolver(&package(), &entry, installed)
                 .expect("optional package lookup is ordinary CommonJS control flow");
-            let output = result.console_output.iter().map(|line| line.message.as_str())
-                .collect::<Vec<_>>().join("\n") + "\n";
+            let output = result
+                .console_output
+                .iter()
+                .map(|line| line.message.as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n";
             assert_eq!(output.as_bytes(), reference.stdout, "{lane:?}");
         }
     }
@@ -488,14 +833,25 @@ module.exports = { value: value, lookup: lookup, resolved: resolved };
     fn native_lexical_const_npm_requests_match_node_after_source_replacement() {
         let root = tempfile::tempdir().unwrap();
         let root = root.path();
-        put(root, "app.cjs", r#"
+        put(
+            root,
+            "app.cjs",
+            r#"
 const fixture = require('scoped-fixture');
 console.log('values', fixture.load(true), fixture.load(false));
 console.log('resolved', fixture.lookup());
 console.log('optional', fixture.optional());
-"#);
-        put(root, "node_modules/scoped-fixture/package.json", r#"{"main":"index.cjs"}"#);
-        put(root, "node_modules/scoped-fixture/index.cjs", r#"
+"#,
+        );
+        put(
+            root,
+            "node_modules/scoped-fixture/package.json",
+            r#"{"main":"index.cjs"}"#,
+        );
+        put(
+            root,
+            "node_modules/scoped-fixture/index.cjs",
+            r#"
 const prefix = './';
 function load(flag) {
     const leaf = flag ? 'one' : 'two';
@@ -512,12 +868,28 @@ function optional() {
     catch (error) { return error.code; }
 }
 module.exports = { load: load, lookup: lookup, optional: optional };
-"#);
-        put(root, "node_modules/scoped-fixture/one.cjs", "module.exports = 41;");
-        put(root, "node_modules/scoped-fixture/two.cjs", "module.exports = 42;");
-        let reference = std::process::Command::new("node").arg("app.cjs").current_dir(root)
-            .output().expect("Node supplies the scoped-package reference result");
-        assert!(reference.status.success(), "{}", String::from_utf8_lossy(&reference.stderr));
+"#,
+        );
+        put(
+            root,
+            "node_modules/scoped-fixture/one.cjs",
+            "module.exports = 41;",
+        );
+        put(
+            root,
+            "node_modules/scoped-fixture/two.cjs",
+            "module.exports = 42;",
+        );
+        let reference = std::process::Command::new("node")
+            .arg("app.cjs")
+            .current_dir(root)
+            .output()
+            .expect("Node supplies the scoped-package reference result");
+        assert!(
+            reference.status.success(),
+            "{}",
+            String::from_utf8_lossy(&reference.stderr)
+        );
         let expected = format!(
             "values 41 42\nresolved {}\noptional MODULE_NOT_FOUND\n",
             root.join("node_modules/scoped-fixture/one.cjs").display(),
@@ -529,27 +901,46 @@ module.exports = { load: load, lookup: lookup, optional: optional };
         let pin = captured.report().input_hash.clone();
         let encoded = capsule::encode(&captured).unwrap();
         std::fs::rename(root.join("node_modules"), root.join("original_packages")).unwrap();
-        put(root, "node_modules/scoped-fixture/index.cjs", "throw new Error('live package reopened');");
-        put(root, "node_modules/optional-addon/index.js", "module.exports = 999;");
+        put(
+            root,
+            "node_modules/scoped-fixture/index.cjs",
+            "throw new Error('live package reopened');",
+        );
+        put(
+            root,
+            "node_modules/optional-addon/index.js",
+            "module.exports = 999;",
+        );
         for lane in [LaneChoice::QuickJs, LaneChoice::V8] {
             let replayed = capsule::replay(encoded.bytes(), encoded.digest()).unwrap();
             assert_eq!(replayed.report(), captured.report());
             let resolver = Arc::new(CapturedEngineResolver::new(replayed, &pin).ok().unwrap());
             assert_eq!(resolver.summary().missing_routes, 1);
             let policy = Arc::new(policy());
-            let entry = resolver.resolve(&resolver.entry_request(), &context(), policy.as_ref()).unwrap();
+            let entry = resolver
+                .resolve(&resolver.entry_request(), &context(), policy.as_ref())
+                .unwrap();
             let installed = resolver.execution_resolver(root, policy).unwrap();
-            let result = engine(lane).execute_resolved_entry_with_resolver(&package(), &entry, installed)
+            let result = engine(lane)
+                .execute_resolved_entry_with_resolver(&package(), &entry, installed)
                 .expect("lexical immutable requests retain the captured npm package origin");
-            let output = result.console_output.iter().map(|line| line.message.as_str())
-                .collect::<Vec<_>>().join("\n") + "\n";
+            let output = result
+                .console_output
+                .iter()
+                .map(|line| line.message.as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n";
             assert_eq!(output.as_bytes(), reference.stdout, "{lane:?}");
         }
     }
 
     #[test]
     fn native_uncaught_missing_require_and_resolve_still_fail_execution() {
-        for source in ["require('missing-package');", "require.resolve('missing-package');"] {
+        for source in [
+            "require('missing-package');",
+            "require.resolve('missing-package');",
+        ] {
             let root = tempfile::tempdir().unwrap();
             put(root.path(), "app.cjs", source);
             let captured = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
@@ -559,13 +950,21 @@ module.exports = { load: load, lookup: lookup, optional: optional };
                 let graph = capsule::replay(encoded.bytes(), encoded.digest()).unwrap();
                 let resolver = Arc::new(CapturedEngineResolver::new(graph, &pin).ok().unwrap());
                 let policy = Arc::new(policy());
-                let entry = resolver.resolve(&resolver.entry_request(), &context(), policy.as_ref()).unwrap();
+                let entry = resolver
+                    .resolve(&resolver.entry_request(), &context(), policy.as_ref())
+                    .unwrap();
                 let installed = resolver.execution_resolver(root.path(), policy).unwrap();
                 let failure = engine(lane)
                     .execute_resolved_entry_with_resolver(&package(), &entry, installed)
-                    .expect_err("admitting a known absence does not turn an uncaught load into success");
-                assert!(failure.to_string().contains("Cannot find module 'missing-package'"),
-                    "{lane:?}: {failure}");
+                    .expect_err(
+                        "admitting a known absence does not turn an uncaught load into success",
+                    );
+                assert!(
+                    failure
+                        .to_string()
+                        .contains("Cannot find module 'missing-package'"),
+                    "{lane:?}: {failure}"
+                );
             }
         }
     }
@@ -575,25 +974,37 @@ module.exports = { load: load, lookup: lookup, optional: optional };
     struct MissingCodePolicy;
 
     impl ModulePolicyHook for MissingCodePolicy {
-        fn authorize_metadata(&self, request: &ModuleRequest, metadata: &ModuleMetadata,
-            context: &ResolutionContext) -> ResolutionResult<()> {
+        fn authorize_metadata(
+            &self,
+            request: &ModuleRequest,
+            metadata: &ModuleMetadata,
+            context: &ResolutionContext,
+        ) -> ResolutionResult<()> {
             let mut policy = policy();
             if request.specifier == "./dep.cjs" {
                 policy.denied_specifiers.insert(request.specifier.clone());
-                let mut denial = policy.authorize_metadata(request, metadata, context).unwrap_err();
-                denial.code = frankenengine_engine::module_resolver::ResolutionErrorCode::ModuleNotFound;
+                let mut denial = policy
+                    .authorize_metadata(request, metadata, context)
+                    .unwrap_err();
+                denial.code =
+                    frankenengine_engine::module_resolver::ResolutionErrorCode::ModuleNotFound;
                 return Err(denial);
             }
             policy.authorize_metadata(request, metadata, context)
         }
 
-        fn authorize(&self, request: &ModuleRequest, record: &ModuleRecord,
-            context: &ResolutionContext) -> ResolutionResult<()> {
+        fn authorize(
+            &self,
+            request: &ModuleRequest,
+            record: &ModuleRecord,
+            context: &ResolutionContext,
+        ) -> ResolutionResult<()> {
             let mut policy = policy();
             if request.specifier == "./dep.cjs" {
                 policy.denied_specifiers.insert(request.specifier.clone());
                 let mut denial = policy.authorize(request, record, context).unwrap_err();
-                denial.code = frankenengine_engine::module_resolver::ResolutionErrorCode::ModuleNotFound;
+                denial.code =
+                    frankenengine_engine::module_resolver::ResolutionErrorCode::ModuleNotFound;
                 return Err(denial);
             }
             policy.authorize(request, record, context)
@@ -612,39 +1023,65 @@ module.exports = { load: load, lookup: lookup, optional: optional };
             let graph = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
             let pin = graph.report().input_hash.clone();
             let resolver = Arc::new(CapturedEngineResolver::new(graph, &pin).ok().unwrap());
-            let request = ModuleRequest::new("./dep.cjs",
-                frankenengine_engine::module_resolver::ImportStyle::Require)
-                .with_referrer(resolver.entry_request().specifier)
-                .with_compatibility_mode(
-                    frankenengine_engine::module_compatibility_matrix::CompatibilityMode::NodeCompat);
+            let request = ModuleRequest::new(
+                "./dep.cjs",
+                frankenengine_engine::module_resolver::ImportStyle::Require,
+            )
+            .with_referrer(resolver.entry_request().specifier)
+            .with_compatibility_mode(
+                frankenengine_engine::module_compatibility_matrix::CompatibilityMode::NodeCompat,
+            );
             let denial = if source.contains("require.resolve") {
-                resolver.resolve_metadata(&request, &context(), &MissingCodePolicy).unwrap_err()
+                resolver
+                    .resolve_metadata(&request, &context(), &MissingCodePolicy)
+                    .unwrap_err()
             } else {
-                resolver.resolve(&request, &context(), &MissingCodePolicy).unwrap_err()
+                resolver
+                    .resolve(&request, &context(), &MissingCodePolicy)
+                    .unwrap_err()
             };
-            assert_eq!(denial.code,
-                frankenengine_engine::module_resolver::ResolutionErrorCode::PolicyDenied);
+            assert_eq!(
+                denial.code,
+                frankenengine_engine::module_resolver::ResolutionErrorCode::PolicyDenied
+            );
             for lane in [LaneChoice::QuickJs, LaneChoice::V8] {
-                let entry = resolver.resolve(&resolver.entry_request(), &context(), &policy()).unwrap();
-                let installed = resolver.execution_resolver(root.path(), Arc::new(MissingCodePolicy)).unwrap();
+                let entry = resolver
+                    .resolve(&resolver.entry_request(), &context(), &policy())
+                    .unwrap();
+                let installed = resolver
+                    .execution_resolver(root.path(), Arc::new(MissingCodePolicy))
+                    .unwrap();
                 let mut engine = engine(lane);
-                let failure = engine.execute_resolved_entry_with_resolver(&package(), &entry, installed)
+                let failure = engine
+                    .execute_resolved_entry_with_resolver(&package(), &entry, installed)
                     .expect_err("policy refusal remains outside guest exception handling");
-                assert!(failure.to_string().contains("closed-world module resolution refused"),
-                    "{lane:?}: {failure}");
+                assert!(
+                    failure
+                        .to_string()
+                        .contains("closed-world module resolution refused"),
+                    "{lane:?}: {failure}"
+                );
                 assert!(engine.last_failed_console_output().is_empty());
             }
         }
     }
 
     impl ModulePolicyHook for RevokeSecondResolve {
-        fn authorize(&self, request: &ModuleRequest, record: &ModuleRecord,
-            context: &ResolutionContext) -> ResolutionResult<()> {
+        fn authorize(
+            &self,
+            request: &ModuleRequest,
+            record: &ModuleRecord,
+            context: &ResolutionContext,
+        ) -> ResolutionResult<()> {
             policy().authorize(request, record, context)
         }
 
-        fn authorize_metadata(&self, request: &ModuleRequest, metadata: &ModuleMetadata,
-            context: &ResolutionContext) -> ResolutionResult<()> {
+        fn authorize_metadata(
+            &self,
+            request: &ModuleRequest,
+            metadata: &ModuleMetadata,
+            context: &ResolutionContext,
+        ) -> ResolutionResult<()> {
             let mut policy = policy();
             if request.specifier == "./dep.cjs" && self.0.fetch_add(1, Ordering::SeqCst) > 0 {
                 policy.denied_specifiers.insert(request.specifier.clone());
@@ -657,22 +1094,45 @@ module.exports = { load: load, lookup: lookup, optional: optional };
     fn native_resolve_rechecks_policy_after_a_cached_success() {
         for lane in [LaneChoice::QuickJs, LaneChoice::V8] {
             let root = tempfile::tempdir().unwrap();
-            put(root.path(), "app.cjs", "console.log(require.resolve('./dep.cjs')); require.resolve('./dep.cjs'); console.log('must not reach');");
-            put(root.path(), "dep.cjs", "throw new Error('must not evaluate');");
+            put(
+                root.path(),
+                "app.cjs",
+                "console.log(require.resolve('./dep.cjs')); require.resolve('./dep.cjs'); console.log('must not reach');",
+            );
+            put(
+                root.path(),
+                "dep.cjs",
+                "throw new Error('must not evaluate');",
+            );
             let graph = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
             let pin = graph.report().input_hash.clone();
             let resolver = Arc::new(CapturedEngineResolver::new(graph, &pin).ok().unwrap());
             let changing = Arc::new(RevokeSecondResolve(AtomicUsize::new(0)));
-            let entry = resolver.resolve(&resolver.entry_request(), &context(), &policy()).unwrap();
-            let installed = resolver.execution_resolver(root.path(), changing.clone()).unwrap();
+            let entry = resolver
+                .resolve(&resolver.entry_request(), &context(), &policy())
+                .unwrap();
+            let installed = resolver
+                .execution_resolver(root.path(), changing.clone())
+                .unwrap();
             let mut engine = engine(lane);
-            let failure = engine.execute_resolved_entry_with_resolver(&package(), &entry, installed)
+            let failure = engine
+                .execute_resolved_entry_with_resolver(&package(), &entry, installed)
                 .expect_err("cached require.resolve cannot bypass revocation");
-            assert!(failure.to_string().contains("closed-world module resolution refused"), "{failure}");
+            assert!(
+                failure
+                    .to_string()
+                    .contains("closed-world module resolution refused"),
+                "{failure}"
+            );
             assert_eq!(changing.0.load(Ordering::SeqCst), 2);
-            assert_eq!(engine.last_failed_console_output().iter()
-                .map(|line| line.message.clone()).collect::<Vec<_>>(),
-                [root.path().join("dep.cjs").display().to_string()]);
+            assert_eq!(
+                engine
+                    .last_failed_console_output()
+                    .iter()
+                    .map(|line| line.message.clone())
+                    .collect::<Vec<_>>(),
+                [root.path().join("dep.cjs").display().to_string()]
+            );
         }
     }
 }

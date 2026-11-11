@@ -29,11 +29,18 @@ struct Version {
 }
 
 impl Version {
-    fn release(core: [u64; 3]) -> Self { Self { core, pre: Vec::new() } }
+    fn release(core: [u64; 3]) -> Self {
+        Self {
+            core,
+            pre: Vec::new(),
+        }
+    }
 
     fn cmp(&self, other: &Self) -> Ordering {
         let core = self.core.cmp(&other.core);
-        if core != Ordering::Equal { return core; }
+        if core != Ordering::Equal {
+            return core;
+        }
         match (self.pre.is_empty(), other.pre.is_empty()) {
             (true, true) => return Ordering::Equal,
             (true, false) => return Ordering::Greater,
@@ -49,7 +56,9 @@ impl Version {
                 (false, true) => Ordering::Greater,
                 (false, false) => left.cmp(right),
             };
-            if order != Ordering::Equal { return order; }
+            if order != Ordering::Equal {
+                return order;
+            }
         }
         self.pre.len().cmp(&other.pre.len())
     }
@@ -62,39 +71,52 @@ struct Partial {
 }
 
 fn identifiers(text: &str, prerelease: bool) -> Checked<Vec<String>> {
-    text.split('.').map(|part| {
-        if part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-') {
-            return Err(());
-        }
-        if prerelease && part.bytes().all(|byte| byte.is_ascii_digit()) {
-            // npm's numeric comparison can lose precision beyond its safe
-            // integer domain. Refuse that ambiguity rather than certifying a
-            // mathematically ordered pair the reference treats as equal.
-            component(part)?;
-        }
-        Ok(part.to_owned())
-    }).collect()
+    text.split('.')
+        .map(|part| {
+            if part.is_empty()
+                || !part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            {
+                return Err(());
+            }
+            if prerelease && part.bytes().all(|byte| byte.is_ascii_digit()) {
+                // npm's numeric comparison can lose precision beyond its safe
+                // integer domain. Refuse that ambiguity rather than certifying a
+                // mathematically ordered pair the reference treats as equal.
+                component(part)?;
+            }
+            Ok(part.to_owned())
+        })
+        .collect()
 }
 
 fn component(text: &str) -> Checked<u64> {
-    if text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_digit())
+    if text.is_empty()
+        || !text.bytes().all(|byte| byte.is_ascii_digit())
         || (text.len() > 1 && text.starts_with('0'))
     {
         return Err(());
     }
     let value: u64 = text.parse().map_err(|_| ())?;
-    if value > MAX_COMPONENT { return Err(()); }
+    if value > MAX_COMPONENT {
+        return Err(());
+    }
     Ok(value)
 }
 
 fn partial(text: &str) -> Checked<Partial> {
-    if text.is_empty() || text.len() > MAX_VERSION_BYTES || !text.is_ascii() { return Err(()); }
+    if text.is_empty() || text.len() > MAX_VERSION_BYTES || !text.is_ascii() {
+        return Err(());
+    }
     let text = text.strip_prefix('v').unwrap_or(text);
     let (text, build) = match text.split_once('+') {
         Some((text, build)) => (text, Some(build)),
         None => (text, None),
     };
-    if let Some(build) = build { identifiers(build, false)?; }
+    if let Some(build) = build {
+        identifiers(build, false)?;
+    }
     let (core, pre) = match text.split_once('-') {
         Some((core, pre)) => (core, identifiers(pre, true)?),
         None => (text, Vec::new()),
@@ -104,38 +126,62 @@ fn partial(text: &str) -> Checked<Partial> {
     let mut wildcard = false;
     let mut parts = 0;
     for (index, part) in core.split('.').enumerate() {
-        if index >= 3 { return Err(()); }
+        if index >= 3 {
+            return Err(());
+        }
         parts += 1;
         if matches!(part, "*" | "x" | "X") {
             wildcard = true;
         } else {
             // Deliberately do not guess what mixed wildcard/numeric forms
             // such as 1.x.3 mean. They require explicit review.
-            if wildcard { return Err(()); }
+            if wildcard {
+                return Err(());
+            }
             version.core[index] = component(part)?;
             specified += 1;
         }
     }
-    if parts == 0 || ((!pre.is_empty() || build.is_some()) && specified != 3) { return Err(()); }
+    if parts == 0 || ((!pre.is_empty() || build.is_some()) && specified != 3) {
+        return Err(());
+    }
     version.pre = pre;
-    Ok(Partial { base: version, specified })
+    Ok(Partial {
+        base: version,
+        specified,
+    })
 }
 
 fn upper(base: &Version, index: usize, prerelease_floor: bool) -> Checked<Version> {
     let mut result = Version::release(base.core);
     let next = result.core[index].checked_add(1).ok_or(())?;
-    if next > MAX_COMPONENT { return Err(()); }
+    if next > MAX_COMPONENT {
+        return Err(());
+    }
     result.core[index] = next;
-    for component in &mut result.core[index + 1..] { *component = 0; }
-    if prerelease_floor { result.pre.push("0".into()); }
+    for component in &mut result.core[index + 1..] {
+        *component = 0;
+    }
+    if prerelease_floor {
+        result.pre.push("0".into());
+    }
     Ok(result)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Op { Eq, Lt, Le, Gt, Ge }
+enum Op {
+    Eq,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct Comparator { op: Op, version: Version }
+struct Comparator {
+    op: Op,
+    version: Version,
+}
 
 impl Comparator {
     fn accepts(&self, candidate: &Version) -> bool {
@@ -151,26 +197,37 @@ impl Comparator {
 }
 
 #[derive(Debug, Default)]
-struct Conjunction { comparators: Vec<Comparator>, impossible: bool }
+struct Conjunction {
+    comparators: Vec<Comparator>,
+    impossible: bool,
+}
 
 impl Conjunction {
     fn push(&mut self, op: Op, version: Version) -> Checked<()> {
-        if self.comparators.len() >= MAX_TERMS * 2 { return Err(()); }
+        if self.comparators.len() >= MAX_TERMS * 2 {
+            return Err(());
+        }
         self.comparators.push(Comparator { op, version });
         Ok(())
     }
 
     fn accepts(&self, candidate: &Version) -> bool {
         !self.impossible
-            && self.comparators.iter().all(|comparison| comparison.accepts(candidate))
-            && (candidate.pre.is_empty() || self.comparators.iter().any(|comparison| {
-                !comparison.version.pre.is_empty() && comparison.version.core == candidate.core
-            }))
+            && self
+                .comparators
+                .iter()
+                .all(|comparison| comparison.accepts(candidate))
+            && (candidate.pre.is_empty()
+                || self.comparators.iter().any(|comparison| {
+                    !comparison.version.pre.is_empty() && comparison.version.core == candidate.core
+                }))
     }
 
     fn term(&mut self, operator: &str, value: Partial) -> Checked<()> {
         if value.specified == 0 {
-            if matches!(operator, ">" | "<") { self.impossible = true; }
+            if matches!(operator, ">" | "<") {
+                self.impossible = true;
+            }
             return Ok(());
         }
         if matches!(operator, "^" | "~" | "~>") {
@@ -180,7 +237,9 @@ impl Conjunction {
                 0
             } else if value.base.core[1] != 0 || value.specified == 2 {
                 1
-            } else { 2 };
+            } else {
+                2
+            };
             let end = upper(&value.base, index, true)?;
             self.push(Op::Ge, value.base)?;
             return self.push(Op::Lt, end);
@@ -193,7 +252,9 @@ impl Conjunction {
             ">=" => Op::Ge,
             _ => return Err(()),
         };
-        if value.specified == 3 { return self.push(op, value.base); }
+        if value.specified == 3 {
+            return self.push(op, value.base);
+        }
         match op {
             Op::Eq => {
                 let end = upper(&value.base, value.specified - 1, true)?;
@@ -212,7 +273,9 @@ impl Conjunction {
     }
 
     fn hyphen(&mut self, start: Partial, end: Partial) -> Checked<()> {
-        if start.specified > 0 { self.push(Op::Ge, start.base)?; }
+        if start.specified > 0 {
+            self.push(Op::Ge, start.base)?;
+        }
         match end.specified {
             0 => Ok(()),
             3 => self.push(Op::Le, end.base),
@@ -223,21 +286,29 @@ impl Conjunction {
 
 fn operator(text: &str) -> (&str, &str) {
     for prefix in [">=", "<=", "~>", ">", "<", "=", "^", "~"] {
-        if let Some(value) = text.strip_prefix(prefix) { return (prefix, value); }
+        if let Some(value) = text.strip_prefix(prefix) {
+            return (prefix, value);
+        }
     }
     ("", text)
 }
 
 fn parse_range(text: &str) -> Checked<Vec<Conjunction>> {
-    if text.len() > MAX_RANGE_BYTES || !text.is_ascii() { return Err(()); }
+    if text.len() > MAX_RANGE_BYTES || !text.is_ascii() {
+        return Err(());
+    }
     let mut result = Vec::new();
     let mut term_count = 0_usize;
     for arm in text.split("||") {
-        if result.len() >= MAX_ALTERNATIVES { return Err(()); }
+        if result.len() >= MAX_ALTERNATIVES {
+            return Err(());
+        }
         // Bound the complete input before collecting borrowed tokens.
         let tokens: Vec<_> = arm.split_ascii_whitespace().collect();
         term_count = term_count.checked_add(tokens.len()).ok_or(())?;
-        if term_count > MAX_TERMS { return Err(()); }
+        if term_count > MAX_TERMS {
+            return Err(());
+        }
         let mut conjunction = Conjunction::default();
         let mut index = 0;
         while index < tokens.len() {
@@ -245,7 +316,9 @@ fn parse_range(text: &str) -> Checked<Vec<Conjunction>> {
                 // npm admits a hyphen range only as the entire OR arm. A
                 // conjunction such as `1 - 4 >=2` is invalid, not a broader
                 // range we may silently interpret on the producer's behalf.
-                if index != 0 || tokens.len() != 3 { return Err(()); }
+                if index != 0 || tokens.len() != 3 {
+                    return Err(());
+                }
                 let last = tokens.get(index + 2).ok_or(())?;
                 conjunction.hyphen(partial(tokens[index])?, partial(last)?)?;
                 index += 3;
@@ -269,7 +342,9 @@ fn parse_range(text: &str) -> Checked<Vec<Conjunction>> {
 /// execution. Callers must distinguish these in their review findings.
 pub(super) fn matches(request: &str, locked_version: &str) -> Option<bool> {
     let candidate = partial(locked_version).ok()?;
-    if candidate.specified != 3 { return None; }
+    if candidate.specified != 3 {
+        return None;
+    }
     let range = parse_range(request).ok()?;
     Some(range.iter().any(|arm| arm.accepts(&candidate.base)))
 }
@@ -297,7 +372,10 @@ pub(super) fn intersects(left: &str, right: &str) -> Option<bool> {
             if arm.impossible {
                 arm.comparators.push(Comparator {
                     op: Op::Lt,
-                    version: Version { core: [0; 3], pre: vec!["0".into()] },
+                    version: Version {
+                        core: [0; 3],
+                        pre: vec!["0".into()],
+                    },
                 });
             }
             if let Some(empty) = arm.comparators.iter().find(|entry| null(entry)) {
@@ -310,33 +388,51 @@ pub(super) fn intersects(left: &str, right: &str) -> Option<bool> {
                 if entry.op == Op::Ge && entry.version == Version::release([0; 3]) {
                     continue;
                 }
-                if !comparisons.contains(&entry) { comparisons.push(entry); }
+                if !comparisons.contains(&entry) {
+                    comparisons.push(entry);
+                }
             }
             arms.push(comparisons);
         }
-        if arms.iter().any(|arm| arm.first().is_none_or(|entry| !null(entry))) {
+        if arms
+            .iter()
+            .any(|arm| arm.first().is_none_or(|entry| !null(entry)))
+        {
             arms.retain(|arm| arm.first().is_none_or(|entry| !null(entry)));
         }
-        if arms.iter().any(Vec::is_empty) { return Some(vec![Vec::new()]); }
+        if arms.iter().any(Vec::is_empty) {
+            return Some(vec![Vec::new()]);
+        }
         Some(arms)
     }
     fn pair(left: &Comparator, right: &Comparator) -> bool {
         if left.op == Op::Eq || right.op == Op::Eq {
             let (candidate, comparison) = if left.op == Op::Eq {
                 (&left.version, right)
-            } else { (&right.version, left) };
+            } else {
+                (&right.version, left)
+            };
             return comparison.accepts(candidate)
                 && (candidate.pre.is_empty()
                     || (!comparison.version.pre.is_empty()
                         && comparison.version.core == candidate.core));
         }
-        if [left, right].iter().any(|entry| {
-            entry.op == Op::Lt && entry.version.core == [0; 3]
-        }) { return false; }
+        if [left, right]
+            .iter()
+            .any(|entry| entry.op == Op::Lt && entry.version.core == [0; 3])
+        {
+            return false;
+        }
         let left_lower = matches!(left.op, Op::Gt | Op::Ge);
         let right_lower = matches!(right.op, Op::Gt | Op::Ge);
-        if left_lower == right_lower { return true; }
-        let (lower, upper) = if left_lower { (left, right) } else { (right, left) };
+        if left_lower == right_lower {
+            return true;
+        }
+        let (lower, upper) = if left_lower {
+            (left, right)
+        } else {
+            (right, left)
+        };
         match lower.version.cmp(&upper.version) {
             Ordering::Less => true,
             Ordering::Equal => lower.op == Op::Ge && upper.op == Op::Le,
@@ -353,9 +449,11 @@ pub(super) fn intersects(left: &str, right: &str) -> Option<bool> {
             // do not intersect an ANY on their right, while ANY on the left
             // accepts them. Canonical empty arms represent that ANY; do not
             // lose its prerelease exclusion when joining comparator lists.
-            if right.is_empty() && left.iter().any(|entry| {
-                entry.op == Op::Eq && !entry.version.pre.is_empty()
-            }) {
+            if right.is_empty()
+                && left
+                    .iter()
+                    .any(|entry| entry.op == Op::Eq && !entry.version.pre.is_empty())
+            {
                 continue;
             }
             let joined: Vec<_> = left.iter().chain(right).collect();
@@ -363,12 +461,21 @@ pub(super) fn intersects(left: &str, right: &str) -> Option<bool> {
             for (index, a) in joined.iter().enumerate() {
                 for b in &joined[index + 1..] {
                     comparisons = comparisons.checked_add(1)?;
-                    if comparisons > 65_536 { return None; }
-                    if !pair(a, b) { compatible = false; break; }
+                    if comparisons > 65_536 {
+                        return None;
+                    }
+                    if !pair(a, b) {
+                        compatible = false;
+                        break;
+                    }
                 }
-                if !compatible { break; }
+                if !compatible {
+                    break;
+                }
             }
-            if compatible { return Some(true); }
+            if compatible {
+                return Some(true);
+            }
         }
     }
     Some(false)
@@ -425,7 +532,13 @@ mod tests {
                 assert_eq!(intersects(exact, any), Some(false), "{exact} / {any}");
             }
         }
-        for invalid in ["^1 || latest", "npm:alias@1", "workspace:*", "1.x.3", ">9007199254740991"] {
+        for invalid in [
+            "^1 || latest",
+            "npm:alias@1",
+            "workspace:*",
+            "1.x.3",
+            ">9007199254740991",
+        ] {
             assert_eq!(intersects(invalid, "*"), None, "{invalid}");
             assert_eq!(intersects("*", invalid), None, "{invalid}");
         }
@@ -493,32 +606,62 @@ mod tests {
     #[test]
     fn supported_ranges_obey_independent_reference_truth_values() {
         for (request, version, expected) in CASES {
-            assert_eq!(matches(request, version), Some(*expected), "{request:?} / {version:?}");
+            assert_eq!(
+                matches(request, version),
+                Some(*expected),
+                "{request:?} / {version:?}"
+            );
         }
     }
 
     #[test]
     fn opaque_requests_invalid_versions_and_invalid_alternatives_are_not_matches() {
-        for request in ["latest", "next", "file:../x", "workspace:*", "git+https://x/repo",
-            "npm:other@1", "https://x/a.tgz", "1.2.3 || garbage", "* || >=", "01.2.3",
-            "1.2.3-alpha.01", "1.x.3", ">=", "1.2.3 -", "1.2.3+", "1.2.3 ||| 2",
-            "1 - 4 2 - 3", "1 - 4 >=2", ">=1 1 - 4"]
-        {
+        for request in [
+            "latest",
+            "next",
+            "file:../x",
+            "workspace:*",
+            "git+https://x/repo",
+            "npm:other@1",
+            "https://x/a.tgz",
+            "1.2.3 || garbage",
+            "* || >=",
+            "01.2.3",
+            "1.2.3-alpha.01",
+            "1.x.3",
+            ">=",
+            "1.2.3 -",
+            "1.2.3+",
+            "1.2.3 ||| 2",
+            "1 - 4 2 - 3",
+            "1 - 4 >=2",
+            ">=1 1 - 4",
+        ] {
             assert_eq!(matches(request, "1.2.3"), None, "{request}");
         }
-        for version in ["1", "1.x", "1.2.3.4", "1.2.3-alpha.01", "1.2.3+", "01.2.3", "latest"] {
+        for version in [
+            "1",
+            "1.x",
+            "1.2.3.4",
+            "1.2.3-alpha.01",
+            "1.2.3+",
+            "01.2.3",
+            "latest",
+        ] {
             assert_eq!(matches("*", version), None, "{version}");
         }
     }
 
     #[test]
     fn prerelease_numeric_identifiers_never_use_lossy_comparison() {
-        assert_eq!(matches(
-            ">1.0.0-9007199254740992", "1.0.0-9007199254740993"
-        ), None);
-        assert_eq!(matches(
-            ">1.0.0-999999999999999", "1.0.0-1000000000000000"
-        ), Some(true));
+        assert_eq!(
+            matches(">1.0.0-9007199254740992", "1.0.0-9007199254740993"),
+            None
+        );
+        assert_eq!(
+            matches(">1.0.0-999999999999999", "1.0.0-1000000000000000"),
+            Some(true)
+        );
         assert_eq!(matches("*", "1.0.0-alpha"), Some(false));
         assert_eq!(matches("<2.0.0", "1.9.0-alpha"), Some(false));
     }
@@ -526,10 +669,19 @@ mod tests {
     #[test]
     fn budgets_and_arithmetic_fail_closed() {
         assert_eq!(matches(&" ".repeat(MAX_RANGE_BYTES + 1), "1.0.0"), None);
-        assert_eq!(matches("*", &format!("1.0.0+{}", "a".repeat(MAX_VERSION_BYTES))), None);
-        assert_eq!(matches(&vec!["*"; MAX_ALTERNATIVES + 1].join(" || "), "1.0.0"), None);
+        assert_eq!(
+            matches("*", &format!("1.0.0+{}", "a".repeat(MAX_VERSION_BYTES))),
+            None
+        );
+        assert_eq!(
+            matches(&vec!["*"; MAX_ALTERNATIVES + 1].join(" || "), "1.0.0"),
+            None
+        );
         assert_eq!(matches(&vec!["1"; MAX_TERMS + 1].join(" "), "1.0.0"), None);
-        assert_eq!(matches("^9007199254740991.0.0", "9007199254740991.0.0"), None);
+        assert_eq!(
+            matches("^9007199254740991.0.0", "9007199254740991.0.0"),
+            None
+        );
         assert_eq!(matches("*", "9007199254740992.0.0"), None);
         assert_eq!(matches("π", "1.0.0"), None);
     }

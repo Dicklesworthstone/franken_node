@@ -122,8 +122,9 @@ fn require_seed(report: &ProductReport) -> Result<()> {
     ensure!(
         report.cases.iter().all(|row| {
             [&row.node, &row.bun].into_iter().all(|run| {
-                run.as_ref()
-                    .is_some_and(|run| run.exit_code == Some(i32::from(row.expected_exit_code)) && run.signal.is_none())
+                run.as_ref().is_some_and(|run| {
+                    run.exit_code == Some(i32::from(row.expected_exit_code)) && run.signal.is_none()
+                })
             }) && row.native.as_ref().is_some_and(|run| {
                 run.exit_code.is_some_and(|code| (0..=255).contains(&code)) && run.signal.is_none()
             })

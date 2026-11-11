@@ -35,24 +35,37 @@ struct Budget {
 impl Budget {
     fn account(&mut self, bytes: usize, deadline: Instant) -> Result<()> {
         time_remaining(deadline)?;
-        self.entries = self.entries.checked_add(1).context("Bun catalog count overflow")?;
-        self.bytes = self.bytes.checked_add(bytes).context("Bun catalog byte count overflow")?;
-        ensure!(self.entries <= MAX_PACKAGES && self.bytes <= MAX_METADATA_BYTES,
-            "Bun catalog expansion exceeds its shared entry/byte budget");
+        self.entries = self
+            .entries
+            .checked_add(1)
+            .context("Bun catalog count overflow")?;
+        self.bytes = self
+            .bytes
+            .checked_add(bytes)
+            .context("Bun catalog byte count overflow")?;
+        ensure!(
+            self.entries <= MAX_PACKAGES && self.bytes <= MAX_METADATA_BYTES,
+            "Bun catalog expansion exceeds its shared entry/byte budget"
+        );
         Ok(())
     }
 }
 
 fn catalog_name(value: &str) -> Result<&str> {
-    ensure!(value.len() <= MAX_CATALOG_NAME_BYTES && !value.chars().any(char::is_control),
-        "invalid or oversized Bun catalog name");
+    ensure!(
+        value.len() <= MAX_CATALOG_NAME_BYTES && !value.chars().any(char::is_control),
+        "invalid or oversized Bun catalog name"
+    );
     let name = value.trim();
     Ok(if name == "default" { "" } else { name })
 }
 
 pub(super) fn request_text(value: &Value) -> Result<&str> {
     if let Some(text) = value.as_str().filter(|text| text.starts_with("catalog:")) {
-        ensure!(text.len() <= 4096, "Bun catalog reference exceeds its text bound");
+        ensure!(
+            text.len() <= 4096,
+            "Bun catalog reference exceeds its text bound"
+        );
         catalog_name(&text["catalog:".len()..])?;
         Ok(text)
     } else {
@@ -68,7 +81,9 @@ fn add_catalog(
     deadline: Instant,
 ) -> Result<()> {
     let label = catalog_name(label)?;
-    let entries = value.as_object().context("Bun catalog must be a dependency map")?;
+    let entries = value
+        .as_object()
+        .context("Bun catalog must be a dependency map")?;
     for (package, request) in entries {
         name(package)?;
         let request = bounded_text(request, "Bun catalog request")?;
@@ -77,15 +92,22 @@ fn add_catalog(
         // An opaque request, recursion, or unversioned alias does not. The
         // actual installed version is checked later by the same checker.
         let review = graph::version_review(requirement, Some("0.0.0"));
-        ensure!(review.is_none_or(|(code, _)| code == "dependency_version_mismatch"),
-            "Bun catalog entries require supported registry ranges or versioned npm aliases");
+        ensure!(
+            review.is_none_or(|(code, _)| code == "dependency_version_mismatch"),
+            "Bun catalog entries require supported registry ranges or versioned npm aliases"
+        );
         budget.account(label.len() + package.len() + request.len(), deadline)?;
         if !definitions.contains_key(label) {
-            ensure!(definitions.len() < MAX_CATALOGS, "Bun catalog namespace limit exceeded");
+            ensure!(
+                definitions.len() < MAX_CATALOGS,
+                "Bun catalog namespace limit exceeded"
+            );
         }
         let catalog = definitions.entry(label.to_owned()).or_default();
-        ensure!(!catalog.contains_key(package),
-            "duplicate Bun catalog dependency after default/name normalization");
+        ensure!(
+            !catalog.contains_key(package),
+            "duplicate Bun catalog dependency after default/name normalization"
+        );
         catalog.insert(package.clone(), request.to_owned());
     }
     time_remaining(deadline)
@@ -101,8 +123,13 @@ fn collect_fields(
         add_catalog(definitions, "", value, budget, deadline)?;
     }
     if let Some(value) = object.get("catalogs") {
-        let catalogs = value.as_object().context("Bun catalogs must be a map of dependency maps")?;
-        ensure!(catalogs.len() <= MAX_CATALOGS, "Bun catalog namespace limit exceeded");
+        let catalogs = value
+            .as_object()
+            .context("Bun catalogs must be a map of dependency maps")?;
+        ensure!(
+            catalogs.len() <= MAX_CATALOGS,
+            "Bun catalog namespace limit exceeded"
+        );
         for (label, value) in catalogs {
             time_remaining(deadline)?;
             add_catalog(definitions, label, value, budget, deadline)?;
@@ -119,9 +146,16 @@ pub(super) fn workspace_selectors(manifest: &Map<String, Value>) -> Result<Optio
         None => Ok(None),
         Some(Value::Array(selectors)) => Ok(Some(selectors)),
         Some(Value::Object(options)) => {
-            ensure!(options.keys().all(|key| ["packages", "catalog", "catalogs"].contains(&key.as_str())),
-                "unsupported Bun workspace object field; layout controls require separate review");
-            options.get("packages").and_then(Value::as_array).map(Some)
+            ensure!(
+                options
+                    .keys()
+                    .all(|key| ["packages", "catalog", "catalogs"].contains(&key.as_str())),
+                "unsupported Bun workspace object field; layout controls require separate review"
+            );
+            options
+                .get("packages")
+                .and_then(Value::as_array)
+                .map(Some)
                 .context("Bun workspace object requires a packages selector array")
         }
         _ => anyhow::bail!("Bun workspaces must be an array or a supported workspace object"),
@@ -146,9 +180,13 @@ impl Catalogs {
             collect_fields(options, &mut declared, &mut budget, deadline)?;
         }
         collect_fields(lock, &mut recorded, &mut Budget::default(), deadline)?;
-        ensure!(declared == recorded,
-            "Bun catalog definitions differ between captured package.json and bun.lock");
-        Ok(Self { definitions: declared })
+        ensure!(
+            declared == recorded,
+            "Bun catalog definitions differ between captured package.json and bun.lock"
+        );
+        Ok(Self {
+            definitions: declared,
+        })
     }
 
     pub(in super::super) fn has_entries(&self) -> bool {
@@ -164,21 +202,29 @@ impl Catalogs {
         mut root: Value,
     ) -> Result<BTreeMap<String, Value>> {
         time_remaining(capture.deadline)?;
-        let object = root.as_object_mut().context("Bun root manifest must be an object")?;
+        let object = root
+            .as_object_mut()
+            .context("Bun root manifest must be an object")?;
         workspace_selectors(object)?;
         if let Some(Value::Object(options)) = object.get_mut("workspaces") {
             // Move rather than clone a potentially large selector vector.
             // The common selector retains its own count/path/glob budgets.
-            let selectors = options.remove("packages").context("Bun workspace selectors missing")?;
+            let selectors = options
+                .remove("packages")
+                .context("Bun workspace selectors missing")?;
             object.insert("workspaces".into(), selectors);
         }
         workspaces::capture(capture, root)
     }
 
     fn resolve<'a>(&'a self, package: &str, request: &str) -> Result<Option<&'a str>> {
-        let Some(label) = request.strip_prefix("catalog:") else { return Ok(None); };
+        let Some(label) = request.strip_prefix("catalog:") else {
+            return Ok(None);
+        };
         let label = catalog_name(label)?;
-        self.definitions.get(label).and_then(|entries| entries.get(package))
+        self.definitions
+            .get(label)
+            .and_then(|entries| entries.get(package))
             .map(|request| Some(request.as_str()))
             .context("Bun catalog reference has no pinned dependency in the selected catalog")
     }
@@ -194,17 +240,26 @@ impl Catalogs {
         let mut budget = Budget::default();
         for (directory, manifest) in projects {
             time_remaining(deadline)?;
-            let manifest = manifest.as_object_mut().context("Bun project manifest must be an object")?;
+            let manifest = manifest
+                .as_object_mut()
+                .context("Bun project manifest must be an object")?;
             if !directory.is_empty() {
                 for field in ["catalog", "catalogs"] {
-                    ensure!(manifest.get(field).is_none_or(|value|
-                        value.as_object().is_some_and(Map::is_empty)),
-                        "Bun catalogs are root-owned; workspace-local catalog definitions require review");
+                    ensure!(
+                        manifest
+                            .get(field)
+                            .is_none_or(|value| value.as_object().is_some_and(Map::is_empty)),
+                        "Bun catalogs are root-owned; workspace-local catalog definitions require review"
+                    );
                 }
             }
             for field in SECTIONS {
-                let Some(value) = manifest.get_mut(*field) else { continue; };
-                let entries = value.as_object_mut().context("Bun dependency section must be an object")?;
+                let Some(value) = manifest.get_mut(*field) else {
+                    continue;
+                };
+                let entries = value
+                    .as_object_mut()
+                    .context("Bun dependency section must be an object")?;
                 // Validate even losing/optional declarations. Missing catalogs
                 // cannot disappear behind optional absence or dev precedence.
                 for (package, value) in entries {
@@ -212,7 +267,9 @@ impl Catalogs {
                     let request = request_text(value)?;
                     let resolved = self.resolve(package, request)?;
                     budget.account(resolved.map_or(0, str::len), deadline)?;
-                    if let Some(resolved) = resolved { *value = Value::String(resolved.to_owned()); }
+                    if let Some(resolved) = resolved {
+                        *value = Value::String(resolved.to_owned());
+                    }
                 }
             }
         }
@@ -222,17 +279,23 @@ impl Catalogs {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::super::{inspect, inspect_for_execution};
+    use super::*;
     use serde_json::json;
     use sha2::{Digest, Sha256};
     use std::fs;
     use std::path::Path;
     use std::time::Duration;
 
-    fn deadline() -> Instant { Instant::now() + Duration::from_secs(15) }
+    fn deadline() -> Instant {
+        Instant::now() + Duration::from_secs(15)
+    }
     fn bind(manifest: Value, lock: Value) -> Result<Catalogs> {
-        Catalogs::bind(manifest.as_object().unwrap(), lock.as_object().unwrap(), deadline())
+        Catalogs::bind(
+            manifest.as_object().unwrap(),
+            lock.as_object().unwrap(),
+            deadline(),
+        )
     }
     fn put(root: &Path, path: &str, value: &Value) {
         let path = root.join(path);
@@ -244,7 +307,9 @@ mod tests {
         let mut lock = json!({"lockfileVersion":2,"configVersion":0,
             "workspaces":{"":root_record},"packages":packages});
         for field in ["catalog", "catalogs"] {
-            if let Some(value) = manifest.get(field) { lock[field] = value.clone(); }
+            if let Some(value) = manifest.get(field) {
+                lock[field] = value.clone();
+            }
         }
         put(root.path(), "package.json", manifest);
         put(root.path(), "bun.lock", &lock);
@@ -252,13 +317,19 @@ mod tests {
     }
     fn ordinary(request: &str) -> tempfile::TempDir {
         let manifest = json!({"catalog":{"a":"^1"},"dependencies":{"a":request}});
-        fixture(&manifest, &json!({"dependencies":{"a":request}}),
-            json!({"a":["a@1.2.3","",{},""]}))
+        fixture(
+            &manifest,
+            &json!({"dependencies":{"a":request}}),
+            json!({"a":["a@1.2.3","",{},""]}),
+        )
     }
     fn install(root: &Path, manifest: Value) {
         put(root, "node_modules/a/package.json", &manifest);
-        fs::write(root.join("node_modules/a/index.js"),
-            "throw Error('catalog inspection must not execute source');").unwrap();
+        fs::write(
+            root.join("node_modules/a/index.js"),
+            "throw Error('catalog inspection must not execute source');",
+        )
+        .unwrap();
     }
 
     #[test]
@@ -269,8 +340,14 @@ mod tests {
         for request in ["catalog:", "catalog:default", "catalog:   "] {
             assert_eq!(context.resolve("a", request).unwrap(), Some("^1"));
         }
-        assert_eq!(context.resolve("b", "catalog:default").unwrap(), Some("~2.0"));
-        assert_eq!(context.resolve("a", "catalog:testing").unwrap(), Some("npm:@scope/real@^3"));
+        assert_eq!(
+            context.resolve("b", "catalog:default").unwrap(),
+            Some("~2.0")
+        );
+        assert_eq!(
+            context.resolve("a", "catalog:testing").unwrap(),
+            Some("npm:@scope/real@^3")
+        );
         assert_eq!(context.resolve("a", "^8").unwrap(), None);
         assert!(context.resolve("absent", "catalog:").is_err());
         assert!(context.resolve("a", "catalog:missing").is_err());
@@ -281,7 +358,8 @@ mod tests {
     fn stale_ambiguous_recursive_and_opaque_definitions_are_refused() {
         assert!(bind(json!({"catalog":{"a":"^1"}}), json!({"catalog":{"a":"^2"}})).is_err());
         for definitions in [
-            json!({"catalog":null}), json!({"catalogs":{"testing":"^1"}}),
+            json!({"catalog":null}),
+            json!({"catalogs":{"testing":"^1"}}),
             json!({"catalog":{"a":"1"},"catalogs":{"default":{"a":"1"}}}),
             json!({"catalogs":{"testing":{"a":"1"}," testing ":{"a":"1"}}}),
             json!({"catalog":{"a":"catalog:loop"}}),
@@ -306,21 +384,37 @@ mod tests {
             let metadata = inspect(root.path(), deadline()).unwrap();
             assert!(!metadata.requires_review(), "{metadata:?}");
             assert!(!metadata.installation_checked);
-            assert!(inspect_for_execution(root.path(), deadline()).unwrap().requires_review());
+            assert!(
+                inspect_for_execution(root.path(), deadline())
+                    .unwrap()
+                    .requires_review()
+            );
             install(root.path(), json!({"name":"a","version":"1.2.3"}));
             let report = inspect_for_execution(root.path(), deadline()).unwrap();
             assert!(!report.requires_review(), "{report:?}");
             assert!(report.installation_checked);
             assert!(report.scope.contains("catalog"));
             for (path, bytes) in [("package.json", &raw_manifest), ("bun.lock", &raw_lock)] {
-                let input = report.inputs.iter().find(|input| input.path == path).unwrap();
+                let input = report
+                    .inputs
+                    .iter()
+                    .find(|input| input.path == path)
+                    .unwrap();
                 assert_eq!(input.sha256, hex::encode(Sha256::digest(bytes)));
                 assert_eq!(fs::read(root.path().join(path)).unwrap(), *bytes);
             }
-            assert_eq!(report, inspect_for_execution(root.path(), deadline()).unwrap());
+            assert_eq!(
+                report,
+                inspect_for_execution(root.path(), deadline()).unwrap()
+            );
             install(root.path(), json!({"name":"a","version":"1.9.0"}));
-            assert!(inspect_for_execution(root.path(), deadline()).unwrap().findings.iter()
-                .any(|finding| finding.code == "installed_identity_mismatch"));
+            assert!(
+                inspect_for_execution(root.path(), deadline())
+                    .unwrap()
+                    .findings
+                    .iter()
+                    .any(|finding| finding.code == "installed_identity_mismatch")
+            );
         }
     }
 
@@ -331,18 +425,30 @@ mod tests {
             ("npm:sharp@^1", "sharp@1.2.3", "native_addon"),
             ("npm:other@^1", "a@1.2.3", "unresolved_declaration"),
         ] {
-            let root = fixture(&json!({"catalog":{"a":effective},"dependencies":{"a":"catalog:"}}),
-                &json!({"dependencies":{"a":"catalog:"}}), json!({"a":[identity,"",{},""]}));
+            let root = fixture(
+                &json!({"catalog":{"a":effective},"dependencies":{"a":"catalog:"}}),
+                &json!({"dependencies":{"a":"catalog:"}}),
+                json!({"a":[identity,"",{},""]}),
+            );
             let report = inspect_for_execution(root.path(), deadline()).unwrap();
-            assert!(report.findings.iter().any(|finding| finding.code == code), "{report:?}");
+            assert!(
+                report.findings.iter().any(|finding| finding.code == code),
+                "{report:?}"
+            );
             assert!(!report.installation_checked);
         }
-        let root = fixture(&json!({"catalogs":{"testing":{"a":"npm:@scope/real@^1"}},
+        let root = fixture(
+            &json!({"catalogs":{"testing":{"a":"npm:@scope/real@^1"}},
             "devDependencies":{"a":"catalog:testing"}}),
             &json!({"devDependencies":{"a":"catalog:testing"}}),
-            json!({"a":["@scope/real@1.2.3","",{},""]}));
+            json!({"a":["@scope/real@1.2.3","",{},""]}),
+        );
         install(root.path(), json!({"name":"@scope/real","version":"1.2.3"}));
-        assert!(!inspect_for_execution(root.path(), deadline()).unwrap().requires_review());
+        assert!(
+            !inspect_for_execution(root.path(), deadline())
+                .unwrap()
+                .requires_review()
+        );
     }
 
     #[test]
@@ -355,15 +461,32 @@ mod tests {
             assert!(inspect(root.path(), deadline()).is_err());
         }
         let manifest = json!({"catalog":{"a":"1"},"dependencies":{"outer":"1"}});
-        let root = fixture(&manifest, &json!({"dependencies":{"outer":"1"}}), json!({
-            "outer":["outer@1.0.0","",{"optionalDependencies":{"a":"catalog:"}},""]}));
+        let root = fixture(
+            &manifest,
+            &json!({"dependencies":{"outer":"1"}}),
+            json!({
+            "outer":["outer@1.0.0","",{"optionalDependencies":{"a":"catalog:"}},""]}),
+        );
         assert!(inspect(root.path(), deadline()).is_err());
         let root = tempfile::tempdir().unwrap();
-        put(root.path(), "package.json", &json!({"catalog":{"a":"1"},"dependencies":{"a":"catalog:"}}));
-        put(root.path(), "package-lock.json", &json!({"lockfileVersion":3,"packages":{
-            "node_modules/a":{"version":"1.0.0"}}}));
+        put(
+            root.path(),
+            "package.json",
+            &json!({"catalog":{"a":"1"},"dependencies":{"a":"catalog:"}}),
+        );
+        put(
+            root.path(),
+            "package-lock.json",
+            &json!({"lockfileVersion":3,"packages":{
+            "node_modules/a":{"version":"1.0.0"}}}),
+        );
         let report = inspect(root.path(), deadline()).unwrap();
-        assert!(report.findings.iter().any(|finding| finding.code == "unverifiable_dependency_version"));
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|finding| finding.code == "unverifiable_dependency_version")
+        );
     }
 
     #[test]
@@ -371,12 +494,17 @@ mod tests {
         let context = bind(json!({"catalog":{"a":"1"}}), json!({"catalog":{"a":"1"}})).unwrap();
         let mut projects = BTreeMap::new();
         for (index, section) in SECTIONS.iter().enumerate() {
-            projects.insert(format!("packages/{index}"), json!({(*section):{"a":"catalog:"}}));
+            projects.insert(
+                format!("packages/{index}"),
+                json!({(*section):{"a":"catalog:"}}),
+            );
         }
         context.expand(&mut projects, deadline()).unwrap();
         for manifest in projects.values() {
             for section in SECTIONS {
-                if let Some(entries) = manifest.get(*section) { assert_eq!(entries["a"], "1"); }
+                if let Some(entries) = manifest.get(*section) {
+                    assert_eq!(entries["a"], "1");
+                }
             }
         }
         let new = bind(json!({"catalog":{"a":"2"}}), json!({"catalog":{"a":"2"}})).unwrap();
@@ -389,12 +517,19 @@ mod tests {
     #[test]
     fn catalog_deadline_namespace_and_aggregate_expansion_budgets_fail_closed() {
         assert!(Catalogs::bind(&Map::new(), &Map::new(), Instant::now()).is_err());
-        let mut budget = Budget { entries: MAX_PACKAGES, bytes: 0 };
+        let mut budget = Budget {
+            entries: MAX_PACKAGES,
+            bytes: 0,
+        };
         assert!(budget.account(0, deadline()).is_err());
-        let mut budget = Budget { entries: 0, bytes: MAX_METADATA_BYTES };
+        let mut budget = Budget {
+            entries: 0,
+            bytes: MAX_METADATA_BYTES,
+        };
         assert!(budget.account(1, deadline()).is_err());
         let catalogs: Map<String, Value> = (0..MAX_CATALOGS + 1)
-            .map(|index| (format!("c{index}"), json!({"a":"1"}))).collect();
+            .map(|index| (format!("c{index}"), json!({"a":"1"})))
+            .collect();
         let value = json!({"catalogs":catalogs});
         assert!(bind(value.clone(), value).is_err());
     }
@@ -416,18 +551,39 @@ mod tests {
         put(root.path(), "package.json", &manifest);
         put(root.path(), "bun.lock", &lock);
         put(root.path(), "packages/app/package.json", &member);
-        fs::write(root.path().join("packages/app/index.js"), "throw Error('not executed');").unwrap();
+        fs::write(
+            root.path().join("packages/app/index.js"),
+            "throw Error('not executed');",
+        )
+        .unwrap();
         fs::create_dir_all(root.path().join("node_modules/@demo")).unwrap();
-        std::os::unix::fs::symlink("../../packages/app", root.path().join("node_modules/@demo/app")).unwrap();
+        std::os::unix::fs::symlink(
+            "../../packages/app",
+            root.path().join("node_modules/@demo/app"),
+        )
+        .unwrap();
         for (slot, package, version) in [("a", "a", "1.2.3"), ("tool", "@tools/real", "2.0.1")] {
             let location = if isolated {
                 format!("node_modules/.bun/{slot}@{version}/node_modules/{slot}")
-            } else { format!("node_modules/{slot}") };
-            put(root.path(), &format!("{location}/package.json"), &json!({"name":package,"version":version}));
-            fs::write(root.path().join(&location).join("index.js"), "throw Error('not executed');").unwrap();
+            } else {
+                format!("node_modules/{slot}")
+            };
+            put(
+                root.path(),
+                &format!("{location}/package.json"),
+                &json!({"name":package,"version":version}),
+            );
+            fs::write(
+                root.path().join(&location).join("index.js"),
+                "throw Error('not executed');",
+            )
+            .unwrap();
             if isolated {
-                std::os::unix::fs::symlink(format!(".bun/{slot}@{version}/node_modules/{slot}"),
-                    root.path().join("node_modules").join(slot)).unwrap();
+                std::os::unix::fs::symlink(
+                    format!(".bun/{slot}@{version}/node_modules/{slot}"),
+                    root.path().join("node_modules").join(slot),
+                )
+                .unwrap();
             }
         }
         (root, manifest, lock)
@@ -446,30 +602,58 @@ mod tests {
             // Isolated: those registry positions are aliases, with two
             // additional physical store positions; no manifest is reread
             // through either alias.
-            assert_eq!(report.installed_packages_scanned, if isolated { 5 } else { 3 });
+            assert_eq!(
+                report.installed_packages_scanned,
+                if isolated { 5 } else { 3 }
+            );
             assert_eq!(report.manifests_scanned, 4);
             for (slot, version) in [("a", "1.2.3"), ("tool", "2.0.1")] {
                 let position = format!("node_modules/{slot}");
                 let manifest_path = if isolated {
                     let target = format!(".bun/{slot}@{version}/node_modules/{slot}");
-                    let link = report.inputs.iter().find(|input| input.path == position).unwrap();
+                    let link = report
+                        .inputs
+                        .iter()
+                        .find(|input| input.path == position)
+                        .unwrap();
                     assert_eq!(link.bytes, target.len());
                     assert_eq!(link.sha256, hex::encode(Sha256::digest(target.as_bytes())));
-                    assert!(!report.inputs.iter().any(|input| input.path == format!("{position}/package.json")));
+                    assert!(
+                        !report
+                            .inputs
+                            .iter()
+                            .any(|input| input.path == format!("{position}/package.json"))
+                    );
                     format!("node_modules/{target}/package.json")
-                } else { format!("{position}/package.json") };
-                let input = report.inputs.iter().find(|input| input.path == manifest_path).unwrap();
+                } else {
+                    format!("{position}/package.json")
+                };
+                let input = report
+                    .inputs
+                    .iter()
+                    .find(|input| input.path == manifest_path)
+                    .unwrap();
                 let bytes = fs::read(root.path().join(&manifest_path)).unwrap();
                 assert_eq!(input.sha256, hex::encode(Sha256::digest(&bytes)));
             }
             assert!(report.scope.contains("catalog"));
-            for (path, raw) in [("package.json", serde_json::to_vec(&manifest).unwrap()),
-                ("bun.lock", serde_json::to_vec(&lock).unwrap()), ("packages/app/package.json", raw_member)] {
-                let input = report.inputs.iter().find(|input| input.path == path).unwrap();
+            for (path, raw) in [
+                ("package.json", serde_json::to_vec(&manifest).unwrap()),
+                ("bun.lock", serde_json::to_vec(&lock).unwrap()),
+                ("packages/app/package.json", raw_member),
+            ] {
+                let input = report
+                    .inputs
+                    .iter()
+                    .find(|input| input.path == path)
+                    .unwrap();
                 assert_eq!(input.sha256, hex::encode(Sha256::digest(&raw)));
                 assert_eq!(fs::read(root.path().join(path)).unwrap(), raw);
             }
-            assert_eq!(report, inspect_for_execution(root.path(), deadline()).unwrap());
+            assert_eq!(
+                report,
+                inspect_for_execution(root.path(), deadline()).unwrap()
+            );
         }
     }
 
@@ -490,12 +674,24 @@ mod tests {
                 assert!(result.is_err());
             } else {
                 let report = result.unwrap();
-                let code = if mode == "lifecycle" { "install_script" } else { "workspace_review" };
-                assert!(report.findings.iter().any(|finding| finding.code == code), "{report:?}");
+                let code = if mode == "lifecycle" {
+                    "install_script"
+                } else {
+                    "workspace_review"
+                };
+                assert!(
+                    report.findings.iter().any(|finding| finding.code == code),
+                    "{report:?}"
+                );
                 assert!(!report.installation_checked);
             }
             assert!(!root.path().join("catalog-must-not-run").exists());
-            assert!(!root.path().join("packages/app/catalog-must-not-run").exists());
+            assert!(
+                !root
+                    .path()
+                    .join("packages/app/catalog-must-not-run")
+                    .exists()
+            );
         }
     }
 
@@ -506,7 +702,10 @@ mod tests {
         let recorded = json!({"catalog":{"a":"1"},"catalogs":{"testing":{"tool":"2"}}});
         let catalogs = bind(root.clone(), recorded.clone()).unwrap();
         assert_eq!(catalogs.resolve("a", "catalog:").unwrap(), Some("1"));
-        assert_eq!(catalogs.resolve("tool", "catalog:testing").unwrap(), Some("2"));
+        assert_eq!(
+            catalogs.resolve("tool", "catalog:testing").unwrap(),
+            Some("2")
+        );
         let mut duplicate = root.clone();
         duplicate["workspaces"]["catalog"] = json!({"a":"1"});
         assert!(bind(duplicate, recorded.clone()).is_err());
@@ -517,9 +716,13 @@ mod tests {
 
     #[test]
     fn object_workspace_selectors_cannot_grant_lock_only_or_unknown_layout_authority() {
-        for options in [json!({"packages":"packages/*"}), json!({"catalog":{}}),
+        for options in [
+            json!({"packages":"packages/*"}),
+            json!({"catalog":{}}),
             json!({"packages":[],"selfContained":true}),
-            json!({"packages":[],"nohoist":["**"]}), json!({"packages":[],"unknown":false})] {
+            json!({"packages":[],"nohoist":["**"]}),
+            json!({"packages":[],"unknown":false}),
+        ] {
             assert!(bind(json!({"workspaces":options}), json!({})).is_err());
         }
         let (root, mut manifest, _) = workspace_fixture(false);
@@ -527,8 +730,16 @@ mod tests {
         put(root.path(), "package.json", &manifest);
         assert!(inspect_for_execution(root.path(), deadline()).is_err());
         let root = tempfile::tempdir().unwrap();
-        put(root.path(), "package.json", &json!({"workspaces":{"packages":[]}}));
-        put(root.path(), "package-lock.json", &json!({"lockfileVersion":3,"packages":{}}));
+        put(
+            root.path(),
+            "package.json",
+            &json!({"workspaces":{"packages":[]}}),
+        );
+        put(
+            root.path(),
+            "package-lock.json",
+            &json!({"lockfileVersion":3,"packages":{}}),
+        );
         assert!(inspect(root.path(), deadline()).is_err());
     }
 
@@ -536,15 +747,29 @@ mod tests {
     fn catalog_workspace_still_checks_native_payloads_and_exact_private_routes() {
         let (root, _, mut lock) = workspace_fixture(false);
         // A compatible hoist cannot replace the pinned private installation.
-        lock["packages"]["@demo/app/a"] = json!(["a@1.2.3","",{},""]);
+        lock["packages"]["@demo/app/a"] = json!(["a@1.2.3", "", {}, ""]);
         put(root.path(), "bun.lock", &lock);
         let report = inspect_for_execution(root.path(), deadline()).unwrap();
-        assert!(report.findings.iter().any(|finding|
-            finding.code == "installed_dependency_route_mismatch"
-                && finding.source == "packages/app/package.json#dependencies"), "{report:?}");
+        assert!(
+            report.findings.iter().any(|finding| finding.code
+                == "installed_dependency_route_mismatch"
+                && finding.source == "packages/app/package.json#dependencies"),
+            "{report:?}"
+        );
         let (root, _, _) = workspace_fixture(true);
-        fs::write(root.path().join("node_modules/.bun/a@1.2.3/node_modules/a/native.node"), b"not executable").unwrap();
+        fs::write(
+            root.path()
+                .join("node_modules/.bun/a@1.2.3/node_modules/a/native.node"),
+            b"not executable",
+        )
+        .unwrap();
         let report = inspect_for_execution(root.path(), deadline()).unwrap();
-        assert!(report.findings.iter().any(|finding| finding.code == "native_payload"), "{report:?}");
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|finding| finding.code == "native_payload"),
+            "{report:?}"
+        );
     }
 }

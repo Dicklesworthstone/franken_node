@@ -6,11 +6,11 @@
 
 use super::super::super::product_oracle::{self, CaseOutcome, ProductReport};
 use super::super::{
-    Blob, CapsuleSummary, CapturedInputs, ExecutionControl, ExportedInputs, HashWriter, Invocation, LEG_TIMEOUT,
-    MAX_CAPSULE_BYTES, MAX_ENTRIES, MAX_EXPANDED_BYTES, Origin, Snapshot, StoredSnapshot, TOTAL_TIMEOUT,
-    budget, implementation_hash, is_hash, matched_tests, open_regular, output_destination,
-    resolve_capsule_input, restore_snapshot, runtime_invocations, same_file_version, same_runtime, store_snapshot,
-    workspace_effects,
+    Blob, CapsuleSummary, CapturedInputs, ExecutionControl, ExportedInputs, HashWriter, Invocation,
+    LEG_TIMEOUT, MAX_CAPSULE_BYTES, MAX_ENTRIES, MAX_EXPANDED_BYTES, Origin, Snapshot,
+    StoredSnapshot, TOTAL_TIMEOUT, budget, implementation_hash, is_hash, matched_tests,
+    open_regular, output_destination, resolve_capsule_input, restore_snapshot, runtime_invocations,
+    same_file_version, same_runtime, store_snapshot, workspace_effects,
 };
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
@@ -249,7 +249,8 @@ pub fn check_complete_evidence(
             }
         }
         let outcome = if node.exit_code != Some(i32::from(*expected_exit))
-            || bun.exit_code != Some(i32::from(*expected_exit)) {
+            || bun.exit_code != Some(i32::from(*expected_exit))
+        {
             reference_failures += 1;
             CaseOutcome::ReferenceFailure
         } else if reference_mismatch {
@@ -1092,8 +1093,14 @@ mod tests {
         let capsule: Capsule = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
         let original = capsule.payload.expected;
         let tests = BTreeMap::from([(PathBuf::from("case.test.js"), 0)]);
-        let check = |report: &ProductReport| check_native_regression(report,
-            &original.input_sha256, &original.candidate_input_sha256, &tests);
+        let check = |report: &ProductReport| {
+            check_native_regression(
+                report,
+                &original.input_sha256,
+                &original.candidate_input_sha256,
+                &tests,
+            )
+        };
         assert_eq!(check(&original).unwrap(), 1);
         for mutation in 0..13 {
             let mut changed = original.clone();
@@ -1115,13 +1122,33 @@ mod tests {
             }
             assert!(check(&changed).is_err(), "{mutation}");
         }
-        assert!(check_native_regression(&original, &"0".repeat(64),
-            &original.candidate_input_sha256, &tests).is_err());
-        assert!(check_native_regression(&original, &original.input_sha256,
-            &original.candidate_input_sha256, &BTreeMap::new()).is_err());
-        assert!(check_native_regression(&original, &original.input_sha256,
-            &original.candidate_input_sha256,
-            &BTreeMap::from([(PathBuf::from("case.test.js"), 7)])).is_err());
+        assert!(
+            check_native_regression(
+                &original,
+                &"0".repeat(64),
+                &original.candidate_input_sha256,
+                &tests
+            )
+            .is_err()
+        );
+        assert!(
+            check_native_regression(
+                &original,
+                &original.input_sha256,
+                &original.candidate_input_sha256,
+                &BTreeMap::new()
+            )
+            .is_err()
+        );
+        assert!(
+            check_native_regression(
+                &original,
+                &original.input_sha256,
+                &original.candidate_input_sha256,
+                &BTreeMap::from([(PathBuf::from("case.test.js"), 7)])
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -1135,10 +1162,22 @@ mod tests {
             let capsule: Capsule = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
             let report = capsule.payload.expected;
             let tests = BTreeMap::from([(PathBuf::from("case.test.js"), 0)]);
-            check_complete_evidence(&report, &report.input_sha256,
-                &report.candidate_input_sha256, &tests).unwrap();
-            assert!(check_native_regression(&report, &report.input_sha256,
-                &report.candidate_input_sha256, &tests).is_err());
+            check_complete_evidence(
+                &report,
+                &report.input_sha256,
+                &report.candidate_input_sha256,
+                &tests,
+            )
+            .unwrap();
+            assert!(
+                check_native_regression(
+                    &report,
+                    &report.input_sha256,
+                    &report.candidate_input_sha256,
+                    &tests
+                )
+                .is_err()
+            );
         }
     }
 }

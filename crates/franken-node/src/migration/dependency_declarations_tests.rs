@@ -1,14 +1,21 @@
-use super::*;
 use super::super::{DependencyAdmission, inspect, inspect_for_execution};
+use super::*;
 use serde_json::json;
 use std::fs;
 use std::os::unix::fs::symlink;
 use std::path::Path;
 use std::time::Duration;
 
-const FIELDS: [&str; 4] = ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"];
+const FIELDS: [&str; 4] = [
+    "dependencies",
+    "devDependencies",
+    "peerDependencies",
+    "optionalDependencies",
+];
 
-fn deadline() -> Instant { Instant::now() + Duration::from_secs(15) }
+fn deadline() -> Instant {
+    Instant::now() + Duration::from_secs(15)
+}
 fn selection(manifest: &Value, project: bool) -> Vec<Declaration<'_>> {
     select(manifest, project, deadline(), &mut 0, 100).unwrap()
 }
@@ -20,7 +27,11 @@ fn put(root: &Path, path: &str, value: &Value) {
 fn fixture(manifest: Value, records: Value) -> tempfile::TempDir {
     let root = tempfile::tempdir().unwrap();
     put(root.path(), "package.json", &manifest);
-    put(root.path(), "package-lock.json", &json!({"lockfileVersion":3,"packages":records}));
+    put(
+        root.path(),
+        "package-lock.json",
+        &json!({"lockfileVersion":3,"packages":records}),
+    );
     root
 }
 fn has(report: &DependencyAdmission, code: &str) -> bool {
@@ -29,7 +40,9 @@ fn has(report: &DependencyAdmission, code: &str) -> bool {
 fn collision(mask: usize) -> Value {
     let mut manifest = json!({"name":"consumer","version":"1.0.0"});
     for (index, field) in FIELDS.iter().enumerate() {
-        if mask & (1 << index) != 0 { manifest[*field] = json!({"x":(index + 1).to_string()}); }
+        if mask & (1 << index) != 0 {
+            manifest[*field] = json!({"x":(index + 1).to_string()});
+        }
     }
     manifest
 }
@@ -39,8 +52,23 @@ fn all_declaration_collisions_match_independent_npm_reference_table() {
     // npm 10.9.2 / Arborist 8.0.0, loadActual over real root and workspace
     // trees. Literal expected winners, not computed by the selector under test.
     let project_winners = [0, 1, 1, 2, 0, 1, 1, 3, 3, 1, 1, 3, 3, 1, 1];
-    let package_winners = [Some(0), None, Some(0), Some(2), Some(0), Some(2), Some(0),
-        Some(3), Some(3), Some(3), Some(3), Some(3), Some(3), Some(3), Some(3)];
+    let package_winners = [
+        Some(0),
+        None,
+        Some(0),
+        Some(2),
+        Some(0),
+        Some(2),
+        Some(0),
+        Some(3),
+        Some(3),
+        Some(3),
+        Some(3),
+        Some(3),
+        Some(3),
+        Some(3),
+        Some(3),
+    ];
     for mask in 1..16 {
         let manifest = collision(mask);
         let selected = selection(&manifest, true);
@@ -72,20 +100,43 @@ fn all_project_and_workspace_collisions_reach_live_installed_admission() {
             let mut records = json!({"node_modules/x":{"version":version.clone()}});
             let root = if workspace {
                 records["packages/consumer"] = manifest.clone();
-                records["node_modules/consumer"] = json!({"link":true,"resolved":"packages/consumer"});
-                let root = fixture(json!({"name":"root","workspaces":["packages/consumer"]}), records);
+                records["node_modules/consumer"] =
+                    json!({"link":true,"resolved":"packages/consumer"});
+                let root = fixture(
+                    json!({"name":"root","workspaces":["packages/consumer"]}),
+                    records,
+                );
                 put(root.path(), "packages/consumer/package.json", &manifest);
                 fs::create_dir(root.path().join("node_modules")).unwrap();
-                symlink("../packages/consumer", root.path().join("node_modules/consumer")).unwrap();
+                symlink(
+                    "../packages/consumer",
+                    root.path().join("node_modules/consumer"),
+                )
+                .unwrap();
                 root
-            } else { fixture(manifest, records) };
-            put(root.path(), "node_modules/x/package.json", &json!({"name":"x","version":version}));
+            } else {
+                fixture(manifest, records)
+            };
+            put(
+                root.path(),
+                "node_modules/x/package.json",
+                &json!({"name":"x","version":version}),
+            );
             let metadata = inspect(root.path(), deadline()).unwrap();
-            assert!(!metadata.requires_review(), "workspace={workspace} mask={mask}: {metadata:#?}");
+            assert!(
+                !metadata.requires_review(),
+                "workspace={workspace} mask={mask}: {metadata:#?}"
+            );
             let installed = inspect_for_execution(root.path(), deadline()).unwrap();
-            assert!(!installed.requires_review(), "workspace={workspace} mask={mask}: {installed:#?}");
+            assert!(
+                !installed.requires_review(),
+                "workspace={workspace} mask={mask}: {installed:#?}"
+            );
             assert!(installed.installation_checked);
-            assert_eq!(installed.installed_packages_scanned, if workspace { 2 } else { 1 });
+            assert_eq!(
+                installed.installed_packages_scanned,
+                if workspace { 2 } else { 1 }
+            );
         }
     }
 }
@@ -100,7 +151,10 @@ fn optional_dependencies_and_optional_peers_may_have_no_locked_installation() {
         let root = fixture(manifest, json!({}));
         assert!(!inspect(root.path(), deadline()).unwrap().requires_review());
         let report = inspect_for_execution(root.path(), deadline()).unwrap();
-        assert!(report.installation_checked && !report.requires_review(), "{report:#?}");
+        assert!(
+            report.installation_checked && !report.requires_review(),
+            "{report:#?}"
+        );
         assert!(!root.path().join("node_modules").exists());
     }
 }
@@ -114,8 +168,15 @@ fn a_dev_declaration_cannot_be_softened_by_same_named_optional_metadata() {
         let root = fixture(manifest, json!({"node_modules/x":{"version":"1.0.0"}}));
         assert!(!inspect(root.path(), deadline()).unwrap().requires_review());
         let installed = inspect_for_execution(root.path(), deadline()).unwrap();
-        assert!(installed.installation_checked && has(&installed, "missing_installed_dependency"), "{installed:#?}");
-        let finding = installed.findings.iter().find(|finding| finding.code == "missing_installed_dependency").unwrap();
+        assert!(
+            installed.installation_checked && has(&installed, "missing_installed_dependency"),
+            "{installed:#?}"
+        );
+        let finding = installed
+            .findings
+            .iter()
+            .find(|finding| finding.code == "missing_installed_dependency")
+            .unwrap();
         assert_eq!(finding.source, "package.json#devDependencies");
         assert_eq!(finding.package_path.as_deref(), Some("node_modules/x"));
     }
@@ -128,37 +189,73 @@ fn installed_optional_versions_and_alias_identities_remain_checked() {
         json!({"peerDependencies":{"x":"^2"},"peerDependenciesMeta":{"x":{"optional":true}}}),
     ] {
         let root = fixture(manifest, json!({"node_modules/x":{"version":"1.0.0"}}));
-        assert!(has(&inspect(root.path(), deadline()).unwrap(), "dependency_version_mismatch"));
+        assert!(has(
+            &inspect(root.path(), deadline()).unwrap(),
+            "dependency_version_mismatch"
+        ));
     }
-    let root = fixture(json!({"optionalDependencies":{"x":"npm:expected@1"}}),
-        json!({"node_modules/x":{"name":"wrong","version":"1.0.0"}}));
-    assert!(has(&inspect(root.path(), deadline()).unwrap(), "unresolved_declaration"));
+    let root = fixture(
+        json!({"optionalDependencies":{"x":"npm:expected@1"}}),
+        json!({"node_modules/x":{"name":"wrong","version":"1.0.0"}}),
+    );
+    assert!(has(
+        &inspect(root.path(), deadline()).unwrap(),
+        "unresolved_declaration"
+    ));
 }
 
 #[test]
 fn only_the_effective_alias_controls_declaration_risk_but_inventory_is_not_hidden() {
-    let root = fixture(json!({"dependencies":{"x":"npm:sharp@1"},"devDependencies":{"x":"npm:ordinary@2"}}),
-        json!({"node_modules/x":{"name":"ordinary","version":"2.0.0"}}));
-    put(root.path(), "node_modules/x/package.json", &json!({"name":"ordinary","version":"2.0.0"}));
-    assert!(!inspect_for_execution(root.path(), deadline()).unwrap().requires_review());
-    let root = fixture(json!({"dependencies":{"x":"npm:ordinary@2"},"devDependencies":{"x":"npm:sharp@1"}}),
-        json!({"node_modules/x":{"name":"sharp","version":"1.0.0"}}));
-    assert!(has(&inspect(root.path(), deadline()).unwrap(), "native_addon"));
-    let root = fixture(json!({"optionalDependencies":{"x":"1"}}),
-        json!({"node_modules/x":{"version":"1.0.0","hasInstallScript":true}}));
-    assert!(has(&inspect(root.path(), deadline()).unwrap(), "install_script"));
+    let root = fixture(
+        json!({"dependencies":{"x":"npm:sharp@1"},"devDependencies":{"x":"npm:ordinary@2"}}),
+        json!({"node_modules/x":{"name":"ordinary","version":"2.0.0"}}),
+    );
+    put(
+        root.path(),
+        "node_modules/x/package.json",
+        &json!({"name":"ordinary","version":"2.0.0"}),
+    );
+    assert!(
+        !inspect_for_execution(root.path(), deadline())
+            .unwrap()
+            .requires_review()
+    );
+    let root = fixture(
+        json!({"dependencies":{"x":"npm:ordinary@2"},"devDependencies":{"x":"npm:sharp@1"}}),
+        json!({"node_modules/x":{"name":"sharp","version":"1.0.0"}}),
+    );
+    assert!(has(
+        &inspect(root.path(), deadline()).unwrap(),
+        "native_addon"
+    ));
+    let root = fixture(
+        json!({"optionalDependencies":{"x":"1"}}),
+        json!({"node_modules/x":{"version":"1.0.0","hasInstallScript":true}}),
+    );
+    assert!(has(
+        &inspect(root.path(), deadline()).unwrap(),
+        "install_script"
+    ));
 }
 
 #[test]
 fn superseded_declarations_and_unattached_peer_metadata_are_still_validated() {
     for losing in [json!(17), json!("npm:"), json!("npm:bad@@1")] {
-        let root = fixture(json!({"dependencies":{"x":losing},"devDependencies":{"x":"2"}}),
-            json!({"node_modules/x":{"version":"2.0.0"}}));
+        let root = fixture(
+            json!({"dependencies":{"x":losing},"devDependencies":{"x":"2"}}),
+            json!({"node_modules/x":{"version":"2.0.0"}}),
+        );
         assert!(inspect(root.path(), deadline()).is_err());
     }
-    for meta in [json!(null), json!({"unused":null}), json!({"unused":{"optional":"true"}})] {
-        let root = fixture(json!({"devDependencies":{"x":"2"},"peerDependenciesMeta":meta}),
-            json!({"node_modules/x":{"version":"2.0.0"}}));
+    for meta in [
+        json!(null),
+        json!({"unused":null}),
+        json!({"unused":{"optional":"true"}}),
+    ] {
+        let root = fixture(
+            json!({"devDependencies":{"x":"2"},"peerDependenciesMeta":meta}),
+            json!({"node_modules/x":{"version":"2.0.0"}}),
+        );
         assert!(inspect(root.path(), deadline()).is_err());
     }
     for field in FIELDS {
@@ -174,7 +271,12 @@ fn declaration_budgets_count_losing_entries_and_peer_metadata_without_overflow()
     let mut count = 0;
     assert!(select(&manifest, true, deadline(), &mut count, 3).is_err());
     let mut count = 0;
-    assert_eq!(select(&manifest, true, deadline(), &mut count, 4).unwrap().len(), 1);
+    assert_eq!(
+        select(&manifest, true, deadline(), &mut count, 4)
+            .unwrap()
+            .len(),
+        1
+    );
     assert_eq!(count, 4);
     let metadata = json!({"peerDependenciesMeta":{"unused":{"optional":true}}});
     assert!(select(&metadata, true, deadline(), &mut 0, 0).is_err());
@@ -186,20 +288,44 @@ fn declaration_budgets_count_losing_entries_and_peer_metadata_without_overflow()
 #[test]
 fn workspace_private_required_tool_cannot_be_rescued_by_an_optional_hoist() {
     let manifest = json!({"name":"consumer","version":"1.0.0", "devDependencies":{"x":"2"}, "optionalDependencies":{"x":"1"}});
-    let root = fixture(json!({"name":"root","workspaces":["packages/consumer"]}), json!({
-        "packages/consumer":manifest.clone(),
-        "node_modules/consumer":{"link":true,"resolved":"packages/consumer"},
-        "packages/consumer/node_modules/x":{"version":"2.0.0"},
-        "node_modules/x":{"version":"2.0.0"}
-    }));
+    let root = fixture(
+        json!({"name":"root","workspaces":["packages/consumer"]}),
+        json!({
+            "packages/consumer":manifest.clone(),
+            "node_modules/consumer":{"link":true,"resolved":"packages/consumer"},
+            "packages/consumer/node_modules/x":{"version":"2.0.0"},
+            "node_modules/x":{"version":"2.0.0"}
+        }),
+    );
     put(root.path(), "packages/consumer/package.json", &manifest);
-    put(root.path(), "node_modules/x/package.json", &json!({"name":"x","version":"2.0.0"}));
-    symlink("../packages/consumer", root.path().join("node_modules/consumer")).unwrap();
+    put(
+        root.path(),
+        "node_modules/x/package.json",
+        &json!({"name":"x","version":"2.0.0"}),
+    );
+    symlink(
+        "../packages/consumer",
+        root.path().join("node_modules/consumer"),
+    )
+    .unwrap();
     let report = inspect_for_execution(root.path(), deadline()).unwrap();
-    assert!(report.installation_checked && has(&report, "installed_dependency_route_mismatch"), "{report:#?}");
-    let finding = report.findings.iter().find(|finding| finding.code == "installed_dependency_route_mismatch").unwrap();
-    assert_eq!(finding.source, "packages/consumer/package.json#devDependencies");
-    assert_eq!(finding.package_path.as_deref(), Some("packages/consumer/node_modules/x"));
+    assert!(
+        report.installation_checked && has(&report, "installed_dependency_route_mismatch"),
+        "{report:#?}"
+    );
+    let finding = report
+        .findings
+        .iter()
+        .find(|finding| finding.code == "installed_dependency_route_mismatch")
+        .unwrap();
+    assert_eq!(
+        finding.source,
+        "packages/consumer/package.json#devDependencies"
+    );
+    assert_eq!(
+        finding.package_path.as_deref(),
+        Some("packages/consumer/node_modules/x")
+    );
 }
 
 #[test]
@@ -207,7 +333,13 @@ fn stable_selection_retains_alias_requirements_without_mutating_captured_maps() 
     let manifest = json!({"optionalDependencies":{"z":"npm:@scope/z@^2","a":"1"}, "peerDependenciesMeta":{"z":{"optional":true}}});
     let original = serde_json::to_vec(&manifest).unwrap();
     let selected = selection(&manifest, true);
-    assert_eq!(selected.iter().map(|edge| edge.installed_as).collect::<Vec<_>>(), ["a", "z"]);
+    assert_eq!(
+        selected
+            .iter()
+            .map(|edge| edge.installed_as)
+            .collect::<Vec<_>>(),
+        ["a", "z"]
+    );
     assert_eq!(selected[1].package, "@scope/z");
     assert_eq!(selected[1].requirement, Some("^2"));
     assert!(selected[1].optional);
@@ -902,14 +1034,27 @@ fn version_qualified_overrides_select_original_ranges_and_verify_installed_repla
             };
             put(root.path(), "package-lock.json", &lock);
             let report = inspect_for_execution(root.path(), deadline()).unwrap();
-            assert_eq!(!report.requires_review(), allowed, "v{version} {request} / {pin}: {report:#?}");
-            assert_eq!(report.installation_checked, allowed, "v{version} {request}: {report:#?}");
+            assert_eq!(
+                !report.requires_review(),
+                allowed,
+                "v{version} {request} / {pin}: {report:#?}"
+            );
+            assert_eq!(
+                report.installation_checked, allowed,
+                "v{version} {request}: {report:#?}"
+            );
             if allowed {
                 assert_eq!(report.installed_packages_scanned, 2);
                 assert!(report.scope.contains("version-qualified selectors"));
-                put(root.path(), "node_modules/child/package.json", &json!({"name":"child","version":"9.0.0"}));
+                put(
+                    root.path(),
+                    "node_modules/child/package.json",
+                    &json!({"name":"child","version":"9.0.0"}),
+                );
                 let changed = inspect_for_execution(root.path(), deadline()).unwrap();
-                assert!(changed.installation_checked && has(&changed, "installed_identity_mismatch"));
+                assert!(
+                    changed.installation_checked && has(&changed, "installed_identity_mismatch")
+                );
             } else {
                 assert!(has(&report, "dependency_version_mismatch"));
             }
@@ -934,9 +1079,18 @@ fn version_qualified_overrides_preserve_npm_prerelease_selection_direction() {
     ] {
         let root = overridden_tree(json!({format!("child@{selector}"):"^2"}), request, pin);
         let report = inspect_for_execution(root.path(), deadline()).unwrap();
-        assert_eq!(!report.requires_review(), allowed, "{selector} / {request} / {pin}: {report:#?}");
-        assert_eq!(report.installation_checked, allowed, "{selector} / {request}: {report:#?}");
-        if !allowed { assert!(has(&report, "dependency_version_mismatch")); }
+        assert_eq!(
+            !report.requires_review(),
+            allowed,
+            "{selector} / {request} / {pin}: {report:#?}"
+        );
+        assert_eq!(
+            report.installation_checked, allowed,
+            "{selector} / {request}: {report:#?}"
+        );
+        if !allowed {
+            assert!(has(&report, "dependency_version_mismatch"));
+        }
     }
     for (selector, request, pin, conflict) in [
         (">=0", "1.0.0-alpha", "1.0.0-alpha", false),
@@ -946,9 +1100,17 @@ fn version_qualified_overrides_preserve_npm_prerelease_selection_direction() {
             json!({"dependencies":{"child":request},"overrides":{format!("child@{selector}"):"^2"}}),
             json!({"node_modules/child":{"version":pin}}),
         );
-        put(root.path(), "node_modules/child/package.json", &json!({"name":"child","version":pin}));
+        put(
+            root.path(),
+            "node_modules/child/package.json",
+            &json!({"name":"child","version":pin}),
+        );
         let report = inspect_for_execution(root.path(), deadline()).unwrap();
-        assert_eq!(has(&report, "conflicting_npm_override"), conflict, "{selector} / {request}: {report:#?}");
+        assert_eq!(
+            has(&report, "conflicting_npm_override"),
+            conflict,
+            "{selector} / {request}: {report:#?}"
+        );
         assert_eq!(report.installation_checked, !conflict);
     }
     // Capture cannot assume intersection symmetry when certifying that
@@ -978,32 +1140,57 @@ fn disjoint_version_overrides_follow_each_consumers_nearest_installation() {
     );
     put(root.path(), "node_modules/first/package.json", &first);
     put(root.path(), "node_modules/second/package.json", &second);
-    put(root.path(), "node_modules/@scope/child/package.json", &json!({"name":"@patched/child","version":"2.1.0"}));
-    put(root.path(), "node_modules/second/node_modules/@scope/child/package.json", &json!({"name":"@scope/child","version":"4.1.0"}));
+    put(
+        root.path(),
+        "node_modules/@scope/child/package.json",
+        &json!({"name":"@patched/child","version":"2.1.0"}),
+    );
+    put(
+        root.path(),
+        "node_modules/second/node_modules/@scope/child/package.json",
+        &json!({"name":"@scope/child","version":"4.1.0"}),
+    );
     let report = inspect_for_execution(root.path(), deadline()).unwrap();
-    assert!(!report.requires_review() && report.installation_checked, "{report:#?}");
+    assert!(
+        !report.requires_review() && report.installation_checked,
+        "{report:#?}"
+    );
     assert_eq!(report.installed_packages_scanned, 4);
     let mut changed = first;
     changed["dependencies"]["@scope/child"] = json!("^3");
     put(root.path(), "node_modules/first/package.json", &changed);
     let report = inspect_for_execution(root.path(), deadline()).unwrap();
     assert!(has(&report, "installed_dependency_metadata_mismatch"));
-    assert!(has(&report, "unresolved_transitive_dependency"), "{report:#?}");
+    assert!(
+        has(&report, "unresolved_transitive_dependency"),
+        "{report:#?}"
+    );
 }
 
 #[test]
 fn version_qualified_direct_overrides_retain_exact_eoverride_and_reference_rules() {
     for (selector, replacement, conflict) in [
-        ("^1", "^1", false), ("^1", "$child", false),
-        ("^1", "1", true), ("^1", "^2", true), ("^2", "^3", false),
+        ("^1", "^1", false),
+        ("^1", "$child", false),
+        ("^1", "1", true),
+        ("^1", "^2", true),
+        ("^2", "^3", false),
     ] {
         let root = fixture(
             json!({"dependencies":{"child":"^1"},"overrides":{format!("child@{selector}"):replacement}}),
             json!({"node_modules/child":{"version":"1.2.0"}}),
         );
-        put(root.path(), "node_modules/child/package.json", &json!({"name":"child","version":"1.2.0"}));
+        put(
+            root.path(),
+            "node_modules/child/package.json",
+            &json!({"name":"child","version":"1.2.0"}),
+        );
         let report = inspect_for_execution(root.path(), deadline()).unwrap();
-        assert_eq!(has(&report, "conflicting_npm_override"), conflict, "{selector} / {replacement}: {report:#?}");
+        assert_eq!(
+            has(&report, "conflicting_npm_override"),
+            conflict,
+            "{selector} / {replacement}: {report:#?}"
+        );
         assert_eq!(report.installation_checked, !conflict);
     }
 }
@@ -1028,22 +1215,43 @@ fn version_qualified_override_ambiguity_and_opaque_requests_never_gain_authority
     ] {
         let root = overridden_tree(rules, "1 || 3", "4.0.0");
         let error = inspect_for_execution(root.path(), deadline()).unwrap_err();
-        assert!(format!("{error:#}").contains("multiple version-qualified"), "{error:#}");
+        assert!(
+            format!("{error:#}").contains("multiple version-qualified"),
+            "{error:#}"
+        );
     }
-    for request in ["latest", "git+https://example.invalid/pkg", "file:../pkg", "workspace:*", "npm:fork@latest"] {
+    for request in [
+        "latest",
+        "git+https://example.invalid/pkg",
+        "file:../pkg",
+        "workspace:*",
+        "npm:fork@latest",
+    ] {
         let root = overridden_tree(json!({"child@^1":"2"}), request, "2.0.0");
         let error = inspect_for_execution(root.path(), deadline()).unwrap_err();
-        assert!(format!("{error:#}").contains("version-qualified override"), "{request}: {error:#}");
+        assert!(
+            format!("{error:#}").contains("version-qualified override"),
+            "{request}: {error:#}"
+        );
     }
 }
 
 #[test]
 fn unused_version_qualified_rules_are_validated_and_selector_counts_are_bounded() {
-    let root = overridden_tree(json!({"child":"2","unused@^1":"2","@scope/unused@^1":"3"}), "^1", "2.0.0");
+    let root = overridden_tree(
+        json!({"child":"2","unused@^1":"2","@scope/unused@^1":"3"}),
+        "^1",
+        "2.0.0",
+    );
     let report = inspect_for_execution(root.path(), deadline()).unwrap();
-    assert!(!report.requires_review() && report.installation_checked, "{report:#?}");
+    assert!(
+        !report.requires_review() && report.installation_checked,
+        "{report:#?}"
+    );
     let mut rules = serde_json::Map::new();
-    for major in 0..65 { rules.insert(format!("unused@{major}"), json!("1")); }
+    for major in 0..65 {
+        rules.insert(format!("unused@{major}"), json!("1"));
+    }
     let root = overridden_tree(Value::Object(rules), "^1", "1.0.0");
     let error = inspect(root.path(), deadline()).unwrap_err();
     assert!(format!("{error:#}").contains("selectors per package exceed limit"));

@@ -27,8 +27,13 @@ pub(super) struct Declaration<'a> {
 
 fn account(count: &mut usize, limit: usize, deadline: Instant) -> Result<()> {
     time_remaining(deadline)?;
-    *count = count.checked_add(1).context("dependency declaration count overflow")?;
-    ensure!(*count <= limit, "dependency declaration/peer metadata count exceeds limit");
+    *count = count
+        .checked_add(1)
+        .context("dependency declaration count overflow")?;
+    ensure!(
+        *count <= limit,
+        "dependency declaration/peer metadata count exceeds limit"
+    );
     Ok(())
 }
 
@@ -44,42 +49,70 @@ pub(super) fn select<'a>(
     limit: usize,
 ) -> Result<Vec<Declaration<'a>>> {
     time_remaining(deadline)?;
-    ensure!(manifest.is_object(), "dependency manifest must be an object");
-    let peer_meta = manifest.get("peerDependenciesMeta")
-        .map(|value| value.as_object().context("peerDependenciesMeta must be an object"))
+    ensure!(
+        manifest.is_object(),
+        "dependency manifest must be an object"
+    );
+    let peer_meta = manifest
+        .get("peerDependenciesMeta")
+        .map(|value| {
+            value
+                .as_object()
+                .context("peerDependenciesMeta must be an object")
+        })
         .transpose()?;
     if let Some(metadata) = peer_meta {
         for (installed_as, value) in metadata {
             account(count, limit, deadline)?;
             name(installed_as)?;
-            flag(value.as_object().context("peer dependency metadata must be an object")?, "optional")?;
+            flag(
+                value
+                    .as_object()
+                    .context("peer dependency metadata must be an object")?,
+                "optional",
+            )?;
         }
     }
     let mut selected = BTreeMap::new();
     // Increasing precedence. Dev is deliberately last for project/workspace
     // roots: an optional declaration cannot make a required test tool optional.
-    for field in ["peerDependencies", "dependencies", "optionalDependencies", "devDependencies"] {
-        if field == "devDependencies" && !project { continue; }
-        let Some(value) = manifest.get(field) else { continue; };
-        let declarations = value.as_object().with_context(|| format!("{field} must be an object"))?;
+    for field in [
+        "peerDependencies",
+        "dependencies",
+        "optionalDependencies",
+        "devDependencies",
+    ] {
+        if field == "devDependencies" && !project {
+            continue;
+        }
+        let Some(value) = manifest.get(field) else {
+            continue;
+        };
+        let declarations = value
+            .as_object()
+            .with_context(|| format!("{field} must be an object"))?;
         for (installed_as, request) in declarations {
             account(count, limit, deadline)?;
             name(installed_as)?;
             let request = bounded_text(request, "dependency request")?;
             let (package, requirement) = alias(installed_as, Some(request))?;
-            let optional_peer = peer_meta.and_then(|metadata| metadata.get(installed_as))
+            let optional_peer = peer_meta
+                .and_then(|metadata| metadata.get(installed_as))
                 .and_then(|value| value.get("optional"))
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
-            selected.insert(installed_as.as_str(), Declaration {
-                section: field,
-                installed_as,
-                request,
-                package,
-                requirement,
-                optional: field == "optionalDependencies"
-                    || (field == "peerDependencies" && optional_peer),
-            });
+            selected.insert(
+                installed_as.as_str(),
+                Declaration {
+                    section: field,
+                    installed_as,
+                    request,
+                    package,
+                    requirement,
+                    optional: field == "optionalDependencies"
+                        || (field == "peerDependencies" && optional_peer),
+                },
+            );
         }
     }
     time_remaining(deadline)?;
@@ -133,14 +166,17 @@ fn override_selector(key: &str) -> Option<(&str, Option<&str>)> {
 }
 
 fn selector_matches(package: &str, selector: &str, request: &str) -> Result<bool> {
-    if selector == "*" { return Ok(true); }
+    if selector == "*" {
+        return Ok(true);
+    }
     let (_, range) = alias(package, Some(request))?;
     // Arborist tests the original request first. node-semver's comparator
     // intersection is directional for exact prereleases versus ANY.
     graph::ranges_intersect(
         range.context("version-qualified override cannot verify an opaque dependency request")?,
         selector,
-    ).context("version-qualified override requires bounded, verifiable registry ranges")
+    )
+    .context("version-qualified override requires bounded, verifiable registry ranges")
 }
 
 fn npm_registry_replacement(installed_as: &str, request: &str) -> bool {
@@ -200,8 +236,10 @@ impl Overrides {
             if let Some((package, range)) = selector {
                 let range = range.unwrap_or("*");
                 let preceding = selectors.entry(package).or_default();
-                ensure!(preceding.len() < 64,
-                    "version-qualified override selectors per package exceed limit");
+                ensure!(
+                    preceding.len() < 64,
+                    "version-qualified override selectors per package exceed limit"
+                );
                 for previous in preceding.iter() {
                     account(&mut count, MAX_PACKAGES, deadline)?;
                     if graph::ranges_intersect(previous, range) != Some(false)
@@ -209,8 +247,10 @@ impl Overrides {
                     {
                         // Canonical metadata does not retain object insertion
                         // order. Never invent npm's first-rule precedence.
-                        issue = Some(("unsupported_npm_override",
-                            "Overlapping same-name override selectors require insertion-order-aware review"));
+                        issue = Some((
+                            "unsupported_npm_override",
+                            "Overlapping same-name override selectors require insertion-order-aware review",
+                        ));
                     }
                 }
                 preceding.push(range);
@@ -237,7 +277,9 @@ impl Overrides {
                         Some(request)
                     };
                     if let Some(request) = request {
-                        if selector.is_some_and(|(package, _)| npm_registry_replacement(package, request)) {
+                        if selector
+                            .is_some_and(|(package, _)| npm_registry_replacement(package, request))
+                        {
                             effective = Some(request);
                         } else {
                             issue = Some((
@@ -261,12 +303,16 @@ impl Overrides {
                 if let Some(raw) = direct.get(package) {
                     match range.map_or(Ok(true), |range| selector_matches(package, range, raw)) {
                         Ok(true) if *raw != request => {
-                            issue = Some(("conflicting_npm_override",
-                                "EOVERRIDE: root direct dependency and selected override must use exactly the same request"));
+                            issue = Some((
+                                "conflicting_npm_override",
+                                "EOVERRIDE: root direct dependency and selected override must use exactly the same request",
+                            ));
                         }
                         Err(_) => {
-                            issue = Some(("unsupported_npm_override",
-                                "Version-qualified override selection requires a bounded registry dependency request"));
+                            issue = Some((
+                                "unsupported_npm_override",
+                                "Version-qualified override selection requires a bounded registry dependency request",
+                            ));
                         }
                         _ => {}
                     }
@@ -276,9 +322,13 @@ impl Overrides {
                 }
             }
             if let Some((package, Some(range))) = selector {
-                qualified.entry(package.into()).or_default().push(QualifiedOverride {
-                    selector: range.into(), replacement: effective.map(str::to_owned),
-                });
+                qualified
+                    .entry(package.into())
+                    .or_default()
+                    .push(QualifiedOverride {
+                        selector: range.into(),
+                        replacement: effective.map(str::to_owned),
+                    });
             }
             if let Some((code, detail)) = issue {
                 supported = false;
@@ -297,7 +347,9 @@ impl Overrides {
         Ok(if supported {
             Self {
                 rules: selected,
-                has_qualified_replacements: qualified.values().flatten()
+                has_qualified_replacements: qualified
+                    .values()
+                    .flatten()
                     .any(|rule| rule.replacement.is_some()),
                 qualified,
                 ..Self::default()
@@ -365,7 +417,11 @@ impl Overrides {
             );
         }
         time_remaining(deadline)?;
-        Ok(Self { rules, bun: true, ..Self::default() })
+        Ok(Self {
+            rules,
+            bun: true,
+            ..Self::default()
+        })
     }
 
     pub(super) fn replacement(&self, installed_as: &str, request: &str) -> Result<Option<&str>> {
@@ -383,8 +439,10 @@ impl Overrides {
             if selector_matches(installed_as, &rule.selector, request)? {
                 // Even disjoint selectors may intersect a broad declaration.
                 // Without original key order this is deliberately unresolved.
-                ensure!(selected.is_none(),
-                    "dependency request intersects multiple version-qualified override selectors; explicit review required");
+                ensure!(
+                    selected.is_none(),
+                    "dependency request intersects multiple version-qualified override selectors; explicit review required"
+                );
                 selected = Some(rule);
             }
         }
@@ -416,7 +474,9 @@ impl Overrides {
         )?;
         if !self.bun
             && let Some(package) = record.get("name").and_then(Value::as_str)
-            && self.qualified.get(package)
+            && self
+                .qualified
+                .get(package)
                 .is_some_and(|rules| rules.iter().any(|rule| rule.replacement.is_some()))
         {
             report.finding(DependencyFinding {

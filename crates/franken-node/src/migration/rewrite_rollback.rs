@@ -7,8 +7,8 @@
 //! recovery metadata, not signatures; this is not an adversarial OS sandbox.
 
 use super::{
-    InstallRequest, Journal, MAX_FILE_BYTES, MAX_JOURNAL_BYTES, PENDING, RewriteTransaction, STORE, digest,
-    directory, parent_and_name, read_optional, read_required, verify_image,
+    InstallRequest, Journal, MAX_FILE_BYTES, MAX_JOURNAL_BYTES, PENDING, RewriteTransaction, STORE,
+    digest, directory, parent_and_name, read_optional, read_required, verify_image,
 };
 use anyhow::{Context, Result, ensure};
 use rustix::fs::{Dir, FlockOperation, Mode, OFlags, flock, open, openat};
@@ -364,7 +364,9 @@ fn preflight(transaction: &RewriteTransaction, journal: &Journal) -> Vec<Rollbac
 /// describes retained history, NOT whether current sources still match it.
 /// Lookup addresses one deterministic slot and never scans/guesses latest work.
 pub fn inspect_request(project: &Path, request: &InstallRequest) -> Result<Option<HistoryEntry>> {
-    let project = project.canonicalize().context("resolve installation request project")?;
+    let project = project
+        .canonicalize()
+        .context("resolve installation request project")?;
     request.check_project(&project)?;
     let Some(transaction) = open_existing(&project)? else {
         return Ok(None);
@@ -387,8 +389,10 @@ pub(super) fn lookup_request(
         .with_context(|| format!(
             "request staging exists without a committed journal: {id}; preserve it for inspection; automatic retry refused"
         ))?;
-    ensure!(selected.journal.request.as_ref() == Some(request),
-        "request ID is already bound to different reviewed inputs or a different project");
+    ensure!(
+        selected.journal.request.as_ref() == Some(request),
+        "request ID is already bound to different reviewed inputs or a different project"
+    );
     selected.history_entry().map(Some)
 }
 
@@ -404,12 +408,7 @@ pub fn run(project: &Path, id: Option<&str>, apply: bool) -> RollbackReport {
 /// It is checked under the SAME writer lock as preflight and restoration,
 /// including when the transaction already has a completed rollback receipt.
 /// This prevents a changed journal from redefining an admitted recovery plan.
-pub fn run_pinned(
-    project: &Path,
-    id: &str,
-    journal_sha256: &str,
-    apply: bool,
-) -> RollbackReport {
+pub fn run_pinned(project: &Path, id: &str, journal_sha256: &str, apply: bool) -> RollbackReport {
     run_checked(project, Some(id), apply, Some(journal_sha256))
 }
 
@@ -439,7 +438,9 @@ fn run_checked(
             ensure!(
                 id.is_some()
                     && pin.len() == 64
-                    && pin.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+                    && pin
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
                 "rollback journal pin must be a lowercase SHA-256 digest"
             );
         }
@@ -661,7 +662,10 @@ mod tests {
     fn pinned_rollback_restores_the_reviewed_journal_and_modes() {
         let root = fixture();
         let id = applied(root.path());
-        let pin = run(root.path(), Some(&id), false).transaction.unwrap().journal_sha256;
+        let pin = run(root.path(), Some(&id), false)
+            .transaction
+            .unwrap()
+            .journal_sha256;
         let report = run_pinned(root.path(), &id, &pin, true);
         assert_eq!(report.status, RollbackStatus::RolledBack, "{report:#?}");
         assert_eq!(report.transaction.unwrap().journal_sha256, pin);
@@ -672,10 +676,17 @@ mod tests {
     fn journal_substitution_is_rejected_before_any_restore_or_pending_write() {
         let root = fixture();
         let id = applied(root.path());
-        let pin = run(root.path(), Some(&id), false).transaction.unwrap().journal_sha256;
+        let pin = run(root.path(), Some(&id), false)
+            .transaction
+            .unwrap()
+            .journal_sha256;
         let mut substituted = journal(root.path(), &id);
         substituted.records.pop();
-        fs::write(store(root.path()).join(&id).join("applied.json"), serde_json::to_vec(&substituted).unwrap()).unwrap();
+        fs::write(
+            store(root.path()).join(&id).join("applied.json"),
+            serde_json::to_vec(&substituted).unwrap(),
+        )
+        .unwrap();
         let report = run_pinned(root.path(), &id, &pin, true);
         assert_eq!(report.status, RollbackStatus::Error);
         assert!(report.errors[0].contains("bound recovery plan"));
@@ -687,18 +698,39 @@ mod tests {
     fn completed_rollback_must_match_pin_before_idempotent_success() {
         let root = fixture();
         let id = applied(root.path());
-        let pin = run(root.path(), Some(&id), false).transaction.unwrap().journal_sha256;
-        assert_eq!(run_pinned(root.path(), &id, &pin, true).status, RollbackStatus::RolledBack);
+        let pin = run(root.path(), Some(&id), false)
+            .transaction
+            .unwrap()
+            .journal_sha256;
+        assert_eq!(
+            run_pinned(root.path(), &id, &pin, true).status,
+            RollbackStatus::RolledBack
+        );
         fs::write(root.path().join("a.js"), b"later user work").unwrap();
-        assert_eq!(run_pinned(root.path(), &id, &"0".repeat(64), true).status, RollbackStatus::Error);
-        assert_eq!(run_pinned(root.path(), &id, &pin, true).status, RollbackStatus::AlreadyRolledBack);
-        assert_eq!(fs::read(root.path().join("a.js")).unwrap(), b"later user work");
+        assert_eq!(
+            run_pinned(root.path(), &id, &"0".repeat(64), true).status,
+            RollbackStatus::Error
+        );
+        assert_eq!(
+            run_pinned(root.path(), &id, &pin, true).status,
+            RollbackStatus::AlreadyRolledBack
+        );
+        assert_eq!(
+            fs::read(root.path().join("a.js")).unwrap(),
+            b"later user work"
+        );
     }
 
     #[test]
     fn invalid_journal_pins_fail_without_creating_recovery_state() {
         let root = fixture();
-        for pin in [String::new(), "0".repeat(63), "0".repeat(65), "G".repeat(64), "A".repeat(64)] {
+        for pin in [
+            String::new(),
+            "0".repeat(63),
+            "0".repeat(65),
+            "G".repeat(64),
+            "A".repeat(64),
+        ] {
             let report = run_pinned(root.path(), "txn-selected", &pin, true);
             assert_eq!(report.status, RollbackStatus::Error);
             assert!(report.errors[0].contains("lowercase SHA-256"));
@@ -713,10 +745,19 @@ mod tests {
         let pending = transaction.prepare(&edits()).unwrap();
         transaction.install(&pending, 0).unwrap();
         drop(transaction);
-        let pin = run(root.path(), Some(&pending.session), false).transaction.unwrap().journal_sha256;
-        assert_eq!(run_pinned(root.path(), &pending.session, &"0".repeat(64), true).status, RollbackStatus::Error);
+        let pin = run(root.path(), Some(&pending.session), false)
+            .transaction
+            .unwrap()
+            .journal_sha256;
+        assert_eq!(
+            run_pinned(root.path(), &pending.session, &"0".repeat(64), true).status,
+            RollbackStatus::Error
+        );
         assert!(store(root.path()).join(PENDING).exists());
-        assert_eq!(run_pinned(root.path(), &pending.session, &pin, true).status, RollbackStatus::RolledBack);
+        assert_eq!(
+            run_pinned(root.path(), &pending.session, &pin, true).status,
+            RollbackStatus::RolledBack
+        );
         assert_source(root.path(), false);
     }
 
@@ -724,12 +765,21 @@ mod tests {
     fn pinned_restore_cannot_bypass_an_existing_writer() {
         let root = fixture();
         let id = applied(root.path());
-        let pin = run(root.path(), Some(&id), false).transaction.unwrap().journal_sha256;
+        let pin = run(root.path(), Some(&id), false)
+            .transaction
+            .unwrap()
+            .journal_sha256;
         let writer = RewriteTransaction::open(root.path()).unwrap();
-        assert_eq!(run_pinned(root.path(), &id, &pin, true).status, RollbackStatus::Error);
+        assert_eq!(
+            run_pinned(root.path(), &id, &pin, true).status,
+            RollbackStatus::Error
+        );
         assert_source(root.path(), true);
         drop(writer);
-        assert_eq!(run_pinned(root.path(), &id, &pin, false).status, RollbackStatus::Ready);
+        assert_eq!(
+            run_pinned(root.path(), &id, &pin, false).status,
+            RollbackStatus::Ready
+        );
     }
 
     #[test]

@@ -454,7 +454,10 @@ mod tests {
                     "guest",
                 ],
             ),
-            ("node -- app.js -- --policy guest", &["--", "--policy", "guest"]),
+            (
+                "node -- app.js -- --policy guest",
+                &["--", "--policy", "guest"],
+            ),
             ("bun app.js --watch", &["--watch"]),
             ("node app.js --", &["--"]),
         ];
@@ -784,7 +787,10 @@ mod tests {
                 (1, 1, 0)
             );
             assert_eq!(applied.rollback_entries, plan.rollback_entries);
-            assert_eq!(fs::read_to_string(root.path().join(name)).unwrap(), expected);
+            assert_eq!(
+                fs::read_to_string(root.path().join(name)).unwrap(),
+                expected
+            );
             assert_eq!(
                 fs::read_to_string(root.path().join(".migrate-backup").join(name)).unwrap(),
                 source

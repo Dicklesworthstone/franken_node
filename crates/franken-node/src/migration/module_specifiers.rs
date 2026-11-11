@@ -95,10 +95,7 @@ pub(super) fn normalize_import_specifier(specifier: &str) -> String {
 /// Preserve CommonJS wrapper semantics and load sites. Syntax establishes safe
 /// literal-edit locations; runtime comparison is still needed to detect loader
 /// changes elsewhere in a project, including builtin require.cache injection.
-pub(super) fn rewrite_commonjs(
-    source: &str,
-    deadline: Instant,
-) -> Result<(String, usize), String> {
+pub(super) fn rewrite_commonjs(source: &str, deadline: Instant) -> Result<(String, usize), String> {
     if source.len() > MAX_SOURCE_BYTES || Instant::now() >= deadline {
         return Err(
             "CommonJS source size or planning budget exceeded; manual migration required".into(),

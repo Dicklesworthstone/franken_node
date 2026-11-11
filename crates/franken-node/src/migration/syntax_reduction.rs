@@ -93,10 +93,16 @@ impl Grammar {
 /// Never inspect source text to infer a more permissive dialect, and never
 /// reduce declaration-only fixtures as if they were executable programs.
 pub(super) fn grammar_for_path(path: &Path) -> Result<Grammar> {
-    let name = path.file_name().and_then(|name| name.to_str())
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
         .ok_or_else(|| anyhow::anyhow!("reduction source requires a UTF-8 filename"))?;
-    ensure!(![".d.ts", ".d.mts", ".d.cts"].iter().any(|suffix| name.ends_with(suffix)),
-        "declaration-only TypeScript files are not runtime reduction targets");
+    ensure!(
+        ![".d.ts", ".d.mts", ".d.cts"]
+            .iter()
+            .any(|suffix| name.ends_with(suffix)),
+        "declaration-only TypeScript files are not runtime reduction targets"
+    );
     match path.extension().and_then(|extension| extension.to_str()) {
         Some("js" | "mjs" | "cjs" | "jsx") => Ok(Grammar::JavaScript),
         Some("ts" | "mts" | "cts") => Ok(Grammar::TypeScript),
@@ -545,7 +551,11 @@ pub(super) fn reduce(
     if !source.is_empty() {
         let phase_deadline = search_deadline.min(Instant::now() + PARSE_BUDGET);
         progress.statistics.passes += 1;
-        *progress.statistics.grammar_passes.entry(grammar.name().into()).or_default() += 1;
+        *progress
+            .statistics
+            .grammar_passes
+            .entry(grammar.name().into())
+            .or_default() += 1;
         let tree = match parse(&mut parser, &source, phase_deadline) {
             Ok(Some(tree)) => tree,
             Ok(None) => return Ok(progress.skip(
@@ -604,8 +614,11 @@ mod tests {
     fn parser() -> Result<Parser> {
         super::parser(Grammar::JavaScript)
     }
-    fn reduce(source: Vec<u8>, deadline: Instant,
-        evaluate: impl FnMut(Vec<u8>) -> Result<Trial>) -> Result<Progress> {
+    fn reduce(
+        source: Vec<u8>,
+        deadline: Instant,
+        evaluate: impl FnMut(Vec<u8>) -> Result<Trial>,
+    ) -> Result<Progress> {
         super::reduce(Path::new("fixture.js"), source, deadline, evaluate)
     }
     fn proposals(source: &str) -> Plan {
@@ -1096,13 +1109,29 @@ mod tests {
     #[test]
     fn source_extension_selects_exactly_one_grammar_and_rejects_declarations() {
         for extension in ["js", "mjs", "cjs", "jsx"] {
-            assert_eq!(grammar_for_path(Path::new(&format!("case.{extension}"))).unwrap(), Grammar::JavaScript);
+            assert_eq!(
+                grammar_for_path(Path::new(&format!("case.{extension}"))).unwrap(),
+                Grammar::JavaScript
+            );
         }
         for extension in ["ts", "mts", "cts"] {
-            assert_eq!(grammar_for_path(Path::new(&format!("case.{extension}"))).unwrap(), Grammar::TypeScript);
+            assert_eq!(
+                grammar_for_path(Path::new(&format!("case.{extension}"))).unwrap(),
+                Grammar::TypeScript
+            );
         }
-        assert_eq!(grammar_for_path(Path::new("component.tsx")).unwrap(), Grammar::Tsx);
-        for name in ["types.d.ts", "types.d.mts", "types.d.cts", "package.json", "case.TS", "case"] {
+        assert_eq!(
+            grammar_for_path(Path::new("component.tsx")).unwrap(),
+            Grammar::Tsx
+        );
+        for name in [
+            "types.d.ts",
+            "types.d.mts",
+            "types.d.cts",
+            "package.json",
+            "case.TS",
+            "case",
+        ] {
             assert!(grammar_for_path(Path::new(name)).is_err(), "{name}");
         }
     }
@@ -1115,68 +1144,164 @@ mod tests {
             ("assertion.tsx", "const answer=<number>42;"),
             ("broken.cts", "const answer:number=;"),
         ] {
-            let result = super::reduce(Path::new(name), source.as_bytes().to_vec(), deadline(), |_| {
-                panic!("invalid dialect must not execute a candidate")
-            }).unwrap();
+            let result = super::reduce(
+                Path::new(name),
+                source.as_bytes().to_vec(),
+                deadline(),
+                |_| panic!("invalid dialect must not execute a candidate"),
+            )
+            .unwrap();
             assert!(!result.complete);
             assert_eq!(result.statistics.skipped, 1);
             assert_eq!(result.statistics.candidates_checked, 0);
-            assert!(result.statistics.last_skip.unwrap().contains("no dialect fallback"));
+            assert!(
+                result
+                    .statistics
+                    .last_skip
+                    .unwrap()
+                    .contains("no dialect fallback")
+            );
         }
     }
 
     #[test]
     fn typed_nodes_produce_byte_range_edits_without_transpiling_the_program() {
         for (grammar, source, expected) in [
-            (Grammar::TypeScript, "const answer:number=42;", "const answer=42;"),
-            (Grammar::TypeScript, "function id<T>(x:T):T{return x;}", "function id(x:T):T{return x;}"),
-            (Grammar::TypeScript, "const answer=id<number>(42);", "const answer=id(42);"),
-            (Grammar::Tsx, "const dead:number=7;const el=<span>π</span>;", "const el=<span>π</span>;"),
-            (Grammar::TypeScript, "interface Dead{n:number};console.log(42);", ";console.log(42);"),
+            (
+                Grammar::TypeScript,
+                "const answer:number=42;",
+                "const answer=42;",
+            ),
+            (
+                Grammar::TypeScript,
+                "function id<T>(x:T):T{return x;}",
+                "function id(x:T):T{return x;}",
+            ),
+            (
+                Grammar::TypeScript,
+                "const answer=id<number>(42);",
+                "const answer=id(42);",
+            ),
+            (
+                Grammar::Tsx,
+                "const dead:number=7;const el=<span>π</span>;",
+                "const el=<span>π</span>;",
+            ),
+            (
+                Grammar::TypeScript,
+                "interface Dead{n:number};console.log(42);",
+                ";console.log(42);",
+            ),
         ] {
-            let tree = parse(&mut super::parser(grammar).unwrap(), source.as_bytes(), deadline()).unwrap().unwrap();
+            let tree = parse(
+                &mut super::parser(grammar).unwrap(),
+                source.as_bytes(),
+                deadline(),
+            )
+            .unwrap()
+            .unwrap();
             let edits = plan(&tree, deadline()).unwrap();
-            assert!(edits.edits.iter().any(|edit| edit.apply(source.as_bytes()) == expected.as_bytes()), "{source} -> {expected}");
-            assert!(parse(&mut super::parser(grammar).unwrap(), expected.as_bytes(), deadline()).unwrap().is_some());
+            assert!(
+                edits
+                    .edits
+                    .iter()
+                    .any(|edit| edit.apply(source.as_bytes()) == expected.as_bytes()),
+                "{source} -> {expected}"
+            );
+            assert!(
+                parse(
+                    &mut super::parser(grammar).unwrap(),
+                    expected.as_bytes(),
+                    deadline()
+                )
+                .unwrap()
+                .is_some()
+            );
         }
     }
 
     #[test]
     fn every_typed_candidate_reparses_in_its_selected_dialect_and_yields_after_acceptance() {
         for (name, source) in [
-            ("fixture.cts", "const dead:number=1;const live:number=42;console.log(live);"),
-            ("fixture.mts", "interface Dead{value:number};const live:number=42;console.log(live);"),
-            ("fixture.tsx", "const dead:number=1;const el=<span>42</span>;console.log(el);"),
+            (
+                "fixture.cts",
+                "const dead:number=1;const live:number=42;console.log(live);",
+            ),
+            (
+                "fixture.mts",
+                "interface Dead{value:number};const live:number=42;console.log(live);",
+            ),
+            (
+                "fixture.tsx",
+                "const dead:number=1;const el=<span>42</span>;console.log(el);",
+            ),
         ] {
             let grammar = grammar_for_path(Path::new(name)).unwrap();
             let mut accepted = false;
-            let result = super::reduce(Path::new(name), source.as_bytes().to_vec(), deadline(), |candidate| {
-                assert!(!accepted, "accepted edits must yield before another proposal");
-                assert!(parse(&mut super::parser(grammar).unwrap(), &candidate, deadline()).unwrap().is_some());
-                assert!(candidate.len() < source.len());
-                if std::str::from_utf8(&candidate).unwrap().contains("console.log(") {
-                    accepted = true;
-                    Ok(Trial::Accept)
-                } else { Ok(Trial::Reject) }
-            }).unwrap();
+            let result = super::reduce(
+                Path::new(name),
+                source.as_bytes().to_vec(),
+                deadline(),
+                |candidate| {
+                    assert!(
+                        !accepted,
+                        "accepted edits must yield before another proposal"
+                    );
+                    assert!(
+                        parse(&mut super::parser(grammar).unwrap(), &candidate, deadline())
+                            .unwrap()
+                            .is_some()
+                    );
+                    assert!(candidate.len() < source.len());
+                    if std::str::from_utf8(&candidate)
+                        .unwrap()
+                        .contains("console.log(")
+                    {
+                        accepted = true;
+                        Ok(Trial::Accept)
+                    } else {
+                        Ok(Trial::Reject)
+                    }
+                },
+            )
+            .unwrap();
             assert!(accepted);
             assert_eq!(result.statistics.accepted, 1);
-            assert_eq!(result.statistics.grammar_passes.get(grammar.name()), Some(&1));
+            assert_eq!(
+                result.statistics.grammar_passes.get(grammar.name()),
+                Some(&1)
+            );
         }
     }
 
     #[test]
     fn typed_parse_limits_and_statistics_remain_bounded_and_separate_from_execution() {
         let source = b"const answer:number=42;".to_vec();
-        let result = super::reduce(Path::new("fixture.ts"), source, Instant::now(), |_| panic!("expired")).unwrap();
+        let result = super::reduce(Path::new("fixture.ts"), source, Instant::now(), |_| {
+            panic!("expired")
+        })
+        .unwrap();
         assert!(result.stopped && !result.complete);
         assert_eq!(result.statistics.candidates_checked, 0);
         for grammar in [Grammar::TypeScript, Grammar::Tsx] {
-            assert!(parse(&mut super::parser(grammar).unwrap(), &vec![b' '; MAX_BYTES + 1], deadline()).is_err());
+            assert!(
+                parse(
+                    &mut super::parser(grammar).unwrap(),
+                    &vec![b' '; MAX_BYTES + 1],
+                    deadline()
+                )
+                .is_err()
+            );
         }
         let mut total = SyntaxStatistics::default();
         for name in ["fixture.ts", "fixture.tsx", "fixture.js"] {
-            let progress = super::reduce(Path::new(name), b"console.log(42);".to_vec(), deadline(), |_| Ok(Trial::Reject)).unwrap();
+            let progress = super::reduce(
+                Path::new(name),
+                b"console.log(42);".to_vec(),
+                deadline(),
+                |_| Ok(Trial::Reject),
+            )
+            .unwrap();
             total.merge(progress.statistics);
         }
         assert_eq!(total.grammar_passes.len(), 3);
