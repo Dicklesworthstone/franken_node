@@ -659,3 +659,449 @@ fn compliance_report_counts() {
     assert_eq!(report["outcome_pass"], 1);
     assert_eq!(report["outcome_fail"], 1);
 }
+
+// ── Ristretto255 Cryptographic Compliance Verification (bd-reality-20260923-26n9r.18) ──
+
+#[test]
+fn ristretto_threshold_above_and_exact_boundary_verify_and_64bit_range_works() {
+    let mut ledger = AttestationLedger::new();
+    let policy = test_policy();
+    let params_16 = ZkVerifierParams::for_policy(
+        &policy,
+        "vk-threshold-16",
+        7,
+        "nonce-701",
+        ZkComplianceRelation::threshold_at_least(1_000, 16).unwrap(),
+    )
+    .unwrap();
+
+    // Strictly above threshold: v = 1_512 > 1_000
+    let w_above = ZkPrivateWitness::new(1_512, [0x31u8; 32]).unwrap();
+    let att_above = ledger
+        .prove_compliance(
+            "att-crypto-above".to_string(),
+            &policy,
+            &params_16,
+            &w_above,
+            1_000_000,
+            "trace-above".to_string(),
+        )
+        .unwrap();
+    assert!(
+        ledger
+            .verify_authenticated_proof(
+                &att_above,
+                &policy,
+                &params_16,
+                1_000_001,
+                "trace-above-v".to_string(),
+            )
+            .is_verified()
+    );
+    assert!(
+        verify_compliance_proof_stateless(
+            &att_above,
+            &policy,
+            &params_16,
+            1_000_001,
+            "trace-stateless".to_string(),
+        )
+        .is_verified()
+    );
+
+    // Exact boundary: v == 1_000
+    let w_exact = ZkPrivateWitness::new(1_000, [0x32u8; 32]).unwrap();
+    let att_exact = ledger
+        .prove_compliance(
+            "att-crypto-exact".to_string(),
+            &policy,
+            &params_16,
+            &w_exact,
+            1_000_000,
+            "trace-exact".to_string(),
+        )
+        .unwrap();
+    assert!(
+        ledger
+            .verify_authenticated_proof(
+                &att_exact,
+                &policy,
+                &params_16,
+                1_000_001,
+                "trace-exact-v".to_string(),
+            )
+            .is_verified()
+    );
+
+    // Full 64-bit threshold boundary near u64::MAX
+    let params_64 = ZkVerifierParams::for_policy(
+        &policy,
+        "vk-threshold-64",
+        7,
+        "nonce-702",
+        ZkComplianceRelation::threshold_at_least(u64::MAX - 10, 64).unwrap(),
+    )
+    .unwrap();
+    let w_max = ZkPrivateWitness::new(u64::MAX, [0x33u8; 32]).unwrap();
+    let att_max = ledger
+        .prove_compliance(
+            "att-crypto-u64max".to_string(),
+            &policy,
+            &params_64,
+            &w_max,
+            1_000_000,
+            "trace-max".to_string(),
+        )
+        .unwrap();
+    assert!(
+        ledger
+            .verify_authenticated_proof(
+                &att_max,
+                &policy,
+                &params_64,
+                1_000_001,
+                "trace-max-v".to_string(),
+            )
+            .is_verified()
+    );
+    assert_eq!(
+        ledger
+            .query_audit(|r| r.event_code == event_codes::FN_ZK_003)
+            .len(),
+        3
+    );
+}
+
+#[test]
+fn ristretto_threshold_underflow_witness_and_forged_commitment_rejected() {
+    let mut ledger = AttestationLedger::new();
+    let policy = test_policy();
+    let params = ZkVerifierParams::for_policy(
+        &policy,
+        "vk-threshold-underflow",
+        3,
+        "nonce-underflow",
+        ZkComplianceRelation::threshold_at_least(500, 16).unwrap(),
+    )
+    .unwrap();
+
+    // 1. Prover refuses v = tau - 1 = 499
+    let w_under = ZkPrivateWitness::new(499, [0x41u8; 32]).unwrap();
+    let err = ledger
+        .prove_compliance(
+            "att-underflow".to_string(),
+            &policy,
+            &params,
+            &w_under,
+            1_000_000,
+            "trace-under".to_string(),
+        )
+        .unwrap_err();
+    assert!(err.contains(error_codes::ERR_ZKA_PREDICATE_UNSATISFIED));
+
+    // 2. Attacker substitutes commitment C(499, r) into an otherwise valid proof transcript
+    let w_valid = ZkPrivateWitness::new(500, [0x42u8; 32]).unwrap();
+    let mut att = ledger
+        .prove_compliance(
+            "att-forged-underflow".to_string(),
+            &policy,
+            &params,
+            &w_valid,
+            1_000_000,
+            "trace-forge".to_string(),
+        )
+        .unwrap();
+    let underflow_comm_hex = w_under.pedersen_commitment_hex();
+    let underflow_comm_bytes = hex::decode(&underflow_comm_hex).unwrap();
+    let mut wire = hex::decode(&att.payload.proof_bytes_hex).unwrap();
+    wire[38..70].copy_from_slice(&underflow_comm_bytes);
+    att.payload.metadata_commitment = underflow_comm_hex;
+    att.payload.proof_bytes_hex = hex::encode(wire);
+
+    let res = ledger.verify_authenticated_proof(
+        &att,
+        &policy,
+        &params,
+        1_000_005,
+        "trace-forge-v".to_string(),
+    );
+    assert!(
+        matches!(
+            res,
+            ZkVerificationResult::Rejected { ref error_code, .. }
+            if error_code == error_codes::ERR_ZKA_WITNESS_INVALID
+        ),
+        "expected ERR_ZKA_WITNESS_INVALID, got {res:?}"
+    );
+}
+
+#[test]
+fn ristretto_allowlist_membership_verifies_members_and_rejects_nonmembers_and_tampered_merkle() {
+    let mut ledger = AttestationLedger::new();
+    let policy = test_policy();
+    // ISO-3166 EU numeric codes subset
+    let eu_subset = vec![250, 276, 372, 528, 724];
+    let params = ZkVerifierParams::for_policy(
+        &policy,
+        "vk-eu-residency",
+        2,
+        "nonce-eu-01",
+        ZkComplianceRelation::allowlist(eu_subset).unwrap(),
+    )
+    .unwrap();
+
+    // Member 372 (Ireland) verifies without revealing 372
+    let w_member = ZkPrivateWitness::random(372);
+    let att = ledger
+        .prove_compliance(
+            "att-eu-372".to_string(),
+            &policy,
+            &params,
+            &w_member,
+            1_000_000,
+            "trace-eu".to_string(),
+        )
+        .unwrap();
+    assert!(
+        ledger
+            .verify_authenticated_proof(&att, &policy, &params, 1_000_002, "trace-eu-v".to_string())
+            .is_verified()
+    );
+
+    // Non-member 840 rejected
+    let w_nonmember = ZkPrivateWitness::new(840, [0x55u8; 32]).unwrap();
+    let err = ledger
+        .prove_compliance(
+            "att-eu-840".to_string(),
+            &policy,
+            &params,
+            &w_nonmember,
+            1_000_000,
+            "trace-nonmember".to_string(),
+        )
+        .unwrap_err();
+    assert!(err.contains(error_codes::ERR_ZKA_PREDICATE_UNSATISFIED));
+
+    // Tampered Merkle root on verifier_params rejected fail-closed
+    let mut tampered_params = params.clone();
+    if let ZkComplianceRelation::AllowlistMembership {
+        ref mut merkle_root_hex,
+        ..
+    } = tampered_params.relation
+    {
+        *merkle_root_hex = "00".repeat(32);
+    }
+    let res_merkle = ledger.verify_authenticated_proof(
+        &att,
+        &policy,
+        &tampered_params,
+        1_000_003,
+        "trace-tampered-merkle".to_string(),
+    );
+    assert!(
+        matches!(
+            res_merkle,
+            ZkVerificationResult::Rejected { ref error_code, .. }
+            if error_code == error_codes::ERR_ZKA_POLICY_MISMATCH
+        ),
+        "expected ERR_ZKA_POLICY_MISMATCH on tampered Merkle root, got {res_merkle:?}"
+    );
+}
+
+#[test]
+fn ristretto_same_policy_id_with_different_policy_content_or_params_is_rejected() {
+    let mut ledger = AttestationLedger::new();
+    let policy_a = test_policy();
+    // Identical policy_id ("pol-compliance-01") but different issuer / predicate!
+    let mut policy_b_same_id = policy_a.clone();
+    policy_b_same_id.issuer = "rogue-issuer-key-999".to_string();
+
+    let params_a = ZkVerifierParams::for_policy(
+        &policy_a,
+        "vk-bind-1",
+        1,
+        "nonce-bind-a",
+        ZkComplianceRelation::threshold_at_least(50, 8).unwrap(),
+    )
+    .unwrap();
+    let params_b_higher_threshold = ZkVerifierParams::for_policy(
+        &policy_a,
+        "vk-bind-1",
+        1,
+        "nonce-bind-a",
+        ZkComplianceRelation::threshold_at_least(200, 8).unwrap(),
+    )
+    .unwrap();
+
+    let witness = ZkPrivateWitness::new(75, [0x61u8; 32]).unwrap();
+    let att = ledger
+        .prove_compliance(
+            "att-bind-1".to_string(),
+            &policy_a,
+            &params_a,
+            &witness,
+            1_000_000,
+            "trace-bind".to_string(),
+        )
+        .unwrap();
+
+    // 1. Same policy_id, mutated policy issuer -> ERR_ZKA_POLICY_MISMATCH
+    let res_policy_swap = ledger.verify_authenticated_proof(
+        &att,
+        &policy_b_same_id,
+        &params_a,
+        1_000_001,
+        "trace-bind-swap-pol".to_string(),
+    );
+    assert!(matches!(
+        res_policy_swap,
+        ZkVerificationResult::Rejected { ref error_code, .. }
+        if error_code == error_codes::ERR_ZKA_POLICY_MISMATCH
+    ));
+
+    // 2. Same policy, swapped verifier_params threshold (200 vs 50) -> ERR_ZKA_POLICY_MISMATCH
+    let res_param_swap = ledger.verify_authenticated_proof(
+        &att,
+        &policy_a,
+        &params_b_higher_threshold,
+        1_000_001,
+        "trace-bind-swap-params".to_string(),
+    );
+    assert!(matches!(
+        res_param_swap,
+        ZkVerificationResult::Rejected { ref error_code, .. }
+        if error_code == error_codes::ERR_ZKA_POLICY_MISMATCH
+    ));
+
+    // 3. Attacker patches wire params_sha256 to match params_b_higher_threshold -> Fiat-Shamir / homomorphic check rejects with ERR_ZKA_WITNESS_INVALID
+    let mut patched_att = att.clone();
+    let mut wire = hex::decode(&patched_att.payload.proof_bytes_hex).unwrap();
+    let target_digest = hex::decode(params_b_higher_threshold.params_sha256()).unwrap();
+    wire[6..38].copy_from_slice(&target_digest);
+    patched_att.payload.proof_bytes_hex = hex::encode(wire);
+
+    let res_patched = ledger.verify_authenticated_proof(
+        &patched_att,
+        &policy_a,
+        &params_b_higher_threshold,
+        1_000_001,
+        "trace-bind-patched".to_string(),
+    );
+    assert!(
+        matches!(
+            res_patched,
+            ZkVerificationResult::Rejected { ref error_code, .. }
+            if error_code == error_codes::ERR_ZKA_WITNESS_INVALID
+        ),
+        "expected ERR_ZKA_WITNESS_INVALID on patched params digest, got {res_patched:?}"
+    );
+}
+
+#[test]
+fn ristretto_caller_forced_pass_garbage_hex_revocation_and_zero_witness_disclosure() {
+    let mut ledger = AttestationLedger::new();
+    let policy = test_policy();
+    let params = ZkVerifierParams::for_policy(
+        &policy,
+        "vk-disclosure-1",
+        5,
+        "nonce-disc-01",
+        ZkComplianceRelation::threshold_at_least(100_000, 32).unwrap(),
+    )
+    .unwrap();
+
+    // Caller-registered legacy Pass with garbage hex still fails closed under authenticated verifier
+    let legacy_att = ledger
+        .generate_proof(
+            "att-legacy-pass".to_string(),
+            &policy,
+            "ab".repeat(32),
+            "deadbeef".to_string(),
+            PredicateOutcome::Pass,
+            1_000_000,
+            "trace-legacy".to_string(),
+        )
+        .unwrap();
+    let legacy_res = ledger.verify_authenticated_proof(
+        &legacy_att,
+        &policy,
+        &params,
+        1_000_001,
+        "trace-legacy-v".to_string(),
+    );
+    assert!(matches!(
+        legacy_res,
+        ZkVerificationResult::Rejected { ref error_code, .. }
+        if error_code == error_codes::ERR_ZKA_VERIFIER_UNAVAILABLE
+    ));
+
+    // Caller mutates schema_version to CRYPTO_SCHEMA_VERSION with empty/garbage hex
+    let mut forged_v2 = legacy_att.clone();
+    forged_v2.payload.schema_version = CRYPTO_SCHEMA_VERSION.to_string();
+    for bad_hex in ["", "deadbeef"] {
+        forged_v2.payload.proof_bytes_hex = bad_hex.to_string();
+        let bad_res = ledger.verify_authenticated_proof(
+            &forged_v2,
+            &policy,
+            &params,
+            1_000_001,
+            "trace-bad-hex".to_string(),
+        );
+        assert!(matches!(
+            bad_res,
+            ZkVerificationResult::Rejected { ref error_code, .. }
+            if error_code == error_codes::ERR_ZKA_INVALID_PROOF
+        ));
+    }
+
+    // Secret witness value 987_654_321 and secret blinding never appear in Debug, JSON, or audit logs
+    let secret_value = 987_654_321u64;
+    let secret_blinding = [0x7au8; 32];
+    let secret_blinding_hex = hex::encode(secret_blinding);
+    let witness = ZkPrivateWitness::new(secret_value, secret_blinding).unwrap();
+    let real_att = ledger
+        .prove_compliance(
+            "att-nodisclose".to_string(),
+            &policy,
+            &params,
+            &witness,
+            1_000_000,
+            "trace-nodisclose".to_string(),
+        )
+        .unwrap();
+
+    let batch = ledger.verify_batch_authenticated(
+        &[real_att.clone(), forged_v2],
+        &policy,
+        &params,
+        1_000_002,
+        "trace-batch-auth".to_string(),
+    );
+    assert_eq!(batch.total, 2);
+    assert_eq!(batch.passed, 1);
+    assert_eq!(batch.failed, 1);
+
+    let ledger_json = serde_json::to_string(&ledger).unwrap();
+    let witness_dbg = format!("{witness:?}");
+    assert!(!witness_dbg.contains("987654321"));
+    assert!(!witness_dbg.contains(&secret_blinding_hex));
+    assert!(!ledger_json.contains("987654321"));
+    assert!(!ledger_json.contains(&secret_blinding_hex));
+
+    // Revoking the cryptographic attestation immediately blocks subsequent verification even with stale struct
+    ledger
+        .revoke_attestation("att-nodisclose", 1_000_003, "trace-rev".to_string())
+        .unwrap();
+    let after_revoke = ledger.verify_authenticated_proof(
+        &real_att,
+        &policy,
+        &params,
+        1_000_004,
+        "trace-after-rev".to_string(),
+    );
+    assert!(matches!(
+        after_revoke,
+        ZkVerificationResult::Rejected { ref error_code, .. }
+        if error_code == error_codes::ERR_ZKA_REVOKED
+    ));
+}

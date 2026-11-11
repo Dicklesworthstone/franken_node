@@ -396,12 +396,12 @@
     {
       "check": "Rust inline tests >= 20",
       "passed": true,
-      "detail": "found 62"
+      "detail": "found 65"
     },
     {
       "check": "Security tests >= 10",
       "passed": true,
-      "detail": "found 29"
+      "detail": "found 35"
     },
     {
       "check": "Uses BTreeMap",

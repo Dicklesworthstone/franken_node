@@ -2,15 +2,26 @@
 
 ## Current implementation boundary
 
-The `zka-v1.0` wire format is retained for historical lifecycle records. It has
-no cryptographic witness relation, verifier key or authenticated public statement.
-`generate_proof` registers caller-supplied bytes and an outcome; it does not prove
-that outcome. After lifecycle and structural checks, `verify_proof` returns
-`Rejected` with `ERR_ZKA_VERIFIER_UNAVAILABLE`, logs FN-ZK-004, and never emits
-FN-ZK-003. Batch verification likewise counts no registration as a verified proof.
-Reloading a historical ledger cannot confer proof authority. The acceptance goals
-below remain unfulfilled until a reviewed cryptographic backend and independently
-authenticated parameters are implemented (bd-reality-20260923-26n9r.18/.19).
+The legacy `zka-v1.0` wire format is retained strictly for historical lifecycle
+records. Because `zka-v1.0` has no cryptographic witness relation, verifier key,
+or authenticated public statement, `generate_proof` + `verify_proof` on legacy
+records continue to fail closed with `ERR_ZKA_VERIFIER_UNAVAILABLE` and `FN-ZK-004`
+so historical registrations can never confer compliance authority.
+
+Authenticated selective-compliance verification (`bd-reality-20260923-26n9r.18`)
+uses schema `zka-ristretto255-v2.0` (`CRYPTO_SCHEMA_VERSION`) over prime-order
+Ristretto255 (`curve25519-dalek`, `#![forbid(unsafe_code)]`, zero trusted setup):
+- Pedersen commitments `C = v * G + r * H` with nothing-up-my-sleeve generator
+  `H = RistrettoPoint::from_uniform_bytes(SHA512("franken-node/zka-ristretto255/pedersen-generator-h/v1"))`.
+- `ZkComplianceRelation::ThresholdAtLeast { threshold, range_bits }`: homomorphic
+  shift `C - threshold * G == sum_{j=0}^{k-1} 2^j * C_j` paired with `k` parallel
+  CDS94 1-of-2 Schnorr OR-proofs bound via Fiat-Shamir to `(attestation_id, params_sha256, C, C_0..C_{k-1})`.
+- `ZkComplianceRelation::AllowlistMembership { allowed_values, merkle_root_hex }`:
+  domain-separated binary Merkle root check paired with a CDS94 1-of-N Schnorr OR-proof.
+- `ZkVerifierParams` binds the full `ZkPolicy` content (`policy_binding_sha256`),
+  `verifier_key_id`, `epoch`, `challenge_nonce`, and `relation`; invalid witness
+  or Schnorr transcripts fail deterministically with `ERR_ZKA_WITNESS_INVALID`
+  (`ERR_ZK_WITNESS_INVALID`).
 
 ## Section
 
@@ -76,6 +87,8 @@ full private metadata.  Invalid or forged proofs fail admission deterministicall
 | ERR_ZKA_POLICY_NOT_FOUND      | Impl: referenced policy not registered              |
 | ERR_ZKA_BATCH_PARTIAL         | Impl: some proofs in batch failed                   |
 | ERR_ZKA_METADATA_LEAK         | Impl: proof structure would reveal private fields   |
+| ERR_ZK_WITNESS_INVALID        | Cryptographic witness or Schnorr relation failed    |
+| ERR_ZKA_WITNESS_INVALID       | Impl: commitment or CDS94 Schnorr proof invalid     |
 
 ## Types
 

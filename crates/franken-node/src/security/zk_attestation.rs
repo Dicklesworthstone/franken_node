@@ -1,10 +1,20 @@
-//! bd-kcg9: Zero-knowledge attestation support for selective compliance verification.
+//! bd-kcg9 / bd-reality-20260923-26n9r.18: Zero-knowledge attestation support
+//! for selective compliance verification.
 //!
-//! Legacy attestation records and lifecycle auditing. The v1 format contains
-//! caller-supplied bytes and outcomes, with no cryptographic witness relation,
-//! verifier key or public statement. Registration is not proof generation.
-//! Verification therefore fails closed until a supported cryptographic backend
-//! and independently authenticated public parameters are implemented.
+//! Legacy `zka-v1.0` records carry caller-supplied bytes and outcomes with no
+//! cryptographic witness relation; `verify_proof` continues to fail closed with
+//! `ERR_ZKA_VERIFIER_UNAVAILABLE` on unauthenticated legacy records so historical
+//! registrations never gain compliance authority.
+//!
+//! Authenticated `zka-ristretto255-v2.0` attestations prove selective compliance
+//! over prime-order Ristretto255 (`curve25519-dalek`) with zero trusted setup:
+//! - Pedersen commitments `C = v * G + r * H` with hash-to-group generator `H`.
+//! - `ThresholdAtLeast`: homomorphic shift `C - tau * G == sum(2^j * C_j)` plus
+//!   `range_bits` parallel Cramer-Damgard-Schoenmakers (CDS94) 1-of-2 Schnorr
+//!   OR-proofs establishing `v >= threshold` without disclosing `v`.
+//! - `AllowlistMembership`: Merkle-authenticated allowlist root plus a CDS94
+//!   1-of-N Schnorr OR-proof establishing `v in allowed_values` without
+//!   disclosing which element matched.
 //!
 //! # Invariants
 //!
@@ -21,15 +31,34 @@
 //! - INV-ZKA-SCHEMA-VERSIONED: all serialised attestation payloads carry a
 //!   schema version tag for forward-compatible deserialisation.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
+use curve25519_dalek::constants::RISTRETTO_BASEPOINT_POINT;
+use curve25519_dalek::ristretto::{CompressedRistretto, RistrettoPoint};
+use curve25519_dalek::scalar::Scalar;
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256, Sha512};
+use subtle::ConstantTimeEq;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::push_bounded;
 
-/// Schema version for all ZK attestation payloads.
+/// Schema version for legacy v1 ZK attestation payloads and ledger envelopes.
 pub const SCHEMA_VERSION: &str = "zka-v1.0";
+
+/// Schema version for authenticated Ristretto255 zero-knowledge compliance payloads.
+pub const CRYPTO_SCHEMA_VERSION: &str = "zka-ristretto255-v2.0";
+
+/// Maximum hex character length accepted for a serialized cryptographic proof (32 KiB raw).
+pub const MAX_CRYPTO_PROOF_HEX_LEN: usize = 65_536;
+
+/// Maximum bit width for `ThresholdAtLeast` range decompositions.
+pub const MAX_RANGE_BITS: u8 = 64;
+
+/// Maximum cardinality for `AllowlistMembership` ring/OR-proofs.
+pub const MAX_ALLOWLIST_MEMBERS: usize = 64;
 
 /// Default proof validity window in milliseconds.
 pub const DEFAULT_VALIDITY_MS: u64 = 600_000; // 10 minutes
@@ -126,6 +155,10 @@ pub const ERR_ZK_CIRCUIT_MISMATCH: &str = "ERR_ZK_CIRCUIT_MISMATCH";
 /// Maps to ERR_ZKA_EXPIRED.
 pub const ERR_ZK_ATTESTATION_EXPIRED: &str = "ERR_ZK_ATTESTATION_EXPIRED";
 
+/// ERR_ZK_WITNESS_INVALID: cryptographic witness or Schnorr relation failed verification.
+/// Maps to ERR_ZKA_WITNESS_INVALID.
+pub const ERR_ZK_WITNESS_INVALID: &str = "ERR_ZK_WITNESS_INVALID";
+
 // ── Event codes ─────────────────────────────────────────────────────────────
 
 pub mod event_codes {
@@ -180,6 +213,8 @@ pub mod error_codes {
     pub const ERR_ZKA_BATCH_PARTIAL: &str = "ERR_ZKA_BATCH_PARTIAL";
     /// Proof structure would reveal private fields.
     pub const ERR_ZKA_METADATA_LEAK: &str = "ERR_ZKA_METADATA_LEAK";
+    /// Cryptographic proof transcript failed relation, commitment, or Schnorr verification.
+    pub const ERR_ZKA_WITNESS_INVALID: &str = "ERR_ZKA_WITNESS_INVALID";
 }
 
 // ── Types ───────────────────────────────────────────────────────────────────
@@ -377,6 +412,1091 @@ pub struct AttestationLedger {
     pub seen_commitments: BTreeMap<String, String>,
     /// Schema version.
     pub schema_version: String,
+}
+
+// ── Authenticated Ristretto255 Zero-Knowledge Compliance Types ──────────────
+
+const PEDERSEN_H_DOMAIN: &[u8] = b"franken-node/zka-ristretto255/pedersen-generator-h/v1";
+const POLICY_BINDING_DOMAIN: &[u8] = b"franken-node/zka-ristretto255/policy-binding/v2";
+const PARAMS_HASH_DOMAIN: &[u8] = b"franken-node/zka-ristretto255/verifier-params/v2";
+const ALLOWLIST_LEAF_DOMAIN: &[u8] = b"franken-node/zka-ristretto255/allowlist-leaf/v2";
+const ALLOWLIST_NODE_DOMAIN: &[u8] = b"franken-node/zka-ristretto255/allowlist-node/v2";
+const ALLOWLIST_ODD_DOMAIN: &[u8] = b"franken-node/zka-ristretto255/allowlist-odd/v2";
+const FIAT_SHAMIR_DOMAIN: &[u8] = b"franken-node/zka-ristretto255/fiat-shamir/v2";
+const HEDGED_NONCE_DOMAIN: &[u8] = b"franken-node/zka-ristretto255/hedged-nonce-seed/v2";
+const ZKRP2_MAGIC: &[u8; 5] = b"ZKRP2";
+const ZKRP2_TAG_THRESHOLD: u8 = 0x01;
+const ZKRP2_TAG_ALLOWLIST: u8 = 0x02;
+
+/// Zeroized private witness `(value, blinding)` for Ristretto255 Pedersen commitments.
+///
+/// Deliberately omits `Serialize`/`Deserialize` and redacts `Debug` so private
+/// compliance attributes cannot leak into logs, snapshots, or audit trails.
+/// INV-ZKA-SELECTIVE, INV-ZK-NO-DISCLOSURE
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
+pub struct ZkPrivateWitness {
+    value: u64,
+    blinding_bytes: [u8; 32],
+}
+
+impl fmt::Debug for ZkPrivateWitness {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ZkPrivateWitness")
+            .field("value", &"[REDACTED]")
+            .field("blinding", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl ZkPrivateWitness {
+    /// Construct a private witness from an explicit 32-byte blinding seed.
+    /// Rejects seeds that reduce to zero modulo the Ristretto255 group order.
+    pub fn new(value: u64, blinding_bytes: [u8; 32]) -> Result<Self, String> {
+        if Scalar::from_bytes_mod_order(blinding_bytes) == Scalar::ZERO {
+            return Err(format!(
+                "{}: witness blinding scalar must be non-zero",
+                error_codes::ERR_ZKA_WITNESS_INVALID
+            ));
+        }
+        Ok(Self {
+            value,
+            blinding_bytes,
+        })
+    }
+
+    /// Construct a private witness with fresh OS-supplied blinding randomness.
+    #[must_use]
+    pub fn random(value: u64) -> Self {
+        let mut rng = rand::rngs::OsRng;
+        loop {
+            let mut blinding_bytes = [0u8; 32];
+            rng.fill_bytes(&mut blinding_bytes);
+            if Scalar::from_bytes_mod_order(blinding_bytes) != Scalar::ZERO {
+                return Self {
+                    value,
+                    blinding_bytes,
+                };
+            }
+        }
+    }
+
+    fn blinding_scalar(&self) -> Scalar {
+        Scalar::from_bytes_mod_order(self.blinding_bytes)
+    }
+
+    fn commitment_point(&self) -> RistrettoPoint {
+        pedersen_commit(Scalar::from(self.value), self.blinding_scalar())
+    }
+
+    /// Compute the 64-character lowercase hex compressed Ristretto255 Pedersen commitment
+    /// `C = value * G + blinding * H`.
+    #[must_use]
+    pub fn pedersen_commitment_hex(&self) -> String {
+        hex::encode(self.commitment_point().compress().as_bytes())
+    }
+}
+
+/// Cryptographic compliance predicate proven in zero knowledge over a committed `u64` attribute.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ZkComplianceRelation {
+    /// Proves committed attribute `v` satisfies `threshold <= v < threshold + 2^range_bits`
+    /// (`1 <= range_bits <= 64`) using Pedersen homomorphic shift and `range_bits` parallel
+    /// CDS94 1-of-2 Schnorr OR-proofs.
+    ThresholdAtLeast { threshold: u64, range_bits: u8 },
+    /// Proves committed attribute `v` belongs to `allowed_values` (`1..=64` unique values
+    /// authenticated by `merkle_root_hex`) using a CDS94 1-of-N Schnorr OR-proof.
+    AllowlistMembership {
+        allowed_values: Vec<u64>,
+        merkle_root_hex: String,
+    },
+}
+
+impl ZkComplianceRelation {
+    /// Construct a validated `ThresholdAtLeast` relation.
+    pub fn threshold_at_least(threshold: u64, range_bits: u8) -> Result<Self, String> {
+        let rel = Self::ThresholdAtLeast {
+            threshold,
+            range_bits,
+        };
+        rel.validate()?;
+        Ok(rel)
+    }
+
+    /// Construct a validated `AllowlistMembership` relation with canonical Merkle root.
+    pub fn allowlist(allowed_values: Vec<u64>) -> Result<Self, String> {
+        let merkle_root_hex = compute_allowlist_merkle_root(&allowed_values);
+        let rel = Self::AllowlistMembership {
+            allowed_values,
+            merkle_root_hex,
+        };
+        rel.validate()?;
+        Ok(rel)
+    }
+
+    /// Validate relation parameters and Merkle binding.
+    pub fn validate(&self) -> Result<(), String> {
+        match self {
+            Self::ThresholdAtLeast { range_bits, .. } => {
+                if *range_bits == 0 || *range_bits > MAX_RANGE_BITS {
+                    return Err(format!(
+                        "{}: range_bits {} outside 1..={}",
+                        error_codes::ERR_ZKA_POLICY_MISMATCH,
+                        range_bits,
+                        MAX_RANGE_BITS
+                    ));
+                }
+                Ok(())
+            }
+            Self::AllowlistMembership {
+                allowed_values,
+                merkle_root_hex,
+            } => {
+                if allowed_values.is_empty() || allowed_values.len() > MAX_ALLOWLIST_MEMBERS {
+                    return Err(format!(
+                        "{}: allowlist cardinality {} outside 1..={}",
+                        error_codes::ERR_ZKA_POLICY_MISMATCH,
+                        allowed_values.len(),
+                        MAX_ALLOWLIST_MEMBERS
+                    ));
+                }
+                let unique: BTreeSet<u64> = allowed_values.iter().copied().collect();
+                if unique.len() != allowed_values.len() {
+                    return Err(format!(
+                        "{}: allowlist contains duplicate members",
+                        error_codes::ERR_ZKA_POLICY_MISMATCH
+                    ));
+                }
+                let expected_root = compute_allowlist_merkle_root(allowed_values);
+                if !constant_time_str_eq(merkle_root_hex, &expected_root) {
+                    return Err(format!(
+                        "{}: allowlist Merkle root mismatch",
+                        error_codes::ERR_ZKA_POLICY_MISMATCH
+                    ));
+                }
+                Ok(())
+            }
+        }
+    }
+
+    fn canonical_digest(&self) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        match self {
+            Self::ThresholdAtLeast {
+                threshold,
+                range_bits,
+            } => {
+                hasher.update([ZKRP2_TAG_THRESHOLD]);
+                hasher.update(threshold.to_le_bytes());
+                hasher.update([*range_bits]);
+            }
+            Self::AllowlistMembership {
+                allowed_values,
+                merkle_root_hex,
+            } => {
+                hasher.update([ZKRP2_TAG_ALLOWLIST]);
+                hasher.update((allowed_values.len() as u64).to_le_bytes());
+                for v in allowed_values {
+                    hasher.update(v.to_le_bytes());
+                }
+                update_len_prefixed(&mut hasher, merkle_root_hex.as_bytes());
+            }
+        }
+        hasher.finalize().into()
+    }
+}
+
+/// Authenticated public verifier parameters binding a `ZkPolicy`'s full content,
+/// verifier key identity, epoch, challenge nonce, and compliance relation.
+/// INV-ZKA-POLICY-BOUND
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ZkVerifierParams {
+    /// Schema version (`zka-ristretto255-v2.0`).
+    pub schema_version: String,
+    /// Policy identifier bound to these parameters.
+    pub policy_id: String,
+    /// Domain-separated SHA-256 over the full `ZkPolicy` definition.
+    pub policy_binding_sha256: String,
+    /// Authenticated verifier parameter/key identifier.
+    pub verifier_key_id: String,
+    /// Monotonic security epoch bound into Fiat-Shamir transcripts.
+    pub epoch: u64,
+    /// Non-empty verifier challenge nonce bound into Fiat-Shamir transcripts.
+    pub challenge_nonce: String,
+    /// Mathematical compliance relation proven by attestations under these parameters.
+    pub relation: ZkComplianceRelation,
+}
+
+impl ZkVerifierParams {
+    /// Construct authenticated verifier parameters bound to `policy`.
+    pub fn for_policy(
+        policy: &ZkPolicy,
+        verifier_key_id: impl Into<String>,
+        epoch: u64,
+        challenge_nonce: impl Into<String>,
+        relation: ZkComplianceRelation,
+    ) -> Result<Self, String> {
+        let verifier_key_id = verifier_key_id.into();
+        let challenge_nonce = challenge_nonce.into();
+        if policy.policy_id.trim().is_empty() {
+            return Err(format!(
+                "{}: policy_id must be non-empty",
+                error_codes::ERR_ZKA_POLICY_MISMATCH
+            ));
+        }
+        if verifier_key_id.trim().is_empty() {
+            return Err(format!(
+                "{}: verifier_key_id must be non-empty",
+                error_codes::ERR_ZKA_VERIFIER_UNAVAILABLE
+            ));
+        }
+        if challenge_nonce.trim().is_empty() {
+            return Err(format!(
+                "{}: challenge_nonce must be non-empty",
+                error_codes::ERR_ZKA_VERIFIER_UNAVAILABLE
+            ));
+        }
+        relation.validate()?;
+        Ok(Self {
+            schema_version: CRYPTO_SCHEMA_VERSION.to_string(),
+            policy_id: policy.policy_id.clone(),
+            policy_binding_sha256: compute_policy_binding_sha256(policy),
+            verifier_key_id,
+            epoch,
+            challenge_nonce,
+            relation,
+        })
+    }
+
+    /// Verify that these parameters are authentic, structurally valid, and bound
+    /// to the exact `ZkPolicy` content (not merely a matching `policy_id` string).
+    #[must_use]
+    pub fn matches_policy(&self, policy: &ZkPolicy) -> bool {
+        if self.schema_version != CRYPTO_SCHEMA_VERSION
+            || self.verifier_key_id.trim().is_empty()
+            || self.challenge_nonce.trim().is_empty()
+            || self.policy_id != policy.policy_id
+            || self.relation.validate().is_err()
+        {
+            return false;
+        }
+        let expected_binding = compute_policy_binding_sha256(policy);
+        constant_time_str_eq(&self.policy_binding_sha256, &expected_binding)
+    }
+
+    fn params_digest_bytes(&self) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        hasher.update(PARAMS_HASH_DOMAIN);
+        update_len_prefixed(&mut hasher, self.schema_version.as_bytes());
+        update_len_prefixed(&mut hasher, self.policy_id.as_bytes());
+        update_len_prefixed(&mut hasher, self.policy_binding_sha256.as_bytes());
+        update_len_prefixed(&mut hasher, self.verifier_key_id.as_bytes());
+        hasher.update(self.epoch.to_le_bytes());
+        update_len_prefixed(&mut hasher, self.challenge_nonce.as_bytes());
+        hasher.update(self.relation.canonical_digest());
+        hasher.finalize().into()
+    }
+
+    /// Canonical 64-character lowercase hex SHA-256 digest of these verifier parameters.
+    #[must_use]
+    pub fn params_sha256(&self) -> String {
+        hex::encode(self.params_digest_bytes())
+    }
+}
+
+/// Deterministic verification telemetry derived from `AttestationLedger` state.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ZkVerificationTelemetry {
+    /// Count of `zka-ristretto255-v2.0` attestations in the ledger.
+    pub crypto_proofs_generated: usize,
+    /// Count of legacy `zka-v1.0` registrations in the ledger.
+    pub legacy_registrations: usize,
+    /// Total `FN-ZK-002` verification submissions recorded.
+    pub verification_submissions: usize,
+    /// Total `FN-ZK-003` cryptographic verifications passed.
+    pub crypto_verifications_passed: usize,
+    /// Total `FN-ZK-005` policy/parameter mismatch rejections.
+    pub rejections_policy_mismatch: usize,
+    /// Total `FN-ZK-004` rejections where Schnorr/relation witness verification failed.
+    pub rejections_witness_invalid: usize,
+    /// Total `FN-ZK-004` rejections across all invalid/revoked/expired/unavailable paths.
+    pub rejections_total_fn_zk_004: usize,
+}
+
+/// Compute the canonical domain-separated SHA-256 binding digest over a `ZkPolicy`.
+#[must_use]
+pub fn compute_policy_binding_sha256(policy: &ZkPolicy) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(POLICY_BINDING_DOMAIN);
+    update_len_prefixed(&mut hasher, policy.policy_id.as_bytes());
+    update_len_prefixed(&mut hasher, policy.predicate_description.as_bytes());
+    update_len_prefixed(&mut hasher, policy.issuer.as_bytes());
+    hasher.update(policy.validity_ms.to_le_bytes());
+    update_len_prefixed(&mut hasher, policy.schema_version.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+/// Compute the domain-separated binary Merkle root over an allowlist of `u64` compliance codes.
+#[must_use]
+pub fn compute_allowlist_merkle_root(values: &[u64]) -> String {
+    if values.is_empty() {
+        let mut hasher = Sha256::new();
+        hasher.update(ALLOWLIST_LEAF_DOMAIN);
+        return hex::encode(hasher.finalize());
+    }
+    let mut level: Vec<[u8; 32]> = values
+        .iter()
+        .enumerate()
+        .map(|(idx, value)| {
+            let mut hasher = Sha256::new();
+            hasher.update(ALLOWLIST_LEAF_DOMAIN);
+            hasher.update((idx as u64).to_le_bytes());
+            hasher.update(value.to_le_bytes());
+            hasher.finalize().into()
+        })
+        .collect();
+    while level.len() > 1 {
+        let mut next = Vec::with_capacity(level.len().div_ceil(2));
+        let mut idx = 0usize;
+        while idx < level.len() {
+            let mut hasher = Sha256::new();
+            if idx + 1 < level.len() {
+                hasher.update(ALLOWLIST_NODE_DOMAIN);
+                hasher.update(level[idx]);
+                hasher.update(level[idx + 1]);
+            } else {
+                hasher.update(ALLOWLIST_ODD_DOMAIN);
+                hasher.update(level[idx]);
+            }
+            next.push(hasher.finalize().into());
+            idx += 2;
+        }
+        level = next;
+    }
+    hex::encode(level[0])
+}
+
+fn update_len_prefixed(hasher: &mut Sha256, bytes: &[u8]) {
+    hasher.update((bytes.len() as u64).to_le_bytes());
+    hasher.update(bytes);
+}
+
+fn update_len_prefixed_512(hasher: &mut Sha512, bytes: &[u8]) {
+    hasher.update((bytes.len() as u64).to_le_bytes());
+    hasher.update(bytes);
+}
+
+fn constant_time_str_eq(lhs: &str, rhs: &str) -> bool {
+    lhs.len() == rhs.len() && bool::from(lhs.as_bytes().ct_eq(rhs.as_bytes()))
+}
+
+fn pedersen_generator_h() -> RistrettoPoint {
+    let mut hasher = Sha512::new();
+    hasher.update(PEDERSEN_H_DOMAIN);
+    let uniform: [u8; 64] = hasher.finalize().into();
+    RistrettoPoint::from_uniform_bytes(&uniform)
+}
+
+fn pedersen_commit(value: Scalar, blinding: Scalar) -> RistrettoPoint {
+    value * RISTRETTO_BASEPOINT_POINT + blinding * pedersen_generator_h()
+}
+
+struct DeterministicScalarPrf {
+    seed: [u8; 64],
+    counter: u64,
+}
+
+impl Drop for DeterministicScalarPrf {
+    fn drop(&mut self) {
+        self.seed.zeroize();
+        self.counter.zeroize();
+    }
+}
+
+impl DeterministicScalarPrf {
+    fn hedged(witness: &ZkPrivateWitness, params_digest: &[u8; 32], attestation_id: &str) -> Self {
+        let mut os_entropy = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut os_entropy);
+        let mut hasher = Sha512::new();
+        hasher.update(HEDGED_NONCE_DOMAIN);
+        hasher.update(witness.blinding_bytes);
+        hasher.update(witness.value.to_le_bytes());
+        hasher.update(params_digest);
+        update_len_prefixed_512(&mut hasher, attestation_id.as_bytes());
+        hasher.update(os_entropy);
+        os_entropy.zeroize();
+        Self {
+            seed: hasher.finalize().into(),
+            counter: 0,
+        }
+    }
+
+    fn next_nonzero_scalar(&mut self, label: &[u8]) -> Scalar {
+        loop {
+            let mut hasher = Sha512::new();
+            hasher.update(self.seed);
+            hasher.update(self.counter.to_le_bytes());
+            update_len_prefixed_512(&mut hasher, label);
+            self.counter = self.counter.wrapping_add(1);
+            let mut wide: [u8; 64] = hasher.finalize().into();
+            let s = Scalar::from_bytes_mod_order_wide(&wide);
+            wide.zeroize();
+            if s != Scalar::ZERO {
+                return s;
+            }
+        }
+    }
+}
+
+struct Cds94OrProof {
+    challenges: Vec<Scalar>,
+    responses: Vec<Scalar>,
+}
+
+fn cds94_fiat_shamir_challenge(
+    transcript_context: &[u8],
+    subproof_index: u32,
+    commitment: &CompressedRistretto,
+    candidates: &[u64],
+    announcements: &[CompressedRistretto],
+) -> Scalar {
+    let mut hasher = Sha512::new();
+    hasher.update(FIAT_SHAMIR_DOMAIN);
+    update_len_prefixed_512(&mut hasher, transcript_context);
+    hasher.update(subproof_index.to_le_bytes());
+    hasher.update(commitment.as_bytes());
+    hasher.update((candidates.len() as u64).to_le_bytes());
+    for candidate in candidates {
+        hasher.update(candidate.to_le_bytes());
+    }
+    hasher.update((announcements.len() as u64).to_le_bytes());
+    for ann in announcements {
+        hasher.update(ann.as_bytes());
+    }
+    let wide: [u8; 64] = hasher.finalize().into();
+    Scalar::from_bytes_mod_order_wide(&wide)
+}
+
+/// Prove in zero knowledge via CDS94 1-of-N disjunctive Schnorr that
+/// `commitment == candidates[real_index] * G + blinding * H`.
+fn prove_cds94_or(
+    prf: &mut DeterministicScalarPrf,
+    transcript_context: &[u8],
+    subproof_index: u32,
+    commitment: RistrettoPoint,
+    candidates: &[u64],
+    real_index: usize,
+    blinding: Scalar,
+) -> Cds94OrProof {
+    let h = pedersen_generator_h();
+    let branch_count = candidates.len();
+    let mut challenges = vec![Scalar::ZERO; branch_count];
+    let mut responses = vec![Scalar::ZERO; branch_count];
+    let mut announcements = Vec::with_capacity(branch_count);
+
+    let mut real_nonce = prf.next_nonzero_scalar(b"cds94-real-k");
+    let mut simulated_sum = Scalar::ZERO;
+
+    for idx in 0..branch_count {
+        if idx == real_index {
+            announcements.push((real_nonce * h).compress());
+        } else {
+            let e_sim = prf.next_nonzero_scalar(b"cds94-sim-e");
+            let s_sim = prf.next_nonzero_scalar(b"cds94-sim-s");
+            let shifted = commitment - Scalar::from(candidates[idx]) * RISTRETTO_BASEPOINT_POINT;
+            let r_sim = s_sim * h - e_sim * shifted;
+            challenges[idx] = e_sim;
+            responses[idx] = s_sim;
+            simulated_sum += e_sim;
+            announcements.push(r_sim.compress());
+        }
+    }
+
+    let compressed_commitment = commitment.compress();
+    let total_challenge = cds94_fiat_shamir_challenge(
+        transcript_context,
+        subproof_index,
+        &compressed_commitment,
+        candidates,
+        &announcements,
+    );
+    let e_real = total_challenge - simulated_sum;
+    let s_real = real_nonce + e_real * blinding;
+    real_nonce.zeroize();
+
+    challenges[real_index] = e_real;
+    responses[real_index] = s_real;
+
+    Cds94OrProof {
+        challenges,
+        responses,
+    }
+}
+
+/// Verify a CDS94 1-of-N disjunctive Schnorr proof over `commitment`.
+fn verify_cds94_or(
+    transcript_context: &[u8],
+    subproof_index: u32,
+    commitment: RistrettoPoint,
+    compressed_commitment: &CompressedRistretto,
+    candidates: &[u64],
+    proof: &Cds94OrProof,
+) -> bool {
+    if proof.challenges.len() != candidates.len() || proof.responses.len() != candidates.len() {
+        return false;
+    }
+    let h = pedersen_generator_h();
+    let mut announcements = Vec::with_capacity(candidates.len());
+    let mut challenge_sum = Scalar::ZERO;
+
+    for (idx, candidate) in candidates.iter().enumerate() {
+        let shifted = commitment - Scalar::from(*candidate) * RISTRETTO_BASEPOINT_POINT;
+        let reconstructed = proof.responses[idx] * h - proof.challenges[idx] * shifted;
+        announcements.push(reconstructed.compress());
+        challenge_sum += proof.challenges[idx];
+    }
+
+    let expected_challenge = cds94_fiat_shamir_challenge(
+        transcript_context,
+        subproof_index,
+        compressed_commitment,
+        candidates,
+        &announcements,
+    );
+    bool::from(
+        challenge_sum
+            .as_bytes()
+            .ct_eq(expected_challenge.as_bytes()),
+    )
+}
+
+fn build_fiat_shamir_context(
+    attestation_id: &str,
+    params_digest: &[u8; 32],
+    compressed_commitment: &[u8; 32],
+    extra_commitments: &[[u8; 32]],
+) -> Vec<u8> {
+    let mut hasher = Sha256::new();
+    hasher.update(FIAT_SHAMIR_DOMAIN);
+    update_len_prefixed(&mut hasher, attestation_id.as_bytes());
+    hasher.update(params_digest);
+    hasher.update(compressed_commitment);
+    hasher.update((extra_commitments.len() as u64).to_le_bytes());
+    for c in extra_commitments {
+        hasher.update(c);
+    }
+    hasher.finalize().to_vec()
+}
+
+fn decode_canonical_scalar(bytes: &[u8]) -> Option<Scalar> {
+    let arr: [u8; 32] = bytes.try_into().ok()?;
+    Option::from(Scalar::from_canonical_bytes(arr))
+}
+
+fn decode_canonical_point(bytes: &[u8]) -> Option<(CompressedRistretto, RistrettoPoint)> {
+    let arr: [u8; 32] = bytes.try_into().ok()?;
+    let compressed = CompressedRistretto(arr);
+    let point = compressed.decompress()?;
+    Some((compressed, point))
+}
+
+fn prove_compliance_wire_bytes(
+    attestation_id: &str,
+    verifier_params: &ZkVerifierParams,
+    witness: &ZkPrivateWitness,
+) -> Result<(String, String), String> {
+    verifier_params.relation.validate()?;
+    let params_digest = verifier_params.params_digest_bytes();
+    let commitment_point = witness.commitment_point();
+    let commitment_compressed = commitment_point.compress();
+    let commitment_bytes = commitment_compressed.to_bytes();
+    let commitment_hex = hex::encode(commitment_bytes);
+    let mut prf = DeterministicScalarPrf::hedged(witness, &params_digest, attestation_id);
+
+    match &verifier_params.relation {
+        ZkComplianceRelation::ThresholdAtLeast {
+            threshold,
+            range_bits,
+        } => {
+            let Some(delta) = witness.value.checked_sub(*threshold) else {
+                return Err(format!(
+                    "{}: witness does not satisfy threshold relation",
+                    error_codes::ERR_ZKA_PREDICATE_UNSATISFIED
+                ));
+            };
+            if *range_bits < 64 && (delta >> u32::from(*range_bits)) != 0 {
+                return Err(format!(
+                    "{}: witness delta exceeds {}-bit range bound",
+                    error_codes::ERR_ZKA_PREDICATE_UNSATISFIED,
+                    range_bits
+                ));
+            }
+            let bit_count = usize::from(*range_bits);
+            let mut bit_blindings = vec![Scalar::ZERO; bit_count];
+            let mut weighted_tail = Scalar::ZERO;
+            let two = Scalar::from(2u64);
+            let mut pow_two = two;
+            for r_j in bit_blindings.iter_mut().skip(1) {
+                *r_j = prf.next_nonzero_scalar(b"threshold-bit-blinding");
+                weighted_tail += pow_two * *r_j;
+                pow_two *= two;
+            }
+            bit_blindings[0] = witness.blinding_scalar() - weighted_tail;
+
+            let mut bit_points = Vec::with_capacity(bit_count);
+            let mut bit_compressed_bytes = Vec::with_capacity(bit_count);
+            for (j, r_j) in bit_blindings.iter().enumerate() {
+                let bit_val = (delta >> j) & 1;
+                let c_j = pedersen_commit(Scalar::from(bit_val), *r_j);
+                bit_compressed_bytes.push(c_j.compress().to_bytes());
+                bit_points.push((usize::try_from(bit_val).unwrap_or(0), c_j));
+            }
+
+            let ctx = build_fiat_shamir_context(
+                attestation_id,
+                &params_digest,
+                &commitment_bytes,
+                &bit_compressed_bytes,
+            );
+
+            let mut out = Vec::with_capacity(72 + bit_count * 160);
+            out.extend_from_slice(ZKRP2_MAGIC);
+            out.push(ZKRP2_TAG_THRESHOLD);
+            out.extend_from_slice(&params_digest);
+            out.extend_from_slice(&commitment_bytes);
+            out.extend_from_slice(&u16::from(*range_bits).to_le_bytes());
+
+            for (j, ((bit_idx, c_j), r_j)) in
+                bit_points.iter().zip(bit_blindings.iter()).enumerate()
+            {
+                let subproof_idx = u32::try_from(j).unwrap_or(u32::MAX);
+                let or_proof =
+                    prove_cds94_or(&mut prf, &ctx, subproof_idx, *c_j, &[0, 1], *bit_idx, *r_j);
+                out.extend_from_slice(&bit_compressed_bytes[j]);
+                out.extend_from_slice(or_proof.challenges[0].as_bytes());
+                out.extend_from_slice(or_proof.challenges[1].as_bytes());
+                out.extend_from_slice(or_proof.responses[0].as_bytes());
+                out.extend_from_slice(or_proof.responses[1].as_bytes());
+            }
+
+            for r_j in &mut bit_blindings {
+                r_j.zeroize();
+            }
+
+            Ok((commitment_hex, hex::encode(out)))
+        }
+        ZkComplianceRelation::AllowlistMembership { allowed_values, .. } => {
+            let Some(real_index) = allowed_values.iter().position(|v| *v == witness.value) else {
+                return Err(format!(
+                    "{}: witness is not a member of the policy allowlist",
+                    error_codes::ERR_ZKA_PREDICATE_UNSATISFIED
+                ));
+            };
+            let branch_count = allowed_values.len();
+            let branch_count_u16 = u16::try_from(branch_count).map_err(|_| {
+                format!(
+                    "{}: allowlist too large",
+                    error_codes::ERR_ZKA_POLICY_MISMATCH
+                )
+            })?;
+            let ctx =
+                build_fiat_shamir_context(attestation_id, &params_digest, &commitment_bytes, &[]);
+            let or_proof = prove_cds94_or(
+                &mut prf,
+                &ctx,
+                0,
+                commitment_point,
+                allowed_values,
+                real_index,
+                witness.blinding_scalar(),
+            );
+
+            let mut out = Vec::with_capacity(72 + branch_count * 64);
+            out.extend_from_slice(ZKRP2_MAGIC);
+            out.push(ZKRP2_TAG_ALLOWLIST);
+            out.extend_from_slice(&params_digest);
+            out.extend_from_slice(&commitment_bytes);
+            out.extend_from_slice(&branch_count_u16.to_le_bytes());
+            for idx in 0..branch_count {
+                out.extend_from_slice(or_proof.challenges[idx].as_bytes());
+                out.extend_from_slice(or_proof.responses[idx].as_bytes());
+            }
+
+            Ok((commitment_hex, hex::encode(out)))
+        }
+    }
+}
+
+/// Stateless cryptographic verification of a `zka-ristretto255-v2.0` compliance proof
+/// against `policy` and authenticated `verifier_params` at `now_ms`.
+///
+/// Does not rely on ledger membership; enforces full policy/parameter binding,
+/// validity window, canonical Ristretto255 point/scalar decoding, Pedersen
+/// homomorphic relation, and CDS94 Schnorr verification.
+#[must_use]
+pub fn verify_compliance_proof_stateless(
+    attestation: &ZkAttestation,
+    policy: &ZkPolicy,
+    verifier_params: &ZkVerifierParams,
+    now_ms: u64,
+    trace_id: String,
+) -> ZkVerificationResult {
+    let aid = attestation.attestation_id.clone();
+    let pid = policy.policy_id.clone();
+
+    if !policy.active
+        || !invariants::check_policy_bound(attestation, policy)
+        || !verifier_params.matches_policy(policy)
+    {
+        return ZkVerificationResult::Rejected {
+            attestation_id: aid,
+            policy_id: pid,
+            trace_id,
+            reason: "Policy or authenticated verifier parameter mismatch".to_string(),
+            error_code: error_codes::ERR_ZKA_POLICY_MISMATCH.to_string(),
+        };
+    }
+
+    if attestation.status == AttestationStatus::Revoked {
+        return ZkVerificationResult::Rejected {
+            attestation_id: aid,
+            policy_id: pid,
+            trace_id,
+            reason: "Attestation has been revoked".to_string(),
+            error_code: error_codes::ERR_ZKA_REVOKED.to_string(),
+        };
+    }
+
+    if now_ms >= attestation.expires_at_ms {
+        return ZkVerificationResult::Rejected {
+            attestation_id: aid,
+            policy_id: pid,
+            trace_id,
+            reason: "Proof exceeded validity window".to_string(),
+            error_code: error_codes::ERR_ZKA_EXPIRED.to_string(),
+        };
+    }
+
+    if now_ms < attestation.generated_at_ms {
+        return ZkVerificationResult::Rejected {
+            attestation_id: aid,
+            policy_id: pid,
+            trace_id,
+            reason: "Proof generated in the future".to_string(),
+            error_code: error_codes::ERR_ZKA_INVALID_PROOF.to_string(),
+        };
+    }
+
+    if !invariants::check_selective(attestation) {
+        return ZkVerificationResult::Rejected {
+            attestation_id: aid,
+            policy_id: pid,
+            trace_id,
+            reason: "Proof structure would reveal private fields".to_string(),
+            error_code: error_codes::ERR_ZKA_METADATA_LEAK.to_string(),
+        };
+    }
+
+    if attestation.outcome != PredicateOutcome::Pass {
+        return ZkVerificationResult::Rejected {
+            attestation_id: aid,
+            policy_id: pid,
+            trace_id,
+            reason: format!("Compliance predicate not met: {}", attestation.outcome),
+            error_code: error_codes::ERR_ZKA_PREDICATE_UNSATISFIED.to_string(),
+        };
+    }
+
+    if attestation.payload.schema_version == SCHEMA_VERSION {
+        return ZkVerificationResult::Rejected {
+            attestation_id: aid,
+            policy_id: pid,
+            trace_id,
+            reason: "Legacy zka-v1.0 registration carries no cryptographic proof".to_string(),
+            error_code: error_codes::ERR_ZKA_VERIFIER_UNAVAILABLE.to_string(),
+        };
+    }
+
+    if attestation.payload.schema_version != CRYPTO_SCHEMA_VERSION {
+        return ZkVerificationResult::Rejected {
+            attestation_id: aid,
+            policy_id: pid,
+            trace_id,
+            reason: "Unsupported ZK proof schema version".to_string(),
+            error_code: error_codes::ERR_ZKA_INVALID_PROOF.to_string(),
+        };
+    }
+
+    if attestation.payload.proof_bytes_hex.is_empty()
+        || attestation.payload.proof_bytes_hex.len() > MAX_CRYPTO_PROOF_HEX_LEN
+        || !attestation.payload.proof_bytes_hex.len().is_multiple_of(2)
+    {
+        return ZkVerificationResult::Rejected {
+            attestation_id: aid,
+            policy_id: pid,
+            trace_id,
+            reason: "Cryptographic proof hex missing, odd-length, or exceeds size cap".to_string(),
+            error_code: error_codes::ERR_ZKA_INVALID_PROOF.to_string(),
+        };
+    }
+
+    let Ok(commitment_raw) = hex::decode(&attestation.payload.metadata_commitment) else {
+        return ZkVerificationResult::Rejected {
+            attestation_id: aid,
+            policy_id: pid,
+            trace_id,
+            reason: "Metadata commitment is not valid 32-byte hex".to_string(),
+            error_code: error_codes::ERR_ZKA_INVALID_PROOF.to_string(),
+        };
+    };
+    let Some((compressed_commitment, commitment_point)) = decode_canonical_point(&commitment_raw)
+    else {
+        return ZkVerificationResult::Rejected {
+            attestation_id: aid,
+            policy_id: pid,
+            trace_id,
+            reason: "Metadata commitment is not a canonical Ristretto255 point".to_string(),
+            error_code: error_codes::ERR_ZKA_INVALID_PROOF.to_string(),
+        };
+    };
+
+    let Ok(wire) = hex::decode(&attestation.payload.proof_bytes_hex) else {
+        return ZkVerificationResult::Rejected {
+            attestation_id: aid,
+            policy_id: pid,
+            trace_id,
+            reason: "Proof bytes hex failed decoding".to_string(),
+            error_code: error_codes::ERR_ZKA_INVALID_PROOF.to_string(),
+        };
+    };
+
+    if wire.len() < 72 || &wire[0..5] != ZKRP2_MAGIC {
+        return ZkVerificationResult::Rejected {
+            attestation_id: aid,
+            policy_id: pid,
+            trace_id,
+            reason: "Proof envelope missing ZKRP2 header".to_string(),
+            error_code: error_codes::ERR_ZKA_INVALID_PROOF.to_string(),
+        };
+    }
+
+    let variant_tag = wire[5];
+    let expected_params_digest = verifier_params.params_digest_bytes();
+    if !bool::from(wire[6..38].ct_eq(&expected_params_digest)) {
+        return ZkVerificationResult::Rejected {
+            attestation_id: aid,
+            policy_id: pid,
+            trace_id,
+            reason: "Proof verifier parameter digest does not match verifier_params".to_string(),
+            error_code: error_codes::ERR_ZKA_POLICY_MISMATCH.to_string(),
+        };
+    }
+
+    if !bool::from(wire[38..70].ct_eq(compressed_commitment.as_bytes())) {
+        return ZkVerificationResult::Rejected {
+            attestation_id: aid,
+            policy_id: pid,
+            trace_id,
+            reason: "Proof commitment does not match attestation metadata_commitment".to_string(),
+            error_code: error_codes::ERR_ZKA_WITNESS_INVALID.to_string(),
+        };
+    }
+
+    let declared_count = usize::from(u16::from_le_bytes([wire[70], wire[71]]));
+
+    match &verifier_params.relation {
+        ZkComplianceRelation::ThresholdAtLeast {
+            threshold,
+            range_bits,
+        } => {
+            let expected_bits = usize::from(*range_bits);
+            if variant_tag != ZKRP2_TAG_THRESHOLD || declared_count != expected_bits {
+                return ZkVerificationResult::Rejected {
+                    attestation_id: aid,
+                    policy_id: pid,
+                    trace_id,
+                    reason: "Threshold proof tag or bit-width mismatch".to_string(),
+                    error_code: error_codes::ERR_ZKA_POLICY_MISMATCH.to_string(),
+                };
+            }
+            let expected_len = 72usize.saturating_add(expected_bits.saturating_mul(160));
+            if wire.len() != expected_len {
+                return ZkVerificationResult::Rejected {
+                    attestation_id: aid,
+                    policy_id: pid,
+                    trace_id,
+                    reason: "Threshold proof byte length mismatch".to_string(),
+                    error_code: error_codes::ERR_ZKA_INVALID_PROOF.to_string(),
+                };
+            }
+
+            let mut bit_compressed = Vec::with_capacity(expected_bits);
+            let mut bit_points = Vec::with_capacity(expected_bits);
+            let mut bit_proofs = Vec::with_capacity(expected_bits);
+            for j in 0..expected_bits {
+                let offset = 72 + j * 160;
+                let Some((comp_j, pt_j)) = decode_canonical_point(&wire[offset..offset + 32])
+                else {
+                    return ZkVerificationResult::Rejected {
+                        attestation_id: aid,
+                        policy_id: pid,
+                        trace_id,
+                        reason: "Non-canonical bit commitment point".to_string(),
+                        error_code: error_codes::ERR_ZKA_INVALID_PROOF.to_string(),
+                    };
+                };
+                let (Some(e0), Some(e1), Some(s0), Some(s1)) = (
+                    decode_canonical_scalar(&wire[offset + 32..offset + 64]),
+                    decode_canonical_scalar(&wire[offset + 64..offset + 96]),
+                    decode_canonical_scalar(&wire[offset + 96..offset + 128]),
+                    decode_canonical_scalar(&wire[offset + 128..offset + 160]),
+                ) else {
+                    return ZkVerificationResult::Rejected {
+                        attestation_id: aid,
+                        policy_id: pid,
+                        trace_id,
+                        reason: "Non-canonical Schnorr scalar in threshold proof".to_string(),
+                        error_code: error_codes::ERR_ZKA_INVALID_PROOF.to_string(),
+                    };
+                };
+                bit_compressed.push(comp_j.to_bytes());
+                bit_points.push((comp_j, pt_j));
+                bit_proofs.push(Cds94OrProof {
+                    challenges: vec![e0, e1],
+                    responses: vec![s0, s1],
+                });
+            }
+
+            // Check homomorphic decomposition: sum_{j=0}^{k-1} 2^j * C_j == C - threshold * G
+            let two = Scalar::from(2u64);
+            let mut pow_two = Scalar::ONE;
+            let mut homomorphic_sum = RistrettoPoint::default();
+            for (_, pt_j) in &bit_points {
+                homomorphic_sum += pow_two * pt_j;
+                pow_two *= two;
+            }
+            let shifted_target =
+                commitment_point - Scalar::from(*threshold) * RISTRETTO_BASEPOINT_POINT;
+            if !bool::from(
+                homomorphic_sum
+                    .compress()
+                    .as_bytes()
+                    .ct_eq(shifted_target.compress().as_bytes()),
+            ) {
+                return ZkVerificationResult::Rejected {
+                    attestation_id: aid,
+                    policy_id: pid,
+                    trace_id,
+                    reason: "Pedersen bit-decomposition sum does not equal shifted commitment"
+                        .to_string(),
+                    error_code: error_codes::ERR_ZKA_WITNESS_INVALID.to_string(),
+                };
+            }
+
+            let ctx = build_fiat_shamir_context(
+                &aid,
+                &expected_params_digest,
+                &compressed_commitment.to_bytes(),
+                &bit_compressed,
+            );
+            for (j, ((comp_j, pt_j), or_proof)) in
+                bit_points.iter().zip(bit_proofs.iter()).enumerate()
+            {
+                let subproof_idx = u32::try_from(j).unwrap_or(u32::MAX);
+                if !verify_cds94_or(&ctx, subproof_idx, *pt_j, comp_j, &[0, 1], or_proof) {
+                    return ZkVerificationResult::Rejected {
+                        attestation_id: aid,
+                        policy_id: pid,
+                        trace_id,
+                        reason: format!("Bit {} failed CDS94 1-of-2 Schnorr verification", j),
+                        error_code: error_codes::ERR_ZKA_WITNESS_INVALID.to_string(),
+                    };
+                }
+            }
+
+            ZkVerificationResult::Verified {
+                attestation_id: aid,
+                policy_id: pid,
+                trace_id,
+                verified_at_ms: now_ms,
+            }
+        }
+        ZkComplianceRelation::AllowlistMembership { allowed_values, .. } => {
+            if variant_tag != ZKRP2_TAG_ALLOWLIST || declared_count != allowed_values.len() {
+                return ZkVerificationResult::Rejected {
+                    attestation_id: aid,
+                    policy_id: pid,
+                    trace_id,
+                    reason: "Allowlist proof tag or branch-count mismatch".to_string(),
+                    error_code: error_codes::ERR_ZKA_POLICY_MISMATCH.to_string(),
+                };
+            }
+            let expected_len = 72usize.saturating_add(declared_count.saturating_mul(64));
+            if wire.len() != expected_len {
+                return ZkVerificationResult::Rejected {
+                    attestation_id: aid,
+                    policy_id: pid,
+                    trace_id,
+                    reason: "Allowlist proof byte length mismatch".to_string(),
+                    error_code: error_codes::ERR_ZKA_INVALID_PROOF.to_string(),
+                };
+            }
+
+            let mut challenges = Vec::with_capacity(declared_count);
+            let mut responses = Vec::with_capacity(declared_count);
+            for idx in 0..declared_count {
+                let offset = 72 + idx * 64;
+                let (Some(e_i), Some(s_i)) = (
+                    decode_canonical_scalar(&wire[offset..offset + 32]),
+                    decode_canonical_scalar(&wire[offset + 32..offset + 64]),
+                ) else {
+                    return ZkVerificationResult::Rejected {
+                        attestation_id: aid,
+                        policy_id: pid,
+                        trace_id,
+                        reason: "Non-canonical Schnorr scalar in allowlist proof".to_string(),
+                        error_code: error_codes::ERR_ZKA_INVALID_PROOF.to_string(),
+                    };
+                };
+                challenges.push(e_i);
+                responses.push(s_i);
+            }
+
+            let ctx = build_fiat_shamir_context(
+                &aid,
+                &expected_params_digest,
+                &compressed_commitment.to_bytes(),
+                &[],
+            );
+            let or_proof = Cds94OrProof {
+                challenges,
+                responses,
+            };
+            if !verify_cds94_or(
+                &ctx,
+                0,
+                commitment_point,
+                &compressed_commitment,
+                allowed_values,
+                &or_proof,
+            ) {
+                return ZkVerificationResult::Rejected {
+                    attestation_id: aid,
+                    policy_id: pid,
+                    trace_id,
+                    reason: "Allowlist proof failed CDS94 1-of-N Schnorr verification".to_string(),
+                    error_code: error_codes::ERR_ZKA_WITNESS_INVALID.to_string(),
+                };
+            }
+
+            ZkVerificationResult::Verified {
+                attestation_id: aid,
+                policy_id: pid,
+                trace_id,
+                verified_at_ms: now_ms,
+            }
+        }
+    }
 }
 
 // ── Invariants module ───────────────────────────────────────────────────────
@@ -979,6 +2099,313 @@ impl AttestationLedger {
             }
         }
         report
+    }
+
+    // ── Authenticated Ristretto255 Zero-Knowledge Operations ────────────────
+
+    /// Generate a real `zka-ristretto255-v2.0` zero-knowledge compliance proof
+    /// over `witness` bound to `policy` and `verifier_params`, and register it
+    /// in the ledger. Emits `FN-ZK-001`.
+    pub fn prove_compliance(
+        &mut self,
+        attestation_id: String,
+        policy: &ZkPolicy,
+        verifier_params: &ZkVerifierParams,
+        witness: &ZkPrivateWitness,
+        now_ms: u64,
+        trace_id: String,
+    ) -> Result<ZkAttestation, String> {
+        if !policy.active {
+            return Err(format!(
+                "{}: policy {} is inactive",
+                error_codes::ERR_ZKA_POLICY_MISMATCH,
+                policy.policy_id
+            ));
+        }
+        if !verifier_params.matches_policy(policy) {
+            return Err(format!(
+                "{}: verifier_params do not bind to policy {}",
+                error_codes::ERR_ZKA_POLICY_MISMATCH,
+                policy.policy_id
+            ));
+        }
+        if self.attestations.contains_key(&attestation_id) {
+            return Err(format!(
+                "{}: attestation {} already exists",
+                error_codes::ERR_ZKA_DUPLICATE,
+                attestation_id
+            ));
+        }
+
+        let (metadata_commitment, proof_bytes_hex) =
+            prove_compliance_wire_bytes(&attestation_id, verifier_params, witness)?;
+
+        if self.seen_commitments.contains_key(&metadata_commitment) {
+            return Err(format!(
+                "{}: commitment {} already submitted",
+                error_codes::ERR_ZKA_DUPLICATE,
+                metadata_commitment
+            ));
+        }
+
+        let attestation = ZkAttestation {
+            attestation_id: attestation_id.clone(),
+            policy_id: policy.policy_id.clone(),
+            payload: ZkProofPayload {
+                schema_version: CRYPTO_SCHEMA_VERSION.to_string(),
+                proof_bytes_hex,
+                metadata_commitment: metadata_commitment.clone(),
+            },
+            outcome: PredicateOutcome::Pass,
+            status: AttestationStatus::Active,
+            generated_at_ms: now_ms,
+            expires_at_ms: now_ms.saturating_add(policy.validity_ms),
+            trace_id: trace_id.clone(),
+        };
+
+        self.seen_commitments
+            .insert(metadata_commitment, attestation_id.clone());
+        self.attestations
+            .insert(attestation_id.clone(), attestation.clone());
+
+        self.record_audit(
+            format!("audit-{}-gen", attestation_id),
+            event_codes::FN_ZK_001.to_string(),
+            Some(attestation_id),
+            Some(policy.policy_id.clone()),
+            trace_id,
+            now_ms,
+            format!(
+                "Ristretto255 ZK compliance proof generated (params={})",
+                verifier_params.params_sha256()
+            ),
+        );
+
+        Ok(attestation)
+    }
+
+    /// Verify a single attestation against `policy` and authenticated `verifier_params`,
+    /// enforcing ledger revocation/expiry lifecycle plus full Ristretto255 cryptographic
+    /// proof verification. Emits `FN-ZK-002` on submission and `FN-ZK-003` / `FN-ZK-004` /
+    /// `FN-ZK-005` on terminal outcome.
+    pub fn verify_authenticated_proof(
+        &mut self,
+        attestation: &ZkAttestation,
+        policy: &ZkPolicy,
+        verifier_params: &ZkVerifierParams,
+        now_ms: u64,
+        trace_id: String,
+    ) -> ZkVerificationResult {
+        let aid = attestation.attestation_id.clone();
+        let pid = policy.policy_id.clone();
+        let audit_seq = self.audit_trail.len();
+
+        self.record_audit(
+            format!("audit-{}-{}-submit", aid, audit_seq),
+            event_codes::FN_ZK_002.to_string(),
+            Some(aid.clone()),
+            Some(pid.clone()),
+            trace_id.clone(),
+            now_ms,
+            "Authenticated proof submitted for cryptographic verification".to_string(),
+        );
+
+        let Some(ledger_record) = self.attestations.get(&aid).cloned() else {
+            self.record_audit(
+                format!("audit-{}-{}-unknown", aid, audit_seq),
+                event_codes::FN_ZK_004.to_string(),
+                Some(aid.clone()),
+                Some(pid.clone()),
+                trace_id.clone(),
+                now_ms,
+                "Attestation not found in ledger".to_string(),
+            );
+            return ZkVerificationResult::Rejected {
+                attestation_id: aid,
+                policy_id: pid,
+                trace_id,
+                reason: "Attestation not found in ledger — may be forged".to_string(),
+                error_code: error_codes::ERR_ZKA_INVALID_PROOF.to_string(),
+            };
+        };
+
+        // Overlay authoritative ledger lifecycle state onto the candidate attestation
+        // so revocations and original timestamps cannot be bypassed by stale caller copies,
+        // while still verifying the caller's submitted cryptographic payload.
+        let mut effective = attestation.clone();
+        effective.status = ledger_record.status;
+        effective.generated_at_ms = ledger_record.generated_at_ms;
+        effective.expires_at_ms = ledger_record.expires_at_ms;
+        if effective.policy_id != ledger_record.policy_id {
+            self.record_audit(
+                format!("audit-{}-{}-pmm-ledger", aid, audit_seq),
+                event_codes::FN_ZK_005.to_string(),
+                Some(aid.clone()),
+                Some(pid.clone()),
+                trace_id.clone(),
+                now_ms,
+                "Caller policy_id diverges from ledger record".to_string(),
+            );
+            return ZkVerificationResult::Rejected {
+                attestation_id: aid,
+                policy_id: pid,
+                trace_id,
+                reason: "Caller policy_id diverges from ledger record".to_string(),
+                error_code: error_codes::ERR_ZKA_POLICY_MISMATCH.to_string(),
+            };
+        }
+
+        let result = verify_compliance_proof_stateless(
+            &effective,
+            policy,
+            verifier_params,
+            now_ms,
+            trace_id.clone(),
+        );
+        match &result {
+            ZkVerificationResult::Verified { .. } => {
+                self.record_audit(
+                    format!("audit-{}-{}-verified", aid, audit_seq),
+                    event_codes::FN_ZK_003.to_string(),
+                    Some(aid),
+                    Some(pid),
+                    trace_id,
+                    now_ms,
+                    format!(
+                        "Ristretto255 ZK proof verified (params={})",
+                        verifier_params.params_sha256()
+                    ),
+                );
+            }
+            ZkVerificationResult::Rejected {
+                reason, error_code, ..
+            } => {
+                let ev = if error_code == error_codes::ERR_ZKA_POLICY_MISMATCH {
+                    event_codes::FN_ZK_005
+                } else {
+                    event_codes::FN_ZK_004
+                };
+                self.record_audit(
+                    format!("audit-{}-{}-rejected", aid, audit_seq),
+                    ev.to_string(),
+                    Some(aid),
+                    Some(pid),
+                    trace_id,
+                    now_ms,
+                    format!("{}: {}", error_code, reason),
+                );
+            }
+        }
+        result
+    }
+
+    /// Verify a batch of attestations against `policy` and authenticated `verifier_params`.
+    /// Capped at [`MAX_BATCH_SIZE`]; emits `FN-ZK-011` and `FN-ZK-012`.
+    pub fn verify_batch_authenticated(
+        &mut self,
+        attestations: &[ZkAttestation],
+        policy: &ZkPolicy,
+        verifier_params: &ZkVerifierParams,
+        now_ms: u64,
+        trace_id: String,
+    ) -> ZkBatchResult {
+        let attestations = if attestations.len() > MAX_BATCH_SIZE {
+            &attestations[..MAX_BATCH_SIZE]
+        } else {
+            attestations
+        };
+
+        self.record_audit(
+            format!("audit-batch-auth-{}-start", trace_id),
+            event_codes::FN_ZK_011.to_string(),
+            None,
+            Some(policy.policy_id.clone()),
+            trace_id.clone(),
+            now_ms,
+            format!(
+                "Authenticated batch verification initiated: {} proofs",
+                attestations.len()
+            ),
+        );
+
+        let mut results = BTreeMap::new();
+        let mut passed = 0usize;
+        let mut failed = 0usize;
+
+        for att in attestations {
+            let sub_trace = format!("{}-{}", trace_id, att.attestation_id);
+            let result =
+                self.verify_authenticated_proof(att, policy, verifier_params, now_ms, sub_trace);
+            if result.is_verified() {
+                passed = passed.saturating_add(1);
+            } else {
+                failed = failed.saturating_add(1);
+            }
+            results.insert(att.attestation_id.clone(), result);
+        }
+
+        self.record_audit(
+            format!("audit-batch-auth-{}-end", trace_id),
+            event_codes::FN_ZK_012.to_string(),
+            None,
+            Some(policy.policy_id.clone()),
+            trace_id.clone(),
+            now_ms,
+            format!(
+                "Authenticated batch verification completed: {}/{} passed",
+                passed,
+                attestations.len()
+            ),
+        );
+
+        ZkBatchResult {
+            total: attestations.len(),
+            passed,
+            failed,
+            results,
+            trace_id,
+            schema_version: CRYPTO_SCHEMA_VERSION.to_string(),
+        }
+    }
+
+    /// Compute structured telemetry over ledger registrations and verification outcomes.
+    #[must_use]
+    pub fn verification_telemetry(&self) -> ZkVerificationTelemetry {
+        let mut telemetry = ZkVerificationTelemetry::default();
+        for att in self.attestations.values() {
+            if att.payload.schema_version == CRYPTO_SCHEMA_VERSION {
+                telemetry.crypto_proofs_generated =
+                    telemetry.crypto_proofs_generated.saturating_add(1);
+            } else {
+                telemetry.legacy_registrations = telemetry.legacy_registrations.saturating_add(1);
+            }
+        }
+        for rec in self.audit_trail.values() {
+            match rec.event_code.as_str() {
+                event_codes::FN_ZK_002 => {
+                    telemetry.verification_submissions =
+                        telemetry.verification_submissions.saturating_add(1);
+                }
+                event_codes::FN_ZK_003 => {
+                    telemetry.crypto_verifications_passed =
+                        telemetry.crypto_verifications_passed.saturating_add(1);
+                }
+                event_codes::FN_ZK_005 => {
+                    telemetry.rejections_policy_mismatch =
+                        telemetry.rejections_policy_mismatch.saturating_add(1);
+                }
+                event_codes::FN_ZK_004 => {
+                    telemetry.rejections_total_fn_zk_004 =
+                        telemetry.rejections_total_fn_zk_004.saturating_add(1);
+                    if rec.detail.starts_with(error_codes::ERR_ZKA_WITNESS_INVALID) {
+                        telemetry.rejections_witness_invalid =
+                            telemetry.rejections_witness_invalid.saturating_add(1);
+                    }
+                }
+                _ => {}
+            }
+        }
+        telemetry
     }
 
     // ── Internal helpers ────────────────────────────────────────────────────
@@ -2569,5 +3996,154 @@ mod tests {
         for record in ledger.audit_trail.values() {
             assert!(invariants::check_audit_trail(record));
         }
+    }
+
+    #[test]
+    fn ristretto_threshold_proof_verifies_and_hides_witness() {
+        let mut ledger = AttestationLedger::new();
+        let policy = test_policy();
+        let params = ZkVerifierParams::for_policy(
+            &policy,
+            "vk-gdpr-epoch1",
+            1,
+            "nonce-threshold-01",
+            ZkComplianceRelation::threshold_at_least(100, 16).unwrap(),
+        )
+        .unwrap();
+        let secret_blinding = [0x42u8; 32];
+        let witness = ZkPrivateWitness::new(142, secret_blinding).unwrap();
+
+        let debug_repr = format!("{witness:?}");
+        assert!(!debug_repr.contains("142"));
+        assert!(!debug_repr.contains("4242"));
+
+        let att = ledger
+            .prove_compliance(
+                "att-zk-thresh-1".to_string(),
+                &policy,
+                &params,
+                &witness,
+                1_000_000,
+                "trace-zk-1".to_string(),
+            )
+            .unwrap();
+        assert_eq!(att.payload.schema_version, CRYPTO_SCHEMA_VERSION);
+
+        let res = ledger.verify_authenticated_proof(
+            &att,
+            &policy,
+            &params,
+            1_000_010,
+            "trace-zk-verify-1".to_string(),
+        );
+        assert!(res.is_verified(), "expected verified, got {res:?}");
+
+        let telemetry = ledger.verification_telemetry();
+        assert_eq!(telemetry.crypto_proofs_generated, 1);
+        assert_eq!(telemetry.crypto_verifications_passed, 1);
+        assert_eq!(telemetry.rejections_witness_invalid, 0);
+    }
+
+    #[test]
+    fn ristretto_whitebox_homomorphic_passing_bit0_forgery_rejected() {
+        let mut ledger = AttestationLedger::new();
+        let policy = test_policy();
+        let params = ZkVerifierParams::for_policy(
+            &policy,
+            "vk-gdpr-epoch1",
+            1,
+            "nonce-forge-01",
+            ZkComplianceRelation::threshold_at_least(100, 8).unwrap(),
+        )
+        .unwrap();
+        // Start from a valid proof for v = 100 (delta = 0), then replace C with 99*G + r*H
+        // and replace C_0 with (-1)*G + r_0*H so sum(2^j * C_j) == C - 100*G STILL HOLDS,
+        // forcing soundness to rely strictly on bit 0's CDS94 1-of-2 Schnorr proof.
+        let valid_witness = ZkPrivateWitness::new(100, [0x11u8; 32]).unwrap();
+        let mut att = ledger
+            .prove_compliance(
+                "att-zk-wb-forge".to_string(),
+                &policy,
+                &params,
+                &valid_witness,
+                1_000_000,
+                "trace-wb".to_string(),
+            )
+            .unwrap();
+
+        let mut wire = hex::decode(&att.payload.proof_bytes_hex).unwrap();
+        let (_, orig_c) = decode_canonical_point(&wire[38..70]).unwrap();
+        let (_, orig_c0) = decode_canonical_point(&wire[72..104]).unwrap();
+        let forged_c = (orig_c - RISTRETTO_BASEPOINT_POINT).compress().to_bytes();
+        let forged_c0 = (orig_c0 - RISTRETTO_BASEPOINT_POINT).compress().to_bytes();
+        wire[38..70].copy_from_slice(&forged_c);
+        wire[72..104].copy_from_slice(&forged_c0);
+        att.payload.metadata_commitment = hex::encode(forged_c);
+        att.payload.proof_bytes_hex = hex::encode(wire);
+
+        let res = ledger.verify_authenticated_proof(
+            &att,
+            &policy,
+            &params,
+            1_000_005,
+            "trace-wb-verify".to_string(),
+        );
+        assert!(
+            matches!(
+                res,
+                ZkVerificationResult::Rejected { ref error_code, .. }
+                if error_code == error_codes::ERR_ZKA_WITNESS_INVALID
+            ),
+            "expected ERR_ZKA_WITNESS_INVALID, got {res:?}"
+        );
+        assert_eq!(
+            ledger.verification_telemetry().rejections_witness_invalid,
+            1
+        );
+    }
+
+    #[test]
+    fn ristretto_noncanonical_scalar_in_proof_is_rejected() {
+        let mut ledger = AttestationLedger::new();
+        let policy = test_policy();
+        let params = ZkVerifierParams::for_policy(
+            &policy,
+            "vk-allow-1",
+            1,
+            "nonce-allow-01",
+            ZkComplianceRelation::allowlist(vec![10, 20, 30]).unwrap(),
+        )
+        .unwrap();
+        let witness = ZkPrivateWitness::new(20, [0x22u8; 32]).unwrap();
+        let mut att = ledger
+            .prove_compliance(
+                "att-zk-noncanon".to_string(),
+                &policy,
+                &params,
+                &witness,
+                1_000_000,
+                "trace-nc".to_string(),
+            )
+            .unwrap();
+        let mut wire = hex::decode(&att.payload.proof_bytes_hex).unwrap();
+        // 0xff..ff >= group order l, so Scalar::from_canonical_bytes must reject it.
+        wire[72..104].fill(0xff);
+        att.payload.proof_bytes_hex = hex::encode(wire);
+
+        let res = verify_compliance_proof_stateless(
+            &att,
+            &policy,
+            &params,
+            1_000_005,
+            "trace-nc-verify".to_string(),
+        );
+        assert!(
+            matches!(
+                res,
+                ZkVerificationResult::Rejected { ref error_code, .. }
+                if error_code == error_codes::ERR_ZKA_INVALID_PROOF
+            ),
+            "expected ERR_ZKA_INVALID_PROOF on non-canonical scalar, got {res:?}"
+        );
     }
 }
