@@ -10,7 +10,7 @@
 //! - Error handling edge cases
 
 use crate::tools::replay_bundle::*;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 use std::path::Path;
 use tempfile::TempDir;
@@ -27,7 +27,7 @@ mod uuid_generation_tests {
             ("INC-001", "2026-01-01T00:00:00.000000Z"),
             ("INC-002", "2026-01-01T00:00:00.000000Z"), // Same timestamp, different ID
             ("INC-001", "2026-01-01T00:00:00.000001Z"), // Same ID, different timestamp
-            ("", "2026-01-01T00:00:00.000000Z"),         // Empty ID
+            ("", "2026-01-01T00:00:00.000000Z"),        // Empty ID
             ("INC-001", "1970-01-01T00:00:00.000000Z"), // Epoch timestamp
             ("INC-001", "9999-12-31T23:59:59.999999Z"), // Far future timestamp
         ];
@@ -47,7 +47,7 @@ mod uuid_generation_tests {
                     generated_uuids.push(bundle.bundle_id);
                     // Verify UUID is version 7
                     assert_eq!(bundle.bundle_id.get_version_num(), 7);
-                },
+                }
                 Err(_) => {
                     // Some cases may fail validation, that's expected
                     continue;
@@ -206,7 +206,7 @@ mod json_canonicalization_tests {
             // Float in nested object
             json!({"outer": {"inner": {"value": 3.14159}}}),
             // Float in deeply nested array
-            json!({"levels": [[[{"float": 2.718}]]])),
+            json!({"levels": [[[{"float": 2.718}]]]}),
             // Special float values
             json!({"nan": f64::NAN}),
             json!({"infinity": f64::INFINITY}),
@@ -233,9 +233,9 @@ mod json_canonicalization_tests {
     fn test_very_large_string_values() {
         // Test very large string values in JSON
         let large_strings = vec![
-            "a".repeat(1_000_000),                    // 1MB string
-            "\0".repeat(100_000),                     // Null bytes
-            "🔥".repeat(100_000),                      // Large Unicode
+            "a".repeat(1_000_000),                                       // 1MB string
+            "\0".repeat(100_000),                                        // Null bytes
+            "🔥".repeat(100_000),                                        // Large Unicode
             format!("{}\n{}", "x".repeat(500_000), "y".repeat(500_000)), // Multi-line
         ];
 
@@ -255,7 +255,7 @@ mod json_canonicalization_tests {
                     if large_string.len() > 1_000_000 {
                         assert!(bundle.manifest.chunk_count > 1);
                     }
-                },
+                }
                 Err(e) => {
                     // May fail due to size limits, which is acceptable
                     println!("Large string test {} failed as expected: {}", i, e);
@@ -273,20 +273,20 @@ mod path_validation_tests {
     #[test]
     fn test_evidence_ref_path_traversal_prevention() {
         let malicious_paths = vec![
-            "../../../etc/passwd",        // Classic path traversal
+            "../../../etc/passwd",           // Classic path traversal
             "..\\..\\..\\windows\\system32", // Windows path traversal
-            "/etc/passwd",                 // Absolute path
-            "C:\\Windows\\System32",       // Windows absolute path
-            "./../../sensitive",          // Mixed relative/traversal
-            "refs/../../../secret",       // Legitimate prefix with traversal
-            "refs/logs/../../config",     // Nested traversal
-            "",                           // Empty path
-            " ",                          // Whitespace-only path
-            "refs/logs/../..",            // Double traversal
-            "refs/logs/./../../data",     // Mixed current/parent dirs
-            "refs\\/logs\\/../data",      // Mixed separators
-            "\0refs/logs/data.json",      // Null byte injection
-            "refs/logs/data.json\0.exe",  // Null byte suffix
+            "/etc/passwd",                   // Absolute path
+            "C:\\Windows\\System32",         // Windows absolute path
+            "./../../sensitive",             // Mixed relative/traversal
+            "refs/../../../secret",          // Legitimate prefix with traversal
+            "refs/logs/../../config",        // Nested traversal
+            "",                              // Empty path
+            " ",                             // Whitespace-only path
+            "refs/logs/../..",               // Double traversal
+            "refs/logs/./../../data",        // Mixed current/parent dirs
+            "refs\\/logs\\/../data",         // Mixed separators
+            "\0refs/logs/data.json",         // Null byte injection
+            "refs/logs/data.json\0.exe",     // Null byte suffix
         ];
 
         for malicious_path in malicious_paths {
@@ -435,7 +435,7 @@ mod chunking_overflow_tests {
                 for (i, event) in bundle.timeline.iter().enumerate() {
                     assert_eq!(event.sequence_number, (i + 1) as u64);
                 }
-            },
+            }
             Err(e) => {
                 // May fail due to resource limits, which is acceptable
                 println!("Large event test failed as expected: {}", e);
@@ -450,7 +450,8 @@ mod chunking_overflow_tests {
         let medium_payload = "m".repeat(2_000_000); // 2MB each
         let mut events = Vec::new();
 
-        for i in 0..100 { // Should create many chunks
+        for i in 0..100 {
+            // Should create many chunks
             events.push(RawEvent::new(
                 &format!("2026-01-01T00:00:00.{:06}Z", i),
                 EventType::StateChange,
@@ -500,13 +501,19 @@ mod timestamp_edge_tests {
 
                     // Timestamp should be normalized to UTC
                     assert!(bundle.timeline[0].timestamp.ends_with("Z"));
-                },
+                }
                 Err(ReplayBundleError::TimestampParse { .. }) => {
                     // Some extreme timestamps may fail parsing, which is acceptable
-                    println!("Timestamp {} ({}) failed parsing as expected", timestamp, description);
-                },
+                    println!(
+                        "Timestamp {} ({}) failed parsing as expected",
+                        timestamp, description
+                    );
+                }
                 Err(e) => {
-                    panic!("Unexpected error for timestamp {} ({}): {}", timestamp, description, e);
+                    panic!(
+                        "Unexpected error for timestamp {} ({}): {}",
+                        timestamp, description, e
+                    );
                 }
             }
         }
@@ -515,16 +522,16 @@ mod timestamp_edge_tests {
     #[test]
     fn test_invalid_timestamp_formats() {
         let invalid_timestamps = vec![
-            "",                           // Empty
-            "not-a-timestamp",           // Plain text
-            "2026-01-01",               // Date only
-            "2026-01-01T25:00:00Z",     // Invalid hour
-            "2026-01-01T12:60:00Z",     // Invalid minute
-            "2026-01-01T12:00:60Z",     // Invalid second
-            "2026-13-01T12:00:00Z",     // Invalid month
-            "2026-01-32T12:00:00Z",     // Invalid day
-            "2026-01-01T12:00:00",      // Missing timezone
-            "2026-01-01T12:00:00.Z",    // Malformed microseconds
+            "",                             // Empty
+            "not-a-timestamp",              // Plain text
+            "2026-01-01",                   // Date only
+            "2026-01-01T25:00:00Z",         // Invalid hour
+            "2026-01-01T12:60:00Z",         // Invalid minute
+            "2026-01-01T12:00:60Z",         // Invalid second
+            "2026-13-01T12:00:00Z",         // Invalid month
+            "2026-01-32T12:00:00Z",         // Invalid day
+            "2026-01-01T12:00:00",          // Missing timezone
+            "2026-01-01T12:00:00.Z",        // Malformed microseconds
             "2026-01-01T12:00:00.1234567Z", // Too many microseconds
         ];
 
@@ -690,12 +697,24 @@ mod error_handling_edge_tests {
 
         // Test empty required fields
         let field_tests = vec![
-            ("incident_id", |p: &mut IncidentEvidencePackage| p.incident_id = "".to_string()),
-            ("trace_id", |p: &mut IncidentEvidencePackage| p.trace_id = "".to_string()),
-            ("incident_type", |p: &mut IncidentEvidencePackage| p.incident_type = "".to_string()),
-            ("detector", |p: &mut IncidentEvidencePackage| p.detector = "".to_string()),
-            ("policy_version", |p: &mut IncidentEvidencePackage| p.policy_version = "".to_string()),
-            ("metadata.title", |p: &mut IncidentEvidencePackage| p.metadata.title = "".to_string()),
+            ("incident_id", |p: &mut IncidentEvidencePackage| {
+                p.incident_id = "".to_string()
+            }),
+            ("trace_id", |p: &mut IncidentEvidencePackage| {
+                p.trace_id = "".to_string()
+            }),
+            ("incident_type", |p: &mut IncidentEvidencePackage| {
+                p.incident_type = "".to_string()
+            }),
+            ("detector", |p: &mut IncidentEvidencePackage| {
+                p.detector = "".to_string()
+            }),
+            ("policy_version", |p: &mut IncidentEvidencePackage| {
+                p.policy_version = "".to_string()
+            }),
+            ("metadata.title", |p: &mut IncidentEvidencePackage| {
+                p.metadata.title = "".to_string()
+            }),
         ];
 
         for (field_name, modify_fn) in field_tests {
@@ -863,12 +882,14 @@ mod error_handling_edge_tests {
                 "2026-01-01T00:00:00.000002Z",
                 EventType::PolicyEval,
                 json!({"order": 2}),
-            ).with_causal_parent(3), // Invalid: refers to nonexistent event
+            )
+            .with_causal_parent(3), // Invalid: refers to nonexistent event
             RawEvent::new(
                 "2026-01-01T00:00:00.000003Z",
                 EventType::OperatorAction,
                 json!({"order": 3}),
-            ).with_causal_parent(3), // Invalid: self-reference
+            )
+            .with_causal_parent(3), // Invalid: self-reference
         ];
 
         // Should handle invalid causal parents gracefully

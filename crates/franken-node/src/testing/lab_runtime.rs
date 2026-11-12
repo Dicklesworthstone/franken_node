@@ -26,6 +26,7 @@ use crate::capacity_defaults::aliases::MAX_EVENTS;
 use crate::push_bounded;
 const MAX_REORDER_BUFFERS: usize = 4096;
 const MAX_VIRTUAL_LINKS: usize = 4096;
+const MAX_DPOR_INTERLEAVINGS: u64 = 100_000;
 
 /// Lab runtime initialized with seed and config.
 pub const EVT_LAB_INITIALIZED: &str = "FN-LB-001";
@@ -901,6 +902,13 @@ impl LabRuntime {
             return rt.run_scenario(scenario);
         }
 
+        if config.max_interleavings > MAX_DPOR_INTERLEAVINGS {
+            return Err(LabError::BudgetExceeded {
+                explored: 0,
+                budget: config.max_interleavings,
+            });
+        }
+
         let mut all_events = Vec::new();
         let mut bugs_found: u64 = 0;
         let mut last_repro: Option<String> = None;
@@ -934,7 +942,9 @@ impl LabRuntime {
                 bugs_found += 1;
                 last_repro = result.repro_bundle.clone();
             }
-            all_events.extend(result.events);
+            for event in result.events {
+                push_bounded(&mut all_events, event, MAX_EVENTS);
+            }
         }
 
         Ok(ScenarioResult {
@@ -4798,1756 +4808,1773 @@ mod tests {
             assert_eq!(large_capacity.len(), 10);
             assert_eq!(large_capacity, (0..10).collect::<Vec<_>>());
         }
+    }
 
-        #[test]
-        fn test_lab_runtime_invalid_seed_configurations() {
-            // Test zero seed (should fail)
-            let zero_config = LabConfig {
-                seed: 0,
+    #[test]
+    fn test_lab_runtime_invalid_seed_configurations() {
+        // Test zero seed (should fail)
+        let zero_config = LabConfig {
+            seed: 0,
+            max_interleavings: 1000,
+            max_ticks: 10_000,
+            enable_dpor: false,
+        };
+
+        let result = LabRuntime::new(zero_config);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("ERR_LB_NO_SEED"));
+
+        // Test boundary seed values
+        let boundary_seeds = vec![1, u64::MAX, u64::MAX / 2];
+        for seed in boundary_seeds {
+            let config = LabConfig {
+                seed,
                 max_interleavings: 1000,
                 max_ticks: 10_000,
                 enable_dpor: false,
             };
 
-            let result = LabRuntime::new(zero_config);
-            assert!(result.is_err());
-            let err = result.unwrap_err();
-            assert!(err.to_string().contains("ERR_LB_NO_SEED"));
+            let result = LabRuntime::new(config);
+            assert!(result.is_ok());
+            let runtime = result.unwrap();
+            assert_eq!(runtime.now(), 0);
+        }
+    }
 
-            // Test boundary seed values
-            let boundary_seeds = vec![1, u64::MAX, u64::MAX / 2];
-            for seed in boundary_seeds {
-                let config = LabConfig {
-                    seed,
-                    max_interleavings: 1000,
-                    max_ticks: 10_000,
-                    enable_dpor: false,
-                };
+    #[test]
+    fn test_unicode_injection_in_scenario_identifiers() {
+        let config = LabConfig {
+            seed: 42,
+            max_interleavings: 100,
+            max_ticks: 10_000,
+            enable_dpor: false,
+        };
 
-                let result = LabRuntime::new(config);
-                assert!(result.is_ok());
-                let runtime = result.unwrap();
-                assert_eq!(runtime.now(), 0);
-            }
+        let mut runtime = LabRuntime::new(config).unwrap();
+
+        // Test various Unicode injection attacks in scenario IDs
+        let malicious_scenario_ids = vec![
+            "normal\u{202e}evil\u{202c}scenario", // BiDi override
+            "scenario\u{200b}\u{feff}hidden",     // Zero-width characters
+            "scenario\nnewline",                  // Newline injection
+            "scenario\ttab",                      // Tab injection
+            "scenario\x00null",                   // Null byte injection
+            "../../../etc/passwd",                // Path traversal
+            "scenario\"quote",                    // Quote injection
+        ];
+
+        // Drive each malicious identifier through real runtime channels that
+        // store and emit it (timer labels + link endpoint names). The runtime
+        // must handle the hostile Unicode without panicking or corrupting state.
+        for (i, scenario_id) in malicious_scenario_ids.iter().enumerate() {
+            let timer_result = runtime.schedule_timer(100 + i as u64, *scenario_id);
+            assert!(timer_result.is_ok());
+
+            let link_result = VirtualLink::new(*scenario_id, "receiver", FaultProfile::default())
+                .and_then(|link| runtime.add_link(link));
+            assert!(link_result.is_ok());
         }
 
-        #[test]
-        fn test_unicode_injection_in_scenario_identifiers() {
-            let config = LabConfig {
-                seed: 42,
-                max_interleavings: 100,
-                max_ticks: 10_000,
-                enable_dpor: false,
-            };
+        // Identifiers must be recorded faithfully in the event log.
+        let recorded = runtime.events().iter().any(|e| {
+            malicious_scenario_ids
+                .iter()
+                .any(|id| e.payload.contains(*id))
+        });
+        assert!(
+            recorded,
+            "Malicious identifiers should be recorded without corruption"
+        );
+    }
 
-            let mut runtime = LabRuntime::new(config).unwrap();
+    #[test]
+    fn test_timer_overflow_and_exhaustion() {
+        let config = LabConfig {
+            seed: 123,
+            max_interleavings: 500,
+            max_ticks: 10_000,
+            enable_dpor: false,
+        };
 
-            // Test various Unicode injection attacks in scenario IDs
-            let malicious_scenario_ids = vec![
-                "normal\u{202e}evil\u{202c}scenario", // BiDi override
-                "scenario\u{200b}\u{feff}hidden",     // Zero-width characters
-                "scenario\nnewline",                  // Newline injection
-                "scenario\ttab",                      // Tab injection
-                "scenario\x00null",                   // Null byte injection
-                "../../../etc/passwd",                // Path traversal
-                "scenario\"quote",                    // Quote injection
-            ];
+        let mut runtime = LabRuntime::new(config).unwrap();
 
-            // Drive each malicious identifier through real runtime channels that
-            // store and emit it (timer labels + link endpoint names). The runtime
-            // must handle the hostile Unicode without panicking or corrupting state.
-            for (i, scenario_id) in malicious_scenario_ids.iter().enumerate() {
-                let timer_result = runtime.schedule_timer(100 + i as u64, *scenario_id);
-                assert!(timer_result.is_ok());
+        // Test near-overflow timer tick values
+        let overflow_ticks = vec![
+            u64::MAX - 1,
+            u64::MAX,
+            u64::MAX / 2,
+            (1u64 << 63) - 1, // Just below signed overflow
+        ];
 
-                let link_result =
-                    VirtualLink::new(*scenario_id, "receiver", FaultProfile::default())
-                        .and_then(|link| runtime.add_link(link));
-                assert!(link_result.is_ok());
-            }
+        for (i, tick) in overflow_ticks.iter().enumerate() {
+            let timer_id = format!("timer-{}", i);
+            let result = runtime.schedule_timer(*tick, &timer_id);
 
-            // Identifiers must be recorded faithfully in the event log.
-            let recorded = runtime.events().iter().any(|e| {
-                malicious_scenario_ids
-                    .iter()
-                    .any(|id| e.payload.contains(*id))
-            });
-            assert!(
-                recorded,
-                "Malicious identifiers should be recorded without corruption"
-            );
+            // Should handle large tick values without overflow
+            assert!(result.is_ok());
         }
 
-        #[test]
-        fn test_timer_overflow_and_exhaustion() {
-            let config = LabConfig {
-                seed: 123,
-                max_interleavings: 500,
-                max_ticks: 10_000,
-                enable_dpor: false,
-            };
-
-            let mut runtime = LabRuntime::new(config).unwrap();
-
-            // Test near-overflow timer tick values
-            let overflow_ticks = vec![
-                u64::MAX - 1,
-                u64::MAX,
-                u64::MAX / 2,
-                (1u64 << 63) - 1, // Just below signed overflow
-            ];
-
-            for (i, tick) in overflow_ticks.iter().enumerate() {
-                let timer_id = format!("timer-{}", i);
-                let result = runtime.schedule_timer(*tick, &timer_id);
-
-                // Should handle large tick values without overflow
-                assert!(result.is_ok());
-            }
-
-            // Test timer ID exhaustion by creating many timers
-            for i in 0..10000 {
-                let timer_id = format!("stress-timer-{}", i);
-                let result = runtime.schedule_timer(1000 + i, &timer_id);
-
-                if result.is_err() {
-                    // Should fail gracefully when IDs are exhausted
-                    let err = result.unwrap_err();
-                    assert!(err.to_string().contains("ERR_LB_TIMER_ID_EXHAUSTED"));
-                    break;
-                }
-            }
-        }
-
-        #[test]
-        fn test_clock_tick_arithmetic_overflow_protection() {
-            let config = LabConfig {
-                seed: 456,
-                max_interleavings: 100,
-                max_ticks: 10_000,
-                enable_dpor: false,
-            };
-
-            let mut runtime = LabRuntime::new(config).unwrap();
-
-            // Test advancing clock near overflow boundaries
-            let _ = runtime.advance_clock(u64::MAX - 100);
-            assert_eq!(runtime.now(), u64::MAX - 100);
-
-            // Test incrementing near overflow (should saturate or error)
-            let result = runtime.advance_clock(150);
+        // Test timer ID exhaustion by creating many timers
+        for i in 0..10000 {
+            let timer_id = format!("stress-timer-{}", i);
+            let result = runtime.schedule_timer(1000 + i, &timer_id);
 
             if result.is_err() {
-                // Should fail gracefully with overflow error
+                // Should fail gracefully when IDs are exhausted
                 let err = result.unwrap_err();
-                assert!(err.to_string().contains("ERR_LB_TICK_OVERFLOW"));
-            } else {
-                // If it succeeds, should not overflow past u64::MAX
-                assert!(runtime.now() <= u64::MAX);
+                assert!(err.to_string().contains("ERR_LB_TIMER_ID_EXHAUSTED"));
+                break;
+            }
+        }
+    }
+
+    #[test]
+    fn test_clock_tick_arithmetic_overflow_protection() {
+        let config = LabConfig {
+            seed: 456,
+            max_interleavings: 100,
+            max_ticks: 10_000,
+            enable_dpor: false,
+        };
+
+        let mut runtime = LabRuntime::new(config).unwrap();
+
+        // Test advancing clock near overflow boundaries
+        let _ = runtime.advance_clock(u64::MAX - 100);
+        assert_eq!(runtime.now(), u64::MAX - 100);
+
+        // Test incrementing near overflow (should saturate or error)
+        let result = runtime.advance_clock(150);
+
+        if result.is_err() {
+            // Should fail gracefully with overflow error
+            let err = result.unwrap_err();
+            assert!(err.to_string().contains("ERR_LB_TICK_OVERFLOW"));
+        } else {
+            // If it succeeds, should not overflow past u64::MAX
+            assert!(runtime.now() <= u64::MAX);
+        }
+    }
+
+    #[test]
+    fn test_massive_virtual_link_memory_exhaustion() {
+        let config = LabConfig {
+            seed: 789,
+            max_interleavings: 100,
+            max_ticks: 10_000,
+            enable_dpor: false,
+        };
+
+        let mut runtime = LabRuntime::new(config).unwrap();
+
+        // Create maximum number of virtual links
+        for i in 0..MAX_VIRTUAL_LINKS {
+            let _link_id = format!("massive-link-{:04}", i);
+            let from_node = format!("node-{}", i % 100);
+            let to_node = format!("node-{}", (i + 1) % 100);
+
+            // Create massive fault profile data
+            let fault_profile = FaultProfile {
+                drop_pct: 0.1,
+                reorder_depth: 1000,
+                corrupt_probability: 0.01,
+                delay_ticks: i as u64,
+            };
+
+            let result = VirtualLink::new(&from_node, &to_node, fault_profile)
+                .and_then(|link| runtime.add_link(link));
+
+            if result.is_err() {
+                // Should fail gracefully when capacity exceeded
+                let err = result.unwrap_err();
+                assert!(err.to_string().contains("ERR_LB_LINK_CAPACITY_EXCEEDED"));
+                break;
             }
         }
 
-        #[test]
-        fn test_massive_virtual_link_memory_exhaustion() {
-            let config = LabConfig {
-                seed: 789,
-                max_interleavings: 100,
-                max_ticks: 10_000,
-                enable_dpor: false,
+        // Runtime should remain functional after stress.
+        assert!(runtime.link_count() > 0);
+    }
+
+    #[test]
+    fn test_fault_probability_floating_point_edge_cases() {
+        let config = LabConfig {
+            seed: 999,
+            max_interleavings: 50,
+            max_ticks: 10_000,
+            enable_dpor: false,
+        };
+
+        let mut runtime = LabRuntime::new(config).unwrap();
+
+        // Test invalid fault probability values
+        let invalid_probabilities = vec![
+            -0.1,              // Negative
+            1.1,               // Above 1.0
+            f64::NAN,          // NaN
+            f64::INFINITY,     // Positive infinity
+            f64::NEG_INFINITY, // Negative infinity
+            2.0,               // Well above 1.0
+        ];
+
+        for (i, prob) in invalid_probabilities.iter().enumerate() {
+            let _link_id = format!("fault-link-{}", i);
+            let fault_profile = FaultProfile {
+                drop_pct: *prob,
+                reorder_depth: 0,
+                corrupt_probability: 0.0,
+                delay_ticks: 0,
             };
 
-            let mut runtime = LabRuntime::new(config).unwrap();
+            let result = VirtualLink::new("sender", "receiver", fault_profile)
+                .and_then(|link| runtime.add_link(link));
 
-            // Create maximum number of virtual links
-            for i in 0..MAX_VIRTUAL_LINKS {
-                let _link_id = format!("massive-link-{:04}", i);
-                let from_node = format!("node-{}", i % 100);
-                let to_node = format!("node-{}", (i + 1) % 100);
+            if prob.is_nan() || prob.is_infinite() || *prob < 0.0 || *prob > 1.0 {
+                // Should reject invalid probabilities
+                assert!(result.is_err());
+                if let Err(e) = result {
+                    assert!(e.to_string().contains("ERR_LB_FAULT_RANGE"));
+                }
+            }
+        }
 
-                // Create massive fault profile data
-                let fault_profile = FaultProfile {
-                    drop_pct: 0.1,
-                    reorder_depth: 1000,
-                    corrupt_probability: 0.01,
-                    delay_ticks: i as u64,
-                };
+        // Test valid edge case probabilities
+        let valid_edge_probabilities = vec![
+            0.0,                // Exact zero
+            1.0,                // Exact one
+            f64::EPSILON,       // Smallest positive
+            1.0 - f64::EPSILON, // Just below 1.0
+            0.3333333333333333, // Repeating decimal
+        ];
 
-                let result = VirtualLink::new(&from_node, &to_node, fault_profile)
-                    .and_then(|link| runtime.add_link(link));
+        for (i, prob) in valid_edge_probabilities.iter().enumerate() {
+            let _link_id = format!("valid-fault-{}", i);
+            let fault_profile = FaultProfile {
+                drop_pct: *prob,
+                reorder_depth: 10,
+                corrupt_probability: *prob / 10.0,
+                delay_ticks: i as u64,
+            };
 
-                if result.is_err() {
-                    // Should fail gracefully when capacity exceeded
-                    let err = result.unwrap_err();
-                    assert!(err.to_string().contains("ERR_LB_LINK_CAPACITY_EXCEEDED"));
+            let result = VirtualLink::new("precise-sender", "precise-receiver", fault_profile)
+                .and_then(|link| runtime.add_link(link));
+            assert!(result.is_ok());
+        }
+    }
+
+    #[test]
+    fn test_repro_bundle_corruption_resilience() {
+        let config = LabConfig {
+            seed: 111,
+            max_interleavings: 200,
+            max_ticks: 10_000,
+            enable_dpor: false,
+        };
+
+        let mut runtime = LabRuntime::new(config).unwrap();
+
+        // Create some test state
+        runtime.schedule_timer(100, "test-timer").unwrap();
+        let _ = runtime.advance_clock(50);
+
+        // Export repro bundle (passing state) to confirm export works.
+        let _bundle = runtime.export_repro_bundle(true);
+
+        // Test corrupted JSON variations
+        let corrupted_bundles = vec![
+            r#"{"seed": 111, "events": [malformed]"#, // Malformed JSON
+            r#"{"seed": "not-a-number"}"#,            // Wrong type
+            r#"{"seed": 111, "events": null}"#,       // Null events
+            r#"{}"#,                                  // Empty object
+            r#"null"#,                                // Null root
+            r#"{"seed": 111, "events": [], "schema": "invalid-version"}"#, // Bad schema
+        ];
+
+        for corrupt_json in corrupted_bundles {
+            let deserialize_result = serde_json::from_str::<ReproBundle>(corrupt_json);
+
+            if let Ok(parsed_bundle) = deserialize_result {
+                // If parsing succeeds, replay should validate and reject
+                let replay_result = LabRuntime::replay_bundle(&parsed_bundle, &|_rt| Ok(true));
+                assert!(replay_result.is_err());
+                if let Err(e) = replay_result {
+                    assert!(e.to_string().contains("ERR_LB_BUNDLE_VALIDATION"));
+                }
+            } else {
+                // Parsing failure is also acceptable for malformed JSON
+                // Should fail gracefully without panic
+            }
+        }
+    }
+
+    #[test]
+    fn test_dpor_budget_exhaustion_boundary() {
+        // Test DPOR interleaving budget limits
+        let small_budget_config = LabConfig {
+            seed: 222,
+            max_interleavings: 5, // Very small budget
+            max_ticks: 10_000,
+            enable_dpor: false,
+        };
+
+        let mut runtime = LabRuntime::new(small_budget_config).unwrap();
+
+        // Create many virtual links to trigger DPOR exploration
+        for i in 0..20 {
+            let _link_id = format!("dpor-link-{}", i);
+            let fault_profile = FaultProfile {
+                drop_pct: 0.5, // High fault rate to trigger exploration
+                reorder_depth: 5,
+                corrupt_probability: 0.1,
+                delay_ticks: i as u64,
+            };
+
+            let result = VirtualLink::new("sender", "receiver", fault_profile)
+                .and_then(|link| runtime.add_link(link));
+
+            if result.is_err() {
+                // Should fail gracefully when capacity is exceeded
+                let err = result.unwrap_err();
+                assert!(err.to_string().contains("ERR_LB_LINK_CAPACITY_EXCEEDED"));
+                break;
+            }
+        }
+
+        // Runtime should remain functional despite budget exhaustion
+        assert!(runtime.link_count() > 0);
+    }
+
+    #[test]
+    fn test_concurrent_lab_runtime_access_safety() {
+        use std::sync::{Arc, Barrier, Mutex};
+        use std::thread;
+
+        let config = LabConfig {
+            seed: 333,
+            max_interleavings: 1000,
+            max_ticks: 10_000,
+            enable_dpor: false,
+        };
+
+        let runtime = Arc::new(Mutex::new(LabRuntime::new(config).unwrap()));
+        let barrier = Arc::new(Barrier::new(4));
+
+        let handles: Vec<_> = (0..4)
+            .map(|i| {
+                let runtime = Arc::clone(&runtime);
+                let barrier = Arc::clone(&barrier);
+
+                thread::spawn(move || {
+                    barrier.wait();
+
+                    // Each thread performs different operations
+                    let mut rt =
+                        try_lock(&runtime, "lab runtime concurrent access worker operation")
+                            .expect("lab runtime mutex should lock for worker operation");
+
+                    match i {
+                        0 => {
+                            // Thread 0: scenario-style runtime activity
+                            let scenario_id = format!("thread-{}-scenario", i);
+                            let _ = rt.schedule_timer(1, &scenario_id);
+                            let _ = rt.now();
+                        }
+                        1 => {
+                            // Thread 1: timer operations
+                            for j in 0..10 {
+                                let timer_id = format!("thread-{}-timer-{}", i, j);
+                                let _ = rt.schedule_timer(100 + j, &timer_id);
+                            }
+                        }
+                        2 => {
+                            // Thread 2: clock advancement
+                            let _ = rt.advance_clock(10);
+                        }
+                        3 => {
+                            // Thread 3: virtual link creation
+                            let _link_id = format!("thread-{}-link", i);
+                            let fault_profile = FaultProfile {
+                                drop_pct: 0.1,
+                                reorder_depth: 1,
+                                corrupt_probability: 0.0,
+                                delay_ticks: 0,
+                            };
+                            let _ = VirtualLink::new(
+                                "concurrent-sender",
+                                "concurrent-receiver",
+                                fault_profile,
+                            )
+                            .and_then(|link| rt.add_link(link));
+                        }
+                        _ => {}
+                    }
+                })
+            })
+            .collect();
+
+        // Wait for all threads to complete
+        for handle in handles {
+            handle.join().expect("thread should complete");
+        }
+
+        // Verify runtime remains in consistent state
+        let rt = try_lock(&runtime, "lab runtime concurrent access final verification")
+            .expect("lab runtime mutex should lock for final verification");
+        assert!(rt.now() >= 0);
+    }
+
+    #[test]
+    fn test_edge_case_empty_and_massive_configurations() {
+        // Test empty configuration
+        let empty_config = LabConfig {
+            seed: 444,
+            max_interleavings: 0, // Zero budget
+            max_ticks: 10_000,
+            enable_dpor: false,
+        };
+
+        let empty_runtime = LabRuntime::new(empty_config);
+        if empty_runtime.is_ok() {
+            let mut rt = empty_runtime.unwrap();
+            // Should handle zero budget gracefully
+            let start_result = rt.schedule_timer(1, "empty-test");
+            assert!(start_result.is_ok());
+        }
+
+        // Test massive configuration
+        let massive_config = LabConfig {
+            seed: 555,
+            max_interleavings: u64::MAX, // Maximum budget
+            max_ticks: 10_000,
+            enable_dpor: false,
+        };
+
+        let massive_runtime = LabRuntime::new(massive_config);
+        assert!(massive_runtime.is_ok());
+        let mut rt = massive_runtime.unwrap();
+
+        // Should handle massive budget without issues
+        let start_result = rt.schedule_timer(1, "massive-test");
+        assert!(start_result.is_ok());
+    }
+
+    #[test]
+    fn negative_test_clock_overflow_and_time_manipulation_attacks() {
+        // Test test clock overflow and time manipulation attack resistance
+        let config = LabConfig {
+            seed: 888,
+            max_interleavings: 1000,
+            max_ticks: 10_000,
+            enable_dpor: false,
+        };
+
+        let mut runtime = LabRuntime::new(config).expect("runtime should create");
+
+        // Test extreme time advancement scenarios
+        let time_attack_scenarios = [
+            1,               // Normal advancement
+            1000,            // Large jump
+            u64::MAX / 4,    // Very large jump
+            u64::MAX / 2,    // Half of maximum
+            u64::MAX - 1000, // Near overflow
+            u64::MAX - 1,    // Just before overflow
+            u64::MAX,        // Maximum value
+        ];
+
+        for (test_idx, advance_delta) in time_attack_scenarios.into_iter().enumerate() {
+            let current_tick = runtime.now();
+
+            // Test advancement with potential overflow
+            let advance_result = runtime.advance_clock(advance_delta);
+
+            match advance_result {
+                Ok(_) => {
+                    // Advancement succeeded
+                    let new_tick = runtime.now();
+
+                    // Verify no overflow occurred
+                    assert!(
+                        new_tick >= current_tick,
+                        "Clock should not go backwards: {} -> {}",
+                        current_tick,
+                        new_tick
+                    );
+
+                    // Should be a reasonable advancement
+                    let expected_new_tick = current_tick.saturating_add(advance_delta);
+                    assert!(
+                        new_tick <= expected_new_tick,
+                        "Clock advanced too far: expected <= {}, got {}",
+                        expected_new_tick,
+                        new_tick
+                    );
+
+                    // Test timer scheduling at extreme times
+                    let timer_id = format!("extreme_timer_{}", test_idx);
+                    let timer_result = runtime.schedule_timer(10, &timer_id);
+
+                    match timer_result {
+                        Ok(_) => {
+                            // Timer scheduled at extreme time
+                            let _ = runtime.advance_clock(11);
+
+                            // Verify timer behavior at extreme times for this iteration's timer
+                            let events = runtime.events();
+                            let timer_events: Vec<_> = events
+                                .iter()
+                                .filter(|e| {
+                                    e.event_code == EVT_TIMER_FIRED && e.payload.contains(&timer_id)
+                                })
+                                .collect();
+
+                            // Should handle timers correctly even at extreme times
+                            for event in timer_events {
+                                assert!(event.tick >= current_tick);
+                                assert!(event.tick <= runtime.now());
+                            }
+                        }
+                        Err(err) => {
+                            // Timer scheduling may fail at extreme times
+                            match err {
+                                LabError::TimerIdExhausted => {
+                                    // Expected at extreme conditions
+                                }
+                                LabError::TickOverflow { .. } => {
+                                    // Expected for overflow scenarios
+                                }
+                                _ => {
+                                    // Other errors acceptable for extreme times
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(err) => {
+                    // Large advancements may be rejected
+                    match err {
+                        LabError::TickOverflow { current, delta } => {
+                            assert_eq!(current, current_tick);
+                            assert_eq!(delta, advance_delta);
+                            // Should detect overflow correctly
+                            assert!(current.checked_add(delta).is_none());
+                        }
+                        _ => {
+                            // Other errors may occur for extreme advancements
+                        }
+                    }
+                }
+            }
+        }
+
+        // Test rapid time advancement attacks
+        for rapid_idx in 0..1000 {
+            let small_advance = rapid_idx % 100 + 1;
+            let result = runtime.advance_clock(small_advance);
+
+            match result {
+                Ok(_) => {
+                    // Should handle rapid advancements
+                }
+                Err(_) => {
+                    // May hit limits under rapid advancement
                     break;
                 }
             }
-
-            // Runtime should remain functional after stress.
-            assert!(runtime.link_count() > 0);
         }
 
-        #[test]
-        fn test_fault_probability_floating_point_edge_cases() {
-            let config = LabConfig {
-                seed: 999,
-                max_interleavings: 50,
-                max_ticks: 10_000,
-                enable_dpor: false,
+        // Test timer ordering under extreme conditions
+        let timer_ids: Vec<String> = (0..100).map(|i| format!("order_timer_{}", i)).collect();
+        let mut timer_fire_times = Vec::new();
+
+        for (i, timer_id) in timer_ids.iter().enumerate() {
+            let fire_time = (i * 10) as u64 + 100;
+            timer_fire_times.push(fire_time);
+
+            let result = runtime.schedule_timer(fire_time, timer_id);
+            if result.is_err() {
+                break; // Hit timer capacity limits
+            }
+        }
+
+        // Advance time to fire all timers
+        if !timer_fire_times.is_empty() {
+            let max_fire_time = *timer_fire_times.iter().max().unwrap();
+            let _ = runtime.advance_clock(max_fire_time + 100);
+
+            // Verify timer ordering invariant
+            let events = runtime.events();
+            let timer_events: Vec<_> = events
+                .iter()
+                .filter(|e| e.event_code == EVT_TIMER_FIRED)
+                .collect();
+
+            let mut prev_tick = 0;
+            for event in timer_events {
+                assert!(
+                    event.tick >= prev_tick,
+                    "Timers should fire in order: {} < {}",
+                    event.tick,
+                    prev_tick
+                );
+                prev_tick = event.tick;
+            }
+        }
+
+        // Final time consistency check
+        let final_tick = runtime.now();
+        assert!(final_tick < u64::MAX, "Final tick should not overflow");
+
+        // All events should have reasonable timestamps
+        let events = runtime.events();
+        for event in events {
+            assert!(
+                event.tick <= final_tick,
+                "Event timestamp {} should not exceed current time {}",
+                event.tick,
+                final_tick
+            );
+        }
+    }
+
+    #[test]
+    fn negative_fault_profile_floating_point_and_probability_attacks() {
+        // Test fault profile floating-point and probability attack resistance
+        let config = LabConfig {
+            seed: 999,
+            max_interleavings: 1000,
+            max_ticks: 10_000,
+            enable_dpor: false,
+        };
+
+        let mut runtime = LabRuntime::new(config).expect("runtime should create");
+
+        // Test extreme and malicious probability values
+        let malicious_probabilities = [
+            f64::NAN,                           // Not a number
+            f64::INFINITY,                      // Positive infinity
+            f64::NEG_INFINITY,                  // Negative infinity
+            -0.0,                               // Negative zero
+            -1.0,                               // Invalid negative
+            2.0,                                // Invalid > 1.0
+            f64::MIN,                           // Smallest finite value
+            f64::MAX,                           // Largest finite value
+            f64::EPSILON,                       // Machine epsilon
+            1.0 + f64::EPSILON,                 // Just above 1.0
+            -f64::EPSILON,                      // Just below 0.0
+            0.5000000000000001,                 // Precision edge case
+            1.0 / 3.0,                          // Repeating decimal
+            f64::from_bits(0x7FF8000000000001), // Specific NaN pattern
+            f64::from_bits(0xFFF8000000000001), // Different NaN pattern
+            100.0,                              // Way above 1.0
+            -100.0,                             // Way below 0.0
+        ];
+
+        for (i, drop_prob) in malicious_probabilities.into_iter().enumerate() {
+            let fault_profile = FaultProfile {
+                drop_pct: drop_prob,
+                reorder_depth: 1,
+                corrupt_probability: 0.1,
+                delay_ticks: 10,
             };
 
-            let mut runtime = LabRuntime::new(config).unwrap();
+            let _link_id = format!("prob_attack_{}", i);
+            let result = VirtualLink::new("attack-src", "attack-tgt", fault_profile.clone())
+                .and_then(|link| runtime.add_link(link));
 
-            // Test invalid fault probability values
-            let invalid_probabilities = vec![
-                -0.1,              // Negative
-                1.1,               // Above 1.0
-                f64::NAN,          // NaN
-                f64::INFINITY,     // Positive infinity
-                f64::NEG_INFINITY, // Negative infinity
-                2.0,               // Well above 1.0
-            ];
+            match result {
+                Ok(idx) => {
+                    // Link created with potentially dangerous probability
+                    assert!(
+                        drop_prob.is_finite() && drop_prob >= 0.0 && drop_prob <= 1.0,
+                        "Invalid probability {} should not create link",
+                        drop_prob
+                    );
 
-            for (i, prob) in invalid_probabilities.iter().enumerate() {
-                let _link_id = format!("fault-link-{}", i);
+                    // Test message sending with dangerous probabilities
+                    for j in 0..100 {
+                        let message = format!("prob_test_{}_{}", i, j);
+                        let send_result = runtime.send_message(idx, &message);
+
+                        match send_result {
+                            Ok(_) => {
+                                // Message sent successfully
+                            }
+                            Err(_) => {
+                                // May fail due to fault injection
+                            }
+                        }
+
+                        // Advance time to process faults
+                        let _ = runtime.advance_clock(1);
+                    }
+
+                    // Verify system stability after probability calculations
+                    let events = runtime.events();
+                    assert!(events.len() <= MAX_EVENTS);
+
+                    // All events should be well-formed
+                    for event in events {
+                        assert!(!event.event_code.is_empty());
+                        assert!(event.tick <= runtime.now());
+                    }
+                }
+                Err(err) => {
+                    // Invalid probabilities should be rejected
+                    match err {
+                        LabError::FaultRange { field, value } => {
+                            assert_eq!(field, "drop_pct");
+                            assert!(
+                                (value.is_nan() || value < 0.0 || value > 1.0),
+                                "Error should be for invalid probability, got value: {}",
+                                value
+                            );
+                        }
+                        _ => {
+                            // Other error types may be valid for extreme values
+                        }
+                    }
+                }
+            }
+        }
+
+        // Test corruption rate with similar extreme values
+        let malicious_corrupt_probabilitys = [f64::NAN, f64::INFINITY, -1.0, 2.0, f64::MAX];
+
+        for (i, corrupt_probability) in malicious_corrupt_probabilitys.into_iter().enumerate() {
+            let fault_profile = FaultProfile {
+                drop_pct: 0.1,
+                reorder_depth: 1,
+                corrupt_probability,
+                delay_ticks: 10,
+            };
+
+            let _link_id = format!("corruption_attack_{}", i);
+            let result = VirtualLink::new("corrupt-src", "corrupt-tgt", fault_profile)
+                .and_then(|link| runtime.add_link(link));
+
+            match result {
+                Ok(_) => {
+                    // Should only succeed with valid corruption rates
+                    assert!(
+                        corrupt_probability.is_finite()
+                            && corrupt_probability >= 0.0
+                            && corrupt_probability <= 1.0,
+                        "Invalid corruption rate {} should not create link",
+                        corrupt_probability
+                    );
+                }
+                Err(err) => {
+                    // Invalid corruption rates should be rejected
+                    match err {
+                        LabError::FaultRange { field, value } => {
+                            assert_eq!(field, "corrupt_probability");
+                            assert!(
+                                (value.is_nan() || value < 0.0 || value > 1.0),
+                                "Error should be for invalid corruption rate"
+                            );
+                        }
+                        _ => {
+                            // Other error types may be valid
+                        }
+                    }
+                }
+            }
+        }
+
+        // Test floating-point precision attacks in batch operations
+        let precision_attacks = [
+            vec![0.1; 10],                                 // Repeated 0.1 (known precision issues)
+            vec![0.3333333333333333; 10],                  // Repeated 1/3
+            (0..100).map(|i| (i as f64) * 0.01).collect(), // 0.00, 0.01, 0.02, ...
+        ];
+
+        for (attack_idx, probs) in precision_attacks.into_iter().enumerate() {
+            let mut accumulated_error = 0.0;
+
+            for (i, prob) in probs.into_iter().enumerate() {
                 let fault_profile = FaultProfile {
-                    drop_pct: *prob,
+                    drop_pct: prob,
                     reorder_depth: 0,
                     corrupt_probability: 0.0,
                     delay_ticks: 0,
                 };
 
-                let result = VirtualLink::new("sender", "receiver", fault_profile)
-                    .and_then(|link| runtime.add_link(link));
+                let _link_id = format!("precision_attack_{}_{}", attack_idx, i);
+                if let Ok(idx) = VirtualLink::new("precision-src", "precision-tgt", fault_profile)
+                    .and_then(|link| runtime.add_link(link))
+                {
+                    // Test that accumulated floating-point errors don't cause issues
+                    accumulated_error += prob;
 
-                if prob.is_nan() || prob.is_infinite() || *prob < 0.0 || *prob > 1.0 {
-                    // Should reject invalid probabilities
-                    assert!(result.is_err());
-                    if let Err(e) = result {
-                        assert!(e.to_string().contains("ERR_LB_FAULT_RANGE"));
-                    }
+                    // Should handle precision issues gracefully
+                    let test_message = format!("precision_{}", i);
+                    let _result = runtime.send_message(idx, &test_message);
                 }
             }
 
-            // Test valid edge case probabilities
-            let valid_edge_probabilities = vec![
-                0.0,                // Exact zero
-                1.0,                // Exact one
-                f64::EPSILON,       // Smallest positive
-                1.0 - f64::EPSILON, // Just below 1.0
-                0.3333333333333333, // Repeating decimal
-            ];
-
-            for (i, prob) in valid_edge_probabilities.iter().enumerate() {
-                let _link_id = format!("valid-fault-{}", i);
-                let fault_profile = FaultProfile {
-                    drop_pct: *prob,
-                    reorder_depth: 10,
-                    corrupt_probability: *prob / 10.0,
-                    delay_ticks: i as u64,
-                };
-
-                let result = VirtualLink::new("precise-sender", "precise-receiver", fault_profile)
-                    .and_then(|link| runtime.add_link(link));
-                assert!(result.is_ok());
-            }
-        }
-
-        #[test]
-        fn test_repro_bundle_corruption_resilience() {
-            let config = LabConfig {
-                seed: 111,
-                max_interleavings: 200,
-                max_ticks: 10_000,
-                enable_dpor: false,
-            };
-
-            let mut runtime = LabRuntime::new(config).unwrap();
-
-            // Create some test state
-            runtime.schedule_timer(100, "test-timer").unwrap();
-            let _ = runtime.advance_clock(50);
-
-            // Export repro bundle (passing state) to confirm export works.
-            let _bundle = runtime.export_repro_bundle(true);
-
-            // Test corrupted JSON variations
-            let corrupted_bundles = vec![
-                r#"{"seed": 111, "events": [malformed]"#, // Malformed JSON
-                r#"{"seed": "not-a-number"}"#,            // Wrong type
-                r#"{"seed": 111, "events": null}"#,       // Null events
-                r#"{}"#,                                  // Empty object
-                r#"null"#,                                // Null root
-                r#"{"seed": 111, "events": [], "schema": "invalid-version"}"#, // Bad schema
-            ];
-
-            for corrupt_json in corrupted_bundles {
-                let deserialize_result = serde_json::from_str::<ReproBundle>(corrupt_json);
-
-                if let Ok(parsed_bundle) = deserialize_result {
-                    // If parsing succeeds, replay should validate and reject
-                    let replay_result = LabRuntime::replay_bundle(&parsed_bundle, &|_rt| Ok(true));
-                    assert!(replay_result.is_err());
-                    if let Err(e) = replay_result {
-                        assert!(e.to_string().contains("ERR_LB_BUNDLE_VALIDATION"));
-                    }
-                } else {
-                    // Parsing failure is also acceptable for malformed JSON
-                    // Should fail gracefully without panic
-                }
-            }
-        }
-
-        #[test]
-        fn test_dpor_budget_exhaustion_boundary() {
-            // Test DPOR interleaving budget limits
-            let small_budget_config = LabConfig {
-                seed: 222,
-                max_interleavings: 5, // Very small budget
-                max_ticks: 10_000,
-                enable_dpor: false,
-            };
-
-            let mut runtime = LabRuntime::new(small_budget_config).unwrap();
-
-            // Create many virtual links to trigger DPOR exploration
-            for i in 0..20 {
-                let _link_id = format!("dpor-link-{}", i);
-                let fault_profile = FaultProfile {
-                    drop_pct: 0.5, // High fault rate to trigger exploration
-                    reorder_depth: 5,
-                    corrupt_probability: 0.1,
-                    delay_ticks: i as u64,
-                };
-
-                let result = VirtualLink::new("sender", "receiver", fault_profile)
-                    .and_then(|link| runtime.add_link(link));
-
-                if result.is_err() {
-                    // Should fail gracefully when capacity is exceeded
-                    let err = result.unwrap_err();
-                    assert!(err.to_string().contains("ERR_LB_LINK_CAPACITY_EXCEEDED"));
-                    break;
-                }
-            }
-
-            // Runtime should remain functional despite budget exhaustion
-            assert!(runtime.link_count() > 0);
-        }
-
-        #[test]
-        fn test_concurrent_lab_runtime_access_safety() {
-            use std::sync::{Arc, Barrier, Mutex};
-            use std::thread;
-
-            let config = LabConfig {
-                seed: 333,
-                max_interleavings: 1000,
-                max_ticks: 10_000,
-                enable_dpor: false,
-            };
-
-            let runtime = Arc::new(Mutex::new(LabRuntime::new(config).unwrap()));
-            let barrier = Arc::new(Barrier::new(4));
-
-            let handles: Vec<_> = (0..4)
-                .map(|i| {
-                    let runtime = Arc::clone(&runtime);
-                    let barrier = Arc::clone(&barrier);
-
-                    thread::spawn(move || {
-                        barrier.wait();
-
-                        // Each thread performs different operations
-                        let mut rt =
-                            try_lock(&runtime, "lab runtime concurrent access worker operation")
-                                .expect("lab runtime mutex should lock for worker operation");
-
-                        match i {
-                            0 => {
-                                // Thread 0: scenario-style runtime activity
-                                let scenario_id = format!("thread-{}-scenario", i);
-                                let _ = rt.schedule_timer(1, &scenario_id);
-                                let _ = rt.now();
-                            }
-                            1 => {
-                                // Thread 1: timer operations
-                                for j in 0..10 {
-                                    let timer_id = format!("thread-{}-timer-{}", i, j);
-                                    let _ = rt.schedule_timer(100 + j, &timer_id);
-                                }
-                            }
-                            2 => {
-                                // Thread 2: clock advancement
-                                let _ = rt.advance_clock(10);
-                            }
-                            3 => {
-                                // Thread 3: virtual link creation
-                                let _link_id = format!("thread-{}-link", i);
-                                let fault_profile = FaultProfile {
-                                    drop_pct: 0.1,
-                                    reorder_depth: 1,
-                                    corrupt_probability: 0.0,
-                                    delay_ticks: 0,
-                                };
-                                let _ = VirtualLink::new(
-                                    "concurrent-sender",
-                                    "concurrent-receiver",
-                                    fault_profile,
-                                )
-                                .and_then(|link| rt.add_link(link));
-                            }
-                            _ => {}
-                        }
-                    })
-                })
-                .collect();
-
-            // Wait for all threads to complete
-            for handle in handles {
-                handle.join().expect("thread should complete");
-            }
-
-            // Verify runtime remains in consistent state
-            let rt = try_lock(&runtime, "lab runtime concurrent access final verification")
-                .expect("lab runtime mutex should lock for final verification");
-            assert!(rt.now() >= 0);
-        }
-
-        #[test]
-        fn test_edge_case_empty_and_massive_configurations() {
-            // Test empty configuration
-            let empty_config = LabConfig {
-                seed: 444,
-                max_interleavings: 0, // Zero budget
-                max_ticks: 10_000,
-                enable_dpor: false,
-            };
-
-            let empty_runtime = LabRuntime::new(empty_config);
-            if empty_runtime.is_ok() {
-                let mut rt = empty_runtime.unwrap();
-                // Should handle zero budget gracefully
-                let start_result = rt.schedule_timer(1, "empty-test");
-                assert!(start_result.is_ok());
-            }
-
-            // Test massive configuration
-            let massive_config = LabConfig {
-                seed: 555,
-                max_interleavings: u64::MAX, // Maximum budget
-                max_ticks: 10_000,
-                enable_dpor: false,
-            };
-
-            let massive_runtime = LabRuntime::new(massive_config);
-            assert!(massive_runtime.is_ok());
-            let mut rt = massive_runtime.unwrap();
-
-            // Should handle massive budget without issues
-            let start_result = rt.schedule_timer(1, "massive-test");
-            assert!(start_result.is_ok());
-        }
-
-        #[test]
-        fn negative_test_clock_overflow_and_time_manipulation_attacks() {
-            // Test test clock overflow and time manipulation attack resistance
-            let config = LabConfig {
-                seed: 888,
-                max_interleavings: 1000,
-                max_ticks: 10_000,
-                enable_dpor: false,
-            };
-
-            let mut runtime = LabRuntime::new(config).expect("runtime should create");
-
-            // Test extreme time advancement scenarios
-            let time_attack_scenarios = [
-                1,               // Normal advancement
-                1000,            // Large jump
-                u64::MAX / 4,    // Very large jump
-                u64::MAX / 2,    // Half of maximum
-                u64::MAX - 1000, // Near overflow
-                u64::MAX - 1,    // Just before overflow
-                u64::MAX,        // Maximum value
-            ];
-
-            for (test_idx, advance_delta) in time_attack_scenarios.into_iter().enumerate() {
-                let current_tick = runtime.now();
-
-                // Test advancement with potential overflow
-                let advance_result = runtime.advance_clock(advance_delta);
-
-                match advance_result {
-                    Ok(_) => {
-                        // Advancement succeeded
-                        let new_tick = runtime.now();
-
-                        // Verify no overflow occurred
-                        assert!(
-                            new_tick >= current_tick,
-                            "Clock should not go backwards: {} -> {}",
-                            current_tick,
-                            new_tick
-                        );
-
-                        // Should be a reasonable advancement
-                        let expected_new_tick = current_tick.saturating_add(advance_delta);
-                        assert!(
-                            new_tick <= expected_new_tick,
-                            "Clock advanced too far: expected <= {}, got {}",
-                            expected_new_tick,
-                            new_tick
-                        );
-
-                        // Test timer scheduling at extreme times
-                        let timer_id = format!("extreme_timer_{}", test_idx);
-                        let timer_result = runtime.schedule_timer(10, &timer_id);
-
-                        match timer_result {
-                            Ok(_) => {
-                                // Timer scheduled at extreme time
-                                let _ = runtime.advance_clock(11);
-
-                                // Verify timer behavior at extreme times
-                                let events = runtime.events();
-                                let timer_events: Vec<_> = events
-                                    .iter()
-                                    .filter(|e| e.event_code.contains("TIMER"))
-                                    .collect();
-
-                                // Should handle timers correctly even at extreme times
-                                for event in timer_events {
-                                    assert!(event.tick >= current_tick);
-                                    assert!(event.tick <= runtime.now());
-                                }
-                            }
-                            Err(err) => {
-                                // Timer scheduling may fail at extreme times
-                                match err {
-                                    LabError::TimerIdExhausted => {
-                                        // Expected at extreme conditions
-                                    }
-                                    LabError::TickOverflow { .. } => {
-                                        // Expected for overflow scenarios
-                                    }
-                                    _ => {
-                                        // Other errors acceptable for extreme times
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Err(err) => {
-                        // Large advancements may be rejected
-                        match err {
-                            LabError::TickOverflow { current, delta } => {
-                                assert_eq!(current, current_tick);
-                                assert_eq!(delta, advance_delta);
-                                // Should detect overflow correctly
-                                assert!(
-                                    current.saturating_add(delta) == u64::MAX
-                                        || current + delta < current
-                                ); // Overflow detection
-                            }
-                            _ => {
-                                // Other errors may occur for extreme advancements
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Test rapid time advancement attacks
-            for rapid_idx in 0..1000 {
-                let small_advance = rapid_idx % 100 + 1;
-                let result = runtime.advance_clock(small_advance);
-
-                match result {
-                    Ok(_) => {
-                        // Should handle rapid advancements
-                    }
-                    Err(_) => {
-                        // May hit limits under rapid advancement
-                        break;
-                    }
-                }
-            }
-
-            // Test timer ordering under extreme conditions
-            let timer_ids: Vec<String> = (0..100).map(|i| format!("order_timer_{}", i)).collect();
-            let mut timer_fire_times = Vec::new();
-
-            for (i, timer_id) in timer_ids.iter().enumerate() {
-                let fire_time = (i * 10) as u64 + 100;
-                timer_fire_times.push(fire_time);
-
-                let result = runtime.schedule_timer(fire_time, timer_id);
-                if result.is_err() {
-                    break; // Hit timer capacity limits
-                }
-            }
-
-            // Advance time to fire all timers
-            if !timer_fire_times.is_empty() {
-                let max_fire_time = *timer_fire_times.iter().max().unwrap();
-                let _ = runtime.advance_clock(max_fire_time + 100);
-
-                // Verify timer ordering invariant
-                let events = runtime.events();
-                let timer_events: Vec<_> = events
-                    .iter()
-                    .filter(|e| e.event_code.contains("TIMER"))
-                    .collect();
-
-                let mut prev_tick = 0;
-                for event in timer_events {
-                    assert!(
-                        event.tick >= prev_tick,
-                        "Timers should fire in order: {} < {}",
-                        event.tick,
-                        prev_tick
-                    );
-                    prev_tick = event.tick;
-                }
-            }
-
-            // Final time consistency check
-            let final_tick = runtime.now();
-            assert!(final_tick < u64::MAX, "Final tick should not overflow");
-
-            // All events should have reasonable timestamps
+            // System should remain stable despite floating-point precision issues
+            let _ = runtime.advance_clock(10);
             let events = runtime.events();
-            for event in events {
-                assert!(
-                    event.tick <= final_tick,
-                    "Event timestamp {} should not exceed current time {}",
-                    event.tick,
-                    final_tick
-                );
-            }
+            assert!(events.len() <= MAX_EVENTS);
         }
+    }
 
-        #[test]
-        fn negative_fault_profile_floating_point_and_probability_attacks() {
-            // Test fault profile floating-point and probability attack resistance
-            let config = LabConfig {
-                seed: 999,
-                max_interleavings: 1000,
-                max_ticks: 10_000,
-                enable_dpor: false,
-            };
+    #[test]
+    fn negative_virtual_link_capacity_exhaustion_and_memory_pressure() {
+        // Test virtual link capacity exhaustion and memory pressure scenarios
+        let config = LabConfig {
+            seed: 1111,
+            max_interleavings: 1000,
+            max_ticks: 10_000,
+            enable_dpor: false,
+        };
 
-            let mut runtime = LabRuntime::new(config).expect("runtime should create");
+        let mut runtime = LabRuntime::new(config).expect("runtime should create");
 
-            // Test extreme and malicious probability values
-            let malicious_probabilities = [
-                f64::NAN,                           // Not a number
-                f64::INFINITY,                      // Positive infinity
-                f64::NEG_INFINITY,                  // Negative infinity
-                -0.0,                               // Negative zero
-                -1.0,                               // Invalid negative
-                2.0,                                // Invalid > 1.0
-                f64::MIN,                           // Smallest finite value
-                f64::MAX,                           // Largest finite value
-                f64::EPSILON,                       // Machine epsilon
-                1.0 + f64::EPSILON,                 // Just above 1.0
-                -f64::EPSILON,                      // Just below 0.0
-                0.5000000000000001,                 // Precision edge case
-                1.0 / 3.0,                          // Repeating decimal
-                f64::from_bits(0x7FF8000000000001), // Specific NaN pattern
-                f64::from_bits(0xFFF8000000000001), // Different NaN pattern
-                100.0,                              // Way above 1.0
-                -100.0,                             // Way below 0.0
-            ];
-
-            for (i, drop_prob) in malicious_probabilities.into_iter().enumerate() {
-                let fault_profile = FaultProfile {
-                    drop_pct: drop_prob,
-                    reorder_depth: 1,
-                    corrupt_probability: 0.1,
-                    delay_ticks: 10,
-                };
-
-                let _link_id = format!("prob_attack_{}", i);
-                let result = VirtualLink::new("attack-src", "attack-tgt", fault_profile.clone())
-                    .and_then(|link| runtime.add_link(link));
-
-                match result {
-                    Ok(idx) => {
-                        // Link created with potentially dangerous probability
-                        assert!(
-                            drop_prob.is_finite() && drop_prob >= 0.0 && drop_prob <= 1.0,
-                            "Invalid probability {} should not create link",
-                            drop_prob
-                        );
-
-                        // Test message sending with dangerous probabilities
-                        for j in 0..100 {
-                            let message = format!("prob_test_{}_{}", i, j);
-                            let send_result = runtime.send_message(idx, &message);
-
-                            match send_result {
-                                Ok(_) => {
-                                    // Message sent successfully
-                                }
-                                Err(_) => {
-                                    // May fail due to fault injection
-                                }
-                            }
-
-                            // Advance time to process faults
-                            let _ = runtime.advance_clock(1);
-                        }
-
-                        // Verify system stability after probability calculations
-                        let events = runtime.events();
-                        assert!(events.len() <= MAX_EVENTS);
-
-                        // All events should be well-formed
-                        for event in events {
-                            assert!(!event.event_code.is_empty());
-                            assert!(event.tick <= runtime.now());
-                        }
-                    }
-                    Err(err) => {
-                        // Invalid probabilities should be rejected
-                        match err {
-                            LabError::FaultRange { field, value } => {
-                                assert_eq!(field, "drop_pct");
-                                assert!(
-                                    (value.is_nan() || value < 0.0 || value > 1.0),
-                                    "Error should be for invalid probability, got value: {}",
-                                    value
-                                );
-                            }
-                            _ => {
-                                // Other error types may be valid for extreme values
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Test corruption rate with similar extreme values
-            let malicious_corrupt_probabilitys = [f64::NAN, f64::INFINITY, -1.0, 2.0, f64::MAX];
-
-            for (i, corrupt_probability) in malicious_corrupt_probabilitys.into_iter().enumerate() {
-                let fault_profile = FaultProfile {
-                    drop_pct: 0.1,
-                    reorder_depth: 1,
-                    corrupt_probability,
-                    delay_ticks: 10,
-                };
-
-                let _link_id = format!("corruption_attack_{}", i);
-                let result = VirtualLink::new("corrupt-src", "corrupt-tgt", fault_profile)
-                    .and_then(|link| runtime.add_link(link));
-
-                match result {
-                    Ok(_) => {
-                        // Should only succeed with valid corruption rates
-                        assert!(
-                            corrupt_probability.is_finite()
-                                && corrupt_probability >= 0.0
-                                && corrupt_probability <= 1.0,
-                            "Invalid corruption rate {} should not create link",
-                            corrupt_probability
-                        );
-                    }
-                    Err(err) => {
-                        // Invalid corruption rates should be rejected
-                        match err {
-                            LabError::FaultRange { field, value } => {
-                                assert_eq!(field, "corrupt_probability");
-                                assert!(
-                                    (value.is_nan() || value < 0.0 || value > 1.0),
-                                    "Error should be for invalid corruption rate"
-                                );
-                            }
-                            _ => {
-                                // Other error types may be valid
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Test floating-point precision attacks in batch operations
-            let precision_attacks = [
-                vec![0.1; 10],                                 // Repeated 0.1 (known precision issues)
-                vec![0.3333333333333333; 10],                  // Repeated 1/3
-                (0..100).map(|i| (i as f64) * 0.01).collect(), // 0.00, 0.01, 0.02, ...
-            ];
-
-            for (attack_idx, probs) in precision_attacks.into_iter().enumerate() {
-                let mut accumulated_error = 0.0;
-
-                for (i, prob) in probs.into_iter().enumerate() {
-                    let fault_profile = FaultProfile {
-                        drop_pct: prob,
-                        reorder_depth: 0,
-                        corrupt_probability: 0.0,
-                        delay_ticks: 0,
-                    };
-
-                    let _link_id = format!("precision_attack_{}_{}", attack_idx, i);
-                    if let Ok(idx) =
-                        VirtualLink::new("precision-src", "precision-tgt", fault_profile)
-                            .and_then(|link| runtime.add_link(link))
-                    {
-                        // Test that accumulated floating-point errors don't cause issues
-                        accumulated_error += prob;
-
-                        // Should handle precision issues gracefully
-                        let test_message = format!("precision_{}", i);
-                        let _result = runtime.send_message(idx, &test_message);
-                    }
-                }
-
-                // System should remain stable despite floating-point precision issues
-                let _ = runtime.advance_clock(10);
-                let events = runtime.events();
-                assert!(events.len() <= MAX_EVENTS);
-            }
-        }
-
-        #[test]
-        fn negative_virtual_link_capacity_exhaustion_and_memory_pressure() {
-            // Test virtual link capacity exhaustion and memory pressure scenarios
-            let config = LabConfig {
-                seed: 1111,
-                max_interleavings: 1000,
-                max_ticks: 10_000,
-                enable_dpor: false,
-            };
-
-            let mut runtime = LabRuntime::new(config).expect("runtime should create");
-
-            // Test maximum virtual link creation
-            let mut created_links: Vec<usize> = Vec::new();
-            for i in 0..MAX_VIRTUAL_LINKS + 100 {
-                let _link_id = format!("capacity_link_{:06}", i);
-                let fault_profile = FaultProfile {
-                    drop_pct: 0.1,
-                    reorder_depth: 1,
-                    corrupt_probability: 0.0,
-                    delay_ticks: 1,
-                };
-
-                let result =
-                    VirtualLink::new(format!("src_{}", i), format!("tgt_{}", i), fault_profile)
-                        .and_then(|link| runtime.add_link(link));
-
-                match result {
-                    Ok(idx) => {
-                        created_links.push(idx);
-                    }
-                    Err(err) => {
-                        // Should hit capacity limit
-                        match err {
-                            LabError::LinkCapacityExceeded { limit } => {
-                                assert_eq!(limit, MAX_VIRTUAL_LINKS);
-                                assert!(created_links.len() <= MAX_VIRTUAL_LINKS);
-                            }
-                            _ => {
-                                // Other capacity-related errors are acceptable
-                            }
-                        }
-                        break;
-                    }
-                }
-            }
-
-            // Verify link capacity is respected
-            assert!(created_links.len() <= MAX_VIRTUAL_LINKS);
-
-            // Test memory pressure on created links
-            for (i, link_idx) in created_links.iter().enumerate() {
-                // Send large messages to stress memory
-                let large_message = "x".repeat(10_000); // 10KB per message
-                let send_result = runtime.send_message(*link_idx, &large_message);
-
-                match send_result {
-                    Ok(_) => {
-                        // Message sent successfully
-                    }
-                    Err(_) => {
-                        // May fail under memory pressure
-                    }
-                }
-
-                // Periodic time advancement to process messages
-                if i % 100 == 0 {
-                    let _ = runtime.advance_clock(10);
-                }
-            }
-
-            // Test reorder buffer capacity exhaustion
-            let reorder_stress_profile = FaultProfile {
-                drop_pct: 0.0,
-                reorder_depth: MAX_REORDER_BUFFERS + 100, // Exceed maximum
-                corrupt_probability: 0.0,
-                delay_ticks: 0,
-            };
-
-            let reorder_result =
-                VirtualLink::new("reorder-src", "reorder-tgt", reorder_stress_profile)
-                    .and_then(|link| runtime.add_link(link));
-
-            match reorder_result {
-                Ok(reorder_idx) => {
-                    // Send many messages to stress reorder buffer
-                    for j in 0..MAX_REORDER_BUFFERS * 2 {
-                        let message = format!("reorder_stress_{}", j);
-                        let send_result = runtime.send_message(reorder_idx, &message);
-
-                        match send_result {
-                            Ok(_) => {
-                                // Message queued in reorder buffer
-                            }
-                            Err(_) => {
-                                // Reorder buffer may be full
-                                break;
-                            }
-                        }
-                    }
-
-                    // Advance time to process reorder buffer
-                    let _ = runtime.advance_clock(100);
-                }
-                Err(_) => {
-                    // Extreme reorder depth may be rejected at creation
-                }
-            }
-
-            // Test memory pressure with many heavy links
-            let memory_stress_profile = FaultProfile {
+        // Test maximum virtual link creation
+        let mut created_links: Vec<usize> = Vec::new();
+        for i in 0..MAX_VIRTUAL_LINKS + 100 {
+            let _link_id = format!("capacity_link_{:06}", i);
+            let fault_profile = FaultProfile {
                 drop_pct: 0.1,
                 reorder_depth: 1,
                 corrupt_probability: 0.0,
                 delay_ticks: 1,
             };
 
-            let mut memory_links_created = 0;
-            for _i in 0..100 {
-                let result =
-                    VirtualLink::new("memory-src", "memory-tgt", memory_stress_profile.clone())
-                        .and_then(|link| runtime.add_link(link));
-
-                match result {
-                    Ok(_) => {
-                        memory_links_created += 1;
-                    }
-                    Err(_) => {
-                        // May hit memory limits
-                        break;
-                    }
-                }
-            }
-
-            // Should handle some level of memory pressure
-            assert!(
-                memory_links_created > 0,
-                "Should be able to create at least one memory-intensive link"
-            );
-
-            // Verify system stability under memory pressure
-            let events = runtime.events();
-            assert!(events.len() <= MAX_EVENTS);
-
-            // All events should be well-formed despite memory pressure
-            for event in events {
-                assert!(!event.event_code.is_empty());
-                assert!(event.tick <= runtime.now());
-            }
-
-            // Test rapid link creation/destruction cycles
-            for cycle in 0..1000 {
-                let _cycle_link_id = format!("cycle_link_{}", cycle);
-                let cycle_profile = FaultProfile {
-                    drop_pct: 0.05,
-                    reorder_depth: 1,
-                    corrupt_probability: 0.0,
-                    delay_ticks: 0,
-                };
-
-                // Create link
-                let create_result = VirtualLink::new("cycle-src", "cycle-tgt", cycle_profile)
+            let result =
+                VirtualLink::new(format!("src_{}", i), format!("tgt_{}", i), fault_profile)
                     .and_then(|link| runtime.add_link(link));
 
-                if let Ok(idx) = create_result {
-                    // Send a message
-                    let cycle_message = format!("cycle_msg_{}", cycle);
-                    let _send_result = runtime.send_message(idx, &cycle_message);
-
-                    // Destroy link (if implemented)
-                    // Note: Assuming destroy_virtual_link exists or links are cleaned up automatically
-                } else {
-                    // Break if we hit capacity limits
-                    break;
-                }
-
-                // Periodic cleanup
-                if cycle % 100 == 0 {
-                    let _ = runtime.advance_clock(1);
-                }
-            }
-
-            // Final memory and capacity integrity check
-            let final_events = runtime.events();
-            assert!(final_events.len() <= MAX_EVENTS);
-        }
-
-        #[test]
-        fn negative_scenario_lifecycle_state_corruption_and_race_conditions() {
-            // Test scenario lifecycle state corruption and race condition resistance
-            let config = LabConfig {
-                seed: 2222,
-                max_interleavings: 10000,
-                max_ticks: 10_000,
-                enable_dpor: false,
-            };
-
-            let mut runtime = LabRuntime::new(config).expect("runtime should create");
-
-            // Test invalid scenario lifecycle sequences
-            let invalid_sequences = vec![
-                // Complete before start
-                vec![("scenario_1", "complete"), ("scenario_1", "start")],
-                // Fail before start
-                vec![("scenario_2", "fail"), ("scenario_2", "start")],
-                // Double start
-                vec![("scenario_3", "start"), ("scenario_3", "start")],
-                // Double complete
-                vec![
-                    ("scenario_4", "start"),
-                    ("scenario_4", "complete"),
-                    ("scenario_4", "complete"),
-                ],
-                // Complete then fail
-                vec![
-                    ("scenario_5", "start"),
-                    ("scenario_5", "complete"),
-                    ("scenario_5", "fail"),
-                ],
-                // Fail then complete
-                vec![
-                    ("scenario_6", "start"),
-                    ("scenario_6", "fail"),
-                    ("scenario_6", "complete"),
-                ],
-            ];
-
-            for (seq_idx, sequence) in invalid_sequences.into_iter().enumerate() {
-                for (scenario_id, action) in sequence {
-                    // The real runtime has no imperative scenario state machine; drive
-                    // each named lifecycle action through a real timer keyed by the id.
-                    let result = match action {
-                        "start" => runtime.schedule_timer(1, scenario_id),
-                        "complete" => runtime.schedule_timer(1, scenario_id),
-                        "fail" => {
-                            runtime.schedule_timer(1, format!("{}_fail_{}", scenario_id, seq_idx))
-                        }
-                        _ => continue,
-                    };
-
-                    // Some operations should fail based on state
-                    match result {
-                        Ok(_) => {
-                            // Valid state transitions should succeed
-                        }
-                        Err(_) => {
-                            // Invalid state transitions should fail gracefully
-                        }
-                    }
-                }
-            }
-
-            // Test concurrent scenario operations (simulated)
-            let concurrent_scenarios: Vec<String> = (0..100)
-                .map(|i| format!("concurrent_scenario_{}", i))
-                .collect();
-
-            // Start all scenarios rapidly
-            for scenario_id in &concurrent_scenarios {
-                let result = runtime.schedule_timer(1, scenario_id);
-                match result {
-                    Ok(_) => {
-                        // Scenario started successfully
-                    }
-                    Err(_) => {
-                        // May hit limits under rapid concurrent operations
-                    }
-                }
-            }
-
-            // Interleave various operations rapidly
-            for i in 0..1000 {
-                let scenario_idx = i % concurrent_scenarios.len();
-                let scenario_id = &concurrent_scenarios[scenario_idx];
-
-                match i % 4 {
-                    0 => {
-                        let _result = runtime.schedule_timer(1, scenario_id);
-                    }
-                    1 => {
-                        let _result = runtime.schedule_timer(1, scenario_id);
-                    }
-                    2 => {
-                        let _result = runtime.schedule_timer(1, scenario_id);
-                    }
-                    3 => {
-                        // Advance time to trigger various events
-                        let _result = runtime.advance_clock(1);
-                    }
-                    _ => {}
-                }
-            }
-
-            // Test scenario with extreme names and failure reasons
-            let extreme_scenarios = vec![
-                ("".to_string(), "empty_name"),                          // Empty name
-                ("x".repeat(100_000), "very_long_name"),                 // Very long name
-                ("scenario\x00\x01\x02null".to_string(), "binary_data"), // Binary data in name
-                ("scenario\u{202E}reverse".to_string(), "unicode_attack"), // Unicode direction override
-                ("../../../etc/passwd".to_string(), "path_traversal"),     // Path traversal attempt
-                ("scenario; rm -rf /".to_string(), "command_injection"), // Command injection attempt
-            ];
-
-            for (scenario_id, failure_reason) in extreme_scenarios {
-                // Test start with extreme scenario ID
-                let start_result = runtime.schedule_timer(1, &scenario_id);
-
-                match start_result {
-                    Ok(_) => {
-                        // If start succeeds, test failure with extreme reason
-                        let failure_result = runtime.schedule_timer(1, failure_reason);
-
-                        match failure_result {
-                            Ok(_) => {
-                                // Extreme content handled gracefully
-                            }
-                            Err(_) => {
-                                // May reject extreme failure reasons
-                            }
-                        }
-                    }
-                    Err(_) => {
-                        // Extreme scenario IDs may be rejected
-                    }
-                }
-            }
-
-            // Test interleaving budget exhaustion
-            let budget_scenario = "budget_exhaustion_test";
-            let start_result = runtime.schedule_timer(1, budget_scenario);
-
-            if start_result.is_ok() {
-                // Perform many operations to potentially exhaust budget
-                for i in 0..runtime.config.max_interleavings + 100 {
-                    // Create timer to generate interleaving events
-                    let timer_id = format!("budget_timer_{}", i);
-                    let timer_result = runtime.schedule_timer(i + 100, &timer_id);
-
-                    if timer_result.is_err() {
-                        break; // Hit some limit
-                    }
-
-                    // Advance time to fire timer
-                    let _ = runtime.advance_clock(1);
-
-                    // Check if budget exhausted
-                    if i > runtime.config.max_interleavings {
-                        // Should hit budget exhaustion
-                        break;
-                    }
-                }
-
-                // Try to complete the scenario
-                let complete_result = runtime.schedule_timer(1, budget_scenario);
-                match complete_result {
-                    Ok(_) => {
-                        // Budget exhaustion may or may not affect completion
-                    }
-                    Err(err) => {
-                        match err {
-                            LabError::BudgetExceeded { explored, budget } => {
-                                assert!(explored >= budget);
-                            }
-                            _ => {
-                                // Other errors acceptable
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Verify system state integrity after stress testing
-            let final_events = runtime.events();
-            assert!(final_events.len() <= MAX_EVENTS);
-
-            // All events should have valid structure
-            for event in final_events {
-                assert!(!event.event_code.is_empty());
-                assert!(event.tick <= runtime.now());
-            }
-
-            // Test repro bundle export after state stress
-            {
-                let export_result: Result<ReproBundle, LabError> =
-                    Ok(runtime.export_repro_bundle(true));
-                match export_result {
-                    Ok(bundle) => {
-                        // Bundle should be valid despite state stress
-                        let serialization_result = serde_json::to_string(&bundle);
-                        match serialization_result {
-                            Ok(_json_str) => {
-                                // Should serialize successfully
-                            }
-                            Err(_) => {
-                                // May fail with extreme content
-                            }
-                        }
-                    }
-                    Err(_) => {
-                        // Export may fail after state corruption attempts
-                    }
-                }
-            }
-
-            // Final clock consistency check
-            let final_tick = runtime.now();
-            assert!(final_tick < u64::MAX, "Clock should not overflow");
-        }
-
-        #[test]
-        fn negative_repro_bundle_serialization_injection_and_corruption_attacks() {
-            // Test repro bundle serialization injection and corruption attack resistance
-            let config = LabConfig {
-                seed: 3333,
-                max_interleavings: 1000,
-                max_ticks: 10_000,
-                enable_dpor: false,
-            };
-
-            let mut runtime = LabRuntime::new(config).expect("runtime should create");
-
-            // Create scenario with potentially dangerous content
-            let injection_scenario = "injection_test_scenario";
-            runtime
-                .schedule_timer(1, injection_scenario)
-                .expect("schedule injection scenario timer");
-
-            // Create virtual links with injection attempts
-            let injection_profiles = vec![
-                FaultProfile {
-                    drop_pct: 0.1,
-                    reorder_depth: 1,
-                    corrupt_probability: 0.0,
-                    delay_ticks: 1,
-                },
-                FaultProfile {
-                    drop_pct: 0.2,
-                    reorder_depth: 2,
-                    corrupt_probability: 0.1,
-                    delay_ticks: 2,
-                },
-                FaultProfile {
-                    drop_pct: 0.3,
-                    reorder_depth: 3,
-                    corrupt_probability: 0.2,
-                    delay_ticks: 3,
-                },
-            ];
-
-            for (i, profile) in injection_profiles.into_iter().enumerate() {
-                let _link_id = format!("injection_link_{}", i);
-                let source = format!("src\x00injection_{}", i);
-                let target = format!("tgt\u{202E}fake_{}", i);
-
-                let result = VirtualLink::new(&source, &target, profile)
-                    .and_then(|link| runtime.add_link(link));
-
-                if let Ok(idx) = result {
-                    // Send messages with injection content (valid UTF-8 carriers)
-                    let injection_messages = vec![
-                        "\u{0000}\u{0001}\u{0002}null_bytes".to_string(),
-                        "unicode_message_控制字符\u{202E}reverse".to_string(),
-                        format!("{}'; DROP TABLE logs; --", "x".repeat(500)),
-                        format!("{}/../../../secret_file", "msg".repeat(100)),
-                    ];
-
-                    for (_j, message) in injection_messages.into_iter().enumerate() {
-                        let send_result = runtime.send_message(idx, &message);
-                        if send_result.is_ok() {
-                            let _ = runtime.advance_clock(1);
-                        }
-                    }
-                }
-            }
-
-            // Create timers with injection attempts
-            let injection_timer_ids = vec![
-                "timer\x00null_byte".to_string(),
-                "timer\u{202E}unicode_attack".to_string(),
-                "timer/../../../timer_injection".to_string(),
-                "timer'; DROP TABLE timers; --".to_string(),
-                "x".repeat(10_000), // Very long timer ID
-            ];
-
-            for timer_id in injection_timer_ids {
-                let timer_result = runtime.schedule_timer(100, &timer_id);
-                match timer_result {
-                    Ok(_) => {
-                        // Timer scheduled with injection content
-                    }
-                    Err(_) => {
-                        // Injection content may be rejected
-                    }
-                }
-            }
-
-            let _ = runtime.advance_clock(200); // Fire timers
-
-            // Fail scenario with injection attempt in failure reason
-            let injection_failure_reason =
-                "failure_reason\x00\x01\x02\u{202E}injection_attempt/../../../failure_log";
-            let fail_result = runtime.schedule_timer(1, injection_failure_reason);
-            match fail_result {
-                Ok(_) => {
-                    // Failure recorded with injection content
-                }
-                Err(_) => {
-                    // May reject injection content in failure reasons
-                }
-            }
-
-            // Export repro bundle with injection content
-            let export_result: Result<ReproBundle, LabError> =
-                Ok(runtime.export_repro_bundle(true));
-
-            match export_result {
-                Ok(bundle) => {
-                    // Test serialization safety
-                    let serialization_result = serde_json::to_string(&bundle);
-
-                    match serialization_result {
-                        Ok(json_str) => {
-                            // Verify JSON is safe and well-formed
-                            assert!(
-                                !json_str.contains("\x00"),
-                                "JSON should not contain null bytes"
-                            );
-
-                            // Should be valid JSON
-                            let parse_test: Result<serde_json::Value, _> =
-                                serde_json::from_str(&json_str);
-                            assert!(parse_test.is_ok(), "Serialized bundle should be valid JSON");
-
-                            // Should not contain obvious injection patterns
-                            assert!(
-                                !json_str.contains("DROP TABLE"),
-                                "JSON should not contain SQL injection"
-                            );
-                            assert!(
-                                !json_str.contains("../../../"),
-                                "JSON should not contain path traversal"
-                            );
-
-                            // Test deserialization
-                            let deserialization_result: Result<ReproBundle, _> =
-                                serde_json::from_str(&json_str);
-                            match deserialization_result {
-                                Ok(reconstructed) => {
-                                    // Should successfully round-trip
-                                    assert_eq!(reconstructed.schema_version, bundle.schema_version);
-                                    assert_eq!(reconstructed.seed, bundle.seed);
-
-                                    // Verify injection content is safely contained
-                                    // (not executed or interpreted maliciously)
-                                    for event in &reconstructed.events {
-                                        // Events should be structurally valid
-                                        assert!(!event.event_code.is_empty());
-                                        // Injection content may be preserved but should not be active
-                                    }
-                                }
-                                Err(_) => {
-                                    // Extreme injection content may prevent deserialization
-                                }
-                            }
-
-                            // Test replay safety
-                            let replay_result = LabRuntime::replay_bundle(&bundle, &|_rt| Ok(true));
-                            match replay_result {
-                                Ok(_) => {
-                                    // Replay should not execute injection content
-                                    // Verify replay doesn't cause side effects
-                                    let replay_events = runtime.events();
-                                    for event in replay_events {
-                                        assert!(!event.event_code.is_empty());
-                                        // Injection content should not corrupt event structure
-                                    }
-                                }
-                                Err(err) => {
-                                    // Replay may fail with injection content
-                                    match err {
-                                        LabError::ReplayDivergence { .. } => {
-                                            // Expected for injection-modified content
-                                        }
-                                        LabError::BundleValidation { .. } => {
-                                            // Validation may reject injection content
-                                        }
-                                        _ => {
-                                            // Other replay errors acceptable
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        Err(err) => {
-                            // Extreme injection content may prevent serialization;
-                            // serde_json surfaces a meaningful (non-empty) error message.
-                            assert!(!err.to_string().is_empty());
-                        }
-                    }
+            match result {
+                Ok(idx) => {
+                    created_links.push(idx);
                 }
                 Err(err) => {
-                    // Export may fail with extreme injection content
+                    // Should hit capacity limit
                     match err {
-                        LabError::BundleValidation { .. } => {
-                            // Validation may reject injection content
+                        LabError::LinkCapacityExceeded { limit } => {
+                            assert_eq!(limit, MAX_VIRTUAL_LINKS.min(MAX_REORDER_BUFFERS));
+                            assert!(created_links.len() <= MAX_VIRTUAL_LINKS);
                         }
                         _ => {
-                            // Other export errors acceptable
+                            // Other capacity-related errors are acceptable
                         }
                     }
+                    break;
                 }
-            }
-
-            // Test bundle corruption resistance
-            {
-                let original_bundle = runtime.export_repro_bundle(true);
-                let original_json = serde_json::to_string(&original_bundle).unwrap();
-
-                // Various corruption patterns (own the Strings so the borrows in
-                // the loop outlive the temporaries produced by replace()/format!).
-                let corruption_patterns: Vec<String> = vec![
-                    // Truncate JSON
-                    original_json[..original_json.len() / 2].to_string(),
-                    // Invalid JSON structure
-                    original_json.replace("}", ""),
-                    original_json.replace("\"", "'"),
-                    original_json.replace(":", "="),
-                    // Field manipulation
-                    original_json.replace("\"seed\"", "\"malicious_seed\""),
-                    original_json.replace("\"events\"", "\"malicious_events\""),
-                    // Value injection
-                    original_json.replace("1000", "0xDEADBEEF"),
-                    format!("{}\x00corruption", original_json),
-                ];
-
-                for (corruption_idx, corrupted_json) in corruption_patterns.into_iter().enumerate()
-                {
-                    let parse_result: Result<ReproBundle, _> =
-                        serde_json::from_str(&corrupted_json);
-
-                    match parse_result {
-                        Ok(corrupted_bundle) => {
-                            // If parsing succeeds despite corruption, replay must
-                            // validate and reject it (no public validate_bundle exists).
-                            let _validation_result =
-                                LabRuntime::replay_bundle(&corrupted_bundle, &|_rt| Ok(true));
-                        }
-                        Err(_) => {
-                            // Corruption should be detected during parsing
-                        }
-                    }
-                }
-            }
-
-            // Final integrity check
-            let final_events = runtime.events();
-            assert!(final_events.len() <= MAX_EVENTS);
-
-            // All events should remain structurally valid despite injection attempts
-            for event in final_events {
-                assert!(!event.event_code.is_empty());
-                assert!(event.tick <= runtime.now());
             }
         }
 
-        #[test]
-        fn negative_timer_id_exhaustion_and_concurrent_timer_attacks() {
-            // Test timer ID exhaustion and concurrent timer attack resistance
-            let config = LabConfig {
-                seed: 4444,
-                max_interleavings: 10000,
-                max_ticks: 10_000,
-                enable_dpor: false,
-            };
+        // Verify link capacity is respected
+        assert!(created_links.len() <= MAX_VIRTUAL_LINKS);
 
-            let mut runtime = LabRuntime::new(config).expect("runtime should create");
+        // Test memory pressure on created links
+        for (i, link_idx) in created_links.iter().enumerate() {
+            // Send large messages to stress memory
+            let large_message = "x".repeat(10_000); // 10KB per message
+            let send_result = runtime.send_message(*link_idx, &large_message);
 
-            // Test timer ID exhaustion by creating many timers
-            let mut created_timers = Vec::new();
-            let timer_creation_limit = 100_000; // Reasonable limit to avoid test timeout
-
-            for i in 0..timer_creation_limit {
-                let timer_id = format!("exhaustion_timer_{:08}", i);
-                let fire_time = (i % 1000) as u64 + 100; // Various fire times
-
-                let result = runtime.schedule_timer(fire_time, &timer_id);
-
-                match result {
-                    Ok(_) => {
-                        created_timers.push((timer_id, fire_time));
-                    }
-                    Err(err) => {
-                        // Should eventually hit ID exhaustion
-                        match err {
-                            LabError::TimerIdExhausted => {
-                                // Expected behavior when IDs are exhausted
-                                break;
-                            }
-                            _ => {
-                                // Other errors may occur under stress
-                                break;
-                            }
-                        }
-                    }
+            match send_result {
+                Ok(_) => {
+                    // Message sent successfully
                 }
-
-                // Periodic time advancement to fire some timers and free IDs
-                if i % 1000 == 0 {
-                    let _ = runtime.advance_clock(50);
+                Err(_) => {
+                    // May fail under memory pressure
                 }
             }
 
-            // Verify we created a reasonable number of timers before exhaustion
-            assert!(
-                created_timers.len() > 1000,
-                "Should be able to create many timers before exhaustion"
-            );
+            // Periodic time advancement to process messages
+            if i % 100 == 0 {
+                let _ = runtime.advance_clock(10);
+            }
+        }
 
-            // Test concurrent timer operations (simulated rapid operations)
-            let concurrent_timer_scenarios = vec![
-                // Many timers with same fire time
-                (500, 100),
-                // Many timers with sequential fire times
-                (500, 200),
-                // Timers with extreme fire times
-                (100, u64::MAX / 2),
-                // Immediate timers
-                (100, 0),
-            ];
+        // Test reorder buffer capacity exhaustion
+        let reorder_stress_profile = FaultProfile {
+            drop_pct: 0.0,
+            reorder_depth: MAX_REORDER_BUFFERS + 100, // Exceed maximum
+            corrupt_probability: 0.0,
+            delay_ticks: 0,
+        };
 
-            for (timer_count, base_fire_time) in concurrent_timer_scenarios {
-                let scenario_start_time = runtime.now();
+        let reorder_result = VirtualLink::new("reorder-src", "reorder-tgt", reorder_stress_profile)
+            .and_then(|link| runtime.add_link(link));
 
-                // Create many timers rapidly
-                let mut scenario_timers = Vec::new();
-                for j in 0..timer_count {
-                    let timer_id = format!("concurrent_{}_timer_{}", base_fire_time, j);
-                    let fire_time = base_fire_time.saturating_add(j as u64);
+        match reorder_result {
+            Ok(reorder_idx) => {
+                // Send many messages to stress reorder buffer
+                for j in 0..MAX_REORDER_BUFFERS * 2 {
+                    let message = format!("reorder_stress_{}", j);
+                    let send_result = runtime.send_message(reorder_idx, &message);
 
-                    let result = runtime.schedule_timer(fire_time, &timer_id);
-                    match result {
+                    match send_result {
                         Ok(_) => {
-                            scenario_timers.push((timer_id, fire_time));
+                            // Message queued in reorder buffer
                         }
                         Err(_) => {
-                            // May hit limits under concurrent stress
+                            // Reorder buffer may be full
                             break;
                         }
                     }
                 }
 
-                // Advance time to fire all timers in this scenario
-                if !scenario_timers.is_empty() {
-                    let max_fire_time = scenario_timers
-                        .iter()
-                        .map(|(_, fire_time)| fire_time)
-                        .max()
-                        .unwrap();
-                    let advance_amount = max_fire_time
-                        .saturating_sub(scenario_start_time)
-                        .saturating_add(100);
+                // Advance time to process reorder buffer
+                let _ = runtime.advance_clock(100);
+            }
+            Err(_) => {
+                // Extreme reorder depth may be rejected at creation
+            }
+        }
 
-                    let advance_result = runtime.advance_clock(advance_amount);
-                    match advance_result {
-                        Ok(_) => {
-                            // Time advanced successfully
-                        }
-                        Err(_) => {
-                            // May hit overflow or other limits
-                        }
-                    }
+        // Test memory pressure with many heavy links on a fresh runtime instance
+        let mut memory_runtime =
+            LabRuntime::new(runtime.config.clone()).expect("memory stress runtime should create");
+        let memory_stress_profile = FaultProfile {
+            drop_pct: 0.1,
+            reorder_depth: 1,
+            corrupt_probability: 0.0,
+            delay_ticks: 1,
+        };
+
+        let mut memory_links_created = 0;
+        for _i in 0..100 {
+            let result =
+                VirtualLink::new("memory-src", "memory-tgt", memory_stress_profile.clone())
+                    .and_then(|link| memory_runtime.add_link(link));
+
+            match result {
+                Ok(idx) => {
+                    memory_links_created += 1;
+                    let _ = memory_runtime.send_message(idx, &"m".repeat(4_096));
                 }
-
-                // Verify timer ordering invariant
-                let events = runtime.events();
-                let timer_events: Vec<_> = events
-                    .iter()
-                    .filter(|e| {
-                        e.event_code.contains("TIMER")
-                            && e.payload.contains(&base_fire_time.to_string())
-                    })
-                    .collect();
-
-                // Check timer events are in correct order
-                let mut prev_tick = scenario_start_time;
-                for event in timer_events {
-                    assert!(
-                        event.tick >= prev_tick,
-                        "Timer events should fire in order: {} >= {}",
-                        event.tick,
-                        prev_tick
-                    );
-                    prev_tick = event.tick;
+                Err(_) => {
+                    // May hit memory limits
+                    break;
                 }
             }
+        }
 
-            // Test timer cancellation scenarios (if supported)
-            let cancellation_timers: Vec<_> =
-                (0..1000).map(|i| format!("cancel_timer_{}", i)).collect();
+        // Should handle some level of memory pressure
+        assert!(
+            memory_links_created > 0,
+            "Should be able to create at least one memory-intensive link"
+        );
+        assert!(memory_runtime.events().len() <= MAX_EVENTS);
 
-            // Schedule timers for cancellation testing
-            for timer_id in &cancellation_timers {
-                let fire_time = 10000; // Far in the future
-                let result = runtime.schedule_timer(fire_time, timer_id);
-                if result.is_err() {
-                    break; // Hit limits
-                }
+        // Verify system stability under memory pressure
+        let events = runtime.events();
+        assert!(events.len() <= MAX_EVENTS);
+
+        // All events should be well-formed despite memory pressure
+        for event in events {
+            assert!(!event.event_code.is_empty());
+            assert!(event.tick <= runtime.now());
+        }
+
+        // Test rapid link creation/destruction cycles
+        for cycle in 0..1000 {
+            let _cycle_link_id = format!("cycle_link_{}", cycle);
+            let cycle_profile = FaultProfile {
+                drop_pct: 0.05,
+                reorder_depth: 1,
+                corrupt_probability: 0.0,
+                delay_ticks: 0,
+            };
+
+            // Create link
+            let create_result = VirtualLink::new("cycle-src", "cycle-tgt", cycle_profile)
+                .and_then(|link| runtime.add_link(link));
+
+            if let Ok(idx) = create_result {
+                // Send a message
+                let cycle_message = format!("cycle_msg_{}", cycle);
+                let _send_result = runtime.send_message(idx, &cycle_message);
+
+                // Destroy link (if implemented)
+                // Note: Assuming destroy_virtual_link exists or links are cleaned up automatically
+            } else {
+                // Break if we hit capacity limits
+                break;
             }
 
-            // Test rapid timer creation/cancellation cycles
-            for cycle in 0..10000 {
-                let cycle_timer_id = format!("cycle_timer_{}", cycle);
-                let fire_time = (cycle % 100) as u64 + 1000;
-
-                // Create timer
-                let create_result = runtime.schedule_timer(fire_time, &cycle_timer_id);
-
-                match create_result {
-                    Ok(_) => {
-                        // Timer created successfully
-
-                        // Immediately try to "cancel" by creating timer with same ID
-                        // (behavior depends on implementation)
-                        let duplicate_result =
-                            runtime.schedule_timer(fire_time + 1, &cycle_timer_id);
-                        match duplicate_result {
-                            Ok(_) => {
-                                // Duplicate timer ID handled (may overwrite or be rejected)
-                            }
-                            Err(_) => {
-                                // Duplicate timer ID rejected
-                            }
-                        }
-                    }
-                    Err(_) => {
-                        // Creation failed (likely hit limits)
-                        break;
-                    }
-                }
-
-                // Advance time occasionally to fire some timers
-                if cycle % 500 == 0 {
-                    let _ = runtime.advance_clock(50);
-                }
+            // Periodic cleanup
+            if cycle % 100 == 0 {
+                let _ = runtime.advance_clock(1);
             }
+        }
 
-            // Test timer precision at extreme time values
-            let precision_timers = vec![
-                ("precision_0", 0),                      // Immediate
-                ("precision_1", 1),                      // Next tick
-                ("precision_max_half", u64::MAX / 2),    // Very far future
-                ("precision_max_minus_1", u64::MAX - 1), // Near overflow
-            ];
+        // Final memory and capacity integrity check
+        let final_events = runtime.events();
+        assert!(final_events.len() <= MAX_EVENTS);
+    }
 
-            for (timer_id, fire_time) in precision_timers {
-                let current_time = runtime.now();
-                let result = runtime.schedule_timer(fire_time, timer_id);
+    #[test]
+    fn negative_scenario_lifecycle_state_corruption_and_race_conditions() {
+        // Test scenario lifecycle state corruption and race condition resistance
+        let config = LabConfig {
+            seed: 2222,
+            max_interleavings: 10000,
+            max_ticks: 10_000,
+            enable_dpor: false,
+        };
 
+        let mut runtime = LabRuntime::new(config).expect("runtime should create");
+
+        // Test invalid scenario lifecycle sequences
+        let invalid_sequences = vec![
+            // Complete before start
+            vec![("scenario_1", "complete"), ("scenario_1", "start")],
+            // Fail before start
+            vec![("scenario_2", "fail"), ("scenario_2", "start")],
+            // Double start
+            vec![("scenario_3", "start"), ("scenario_3", "start")],
+            // Double complete
+            vec![
+                ("scenario_4", "start"),
+                ("scenario_4", "complete"),
+                ("scenario_4", "complete"),
+            ],
+            // Complete then fail
+            vec![
+                ("scenario_5", "start"),
+                ("scenario_5", "complete"),
+                ("scenario_5", "fail"),
+            ],
+            // Fail then complete
+            vec![
+                ("scenario_6", "start"),
+                ("scenario_6", "fail"),
+                ("scenario_6", "complete"),
+            ],
+        ];
+
+        for (seq_idx, sequence) in invalid_sequences.into_iter().enumerate() {
+            for (scenario_id, action) in sequence {
+                // The real runtime has no imperative scenario state machine; drive
+                // each named lifecycle action through a real timer keyed by the id.
+                let result = match action {
+                    "start" => runtime.schedule_timer(1, scenario_id),
+                    "complete" => runtime.schedule_timer(1, scenario_id),
+                    "fail" => {
+                        runtime.schedule_timer(1, format!("{}_fail_{}", scenario_id, seq_idx))
+                    }
+                    _ => continue,
+                };
+
+                // Some operations should fail based on state
                 match result {
                     Ok(_) => {
-                        // Timer scheduled at extreme time
-                        if fire_time <= current_time + 1000 {
-                            // For reasonable fire times, advance and verify
-                            let advance_amount =
-                                fire_time.saturating_sub(current_time).saturating_add(10);
-                            let advance_result = runtime.advance_clock(advance_amount);
+                        // Valid state transitions should succeed
+                    }
+                    Err(_) => {
+                        // Invalid state transitions should fail gracefully
+                    }
+                }
+            }
+        }
 
-                            if advance_result.is_ok() {
-                                // Verify timer fired correctly
-                                let events = runtime.events();
-                                let timer_fired = events.iter().any(|e| {
-                                    e.event_code.contains("TIMER") && e.payload.contains(timer_id)
-                                });
+        // Test concurrent scenario operations (simulated)
+        let concurrent_scenarios: Vec<String> = (0..100)
+            .map(|i| format!("concurrent_scenario_{}", i))
+            .collect();
 
-                                if fire_time <= runtime.now() {
-                                    // Timer should have fired
-                                    assert!(
-                                        timer_fired,
-                                        "Timer {} should have fired at time {}",
-                                        timer_id, fire_time
-                                    );
+        // Start all scenarios rapidly
+        for scenario_id in &concurrent_scenarios {
+            let result = runtime.schedule_timer(1, scenario_id);
+            match result {
+                Ok(_) => {
+                    // Scenario started successfully
+                }
+                Err(_) => {
+                    // May hit limits under rapid concurrent operations
+                }
+            }
+        }
+
+        // Interleave various operations rapidly
+        for i in 0..1000 {
+            let scenario_idx = i % concurrent_scenarios.len();
+            let scenario_id = &concurrent_scenarios[scenario_idx];
+
+            match i % 4 {
+                0 => {
+                    let _result = runtime.schedule_timer(1, scenario_id);
+                }
+                1 => {
+                    let _result = runtime.schedule_timer(1, scenario_id);
+                }
+                2 => {
+                    let _result = runtime.schedule_timer(1, scenario_id);
+                }
+                3 => {
+                    // Advance time to trigger various events
+                    let _result = runtime.advance_clock(1);
+                }
+                _ => {}
+            }
+        }
+
+        // Test scenario with extreme names and failure reasons
+        let extreme_scenarios = vec![
+            ("".to_string(), "empty_name"),                          // Empty name
+            ("x".repeat(100_000), "very_long_name"),                 // Very long name
+            ("scenario\x00\x01\x02null".to_string(), "binary_data"), // Binary data in name
+            ("scenario\u{202E}reverse".to_string(), "unicode_attack"), // Unicode direction override
+            ("../../../etc/passwd".to_string(), "path_traversal"),   // Path traversal attempt
+            ("scenario; rm -rf /".to_string(), "command_injection"), // Command injection attempt
+        ];
+
+        for (scenario_id, failure_reason) in extreme_scenarios {
+            // Test start with extreme scenario ID
+            let start_result = runtime.schedule_timer(1, &scenario_id);
+
+            match start_result {
+                Ok(_) => {
+                    // If start succeeds, test failure with extreme reason
+                    let failure_result = runtime.schedule_timer(1, failure_reason);
+
+                    match failure_result {
+                        Ok(_) => {
+                            // Extreme content handled gracefully
+                        }
+                        Err(_) => {
+                            // May reject extreme failure reasons
+                        }
+                    }
+                }
+                Err(_) => {
+                    // Extreme scenario IDs may be rejected
+                }
+            }
+        }
+
+        // Test interleaving budget exhaustion
+        let budget_scenario = "budget_exhaustion_test";
+        let start_result = runtime.schedule_timer(1, budget_scenario);
+
+        if start_result.is_ok() {
+            // Perform many operations to potentially exhaust budget
+            for i in 0..runtime.config.max_interleavings + 100 {
+                // Create timer to generate interleaving events
+                let timer_id = format!("budget_timer_{}", i);
+                let timer_result = runtime.schedule_timer(i + 100, &timer_id);
+
+                if timer_result.is_err() {
+                    break; // Hit some limit
+                }
+
+                // Advance time to fire timer
+                let _ = runtime.advance_clock(1);
+
+                // Check if budget exhausted
+                if i > runtime.config.max_interleavings {
+                    // Should hit budget exhaustion
+                    break;
+                }
+            }
+
+            // Try to complete the scenario
+            let complete_result = runtime.schedule_timer(1, budget_scenario);
+            match complete_result {
+                Ok(_) => {
+                    // Budget exhaustion may or may not affect completion
+                }
+                Err(err) => {
+                    match err {
+                        LabError::BudgetExceeded { explored, budget } => {
+                            assert!(explored >= budget);
+                        }
+                        _ => {
+                            // Other errors acceptable
+                        }
+                    }
+                }
+            }
+        }
+
+        // Verify system state integrity after stress testing
+        let final_events = runtime.events();
+        assert!(final_events.len() <= MAX_EVENTS);
+
+        // All events should have valid structure
+        for event in final_events {
+            assert!(!event.event_code.is_empty());
+            assert!(event.tick <= runtime.now());
+        }
+
+        // Test repro bundle export after state stress
+        {
+            let export_result: Result<ReproBundle, LabError> =
+                Ok(runtime.export_repro_bundle(true));
+            match export_result {
+                Ok(bundle) => {
+                    // Bundle should be valid despite state stress
+                    let serialization_result = serde_json::to_string(&bundle);
+                    match serialization_result {
+                        Ok(_json_str) => {
+                            // Should serialize successfully
+                        }
+                        Err(_) => {
+                            // May fail with extreme content
+                        }
+                    }
+                }
+                Err(_) => {
+                    // Export may fail after state corruption attempts
+                }
+            }
+        }
+
+        // Final clock consistency check
+        let final_tick = runtime.now();
+        assert!(final_tick < u64::MAX, "Clock should not overflow");
+    }
+
+    #[test]
+    fn negative_repro_bundle_serialization_injection_and_corruption_attacks() {
+        // Test repro bundle serialization injection and corruption attack resistance
+        let config = LabConfig {
+            seed: 3333,
+            max_interleavings: 1000,
+            max_ticks: 10_000,
+            enable_dpor: false,
+        };
+
+        let mut runtime = LabRuntime::new(config).expect("runtime should create");
+
+        // Create scenario with potentially dangerous content
+        let injection_scenario = "injection_test_scenario";
+        runtime
+            .schedule_timer(1, injection_scenario)
+            .expect("schedule injection scenario timer");
+
+        // Create virtual links with injection attempts
+        let injection_profiles = vec![
+            FaultProfile {
+                drop_pct: 0.1,
+                reorder_depth: 1,
+                corrupt_probability: 0.0,
+                delay_ticks: 1,
+            },
+            FaultProfile {
+                drop_pct: 0.2,
+                reorder_depth: 2,
+                corrupt_probability: 0.1,
+                delay_ticks: 2,
+            },
+            FaultProfile {
+                drop_pct: 0.3,
+                reorder_depth: 3,
+                corrupt_probability: 0.2,
+                delay_ticks: 3,
+            },
+        ];
+
+        for (i, profile) in injection_profiles.into_iter().enumerate() {
+            let _link_id = format!("injection_link_{}", i);
+            let source = format!("src\x00injection_{}", i);
+            let target = format!("tgt\u{202E}fake_{}", i);
+
+            let result =
+                VirtualLink::new(&source, &target, profile).and_then(|link| runtime.add_link(link));
+
+            if let Ok(idx) = result {
+                // Send messages with injection content (valid UTF-8 carriers)
+                let injection_messages = vec![
+                    "\u{0000}\u{0001}\u{0002}null_bytes".to_string(),
+                    "unicode_message_控制字符\u{202E}reverse".to_string(),
+                    format!("{}'; DROP TABLE logs; --", "x".repeat(500)),
+                    format!("{}/../../../secret_file", "msg".repeat(100)),
+                ];
+
+                for (_j, message) in injection_messages.into_iter().enumerate() {
+                    let send_result = runtime.send_message(idx, &message);
+                    if send_result.is_ok() {
+                        let _ = runtime.advance_clock(1);
+                    }
+                }
+            }
+        }
+
+        // Create timers with injection attempts
+        let injection_timer_ids = vec![
+            "timer\x00null_byte".to_string(),
+            "timer\u{202E}unicode_attack".to_string(),
+            "timer/../../../timer_injection".to_string(),
+            "timer'; DROP TABLE timers; --".to_string(),
+            "x".repeat(10_000), // Very long timer ID
+        ];
+
+        for timer_id in injection_timer_ids {
+            let timer_result = runtime.schedule_timer(100, &timer_id);
+            match timer_result {
+                Ok(_) => {
+                    // Timer scheduled with injection content
+                }
+                Err(_) => {
+                    // Injection content may be rejected
+                }
+            }
+        }
+
+        let _ = runtime.advance_clock(200); // Fire timers
+
+        // Fail scenario with injection attempt in failure reason
+        let injection_failure_reason =
+            "failure_reason\x00\x01\x02\u{202E}injection_attempt/../../../failure_log";
+        let fail_result = runtime.schedule_timer(1, injection_failure_reason);
+        match fail_result {
+            Ok(_) => {
+                // Failure recorded with injection content
+            }
+            Err(_) => {
+                // May reject injection content in failure reasons
+            }
+        }
+
+        // Export repro bundle with injection content
+        let export_result: Result<ReproBundle, LabError> = Ok(runtime.export_repro_bundle(true));
+
+        match export_result {
+            Ok(bundle) => {
+                // Test serialization safety
+                let serialization_result = serde_json::to_string(&bundle);
+
+                match serialization_result {
+                    Ok(json_str) => {
+                        // Verify JSON is safe and well-formed
+                        assert!(
+                            !json_str.contains("\x00"),
+                            "JSON should not contain null bytes"
+                        );
+
+                        // Should be valid JSON with exact ReproBundle structural containment
+                        let parse_test: Result<serde_json::Value, _> =
+                            serde_json::from_str(&json_str);
+                        let parsed_value =
+                            parse_test.expect("Serialized bundle should be valid JSON");
+                        let root_obj = parsed_value
+                            .as_object()
+                            .expect("Serialized ReproBundle root must remain a JSON object");
+                        assert_eq!(
+                            root_obj.len(),
+                            6,
+                            "Injection payloads must not escape string literals to inject root JSON keys"
+                        );
+                        for expected_key in [
+                            "schema_version",
+                            "seed",
+                            "config",
+                            "links",
+                            "events",
+                            "passed",
+                        ] {
+                            assert!(
+                                root_obj.contains_key(expected_key),
+                                "Missing expected ReproBundle key {expected_key}"
+                            );
+                        }
+                        let events_array = root_obj["events"]
+                            .as_array()
+                            .expect("events field must remain a JSON array");
+                        for event_val in events_array {
+                            let event_obj = event_val
+                                .as_object()
+                                .expect("each event must remain a JSON object");
+                            assert_eq!(
+                                event_obj.len(),
+                                3,
+                                "Injection payloads must remain confined inside escaped event string values"
+                            );
+                        }
+
+                        // Test deserialization
+                        let deserialization_result: Result<ReproBundle, _> =
+                            serde_json::from_str(&json_str);
+                        match deserialization_result {
+                            Ok(reconstructed) => {
+                                // Should successfully round-trip
+                                assert_eq!(reconstructed.schema_version, bundle.schema_version);
+                                assert_eq!(reconstructed.seed, bundle.seed);
+
+                                // Verify injection content is safely contained
+                                // (not executed or interpreted maliciously)
+                                for event in &reconstructed.events {
+                                    // Events should be structurally valid
+                                    assert!(!event.event_code.is_empty());
+                                    // Injection content may be preserved but should not be active
+                                }
+                            }
+                            Err(_) => {
+                                // Extreme injection content may prevent deserialization
+                            }
+                        }
+
+                        // Test replay safety
+                        let replay_result = LabRuntime::replay_bundle(&bundle, &|_rt| Ok(true));
+                        match replay_result {
+                            Ok(_) => {
+                                // Replay should not execute injection content
+                                // Verify replay doesn't cause side effects
+                                let replay_events = runtime.events();
+                                for event in replay_events {
+                                    assert!(!event.event_code.is_empty());
+                                    // Injection content should not corrupt event structure
+                                }
+                            }
+                            Err(err) => {
+                                // Replay may fail with injection content
+                                match err {
+                                    LabError::ReplayDivergence { .. } => {
+                                        // Expected for injection-modified content
+                                    }
+                                    LabError::BundleValidation { .. } => {
+                                        // Validation may reject injection content
+                                    }
+                                    _ => {
+                                        // Other replay errors acceptable
+                                    }
                                 }
                             }
                         }
                     }
                     Err(err) => {
-                        // Extreme timer values may be rejected
-                        match err {
-                            LabError::TickOverflow { .. } => {
-                                // Expected for extreme fire times
-                            }
-                            LabError::TimerIdExhausted => {
-                                // Expected when timer capacity is reached
-                            }
-                            _ => {
-                                // Other timer-related errors are acceptable
-                            }
+                        // Extreme injection content may prevent serialization;
+                        // serde_json surfaces a meaningful (non-empty) error message.
+                        assert!(!err.to_string().is_empty());
+                    }
+                }
+            }
+            Err(err) => {
+                // Export may fail with extreme injection content
+                match err {
+                    LabError::BundleValidation { .. } => {
+                        // Validation may reject injection content
+                    }
+                    _ => {
+                        // Other export errors acceptable
+                    }
+                }
+            }
+        }
+
+        // Test bundle corruption resistance
+        {
+            let original_bundle = runtime.export_repro_bundle(true);
+            let original_json = serde_json::to_string(&original_bundle).unwrap();
+
+            // Various corruption patterns (own the Strings so the borrows in
+            // the loop outlive the temporaries produced by replace()/format!).
+            let corruption_patterns: Vec<String> = vec![
+                // Truncate JSON
+                original_json[..original_json.len() / 2].to_string(),
+                // Invalid JSON structure
+                original_json.replace("}", ""),
+                original_json.replace("\"", "'"),
+                original_json.replace(":", "="),
+                // Field manipulation
+                original_json.replace("\"seed\"", "\"malicious_seed\""),
+                original_json.replace("\"events\"", "\"malicious_events\""),
+                // Value injection
+                original_json.replace("1000", "0xDEADBEEF"),
+                format!("{}\x00corruption", original_json),
+            ];
+
+            for (corruption_idx, corrupted_json) in corruption_patterns.into_iter().enumerate() {
+                let parse_result: Result<ReproBundle, _> = serde_json::from_str(&corrupted_json);
+
+                match parse_result {
+                    Ok(corrupted_bundle) => {
+                        // If parsing succeeds despite corruption, replay must
+                        // validate and reject it (no public validate_bundle exists).
+                        let _validation_result =
+                            LabRuntime::replay_bundle(&corrupted_bundle, &|_rt| Ok(true));
+                    }
+                    Err(_) => {
+                        // Corruption should be detected during parsing
+                    }
+                }
+            }
+        }
+
+        // Final integrity check
+        let final_events = runtime.events();
+        assert!(final_events.len() <= MAX_EVENTS);
+
+        // All events should remain structurally valid despite injection attempts
+        for event in final_events {
+            assert!(!event.event_code.is_empty());
+            assert!(event.tick <= runtime.now());
+        }
+    }
+
+    #[test]
+    fn negative_timer_id_exhaustion_and_concurrent_timer_attacks() {
+        // Test timer ID exhaustion and concurrent timer attack resistance
+        let config = LabConfig {
+            seed: 4444,
+            max_interleavings: 10000,
+            max_ticks: 10_000,
+            enable_dpor: false,
+        };
+
+        let mut runtime = LabRuntime::new(config).expect("runtime should create");
+
+        // Test timer ID exhaustion by creating many timers
+        let mut created_timers = Vec::new();
+        let timer_creation_limit = 100_000; // Reasonable limit to avoid test timeout
+
+        for i in 0..timer_creation_limit {
+            let timer_id = format!("exhaustion_timer_{:08}", i);
+            let fire_time = (i % 1000) as u64 + 100; // Various fire times
+
+            let result = runtime.schedule_timer(fire_time, &timer_id);
+
+            match result {
+                Ok(_) => {
+                    created_timers.push((timer_id, fire_time));
+                }
+                Err(err) => {
+                    // Should eventually hit ID exhaustion
+                    match err {
+                        LabError::TimerIdExhausted => {
+                            // Expected behavior when IDs are exhausted
+                            break;
+                        }
+                        _ => {
+                            // Other errors may occur under stress
+                            break;
                         }
                     }
                 }
             }
 
-            // Final timer system integrity check
-            let final_events = runtime.events();
-            assert!(final_events.len() <= MAX_EVENTS);
+            // Periodic time advancement to fire some timers and free IDs
+            if i % 1000 == 0 {
+                let _ = runtime.advance_clock(50);
+            }
+        }
 
-            // All timer events should have valid structure
-            let timer_events: Vec<_> = final_events
+        // Verify we created a reasonable number of timers before exhaustion
+        assert!(
+            created_timers.len() > 1000,
+            "Should be able to create many timers before exhaustion"
+        );
+
+        // Test concurrent timer operations (simulated rapid operations)
+        let concurrent_timer_scenarios = vec![
+            // Many timers with same fire time
+            (500, 100),
+            // Many timers with sequential fire times
+            (500, 200),
+            // Timers with extreme fire times
+            (100, u64::MAX / 2),
+            // Immediate timers
+            (100, 0),
+        ];
+
+        for (timer_count, base_fire_time) in concurrent_timer_scenarios {
+            let scenario_start_time = runtime.now();
+
+            // Create many timers rapidly
+            let mut scenario_timers = Vec::new();
+            for j in 0..timer_count {
+                let timer_id = format!("concurrent_{}_timer_{}", base_fire_time, j);
+                let fire_time = base_fire_time.saturating_add(j as u64);
+
+                let result = runtime.schedule_timer(fire_time, &timer_id);
+                match result {
+                    Ok(_) => {
+                        scenario_timers.push((timer_id, fire_time));
+                    }
+                    Err(_) => {
+                        // May hit limits under concurrent stress
+                        break;
+                    }
+                }
+            }
+
+            // Advance time to fire all timers in this scenario
+            if !scenario_timers.is_empty() {
+                let max_fire_time = scenario_timers
+                    .iter()
+                    .map(|(_, fire_time)| fire_time)
+                    .max()
+                    .unwrap();
+                let advance_amount = max_fire_time
+                    .saturating_sub(scenario_start_time)
+                    .saturating_add(100);
+
+                let advance_result = runtime.advance_clock(advance_amount);
+                match advance_result {
+                    Ok(_) => {
+                        // Time advanced successfully
+                    }
+                    Err(_) => {
+                        // May hit overflow or other limits
+                    }
+                }
+            }
+
+            // Verify timer ordering invariant for this scenario's timers
+            let scenario_prefix = format!("concurrent_{}_timer_", base_fire_time);
+            let events = runtime.events();
+            let timer_events: Vec<_> = events
                 .iter()
-                .filter(|e| e.event_code.contains("TIMER"))
+                .filter(|e| e.event_code == EVT_TIMER_FIRED && e.payload.contains(&scenario_prefix))
                 .collect();
 
+            // Check timer events are in correct order
+            let mut prev_tick = scenario_start_time;
             for event in timer_events {
-                assert!(!event.event_code.is_empty());
-                assert!(event.tick <= runtime.now());
-                assert!(!event.payload.is_empty());
-            }
-
-            // Verify timer ordering invariant across all events
-            let mut all_timer_ticks: Vec<u64> = final_events
-                .iter()
-                .filter(|e| e.event_code.contains("TIMER"))
-                .map(|e| e.tick)
-                .collect();
-
-            all_timer_ticks.sort_unstable();
-
-            // Check for ordering violations
-            for window in all_timer_ticks.windows(2) {
                 assert!(
-                    window[1] >= window[0],
-                    "Timer ordering violation: {} should not come before {}",
-                    window[1],
-                    window[0]
+                    event.tick >= prev_tick,
+                    "Timer events should fire in order: {} >= {}",
+                    event.tick,
+                    prev_tick
                 );
+                prev_tick = event.tick;
             }
+        }
+
+        // Test timer cancellation scenarios (if supported)
+        let cancellation_timers: Vec<_> =
+            (0..1000).map(|i| format!("cancel_timer_{}", i)).collect();
+
+        // Schedule timers for cancellation testing
+        for timer_id in &cancellation_timers {
+            let fire_time = 10000; // Far in the future
+            let result = runtime.schedule_timer(fire_time, timer_id);
+            if result.is_err() {
+                break; // Hit limits
+            }
+        }
+
+        // Test rapid timer creation/cancellation cycles
+        for cycle in 0..10000 {
+            let cycle_timer_id = format!("cycle_timer_{}", cycle);
+            let fire_time = (cycle % 100) as u64 + 1000;
+
+            // Create timer
+            let create_result = runtime.schedule_timer(fire_time, &cycle_timer_id);
+
+            match create_result {
+                Ok(_) => {
+                    // Timer created successfully
+
+                    // Immediately try to "cancel" by creating timer with same ID
+                    // (behavior depends on implementation)
+                    let duplicate_result = runtime.schedule_timer(fire_time + 1, &cycle_timer_id);
+                    match duplicate_result {
+                        Ok(_) => {
+                            // Duplicate timer ID handled (may overwrite or be rejected)
+                        }
+                        Err(_) => {
+                            // Duplicate timer ID rejected
+                        }
+                    }
+                }
+                Err(_) => {
+                    // Creation failed (likely hit limits)
+                    break;
+                }
+            }
+
+            // Advance time occasionally to fire some timers
+            if cycle % 500 == 0 {
+                let _ = runtime.advance_clock(50);
+            }
+        }
+
+        // Test timer precision at extreme time values on a dedicated runtime so
+        // earlier 10,000-timer cycle noise cannot evict fired events from MAX_EVENTS.
+        let mut precision_runtime =
+            LabRuntime::new(runtime.config.clone()).expect("precision runtime should create");
+        let precision_timers = vec![
+            ("precision_0", 0),                      // Immediate
+            ("precision_1", 1),                      // Next tick
+            ("precision_max_half", u64::MAX / 2),    // Very far future
+            ("precision_max_minus_1", u64::MAX - 1), // Near overflow
+        ];
+
+        for (timer_id, delay) in precision_timers {
+            let current_time = precision_runtime.now();
+            let result = precision_runtime.schedule_timer(delay, timer_id);
+
+            match result {
+                Ok(_) => {
+                    // Timer scheduled at extreme relative delay
+                    if delay <= 1000 {
+                        let expected_fire_tick = current_time.saturating_add(delay);
+                        let advance_amount = delay.saturating_add(10);
+                        let advance_result = precision_runtime.advance_clock(advance_amount);
+
+                        if advance_result.is_ok() {
+                            let events = precision_runtime.events();
+                            let timer_fired = events.iter().any(|e| {
+                                e.event_code == EVT_TIMER_FIRED && e.payload.contains(timer_id)
+                            });
+
+                            if expected_fire_tick <= precision_runtime.now() {
+                                assert!(
+                                    timer_fired,
+                                    "Timer {} should have fired at tick {}",
+                                    timer_id, expected_fire_tick
+                                );
+                            }
+                        }
+                    }
+                }
+                Err(err) => {
+                    // Extreme timer values may be rejected
+                    match err {
+                        LabError::TickOverflow { .. } => {
+                            // Expected for extreme fire times
+                        }
+                        LabError::TimerIdExhausted => {
+                            // Expected when timer capacity is reached
+                        }
+                        _ => {
+                            // Other timer-related errors are acceptable
+                        }
+                    }
+                }
+            }
+        }
+
+        // Final timer system integrity check
+        let final_events = runtime.events();
+        assert!(final_events.len() <= MAX_EVENTS);
+
+        // All timer events should have valid structure
+        let timer_events: Vec<_> = final_events
+            .iter()
+            .filter(|e| e.event_code == EVT_TIMER_FIRED)
+            .collect();
+
+        for event in timer_events {
+            assert!(!event.event_code.is_empty());
+            assert!(event.tick <= runtime.now());
+            assert!(!event.payload.is_empty());
+        }
+
+        // Verify timer ordering invariant across all retained events in emission order
+        let all_timer_ticks: Vec<u64> = final_events
+            .iter()
+            .filter(|e| e.event_code == EVT_TIMER_FIRED)
+            .map(|e| e.tick)
+            .collect();
+
+        // Check for ordering violations
+        for window in all_timer_ticks.windows(2) {
+            assert!(
+                window[1] >= window[0],
+                "Timer ordering violation: {} should not come before {}",
+                window[1],
+                window[0]
+            );
         }
     }
 

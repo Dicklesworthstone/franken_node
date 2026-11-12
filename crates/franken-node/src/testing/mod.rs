@@ -2150,7 +2150,8 @@ mod testing_module_negative_tests {
                     .sum();
                 assert_eq!(flipped_bits, 1, "configured corruption: {test_name}");
             }
-            let delivered_count = u64::try_from(delivered.len()).expect("two-message fixture count");
+            let delivered_count =
+                u64::try_from(delivered.len()).expect("two-message fixture count");
             let final_stats = transport.stats();
             assert_eq!(final_stats.total_messages, 2, "both sends: {test_name}");
             assert_eq!(
@@ -2346,961 +2347,972 @@ mod testing_module_negative_tests {
                 test_name
             );
         }
+    }
 
-        /// Test Unicode injection attacks in testing module components
-        #[test]
-        fn negative_testing_unicode_injection_comprehensive() {
-            use super::scenario_builder::{NodeRole, ScenarioBuilder};
-            use super::virtual_transport::{LinkFaultConfig, VirtualTransportLayer};
+    /// Test Unicode injection attacks in testing module components
+    #[test]
+    fn negative_testing_unicode_injection_comprehensive() {
+        use super::scenario_builder::{NodeRole, ScenarioBuilder};
+        use super::virtual_transport::{LinkFaultConfig, VirtualTransportLayer};
 
-            let unicode_injection_vectors = vec![
-                // BiDi override attacks in test scenarios
-                ("bidi_override", "test\u{202E}gninoisufnoc\u{202D}scenario"),
-                (
-                    "bidi_nested",
-                    "test\u{202E}level1\u{202E}level2\u{202D}nested\u{202D}scenario",
-                ),
-                // Zero-width character pollution
-                (
-                    "zws_pollution",
-                    "test\u{200B}invisible\u{200C}spaces\u{200D}scenario",
-                ),
-                (
-                    "zwj_sequence",
-                    "test\u{200D}\u{1F469}\u{200D}\u{1F4BB}scenario",
-                ),
-                // Confusable character attacks
-                ("cyrillic_spoof", "tеst_scеnario"), // Cyrillic 'e' characters
-                ("greek_spoof", "test_scεnαrio"),    // Greek characters
-                // Control character injection
-                ("ansi_escape", "test\x1b[31mred\x1b[0mscenario"),
-                ("vertical_tab", "test\x0Bscenario"),
-                // Unicode normalization attacks
-                ("nfd_attack", "cafe\u{0301}_scenario"), // NFD form
-                (
-                    "combining_stack",
-                    "test\u{0300}\u{0301}\u{0302}\u{0303}scenario",
-                ),
-            ];
+        let unicode_injection_vectors = vec![
+            // BiDi override attacks in test scenarios
+            ("bidi_override", "test\u{202E}gninoisufnoc\u{202D}scenario"),
+            (
+                "bidi_nested",
+                "test\u{202E}level1\u{202E}level2\u{202D}nested\u{202D}scenario",
+            ),
+            // Zero-width character pollution
+            (
+                "zws_pollution",
+                "test\u{200B}invisible\u{200C}spaces\u{200D}scenario",
+            ),
+            (
+                "zwj_sequence",
+                "test\u{200D}\u{1F469}\u{200D}\u{1F4BB}scenario",
+            ),
+            // Confusable character attacks
+            ("cyrillic_spoof", "tеst_scеnario"), // Cyrillic 'e' characters
+            ("greek_spoof", "test_scεnαrio"),    // Greek characters
+            // Control character injection
+            ("ansi_escape", "test\x1b[31mred\x1b[0mscenario"),
+            ("vertical_tab", "test\x0Bscenario"),
+            // Unicode normalization attacks
+            ("nfd_attack", "cafe\u{0301}_scenario"), // NFD form
+            (
+                "combining_stack",
+                "test\u{0300}\u{0301}\u{0302}\u{0303}scenario",
+            ),
+        ];
 
-            for (attack_name, malicious_input) in unicode_injection_vectors {
-                let injection_result = std::panic::catch_unwind(|| {
-                    // Test scenario builder resistance to Unicode injection
-                    let scenario_result = ScenarioBuilder::new(malicious_input)
-                        .seed(98765)
-                        .add_node("clean_node", "Clean Node", NodeRole::Coordinator)
-                        .and_then(|b| {
-                            b.add_node(malicious_input, "Injected Node", NodeRole::Participant)
-                        });
+        for (attack_name, malicious_input) in unicode_injection_vectors {
+            let injection_result = std::panic::catch_unwind(|| {
+                // Test scenario builder resistance to Unicode injection
+                let scenario_result = ScenarioBuilder::new(malicious_input)
+                    .seed(98765)
+                    .add_node("clean_node", "Clean Node", NodeRole::Coordinator)
+                    .and_then(|b| {
+                        b.add_node(malicious_input, "Injected Node", NodeRole::Participant)
+                    });
 
-                    match scenario_result {
-                        Ok(builder) => {
-                            let final_scenario =
-                                builder.build().expect("Should build successfully");
+                match scenario_result {
+                    Ok(builder) => {
+                        let final_scenario = builder.build().expect("Should build successfully");
 
-                            // Test JSON serialization preserves security
-                            let json = final_scenario.to_json().expect("JSON should serialize");
+                        // Test JSON serialization preserves security
+                        let json = final_scenario.to_json().expect("JSON should serialize");
 
-                            // Ensure injection didn't break JSON structure
-                            let parsed: serde_json::Value =
-                                serde_json::from_str(&json).expect("JSON should remain valid");
-                            assert!(parsed.is_object(), "JSON should maintain object structure");
+                        // Ensure injection didn't break JSON structure
+                        let parsed: serde_json::Value =
+                            serde_json::from_str(&json).expect("JSON should remain valid");
+                        assert!(parsed.is_object(), "JSON should maintain object structure");
 
-                            // Test virtual transport with Unicode-injected identifiers
-                            let mut transport = VirtualTransportLayer::new(54321);
-                            let create_result = transport.create_link(
+                        // Test virtual transport with Unicode-injected identifiers
+                        let mut transport = VirtualTransportLayer::new(54321);
+                        let create_result = transport.create_link(
+                            "clean_node",
+                            malicious_input,
+                            LinkFaultConfig::no_faults(),
+                        );
+
+                        if create_result.is_ok() {
+                            // Test message with Unicode payload
+                            let unicode_payload =
+                                format!("payload_{}", malicious_input).into_bytes();
+                            let send_result = transport.send_message(
                                 "clean_node",
                                 malicious_input,
-                                LinkFaultConfig::no_faults(),
+                                unicode_payload,
                             );
 
-                            if create_result.is_ok() {
-                                // Test message with Unicode payload
-                                let unicode_payload =
-                                    format!("payload_{}", malicious_input).into_bytes();
-                                let send_result = transport.send_message(
-                                    "clean_node",
-                                    malicious_input,
-                                    unicode_payload,
-                                );
-
-                                // Should handle without corruption or bypass
-                                assert!(
-                                    send_result.is_ok() || send_result.is_err(),
-                                    "Send should complete deterministically for: {}",
-                                    attack_name
-                                );
-                            }
-                        }
-                        Err(_) => {
-                            // Graceful rejection of malicious input is acceptable
+                            // Should handle without corruption or bypass
+                            assert!(
+                                send_result.is_ok() || send_result.is_err(),
+                                "Send should complete deterministically for: {}",
+                                attack_name
+                            );
                         }
                     }
+                    Err(_) => {
+                        // Graceful rejection of malicious input is acceptable
+                    }
+                }
 
-                    Ok::<(), ()>(())
-                });
+                Ok::<(), ()>(())
+            });
 
-                assert!(
-                    injection_result.is_ok(),
-                    "Unicode injection should not cause panic: {}",
-                    attack_name
-                );
-            }
+            assert!(
+                injection_result.is_ok(),
+                "Unicode injection should not cause panic: {}",
+                attack_name
+            );
         }
+    }
 
-        /// Test memory exhaustion protection in testing modules
-        #[test]
-        fn negative_testing_memory_exhaustion_stress() {
-            use super::scenario_builder::{NodeRole, ScenarioAssertion, ScenarioBuilder};
-            use super::virtual_transport::{LinkFaultConfig, VirtualTransportLayer};
+    /// Test memory exhaustion protection in testing modules
+    #[test]
+    fn negative_testing_memory_exhaustion_stress() {
+        use super::scenario_builder::{NodeRole, ScenarioAssertion, ScenarioBuilder};
+        use super::virtual_transport::{LinkFaultConfig, VirtualTransportLayer};
 
-            // Test massive scenario construction with bounded resources
-            let memory_stress_result = std::panic::catch_unwind(|| {
-                let mut builder = ScenarioBuilder::new("memory_exhaustion_test").seed(77777);
+        // Test massive scenario construction with bounded resources
+        let memory_stress_result = std::panic::catch_unwind(|| {
+            let mut builder = ScenarioBuilder::new("memory_exhaustion_test").seed(77777);
 
-                // Add many nodes to stress memory allocation
-                let mut node_count = 0usize;
-                for i in 0..10000 {
-                    let node_id = format!("stress_node_{:05}", i);
-                    let massive_description = "STRESS ".repeat(1000); // 6KB per description
+            // Add many nodes to stress memory allocation
+            let mut node_count = 0usize;
+            for i in 0..10000 {
+                let node_id = format!("stress_node_{:05}", i);
+                let massive_description = "STRESS ".repeat(1000); // 6KB per description
 
-                    match builder.clone().add_node(
-                        &node_id,
-                        &massive_description,
-                        NodeRole::Participant,
-                    ) {
-                        Ok(new_builder) => {
-                            builder = new_builder;
-                            node_count = node_count.saturating_add(1);
-                        }
-                        Err(_) => {
-                            // Hit memory/capacity limits - expected behavior
-                            break;
-                        }
+                match builder.clone().add_node(
+                    &node_id,
+                    &massive_description,
+                    NodeRole::Participant,
+                ) {
+                    Ok(new_builder) => {
+                        builder = new_builder;
+                        node_count = node_count.saturating_add(1);
                     }
-
-                    // Safety valve to prevent actual memory exhaustion in tests
-                    if i >= 1000 {
+                    Err(_) => {
+                        // Hit memory/capacity limits - expected behavior
                         break;
                     }
                 }
 
-                // Attempt massive link creation
-                let mut link_count = 0usize;
-                for i in 0..(node_count - 1).min(5000) {
-                    let link_id = format!("stress_link_{:05}", i);
-                    let source = format!("stress_node_{:05}", i);
-                    let target = format!("stress_node_{:05}", i + 1);
-
-                    match builder.clone().add_link(&link_id, &source, &target, true) {
-                        Ok(new_builder) => {
-                            builder = new_builder;
-                            link_count = link_count.saturating_add(1);
-                        }
-                        Err(_) => {
-                            // Hit capacity limits
-                            break;
-                        }
-                    }
+                // Safety valve to prevent actual memory exhaustion in tests
+                if i >= 1000 {
+                    break;
                 }
-
-                // Test memory-intensive assertions
-                for i in 0..link_count.min(1000) {
-                    let from = format!("stress_node_{:05}", i);
-                    let to = format!("stress_node_{:05}", i + 1);
-
-                    builder = builder.add_assertion(ScenarioAssertion::MessageDelivered {
-                        from,
-                        to,
-                        within_ticks: 1000,
-                    });
-                }
-
-                // Final build should either succeed or fail gracefully
-                let build_result = builder.build();
-                match build_result {
-                    Ok(scenario) => {
-                        // If build succeeds, test transport with scenario data
-                        let mut transport = VirtualTransportLayer::new(88888);
-
-                        // Create subset of transport links (bounded for memory)
-                        for link in scenario.links.iter().take(100) {
-                            if transport
-                                .create_link(
-                                    &link.source_node,
-                                    &link.target_node,
-                                    LinkFaultConfig::default(),
-                                )
-                                .is_ok()
-                            {
-                                // Send bounded message
-                                let payload = vec![0x42; 1024]; // 1KB message
-                                transport
-                                    .send_message(&link.source_node, &link.target_node, payload)
-                                    .ok();
-                            }
-                        }
-
-                        // Verify transport state remains stable
-                        let stats = transport.stats();
-                        assert!(
-                            stats.total_messages < u64::MAX,
-                            "Message count should not overflow"
-                        );
-                        assert!(stats.active_links <= 100, "Link count should be bounded");
-                    }
-                    Err(_) => {
-                        // Build failure under memory pressure is acceptable
-                    }
-                }
-
-                Ok::<(), ()>(())
-            });
-
-            assert!(
-                memory_stress_result.is_ok(),
-                "Memory stress test should not panic"
-            );
-        }
-
-        /// Test JSON structure integrity validation in testing components
-        #[test]
-        fn negative_testing_json_integrity_validation() {
-            use super::scenario_builder::{NodeRole, Scenario, ScenarioBuilder};
-
-            let json_corruption_patterns = vec![
-                // Structural JSON attacks
-                (r#"{"injected": true, "real_scenario""#, "incomplete_object"),
-                (
-                    r#"scenario": {"injected": "payload"}, "real""#,
-                    "property_injection",
-                ),
-                (
-                    r#"scenario\": {\"nested\": true}, \"continue\": \""#,
-                    "escape_injection",
-                ),
-                // Array confusion attacks
-                (r#"["fake", "array"], "scenario""#, "array_confusion"),
-                (
-                    r#"scenario", {"fake": "object"}, "continue"#,
-                    "mixed_structure",
-                ),
-                // Unicode escape attacks
-                (r#"scenario\u0022injection\u0022"#, "unicode_escape"),
-                (r#"scenario\u0000null_injection"#, "null_escape"),
-                // Control character corruption
-                ("scenario\r\n{\"injected\": true}\r\nreal", "crlf_injection"),
-                ("scenario\x00{\"binary\": true}", "binary_injection"),
-            ];
-
-            for (malicious_input, attack_name) in json_corruption_patterns {
-                let json_test_result = std::panic::catch_unwind(|| {
-                    // Create scenario with potentially malicious input
-                    let scenario_result = ScenarioBuilder::new(malicious_input)
-                        .seed(55555)
-                        .add_node("test_node", malicious_input, NodeRole::Coordinator)
-                        .and_then(|b| b.add_node("clean_node", "Clean Node", NodeRole::Participant))
-                        .and_then(|b| b.build());
-
-                    match scenario_result {
-                        Ok(scenario) => {
-                            // Test JSON serialization integrity
-                            let json_result = scenario.to_json();
-                            match json_result {
-                                Ok(json_string) => {
-                                    // Verify JSON is structurally valid
-                                    let parse_result: Result<serde_json::Value, _> =
-                                        serde_json::from_str(&json_string);
-
-                                    assert!(
-                                        parse_result.is_ok(),
-                                        "JSON should remain valid after serialization: {}",
-                                        attack_name
-                                    );
-
-                                    // Verify no injection occurred
-                                    let parsed = parse_result.unwrap();
-                                    if let Some(obj) = parsed.as_object() {
-                                        // Should not contain injected properties
-                                        assert!(
-                                            !obj.contains_key("injected"),
-                                            "Should not contain injected properties: {}",
-                                            attack_name
-                                        );
-                                        assert!(
-                                            !obj.contains_key("fake"),
-                                            "Should not contain fake properties: {}",
-                                            attack_name
-                                        );
-                                    }
-
-                                    // Test round-trip integrity
-                                    let reparse_result = Scenario::from_json(&json_string);
-                                    match reparse_result {
-                                        Ok(_) => {
-                                            // Successful round-trip preserves integrity
-                                        }
-                                        Err(_) => {
-                                            // Round-trip may fail for extreme cases - acceptable
-                                        }
-                                    }
-                                }
-                                Err(_) => {
-                                    // JSON serialization may fail for malicious input - acceptable
-                                }
-                            }
-                        }
-                        Err(_) => {
-                            // Scenario creation may reject malicious input - acceptable
-                        }
-                    }
-
-                    Ok::<(), ()>(())
-                });
-
-                assert!(
-                    json_test_result.is_ok(),
-                    "JSON integrity test should not panic: {}",
-                    attack_name
-                );
             }
-        }
 
-        /// Test arithmetic overflow protection in testing module counters
-        #[test]
-        fn negative_testing_arithmetic_overflow_protection() {
-            use super::lab_runtime::{LabConfig, LabRuntime};
-            use super::scenario_builder::{NodeRole, ScenarioBuilder};
-            use super::virtual_transport::VirtualTransportLayer;
+            // Attempt massive link creation
+            let mut link_count = 0usize;
+            for i in 0..(node_count - 1).min(5000) {
+                let link_id = format!("stress_link_{:05}", i);
+                let source = format!("stress_node_{:05}", i);
+                let target = format!("stress_node_{:05}", i + 1);
 
-            // Test virtual transport with overflow-prone operations
-            let overflow_test_result = std::panic::catch_unwind(|| {
-                let mut transport = VirtualTransportLayer::new(33333);
-
-                // Simulate near-overflow message ID scenarios
-                // Note: We can't directly set internal state, so we test overflow handling
-                transport
-                    .create_link(
-                        "overflow_src",
-                        "overflow_tgt",
-                        super::virtual_transport::LinkFaultConfig::no_faults(),
-                    )
-                    .expect("Link creation should succeed");
-
-                // Test message sending with potential counter overflow
-                let mut message_count = 0u64;
-                for i in 0..1000 {
-                    let payload = format!("overflow_test_{}", i).into_bytes();
-                    match transport.send_message("overflow_src", "overflow_tgt", payload) {
-                        Ok(msg_id) => {
-                            // Verify message ID doesn't wrap unexpectedly
-                            assert!(msg_id > 0, "Message ID should be positive");
-                            message_count = message_count.saturating_add(1);
-                        }
-                        Err(_) => {
-                            // Message may fail due to capacity limits - acceptable
-                            break;
-                        }
-                    }
-                }
-
-                // Test statistics calculation without overflow
-                let stats = transport.stats();
-                assert!(
-                    stats.total_messages <= message_count,
-                    "Stats should not exceed sent messages"
-                );
-                assert!(
-                    stats.delivered_messages <= stats.total_messages,
-                    "Delivered ≤ total"
-                );
-                assert!(
-                    stats.dropped_messages <= stats.total_messages,
-                    "Dropped ≤ total"
-                );
-
-                // Test lab runtime with overflow-prone tick operations
-                let lab_config = LabConfig::default();
-                let mut runtime =
-                    LabRuntime::new(lab_config).expect("Runtime creation should succeed");
-
-                // Test timer scheduling near tick overflow boundaries
-                let near_max_tick = u64::MAX - 1000;
-                runtime.test_clock.current_tick = near_max_tick;
-
-                // Schedule timer with small delta (should succeed)
-                let small_timer_result = runtime.schedule_timer(500, "near_overflow_safe");
-                assert!(
-                    small_timer_result.is_ok(),
-                    "Safe timer scheduling should succeed"
-                );
-
-                // Schedule timer that would overflow (should fail gracefully)
-                let overflow_timer_result = runtime.schedule_timer(2000, "overflow_attempt");
-                assert!(
-                    overflow_timer_result.is_err(),
-                    "Overflow timer should be rejected"
-                );
-
-                // Test clock advance with saturation
-                let advance_result = runtime.advance_clock(1000);
-                match advance_result {
-                    Ok(_) => {
-                        // If advance succeeds, tick should be bounded
-                        assert!(
-                            runtime.test_clock.current_tick <= u64::MAX,
-                            "Clock tick should not exceed maximum"
-                        );
+                match builder.clone().add_link(&link_id, &source, &target, true) {
+                    Ok(new_builder) => {
+                        builder = new_builder;
+                        link_count = link_count.saturating_add(1);
                     }
                     Err(_) => {
-                        // Advance may fail if it would cause overflow - acceptable
+                        // Hit capacity limits
+                        break;
                     }
                 }
+            }
 
-                Ok::<(), ()>(())
-            });
+            // Test memory-intensive assertions
+            for i in 0..link_count.min(1000) {
+                let from = format!("stress_node_{:05}", i);
+                let to = format!("stress_node_{:05}", i + 1);
 
-            assert!(
-                overflow_test_result.is_ok(),
-                "Arithmetic overflow test should not panic"
-            );
-        }
+                builder = builder.add_assertion(ScenarioAssertion::MessageDelivered {
+                    from,
+                    to,
+                    within_ticks: 1000,
+                });
+            }
 
-        /// Test concurrent access safety simulation in testing modules
-        #[test]
-        fn negative_testing_concurrent_access_safety() {
-            use super::scenario_builder::{NodeRole, ScenarioBuilder};
-            use super::virtual_transport::{LinkFaultConfig, VirtualTransportLayer};
-            use std::sync::{Arc, Mutex};
-            use std::thread;
+            // Final build should either succeed or fail gracefully
+            let build_result = builder.build();
+            match build_result {
+                Ok(scenario) => {
+                    // If build succeeds, test transport with scenario data
+                    let mut transport = VirtualTransportLayer::new(88888);
 
-            let concurrent_safety_result = std::panic::catch_unwind(|| {
-                // Test concurrent scenario creation (simulated)
-                let mut scenarios = Vec::new();
-                for thread_id in 0..4 {
-                    // Simulate concurrent scenario building
-                    let scenario_name = format!("concurrent_test_{}", thread_id);
-                    let builder =
-                        ScenarioBuilder::new(&scenario_name).seed(12345 + thread_id as u64);
-
-                    // Add nodes in rapid succession
-                    let mut current_builder = builder;
-                    for i in 0..10 {
-                        let node_id = format!("thread_{}_node_{}", thread_id, i);
-                        let node_desc = format!("Concurrent Node {} {}", thread_id, i);
-
-                        match current_builder.clone().add_node(
-                            &node_id,
-                            &node_desc,
-                            NodeRole::Participant,
-                        ) {
-                            Ok(new_builder) => current_builder = new_builder,
-                            Err(_) => break,
+                    // Create subset of transport links (bounded for memory)
+                    for link in scenario.links.iter().take(100) {
+                        if transport
+                            .create_link(
+                                &link.source_node,
+                                &link.target_node,
+                                LinkFaultConfig::default(),
+                            )
+                            .is_ok()
+                        {
+                            // Send bounded message
+                            let payload = vec![0x42; 1024]; // 1KB message
+                            transport
+                                .send_message(&link.source_node, &link.target_node, payload)
+                                .ok();
                         }
                     }
 
-                    // Build scenario
-                    if let Ok(scenario) = current_builder.build() {
-                        scenarios.push(scenario);
-                    }
-                }
-
-                // Test shared transport under concurrent-like stress
-                let transport = Arc::new(Mutex::new(VirtualTransportLayer::new(99999)));
-                let mut handles = Vec::new();
-
-                for thread_id in 0..2 {
-                    // Limit threads for test stability
-                    let transport_clone = Arc::clone(&transport);
-                    let handle = thread::spawn(move || {
-                        for i in 0..50 {
-                            let source = format!("thread_{}_src_{}", thread_id, i);
-                            let target = format!("thread_{}_tgt_{}", thread_id, i);
-
-                            // Acquire lock and perform transport operations
-                            if let Ok(mut transport) = transport_clone.lock() {
-                                let create_result = transport.create_link(
-                                    &source,
-                                    &target,
-                                    LinkFaultConfig::no_faults(),
-                                );
-
-                                if create_result.is_ok() {
-                                    let payload =
-                                        format!("concurrent_msg_{}_{}", thread_id, i).into_bytes();
-                                    transport.send_message(&source, &target, payload).ok();
-                                }
-                            }
-
-                            // Yield to simulate concurrent access
-                            thread::yield_now();
-                        }
-                    });
-                    handles.push(handle);
-                }
-
-                // Wait for all threads to complete
-                for handle in handles {
-                    handle.join().expect("Thread should complete without panic");
-                }
-
-                // Verify final state consistency
-                if let Ok(final_transport) = transport.lock() {
-                    let final_stats = final_transport.stats();
+                    // Verify transport state remains stable
+                    let stats = transport.stats();
                     assert!(
-                        final_stats.total_messages < u64::MAX,
+                        stats.total_messages < u64::MAX,
                         "Message count should not overflow"
                     );
+                    assert!(stats.active_links <= 100, "Link count should be bounded");
+                }
+                Err(_) => {
+                    // Build failure under memory pressure is acceptable
+                }
+            }
+
+            Ok::<(), ()>(())
+        });
+
+        assert!(
+            memory_stress_result.is_ok(),
+            "Memory stress test should not panic"
+        );
+    }
+
+    /// Test JSON structure integrity validation in testing components
+    #[test]
+    fn negative_testing_json_integrity_validation() {
+        use super::scenario_builder::{NodeRole, Scenario, ScenarioBuilder};
+
+        let json_corruption_patterns = vec![
+            // Structural JSON attacks
+            (r#"{"injected": true, "real_scenario""#, "incomplete_object"),
+            (
+                r#"scenario": {"injected": "payload"}, "real""#,
+                "property_injection",
+            ),
+            (
+                r#"scenario\": {\"nested\": true}, \"continue\": \""#,
+                "escape_injection",
+            ),
+            // Array confusion attacks
+            (r#"["fake", "array"], "scenario""#, "array_confusion"),
+            (
+                r#"scenario", {"fake": "object"}, "continue"#,
+                "mixed_structure",
+            ),
+            // Unicode escape attacks
+            (r#"scenario\u0022injection\u0022"#, "unicode_escape"),
+            (r#"scenario\u0000null_injection"#, "null_escape"),
+            // Control character corruption
+            ("scenario\r\n{\"injected\": true}\r\nreal", "crlf_injection"),
+            ("scenario\x00{\"binary\": true}", "binary_injection"),
+        ];
+
+        for (malicious_input, attack_name) in json_corruption_patterns {
+            let json_test_result = std::panic::catch_unwind(|| {
+                // Create scenario with potentially malicious input
+                let scenario_result = ScenarioBuilder::new(malicious_input)
+                    .seed(55555)
+                    .add_node("test_node", malicious_input, NodeRole::Coordinator)
+                    .and_then(|b| b.add_node("clean_node", "Clean Node", NodeRole::Participant))
+                    .and_then(|b| b.build());
+
+                match scenario_result {
+                    Ok(scenario) => {
+                        // Test JSON serialization integrity
+                        let json_result = scenario.to_json();
+                        match json_result {
+                            Ok(json_string) => {
+                                // Verify JSON is structurally valid
+                                let parse_result: Result<serde_json::Value, _> =
+                                    serde_json::from_str(&json_string);
+
+                                assert!(
+                                    parse_result.is_ok(),
+                                    "JSON should remain valid after serialization: {}",
+                                    attack_name
+                                );
+
+                                // Verify no injection occurred
+                                let parsed = parse_result.unwrap();
+                                if let Some(obj) = parsed.as_object() {
+                                    // Should not contain injected properties
+                                    assert!(
+                                        !obj.contains_key("injected"),
+                                        "Should not contain injected properties: {}",
+                                        attack_name
+                                    );
+                                    assert!(
+                                        !obj.contains_key("fake"),
+                                        "Should not contain fake properties: {}",
+                                        attack_name
+                                    );
+                                }
+
+                                // Test round-trip integrity
+                                let reparse_result = Scenario::from_json(&json_string);
+                                match reparse_result {
+                                    Ok(_) => {
+                                        // Successful round-trip preserves integrity
+                                    }
+                                    Err(_) => {
+                                        // Round-trip may fail for extreme cases - acceptable
+                                    }
+                                }
+                            }
+                            Err(_) => {
+                                // JSON serialization may fail for malicious input - acceptable
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        // Scenario creation may reject malicious input - acceptable
+                    }
+                }
+
+                Ok::<(), ()>(())
+            });
+
+            assert!(
+                json_test_result.is_ok(),
+                "JSON integrity test should not panic: {}",
+                attack_name
+            );
+        }
+    }
+
+    /// Test arithmetic overflow protection in testing module counters
+    #[test]
+    fn negative_testing_arithmetic_overflow_protection() {
+        use super::lab_runtime::{LabConfig, LabRuntime};
+        use super::scenario_builder::{NodeRole, ScenarioBuilder};
+        use super::virtual_transport::VirtualTransportLayer;
+
+        // Test virtual transport with overflow-prone operations
+        let overflow_test_result = std::panic::catch_unwind(|| {
+            let mut transport = VirtualTransportLayer::new(33333);
+
+            // Simulate near-overflow message ID scenarios
+            // Note: We can't directly set internal state, so we test overflow handling
+            transport
+                .create_link(
+                    "overflow_src",
+                    "overflow_tgt",
+                    super::virtual_transport::LinkFaultConfig::no_faults(),
+                )
+                .expect("Link creation should succeed");
+
+            // Test message sending with potential counter overflow
+            let mut message_count = 0u64;
+            for i in 0..1000 {
+                let payload = format!("overflow_test_{}", i).into_bytes();
+                match transport.send_message("overflow_src", "overflow_tgt", payload) {
+                    Ok(msg_id) => {
+                        // Verify message ID doesn't wrap unexpectedly
+                        assert!(msg_id > 0, "Message ID should be positive");
+                        message_count = message_count.saturating_add(1);
+                    }
+                    Err(_) => {
+                        // Message may fail due to capacity limits - acceptable
+                        break;
+                    }
+                }
+            }
+
+            // Test statistics calculation without overflow
+            let stats = transport.stats();
+            assert!(
+                stats.total_messages <= message_count,
+                "Stats should not exceed sent messages"
+            );
+            assert!(
+                stats.delivered_messages <= stats.total_messages,
+                "Delivered ≤ total"
+            );
+            assert!(
+                stats.dropped_messages <= stats.total_messages,
+                "Dropped ≤ total"
+            );
+
+            // Test lab runtime with overflow-prone tick operations
+            let lab_config = LabConfig::default();
+            let mut runtime = LabRuntime::new(lab_config).expect("Runtime creation should succeed");
+
+            // Test timer scheduling near tick overflow boundaries
+            let near_max_tick = u64::MAX - 1000;
+            runtime.test_clock.current_tick = near_max_tick;
+
+            // Schedule timer with small delta (should succeed)
+            let small_timer_result = runtime.schedule_timer(500, "near_overflow_safe");
+            assert!(
+                small_timer_result.is_ok(),
+                "Safe timer scheduling should succeed"
+            );
+
+            // Schedule timer that would overflow (should fail gracefully)
+            let overflow_timer_result = runtime.schedule_timer(2000, "overflow_attempt");
+            assert!(
+                overflow_timer_result.is_err(),
+                "Overflow timer should be rejected"
+            );
+
+            // Test clock advance with saturation
+            let advance_result = runtime.advance_clock(1000);
+            match advance_result {
+                Ok(_) => {
+                    // If advance succeeds, tick should be bounded
                     assert!(
-                        final_stats.active_links <= 100,
-                        "Link count should be reasonable"
+                        runtime.test_clock.current_tick <= u64::MAX,
+                        "Clock tick should not exceed maximum"
+                    );
+                }
+                Err(_) => {
+                    // Advance may fail if it would cause overflow - acceptable
+                }
+            }
+
+            Ok::<(), ()>(())
+        });
+
+        assert!(
+            overflow_test_result.is_ok(),
+            "Arithmetic overflow test should not panic"
+        );
+    }
+
+    /// Test concurrent access safety simulation in testing modules
+    #[test]
+    fn negative_testing_concurrent_access_safety() {
+        use super::scenario_builder::{NodeRole, ScenarioBuilder};
+        use super::virtual_transport::{LinkFaultConfig, VirtualTransportLayer};
+        use std::sync::{Arc, Mutex};
+        use std::thread;
+
+        let concurrent_safety_result = std::panic::catch_unwind(|| {
+            // Test concurrent scenario creation (simulated)
+            let mut scenarios = Vec::new();
+            for thread_id in 0..4 {
+                // Simulate concurrent scenario building
+                let scenario_name = format!("concurrent_test_{}", thread_id);
+                let builder = ScenarioBuilder::new(&scenario_name).seed(12345 + thread_id as u64);
+
+                // Add nodes in rapid succession
+                let mut current_builder = builder;
+                for i in 0..10 {
+                    let node_id = format!("thread_{}_node_{}", thread_id, i);
+                    let node_desc = format!("Concurrent Node {} {}", thread_id, i);
+
+                    match current_builder.clone().add_node(
+                        &node_id,
+                        &node_desc,
+                        NodeRole::Participant,
+                    ) {
+                        Ok(new_builder) => current_builder = new_builder,
+                        Err(_) => break,
+                    }
+                }
+
+                // Build scenario
+                if let Ok(scenario) = current_builder.build() {
+                    scenarios.push(scenario);
+                }
+            }
+
+            // Test shared transport under concurrent-like stress
+            let transport = Arc::new(Mutex::new(VirtualTransportLayer::new(99999)));
+            let mut handles = Vec::new();
+
+            for thread_id in 0..2 {
+                // Limit threads for test stability
+                let transport_clone = Arc::clone(&transport);
+                let handle = thread::spawn(move || {
+                    for i in 0..50 {
+                        let source = format!("thread_{}_src_{}", thread_id, i);
+                        let target = format!("thread_{}_tgt_{}", thread_id, i);
+
+                        // Acquire lock and perform transport operations
+                        if let Ok(mut transport) = transport_clone.lock() {
+                            let create_result = transport.create_link(
+                                &source,
+                                &target,
+                                LinkFaultConfig::no_faults(),
+                            );
+
+                            if create_result.is_ok() {
+                                let payload =
+                                    format!("concurrent_msg_{}_{}", thread_id, i).into_bytes();
+                                transport.send_message(&source, &target, payload).ok();
+                            }
+                        }
+
+                        // Yield to simulate concurrent access
+                        thread::yield_now();
+                    }
+                });
+                handles.push(handle);
+            }
+
+            // Wait for all threads to complete
+            for handle in handles {
+                handle.join().expect("Thread should complete without panic");
+            }
+
+            // Verify final state consistency
+            if let Ok(final_transport) = transport.lock() {
+                let final_stats = final_transport.stats();
+                assert!(
+                    final_stats.total_messages < u64::MAX,
+                    "Message count should not overflow"
+                );
+                assert!(
+                    final_stats.active_links <= 100,
+                    "Link count should be reasonable"
+                );
+            }
+
+            // Verify scenario data integrity
+            assert!(!scenarios.is_empty(), "Should have created some scenarios");
+            for scenario in &scenarios {
+                let json_result = scenario.to_json();
+                if let Ok(json) = json_result {
+                    assert!(json.len() > 10, "Scenario JSON should have content");
+                }
+            }
+
+            Ok::<(), ()>(())
+        });
+
+        assert!(
+            concurrent_safety_result.is_ok(),
+            "Concurrent safety test should not panic"
+        );
+    }
+
+    /// Test display injection and format string safety in testing output
+    #[test]
+    fn negative_testing_display_injection_safety() {
+        use super::scenario_builder::{NodeRole, ScenarioBuilder};
+        use super::virtual_transport::{VirtualTransportError, VirtualTransportLayer};
+
+        let display_injection_vectors = vec![
+            // Format string injection attempts
+            ("format_inject", "test%s%x%d%p"),
+            ("format_overflow", "test%.999999s"),
+            ("format_position", "test%1$s%2$x"),
+            // ANSI escape sequence injection
+            ("ansi_colors", "test\x1b[31mRED\x1b[0m"),
+            ("ansi_cursor", "test\x1b[H\x1b[2J"),
+            ("ansi_title", "test\x1b]0;TITLE\x07"),
+            // Terminal control injection
+            ("bell_spam", "test\x07\x07\x07"),
+            ("backspace_attack", "test\x08\x08\x08hidden"),
+            ("carriage_return", "test\roverwrite"),
+            // Unicode display corruption
+            ("rtl_override", "test\u{202E}desrever\u{202D}"),
+            ("combining_overflow", "test\u{0300}\u{0301}\u{0302}\u{0303}"),
+            ("width_confusion", "test\u{3000}\u{FF01}"),
+        ];
+
+        for (attack_name, malicious_content) in display_injection_vectors {
+            let display_safety_result = std::panic::catch_unwind(|| {
+                // Test scenario display safety
+                let scenario_result = ScenarioBuilder::new(malicious_content)
+                    .seed(44444)
+                    .add_node("display_node", malicious_content, NodeRole::Coordinator)
+                    .and_then(|b| b.add_node("target_node", "Normal Target", NodeRole::Participant))
+                    .and_then(|b| b.build());
+
+                match scenario_result {
+                    Ok(scenario) => {
+                        // Test Debug formatting safety: Rust Debug escapes control bytes and
+                        // leaves printf-style `%s` specifiers unexpanded as inert ASCII text.
+                        let display_test = format!("{:?}", scenario);
+                        if malicious_content.contains('%') {
+                            assert!(
+                                display_test.contains(malicious_content),
+                                "Debug formatting must preserve printf-style tokens unexpanded: {}",
+                                attack_name
+                            );
+                        }
+                        assert!(
+                            !display_test.contains("\x1b["),
+                            "Display should escape ANSI sequences: {}",
+                            attack_name
+                        );
+                        assert!(
+                            !display_test.contains('\0'),
+                            "Display should escape null bytes: {}",
+                            attack_name
+                        );
+
+                        // Test JSON display safety
+                        if let Ok(json) = scenario.to_json() {
+                            assert!(
+                                !json.contains("\x1b["),
+                                "JSON should escape control sequences: {}",
+                                attack_name
+                            );
+                            assert!(
+                                !json.contains('\0'),
+                                "JSON should escape null bytes: {}",
+                                attack_name
+                            );
+                        }
+                    }
+                    Err(_) => {
+                        // Scenario creation may reject display injection - acceptable
+                    }
+                }
+
+                // Test transport error display/debug safety
+                let mut transport = VirtualTransportLayer::new(66666);
+                let error_result =
+                    transport.send_message(malicious_content, "nonexistent", b"test".to_vec());
+
+                if let Err(error) = error_result {
+                    let error_display = format!("{}", error);
+                    assert!(
+                        error_display.contains("ERR_VT_LINK_NOT_FOUND"),
+                        "Error display must include structured error code: {}",
+                        attack_name
+                    );
+                    if malicious_content.contains('%') {
+                        assert!(
+                            error_display.contains(malicious_content),
+                            "Error display must keep printf-style tokens unexpanded: {}",
+                            attack_name
+                        );
+                    }
+
+                    let error_debug = format!("{:?}", error);
+                    assert!(
+                        !error_debug.contains("\x1b["),
+                        "Error debug should escape ANSI sequences: {}",
+                        attack_name
+                    );
+                    assert!(
+                        !error_debug.contains('\0'),
+                        "Error debug should escape null bytes: {}",
+                        attack_name
                     );
                 }
 
-                // Verify scenario data integrity
-                assert!(!scenarios.is_empty(), "Should have created some scenarios");
-                for scenario in &scenarios {
-                    let json_result = scenario.to_json();
-                    if let Ok(json) = json_result {
-                        assert!(json.len() > 10, "Scenario JSON should have content");
-                    }
-                }
-
                 Ok::<(), ()>(())
             });
 
             assert!(
-                concurrent_safety_result.is_ok(),
-                "Concurrent safety test should not panic"
+                display_safety_result.is_ok(),
+                "Display injection test should not panic: {}",
+                attack_name
             );
         }
+    }
 
-        /// Test display injection and format string safety in testing output
-        #[test]
-        fn negative_testing_display_injection_safety() {
-            use super::scenario_builder::{NodeRole, ScenarioBuilder};
-            use super::virtual_transport::{VirtualTransportError, VirtualTransportLayer};
+    /// Test boundary condition stress in testing module edge cases
+    #[test]
+    fn negative_testing_boundary_stress_comprehensive() {
+        use super::lab_runtime::{LabConfig, LabRuntime};
+        use super::scenario_builder::{NodeRole, ScenarioAssertion, ScenarioBuilder};
+        use super::virtual_transport::{LinkFaultConfig, VirtualTransportLayer};
 
-            let display_injection_vectors = vec![
-                // Format string injection attempts
-                ("format_inject", "test%s%x%d%p"),
-                ("format_overflow", "test%.999999s"),
-                ("format_position", "test%1$s%2$x"),
-                // ANSI escape sequence injection
-                ("ansi_colors", "test\x1b[31mRED\x1b[0m"),
-                ("ansi_cursor", "test\x1b[H\x1b[2J"),
-                ("ansi_title", "test\x1b]0;TITLE\x07"),
-                // Terminal control injection
-                ("bell_spam", "test\x07\x07\x07"),
-                ("backspace_attack", "test\x08\x08\x08hidden"),
-                ("carriage_return", "test\roverwrite"),
-                // Unicode display corruption
-                ("rtl_override", "test\u{202E}desrever\u{202D}"),
-                ("combining_overflow", "test\u{0300}\u{0301}\u{0302}\u{0303}"),
-                ("width_confusion", "test\u{3000}\u{FF01}"),
-            ];
+        // Test scenario boundary conditions
+        let boundary_test_result = std::panic::catch_unwind(|| {
+            // Test empty/minimal scenarios
+            let minimal_result = ScenarioBuilder::new("minimal")
+                .seed(1)
+                .add_node("n1", "", NodeRole::Coordinator) // Empty description
+                .and_then(|b| b.add_node("n2", "", NodeRole::Participant))
+                .and_then(|b| b.build());
 
-            for (attack_name, malicious_content) in display_injection_vectors {
-                let display_safety_result = std::panic::catch_unwind(|| {
-                    // Test scenario display safety
-                    let scenario_result = ScenarioBuilder::new(malicious_content)
-                        .seed(44444)
-                        .add_node("display_node", malicious_content, NodeRole::Coordinator)
-                        .and_then(|b| {
-                            b.add_node("target_node", "Normal Target", NodeRole::Participant)
-                        })
-                        .and_then(|b| b.build());
+            match minimal_result {
+                Ok(_) => {}  // Minimal scenarios accepted
+                Err(_) => {} // Or rejected - both acceptable
+            }
 
-                    match scenario_result {
-                        Ok(scenario) => {
-                            // Test display formatting safety
-                            let display_test = format!("{:?}", scenario);
+            // Test maximum realistic scenario size
+            let mut large_builder = ScenarioBuilder::new("large_boundary_test").seed(12345);
+
+            // Add nodes up to reasonable boundary
+            let mut node_count = 0usize;
+            for i in 0..1000 {
+                let node_id = format!("boundary_node_{:04}", i);
+                match large_builder.clone().add_node(
+                    &node_id,
+                    "Boundary Node",
+                    NodeRole::Participant,
+                ) {
+                    Ok(builder) => {
+                        large_builder = builder;
+                        node_count = node_count.saturating_add(1);
+                    }
+                    Err(_) => break, // Hit capacity boundary
+                }
+            }
+
+            // Test assertion timing boundaries
+            if node_count >= 2 {
+                large_builder = large_builder
+                    .add_assertion(ScenarioAssertion::MessageDelivered {
+                        from: "boundary_node_0000".to_string(),
+                        to: "boundary_node_0001".to_string(),
+                        within_ticks: 0, // Minimum timing
+                    })
+                    .add_assertion(ScenarioAssertion::MessageDelivered {
+                        from: "boundary_node_0001".to_string(),
+                        to: "boundary_node_0000".to_string(),
+                        within_ticks: u64::MAX, // Maximum timing
+                    });
+            }
+
+            let build_result = large_builder.build();
+            match build_result {
+                Ok(_) => {}  // Large scenarios accepted
+                Err(_) => {} // Or rejected at boundary
+            }
+
+            // Test virtual transport boundaries
+            let mut transport = VirtualTransportLayer::new(11111);
+
+            // Test empty payload boundaries
+            transport
+                .create_link(
+                    "empty_test_src",
+                    "empty_test_tgt",
+                    LinkFaultConfig::no_faults(),
+                )
+                .expect("Empty test link should be created");
+
+            let empty_send_result =
+                transport.send_message("empty_test_src", "empty_test_tgt", vec![]);
+            assert!(empty_send_result.is_ok(), "Empty payload should be allowed");
+
+            // Test single byte payload
+            let single_byte_result =
+                transport.send_message("empty_test_src", "empty_test_tgt", vec![0xFF]);
+            assert!(single_byte_result.is_ok(), "Single byte should be allowed");
+
+            // Test maximum reasonable payload size
+            let large_payload = vec![0x42; 1_000_000]; // 1MB payload
+            let large_send_result =
+                transport.send_message("empty_test_src", "empty_test_tgt", large_payload);
+            match large_send_result {
+                Ok(_) => {
+                    // Large payloads accepted - verify delivery works
+                    let delivered = transport
+                        .deliver_next("empty_test_src->empty_test_tgt")
+                        .expect("Delivery should work")
+                        .expect("Message should be delivered");
+                    assert_eq!(
+                        delivered.payload.len(),
+                        1_000_000,
+                        "Payload size should be preserved"
+                    );
+                }
+                Err(_) => {
+                    // Large payloads rejected - acceptable
+                }
+            }
+
+            // Test lab runtime timing boundaries
+            let config = LabConfig::default();
+            let mut runtime = LabRuntime::new(config).expect("Runtime should initialize");
+
+            // Test zero-delay timer
+            let zero_timer_result = runtime.schedule_timer(0, "immediate");
+            assert!(
+                zero_timer_result.is_ok(),
+                "Zero delay timer should be allowed"
+            );
+
+            // Test maximum delay timer
+            let max_timer_result = runtime.schedule_timer(u64::MAX / 2, "very_long");
+            assert!(
+                max_timer_result.is_ok(),
+                "Large delay timer should be allowed"
+            );
+
+            // Test clock at maximum value
+            runtime.test_clock.current_tick = u64::MAX - 100;
+            let near_max_timer = runtime.schedule_timer(50, "near_max");
+            assert!(near_max_timer.is_ok(), "Timer near max tick should work");
+
+            // Test clock advance that would overflow
+            let overflow_advance = runtime.advance_clock(200);
+            assert!(
+                overflow_advance.is_err(),
+                "Clock advance causing overflow should be rejected"
+            );
+
+            Ok::<(), ()>(())
+        });
+
+        assert!(
+            boundary_test_result.is_ok(),
+            "Boundary stress test should not panic"
+        );
+    }
+
+    /// Test cross-module integration edge cases with sophisticated attack scenarios
+    #[test]
+    fn negative_testing_integration_attack_scenarios() {
+        use super::scenario_builder::{NodeRole, ScenarioAssertion, ScenarioBuilder};
+        use super::virtual_transport::{LinkFaultConfig, VirtualTransportLayer};
+
+        let integration_attack_result = std::panic::catch_unwind(|| {
+            // Scenario: Coordinated attack across scenario building and transport layers
+            let attack_scenario_name = "coordinated\u{202E}kcatta\u{202D}_scenario";
+            let attack_node_name = "node\x00\x1b[31mEVIL\x1b[0m_with_%.100s";
+
+            let coordinated_result = ScenarioBuilder::new(attack_scenario_name)
+                .seed(88888)
+                .add_node(
+                    attack_node_name,
+                    "Malicious Node Description",
+                    NodeRole::Coordinator,
+                )
+                .and_then(|b| b.add_node("victim_node", "Victim Node", NodeRole::Participant))
+                .and_then(|b| b.add_link("attack_link", attack_node_name, "victim_node", true))
+                // set_fault_profile and add_assertion now return Self (infallible); wrap in Ok.
+                .and_then(|b| {
+                    Ok(b.set_fault_profile(
+                        "attack_link",
+                        LinkFaultConfig {
+                            drop_probability: 0.999999,       // Near-certain drop to stress edge case
+                            reorder_depth: usize::MAX / 1000, // Large but not overflow-inducing
+                            corrupt_bit_count: 1000000,       // High corruption
+                            delay_ticks: u64::MAX / 2,        // Very large delay
+                            partition: false,
+                        },
+                    ))
+                })
+                .and_then(|b| {
+                    Ok(b.add_assertion(ScenarioAssertion::MessageDelivered {
+                        from: attack_node_name.to_string(),
+                        to: "victim_node".to_string(),
+                        within_ticks: 1, // Nearly impossible timing with high delay
+                    }))
+                })
+                .and_then(|b| b.build());
+
+            match coordinated_result {
+                Ok(attack_scenario) => {
+                    // Test JSON serialization under attack
+                    let json_result = attack_scenario.to_json();
+                    match json_result {
+                        Ok(json_str) => {
+                            // Verify attack didn't break JSON structure
+                            let parse_check: Result<serde_json::Value, _> =
+                                serde_json::from_str(&json_str);
+                            assert!(parse_check.is_ok(), "JSON should remain valid under attack");
+
+                            // Verify Debug escaping of raw control bytes and inertness of format tokens
+                            let display_test = format!("{:?}", attack_scenario);
                             assert!(
-                                !display_test.contains("%s"),
-                                "Display should not contain format specifiers: {}",
-                                attack_name
+                                !display_test.contains("\x1b[31m"),
+                                "Display should escape ANSI"
                             );
                             assert!(
-                                !display_test.contains("\x1b["),
-                                "Display should escape ANSI sequences: {}",
-                                attack_name
+                                !display_test.contains('\0'),
+                                "Display should escape null bytes"
                             );
-
-                            // Test JSON display safety
-                            if let Ok(json) = scenario.to_json() {
-                                assert!(
-                                    !json.contains("\x1b["),
-                                    "JSON should escape control sequences: {}",
-                                    attack_name
-                                );
-                                assert!(
-                                    !json.contains("\x00"),
-                                    "JSON should escape null bytes: {}",
-                                    attack_name
-                                );
-                            }
+                            assert!(
+                                display_test.contains("%.100s"),
+                                "Format tokens must remain unexpanded literal characters"
+                            );
                         }
                         Err(_) => {
-                            // Scenario creation may reject display injection - acceptable
+                            // JSON serialization may fail under extreme attack - acceptable
                         }
                     }
 
-                    // Test transport error display safety
-                    let mut transport = VirtualTransportLayer::new(66666);
-                    let error_result =
-                        transport.send_message(malicious_content, "nonexistent", b"test".to_vec());
-
-                    if let Err(error) = error_result {
-                        let error_display = format!("{}", error);
-                        assert!(
-                            !error_display.contains("%s"),
-                            "Error display should not contain format specifiers: {}",
-                            attack_name
-                        );
-                        assert!(
-                            !error_display.contains("\x1b["),
-                            "Error display should escape ANSI: {}",
-                            attack_name
-                        );
-
-                        let error_debug = format!("{:?}", error);
-                        assert!(
-                            !error_debug.contains("\x00"),
-                            "Error debug should escape null bytes: {}",
-                            attack_name
-                        );
-                    }
-
-                    Ok::<(), ()>(())
-                });
-
-                assert!(
-                    display_safety_result.is_ok(),
-                    "Display injection test should not panic: {}",
-                    attack_name
-                );
-            }
-        }
-
-        /// Test boundary condition stress in testing module edge cases
-        #[test]
-        fn negative_testing_boundary_stress_comprehensive() {
-            use super::lab_runtime::{LabConfig, LabRuntime};
-            use super::scenario_builder::{NodeRole, ScenarioAssertion, ScenarioBuilder};
-            use super::virtual_transport::{LinkFaultConfig, VirtualTransportLayer};
-
-            // Test scenario boundary conditions
-            let boundary_test_result = std::panic::catch_unwind(|| {
-                // Test empty/minimal scenarios
-                let minimal_result = ScenarioBuilder::new("minimal")
-                    .seed(1)
-                    .add_node("n1", "", NodeRole::Coordinator) // Empty description
-                    .and_then(|b| b.add_node("n2", "", NodeRole::Participant))
-                    .and_then(|b| b.build());
-
-                match minimal_result {
-                    Ok(_) => {}  // Minimal scenarios accepted
-                    Err(_) => {} // Or rejected - both acceptable
-                }
-
-                // Test maximum realistic scenario size
-                let mut large_builder = ScenarioBuilder::new("large_boundary_test").seed(12345);
-
-                // Add nodes up to reasonable boundary
-                let mut node_count = 0usize;
-                for i in 0..1000 {
-                    let node_id = format!("boundary_node_{:04}", i);
-                    match large_builder.clone().add_node(
-                        &node_id,
-                        "Boundary Node",
-                        NodeRole::Participant,
-                    ) {
-                        Ok(builder) => {
-                            large_builder = builder;
-                            node_count = node_count.saturating_add(1);
-                        }
-                        Err(_) => break, // Hit capacity boundary
-                    }
-                }
-
-                // Test assertion timing boundaries
-                if node_count >= 2 {
-                    large_builder = large_builder
-                        .add_assertion(ScenarioAssertion::MessageDelivered {
-                            from: "boundary_node_0000".to_string(),
-                            to: "boundary_node_0001".to_string(),
-                            within_ticks: 0, // Minimum timing
-                        })
-                        .add_assertion(ScenarioAssertion::MessageDelivered {
-                            from: "boundary_node_0001".to_string(),
-                            to: "boundary_node_0000".to_string(),
-                            within_ticks: u64::MAX, // Maximum timing
-                        });
-                }
-
-                let build_result = large_builder.build();
-                match build_result {
-                    Ok(_) => {}  // Large scenarios accepted
-                    Err(_) => {} // Or rejected at boundary
-                }
-
-                // Test virtual transport boundaries
-                let mut transport = VirtualTransportLayer::new(11111);
-
-                // Test empty payload boundaries
-                transport
-                    .create_link(
-                        "empty_test_src",
-                        "empty_test_tgt",
-                        LinkFaultConfig::no_faults(),
-                    )
-                    .expect("Empty test link should be created");
-
-                let empty_send_result =
-                    transport.send_message("empty_test_src", "empty_test_tgt", vec![]);
-                assert!(empty_send_result.is_ok(), "Empty payload should be allowed");
-
-                // Test single byte payload
-                let single_byte_result =
-                    transport.send_message("empty_test_src", "empty_test_tgt", vec![0xFF]);
-                assert!(single_byte_result.is_ok(), "Single byte should be allowed");
-
-                // Test maximum reasonable payload size
-                let large_payload = vec![0x42; 1_000_000]; // 1MB payload
-                let large_send_result =
-                    transport.send_message("empty_test_src", "empty_test_tgt", large_payload);
-                match large_send_result {
-                    Ok(_) => {
-                        // Large payloads accepted - verify delivery works
-                        let delivered = transport
-                            .deliver_next("empty_test_src->empty_test_tgt")
-                            .expect("Delivery should work")
-                            .expect("Message should be delivered");
-                        assert_eq!(
-                            delivered.payload.len(),
-                            1_000_000,
-                            "Payload size should be preserved"
-                        );
-                    }
-                    Err(_) => {
-                        // Large payloads rejected - acceptable
-                    }
-                }
-
-                // Test lab runtime timing boundaries
-                let config = LabConfig::default();
-                let mut runtime = LabRuntime::new(config).expect("Runtime should initialize");
-
-                // Test zero-delay timer
-                let zero_timer_result = runtime.schedule_timer(0, "immediate");
-                assert!(
-                    zero_timer_result.is_ok(),
-                    "Zero delay timer should be allowed"
-                );
-
-                // Test maximum delay timer
-                let max_timer_result = runtime.schedule_timer(u64::MAX / 2, "very_long");
-                assert!(
-                    max_timer_result.is_ok(),
-                    "Large delay timer should be allowed"
-                );
-
-                // Test clock at maximum value
-                runtime.test_clock.current_tick = u64::MAX - 100;
-                let near_max_timer = runtime.schedule_timer(50, "near_max");
-                assert!(near_max_timer.is_ok(), "Timer near max tick should work");
-
-                // Test clock advance that would overflow
-                let overflow_advance = runtime.advance_clock(200);
-                assert!(
-                    overflow_advance.is_err(),
-                    "Clock advance causing overflow should be rejected"
-                );
-
-                Ok::<(), ()>(())
-            });
-
-            assert!(
-                boundary_test_result.is_ok(),
-                "Boundary stress test should not panic"
-            );
-        }
-
-        /// Test cross-module integration edge cases with sophisticated attack scenarios
-        #[test]
-        fn negative_testing_integration_attack_scenarios() {
-            use super::scenario_builder::{NodeRole, ScenarioAssertion, ScenarioBuilder};
-            use super::virtual_transport::{LinkFaultConfig, VirtualTransportLayer};
-
-            let integration_attack_result = std::panic::catch_unwind(|| {
-                // Scenario: Coordinated attack across scenario building and transport layers
-                let attack_scenario_name = "coordinated\u{202E}kcatta\u{202D}_scenario";
-                let attack_node_name = "node\x00\x1b[31mEVIL\x1b[0m_with_%.100s";
-
-                let coordinated_result = ScenarioBuilder::new(attack_scenario_name)
-                    .seed(88888)
-                    .add_node(
+                    // Test transport under attack scenario
+                    let mut transport = VirtualTransportLayer::new(77777);
+                    let create_result = transport.create_link(
                         attack_node_name,
-                        "Malicious Node Description",
-                        NodeRole::Coordinator,
-                    )
-                    .and_then(|b| b.add_node("victim_node", "Victim Node", NodeRole::Participant))
-                    .and_then(|b| b.add_link("attack_link", attack_node_name, "victim_node", true))
-                    // set_fault_profile and add_assertion now return Self (infallible); wrap in Ok.
-                    .and_then(|b| {
-                        Ok(b.set_fault_profile(
-                            "attack_link",
-                            LinkFaultConfig {
-                                drop_probability: 0.999999,       // Near-certain drop to stress edge case
-                                reorder_depth: usize::MAX / 1000, // Large but not overflow-inducing
-                                corrupt_bit_count: 1000000,       // High corruption
-                                delay_ticks: u64::MAX / 2,        // Very large delay
-                                partition: false,
-                            },
-                        ))
-                    })
-                    .and_then(|b| {
-                        Ok(b.add_assertion(ScenarioAssertion::MessageDelivered {
-                            from: attack_node_name.to_string(),
-                            to: "victim_node".to_string(),
-                            within_ticks: 1, // Nearly impossible timing with high delay
-                        }))
-                    })
-                    .and_then(|b| b.build());
+                        "victim_node",
+                        LinkFaultConfig {
+                            drop_probability: 0.999999,
+                            reorder_depth: 1000,
+                            corrupt_bit_count: 100,
+                            delay_ticks: 1000,
+                            partition: false,
+                        },
+                    );
 
-                match coordinated_result {
-                    Ok(attack_scenario) => {
-                        // Test JSON serialization under attack
-                        let json_result = attack_scenario.to_json();
-                        match json_result {
-                            Ok(json_str) => {
-                                // Verify attack didn't break JSON structure
-                                let parse_check: Result<serde_json::Value, _> =
-                                    serde_json::from_str(&json_str);
-                                assert!(
-                                    parse_check.is_ok(),
-                                    "JSON should remain valid under attack"
+                    match create_result {
+                        Ok(_) => {
+                            // Send attack payloads
+                            let attack_payloads = vec![
+                                b"normal_payload".to_vec(),
+                                format!("unicode\u{202E}kcatta\u{202D}payload").into_bytes(),
+                                b"format%s%x%d\x00payload".to_vec(),
+                                vec![0x00, 0x1b, 0x5b, 0x33, 0x31, 0x6d, 0xff], // Mixed binary/ANSI
+                            ];
+
+                            for (i, payload) in attack_payloads.into_iter().enumerate() {
+                                let send_result = transport.send_message(
+                                    attack_node_name,
+                                    "victim_node",
+                                    payload,
                                 );
 
-                                // Verify display safety
-                                let display_test = format!("{:?}", attack_scenario);
-                                assert!(
-                                    !display_test.contains("\x1b[31m"),
-                                    "Display should escape ANSI"
-                                );
-                                assert!(
-                                    !display_test.contains("%s"),
-                                    "Display should escape format strings"
-                                );
-                            }
-                            Err(_) => {
-                                // JSON serialization may fail under extreme attack - acceptable
-                            }
-                        }
-
-                        // Test transport under attack scenario
-                        let mut transport = VirtualTransportLayer::new(77777);
-                        let create_result = transport.create_link(
-                            attack_node_name,
-                            "victim_node",
-                            LinkFaultConfig {
-                                drop_probability: 0.999999,
-                                reorder_depth: 1000,
-                                corrupt_bit_count: 100,
-                                delay_ticks: 1000,
-                                partition: false,
-                            },
-                        );
-
-                        match create_result {
-                            Ok(_) => {
-                                // Send attack payloads
-                                let attack_payloads = vec![
-                                    b"normal_payload".to_vec(),
-                                    format!("unicode\u{202E}kcatta\u{202D}payload").into_bytes(),
-                                    b"format%s%x%d\x00payload".to_vec(),
-                                    vec![0x00, 0x1b, 0x5b, 0x33, 0x31, 0x6d, 0xff], // Mixed binary/ANSI
-                                ];
-
-                                for (i, payload) in attack_payloads.into_iter().enumerate() {
-                                    let send_result = transport.send_message(
-                                        attack_node_name,
-                                        "victim_node",
-                                        payload,
-                                    );
-
-                                    // Should handle attack payloads without corruption
-                                    match send_result {
-                                        Ok(msg_id) => {
-                                            assert!(
-                                                msg_id > 0,
-                                                "Message ID should be valid for attack payload {}",
-                                                i
-                                            );
-                                        }
-                                        Err(_) => {
-                                            // Message may be rejected - acceptable under attack
-                                        }
+                                // Should handle attack payloads without corruption
+                                match send_result {
+                                    Ok(msg_id) => {
+                                        assert!(
+                                            msg_id > 0,
+                                            "Message ID should be valid for attack payload {}",
+                                            i
+                                        );
+                                    }
+                                    Err(_) => {
+                                        // Message may be rejected - acceptable under attack
                                     }
                                 }
-
-                                // Verify transport state integrity under attack
-                                let stats = transport.stats();
-                                assert!(
-                                    stats.total_messages < u64::MAX,
-                                    "Stats should not overflow under attack"
-                                );
-                                assert!(
-                                    stats.dropped_messages <= stats.total_messages,
-                                    "Dropped ≤ total under attack"
-                                );
                             }
-                            Err(_) => {
-                                // Transport may reject attack configuration - acceptable
-                            }
-                        }
-                    }
-                    Err(_) => {
-                        // Scenario building may reject coordinated attack - acceptable defense
-                    }
-                }
 
-                // Test cascading failure resistance
-                let cascade_test = ScenarioBuilder::new("cascade_test").seed(99999).add_node(
-                    "cascade_1",
-                    "Node 1",
-                    NodeRole::Coordinator,
-                );
-
-                // Add nodes in rapid succession to test failure propagation
-                let mut current_builder = cascade_test.expect("Initial builder should work");
-                for i in 2..=100 {
-                    let node_id = format!("cascade_{}", i);
-                    match current_builder.clone().add_node(
-                        &node_id,
-                        "Cascade Node",
-                        NodeRole::Participant,
-                    ) {
-                        Ok(builder) => current_builder = builder,
-                        Err(_) => {
-                            // Failure should be isolated, not cascade to previous nodes
-                            let partial_build = current_builder.build();
+                            // Verify transport state integrity under attack
+                            let stats = transport.stats();
                             assert!(
-                                partial_build.is_ok() || partial_build.is_err(),
-                                "Partial build should complete deterministically"
+                                stats.total_messages < u64::MAX,
+                                "Stats should not overflow under attack"
                             );
-                            break;
+                            assert!(
+                                stats.dropped_messages <= stats.total_messages,
+                                "Dropped ≤ total under attack"
+                            );
+                        }
+                        Err(_) => {
+                            // Transport may reject attack configuration - acceptable
                         }
                     }
                 }
+                Err(_) => {
+                    // Scenario building may reject coordinated attack - acceptable defense
+                }
+            }
 
-                Ok::<(), ()>(())
-            });
-
-            assert!(
-                integration_attack_result.is_ok(),
-                "Integration attack test should not panic"
+            // Test cascading failure resistance
+            let cascade_test = ScenarioBuilder::new("cascade_test").seed(99999).add_node(
+                "cascade_1",
+                "Node 1",
+                NodeRole::Coordinator,
             );
-        }
+
+            // Add nodes in rapid succession to test failure propagation
+            let mut current_builder = cascade_test.expect("Initial builder should work");
+            for i in 2..=100 {
+                let node_id = format!("cascade_{}", i);
+                match current_builder.clone().add_node(
+                    &node_id,
+                    "Cascade Node",
+                    NodeRole::Participant,
+                ) {
+                    Ok(builder) => current_builder = builder,
+                    Err(_) => {
+                        // Failure should be isolated, not cascade to previous nodes
+                        let partial_build = current_builder.build();
+                        assert!(
+                            partial_build.is_ok() || partial_build.is_err(),
+                            "Partial build should complete deterministically"
+                        );
+                        break;
+                    }
+                }
+            }
+
+            Ok::<(), ()>(())
+        });
+
+        assert!(
+            integration_attack_result.is_ok(),
+            "Integration attack test should not panic"
+        );
     }
 }

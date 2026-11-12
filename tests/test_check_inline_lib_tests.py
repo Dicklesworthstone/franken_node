@@ -446,6 +446,77 @@ class InlineLibShardReceiptTest(unittest.TestCase):
         self.assertEqual(bin_plan["target_name"], "franken-node")
         self.assertIn("--bin", bin_plan["shards"][0]["command"])
         self.assertIn("franken-node", bin_plan["shards"][0]["command"])
+        self.assertTrue(live["checks"]["no_nested_inner_tests"])
+
+    def test_preflight_detects_nested_inner_tests_and_ignores_literals_and_macros(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            cargo_toml = root / "Cargo.toml"
+            src_dir = root / "src"
+            src_dir.mkdir()
+            lib_rs = src_dir / "lib.rs"
+            cargo_toml.write_text(
+                """
+[lib]
+test = true
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(franken_node_inline_tests)'] }
+""",
+                encoding="utf-8",
+            )
+            lib_rs.write_text(
+                "#![cfg(any(not(test), franken_node_inline_tests))]\n"
+                'const DOC: &str = "#[test] fn ignored_in_string() {}";\n'
+                "macro_rules! gen_test { () => { #[test] fn ok_in_macro() {} }; }\n",
+                encoding="utf-8",
+            )
+            clean = preflight(cargo_toml, lib_rs)
+            self.assertTrue(clean["passed"], clean["issues"])
+            self.assertEqual(clean["nested_inner_tests"], [])
+
+            nested = src_dir / "nested.rs"
+            nested.write_text(
+                "#[cfg(test)]\nmod tests {\n"
+                "    #[test]\n    fn outer() {\n"
+                "        #[test]\n        fn trapped_inner() {}\n"
+                "    }\n}\n",
+                encoding="utf-8",
+            )
+            bad = preflight(cargo_toml, lib_rs)
+            self.assertFalse(bad["passed"])
+            self.assertIn("no_nested_inner_tests", bad["issues"])
+            self.assertEqual(len(bad["nested_inner_tests"]), 1)
+            self.assertIn("nested.rs:5", bad["nested_inner_tests"][0])
+
+    def test_run_shards_collects_observed_results_from_stderr_stream(self) -> None:
+        plan = build_shard_plan(LIST_OUTPUT, max_tests_per_shard=2)
+
+        def runner(command: list[str], timeout_seconds: int) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout="",
+                stderr=(
+                    "running 2 tests\n"
+                    "test security::threshold_sig::tests::rejects_duplicate_signer ... ok\n"
+                    "test runtime::lane_scheduler::tests::control_lane_preempts_background ... ok\n"
+                ),
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            rc = run_shards(
+                plan,
+                receipt_jsonl=root / "receipts.jsonl",
+                output_dir=root / "shards",
+                resume=False,
+                fail_fast=False,
+                runner=runner,
+            )
+            receipt = json.loads((root / "receipts.jsonl").read_text(encoding="utf-8"))
+            self.assertEqual(rc, 0)
+            self.assertEqual(len(receipt["observed_results"]), 2)
 
 
 if __name__ == "__main__":

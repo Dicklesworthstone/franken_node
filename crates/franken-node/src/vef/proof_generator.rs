@@ -243,6 +243,15 @@ impl TestProofBackend {
         let mut hasher = Sha256::new();
         hasher.update(b"proof_generator_hash_v1:");
         hasher.update(b"proof-backend-v1:");
+        if self.name != "test-hash" {
+            hasher.update(b"backend_name:");
+            hasher.update(
+                u64::try_from(self.name.len())
+                    .unwrap_or(u64::MAX)
+                    .to_le_bytes(),
+            );
+            hasher.update(self.name.as_bytes());
+        }
         hasher.update(
             u64::try_from(entries.len())
                 .unwrap_or(u64::MAX)
@@ -322,6 +331,9 @@ impl ProofBackend for TestProofBackend {
         entries: &[ReceiptChainEntry],
     ) -> Result<bool, ProofGeneratorError> {
         if entries.is_empty() {
+            return Ok(false);
+        }
+        if !crate::security::constant_time::ct_eq(&proof.backend_name, &self.name) {
             return Ok(false);
         }
         let expected_data = self.compute_proof_bytes(entries);
@@ -797,7 +809,7 @@ mod tests {
             actor_identity: format!("actor-{n}"),
             artifact_identity: format!("artifact-{n}"),
             policy_snapshot_hash: format!("sha256:{n:064x}"),
-            timestamp_millis: 1_702_000_000_000 + n,
+            timestamp_millis: 1_702_000_000_000_u64.saturating_add(n),
             sequence_number: n,
             witness_references: vec!["w-a".to_string(), "w-b".to_string()],
             trace_id: format!("trace-{n}"),
@@ -2273,1423 +2285,1405 @@ mod tests {
             for (label, duration) in verification_times {
                 println!("Verification timing for {}: {:?}", label, duration);
             }
+        }
 
-            // ── Additional comprehensive negative-path edge case tests ──
+        // ── Additional comprehensive negative-path edge case tests ──
 
-            #[test]
-            fn negative_proof_backend_with_malicious_name_injection_patterns() {
-                // Test proof backend names with various injection patterns
-                let extremely_long_name = format!("backend{}", "x".repeat(100000));
-                let malicious_backend_names = [
-                    "backend\x00null_injection",
-                    "backend\r\n\r\nHTTP/1.1 200 OK\r\nContent-Type: text/html",
-                    "backend<script>alert('xss')</script>",
-                    "backend\"},{\"injected\":true,\"evil\":\"",
-                    "backend\u{202E}spoofed\u{202D}normal",
-                    "backend\u{FEFF}\u{200B}\u{034F}", // Unicode invisibles
-                    "../../../etc/passwd",
-                    "C:\\Windows\\System32\\config\\sam",
-                    "javascript:alert(1)",
-                    "data:text/html,<script>",
-                    "",                           // Empty name
-                    " ",                          // Whitespace only
-                    "\t\n\r",                     // Control characters
-                    extremely_long_name.as_str(), // Extremely long
-                ];
+        #[test]
+        fn negative_proof_backend_with_malicious_name_injection_patterns() {
+            // Test proof backend names with various injection patterns
+            let extremely_long_name = format!("backend{}", "x".repeat(100000));
+            let malicious_backend_names = [
+                "backend\x00null_injection",
+                "backend\r\n\r\nHTTP/1.1 200 OK\r\nContent-Type: text/html",
+                "backend<script>alert('xss')</script>",
+                "backend\"},{\"injected\":true,\"evil\":\"",
+                "backend\u{202E}spoofed\u{202D}normal",
+                "backend\u{FEFF}\u{200B}\u{034F}", // Unicode invisibles
+                "../../../etc/passwd",
+                "C:\\Windows\\System32\\config\\sam",
+                "javascript:alert(1)",
+                "data:text/html,<script>",
+                "",                           // Empty name
+                " ",                          // Whitespace only
+                "\t\n\r",                     // Control characters
+                extremely_long_name.as_str(), // Extremely long
+            ];
 
-                for malicious_name in malicious_backend_names {
-                    let backend = TestProofBackend::with_name(malicious_name);
-                    let generator =
-                        ProofGenerator::new(Arc::new(backend), ProofGeneratorConfig::default());
-
-                    // Backend name should be stored/reported exactly
-                    assert_eq!(generator.backend_name(), malicious_name);
-
-                    // Should work in proof generation
-                    let entries = sample_chain_entries();
-                    let window = sample_window();
-                    let request = ProofRequest {
-                        request_id: "malicious_backend_test".to_string(),
-                        window,
-                        entries: entries.clone(),
-                        timeout_millis: 60_000,
-                        trace_id: "trace_malicious_backend".to_string(),
-                        created_at_millis: 1_702_000_000_000,
-                    };
-
-                    let backend = TestProofBackend::with_name(malicious_name);
-                    let proof = backend
-                        .generate(&request)
-                        .expect("should generate with malicious backend name");
-
-                    // Verify backend name preservation
-                    assert_eq!(proof.backend_name, malicious_name);
-
-                    // JSON serialization should handle malicious names safely
-                    let json = serde_json::to_string(&proof)
-                        .expect("should serialize malicious backend name");
-                    let parsed: ComplianceProof = serde_json::from_str(&json)
-                        .expect("should deserialize malicious backend name");
-                    assert_eq!(parsed.backend_name, malicious_name);
-
-                    // Verification should work despite malicious name
-                    assert!(
-                        backend
-                            .verify(&proof, &entries)
-                            .expect("should verify with malicious backend name")
-                    );
-                }
-            }
-
-            #[test]
-            fn negative_proof_request_with_pathological_timeout_and_capacity_values() {
-                // Test proof generation with extreme timeout and capacity values
-                let extreme_configs = [
-                    ProofGeneratorConfig {
-                        default_timeout_millis: 0, // Zero timeout
-                        max_entries_per_request: 1,
-                        max_pending_requests: 1,
-                    },
-                    ProofGeneratorConfig {
-                        default_timeout_millis: u64::MAX,        // Maximum timeout
-                        max_entries_per_request: usize::MAX / 2, // Near-maximum entries
-                        max_pending_requests: usize::MAX / 2,    // Near-maximum pending
-                    },
-                    ProofGeneratorConfig {
-                        default_timeout_millis: 1,  // Minimal timeout
-                        max_entries_per_request: 0, // Zero entries allowed
-                        max_pending_requests: 0,    // Zero pending allowed
-                    },
-                ];
-
-                for config in extreme_configs {
-                    let backend = Arc::new(TestProofBackend::new());
-                    let mut generator = ProofGenerator::new(backend, config.clone());
-
-                    let entries = sample_chain_entries();
-                    let window = sample_window();
-
-                    let result = generator.submit_request(
-                        &window,
-                        &entries,
-                        1_702_000_000_000,
-                        "trace_extreme",
-                    );
-
-                    match result {
-                        Ok(request_id) => {
-                            // If submission succeeds, test generation
-                            match generator.generate_proof(
-                                &request_id,
-                                &window,
-                                &entries,
-                                1_702_000_000_001,
-                            ) {
-                                Ok(proof) => {
-                                    // Proof should have reasonable timeout value
-                                    assert!(proof.generated_at_millis > 0);
-                                    assert!(!proof.proof_data.is_empty());
-                                }
-                                Err(_) => {
-                                    // Acceptable to fail with extreme configs
-                                }
-                            }
-
-                            // Test timeout enforcement with extreme values
-                            let timed_out = generator.enforce_timeouts(u64::MAX);
-                            // Should handle u64::MAX timestamp without overflow
-                            if config.default_timeout_millis == 0
-                                || config.default_timeout_millis == 1
-                            {
-                                assert!(
-                                    !timed_out.is_empty(),
-                                    "zero/minimal timeout should cause immediate timeout"
-                                );
-                            }
-                        }
-                        Err(err) => {
-                            // Expected to fail with zero capacity configs
-                            if config.max_entries_per_request == 0
-                                || config.max_pending_requests == 0
-                            {
-                                assert!(err.code.contains("ERR"));
-                            }
-                        }
-                    }
-                }
-            }
-
-            #[test]
-            fn negative_receipt_chain_entry_with_extreme_index_and_hash_corruption() {
-                // Test receipt chain entries with extreme index values and hash corruption
-                let backend = TestProofBackend::new();
-
-                let extreme_entry_patterns = [
-                    // Pattern 1: Index overflow boundaries
-                    ReceiptChainEntry {
-                        index: u64::MAX,
-                        prev_chain_hash: "prev_max_index".to_string(),
-                        receipt_hash: "rcpt_max_index".to_string(),
-                        chain_hash: "max_index_hash".to_string(),
-                        receipt: receipt(ExecutionActionType::NetworkAccess, 0),
-                        appended_at_millis: u64::MAX,
-                        trace_id: "trace_max_index".to_string(),
-                    },
-                    // Pattern 2: Zero index
-                    ReceiptChainEntry {
-                        index: 0,
-                        prev_chain_hash: "".to_string(),
-                        receipt_hash: "".to_string(),
-                        chain_hash: "".to_string(), // Empty hash
-                        receipt: receipt(ExecutionActionType::SecretAccess, u64::MAX),
-                        appended_at_millis: 0,
-                        trace_id: "".to_string(), // Empty trace
-                    },
-                    // Pattern 3: Binary data in hash
-                    ReceiptChainEntry {
-                        index: u64::MAX / 2,
-                        prev_chain_hash: "prev_binary".to_string(),
-                        receipt_hash: "rcpt_binary".to_string(),
-                        chain_hash: String::from_utf8_lossy(&[
-                            0x00, 0x01, 0x02, 0x03, 0xFF, 0xFE, 0xFD, 0xFC,
-                        ])
-                        .to_string(),
-                        receipt: receipt(ExecutionActionType::PolicyTransition, 12345),
-                        appended_at_millis: u64::MAX / 2,
-                        trace_id: format!(
-                            "trace{}binary{}",
-                            '\0',
-                            String::from_utf8_lossy(&[0xFF])
-                        ),
-                    },
-                    // Pattern 4: Unicode attacks in hash
-                    ReceiptChainEntry {
-                        index: 999999,
-                        prev_chain_hash: "prev_unicode".to_string(),
-                        receipt_hash: "rcpt_unicode".to_string(),
-                        chain_hash: "hash\u{202E}rtl\u{202D}normal\u{FEFF}".to_string(),
-                        receipt: receipt(ExecutionActionType::ProcessSpawn, 54321),
-                        appended_at_millis: 1_702_000_000_000,
-                        trace_id: "trace\u{200B}invisible\u{034F}".to_string(),
-                    },
-                ];
-
-                for (i, extreme_entry) in extreme_entry_patterns.into_iter().enumerate() {
-                    let entries = vec![extreme_entry.clone()];
-
-                    let request = ProofRequest {
-                        request_id: format!("extreme_entry_{i}"),
-                        window: sample_window(),
-                        entries: entries.clone(),
-                        timeout_millis: 60_000,
-                        trace_id: format!("trace_extreme_{i}"),
-                        created_at_millis: 1_702_000_000_000,
-                    };
-
-                    // Should handle extreme entries without panicking
-                    let proof = backend
-                        .generate(&request)
-                        .expect("should handle extreme entry patterns");
-
-                    // Verify proof integrity despite extreme inputs
-                    assert!(!proof.proof_data.is_empty());
-                    assert!(proof.proof_data_hash.starts_with("sha256:"));
-                    assert_eq!(proof.metadata.get("entry_count").unwrap(), "1");
-
-                    // Verification should work consistently
-                    assert!(
-                        backend
-                            .verify(&proof, &entries)
-                            .expect("should verify extreme entries")
-                    );
-
-                    // JSON round-trip should work
-                    let json = serde_json::to_string(&proof)
-                        .expect("should serialize extreme entry proof");
-                    let parsed: ComplianceProof = serde_json::from_str(&json)
-                        .expect("should deserialize extreme entry proof");
-                    assert_eq!(parsed.proof_data, proof.proof_data);
-                    assert_eq!(parsed.proof_data_hash, proof.proof_data_hash);
-                }
-            }
-
-            #[test]
-            fn negative_concurrent_proof_generator_mutex_poisoning_and_recovery() {
-                // Test concurrent proof generator behavior under mutex poisoning scenarios
-                let backend = Arc::new(TestProofBackend::new());
+            for malicious_name in malicious_backend_names {
+                let backend = TestProofBackend::with_name(malicious_name);
                 let generator =
-                    ConcurrentProofGenerator::new(backend, ProofGeneratorConfig::default());
+                    ProofGenerator::new(Arc::new(backend), ProofGeneratorConfig::default());
+
+                // Backend name should be stored/reported exactly
+                assert_eq!(generator.backend_name(), malicious_name);
+
+                // Should work in proof generation
+                let entries = sample_chain_entries();
+                let window = sample_window();
+                let request = ProofRequest {
+                    request_id: "malicious_backend_test".to_string(),
+                    window,
+                    entries: entries.clone(),
+                    timeout_millis: 60_000,
+                    trace_id: "trace_malicious_backend".to_string(),
+                    created_at_millis: 1_702_000_000_000,
+                };
+
+                let backend = TestProofBackend::with_name(malicious_name);
+                let proof = backend
+                    .generate(&request)
+                    .expect("should generate with malicious backend name");
+
+                // Verify backend name preservation
+                assert_eq!(proof.backend_name, malicious_name);
+
+                // JSON serialization should handle malicious names safely
+                let json =
+                    serde_json::to_string(&proof).expect("should serialize malicious backend name");
+                let parsed: ComplianceProof =
+                    serde_json::from_str(&json).expect("should deserialize malicious backend name");
+                assert_eq!(parsed.backend_name, malicious_name);
+
+                // Verification should work despite malicious name
+                assert!(
+                    backend
+                        .verify(&proof, &entries)
+                        .expect("should verify with malicious backend name")
+                );
+            }
+        }
+
+        #[test]
+        fn negative_proof_request_with_pathological_timeout_and_capacity_values() {
+            // Test proof generation with extreme timeout and capacity values
+            let extreme_configs = [
+                ProofGeneratorConfig {
+                    default_timeout_millis: 0, // Zero timeout
+                    max_entries_per_request: 1,
+                    max_pending_requests: 1,
+                },
+                ProofGeneratorConfig {
+                    default_timeout_millis: u64::MAX,        // Maximum timeout
+                    max_entries_per_request: usize::MAX / 2, // Near-maximum entries
+                    max_pending_requests: usize::MAX / 2,    // Near-maximum pending
+                },
+                ProofGeneratorConfig {
+                    default_timeout_millis: 1,  // Minimal timeout
+                    max_entries_per_request: 0, // Zero entries allowed
+                    max_pending_requests: 0,    // Zero pending allowed
+                },
+            ];
+
+            for config in extreme_configs {
+                let backend = Arc::new(TestProofBackend::new());
+                let mut generator = ProofGenerator::new(backend, config.clone());
 
                 let entries = sample_chain_entries();
                 let window = sample_window();
 
-                // Submit some requests successfully
-                let successful_requests: Vec<String> = (0..3)
-                    .map(|i| {
-                        let mut test_window = window.clone();
-                        test_window.window_id = format!("pre_poison_{i}");
-                        generator
+                let result =
+                    generator.submit_request(&window, &entries, 1_702_000_000_000, "trace_extreme");
+
+                match result {
+                    Ok(request_id) => {
+                        // If submission succeeds, test generation
+                        match generator.generate_proof(
+                            &request_id,
+                            &window,
+                            &entries,
+                            1_702_000_000_001,
+                        ) {
+                            Ok(proof) => {
+                                // Proof should have reasonable timeout value
+                                assert!(proof.generated_at_millis > 0);
+                                assert!(!proof.proof_data.is_empty());
+                            }
+                            Err(_) => {
+                                // Acceptable to fail with extreme configs
+                            }
+                        }
+
+                        // Test timeout enforcement on a fresh pending request with extreme values
+                        let pending_for_timeout = generator
                             .submit_request(
-                                &test_window,
+                                &window,
                                 &entries,
-                                1_702_000_000_000 + i,
-                                &format!("trace_{i}"),
+                                1_702_000_000_010,
+                                "trace_timeout_probe",
                             )
-                            .expect("should submit before poisoning")
-                    })
-                    .collect();
+                            .ok();
+                        let timed_out = generator.enforce_timeouts(u64::MAX);
+                        // Should handle u64::MAX timestamp without overflow
+                        if pending_for_timeout.is_some()
+                            && (config.default_timeout_millis == 0
+                                || config.default_timeout_millis == 1)
+                        {
+                            assert!(
+                                !timed_out.is_empty(),
+                                "zero/minimal timeout should cause immediate timeout"
+                            );
+                        }
+                    }
+                    Err(err) => {
+                        // Expected to fail with zero capacity configs
+                        if config.max_entries_per_request == 0 || config.max_pending_requests == 0 {
+                            assert!(err.code.contains("ERR"));
+                        }
+                    }
+                }
+            }
+        }
 
-                // Simulate mutex poisoning by creating a panicking thread
-                let poison_generator = generator.clone();
-                let poison_thread = std::thread::spawn(move || {
-                    let _guard = crate::lock_utils::try_lock(
-                        poison_generator.inner.as_ref(),
-                        "proof generator intentional poison setup",
-                    )
-                    .expect("proof generator intentional poison setup");
-                    panic!("intentional mutex poisoning for test");
-                });
+        #[test]
+        fn negative_receipt_chain_entry_with_extreme_index_and_hash_corruption() {
+            // Test receipt chain entries with extreme index values and hash corruption
+            let backend = TestProofBackend::new();
 
-                // Wait for poisoning to occur
-                let join_result = poison_thread.join();
-                assert!(join_result.is_err(), "poisoning thread should panic");
+            let extreme_entry_patterns = [
+                // Pattern 1: Index overflow boundaries
+                ReceiptChainEntry {
+                    index: u64::MAX,
+                    prev_chain_hash: "prev_max_index".to_string(),
+                    receipt_hash: "rcpt_max_index".to_string(),
+                    chain_hash: "max_index_hash".to_string(),
+                    receipt: receipt(ExecutionActionType::NetworkAccess, 0),
+                    appended_at_millis: u64::MAX,
+                    trace_id: "trace_max_index".to_string(),
+                },
+                // Pattern 2: Zero index
+                ReceiptChainEntry {
+                    index: 0,
+                    prev_chain_hash: "".to_string(),
+                    receipt_hash: "".to_string(),
+                    chain_hash: "".to_string(), // Empty hash
+                    receipt: receipt(ExecutionActionType::SecretAccess, u64::MAX),
+                    appended_at_millis: 0,
+                    trace_id: "".to_string(), // Empty trace
+                },
+                // Pattern 3: Binary data in hash
+                ReceiptChainEntry {
+                    index: u64::MAX / 2,
+                    prev_chain_hash: "prev_binary".to_string(),
+                    receipt_hash: "rcpt_binary".to_string(),
+                    chain_hash: String::from_utf8_lossy(&[
+                        0x00, 0x01, 0x02, 0x03, 0xFF, 0xFE, 0xFD, 0xFC,
+                    ])
+                    .to_string(),
+                    receipt: receipt(ExecutionActionType::PolicyTransition, 12345),
+                    appended_at_millis: u64::MAX / 2,
+                    trace_id: format!("trace{}binary{}", '\0', String::from_utf8_lossy(&[0xFF])),
+                },
+                // Pattern 4: Unicode attacks in hash
+                ReceiptChainEntry {
+                    index: 999999,
+                    prev_chain_hash: "prev_unicode".to_string(),
+                    receipt_hash: "rcpt_unicode".to_string(),
+                    chain_hash: "hash\u{202E}rtl\u{202D}normal\u{FEFF}".to_string(),
+                    receipt: receipt(ExecutionActionType::ProcessSpawn, 54321),
+                    appended_at_millis: 1_702_000_000_000,
+                    trace_id: "trace\u{200B}invisible\u{034F}".to_string(),
+                },
+            ];
 
-                // Verify operations handle poisoning gracefully
-                let mut poison_window = window.clone();
-                poison_window.window_id = "post_poison_request".to_string();
+            for (i, extreme_entry) in extreme_entry_patterns.into_iter().enumerate() {
+                let entries = vec![extreme_entry.clone()];
 
-                let poisoned_submit = generator.submit_request(
-                    &poison_window,
-                    &entries,
-                    1_702_000_001_000,
-                    "trace_poisoned",
+                let request = ProofRequest {
+                    request_id: format!("extreme_entry_{i}"),
+                    window: sample_window(),
+                    entries: entries.clone(),
+                    timeout_millis: 60_000,
+                    trace_id: format!("trace_extreme_{i}"),
+                    created_at_millis: 1_702_000_000_000,
+                };
+
+                // Should handle extreme entries without panicking
+                let proof = backend
+                    .generate(&request)
+                    .expect("should handle extreme entry patterns");
+
+                // Verify proof integrity despite extreme inputs
+                assert!(!proof.proof_data.is_empty());
+                assert!(proof.proof_data_hash.starts_with("sha256:"));
+                assert_eq!(proof.metadata.get("entry_count").unwrap(), "1");
+
+                // Verification should work consistently
+                assert!(
+                    backend
+                        .verify(&proof, &entries)
+                        .expect("should verify extreme entries")
                 );
 
-                match poisoned_submit {
-                    Ok(_) => {
-                        // If submit succeeds, the implementation recovered from poisoning
-                        // This is possible with proper mutex poison recovery
+                // JSON round-trip should work
+                let json =
+                    serde_json::to_string(&proof).expect("should serialize extreme entry proof");
+                let parsed: ComplianceProof =
+                    serde_json::from_str(&json).expect("should deserialize extreme entry proof");
+                assert_eq!(parsed.proof_data, proof.proof_data);
+                assert_eq!(parsed.proof_data_hash, proof.proof_data_hash);
+            }
+        }
+
+        #[test]
+        fn negative_concurrent_proof_generator_mutex_poisoning_and_recovery() {
+            // Test concurrent proof generator behavior under mutex poisoning scenarios
+            let backend = Arc::new(TestProofBackend::new());
+            let generator = ConcurrentProofGenerator::new(backend, ProofGeneratorConfig::default());
+
+            let entries = sample_chain_entries();
+            let window = sample_window();
+
+            // Submit some requests successfully
+            let successful_requests: Vec<String> = (0..3)
+                .map(|i| {
+                    let mut test_window = window.clone();
+                    test_window.window_id = format!("pre_poison_{i}");
+                    generator
+                        .submit_request(
+                            &test_window,
+                            &entries,
+                            1_702_000_000_000 + i,
+                            &format!("trace_{i}"),
+                        )
+                        .expect("should submit before poisoning")
+                })
+                .collect();
+
+            // Simulate mutex poisoning by creating a panicking thread
+            let poison_generator = generator.clone();
+            let poison_thread = std::thread::spawn(move || {
+                let _guard = crate::lock_utils::try_lock(
+                    poison_generator.inner.as_ref(),
+                    "proof generator intentional poison setup",
+                )
+                .expect("proof generator intentional poison setup");
+                panic!("intentional mutex poisoning for test");
+            });
+
+            // Wait for poisoning to occur
+            let join_result = poison_thread.join();
+            assert!(join_result.is_err(), "poisoning thread should panic");
+
+            // Verify operations handle poisoning gracefully
+            let mut poison_window = window.clone();
+            poison_window.window_id = "post_poison_request".to_string();
+
+            let poisoned_submit = generator.submit_request(
+                &poison_window,
+                &entries,
+                1_702_000_001_000,
+                "trace_poisoned",
+            );
+
+            match poisoned_submit {
+                Ok(_) => {
+                    // If submit succeeds, the implementation recovered from poisoning
+                    // This is possible with proper mutex poison recovery
+                }
+                Err(ref err) => {
+                    // Should fail gracefully with internal error about mutex poisoning
+                    assert_eq!(err.code, error_codes::ERR_PGN_INTERNAL);
+                    assert!(err.message.contains("poisoned"));
+                }
+            }
+
+            // Test generation after poisoning
+            if let Ok(poison_request_id) = poisoned_submit {
+                let poisoned_generate = generator.generate_proof(
+                    &poison_request_id,
+                    &poison_window,
+                    &entries,
+                    1_702_000_001_100,
+                );
+
+                match poisoned_generate {
+                    Ok(proof) => {
+                        // Recovery successful
+                        assert!(!proof.proof_data.is_empty());
                     }
-                    Err(ref err) => {
-                        // Should fail gracefully with internal error about mutex poisoning
+                    Err(err) => {
+                        // Should fail gracefully
                         assert_eq!(err.code, error_codes::ERR_PGN_INTERNAL);
                         assert!(err.message.contains("poisoned"));
                     }
                 }
-
-                // Test generation after poisoning
-                if let Ok(poison_request_id) = poisoned_submit {
-                    let poisoned_generate = generator.generate_proof(
-                        &poison_request_id,
-                        &poison_window,
-                        &entries,
-                        1_702_000_001_100,
-                    );
-
-                    match poisoned_generate {
-                        Ok(proof) => {
-                            // Recovery successful
-                            assert!(!proof.proof_data.is_empty());
-                        }
-                        Err(err) => {
-                            // Should fail gracefully
-                            assert_eq!(err.code, error_codes::ERR_PGN_INTERNAL);
-                            assert!(err.message.contains("poisoned"));
-                        }
-                    }
-                }
-
-                // Test that generator remains functional after recovery attempt
-                let mut recovery_window = window.clone();
-                recovery_window.window_id = "recovery_test".to_string();
-
-                for i in 0..3 {
-                    recovery_window.window_id = format!("recovery_{i}");
-                    let recovery_result = generator.submit_request(
-                        &recovery_window,
-                        &entries,
-                        1_702_000_002_000 + i,
-                        &format!("recovery_trace_{i}"),
-                    );
-
-                    // Should eventually recover or consistently fail gracefully
-                    match recovery_result {
-                        Ok(req_id) => {
-                            // If recovery succeeds, generation should also work
-                            let gen_result = generator.generate_proof(
-                                &req_id,
-                                &recovery_window,
-                                &entries,
-                                1_702_000_002_100 + i,
-                            );
-                            // Either succeeds or fails gracefully
-                            assert!(
-                                gen_result.is_ok()
-                                    || gen_result.unwrap_err().code
-                                        == error_codes::ERR_PGN_INTERNAL
-                            );
-                            break; // Recovery successful
-                        }
-                        Err(_) => {
-                            // Continue trying recovery
-                        }
-                    }
-                }
             }
 
-            #[test]
-            fn negative_proof_window_with_arithmetic_overflow_indices_and_boundaries() {
-                // Test proof windows with index overflow scenarios
-                let backend = TestProofBackend::new();
-                let entries = sample_chain_entries();
+            // Test that generator remains functional after recovery attempt
+            let mut recovery_window = window.clone();
+            recovery_window.window_id = "recovery_test".to_string();
 
-                let overflow_windows = [
-                    // Pattern 1: Maximum indices
-                    ProofWindow {
-                        window_id: "overflow_max".to_string(),
-                        start_index: u64::MAX - 10,
-                        end_index: u64::MAX,
-                        entry_count: 10,
-                        aligned_checkpoint_id: None,
-                        tier: WorkloadTier::High,
-                        created_at_millis: u64::MAX,
-                        trace_id: "trace_max".to_string(),
-                    },
-                    // Pattern 2: Inverted indices (end < start)
-                    ProofWindow {
-                        window_id: "overflow_inverted".to_string(),
-                        start_index: 1000,
-                        end_index: 999, // Invalid: end < start
-                        entry_count: 0, // Inconsistent count
-                        aligned_checkpoint_id: Some(0),
-                        tier: WorkloadTier::Background,
-                        created_at_millis: 0,
-                        trace_id: "trace_inverted".to_string(),
-                    },
-                    // Pattern 3: Mismatched count
-                    ProofWindow {
-                        window_id: "overflow_mismatch".to_string(),
-                        start_index: 0,
-                        end_index: 3,
-                        entry_count: u64::MAX, // Doesn't match actual range
-                        aligned_checkpoint_id: Some(0), // Empty checkpoint
-                        tier: WorkloadTier::Standard,
-                        created_at_millis: u64::MAX / 2,
-                        trace_id: "trace\u{202E}unicode\u{202D}".to_string(),
-                    },
-                ];
+            for i in 0..3 {
+                recovery_window.window_id = format!("recovery_{i}");
+                let recovery_result = generator.submit_request(
+                    &recovery_window,
+                    &entries,
+                    1_702_000_002_000 + i,
+                    &format!("recovery_trace_{i}"),
+                );
 
-                for (i, overflow_window) in overflow_windows.into_iter().enumerate() {
-                    let request = ProofRequest {
-                        request_id: format!("window_overflow_{i}"),
-                        window: overflow_window.clone(),
-                        entries: entries.clone(),
-                        timeout_millis: 60_000,
-                        trace_id: format!("trace_window_overflow_{i}"),
-                        created_at_millis: 1_702_000_000_000,
-                    };
-
-                    // Should handle overflow windows gracefully
-                    let proof = backend
-                        .generate(&request)
-                        .expect("should handle window overflow patterns");
-
-                    // Verify window reference is preserved
-                    assert_eq!(proof.receipt_window_ref, overflow_window.window_id);
-
-                    // Verify metadata includes window information
-                    assert_eq!(
-                        proof.metadata.get("window_start").unwrap(),
-                        &overflow_window.start_index.to_string()
-                    );
-                    assert_eq!(
-                        proof.metadata.get("window_end").unwrap(),
-                        &overflow_window.end_index.to_string()
-                    );
-
-                    // Verification should work despite overflow indices
-                    assert!(
-                        backend
-                            .verify(&proof, &entries)
-                            .expect("should verify overflow window")
-                    );
-
-                    // Test with ProofGenerator
-                    let mut generator = test_generator();
-                    match generator.submit_request(
-                        &overflow_window,
-                        &entries,
-                        1_702_000_000_000,
-                        &format!("gen_trace_{i}"),
-                    ) {
-                        Ok(req_id) => {
-                            // Generation should handle overflow gracefully
-                            match generator.generate_proof(
-                                &req_id,
-                                &overflow_window,
-                                &entries,
-                                1_702_000_000_100,
-                            ) {
-                                Ok(gen_proof) => {
-                                    assert_eq!(
-                                        gen_proof.receipt_window_ref,
-                                        overflow_window.window_id
-                                    );
-                                }
-                                Err(_) => {
-                                    // Acceptable to reject overflow patterns
-                                }
-                            }
-                        }
-                        Err(_) => {
-                            // Acceptable to reject invalid windows at submission
-                        }
-                    }
-                }
-            }
-
-            #[test]
-            fn negative_proof_hash_computation_with_degenerate_entry_data_patterns() {
-                // Test hash computation with degenerate data patterns that might cause collisions
-                let backend = TestProofBackend::new();
-
-                let degenerate_patterns = [
-                    // Pattern 1: All identical entries
-                    vec![
-                        ReceiptChainEntry {
-                            index: 0,
-                            prev_chain_hash: "identical_prev".to_string(),
-                            receipt_hash: "identical_rcpt".to_string(),
-                            chain_hash: "identical".to_string(),
-                            receipt: receipt(ExecutionActionType::NetworkAccess, 0),
-                            appended_at_millis: 1_702_000_000_000,
-                            trace_id: "identical".to_string(),
-                        };
-                        100
-                    ],
-                    // Pattern 2: Incrementing pattern that might collide
-                    (0..50)
-                        .map(|i| ReceiptChainEntry {
-                            index: i,
-                            prev_chain_hash: format!("prev_{:02}", i % 10),
-                            receipt_hash: format!("rcpt_{:02}", i % 10),
-                            chain_hash: format!("pattern_{:02}", i % 10), // Limited variation
-                            receipt: receipt(ExecutionActionType::PolicyTransition, i),
-                            appended_at_millis: 1_702_000_000_000 + i,
-                            trace_id: format!("trace_{:02}", i % 5), // Limited variation
-                        })
-                        .collect(),
-                    // Pattern 3: Binary data designed to stress hasher
-                    (0..10)
-                        .map(|i| ReceiptChainEntry {
-                            index: i,
-                            prev_chain_hash: format!("prev_{:08b}", i),
-                            receipt_hash: format!("rcpt_{:08b}", i),
-                            chain_hash: format!("{:08b}", i).repeat(100), // Binary patterns
-                            receipt: receipt(ExecutionActionType::SecretAccess, i),
-                            appended_at_millis: 1_702_000_000_000 + i,
-                            trace_id: format!("binary_{:08b}", i),
-                        })
-                        .collect(),
-                ];
-
-                let mut all_proofs = Vec::new();
-
-                for (pattern_idx, entries) in degenerate_patterns.into_iter().enumerate() {
-                    let request = ProofRequest {
-                        request_id: format!("degenerate_{pattern_idx}"),
-                        window: sample_window(),
-                        entries: entries.clone(),
-                        timeout_millis: 60_000,
-                        trace_id: format!("trace_degenerate_{pattern_idx}"),
-                        created_at_millis: 1_702_000_000_000,
-                    };
-
-                    let proof = backend
-                        .generate(&request)
-                        .expect("should handle degenerate patterns");
-                    all_proofs.push((pattern_idx, proof, entries));
-                }
-
-                // Verify all proofs are unique despite degenerate input patterns
-                for i in 0..all_proofs.len() {
-                    for j in (i + 1)..all_proofs.len() {
-                        let (idx1, proof1, _) = &all_proofs[i];
-                        let (idx2, proof2, _) = &all_proofs[j];
-
-                        assert_ne!(
-                            proof1.proof_data_hash, proof2.proof_data_hash,
-                            "hash collision between pattern {idx1} and {idx2}"
+                // Should eventually recover or consistently fail gracefully
+                match recovery_result {
+                    Ok(req_id) => {
+                        // If recovery succeeds, generation should also work
+                        let gen_result = generator.generate_proof(
+                            &req_id,
+                            &recovery_window,
+                            &entries,
+                            1_702_000_002_100 + i,
                         );
-                        assert_ne!(
-                            proof1.proof_data, proof2.proof_data,
-                            "proof data collision between pattern {idx1} and {idx2}"
-                        );
-                    }
-                }
-
-                // Verify verification works for all patterns
-                for (pattern_idx, proof, entries) in &all_proofs {
-                    assert!(
-                        backend
-                            .verify(proof, entries)
-                            .expect("should verify degenerate pattern"),
-                        "verification failed for pattern {pattern_idx}"
-                    );
-
-                    // Test hash integrity computation
-                    let recomputed_hash = TestProofBackend::hash_bytes(&proof.proof_data);
-                    assert_eq!(
-                        proof.proof_data_hash, recomputed_hash,
-                        "hash integrity check failed for pattern {pattern_idx}"
-                    );
-                }
-            }
-
-            #[test]
-            fn negative_status_counts_arithmetic_consistency_under_overflow_scenarios() {
-                // Test status count arithmetic under overflow scenarios
-                let backend = Arc::new(TestProofBackend::new());
-                let mut generator = ProofGenerator::new(
-                    backend,
-                    ProofGeneratorConfig {
-                        max_pending_requests: usize::MAX / 1000, // Large but not maximum
-                        max_entries_per_request: 1000,
-                        default_timeout_millis: 60_000,
-                    },
-                );
-
-                let entries = sample_chain_entries();
-                let window = sample_window();
-
-                // Submit many requests to test counter arithmetic
-                let mut submitted_count = 0;
-                let mut completed_count = 0;
-                let mut failed_count = 0;
-
-                // Submit requests until capacity is reached
-                for i in 0..1000 {
-                    let mut test_window = window.clone();
-                    test_window.window_id = format!("count_test_{i:06}");
-
-                    match generator.submit_request(
-                        &test_window,
-                        &entries,
-                        1_702_000_000_000 + i,
-                        &format!("trace_{i}"),
-                    ) {
-                        Ok(req_id) => {
-                            submitted_count += 1;
-
-                            // Generate some proofs
-                            if i % 3 == 0 {
-                                match generator.generate_proof(
-                                    &req_id,
-                                    &test_window,
-                                    &entries,
-                                    1_702_000_000_100 + i,
-                                ) {
-                                    Ok(_) => completed_count += 1,
-                                    Err(_) => failed_count += 1,
-                                }
-                            }
-
-                            // Periodically enforce timeouts to create more failed requests
-                            if i % 10 == 0 {
-                                // Use a past timeout to force failures
-                                let timeout_timestamp = 1_702_000_000_000 + i + 61_000;
-                                generator.enforce_timeouts(timeout_timestamp);
-                            }
-                        }
-                        Err(_) => {
-                            // Hit capacity limit
-                            break;
-                        }
-                    }
-                }
-
-                // Verify status counts are arithmetically consistent
-                let status_counts = generator.status_counts();
-
-                let pending = status_counts.get("pending").copied().unwrap_or(0);
-                let generating = status_counts.get("generating").copied().unwrap_or(0);
-                let complete = status_counts.get("complete").copied().unwrap_or(0);
-                let failed = status_counts.get("failed").copied().unwrap_or(0);
-
-                let total_counted = pending + generating + complete + failed;
-                let total_requests = generator.requests().len();
-
-                // All requests should be accounted for in status counts
-                assert_eq!(
-                    total_counted, total_requests,
-                    "status count mismatch: counted={total_counted}, actual={total_requests}"
-                );
-
-                // Individual counts should be consistent with internal state
-                let actual_pending = generator
-                    .requests()
-                    .values()
-                    .filter(|r| matches!(r.status, ProofStatus::Pending))
-                    .count();
-                let actual_generating = generator
-                    .requests()
-                    .values()
-                    .filter(|r| matches!(r.status, ProofStatus::Generating))
-                    .count();
-                let actual_complete = generator
-                    .requests()
-                    .values()
-                    .filter(|r| matches!(r.status, ProofStatus::Complete))
-                    .count();
-                let actual_failed = generator
-                    .requests()
-                    .values()
-                    .filter(|r| matches!(r.status, ProofStatus::Failed))
-                    .count();
-
-                assert_eq!(pending, actual_pending, "pending count mismatch");
-                assert_eq!(generating, actual_generating, "generating count mismatch");
-                assert_eq!(complete, actual_complete, "complete count mismatch");
-                assert_eq!(failed, actual_failed, "failed count mismatch");
-
-                // Verify no arithmetic overflow occurred
-                assert!(total_counted <= usize::MAX / 2, "count overflow detected");
-                assert!(submitted_count > 0, "should have submitted some requests");
-
-                // Test status count stability under additional operations
-                let pre_op_counts = generator.status_counts();
-
-                // Perform operations that shouldn't change existing counts
-                generator.enforce_timeouts(u64::MAX); // Force all remaining to timeout
-
-                let post_op_counts = generator.status_counts();
-
-                // Total should remain the same, but distribution may change
-                let pre_total: usize = pre_op_counts.values().sum();
-                let post_total: usize = post_op_counts.values().sum();
-                assert_eq!(
-                    pre_total, post_total,
-                    "total count changed during timeout enforcement"
-                );
-            }
-
-            #[test]
-            fn negative_proof_serialization_with_massive_metadata_and_payload_stress() {
-                // Test proof serialization with massive metadata and payloads
-                let backend = TestProofBackend::new();
-                let entries = sample_chain_entries();
-
-                // Create massive metadata to stress serialization
-                let massive_metadata_sizes = [1000, 10000, 100000]; // Up to 100KB keys/values
-
-                for &size in &massive_metadata_sizes {
-                    let mut window = sample_window();
-                    window.window_id = format!("massive_metadata_{size}");
-
-                    let request = ProofRequest {
-                        request_id: format!("massive_meta_{size}"),
-                        window: window.clone(),
-                        entries: entries.clone(),
-                        timeout_millis: 60_000,
-                        trace_id: format!("trace_massive_{size}"),
-                        created_at_millis: 1_702_000_000_000,
-                    };
-
-                    let mut proof = backend
-                        .generate(&request)
-                        .expect("should generate base proof");
-
-                    // Inject massive metadata
-                    proof
-                        .metadata
-                        .insert("massive_key".to_string(), "x".repeat(size));
-                    proof
-                        .metadata
-                        .insert("y".repeat(size), "massive_value".to_string());
-                    proof.metadata.insert(
-                        "binary_data".to_string(),
-                        (0..size).map(|i| (i % 256) as u8 as char).collect(),
-                    );
-
-                    // Add Unicode stress metadata
-                    proof
-                        .metadata
-                        .insert("unicode_stress".to_string(), "\u{1F4A9}".repeat(size / 4)); // Emoji stress
-                    proof.metadata.insert(
-                        "control_chars".to_string(),
-                        "\x00\x01\x02\x03\x04\x05".repeat(size / 6),
-                    );
-
-                    // Test JSON serialization with massive metadata
-                    let serialization_result =
-                        std::panic::catch_unwind(|| serde_json::to_string(&proof));
-
-                    match serialization_result {
-                        Ok(Ok(json)) => {
-                            // If serialization succeeds, test round-trip
-                            let deserialization_result: Result<ComplianceProof, _> =
-                                serde_json::from_str(&json);
-
-                            match deserialization_result {
-                                Ok(parsed_proof) => {
-                                    // Verify metadata preservation
-                                    assert_eq!(parsed_proof.metadata.len(), proof.metadata.len());
-                                    assert_eq!(
-                                        parsed_proof.metadata.get("massive_key"),
-                                        proof.metadata.get("massive_key")
-                                    );
-
-                                    // Verify core proof data integrity
-                                    assert_eq!(parsed_proof.proof_data, proof.proof_data);
-                                    assert_eq!(parsed_proof.proof_data_hash, proof.proof_data_hash);
-                                }
-                                Err(_) => {
-                                    // Deserialization failure with massive data is acceptable
-                                }
-                            }
-                        }
-                        Ok(Err(_)) => {
-                            // JSON serialization failure with massive data is acceptable
-                        }
-                        Err(_) => {
-                            // Serialization panic with massive data is not ideal but may occur
-                        }
-                    }
-
-                    // Test verification with massive metadata (should ignore metadata)
-                    let verification_result =
-                        std::panic::catch_unwind(|| backend.verify(&proof, &entries));
-
-                    match verification_result {
-                        Ok(Ok(valid)) => {
-                            // Verification should focus on proof data, not metadata
-                            assert!(
-                                valid,
-                                "verification should succeed despite massive metadata"
-                            );
-                        }
-                        Ok(Err(_)) => {
-                            // Verification error is acceptable with massive metadata
-                        }
-                        Err(_) => {
-                            // Verification panic with massive metadata indicates a problem
-                            panic!(
-                                "verification should not panic with massive metadata for size {size}"
-                            );
-                        }
-                    }
-                }
-            }
-
-            #[test]
-            fn negative_unicode_injection_in_trace_ids_and_metadata_keys() {
-                // Test Unicode injection attacks in trace IDs and proof metadata
-                let backend = Arc::new(TestProofBackend::new());
-                let mut generator = ProofGenerator::new(backend, ProofGeneratorConfig::default());
-
-                let entries = sample_chain_entries();
-                let malicious_trace_ids = vec![
-                    "trace\u{202e}evil\u{202c}normal", // BiDi override
-                    "trace\u{200b}\u{feff}hidden",     // Zero-width characters
-                    "trace\nnewline\ninjection",       // Newline injection
-                    "trace\ttab\tinjection",           // Tab injection
-                    "trace\x00null\x00injection",      // Null byte injection
-                    "../../../etc/passwd",             // Path traversal
-                    "trace\"quote'sql",                // Quote injection
-                    "\u{1F4A9}trace\u{1F525}emoji",    // Emoji sequence
-                ];
-
-                for (i, malicious_trace) in malicious_trace_ids.iter().enumerate() {
-                    let mut window = sample_window();
-                    window.window_id = format!("unicode_test_{}", i);
-                    window.trace_id = malicious_trace.to_string();
-
-                    let result = generator.submit_request(
-                        &window,
-                        &entries,
-                        1_702_000_000_000 + i as u64,
-                        malicious_trace,
-                    );
-
-                    assert!(
-                        result.is_ok(),
-                        "Should handle Unicode in trace ID: {}",
-                        malicious_trace
-                    );
-
-                    let request_id = result.unwrap();
-                    let proof_result = generator.generate_proof(
-                        &request_id,
-                        &window,
-                        &entries,
-                        1_702_000_000_100 + i as u64,
-                    );
-
-                    if let Ok(proof) = proof_result {
-                        // Verify trace ID preservation
-                        assert!(proof.metadata.values().any(|v| v == malicious_trace));
-
-                        // JSON serialization should handle Unicode safely
-                        let json = serde_json::to_string(&proof);
+                        // Either succeeds or fails gracefully
                         assert!(
-                            json.is_ok(),
-                            "JSON serialization should handle Unicode safely"
+                            gen_result.is_ok()
+                                || gen_result.unwrap_err().code == error_codes::ERR_PGN_INTERNAL
                         );
-
-                        if let Ok(json_str) = json {
-                            let parsed: Result<ComplianceProof, _> =
-                                serde_json::from_str(&json_str);
-                            if let Ok(parsed_proof) = parsed {
-                                assert_eq!(
-                                    parsed_proof.receipt_window_ref,
-                                    proof.receipt_window_ref
-                                );
-                            }
-                        }
+                        break; // Recovery successful
+                    }
+                    Err(_) => {
+                        // Continue trying recovery
                     }
                 }
             }
+        }
 
-            #[test]
-            fn negative_backend_switching_and_proof_consistency_attacks() {
-                // Test backend switching attacks and proof consistency verification
-                let backend1 = Arc::new(TestProofBackend::new());
-                let backend2 = Arc::new(TestProofBackend::new());
+        #[test]
+        fn negative_proof_window_with_arithmetic_overflow_indices_and_boundaries() {
+            // Test proof windows with index overflow scenarios
+            let backend = TestProofBackend::new();
+            let entries = sample_chain_entries();
 
-                let mut generator1 =
-                    ProofGenerator::new(backend1.clone(), ProofGeneratorConfig::default());
-                let mut generator2 =
-                    ProofGenerator::new(backend2.clone(), ProofGeneratorConfig::default());
+            let overflow_windows = [
+                // Pattern 1: Maximum indices
+                ProofWindow {
+                    window_id: "overflow_max".to_string(),
+                    start_index: u64::MAX - 10,
+                    end_index: u64::MAX,
+                    entry_count: 10,
+                    aligned_checkpoint_id: None,
+                    tier: WorkloadTier::High,
+                    created_at_millis: u64::MAX,
+                    trace_id: "trace_max".to_string(),
+                },
+                // Pattern 2: Inverted indices (end < start)
+                ProofWindow {
+                    window_id: "overflow_inverted".to_string(),
+                    start_index: 1000,
+                    end_index: 999, // Invalid: end < start
+                    entry_count: 0, // Inconsistent count
+                    aligned_checkpoint_id: Some(0),
+                    tier: WorkloadTier::Background,
+                    created_at_millis: 0,
+                    trace_id: "trace_inverted".to_string(),
+                },
+                // Pattern 3: Mismatched count
+                ProofWindow {
+                    window_id: "overflow_mismatch".to_string(),
+                    start_index: 0,
+                    end_index: 3,
+                    entry_count: u64::MAX, // Doesn't match actual range
+                    aligned_checkpoint_id: Some(0), // Empty checkpoint
+                    tier: WorkloadTier::Standard,
+                    created_at_millis: u64::MAX / 2,
+                    trace_id: "trace\u{202E}unicode\u{202D}".to_string(),
+                },
+            ];
 
-                let entries = sample_chain_entries();
-                let window = sample_window();
-
-                // Generate proofs with both backends for same data
-                let request_id1 = generator1
-                    .submit_request(&window, &entries, 1_702_000_000_000, "trace1")
-                    .unwrap();
-                let request_id2 = generator2
-                    .submit_request(&window, &entries, 1_702_000_000_000, "trace2")
-                    .unwrap();
-
-                let proof1 = generator1
-                    .generate_proof(&request_id1, &window, &entries, 1_702_000_000_100)
-                    .unwrap();
-                let proof2 = generator2
-                    .generate_proof(&request_id2, &window, &entries, 1_702_000_000_100)
-                    .unwrap();
-
-                // Proofs from different backends should be distinct
-                assert_ne!(
-                    proof1.proof_data, proof2.proof_data,
-                    "Different backends should produce different proofs"
-                );
-                assert_ne!(
-                    proof1.proof_data_hash, proof2.proof_data_hash,
-                    "Different backends should produce different hashes"
-                );
-
-                // But both should be valid for their respective backends
-                assert!(backend1.verify(&proof1, &entries).unwrap());
-                assert!(backend2.verify(&proof2, &entries).unwrap());
-
-                // Cross-backend verification should fail or handle gracefully
-                let cross_verify1 = backend2.verify(&proof1, &entries);
-                let cross_verify2 = backend1.verify(&proof2, &entries);
-
-                // Implementation-dependent: may fail or succeed based on backend design
-                // But should not panic or corrupt state
-                assert!(cross_verify1.is_ok()); // TestBackend is lenient
-                assert!(cross_verify2.is_ok()); // TestBackend is lenient
-
-                // Test backend format version consistency
-                assert_eq!(proof1.format_version, PROOF_FORMAT_VERSION);
-                assert_eq!(proof2.format_version, PROOF_FORMAT_VERSION);
-                assert_eq!(proof1.backend_name, "test");
-                assert_eq!(proof2.backend_name, "test");
-            }
-
-            #[test]
-            fn negative_proof_verification_bypass_attempts() {
-                // Test various proof verification bypass attempts
-                let backend = TestProofBackend::new();
-                let entries = sample_chain_entries();
-
-                // Generate legitimate proof
-                let legitimate_request = ProofRequest {
-                    request_id: "legitimate".to_string(),
-                    window: sample_window(),
+            for (i, overflow_window) in overflow_windows.into_iter().enumerate() {
+                let request = ProofRequest {
+                    request_id: format!("window_overflow_{i}"),
+                    window: overflow_window.clone(),
                     entries: entries.clone(),
                     timeout_millis: 60_000,
-                    trace_id: "legitimate_trace".to_string(),
+                    trace_id: format!("trace_window_overflow_{i}"),
                     created_at_millis: 1_702_000_000_000,
                 };
 
-                let legitimate_proof = backend.generate(&legitimate_request).unwrap();
+                // Should handle overflow windows gracefully
+                let proof = backend
+                    .generate(&request)
+                    .expect("should handle window overflow patterns");
 
-                // Attempt various proof manipulation attacks
-                let bypass_attempts = vec![
-                    // Attempt 1: Modify proof data but keep hash
-                    {
-                        let mut tampered = legitimate_proof.clone();
-                        tampered.proof_data = b"tampered_data".to_vec();
-                        tampered
-                    },
-                    // Attempt 2: Modify hash but keep proof data
-                    {
-                        let mut tampered = legitimate_proof.clone();
-                        tampered.proof_data_hash = "sha256:deadbeefcafebabe".to_string();
-                        tampered
-                    },
-                    // Attempt 3: Modify metadata to claim different properties
-                    {
-                        let mut tampered = legitimate_proof.clone();
-                        tampered
-                            .metadata
-                            .insert("entry_count".to_string(), "999".to_string());
-                        tampered
-                            .metadata
-                            .insert("malicious".to_string(), "true".to_string());
-                        tampered
-                    },
-                    // Attempt 4: Change window reference
-                    {
-                        let mut tampered = legitimate_proof.clone();
-                        tampered.receipt_window_ref = "different_window".to_string();
-                        tampered
-                    },
-                    // Attempt 5: Manipulate timestamps
-                    {
-                        let mut tampered = legitimate_proof.clone();
-                        tampered.generated_at_millis = 0;
-                        tampered
-                    },
-                    // Attempt 6: Change format version
-                    {
-                        let mut tampered = legitimate_proof.clone();
-                        tampered.format_version = "999.0.0".to_string();
-                        tampered
-                    },
-                ];
+                // Verify window reference is preserved
+                assert_eq!(proof.receipt_window_ref, overflow_window.window_id);
 
-                for (i, tampered_proof) in bypass_attempts.iter().enumerate() {
-                    let verification = backend.verify(tampered_proof, &entries);
-
-                    match verification {
-                        Ok(is_valid) => {
-                            // TestBackend is lenient, but should still detect major tampering
-                            if tampered_proof.proof_data != legitimate_proof.proof_data
-                                || tampered_proof.proof_data_hash
-                                    != legitimate_proof.proof_data_hash
-                            {
-                                // Major tampering should ideally be detected
-                                // But TestBackend might be lenient for testing purposes
-                            }
-                        }
-                        Err(_) => {
-                            // Verification error is expected for tampered proofs
-                        }
-                    }
-                }
-
-                // Test with completely fabricated proof
-                let fabricated_proof = ComplianceProof {
-                    proof_id: "fabricated_proof_id".to_string(),
-                    format_version: PROOF_FORMAT_VERSION.to_string(),
-                    backend_name: "test".to_string(),
-                    receipt_window_ref: "fabricated_window".to_string(),
-                    generated_at_millis: 1_702_000_000_000,
-                    proof_data: b"fabricated_proof_data".to_vec(),
-                    proof_data_hash: "sha256:fabricated_hash".to_string(),
-                    metadata: BTreeMap::new(),
-                    trace_id: "trace_fabricated".to_string(),
-                };
-
-                let fabricated_verification = backend.verify(&fabricated_proof, &entries);
-                // Should handle fabricated proofs gracefully
-                assert!(fabricated_verification.is_ok());
-            }
-
-            #[test]
-            fn negative_concurrent_request_id_collision_and_resource_exhaustion() {
-                // Test concurrent request ID collision handling and resource exhaustion
-                use std::sync::{Arc, Barrier};
-                use std::thread;
-
-                let backend = Arc::new(TestProofBackend::new());
-                let generator = Arc::new(ConcurrentProofGenerator::new(
-                    backend,
-                    ProofGeneratorConfig {
-                        max_pending_requests: 100, // Limited capacity
-                        max_entries_per_request: 10,
-                        default_timeout_millis: 1000, // Short timeout
-                    },
-                ));
-
-                let barrier = Arc::new(Barrier::new(8));
-                let entries = sample_chain_entries();
-
-                let mut handles = Vec::new();
-
-                for thread_id in 0..8 {
-                    let generator = Arc::clone(&generator);
-                    let barrier = Arc::clone(&barrier);
-                    let entries = entries.clone();
-
-                    let handle = thread::spawn(move || {
-                        barrier.wait();
-
-                        let mut submitted = 0;
-                        let mut collisions = 0;
-                        let mut resource_exhausted = 0;
-
-                        for i in 0..50 {
-                            // Use potentially colliding window IDs across threads
-                            let mut window = sample_window();
-                            window.window_id = format!("collision_test_{}", i % 10); // High collision probability
-
-                            let trace_id = format!("thread_{}_trace_{}", thread_id, i);
-
-                            match generator.submit_request(
-                                &window,
-                                &entries,
-                                1_702_000_000_000 + (thread_id * 1000 + i) as u64,
-                                &trace_id,
-                            ) {
-                                Ok(request_id) => {
-                                    submitted += 1;
-
-                                    // Immediately try to generate proof to stress system
-                                    let _proof_result = generator.generate_proof(
-                                        &request_id,
-                                        &window,
-                                        &entries,
-                                        1_702_000_000_100 + (thread_id * 1000 + i) as u64,
-                                    );
-                                }
-                                Err(err) => {
-                                    if err.code.contains("DUPLICATE")
-                                        || err.message.contains("collision")
-                                    {
-                                        collisions += 1;
-                                    } else if err.code == error_codes::ERR_PGN_INTERNAL {
-                                        resource_exhausted += 1;
-                                    }
-                                }
-                            }
-                        }
-
-                        (submitted, collisions, resource_exhausted)
-                    });
-
-                    handles.push(handle);
-                }
-
-                // Collect results from all threads
-                let results: Vec<_> = handles
-                    .into_iter()
-                    .map(|h| h.join().expect("Thread should complete"))
-                    .collect();
-
-                let total_submitted: usize = results.iter().map(|(s, _, _)| s).sum();
-                let _total_collisions: usize = results.iter().map(|(_, c, _)| c).sum();
-                let _total_exhausted: usize = results.iter().map(|(_, _, e)| e).sum();
-
-                // Verify system handled concurrent access gracefully
-                assert!(total_submitted > 0, "Should have submitted some requests");
-
-                // System should remain functional after stress
-                let final_window = sample_window();
-                let final_result = generator.submit_request(
-                    &final_window,
-                    &entries,
-                    1_702_000_001_000,
-                    "final_test_trace",
+                // Verify metadata includes window information
+                assert_eq!(
+                    proof.metadata.get("window_start").unwrap(),
+                    &overflow_window.start_index.to_string()
+                );
+                assert_eq!(
+                    proof.metadata.get("window_end").unwrap(),
+                    &overflow_window.end_index.to_string()
                 );
 
-                // Should either succeed or fail gracefully
-                match final_result {
+                // Verification should work despite overflow indices
+                assert!(
+                    backend
+                        .verify(&proof, &entries)
+                        .expect("should verify overflow window")
+                );
+
+                // Test with ProofGenerator
+                let mut generator = test_generator();
+                match generator.submit_request(
+                    &overflow_window,
+                    &entries,
+                    1_702_000_000_000,
+                    &format!("gen_trace_{i}"),
+                ) {
                     Ok(req_id) => {
-                        let _proof = generator.generate_proof(
+                        // Generation should handle overflow gracefully
+                        match generator.generate_proof(
                             &req_id,
-                            &final_window,
+                            &overflow_window,
                             &entries,
-                            1_702_000_001_100,
-                        );
+                            1_702_000_000_100,
+                        ) {
+                            Ok(gen_proof) => {
+                                assert_eq!(gen_proof.receipt_window_ref, overflow_window.window_id);
+                            }
+                            Err(_) => {
+                                // Acceptable to reject overflow patterns
+                            }
+                        }
                     }
                     Err(_) => {
-                        // Failure is acceptable after stress
+                        // Acceptable to reject invalid windows at submission
                     }
                 }
             }
+        }
 
-            #[test]
-            fn negative_timeout_enforcement_with_extreme_timestamp_edge_cases() {
-                // Test timeout enforcement with extreme timestamp scenarios
-                let backend = Arc::new(TestProofBackend::new());
-                let mut generator = ProofGenerator::new(
-                    backend,
-                    ProofGeneratorConfig {
-                        max_pending_requests: 1000,
-                        max_entries_per_request: 100,
-                        default_timeout_millis: 60_000,
-                    },
+        #[test]
+        fn negative_proof_hash_computation_with_degenerate_entry_data_patterns() {
+            // Test hash computation with degenerate data patterns that might cause collisions
+            let backend = TestProofBackend::new();
+
+            let degenerate_patterns = [
+                // Pattern 1: All identical entries
+                vec![
+                    ReceiptChainEntry {
+                        index: 0,
+                        prev_chain_hash: "identical_prev".to_string(),
+                        receipt_hash: "identical_rcpt".to_string(),
+                        chain_hash: "identical".to_string(),
+                        receipt: receipt(ExecutionActionType::NetworkAccess, 0),
+                        appended_at_millis: 1_702_000_000_000,
+                        trace_id: "identical".to_string(),
+                    };
+                    100
+                ],
+                // Pattern 2: Incrementing pattern that might collide
+                (0..50)
+                    .map(|i| ReceiptChainEntry {
+                        index: i,
+                        prev_chain_hash: format!("prev_{:02}", i % 10),
+                        receipt_hash: format!("rcpt_{:02}", i % 10),
+                        chain_hash: format!("pattern_{:02}", i % 10), // Limited variation
+                        receipt: receipt(ExecutionActionType::PolicyTransition, i),
+                        appended_at_millis: 1_702_000_000_000 + i,
+                        trace_id: format!("trace_{:02}", i % 5), // Limited variation
+                    })
+                    .collect(),
+                // Pattern 3: Binary data designed to stress hasher
+                (0..10)
+                    .map(|i| ReceiptChainEntry {
+                        index: i,
+                        prev_chain_hash: format!("prev_{:08b}", i),
+                        receipt_hash: format!("rcpt_{:08b}", i),
+                        chain_hash: format!("{:08b}", i).repeat(100), // Binary patterns
+                        receipt: receipt(ExecutionActionType::SecretAccess, i),
+                        appended_at_millis: 1_702_000_000_000 + i,
+                        trace_id: format!("binary_{:08b}", i),
+                    })
+                    .collect(),
+            ];
+
+            let mut all_proofs = Vec::new();
+
+            for (pattern_idx, entries) in degenerate_patterns.into_iter().enumerate() {
+                let request = ProofRequest {
+                    request_id: format!("degenerate_{pattern_idx}"),
+                    window: sample_window(),
+                    entries: entries.clone(),
+                    timeout_millis: 60_000,
+                    trace_id: format!("trace_degenerate_{pattern_idx}"),
+                    created_at_millis: 1_702_000_000_000,
+                };
+
+                let proof = backend
+                    .generate(&request)
+                    .expect("should handle degenerate patterns");
+                all_proofs.push((pattern_idx, proof, entries));
+            }
+
+            // Verify all proofs are unique despite degenerate input patterns
+            for i in 0..all_proofs.len() {
+                for j in (i + 1)..all_proofs.len() {
+                    let (idx1, proof1, _) = &all_proofs[i];
+                    let (idx2, proof2, _) = &all_proofs[j];
+
+                    assert_ne!(
+                        proof1.proof_data_hash, proof2.proof_data_hash,
+                        "hash collision between pattern {idx1} and {idx2}"
+                    );
+                    assert_ne!(
+                        proof1.proof_data, proof2.proof_data,
+                        "proof data collision between pattern {idx1} and {idx2}"
+                    );
+                }
+            }
+
+            // Verify verification works for all patterns
+            for (pattern_idx, proof, entries) in &all_proofs {
+                assert!(
+                    backend
+                        .verify(proof, entries)
+                        .expect("should verify degenerate pattern"),
+                    "verification failed for pattern {pattern_idx}"
                 );
 
-                let entries = sample_chain_entries();
-
-                // Submit requests with extreme timestamp patterns
-                let extreme_timestamp_scenarios = vec![
-                    // Scenario 1: Requests with timestamps near u64::MAX
-                    (u64::MAX - 100_000, "near_max_past"),
-                    (u64::MAX - 1, "near_max_recent"),
-                    (u64::MAX, "at_max"),
-                    // Scenario 2: Requests with zero and minimal timestamps
-                    (0, "zero_timestamp"),
-                    (1, "minimal_timestamp"),
-                    (1000, "small_timestamp"),
-                    // Scenario 3: Requests with boundary timestamp values
-                    (u64::MAX / 2, "mid_range"),
-                    ((1u64 << 63) - 1, "signed_boundary"),
-                    (1_702_000_000_000, "normal_timestamp"),
-                ];
-
-                let mut submitted_requests = Vec::new();
-
-                for (i, (timestamp, scenario)) in extreme_timestamp_scenarios.iter().enumerate() {
-                    let mut window = sample_window();
-                    window.window_id = format!("timeout_test_{}_{}", i, scenario);
-
-                    match generator.submit_request(
-                        &window,
-                        &entries,
-                        *timestamp,
-                        &format!("trace_{}_{}", i, scenario),
-                    ) {
-                        Ok(request_id) => {
-                            submitted_requests.push((request_id, *timestamp, scenario));
-                        }
-                        Err(_) => {
-                            // Some extreme timestamps might be rejected
-                        }
-                    }
-                }
-
-                // Test timeout enforcement with extreme enforcement timestamps
-                let enforcement_scenarios = vec![
-                    0,            // Zero enforcement time
-                    1,            // Minimal enforcement time
-                    u64::MAX,     // Maximum enforcement time
-                    u64::MAX - 1, // Near maximum
-                ];
-
-                for enforcement_time in enforcement_scenarios {
-                    let timed_out = generator.enforce_timeouts(enforcement_time);
-
-                    // Should handle extreme enforcement times without panic
-                    assert!(timed_out.len() <= submitted_requests.len());
-
-                    // Verify arithmetic safety in timeout calculations
-                    let status_counts = generator.status_counts();
-                    let total_requests = status_counts.values().sum::<usize>();
-                    assert!(total_requests <= 1000); // Within capacity limits
-
-                    // Test continued functionality after extreme timeout enforcement
-                    let mut test_window = sample_window();
-                    test_window.window_id = format!("post_timeout_test_{}", enforcement_time);
-
-                    let post_timeout_result = generator.submit_request(
-                        &test_window,
-                        &entries,
-                        enforcement_time.saturating_add(1000),
-                        "post_timeout_trace",
-                    );
-
-                    // Should remain functional
-                    assert!(post_timeout_result.is_ok() || post_timeout_result.is_err());
-                }
-
-                // Verify no arithmetic overflow in timestamp comparisons
-                for (request_id, original_timestamp, scenario) in &submitted_requests {
-                    let requests = generator.requests();
-                    if let Some(request_state) = requests.get(request_id) {
-                        // Verify timestamp preservation
-                        assert_eq!(request_state.created_at_millis, *original_timestamp);
-
-                        // Verify timeout calculation safety
-                        let timeout_at = original_timestamp.saturating_add(60_000);
-                        assert!(timeout_at >= *original_timestamp); // No overflow
-                    }
-                }
+                // Test hash integrity computation
+                let recomputed_hash = TestProofBackend::hash_bytes(&proof.proof_data);
+                assert_eq!(
+                    proof.proof_data_hash, recomputed_hash,
+                    "hash integrity check failed for pattern {pattern_idx}"
+                );
             }
+        }
 
-            #[test]
-            fn negative_proof_hash_computation_collision_resistance() {
-                // Test proof hash computation collision resistance
-                let _backend = TestProofBackend::new();
+        #[test]
+        fn negative_status_counts_arithmetic_consistency_under_overflow_scenarios() {
+            // Test status count arithmetic under overflow scenarios
+            let backend = Arc::new(TestProofBackend::new());
+            let mut generator = ProofGenerator::new(
+                backend,
+                ProofGeneratorConfig {
+                    max_pending_requests: usize::MAX / 1000, // Large but not maximum
+                    max_entries_per_request: 1000,
+                    default_timeout_millis: 60_000,
+                },
+            );
 
-                // Create similar but distinct proof data patterns
-                // Create bindings for binary patterns to avoid temporary value drops
-                let binary_pattern_1 = String::from_utf8_lossy(&[0xFF, 0xFE, 0xFD, 0xFC]);
-                let binary_pattern_2 = String::from_utf8_lossy(&[0xFF, 0xFE, 0xFD, 0xFB]);
+            let entries = sample_chain_entries();
+            let window = sample_window();
 
-                let collision_test_patterns = vec![
-                    // Pattern 1: Similar strings with single character difference
-                    ("proof_data_a", "proof_data_b"),
-                    ("proof_data_1", "proof_data_2"),
-                    // Pattern 2: Same content with different formatting
-                    ("proof data", "proof_data"),
-                    ("PROOF_DATA", "proof_data"),
-                    // Pattern 3: Binary-similar patterns
-                    ("\x01\x02\x03\x04", "\x01\x02\x03\x05"),
-                    (&binary_pattern_1, &binary_pattern_2),
-                    // Pattern 4: Length extension patterns
-                    ("short", "short_extended"),
-                    ("base", "base_plus_extra"),
-                    // Pattern 5: Unicode similar patterns
-                    ("café", "cafe\u{0301}"), // NFC vs NFD
-                    ("А", "A"),               // Cyrillic vs Latin
-                ];
+            // Submit many requests to test counter arithmetic
+            let mut submitted_count = 0;
+            let mut completed_count = 0;
+            let mut failed_count = 0;
 
-                let mut all_hashes = Vec::new();
+            // Submit requests until capacity is reached
+            for i in 0..1000 {
+                let mut test_window = window.clone();
+                test_window.window_id = format!("count_test_{i:06}");
 
-                for (i, (data1, data2)) in collision_test_patterns.iter().enumerate() {
-                    let hash1 = TestProofBackend::hash_bytes(data1.as_bytes());
-                    let hash2 = TestProofBackend::hash_bytes(data2.as_bytes());
-
-                    // Verify no collision between similar patterns
-                    assert_ne!(
-                        hash1, hash2,
-                        "Hash collision between '{}' and '{}'",
-                        data1, data2
-                    );
-
-                    all_hashes.push((format!("pattern_{}_a", i), hash1));
-                    all_hashes.push((format!("pattern_{}_b", i), hash2));
-                }
-
-                // Additional collision resistance test with many similar inputs
-                for i in 0..1000 {
-                    let data = format!("collision_test_{:04}", i);
-                    let hash = TestProofBackend::hash_bytes(data.as_bytes());
-                    all_hashes.push((data, hash));
-                }
-
-                // Verify all hashes are unique
-                let mut hash_set = std::collections::HashSet::new();
-                for (data, hash) in &all_hashes {
-                    assert!(
-                        hash_set.insert(hash.clone()),
-                        "Hash collision detected for data: {}",
-                        data
-                    );
-                }
-
-                // Verify hash format consistency
-                for (_, hash) in &all_hashes {
-                    assert!(hash.starts_with("sha256:"));
-                    assert_eq!(hash.len(), 71); // "sha256:" + 64 hex chars
-                    let hex_part = &hash[7..];
-                    assert!(hex_part.chars().all(|c| c.is_ascii_hexdigit()));
-                }
-
-                // Test hash determinism
-                for _ in 0..10 {
-                    let test_data = "determinism_test";
-                    let hash1 = TestProofBackend::hash_bytes(test_data.as_bytes());
-                    let hash2 = TestProofBackend::hash_bytes(test_data.as_bytes());
-                    assert_eq!(hash1, hash2, "Hash function should be deterministic");
-                }
-            }
-
-            #[test]
-            fn negative_request_state_corruption_under_concurrent_modifications() {
-                // Test request state corruption under concurrent modifications
-                let backend = Arc::new(TestProofBackend::new());
-                let generator = Arc::new(ConcurrentProofGenerator::new(
-                    backend,
-                    ProofGeneratorConfig::default(),
-                ));
-
-                let entries = sample_chain_entries();
-                let window = sample_window();
-
-                // Submit initial request
-                let request_id = generator
-                    .submit_request(&window, &entries, 1_702_000_000_000, "state_test")
-                    .unwrap();
-
-                // Test concurrent state modifications
-                use crate::security::constant_time;
-                use std::thread;
-
-                let generator1 = Arc::clone(&generator);
-                let generator2 = Arc::clone(&generator);
-                let generator3 = Arc::clone(&generator);
-
-                let req_id1 = request_id.clone();
-                let req_id2 = request_id.clone();
-                let req_id3 = request_id.clone();
-
-                let window1 = window.clone();
-                let window2 = window.clone();
-                let window3 = window.clone();
-
-                let entries1 = entries.clone();
-                let entries2 = entries.clone();
-                let entries3 = entries.clone();
-
-                // Thread 1: Generate proof
-                let handle1 = thread::spawn(move || {
-                    generator1.generate_proof(&req_id1, &window1, &entries1, 1_702_000_000_100)
-                });
-
-                // Thread 2: Try to generate same proof concurrently
-                let handle2 = thread::spawn(move || {
-                    generator2.generate_proof(&req_id2, &window2, &entries2, 1_702_000_000_101)
-                });
-
-                // Thread 3: Enforce timeouts while others are generating
-                let handle3 = thread::spawn(move || {
-                    thread::sleep(std::time::Duration::from_millis(10));
-                    generator3.enforce_timeouts(1_702_000_000_200)
-                });
-
-                // Collect results
-                let result1 = handle1.join().expect("Thread 1 should complete");
-                let result2 = handle2.join().expect("Thread 2 should complete");
-                let timeout_result = handle3.join().expect("Thread 3 should complete");
-
-                // Verify state consistency
-                match (result1, result2) {
-                    (Ok(proof1), Ok(proof2)) => {
-                        // Both succeeded - proofs should be identical or distinct based on timing
-                        assert_eq!(proof1.receipt_window_ref, proof2.receipt_window_ref);
-                    }
-                    (Ok(_), Err(_)) | (Err(_), Ok(_)) => {
-                        // One succeeded, one failed - acceptable for concurrent access
-                    }
-                    (Err(_), Err(_)) => {
-                        // Both failed - acceptable if timeout occurred
-                    }
-                }
-
-                // Verify generator remains functional after concurrent stress
-                let mut final_window = window;
-                final_window.window_id = "final_consistency_test".to_string();
-
-                let final_result = generator.submit_request(
-                    &final_window,
+                match generator.submit_request(
+                    &test_window,
                     &entries,
-                    1_702_000_001_000,
-                    "final_trace",
+                    1_702_000_000_000 + i,
+                    &format!("trace_{i}"),
+                ) {
+                    Ok(req_id) => {
+                        submitted_count += 1;
+
+                        // Generate some proofs
+                        if i % 3 == 0 {
+                            match generator.generate_proof(
+                                &req_id,
+                                &test_window,
+                                &entries,
+                                1_702_000_000_100 + i,
+                            ) {
+                                Ok(_) => completed_count += 1,
+                                Err(_) => failed_count += 1,
+                            }
+                        }
+
+                        // Periodically enforce timeouts to create more failed requests
+                        if i % 10 == 0 {
+                            // Use a past timeout to force failures
+                            let timeout_timestamp = 1_702_000_000_000 + i + 61_000;
+                            generator.enforce_timeouts(timeout_timestamp);
+                        }
+                    }
+                    Err(_) => {
+                        // Hit capacity limit
+                        break;
+                    }
+                }
+            }
+
+            // Verify status counts are arithmetically consistent
+            let status_counts = generator.status_counts();
+
+            let pending = status_counts.get("pending").copied().unwrap_or(0);
+            let generating = status_counts.get("generating").copied().unwrap_or(0);
+            let complete = status_counts.get("complete").copied().unwrap_or(0);
+            let failed = status_counts.get("failed").copied().unwrap_or(0);
+
+            let total_counted = pending + generating + complete + failed;
+            let total_requests = generator.requests().len();
+
+            // All requests should be accounted for in status counts
+            assert_eq!(
+                total_counted, total_requests,
+                "status count mismatch: counted={total_counted}, actual={total_requests}"
+            );
+
+            // Individual counts should be consistent with internal state
+            let actual_pending = generator
+                .requests()
+                .values()
+                .filter(|r| matches!(r.status, ProofStatus::Pending))
+                .count();
+            let actual_generating = generator
+                .requests()
+                .values()
+                .filter(|r| matches!(r.status, ProofStatus::Generating))
+                .count();
+            let actual_complete = generator
+                .requests()
+                .values()
+                .filter(|r| matches!(r.status, ProofStatus::Complete))
+                .count();
+            let actual_failed = generator
+                .requests()
+                .values()
+                .filter(|r| matches!(r.status, ProofStatus::Failed))
+                .count();
+
+            assert_eq!(pending, actual_pending, "pending count mismatch");
+            assert_eq!(generating, actual_generating, "generating count mismatch");
+            assert_eq!(complete, actual_complete, "complete count mismatch");
+            assert_eq!(failed, actual_failed, "failed count mismatch");
+
+            // Verify no arithmetic overflow occurred
+            assert!(total_counted <= usize::MAX / 2, "count overflow detected");
+            assert!(submitted_count > 0, "should have submitted some requests");
+
+            // Test status count stability under additional operations
+            let pre_op_counts = generator.status_counts();
+
+            // Perform operations that shouldn't change existing counts
+            generator.enforce_timeouts(u64::MAX); // Force all remaining to timeout
+
+            let post_op_counts = generator.status_counts();
+
+            // Total should remain the same, but distribution may change
+            let pre_total: usize = pre_op_counts.values().sum();
+            let post_total: usize = post_op_counts.values().sum();
+            assert_eq!(
+                pre_total, post_total,
+                "total count changed during timeout enforcement"
+            );
+        }
+
+        #[test]
+        fn negative_proof_serialization_with_massive_metadata_and_payload_stress() {
+            // Test proof serialization with massive metadata and payloads
+            let backend = TestProofBackend::new();
+            let entries = sample_chain_entries();
+
+            // Create massive metadata to stress serialization
+            let massive_metadata_sizes = [1000, 10000, 100000]; // Up to 100KB keys/values
+
+            for &size in &massive_metadata_sizes {
+                let mut window = sample_window();
+                window.window_id = format!("massive_metadata_{size}");
+
+                let request = ProofRequest {
+                    request_id: format!("massive_meta_{size}"),
+                    window: window.clone(),
+                    entries: entries.clone(),
+                    timeout_millis: 60_000,
+                    trace_id: format!("trace_massive_{size}"),
+                    created_at_millis: 1_702_000_000_000,
+                };
+
+                let mut proof = backend
+                    .generate(&request)
+                    .expect("should generate base proof");
+
+                // Inject massive metadata
+                proof
+                    .metadata
+                    .insert("massive_key".to_string(), "x".repeat(size));
+                proof
+                    .metadata
+                    .insert("y".repeat(size), "massive_value".to_string());
+                proof.metadata.insert(
+                    "binary_data".to_string(),
+                    (0..size).map(|i| (i % 256) as u8 as char).collect(),
+                );
+
+                // Add Unicode stress metadata
+                proof
+                    .metadata
+                    .insert("unicode_stress".to_string(), "\u{1F4A9}".repeat(size / 4)); // Emoji stress
+                proof.metadata.insert(
+                    "control_chars".to_string(),
+                    "\x00\x01\x02\x03\x04\x05".repeat(size / 6),
+                );
+
+                // Test JSON serialization with massive metadata
+                let serialization_result =
+                    std::panic::catch_unwind(|| serde_json::to_string(&proof));
+
+                match serialization_result {
+                    Ok(Ok(json)) => {
+                        // If serialization succeeds, test round-trip
+                        let deserialization_result: Result<ComplianceProof, _> =
+                            serde_json::from_str(&json);
+
+                        match deserialization_result {
+                            Ok(parsed_proof) => {
+                                // Verify metadata preservation
+                                assert_eq!(parsed_proof.metadata.len(), proof.metadata.len());
+                                assert_eq!(
+                                    parsed_proof.metadata.get("massive_key"),
+                                    proof.metadata.get("massive_key")
+                                );
+
+                                // Verify core proof data integrity
+                                assert_eq!(parsed_proof.proof_data, proof.proof_data);
+                                assert_eq!(parsed_proof.proof_data_hash, proof.proof_data_hash);
+                            }
+                            Err(_) => {
+                                // Deserialization failure with massive data is acceptable
+                            }
+                        }
+                    }
+                    Ok(Err(_)) => {
+                        // JSON serialization failure with massive data is acceptable
+                    }
+                    Err(_) => {
+                        // Serialization panic with massive data is not ideal but may occur
+                    }
+                }
+
+                // Test verification with massive metadata (should ignore metadata)
+                let verification_result =
+                    std::panic::catch_unwind(|| backend.verify(&proof, &entries));
+
+                match verification_result {
+                    Ok(Ok(valid)) => {
+                        // Verification should focus on proof data, not metadata
+                        assert!(
+                            valid,
+                            "verification should succeed despite massive metadata"
+                        );
+                    }
+                    Ok(Err(_)) => {
+                        // Verification error is acceptable with massive metadata
+                    }
+                    Err(_) => {
+                        // Verification panic with massive metadata indicates a problem
+                        panic!(
+                            "verification should not panic with massive metadata for size {size}"
+                        );
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn negative_unicode_injection_in_trace_ids_and_metadata_keys() {
+            // Test Unicode injection attacks in trace IDs and proof metadata
+            let backend = Arc::new(TestProofBackend::new());
+            let mut generator = ProofGenerator::new(backend, ProofGeneratorConfig::default());
+
+            let entries = sample_chain_entries();
+            let malicious_trace_ids = vec![
+                "trace\u{202e}evil\u{202c}normal", // BiDi override
+                "trace\u{200b}\u{feff}hidden",     // Zero-width characters
+                "trace\nnewline\ninjection",       // Newline injection
+                "trace\ttab\tinjection",           // Tab injection
+                "trace\x00null\x00injection",      // Null byte injection
+                "../../../etc/passwd",             // Path traversal
+                "trace\"quote'sql",                // Quote injection
+                "\u{1F4A9}trace\u{1F525}emoji",    // Emoji sequence
+            ];
+
+            for (i, malicious_trace) in malicious_trace_ids.iter().enumerate() {
+                let mut window = sample_window();
+                window.window_id = format!("unicode_test_{}", i);
+                window.trace_id = malicious_trace.to_string();
+
+                let result = generator.submit_request(
+                    &window,
+                    &entries,
+                    1_702_000_000_000 + i as u64,
+                    malicious_trace,
                 );
 
                 assert!(
-                    final_result.is_ok(),
-                    "Generator should remain functional after concurrent stress"
+                    result.is_ok(),
+                    "Should handle Unicode in trace ID: {}",
+                    malicious_trace
+                );
+
+                let request_id = result.unwrap();
+                let proof_result = generator.generate_proof(
+                    &request_id,
+                    &window,
+                    &entries,
+                    1_702_000_000_100 + i as u64,
+                );
+
+                if let Ok(proof) = proof_result {
+                    // Verify trace ID preservation on the proof envelope
+                    assert_eq!(proof.trace_id, *malicious_trace);
+
+                    // JSON serialization should handle Unicode safely
+                    let json = serde_json::to_string(&proof);
+                    assert!(
+                        json.is_ok(),
+                        "JSON serialization should handle Unicode safely"
+                    );
+
+                    if let Ok(json_str) = json {
+                        let parsed: Result<ComplianceProof, _> = serde_json::from_str(&json_str);
+                        if let Ok(parsed_proof) = parsed {
+                            assert_eq!(parsed_proof.receipt_window_ref, proof.receipt_window_ref);
+                        }
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn negative_backend_switching_and_proof_consistency_attacks() {
+            // Test backend switching attacks and proof consistency verification
+            let backend1 = Arc::new(TestProofBackend::with_name("test-alpha"));
+            let backend2 = Arc::new(TestProofBackend::with_name("test-beta"));
+
+            let mut generator1 =
+                ProofGenerator::new(backend1.clone(), ProofGeneratorConfig::default());
+            let mut generator2 =
+                ProofGenerator::new(backend2.clone(), ProofGeneratorConfig::default());
+
+            let entries = sample_chain_entries();
+            let window = sample_window();
+
+            // Generate proofs with both backends for same data
+            let request_id1 = generator1
+                .submit_request(&window, &entries, 1_702_000_000_000, "trace1")
+                .unwrap();
+            let request_id2 = generator2
+                .submit_request(&window, &entries, 1_702_000_000_000, "trace2")
+                .unwrap();
+
+            let proof1 = generator1
+                .generate_proof(&request_id1, &window, &entries, 1_702_000_000_100)
+                .unwrap();
+            let proof2 = generator2
+                .generate_proof(&request_id2, &window, &entries, 1_702_000_000_100)
+                .unwrap();
+
+            // Proofs from different backends should be distinct
+            assert_ne!(
+                proof1.proof_data, proof2.proof_data,
+                "Different backends should produce different proofs"
+            );
+            assert_ne!(
+                proof1.proof_data_hash, proof2.proof_data_hash,
+                "Different backends should produce different hashes"
+            );
+
+            // But both should be valid for their respective backends
+            assert!(backend1.verify(&proof1, &entries).unwrap());
+            assert!(backend2.verify(&proof2, &entries).unwrap());
+
+            // Cross-backend verification must reject mismatched backend proofs cleanly without panicking
+            let cross_verify1 = backend2.verify(&proof1, &entries);
+            let cross_verify2 = backend1.verify(&proof2, &entries);
+            assert!(!cross_verify1.unwrap());
+            assert!(!cross_verify2.unwrap());
+
+            // Test backend format version consistency
+            assert_eq!(proof1.format_version, PROOF_FORMAT_VERSION);
+            assert_eq!(proof2.format_version, PROOF_FORMAT_VERSION);
+            assert_eq!(proof1.backend_name, "test-alpha");
+            assert_eq!(proof2.backend_name, "test-beta");
+        }
+
+        #[test]
+        fn negative_proof_verification_bypass_attempts() {
+            // Test various proof verification bypass attempts
+            let backend = TestProofBackend::new();
+            let entries = sample_chain_entries();
+
+            // Generate legitimate proof
+            let legitimate_request = ProofRequest {
+                request_id: "legitimate".to_string(),
+                window: sample_window(),
+                entries: entries.clone(),
+                timeout_millis: 60_000,
+                trace_id: "legitimate_trace".to_string(),
+                created_at_millis: 1_702_000_000_000,
+            };
+
+            let legitimate_proof = backend.generate(&legitimate_request).unwrap();
+
+            // Attempt various proof manipulation attacks
+            let bypass_attempts = vec![
+                // Attempt 1: Modify proof data but keep hash
+                {
+                    let mut tampered = legitimate_proof.clone();
+                    tampered.proof_data = b"tampered_data".to_vec();
+                    tampered
+                },
+                // Attempt 2: Modify hash but keep proof data
+                {
+                    let mut tampered = legitimate_proof.clone();
+                    tampered.proof_data_hash = "sha256:deadbeefcafebabe".to_string();
+                    tampered
+                },
+                // Attempt 3: Modify metadata to claim different properties
+                {
+                    let mut tampered = legitimate_proof.clone();
+                    tampered
+                        .metadata
+                        .insert("entry_count".to_string(), "999".to_string());
+                    tampered
+                        .metadata
+                        .insert("malicious".to_string(), "true".to_string());
+                    tampered
+                },
+                // Attempt 4: Change window reference
+                {
+                    let mut tampered = legitimate_proof.clone();
+                    tampered.receipt_window_ref = "different_window".to_string();
+                    tampered
+                },
+                // Attempt 5: Manipulate timestamps
+                {
+                    let mut tampered = legitimate_proof.clone();
+                    tampered.generated_at_millis = 0;
+                    tampered
+                },
+                // Attempt 6: Change format version
+                {
+                    let mut tampered = legitimate_proof.clone();
+                    tampered.format_version = "999.0.0".to_string();
+                    tampered
+                },
+            ];
+
+            for (i, tampered_proof) in bypass_attempts.iter().enumerate() {
+                let verification = backend.verify(tampered_proof, &entries);
+
+                match verification {
+                    Ok(is_valid) => {
+                        // TestBackend is lenient, but should still detect major tampering
+                        if tampered_proof.proof_data != legitimate_proof.proof_data
+                            || tampered_proof.proof_data_hash != legitimate_proof.proof_data_hash
+                        {
+                            // Major tampering should ideally be detected
+                            // But TestBackend might be lenient for testing purposes
+                        }
+                    }
+                    Err(_) => {
+                        // Verification error is expected for tampered proofs
+                    }
+                }
+            }
+
+            // Test with completely fabricated proof
+            let fabricated_proof = ComplianceProof {
+                proof_id: "fabricated_proof_id".to_string(),
+                format_version: PROOF_FORMAT_VERSION.to_string(),
+                backend_name: "test".to_string(),
+                receipt_window_ref: "fabricated_window".to_string(),
+                generated_at_millis: 1_702_000_000_000,
+                proof_data: b"fabricated_proof_data".to_vec(),
+                proof_data_hash: "sha256:fabricated_hash".to_string(),
+                metadata: BTreeMap::new(),
+                trace_id: "trace_fabricated".to_string(),
+            };
+
+            let fabricated_verification = backend.verify(&fabricated_proof, &entries);
+            // Should handle fabricated proofs gracefully
+            assert!(fabricated_verification.is_ok());
+        }
+
+        #[test]
+        fn negative_concurrent_request_id_collision_and_resource_exhaustion() {
+            // Test concurrent request ID collision handling and resource exhaustion
+            use std::sync::{Arc, Barrier};
+            use std::thread;
+
+            let backend = Arc::new(TestProofBackend::new());
+            let generator = Arc::new(ConcurrentProofGenerator::new(
+                backend,
+                ProofGeneratorConfig {
+                    max_pending_requests: 100, // Limited capacity
+                    max_entries_per_request: 10,
+                    default_timeout_millis: 1000, // Short timeout
+                },
+            ));
+
+            let barrier = Arc::new(Barrier::new(8));
+            let entries = sample_chain_entries();
+
+            let mut handles = Vec::new();
+
+            for thread_id in 0..8 {
+                let generator = Arc::clone(&generator);
+                let barrier = Arc::clone(&barrier);
+                let entries = entries.clone();
+
+                let handle = thread::spawn(move || {
+                    barrier.wait();
+
+                    let mut submitted = 0;
+                    let mut collisions = 0;
+                    let mut resource_exhausted = 0;
+
+                    for i in 0..50 {
+                        // Use potentially colliding window IDs across threads
+                        let mut window = sample_window();
+                        window.window_id = format!("collision_test_{}", i % 10); // High collision probability
+
+                        let trace_id = format!("thread_{}_trace_{}", thread_id, i);
+
+                        match generator.submit_request(
+                            &window,
+                            &entries,
+                            1_702_000_000_000 + (thread_id * 1000 + i) as u64,
+                            &trace_id,
+                        ) {
+                            Ok(request_id) => {
+                                submitted += 1;
+
+                                // Immediately try to generate proof to stress system
+                                let _proof_result = generator.generate_proof(
+                                    &request_id,
+                                    &window,
+                                    &entries,
+                                    1_702_000_000_100 + (thread_id * 1000 + i) as u64,
+                                );
+                            }
+                            Err(err) => {
+                                if err.code.contains("DUPLICATE")
+                                    || err.message.contains("collision")
+                                {
+                                    collisions += 1;
+                                } else if err.code == error_codes::ERR_PGN_INTERNAL {
+                                    resource_exhausted += 1;
+                                }
+                            }
+                        }
+                    }
+
+                    (submitted, collisions, resource_exhausted)
+                });
+
+                handles.push(handle);
+            }
+
+            // Collect results from all threads
+            let results: Vec<_> = handles
+                .into_iter()
+                .map(|h| h.join().expect("Thread should complete"))
+                .collect();
+
+            let total_submitted: usize = results.iter().map(|(s, _, _)| s).sum();
+            let _total_collisions: usize = results.iter().map(|(_, c, _)| c).sum();
+            let _total_exhausted: usize = results.iter().map(|(_, _, e)| e).sum();
+
+            // Verify system handled concurrent access gracefully
+            assert!(total_submitted > 0, "Should have submitted some requests");
+
+            // System should remain functional after stress
+            let final_window = sample_window();
+            let final_result = generator.submit_request(
+                &final_window,
+                &entries,
+                1_702_000_001_000,
+                "final_test_trace",
+            );
+
+            // Should either succeed or fail gracefully
+            match final_result {
+                Ok(req_id) => {
+                    let _proof = generator.generate_proof(
+                        &req_id,
+                        &final_window,
+                        &entries,
+                        1_702_000_001_100,
+                    );
+                }
+                Err(_) => {
+                    // Failure is acceptable after stress
+                }
+            }
+        }
+
+        #[test]
+        fn negative_timeout_enforcement_with_extreme_timestamp_edge_cases() {
+            // Test timeout enforcement with extreme timestamp scenarios
+            let backend = Arc::new(TestProofBackend::new());
+            let mut generator = ProofGenerator::new(
+                backend,
+                ProofGeneratorConfig {
+                    max_pending_requests: 1000,
+                    max_entries_per_request: 100,
+                    default_timeout_millis: 60_000,
+                },
+            );
+
+            let entries = sample_chain_entries();
+
+            // Submit requests with extreme timestamp patterns
+            let extreme_timestamp_scenarios = vec![
+                // Scenario 1: Requests with timestamps near u64::MAX
+                (u64::MAX - 100_000, "near_max_past"),
+                (u64::MAX - 1, "near_max_recent"),
+                (u64::MAX, "at_max"),
+                // Scenario 2: Requests with zero and minimal timestamps
+                (0, "zero_timestamp"),
+                (1, "minimal_timestamp"),
+                (1000, "small_timestamp"),
+                // Scenario 3: Requests with boundary timestamp values
+                (u64::MAX / 2, "mid_range"),
+                ((1u64 << 63) - 1, "signed_boundary"),
+                (1_702_000_000_000, "normal_timestamp"),
+            ];
+
+            let mut submitted_requests = Vec::new();
+
+            for (i, (timestamp, scenario)) in extreme_timestamp_scenarios.iter().enumerate() {
+                let mut window = sample_window();
+                window.window_id = format!("timeout_test_{}_{}", i, scenario);
+
+                match generator.submit_request(
+                    &window,
+                    &entries,
+                    *timestamp,
+                    &format!("trace_{}_{}", i, scenario),
+                ) {
+                    Ok(request_id) => {
+                        submitted_requests.push((request_id, *timestamp, scenario));
+                    }
+                    Err(_) => {
+                        // Some extreme timestamps might be rejected
+                    }
+                }
+            }
+
+            // Test timeout enforcement with extreme enforcement timestamps
+            let enforcement_scenarios = vec![
+                0,            // Zero enforcement time
+                1,            // Minimal enforcement time
+                u64::MAX,     // Maximum enforcement time
+                u64::MAX - 1, // Near maximum
+            ];
+
+            let mut total_submitted_count = submitted_requests.len();
+            for enforcement_time in enforcement_scenarios {
+                let timed_out = generator.enforce_timeouts(enforcement_time);
+
+                // Should handle extreme enforcement times without panic
+                assert!(timed_out.len() <= total_submitted_count);
+
+                // Verify arithmetic safety in timeout calculations
+                let status_counts = generator.status_counts();
+                let total_requests = status_counts.values().sum::<usize>();
+                assert!(total_requests <= 1000); // Within capacity limits
+
+                // Test continued functionality after extreme timeout enforcement
+                let mut test_window = sample_window();
+                test_window.window_id = format!("post_timeout_test_{}", enforcement_time);
+
+                let post_timeout_result = generator.submit_request(
+                    &test_window,
+                    &entries,
+                    enforcement_time.saturating_add(1000),
+                    "post_timeout_trace",
+                );
+                if post_timeout_result.is_ok() {
+                    total_submitted_count += 1;
+                }
+
+                // Should remain functional
+                assert!(post_timeout_result.is_ok() || post_timeout_result.is_err());
+            }
+
+            // Verify no arithmetic overflow in timestamp comparisons
+            for (request_id, original_timestamp, scenario) in &submitted_requests {
+                let requests = generator.requests();
+                if let Some(request_state) = requests.get(request_id) {
+                    // Verify timestamp preservation
+                    assert_eq!(request_state.created_at_millis, *original_timestamp);
+
+                    // Verify timeout calculation safety
+                    let timeout_at = original_timestamp.saturating_add(60_000);
+                    assert!(timeout_at >= *original_timestamp); // No overflow
+                }
+            }
+        }
+
+        #[test]
+        fn negative_proof_hash_computation_collision_resistance() {
+            // Test proof hash computation collision resistance
+            let _backend = TestProofBackend::new();
+
+            // Create similar but distinct raw byte patterns (preserving non-UTF-8 byte differences)
+            let collision_test_patterns: Vec<(&[u8], &[u8])> = vec![
+                // Pattern 1: Similar strings with single character difference
+                (b"proof_data_a", b"proof_data_b"),
+                (b"proof_data_1", b"proof_data_2"),
+                // Pattern 2: Same content with different formatting
+                (b"proof data", b"proof_data"),
+                (b"PROOF_DATA", b"Proof_Data"),
+                // Pattern 3: Binary-similar patterns including non-UTF-8 bytes
+                (b"\x01\x02\x03\x04", b"\x01\x02\x03\x05"),
+                (&[0xFF, 0xFE, 0xFD, 0xFC], &[0xFF, 0xFE, 0xFD, 0xFB]),
+                // Pattern 4: Length extension patterns
+                (b"short", b"short_extended"),
+                (b"base", b"base_plus_extra"),
+                // Pattern 5: Unicode similar patterns
+                ("café".as_bytes(), "cafe\u{0301}".as_bytes()), // NFC vs NFD
+                ("А".as_bytes(), "A".as_bytes()),               // Cyrillic vs Latin
+            ];
+
+            let mut all_hashes = Vec::new();
+
+            for (i, (data1, data2)) in collision_test_patterns.iter().enumerate() {
+                let hash1 = TestProofBackend::hash_bytes(data1);
+                let hash2 = TestProofBackend::hash_bytes(data2);
+
+                // Verify no collision between similar patterns
+                assert_ne!(
+                    hash1, hash2,
+                    "Hash collision between {:?} and {:?}",
+                    data1, data2
+                );
+
+                all_hashes.push((format!("pattern_{}_a", i), hash1));
+                all_hashes.push((format!("pattern_{}_b", i), hash2));
+            }
+
+            // Additional collision resistance test with many similar inputs
+            for i in 0..1000 {
+                let data = format!("collision_test_{:04}", i);
+                let hash = TestProofBackend::hash_bytes(data.as_bytes());
+                all_hashes.push((data, hash));
+            }
+
+            // Verify all hashes are unique
+            let mut hash_set = std::collections::HashSet::new();
+            for (data, hash) in &all_hashes {
+                assert!(
+                    hash_set.insert(hash.clone()),
+                    "Hash collision detected for data: {}",
+                    data
                 );
             }
+
+            // Verify hash format consistency
+            for (_, hash) in &all_hashes {
+                assert!(hash.starts_with("sha256:"));
+                assert_eq!(hash.len(), 71); // "sha256:" + 64 hex chars
+                let hex_part = &hash[7..];
+                assert!(hex_part.chars().all(|c| c.is_ascii_hexdigit()));
+            }
+
+            // Test hash determinism
+            for _ in 0..10 {
+                let test_data = "determinism_test";
+                let hash1 = TestProofBackend::hash_bytes(test_data.as_bytes());
+                let hash2 = TestProofBackend::hash_bytes(test_data.as_bytes());
+                assert_eq!(hash1, hash2, "Hash function should be deterministic");
+            }
+        }
+
+        #[test]
+        fn negative_request_state_corruption_under_concurrent_modifications() {
+            // Test request state corruption under concurrent modifications
+            let backend = Arc::new(TestProofBackend::new());
+            let generator = Arc::new(ConcurrentProofGenerator::new(
+                backend,
+                ProofGeneratorConfig::default(),
+            ));
+
+            let entries = sample_chain_entries();
+            let window = sample_window();
+
+            // Submit initial request
+            let request_id = generator
+                .submit_request(&window, &entries, 1_702_000_000_000, "state_test")
+                .unwrap();
+
+            // Test concurrent state modifications
+            use crate::security::constant_time;
+            use std::thread;
+
+            let generator1 = Arc::clone(&generator);
+            let generator2 = Arc::clone(&generator);
+            let generator3 = Arc::clone(&generator);
+
+            let req_id1 = request_id.clone();
+            let req_id2 = request_id.clone();
+            let req_id3 = request_id.clone();
+
+            let window1 = window.clone();
+            let window2 = window.clone();
+            let window3 = window.clone();
+
+            let entries1 = entries.clone();
+            let entries2 = entries.clone();
+            let entries3 = entries.clone();
+
+            // Thread 1: Generate proof
+            let handle1 = thread::spawn(move || {
+                generator1.generate_proof(&req_id1, &window1, &entries1, 1_702_000_000_100)
+            });
+
+            // Thread 2: Try to generate same proof concurrently
+            let handle2 = thread::spawn(move || {
+                generator2.generate_proof(&req_id2, &window2, &entries2, 1_702_000_000_101)
+            });
+
+            // Thread 3: Enforce timeouts while others are generating
+            let handle3 = thread::spawn(move || {
+                thread::sleep(std::time::Duration::from_millis(10));
+                generator3.enforce_timeouts(1_702_000_000_200)
+            });
+
+            // Collect results
+            let result1 = handle1.join().expect("Thread 1 should complete");
+            let result2 = handle2.join().expect("Thread 2 should complete");
+            let timeout_result = handle3.join().expect("Thread 3 should complete");
+
+            // Verify state consistency
+            match (result1, result2) {
+                (Ok(proof1), Ok(proof2)) => {
+                    // Both succeeded - proofs should be identical or distinct based on timing
+                    assert_eq!(proof1.receipt_window_ref, proof2.receipt_window_ref);
+                }
+                (Ok(_), Err(_)) | (Err(_), Ok(_)) => {
+                    // One succeeded, one failed - acceptable for concurrent access
+                }
+                (Err(_), Err(_)) => {
+                    // Both failed - acceptable if timeout occurred
+                }
+            }
+
+            // Verify generator remains functional after concurrent stress
+            let mut final_window = window;
+            final_window.window_id = "final_consistency_test".to_string();
+
+            let final_result =
+                generator.submit_request(&final_window, &entries, 1_702_000_001_000, "final_trace");
+
+            assert!(
+                final_result.is_ok(),
+                "Generator should remain functional after concurrent stress"
+            );
         }
     }
 }

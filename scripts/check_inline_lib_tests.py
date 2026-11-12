@@ -29,6 +29,9 @@ from pathlib import Path
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 TEST_LINE_RE = re.compile(r"^[^\s:].*: test$")
 TEST_RESULT_RE = re.compile(r"^test (?P<name>.*?) \.\.\. (?P<status>ok|FAILED|ignored)$")
+FN_HEADER_RE = re.compile(r"\bfn\s+(?:r#)?[A-Za-z_][A-Za-z0-9_]*\b")
+MACRO_HEADER_RE = re.compile(r"\bmacro_rules!\s*[A-Za-z_][A-Za-z0-9_]*")
+TEST_ATTR_RE = re.compile(r"#\s*\[\s*(?:[\w:]+::)?test(?:\s*\([^)]*\))?\s*\]")
 DEFAULT_OVERRIDE_CFG = "franken_node_inline_tests"
 DEFAULT_MAX_TESTS_PER_SHARD = 500
 DEFAULT_SHARD_TIMEOUT_SECONDS = 1800
@@ -366,7 +369,7 @@ def run_shards(
             stderr_path = output_dir / f"{shard_id}.stderr.txt"
             stdout_path.write_text(stdout, encoding="utf-8")
             stderr_path.write_text(stderr, encoding="utf-8")
-            observed = test_results_from_run(stdout)
+            observed = test_results_from_run(f"{stdout}\n{stderr}")
             outcome_class = classify_outcome(returncode, stdout, stderr)
             receipt = {
                 "schema_version": SCHEMA_SHARD_RECEIPT,
@@ -484,6 +487,143 @@ def readme_documents_inline_lane_compiled_out(readme: Path) -> bool:
     )
 
 
+def find_nested_inner_tests_in_file(path: Path) -> list[str]:
+    """Return `<path>:<line>` entries for `#[test]` attributes nested inside a Rust `fn` body."""
+    src = path.read_text(encoding="utf-8")
+    n = len(src)
+    i = 0
+    line = 1
+    stack: list[str] = []
+    header_buf: list[str] = []
+    findings: list[str] = []
+
+    while i < n:
+        ch = src[i]
+        if ch == "\n":
+            line += 1
+            header_buf.append(" ")
+            i += 1
+            continue
+        if ch == "/" and i + 1 < n and src[i + 1] == "/":
+            while i < n and src[i] != "\n":
+                i += 1
+            continue
+        if ch == "/" and i + 1 < n and src[i + 1] == "*":
+            depth = 1
+            i += 2
+            while i < n and depth > 0:
+                if src[i] == "\n":
+                    line += 1
+                elif src[i] == "/" and i + 1 < n and src[i + 1] == "*":
+                    depth += 1
+                    i += 2
+                    continue
+                elif src[i] == "*" and i + 1 < n and src[i + 1] == "/":
+                    depth -= 1
+                    i += 2
+                    continue
+                i += 1
+            header_buf.append(" ")
+            continue
+        if ch in ("r", "b", "c"):
+            j = i
+            if src[j] in ("b", "c") and j + 1 < n and src[j + 1] == "r":
+                j += 2
+            elif src[j] == "r":
+                j += 1
+            else:
+                j = -1
+            if j != -1:
+                hashes = 0
+                while j < n and src[j] == "#":
+                    hashes += 1
+                    j += 1
+                if j < n and src[j] == '"':
+                    j += 1
+                    closing = '"' + ("#" * hashes)
+                    end = src.find(closing, j)
+                    if end == -1:
+                        line += src[j:].count("\n")
+                        break
+                    line += src[j:end].count("\n")
+                    i = end + len(closing)
+                    header_buf.append(' "" ')
+                    continue
+        if ch == "'" or (ch == "b" and i + 1 < n and src[i + 1] == "'"):
+            q = i if ch == "'" else i + 1
+            if q + 1 < n:
+                if src[q + 1] == "\\":
+                    k = q + 2
+                    while k < n and src[k] not in ("'", "\n") and k - q <= 12:
+                        k += 1
+                    if k < n and src[k] == "'":
+                        i = k + 1
+                        continue
+                elif src[q + 2 : q + 3] == "'" and src[q + 1] != "\n":
+                    i = q + 3
+                    continue
+            if ch == "'":
+                header_buf.append(ch)
+                i += 1
+                continue
+        if ch == '"':
+            i += 1
+            while i < n:
+                if src[i] == "\n":
+                    line += 1
+                elif src[i] == "\\":
+                    if i + 1 < n and src[i + 1] == "\n":
+                        line += 1
+                    i += 2
+                    continue
+                elif src[i] == '"':
+                    i += 1
+                    break
+                i += 1
+            header_buf.append(' "" ')
+            continue
+        if ch == "#" and "fn" in stack and "macro" not in stack:
+            match = TEST_ATTR_RE.match(src, i)
+            if match:
+                findings.append(f"{path}:{line}")
+                line += match.group(0).count("\n")
+                i = match.end()
+                continue
+        if ch == "{":
+            hdr = "".join(header_buf)
+            if MACRO_HEADER_RE.search(hdr):
+                stack.append("macro")
+            elif FN_HEADER_RE.search(hdr):
+                stack.append("fn")
+            else:
+                stack.append("other")
+            header_buf.clear()
+            i += 1
+            continue
+        if ch == "}":
+            if stack:
+                stack.pop()
+            header_buf.clear()
+            i += 1
+            continue
+        if ch == ";":
+            header_buf.clear()
+            i += 1
+            continue
+        header_buf.append(ch)
+        i += 1
+    return findings
+
+
+def find_nested_inner_tests(src_root: Path) -> list[str]:
+    if not src_root.is_dir():
+        return []
+    findings: list[str] = []
+    for path in sorted(src_root.rglob("*.rs")):
+        findings.extend(find_nested_inner_tests_in_file(path))
+    return findings
+
+
 def preflight(
     cargo_toml: Path,
     lib_rs: Path,
@@ -492,12 +632,14 @@ def preflight(
     main_rs: Path | None = None,
     bin_name: str = "franken-node",
 ) -> dict[str, object]:
+    nested_inner_tests = find_nested_inner_tests(lib_rs.parent)
     checks = {
         "cargo_lib_test_true": cargo_lib_test_enabled(cargo_toml),
         "lib_rs_override_gate": lib_rs_uses_override_gate(lib_rs, override_cfg),
         "cargo_lints_allow_override_cfg": cargo_lints_allow_override_cfg(
             cargo_toml, override_cfg
         ),
+        "no_nested_inner_tests": not nested_inner_tests,
     }
     if main_rs is not None and (main_rs.is_file() or cargo_has_bin(cargo_toml, bin_name)):
         checks["cargo_bin_test_true"] = cargo_bin_test_enabled(cargo_toml, bin_name)
@@ -515,6 +657,7 @@ def preflight(
         "override_cfg": override_cfg,
         "checks": checks,
         "issues": issues,
+        "nested_inner_tests": nested_inner_tests,
     }
 
 

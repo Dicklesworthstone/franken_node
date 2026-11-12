@@ -4042,99 +4042,6 @@ mod api_middleware_advanced_security_edge_tests {
         assert!(result.is_ok(), "Should succeed for no-auth route");
         assert_eq!(log.status, 200, "Should return success status");
     }
-}
-
-// ── Loom Tests for Concurrent Safety ──────────────────────────────────────────
-
-#[cfg(loom)]
-use loom::sync::{Arc, Mutex};
-#[cfg(loom)]
-use loom::thread;
-
-/// Loom model that proves AuthFailureLimiter maintains bounded cardinality and
-/// stable offender visibility under concurrent failure recording.
-///
-/// This test verifies:
-/// 1. MAX_AUTH_FAILURE_SOURCES cardinality bound is maintained
-/// 2. Lowest-volume eviction preserves high-volume attackers
-/// 3. Concurrent access maintains consistency
-/// 4. No race conditions in increment_source_failure_count
-#[cfg(loom)]
-#[doc(hidden)]
-pub fn auth_failure_limiter_cardinality_loom_model() {
-    loom::model(|| {
-        let limiter = Arc::new(Mutex::new(AuthFailureLimiter::new()));
-
-        // Test concurrent failure recording from different source IPs
-        let limiter_a = limiter.clone();
-        let limiter_b = limiter.clone();
-        let limiter_c = limiter.clone();
-
-        let handle_a = thread::spawn(move || {
-            // High-volume attacker - should be preserved during eviction
-            let mut results = Vec::new();
-            for i in 0..10 {
-                let mut guard =
-                    lock_loom_mutex(&limiter_a, "auth failure limiter high-volume source");
-                results.push(guard.increment_source_failure_count("192.168.1.100"));
-            }
-            results
-        });
-
-        let handle_b = thread::spawn(move || {
-            // Medium-volume attacker
-            let mut results = Vec::new();
-            for i in 0..5 {
-                let mut guard =
-                    lock_loom_mutex(&limiter_b, "auth failure limiter medium-volume source");
-                results.push(guard.increment_source_failure_count("192.168.1.101"));
-            }
-            results
-        });
-
-        let handle_c = thread::spawn(move || {
-            // Low-volume attacker - should be evicted first
-            let mut guard = lock_loom_mutex(&limiter_c, "auth failure limiter low-volume source");
-            guard.increment_source_failure_count("192.168.1.102")
-        });
-
-        let results_a = handle_a.join().expect("thread A should complete");
-        let results_b = handle_b.join().expect("thread B should complete");
-        let result_c = handle_c.join().expect("thread C should complete");
-
-        // Verify results are sensible
-        assert!(
-            !results_a.is_empty(),
-            "High-volume attacker should have results"
-        );
-        assert!(
-            !results_b.is_empty(),
-            "Medium-volume attacker should have results"
-        );
-        assert!(
-            result_c > 0,
-            "Low-volume attacker should have positive count"
-        );
-
-        // Verify final state maintains invariants
-        let final_guard = lock_loom_mutex(&limiter, "auth failure limiter final verification");
-        let stats = final_guard.get_failure_stats();
-
-        // Should track at most MAX_AUTH_FAILURE_SOURCES unique IPs
-        assert!(stats.unique_source_ips <= MAX_AUTH_FAILURE_SOURCES);
-
-        // Global count should equal sum of all increments
-        let expected_global = u64::try_from(results_a.len())
-            .unwrap_or(u64::MAX)
-            .saturating_add(u64::try_from(results_b.len()).unwrap_or(u64::MAX))
-            .saturating_add(1u64); // +1 for result_c
-        assert_eq!(stats.global_failure_count, expected_global);
-
-        // If all sources fit, should have exactly 3 unique IPs
-        if MAX_AUTH_FAILURE_SOURCES >= 3 {
-            assert_eq!(stats.unique_source_ips, 3);
-        }
-    });
 
     // Frozen outputs of the module-private function `credential_principal`
     // (middleware.rs:72). The function derives a content-addressed
@@ -4285,4 +4192,97 @@ pub fn auth_failure_limiter_cardinality_loom_model() {
             );
         }
     }
+}
+
+// ── Loom Tests for Concurrent Safety ──────────────────────────────────────────
+
+#[cfg(loom)]
+use loom::sync::{Arc, Mutex};
+#[cfg(loom)]
+use loom::thread;
+
+/// Loom model that proves AuthFailureLimiter maintains bounded cardinality and
+/// stable offender visibility under concurrent failure recording.
+///
+/// This test verifies:
+/// 1. MAX_AUTH_FAILURE_SOURCES cardinality bound is maintained
+/// 2. Lowest-volume eviction preserves high-volume attackers
+/// 3. Concurrent access maintains consistency
+/// 4. No race conditions in increment_source_failure_count
+#[cfg(loom)]
+#[doc(hidden)]
+pub fn auth_failure_limiter_cardinality_loom_model() {
+    loom::model(|| {
+        let limiter = Arc::new(Mutex::new(AuthFailureLimiter::new()));
+
+        // Test concurrent failure recording from different source IPs
+        let limiter_a = limiter.clone();
+        let limiter_b = limiter.clone();
+        let limiter_c = limiter.clone();
+
+        let handle_a = thread::spawn(move || {
+            // High-volume attacker - should be preserved during eviction
+            let mut results = Vec::new();
+            for i in 0..10 {
+                let mut guard =
+                    lock_loom_mutex(&limiter_a, "auth failure limiter high-volume source");
+                results.push(guard.increment_source_failure_count("192.168.1.100"));
+            }
+            results
+        });
+
+        let handle_b = thread::spawn(move || {
+            // Medium-volume attacker
+            let mut results = Vec::new();
+            for i in 0..5 {
+                let mut guard =
+                    lock_loom_mutex(&limiter_b, "auth failure limiter medium-volume source");
+                results.push(guard.increment_source_failure_count("192.168.1.101"));
+            }
+            results
+        });
+
+        let handle_c = thread::spawn(move || {
+            // Low-volume attacker - should be evicted first
+            let mut guard = lock_loom_mutex(&limiter_c, "auth failure limiter low-volume source");
+            guard.increment_source_failure_count("192.168.1.102")
+        });
+
+        let results_a = handle_a.join().expect("thread A should complete");
+        let results_b = handle_b.join().expect("thread B should complete");
+        let result_c = handle_c.join().expect("thread C should complete");
+
+        // Verify results are sensible
+        assert!(
+            !results_a.is_empty(),
+            "High-volume attacker should have results"
+        );
+        assert!(
+            !results_b.is_empty(),
+            "Medium-volume attacker should have results"
+        );
+        assert!(
+            result_c > 0,
+            "Low-volume attacker should have positive count"
+        );
+
+        // Verify final state maintains invariants
+        let final_guard = lock_loom_mutex(&limiter, "auth failure limiter final verification");
+        let stats = final_guard.get_failure_stats();
+
+        // Should track at most MAX_AUTH_FAILURE_SOURCES unique IPs
+        assert!(stats.unique_source_ips <= MAX_AUTH_FAILURE_SOURCES);
+
+        // Global count should equal sum of all increments
+        let expected_global = u64::try_from(results_a.len())
+            .unwrap_or(u64::MAX)
+            .saturating_add(u64::try_from(results_b.len()).unwrap_or(u64::MAX))
+            .saturating_add(1u64); // +1 for result_c
+        assert_eq!(stats.global_failure_count, expected_global);
+
+        // If all sources fit, should have exactly 3 unique IPs
+        if MAX_AUTH_FAILURE_SOURCES >= 3 {
+            assert_eq!(stats.unique_source_ips, 3);
+        }
+    });
 }
