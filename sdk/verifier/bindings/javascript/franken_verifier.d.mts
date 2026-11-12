@@ -1,4 +1,4 @@
-export type EvidenceFormat = "incident-bundle" | "capsule" | "signed-bundle" | "resolution-receipt" | "publisher-source" | "counterfactual-receipt" | "ltv-evidence";
+export type EvidenceFormat = "incident-bundle" | "capsule" | "signed-bundle" | "resolution-receipt" | "publisher-source" | "publisher-source-trust" | "counterfactual-receipt" | "ltv-evidence";
 export interface VerifierOptions {
   /** Trusted SDK executable, installed separately; never supplied by evidence. */
   verifier: string;
@@ -7,7 +7,15 @@ export interface VerifierOptions {
   trustedRunPublicKeyHex?: string;
   /** Independent product root; requires original-run trust and portable session evidence. */
   trustedRuntimePublicKeyHex?: string;
-  /** Required detached signature for signed-bundle and publisher-source. */
+  /** Independent revocation authority; required only for publisher-source-trust. */
+  trustedRevocationPublicKeyHex?: string;
+  /** Optional independent provenance authority; requires a matching signed chain. */
+  trustedProvenancePublicKeyHex?: string;
+  /** Required trust evaluation time: four-digit RFC3339 year, non-leap seconds, <=9 fraction digits. */
+  evaluationTime?: string;
+  /** Required freshness window: canonical positive decimal u64 string, never a rounded number. */
+  maxRevocationAgeSecs?: string;
+  /** Required detached signature for signed-bundle, publisher-source formats, and counterfactual-receipt. */
   signatureHex?: string;
   timeoutMs?: number;
 }
@@ -130,6 +138,19 @@ export type PublisherSourceFacts = {
   { registration_schema: "franken-node/extension-registration-manifest/v1"; runtime_authority: null }
   | { registration_schema: "franken-node/extension-registration-manifest/v2"; runtime_authority: PublisherRuntimeAuthority }
 );
+/** Independently authenticated revocation freshness and optional provenance; no execution grant. */
+export type PublisherSourceTrustFacts = {
+  source: PublisherSourceFacts;
+  revocation_list_sha256: string;
+  revocation_authority_public_key_hex: string;
+  revocation_issued_at: string;
+  /** Same exact instant requested by the caller, normalized by the Rust verifier. */
+  revocation_evaluated_at: string;
+  max_revocation_age_secs: string;
+} & (
+  { provenance_chain_sha256: null; provenance_authority_public_key_hex: null; provenance_link_count: null }
+  | { provenance_chain_sha256: string; provenance_authority_public_key_hex: string; provenance_link_count: number }
+);
 export interface CounterfactualReceiptFacts {
   baseline_integrity_hash: string;
   mode: "single" | "sweep";
@@ -160,6 +181,7 @@ export type Verification = {
   | { format: "signed-bundle"; scope: "authenticated_sdk_replay_bundle"; facts: SignedBundleFacts }
   | { format: "resolution-receipt"; scope: "authenticated_resolution_decision"; facts: ResolutionReceiptFacts }
   | { format: "publisher-source"; scope: "authenticated_publisher_source_content"; facts: PublisherSourceFacts }
+  | { format: "publisher-source-trust"; scope: "authenticated_publisher_source_trust"; facts: PublisherSourceTrustFacts }
   | { format: "counterfactual-receipt"; scope: "authenticated_counterfactual_receipt"; facts: CounterfactualReceiptFacts }
   | { format: "ltv-evidence"; scope: "authenticated_ltv_anteriority"; facts: LtvEvidenceFacts }
 );

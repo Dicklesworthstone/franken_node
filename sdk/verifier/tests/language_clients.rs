@@ -108,6 +108,14 @@ fn external_python_and_javascript_consumers_verify_signed_evidence() {
     let cases: Vec<serde_json::Value> =
         serde_json::from_slice(&fs::read(root.join("vectors.json")).unwrap()).unwrap();
     assert!(cases.len() >= 35, "empty or incomplete normative matrix");
+    assert!(
+        cases
+            .iter()
+            .filter(|case| case["format"] == "publisher-source-trust")
+            .count()
+            >= 25,
+        "publisher trust acceptance and refusal matrix must execute",
+    );
     for case in &cases {
         let mut verifier = Command::new(root.join("verifier"));
         verifier.args([
@@ -125,6 +133,16 @@ fn external_python_and_javascript_consumers_verify_signed_evidence() {
         }
         if let Some(runtime_anchor) = case["runtime_anchor"].as_str() {
             verifier.args(["--trusted-runtime-key-hex", runtime_anchor]);
+        }
+        for (field, option) in [
+            ("revocation_anchor", "--trusted-revocation-key-hex"),
+            ("provenance_anchor", "--trusted-provenance-key-hex"),
+            ("evaluation_time", "--evaluation-time"),
+            ("max_revocation_age_secs", "--max-revocation-age-secs"),
+        ] {
+            if let Some(value) = case[field].as_str() {
+                verifier.args([option, value]);
+            }
         }
         let mut child = verifier
             .stdin(Stdio::piped())
@@ -153,6 +171,15 @@ fn external_python_and_javascript_consumers_verify_signed_evidence() {
                 assert_eq!(response["scope"], "authenticated_publisher_source_content");
                 assert_eq!(response["facts"], case["publisher_facts"]);
                 assert_eq!(response["facts"]["capsule"]["graph_hash_recomputed"], false);
+                assert!(!response.to_string().contains("PRIVATE-"));
+            }
+            if case["format"] == "publisher-source-trust" {
+                assert_eq!(response["scope"], "authenticated_publisher_source_trust");
+                assert_eq!(response["facts"], case["publisher_trust_facts"]);
+                assert_eq!(
+                    response["facts"]["source"]["capsule"]["graph_hash_recomputed"],
+                    false
+                );
                 assert!(!response.to_string().contains("PRIVATE-"));
             }
             if let Some(run_anchor) = case["run_anchor"].as_str() {

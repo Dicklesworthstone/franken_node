@@ -2970,6 +2970,40 @@ impl CancellationGatedHostIo {
     }
 }
 
+/// Install product cancellation and flow observation outside every host source.
+///
+/// EnvironmentSnapshotHostIo serves EnvRead directly, so it must be inside the
+/// flow gate that records successful environment values as sensitive samples.
+/// Cancellation remains outermost for the product's shared effect-admission
+/// barrier; the snapshot also retains its own operation-local control checks.
+/// `None` preserves the existing provider's environment behavior, while
+/// `Some(empty)` supplies an explicitly empty snapshot whose reads return None.
+/// The caller supplies the already SSRF-gated provider with its inner effect WAL.
+#[cfg(feature = "engine")]
+fn compose_native_host_io<P: HostIoProvider + 'static>(
+    inner: P,
+    environment_snapshot: Option<std::collections::BTreeMap<String, String>>,
+    trace_id: impl Into<String>,
+    cancellation: NativeEngineCancellation,
+) -> std::result::Result<Arc<dyn HostIoProvider>, HostIoError> {
+    use crate::ops::flow_gated_host_io::FlowGatedHostIo;
+
+    let trace_id = trace_id.into();
+    // Arc<dyn HostIoProvider> is not itself a HostIoProvider implementation.
+    // Wrap each concrete source first, then erase the two flow-gate types.
+    let flow_gated: Arc<dyn HostIoProvider> = match environment_snapshot {
+        Some(values) => Arc::new(FlowGatedHostIo::new(
+            EnvironmentSnapshotHostIo::with_provider(values, Arc::new(inner))?,
+            trace_id,
+        )),
+        None => Arc::new(FlowGatedHostIo::new(inner, trace_id)),
+    };
+    Ok(Arc::new(CancellationGatedHostIo::new(
+        flow_gated,
+        cancellation,
+    )))
+}
+
 #[cfg(all(feature = "engine", test))]
 fn native_engine_worker_spawn_error(
     app_path: PathBuf,
@@ -11651,19 +11685,9 @@ impl EngineDispatcher {
                     &config.security.network_policy,
                     run_egress_trace.clone(),
                 );
-                // bd-n1bym: wrap the SSRF (endpoint) gate with the information-
-                // flow (data) gate so a secret-carrying network egress is refused
-                // BEFORE endpoint evaluation. This turns the ledger's post-hoc
-                // exfil DETECTION (bd-plhag) into PREVENTION even for an egress
-                // to an SSRF-allowed endpoint: a guest that reads a secret file
-                // and POSTs it out is denied pre-socket, and the denial is
-                // recorded as a flow block in the signed host-effect ledger.
-                let flow_gated =
-                    crate::ops::flow_gated_host_io::FlowGatedHostIo::new(gated, run_egress_trace);
-                let cancellation_gated =
-                    CancellationGatedHostIo::new(Arc::new(flow_gated), cancellation.clone());
-                let mut host_io: Arc<dyn HostIoProvider> = Arc::new(cancellation_gated);
-                if !config.runtime.environment_allowlist.is_empty() {
+                let environment_snapshot = if config.runtime.environment_allowlist.is_empty() {
+                    None
+                } else {
                     let mut environment = std::collections::BTreeMap::new();
                     for name in &config.runtime.environment_allowlist {
                         if let Some(value) = std::env::var_os(name) {
@@ -11678,19 +11702,24 @@ impl EngineDispatcher {
                             environment.insert(name.clone(), value);
                         }
                     }
-                    host_io = Arc::new(
-                        EnvironmentSnapshotHostIo::with_provider(environment, host_io).map_err(
-                            |error| {
-                                native_engine_spawn_error_with_telemetry_cleanup(
-                                    format!(
-                                        "Could not construct bounded guest environment snapshot: {error}"
-                                    ),
-                                    &mut telemetry_guard,
-                                )
-                            },
-                        )?,
-                    );
-                }
+                    Some(environment)
+                };
+                // Both filesystem and explicit environment reads must cross the
+                // same flow observer. It refuses sensitive network payloads before
+                // SSRF evaluation, DNS, and WAL admission. Product cancellation
+                // wraps that whole chain, including direct snapshot responses.
+                let host_io = compose_native_host_io(
+                    gated,
+                    environment_snapshot,
+                    run_egress_trace,
+                    cancellation.clone(),
+                )
+                .map_err(|error| {
+                    native_engine_spawn_error_with_telemetry_cleanup(
+                        format!("Could not construct bounded guest environment snapshot: {error}"),
+                        &mut telemetry_guard,
+                    )
+                })?;
                 orchestrator.set_host_io(host_io, Some(recorder));
                 tracing::info!(
                     execution_mode = "native",
@@ -12933,6 +12962,396 @@ impl EngineDispatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "engine")]
+    mod native_host_io_composition {
+        use super::*;
+        use frankenengine_extension_host::host_io::{
+            ENVIRONMENT_VALUE_MAX_BYTES, HostIoControl, HostIoResponse, UnrestrictedHostIoControl,
+        };
+        use std::collections::BTreeMap;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        #[derive(Debug, Default)]
+        struct BoundaryState {
+            plain_calls: AtomicUsize,
+            controlled_calls: AtomicUsize,
+            last_control: Mutex<Option<Arc<dyn HostIoControl>>>,
+        }
+
+        impl BoundaryState {
+            fn calls(&self) -> usize {
+                self.plain_calls.load(Ordering::Acquire)
+                    + self.controlled_calls.load(Ordering::Acquire)
+            }
+        }
+
+        /// Counts delegation without performing a filesystem or network effect.
+        #[derive(Debug)]
+        struct CountingBoundary(Arc<BoundaryState>);
+
+        impl HostIoProvider for CountingBoundary {
+            fn name(&self) -> &str {
+                "in-memory-composition-boundary"
+            }
+
+            fn filesystem_exception_provenance(&self) -> HostIoExceptionProvenance {
+                HostIoExceptionProvenance::ProviderInternal
+            }
+
+            fn perform(&self, _: &HostIoRequest, _: &[HostIoCapability]) -> HostIoOutcome {
+                self.0.plain_calls.fetch_add(1, Ordering::AcqRel);
+                Err(HostIoError::NotImplemented {
+                    what: "in-memory boundary; no effect executed".into(),
+                })
+            }
+
+            fn perform_controlled(
+                &self,
+                _: &HostIoRequest,
+                _: &[HostIoCapability],
+                control: Arc<dyn HostIoControl>,
+            ) -> HostIoOutcome {
+                self.0.controlled_calls.fetch_add(1, Ordering::AcqRel);
+                *self.0.last_control.lock().unwrap() = Some(Arc::clone(&control));
+                control.checkpoint()?;
+                Err(HostIoError::NotImplemented {
+                    what: "in-memory boundary; no effect executed".into(),
+                })
+            }
+        }
+
+        #[derive(Debug, Default)]
+        struct OperationSignal {
+            refused: AtomicBool,
+            checks: AtomicUsize,
+        }
+
+        impl HostIoControl for OperationSignal {
+            fn checkpoint(&self) -> std::result::Result<(), HostIoError> {
+                self.checks.fetch_add(1, Ordering::AcqRel);
+                if self.refused.load(Ordering::Acquire) {
+                    Err(HostIoError::Denied {
+                        reason: "operation signal refused".into(),
+                    })
+                } else {
+                    Ok(())
+                }
+            }
+        }
+
+        fn composition(
+            snapshot: Option<BTreeMap<String, String>>,
+        ) -> (
+            Arc<dyn HostIoProvider>,
+            Arc<BoundaryState>,
+            NativeEngineCancellation,
+        ) {
+            let boundary = Arc::new(BoundaryState::default());
+            let cancellation = NativeEngineCancellation::new();
+            let provider = compose_native_host_io(
+                CountingBoundary(Arc::clone(&boundary)),
+                snapshot,
+                "native-composition-regression",
+                cancellation.clone(),
+            )
+            .unwrap();
+            (provider, boundary, cancellation)
+        }
+
+        fn invoke(
+            provider: &dyn HostIoProvider,
+            request: &HostIoRequest,
+            granted: &[HostIoCapability],
+            controlled: bool,
+        ) -> HostIoOutcome {
+            if controlled {
+                provider.perform_controlled(request, granted, Arc::new(UnrestrictedHostIoControl))
+            } else {
+                provider.perform(request, granted)
+            }
+        }
+
+        fn outbound(payload: &[u8]) -> HostIoRequest {
+            HostIoRequest::NetworkSend {
+                endpoint: "example.invalid:443".into(),
+                payload: payload.to_vec(),
+            }
+        }
+
+        fn assert_boundary_reached(outcome: HostIoOutcome) {
+            assert!(matches!(
+                outcome,
+                Err(HostIoError::NotImplemented { what })
+                    if what == "in-memory boundary; no effect executed"
+            ));
+        }
+
+        #[test]
+        fn environment_samples_are_observed_before_outbound_delegation() {
+            for controlled in [false, true] {
+                let (provider, boundary, _) = composition(Some(BTreeMap::from([(
+                    "PUBLIC_LOOKING_NAME".into(),
+                    "explicit-secret-sample".into(),
+                )])));
+                assert_eq!(
+                    provider.filesystem_exception_provenance(),
+                    HostIoExceptionProvenance::ProviderInternal
+                );
+                assert_eq!(
+                    invoke(
+                        provider.as_ref(),
+                        &HostIoRequest::EnvRead {
+                            name: "PUBLIC_LOOKING_NAME".into(),
+                        },
+                        &[HostIoCapability::EnvRead],
+                        controlled,
+                    ),
+                    Ok(HostIoResponse::EnvRead {
+                        value: Some("explicit-secret-sample".into()),
+                    })
+                );
+                assert_eq!(boundary.calls(), 0);
+                assert!(matches!(
+                    invoke(
+                        provider.as_ref(),
+                        &outbound(b"header:explicit-secret-sample:trailer"),
+                        &[HostIoCapability::NetworkSend],
+                        controlled,
+                    ),
+                    Err(HostIoError::Denied { reason }) if reason.starts_with("flow_policy:")
+                ));
+                assert_eq!(
+                    boundary.calls(),
+                    0,
+                    "sensitive data must not reach the boundary"
+                );
+                assert_boundary_reached(invoke(
+                    provider.as_ref(),
+                    &outbound(b"unrelated public payload"),
+                    &[HostIoCapability::NetworkSend],
+                    controlled,
+                ));
+                assert_eq!(boundary.calls(), 1);
+                assert_eq!(
+                    boundary.controlled_calls.load(Ordering::Acquire),
+                    usize::from(controlled)
+                );
+            }
+        }
+
+        #[test]
+        fn unconfigured_absent_and_empty_environment_keep_distinct_behavior() {
+            for controlled in [false, true] {
+                let request = HostIoRequest::EnvRead {
+                    name: "EMPTY".into(),
+                };
+                let (unconfigured, boundary, _) = composition(None);
+                assert_boundary_reached(invoke(
+                    unconfigured.as_ref(),
+                    &request,
+                    &[HostIoCapability::EnvRead],
+                    controlled,
+                ));
+                assert_eq!(
+                    boundary.calls(),
+                    1,
+                    "None retains the wrapped provider's behavior"
+                );
+
+                for (values, expected) in [
+                    (BTreeMap::new(), None),
+                    (
+                        BTreeMap::from([("EMPTY".into(), String::new())]),
+                        Some(String::new()),
+                    ),
+                ] {
+                    let (provider, boundary, _) = composition(Some(values));
+                    assert_eq!(
+                        invoke(
+                            provider.as_ref(),
+                            &request,
+                            &[HostIoCapability::EnvRead],
+                            controlled
+                        ),
+                        Ok(HostIoResponse::EnvRead { value: expected })
+                    );
+                    assert_eq!(
+                        invoke(
+                            provider.as_ref(),
+                            &HostIoRequest::EnvRead {
+                                name: "UNLISTED".into()
+                            },
+                            &[HostIoCapability::EnvRead],
+                            controlled,
+                        ),
+                        Ok(HostIoResponse::EnvRead { value: None })
+                    );
+                    assert_eq!(boundary.calls(), 0);
+                    assert_boundary_reached(invoke(
+                        provider.as_ref(),
+                        &outbound(b"unrelated public payload"),
+                        &[HostIoCapability::NetworkSend],
+                        controlled,
+                    ));
+                    assert_eq!(boundary.calls(), 1);
+                }
+            }
+        }
+
+        #[test]
+        fn missing_environment_capability_prevents_read_and_observation() {
+            for controlled in [false, true] {
+                let (provider, boundary, _) = composition(Some(BTreeMap::from([(
+                    "EXPLICIT_NAME".into(),
+                    "unread-secret-sample".into(),
+                )])));
+                assert_eq!(
+                    invoke(
+                        provider.as_ref(),
+                        &HostIoRequest::EnvRead {
+                            name: "EXPLICIT_NAME".into()
+                        },
+                        &[],
+                        controlled,
+                    ),
+                    Err(HostIoError::CapabilityMissing {
+                        capability: HostIoCapability::EnvRead
+                    })
+                );
+                assert_eq!(boundary.calls(), 0);
+                // An unauthorized read contributes no sample. This request is
+                // only a probe of delegation to the in-memory boundary.
+                assert_boundary_reached(invoke(
+                    provider.as_ref(),
+                    &outbound(b"unread-secret-sample"),
+                    &[HostIoCapability::NetworkSend],
+                    controlled,
+                ));
+                assert_eq!(boundary.calls(), 1);
+            }
+        }
+
+        #[test]
+        fn short_nonempty_environment_values_keep_egress_fail_closed() {
+            for controlled in [false, true] {
+                let (provider, boundary, _) =
+                    composition(Some(BTreeMap::from([("EXPLICIT_NAME".into(), "x".into())])));
+                assert_eq!(
+                    invoke(
+                        provider.as_ref(),
+                        &HostIoRequest::EnvRead {
+                            name: "EXPLICIT_NAME".into()
+                        },
+                        &[HostIoCapability::EnvRead],
+                        controlled,
+                    ),
+                    Ok(HostIoResponse::EnvRead {
+                        value: Some("x".into())
+                    })
+                );
+                assert!(matches!(
+                    invoke(
+                        provider.as_ref(),
+                        &outbound(b"unrelated public payload"),
+                        &[HostIoCapability::NetworkSend],
+                        controlled,
+                    ),
+                    Err(HostIoError::Denied { reason }) if reason.contains("incomplete secret tracking")
+                ));
+                assert_eq!(boundary.calls(), 0);
+            }
+        }
+
+        #[test]
+        fn product_cancellation_precedes_direct_snapshot_reads() {
+            for controlled in [false, true] {
+                let (provider, boundary, cancellation) = composition(Some(BTreeMap::from([(
+                    "EXPLICIT_NAME".into(),
+                    "explicit-secret-sample".into(),
+                )])));
+                let request = HostIoRequest::EnvRead {
+                    name: "EXPLICIT_NAME".into(),
+                };
+                assert!(
+                    invoke(
+                        provider.as_ref(),
+                        &request,
+                        &[HostIoCapability::EnvRead],
+                        controlled
+                    )
+                    .is_ok()
+                );
+                cancellation.request_cancel();
+                assert!(matches!(
+                    invoke(provider.as_ref(), &request, &[HostIoCapability::EnvRead], controlled),
+                    Err(HostIoError::Denied { reason }) if reason.contains("native engine execution was cancelled")
+                ));
+                assert_eq!(boundary.calls(), 0);
+            }
+        }
+
+        #[test]
+        fn operation_control_refusal_and_identity_survive_composition() {
+            let (provider, boundary, _) = composition(Some(BTreeMap::from([(
+                "EXPLICIT_NAME".into(),
+                "unread-secret-sample".into(),
+            )])));
+            let signal = Arc::new(OperationSignal::default());
+            signal.refused.store(true, Ordering::Release);
+            let control: Arc<dyn HostIoControl> = signal.clone();
+            assert!(matches!(
+                provider.perform_controlled(
+                    &HostIoRequest::EnvRead {
+                        name: "EXPLICIT_NAME".into()
+                    },
+                    &[HostIoCapability::EnvRead],
+                    Arc::clone(&control),
+                ),
+                Err(HostIoError::Denied { .. })
+            ));
+            assert!(signal.checks.load(Ordering::Acquire) > 0);
+            assert_eq!(boundary.calls(), 0);
+
+            // A different operation may proceed after the caller clears its
+            // signal; the refused read supplied no value to the flow observer.
+            signal.refused.store(false, Ordering::Release);
+            assert_boundary_reached(provider.perform_controlled(
+                &outbound(b"unread-secret-sample"),
+                &[HostIoCapability::NetworkSend],
+                Arc::clone(&control),
+            ));
+            assert_eq!(boundary.plain_calls.load(Ordering::Acquire), 0);
+            assert_eq!(boundary.controlled_calls.load(Ordering::Acquire), 1);
+            assert!(Arc::ptr_eq(
+                boundary.last_control.lock().unwrap().as_ref().unwrap(),
+                &control,
+            ));
+        }
+
+        #[test]
+        fn invalid_environment_snapshots_fail_before_provider_installation() {
+            for snapshot in [
+                BTreeMap::from([("INVALID=NAME".into(), "value".into())]),
+                BTreeMap::from([(
+                    "EXPLICIT_NAME".into(),
+                    "x".repeat(ENVIRONMENT_VALUE_MAX_BYTES + 1),
+                )]),
+            ] {
+                let boundary = Arc::new(BoundaryState::default());
+                assert!(matches!(
+                    compose_native_host_io(
+                        CountingBoundary(Arc::clone(&boundary)),
+                        Some(snapshot),
+                        "invalid-snapshot",
+                        NativeEngineCancellation::new(),
+                    ),
+                    Err(HostIoError::SandboxViolation { .. })
+                ));
+                assert_eq!(boundary.calls(), 0);
+            }
+        }
+    }
 
     #[cfg(feature = "engine")]
     fn publisher_authority_for_test() -> ArtifactRuntimeAuthority {

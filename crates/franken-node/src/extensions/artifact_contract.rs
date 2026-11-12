@@ -4,6 +4,12 @@
 //! set of capabilities the extension requires. Admission is fail-closed: missing or
 //! invalid contracts cause immediate rejection. At runtime, the enforced capability
 //! envelope must match the admitted contract without drift.
+//!
+//! Attenuated envelopes require an independently trusted [`CapabilityEnvelopeCheckpoint`].
+//! Their public HMAC-derived tags commit to a caveat prefix; they do not authenticate
+//! non-removable attenuation through a secret issuer key. Only the pinned prefix is
+//! retained by verification. Consumers that require later restrictions must pin those
+//! restrictions too.
 
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use hmac::{Hmac, KeyInit, Mac};
@@ -131,6 +137,7 @@ pub mod error_codes {
     pub const ERR_ARTIFACT_TRUSTED_SIGNER_CAPACITY: &str = "ERR_ARTIFACT_TRUSTED_SIGNER_CAPACITY";
     pub const ERR_ARTIFACT_PRIVILEGE_AMPLIFICATION: &str = "ERR_ARTIFACT_PRIVILEGE_AMPLIFICATION";
     pub const ERR_ARTIFACT_MACAROON_TAG_MISMATCH: &str = "ERR_ARTIFACT_MACAROON_TAG_MISMATCH";
+    pub const ERR_ARTIFACT_REQUIRED_PREFIX_MISMATCH: &str = "ERR_ARTIFACT_REQUIRED_PREFIX_MISMATCH";
 }
 
 // ---------------------------------------------------------------------------
@@ -1094,6 +1101,7 @@ pub fn make_artifact(
 /// Authority can only advance monotonically across layers
 /// (`PublisherRoot <= RegistryAdmission <= DeployReleasePolicy <= ModuleImportEdge`)
 /// and can never widen an already-narrowed capability, scope, or quota.
+/// Layer labels do not authenticate the party adding a caveat.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AttenuationLayer {
@@ -1114,7 +1122,7 @@ impl AttenuationLayer {
     }
 }
 
-/// First-party capability attenuation caveat chained by RFC-2104 `HMAC-SHA256`.
+/// Capability attenuation caveat committed by a public RFC-2104 `HMAC-SHA256` chain.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum CapabilityCaveat {
@@ -1136,6 +1144,7 @@ pub enum CapabilityCaveat {
 }
 
 /// A caveat bound into the envelope's chained `HMAC-SHA256` tag sequence.
+/// The tag is public and carries no separate issuer signature.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SignedCaveat {
     pub layer: AttenuationLayer,
@@ -1143,13 +1152,18 @@ pub struct SignedCaveat {
     pub caveat_tag_hex: String,
 }
 
-/// Cryptographically authenticated root authority from which caveats attenuate.
+/// Root material from which caveats attenuate, bound by a trusted checkpoint.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "anchor_kind", rename_all = "snake_case")]
 pub enum RootAuthorityAnchor {
     /// Rooted in an Ed25519-signed [`CapabilityContract`].
     SignedCapabilityContract { contract: CapabilityContract },
-    /// Rooted in a publisher-signed v2 registry manifest + `FNSGCAP1` capsule approval.
+    /// Metadata from a v2 registry manifest + `FNSGCAP1` capsule approval.
+    ///
+    /// This variant carries no publisher signature or approval proof. Its caller
+    /// must authenticate the approval separately and retain a checkpoint covering
+    /// these exact facts and capabilities. A matching public key alone cannot
+    /// authenticate this metadata.
     VerifiedPublisherApproval {
         publisher_public_key_hex: String,
         manifest_sha256: String,
@@ -1162,7 +1176,72 @@ pub enum RootAuthorityAnchor {
     },
 }
 
-/// Effective runtime capability ceiling after verifying root + all caveats.
+/// Independently trusted commitment to a required root and caveat prefix.
+///
+/// Obtain these parts from authenticated admission state or a locally regenerated
+/// envelope built from an authenticated approval and trusted operator policy. Never
+/// construct this checkpoint from the candidate envelope being verified: all of its
+/// tags are public and can be recomputed with weaker or missing caveats.
+///
+/// A count of zero pins the root only. Later caveats may be appended monotonically,
+/// but an unpinned suffix may also be discarded or rebuilt. To require a module-edge
+/// restriction, retain a checkpoint that includes that edge. The private fields and
+/// absence of Serde implementations keep this trust input separate from envelope
+/// deserialization; the constructor validates syntax, not the provenance of its input.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapabilityEnvelopeCheckpoint {
+    required_caveat_count: usize,
+    prefix_tag: [u8; 32],
+}
+
+impl CapabilityEnvelopeCheckpoint {
+    /// Validate independently trusted prefix parts without authenticating their source.
+    ///
+    /// `canonical_tag_hex` must be exactly 64 lowercase hex digits, without a prefix.
+    pub fn from_trusted_parts(
+        required_caveat_count: usize,
+        canonical_tag_hex: &str,
+    ) -> Result<Self, AttenuationError> {
+        if required_caveat_count > MAX_CAVEATS_PER_ENVELOPE {
+            return Err(AttenuationError::InvalidCheckpoint {
+                detail: format!(
+                    "required caveat count exceeds maximum ({MAX_CAVEATS_PER_ENVELOPE})"
+                ),
+            });
+        }
+        let prefix_tag = decode_hex_tag(canonical_tag_hex).ok_or_else(|| {
+            AttenuationError::InvalidCheckpoint {
+                detail: "checkpoint tag must be exactly 64 lowercase hex digits".to_string(),
+            }
+        })?;
+        Ok(Self {
+            required_caveat_count,
+            prefix_tag,
+        })
+    }
+
+    pub fn required_caveat_count(&self) -> usize {
+        self.required_caveat_count
+    }
+
+    pub fn prefix_tag_hex(&self) -> String {
+        hex::encode(self.prefix_tag)
+    }
+
+    fn verify_prefix_tag(&self, actual_tag: &[u8; 32]) -> Result<(), AttenuationError> {
+        if !crate::security::constant_time::ct_eq_bytes(&self.prefix_tag, actual_tag) {
+            return Err(AttenuationError::RequiredPrefixMismatch {
+                required_caveat_count: self.required_caveat_count,
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Capability ceiling after verifying the trusted prefix and every supplied caveat.
+///
+/// Path, host, environment, and module predicates must be applied by their consumers;
+/// materializing an [`EnforcementEngine`] alone does not enforce those predicates.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EffectiveCapabilityCeiling {
     pub contract_id: String,
@@ -1246,6 +1325,12 @@ pub enum AttenuationError {
     InvalidRootAnchor {
         detail: String,
     },
+    InvalidCheckpoint {
+        detail: String,
+    },
+    RequiredPrefixMismatch {
+        required_caveat_count: usize,
+    },
     CaveatLimitExceeded {
         max_caveats: usize,
     },
@@ -1273,6 +1358,7 @@ impl AttenuationError {
                 error_codes::ERR_ARTIFACT_SIGNATURE_INVALID
             }
             Self::InvalidRootAnchor { .. }
+            | Self::InvalidCheckpoint { .. }
             | Self::CaveatLimitExceeded { .. }
             | Self::LayerOrderViolation { .. }
             | Self::InvalidCaveat { .. } => error_codes::ERR_ARTIFACT_INVALID_CONTRACT,
@@ -1280,6 +1366,9 @@ impl AttenuationError {
                 error_codes::ERR_ARTIFACT_PRIVILEGE_AMPLIFICATION
             }
             Self::TagMismatch { .. } => error_codes::ERR_ARTIFACT_MACAROON_TAG_MISMATCH,
+            Self::RequiredPrefixMismatch { .. } => {
+                error_codes::ERR_ARTIFACT_REQUIRED_PREFIX_MISMATCH
+            }
         }
     }
 }
@@ -1310,6 +1399,18 @@ impl std::fmt::Display for AttenuationError {
             }
             Self::InvalidRootAnchor { detail } => {
                 write!(f, "{}: invalid root anchor: {detail}", self.code())
+            }
+            Self::InvalidCheckpoint { detail } => {
+                write!(f, "{}: invalid trusted checkpoint: {detail}", self.code())
+            }
+            Self::RequiredPrefixMismatch {
+                required_caveat_count,
+            } => {
+                write!(
+                    f,
+                    "{}: envelope does not retain the independently trusted prefix of {required_caveat_count} caveats",
+                    self.code()
+                )
             }
             Self::CaveatLimitExceeded { max_caveats } => {
                 write!(
@@ -1358,7 +1459,10 @@ impl std::fmt::Display for AttenuationError {
 impl std::error::Error for AttenuationError {}
 
 impl EnforcementEngine {
-    /// Construct a runtime [`EnforcementEngine`] from a verified [`EffectiveCapabilityCeiling`].
+    /// Construct an engine for the ceiling's capability IDs, generic scopes, and quotas.
+    ///
+    /// The caller must first verify the ceiling's provenance and separately apply
+    /// its path, host, environment, and module predicates at the relevant boundary.
     pub fn from_ceiling(ceiling: &EffectiveCapabilityCeiling) -> Self {
         let mut admitted = BTreeMap::new();
         for cap_id in &ceiling.allowed_capabilities {
@@ -1389,8 +1493,13 @@ impl EnforcementEngine {
     }
 }
 
-/// Macaroon-style capability envelope combining an Ed25519-authenticated publisher root
-/// with chained RFC-2104 `HMAC-SHA256` caveats that monotonically narrow authority.
+/// Capability envelope with publicly reproducible chained `HMAC-SHA256` caveat tags.
+///
+/// These tags commit to the root and ordered caveats but are not secret-rooted
+/// Macaroon authentication. A publisher signature authenticates a signed contract,
+/// not later caveats. Verification additionally requires an independently retained
+/// [`CapabilityEnvelopeCheckpoint`] to prevent removal or rewriting of its required
+/// prefix. Unpinned suffixes can be discarded or rebuilt with any monotonic caveats.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MacaroonCapabilityEnvelope {
     pub schema_version: String,
@@ -1402,6 +1511,9 @@ pub struct MacaroonCapabilityEnvelope {
 impl MacaroonCapabilityEnvelope {
     /// Mint a root envelope from an Ed25519-signed [`CapabilityContract`] verified
     /// against an independently configured `trusted_publisher` public key.
+    ///
+    /// Anyone holding the public contract can rebuild this root. Construction does
+    /// not preserve previously required caveats or replace checkpoint verification.
     pub fn from_signed_contract(
         contract: CapabilityContract,
         trusted_publisher: &VerifyingKey,
@@ -1416,7 +1528,11 @@ impl MacaroonCapabilityEnvelope {
         })
     }
 
-    /// Mint a root envelope from an authenticated v2 publisher source-graph approval.
+    /// Build a root envelope from v2 publisher source-graph approval metadata.
+    ///
+    /// The caller must independently authenticate the approval before using this
+    /// envelope to retain a trusted checkpoint. This builder validates metadata and
+    /// commits to it; it does not verify a manifest signature or capsule approval.
     #[allow(clippy::too_many_arguments)]
     pub fn from_verified_publisher_approval(
         publisher_public_key: &VerifyingKey,
@@ -1448,6 +1564,9 @@ impl MacaroonCapabilityEnvelope {
     }
 
     /// Append a monotonically narrowing caveat at `layer` and chain its `HMAC-SHA256` tag.
+    ///
+    /// This is a structural builder, not an authentication boundary. Verify its
+    /// result against an independently retained checkpoint before trusting authority.
     pub fn attenuate(
         &self,
         layer: AttenuationLayer,
@@ -1482,7 +1601,7 @@ impl MacaroonCapabilityEnvelope {
             return Err(AttenuationError::TagMismatch { step: None });
         }
 
-        // Enforce monotonic narrowing before signing the new caveat into the chain.
+        // Enforce monotonic narrowing before committing the new caveat into the chain.
         apply_caveat_monotonically(&mut ceiling, layer, &caveat)?;
         let next_idx = self.caveats.len();
         let next_tag = compute_caveat_hmac(&current_tag, next_idx, layer, &caveat)?;
@@ -1498,11 +1617,20 @@ impl MacaroonCapabilityEnvelope {
         Ok(next)
     }
 
-    /// Cryptographically verify the root publisher anchor, every chained `HMAC-SHA256`
-    /// caveat tag in constant time, layer order, and strict monotonic non-escalation.
+    /// Verify an independently trusted prefix, every supplied caveat, and the tail.
+    ///
+    /// Signed-contract roots still require a valid publisher signature. Approval
+    /// metadata is authenticated only by the caller's independent checkpoint context.
+    /// The recomputed tag at exactly the required prefix is compared in constant time;
+    /// all supplied caveats must preserve layer order and monotonically narrow authority.
+    /// A checkpoint is mandatory even when zero caveats are required or supplied.
+    ///
+    /// Only the pinned prefix is protected against removal or rewriting. Callers
+    /// requiring any later restriction must retain a checkpoint that includes it.
     pub fn verify(
         &self,
         trusted_publisher: Option<&VerifyingKey>,
+        checkpoint: &CapabilityEnvelopeCheckpoint,
     ) -> Result<EffectiveCapabilityCeiling, AttenuationError> {
         if self.schema_version != MACAROON_ENVELOPE_SCHEMA {
             return Err(AttenuationError::SchemaMismatch {
@@ -1515,8 +1643,16 @@ impl MacaroonCapabilityEnvelope {
                 max_caveats: MAX_CAVEATS_PER_ENVELOPE,
             });
         }
+        if self.caveats.len() < checkpoint.required_caveat_count {
+            return Err(AttenuationError::RequiredPrefixMismatch {
+                required_caveat_count: checkpoint.required_caveat_count,
+            });
+        }
 
         let (mut ceiling, mut current_tag) = verify_and_seed_root(&self.root, trusted_publisher)?;
+        if checkpoint.required_caveat_count == 0 {
+            checkpoint.verify_prefix_tag(&current_tag)?;
+        }
         let mut prev_layer: Option<AttenuationLayer> = None;
         for (idx, signed) in self.caveats.iter().enumerate() {
             if let Some(previous) = prev_layer
@@ -1536,6 +1672,9 @@ impl MacaroonCapabilityEnvelope {
             if !crate::security::constant_time::ct_eq_bytes(&current_tag, &step_tag) {
                 return Err(AttenuationError::TagMismatch { step: Some(idx) });
             }
+            if idx + 1 == checkpoint.required_caveat_count {
+                checkpoint.verify_prefix_tag(&current_tag)?;
+            }
         }
 
         let tail_tag = decode_hex_tag(&self.tail_tag_hex)
@@ -1547,13 +1686,16 @@ impl MacaroonCapabilityEnvelope {
         Ok(ceiling)
     }
 
-    /// Verify the envelope and materialize a runtime [`EnforcementEngine`] bound to
-    /// the resulting attenuated ceiling.
+    /// Verify the trusted prefix and materialize an engine for capabilities and quotas.
+    ///
+    /// As with [`EnforcementEngine::from_ceiling`], this does not apply path, host,
+    /// environment, or module predicates at native host-effect boundaries.
     pub fn to_enforcement_engine(
         &self,
         trusted_publisher: Option<&VerifyingKey>,
+        checkpoint: &CapabilityEnvelopeCheckpoint,
     ) -> Result<EnforcementEngine, AttenuationError> {
-        let ceiling = self.verify(trusted_publisher)?;
+        let ceiling = self.verify(trusted_publisher, checkpoint)?;
         Ok(EnforcementEngine::from_ceiling(&ceiling))
     }
 
@@ -4785,8 +4927,11 @@ mod tests {
         }
     }
 
-    #[test]
-    fn macaroon_envelope_attenuates_monotonically_across_all_four_layers() {
+    fn locally_admitted_envelope_fixture() -> (
+        VerifyingKey,
+        MacaroonCapabilityEnvelope,
+        MacaroonCapabilityEnvelope,
+    ) {
         let key = test_signing_key();
         let pubkey = key.verifying_key();
         let contract = make_contract(
@@ -4877,6 +5022,21 @@ mod tests {
                 },
             )
             .expect("deploy lowers network_egress call budget");
+        (pubkey, root_env, l3)
+    }
+
+    #[test]
+    fn macaroon_envelope_attenuates_monotonically_across_all_four_layers() {
+        let (pubkey, _, l3) = locally_admitted_envelope_fixture();
+        // Retain authenticated local admission state before receiving a later suffix.
+        let checkpoint =
+            CapabilityEnvelopeCheckpoint::from_trusted_parts(l3.caveats().len(), l3.tail_tag_hex())
+                .unwrap();
+        let admitted_ceiling = l3
+            .verify(Some(&pubkey), &checkpoint)
+            .expect("verify exact required prefix");
+        assert!(!admitted_ceiling.permits_capability("process_spawn"));
+        assert_eq!(admitted_ceiling.call_budget_for("network_egress"), Some(25));
         let l4 = l3
             .attenuate(
                 AttenuationLayer::ModuleImportEdge,
@@ -4891,7 +5051,9 @@ mod tests {
             )
             .expect("module edge narrows module scope");
 
-        let ceiling = l4.verify(Some(&pubkey)).expect("verify full caveat chain");
+        let ceiling = l4
+            .verify(Some(&pubkey), &checkpoint)
+            .expect("verify required prefix with stricter module-edge suffix");
         assert!(!ceiling.permits_capability("process_spawn"));
         assert!(ceiling.permits_capability("fs_read"));
         assert_eq!(ceiling.call_budget_for("network_egress"), Some(25));
@@ -4906,6 +5068,19 @@ mod tests {
         assert!(!ceiling.permits_env_key("AWS_SECRET_ACCESS_KEY"));
         assert!(ceiling.permits_module_path("packages/core/node_modules/helper/lib/a.js"));
         assert!(!ceiling.permits_module_path("packages/core/index.js"));
+
+        // An unpinned suffix is optional. Requiring its module restrictions needs
+        // a separately retained checkpoint that covers the module edge too.
+        let module_checkpoint =
+            CapabilityEnvelopeCheckpoint::from_trusted_parts(l4.caveats().len(), l4.tail_tag_hex())
+                .unwrap();
+        assert_eq!(l4.verify(Some(&pubkey), &module_checkpoint), Ok(ceiling));
+        assert_eq!(
+            l3.verify(Some(&pubkey), &module_checkpoint),
+            Err(AttenuationError::RequiredPrefixMismatch {
+                required_caveat_count: l4.caveats().len(),
+            })
+        );
     }
 
     #[test]
@@ -5041,7 +5216,7 @@ mod tests {
             SCHEMA_VERSION,
             10,
         );
-        let env = MacaroonCapabilityEnvelope::from_signed_contract(contract, &pubkey)
+        let env = MacaroonCapabilityEnvelope::from_signed_contract(contract.clone(), &pubkey)
             .unwrap()
             .attenuate(
                 AttenuationLayer::DeployReleasePolicy,
@@ -5056,37 +5231,370 @@ mod tests {
                 },
             )
             .unwrap();
+        let checkpoint = CapabilityEnvelopeCheckpoint::from_trusted_parts(
+            env.caveats().len(),
+            env.tail_tag_hex(),
+        )
+        .unwrap();
 
         // Missing trust anchor and foreign publisher key fail closed.
-        assert_eq!(env.verify(None), Err(AttenuationError::MissingTrustAnchor));
         assert_eq!(
-            env.verify(Some(&foreign_key)),
+            env.verify(None, &checkpoint),
+            Err(AttenuationError::MissingTrustAnchor)
+        );
+        assert_eq!(
+            env.verify(Some(&foreign_key), &checkpoint),
             Err(AttenuationError::InvalidRootSignature)
         );
 
-        // Truncating the final caveat (attempting to recover higher call budget) fails tail HMAC check!
+        // The retained prefix refuses truncation even if the public preceding tag
+        // is copied into the tail to make the shortened chain internally consistent.
         let mut truncated = env.clone();
         truncated.caveats.pop();
         assert_eq!(
-            truncated.verify(Some(&pubkey)),
-            Err(AttenuationError::TagMismatch { step: None })
+            truncated.verify(Some(&pubkey), &checkpoint),
+            Err(AttenuationError::RequiredPrefixMismatch {
+                required_caveat_count: 2,
+            })
         );
-        // Even copying the previous caveat tag into `tail_tag_hex` only replays a valid prefix if
-        // the attacker strips a caveat they received — which is why runtime admission recomputes
-        // operator DeployReleasePolicy caveats locally; mutating a caveat payload in place fails step HMAC:
+        truncated.tail_tag_hex = truncated.caveats[0].caveat_tag_hex.clone();
+        assert_eq!(
+            truncated.verify(Some(&pubkey), &checkpoint),
+            Err(AttenuationError::RequiredPrefixMismatch {
+                required_caveat_count: 2,
+            })
+        );
+        assert_eq!(
+            truncated
+                .to_enforcement_engine(Some(&pubkey), &checkpoint)
+                .err(),
+            Some(AttenuationError::RequiredPrefixMismatch {
+                required_caveat_count: 2,
+            })
+        );
+
+        // A genuine public signed contract is sufficient to reconstruct its root,
+        // but that root cannot replace the independently required caveat prefix.
+        let reminted = MacaroonCapabilityEnvelope::from_signed_contract(contract, &pubkey).unwrap();
+        let mut stripped = env.clone();
+        stripped.caveats.clear();
+        stripped.tail_tag_hex = reminted.tail_tag_hex().to_string();
+        for candidate in [stripped, reminted] {
+            assert_eq!(
+                candidate.verify(Some(&pubkey), &checkpoint),
+                Err(AttenuationError::RequiredPrefixMismatch {
+                    required_caveat_count: 2,
+                })
+            );
+            assert_eq!(
+                candidate
+                    .to_enforcement_engine(Some(&pubkey), &checkpoint)
+                    .err(),
+                Some(AttenuationError::RequiredPrefixMismatch {
+                    required_caveat_count: 2,
+                })
+            );
+        }
+
+        // Ordinary in-place tampering must still fail the individual step check.
         let mut mutated = env.clone();
         mutated.caveats[1].caveat = CapabilityCaveat::MaxCallsPerEpoch {
             capability_id: "fs.read".to_string(),
             max_calls: 99,
         };
         assert!(matches!(
-            mutated.verify(Some(&pubkey)),
+            mutated.verify(Some(&pubkey), &checkpoint),
             Err(AttenuationError::TagMismatch { step: Some(1) })
         ));
     }
 
     #[test]
-    fn macaroon_envelope_materializes_drift_free_enforcement_engine() {
+    fn capability_envelope_checkpoint_requires_bounded_canonical_trusted_parts() {
+        let tag = "ab".repeat(32);
+        for count in [0, MAX_CAVEATS_PER_ENVELOPE] {
+            let checkpoint = CapabilityEnvelopeCheckpoint::from_trusted_parts(count, &tag).unwrap();
+            assert_eq!(checkpoint.required_caveat_count(), count);
+            assert_eq!(checkpoint.prefix_tag_hex(), tag);
+        }
+        assert!(matches!(
+            CapabilityEnvelopeCheckpoint::from_trusted_parts(MAX_CAVEATS_PER_ENVELOPE + 1, &tag),
+            Err(AttenuationError::InvalidCheckpoint { .. })
+        ));
+        for malformed in [
+            String::new(),
+            "a".repeat(63),
+            "a".repeat(65),
+            "AB".repeat(32),
+            "g".repeat(64),
+            format!("sha256:{tag}"),
+            format!(" {tag}"),
+        ] {
+            assert!(matches!(
+                CapabilityEnvelopeCheckpoint::from_trusted_parts(0, &malformed),
+                Err(AttenuationError::InvalidCheckpoint { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn macaroon_checkpoint_rejects_recomputed_weaker_required_caveats() {
+        let (pubkey, root, admitted) = locally_admitted_envelope_fixture();
+        let checkpoint = CapabilityEnvelopeCheckpoint::from_trusted_parts(
+            admitted.caveats().len(),
+            admitted.tail_tag_hex(),
+        )
+        .unwrap();
+        let root_checkpoint =
+            CapabilityEnvelopeCheckpoint::from_trusted_parts(0, root.tail_tag_hex()).unwrap();
+        let wrong_position = CapabilityEnvelopeCheckpoint::from_trusted_parts(
+            admitted.caveats().len() - 1,
+            admitted.tail_tag_hex(),
+        )
+        .unwrap();
+        assert_eq!(
+            admitted.verify(Some(&pubkey), &wrong_position),
+            Err(AttenuationError::RequiredPrefixMismatch {
+                required_caveat_count: admitted.caveats().len() - 1,
+            })
+        );
+
+        // Each replacement is legal relative to the genuine signed root, but it
+        // weakens a required local admission restriction. Rebuild all public tags
+        // so refusal must come from the independent checkpoint, not stale tags.
+        let weaker_caveats = [
+            CapabilityCaveat::PathPrefixes(["/srv".to_string(), "config".to_string()].into()),
+            CapabilityCaveat::ModuleScopePrefix("packages".to_string()),
+            CapabilityCaveat::AllowedCapabilities(
+                ["fs_read", "network_egress", "env_read", "process_spawn"]
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect(),
+            ),
+            CapabilityCaveat::HostPorts(
+                [
+                    "api.example.com".to_string(),
+                    "*.cdn.example.com".to_string(),
+                ]
+                .into(),
+            ),
+            CapabilityCaveat::EnvKeys(
+                ["NODE_ENV", "APP_REGION", "AWS_SECRET_ACCESS_KEY"]
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect(),
+            ),
+            CapabilityCaveat::MaxCallsPerEpoch {
+                capability_id: "network_egress".to_string(),
+                max_calls: 100,
+            },
+        ];
+        assert_eq!(weaker_caveats.len(), admitted.caveats().len());
+        for (changed_index, weaker) in weaker_caveats.into_iter().enumerate() {
+            let mut candidate = root.clone();
+            for (index, signed) in admitted.caveats().iter().enumerate() {
+                let caveat = if index == changed_index {
+                    weaker.clone()
+                } else {
+                    signed.caveat.clone()
+                };
+                candidate = candidate.attenuate(signed.layer, caveat).unwrap();
+            }
+            assert_eq!(candidate.caveats().len(), admitted.caveats().len());
+            assert!(candidate.verify(Some(&pubkey), &root_checkpoint).is_ok());
+            assert_eq!(
+                candidate.verify(Some(&pubkey), &checkpoint),
+                Err(AttenuationError::RequiredPrefixMismatch {
+                    required_caveat_count: admitted.caveats().len(),
+                }),
+                "rewritten required caveat {changed_index} must fail"
+            );
+            assert_eq!(
+                candidate
+                    .to_enforcement_engine(Some(&pubkey), &checkpoint)
+                    .err(),
+                Some(AttenuationError::RequiredPrefixMismatch {
+                    required_caveat_count: admitted.caveats().len(),
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn macaroon_checkpoint_binds_the_root_even_without_required_caveats() {
+        let (pubkey, root, _) = locally_admitted_envelope_fixture();
+        let checkpoint =
+            CapabilityEnvelopeCheckpoint::from_trusted_parts(0, root.tail_tag_hex()).unwrap();
+        assert!(root.verify(Some(&pubkey), &checkpoint).is_ok());
+
+        let wrong_checkpoint =
+            CapabilityEnvelopeCheckpoint::from_trusted_parts(0, &"0".repeat(64)).unwrap();
+        assert_eq!(
+            root.verify(Some(&pubkey), &wrong_checkpoint),
+            Err(AttenuationError::RequiredPrefixMismatch {
+                required_caveat_count: 0,
+            })
+        );
+
+        let foreign_contract = make_contract(
+            "another-genuine-contract",
+            "another-extension",
+            test_capabilities(),
+            "signer-A",
+            SCHEMA_VERSION,
+            1_700_000_000_000,
+        );
+        let foreign =
+            MacaroonCapabilityEnvelope::from_signed_contract(foreign_contract, &pubkey).unwrap();
+        assert_eq!(
+            foreign.verify(Some(&pubkey), &checkpoint),
+            Err(AttenuationError::RequiredPrefixMismatch {
+                required_caveat_count: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn macaroon_checkpoint_never_substitutes_for_a_valid_contract_signature() {
+        let (pubkey, mut candidate, _) = locally_admitted_envelope_fixture();
+        let RootAuthorityAnchor::SignedCapabilityContract { contract } = &mut candidate.root else {
+            panic!("expected a signed-contract fixture");
+        };
+        contract.capabilities[0].max_calls_per_epoch += 1;
+        let (_, tag) = compute_signed_contract_root(contract).unwrap();
+        candidate.tail_tag_hex = hex::encode(tag);
+        // Even a checkpoint matching these public tags cannot authorize a contract
+        // whose capabilities were changed without a fresh publisher signature.
+        let checkpoint =
+            CapabilityEnvelopeCheckpoint::from_trusted_parts(0, candidate.tail_tag_hex()).unwrap();
+        assert_eq!(
+            candidate.verify(Some(&pubkey), &checkpoint),
+            Err(AttenuationError::InvalidRootSignature)
+        );
+        assert_eq!(
+            candidate
+                .to_enforcement_engine(Some(&pubkey), &checkpoint)
+                .err(),
+            Some(AttenuationError::InvalidRootSignature)
+        );
+    }
+
+    #[test]
+    fn macaroon_checkpoint_preserves_suffix_monotonicity_and_tag_checks() {
+        let (pubkey, _, admitted) = locally_admitted_envelope_fixture();
+        let checkpoint = CapabilityEnvelopeCheckpoint::from_trusted_parts(
+            admitted.caveats().len(),
+            admitted.tail_tag_hex(),
+        )
+        .unwrap();
+        let valid_suffix = admitted
+            .attenuate(
+                AttenuationLayer::ModuleImportEdge,
+                CapabilityCaveat::MaxCallsPerEpoch {
+                    capability_id: "network_egress".to_string(),
+                    max_calls: 10,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            valid_suffix
+                .verify(Some(&pubkey), &checkpoint)
+                .unwrap()
+                .call_budget_for("network_egress"),
+            Some(10)
+        );
+
+        let suffix_index = admitted.caveats().len();
+        for (layer, max_calls) in [
+            (AttenuationLayer::RegistryAdmission, 10),
+            (AttenuationLayer::ModuleImportEdge, 26),
+        ] {
+            let mut invalid = valid_suffix.clone();
+            let caveat = CapabilityCaveat::MaxCallsPerEpoch {
+                capability_id: "network_egress".to_string(),
+                max_calls,
+            };
+            let prior_tag = decode_hex_tag(admitted.tail_tag_hex()).unwrap();
+            let tag = compute_caveat_hmac(&prior_tag, suffix_index, layer, &caveat).unwrap();
+            invalid.caveats[suffix_index] = SignedCaveat {
+                layer,
+                caveat,
+                caveat_tag_hex: hex::encode(tag),
+            };
+            invalid.tail_tag_hex = hex::encode(tag);
+            if layer == AttenuationLayer::RegistryAdmission {
+                assert!(matches!(
+                    invalid.verify(Some(&pubkey), &checkpoint),
+                    Err(AttenuationError::LayerOrderViolation { .. })
+                ));
+            } else {
+                assert!(matches!(
+                    invalid.verify(Some(&pubkey), &checkpoint),
+                    Err(AttenuationError::PrivilegeAmplification { .. })
+                ));
+            }
+        }
+
+        let mut invalid_step = valid_suffix.clone();
+        invalid_step.caveats[suffix_index].caveat_tag_hex = "0".repeat(64);
+        assert_eq!(
+            invalid_step.verify(Some(&pubkey), &checkpoint),
+            Err(AttenuationError::TagMismatch {
+                step: Some(suffix_index),
+            })
+        );
+        let mut invalid_tail = valid_suffix;
+        invalid_tail.tail_tag_hex = "0".repeat(64);
+        assert_eq!(
+            invalid_tail.verify(Some(&pubkey), &checkpoint),
+            Err(AttenuationError::TagMismatch { step: None })
+        );
+    }
+
+    #[test]
+    fn macaroon_checkpoint_accepts_the_maximum_prefix_and_refuses_excess_caveats() {
+        let pubkey = test_signing_key().verifying_key();
+        let mut admitted =
+            MacaroonCapabilityEnvelope::from_signed_contract(test_contract(), &pubkey).unwrap();
+        for _ in 0..MAX_CAVEATS_PER_ENVELOPE {
+            admitted = admitted
+                .attenuate(
+                    AttenuationLayer::DeployReleasePolicy,
+                    CapabilityCaveat::MaxCallsPerEpoch {
+                        capability_id: "fs.read".to_string(),
+                        max_calls: 1,
+                    },
+                )
+                .unwrap();
+        }
+        let checkpoint = CapabilityEnvelopeCheckpoint::from_trusted_parts(
+            MAX_CAVEATS_PER_ENVELOPE,
+            admitted.tail_tag_hex(),
+        )
+        .unwrap();
+        assert_eq!(
+            admitted
+                .verify(Some(&pubkey), &checkpoint)
+                .unwrap()
+                .call_budget_for("fs.read"),
+            Some(1)
+        );
+        let last = admitted.caveats.last().unwrap().clone();
+        assert_eq!(
+            admitted.attenuate(last.layer, last.caveat.clone()),
+            Err(AttenuationError::CaveatLimitExceeded {
+                max_caveats: MAX_CAVEATS_PER_ENVELOPE,
+            })
+        );
+        admitted.caveats.push(last);
+        assert_eq!(
+            admitted.verify(Some(&pubkey), &checkpoint),
+            Err(AttenuationError::CaveatLimitExceeded {
+                max_caveats: MAX_CAVEATS_PER_ENVELOPE,
+            })
+        );
+    }
+
+    fn locally_approved_publisher_envelope_fixture() -> (VerifyingKey, MacaroonCapabilityEnvelope) {
         let key = test_signing_key();
         let pubkey = key.verifying_key();
         let env = MacaroonCapabilityEnvelope::from_verified_publisher_approval(
@@ -5110,23 +5618,125 @@ mod tests {
                 },
             ],
         )
-        .unwrap()
-        .attenuate(
-            AttenuationLayer::DeployReleasePolicy,
-            CapabilityCaveat::AllowedCapabilities(["console".to_string()].into()),
-        )
-        .unwrap()
-        .attenuate(
-            AttenuationLayer::DeployReleasePolicy,
-            CapabilityCaveat::MaxCallsPerEpoch {
-                capability_id: "console".to_string(),
-                max_calls: 2,
-            },
+        .unwrap();
+        (pubkey, env)
+    }
+
+    #[test]
+    fn macaroon_checkpoint_rejects_substituted_approval_metadata_and_capabilities() {
+        let (pubkey, approved_root) = locally_approved_publisher_envelope_fixture();
+        let required_caveat = CapabilityCaveat::AllowedCapabilities(["console".to_string()].into());
+        let admitted = approved_root
+            .attenuate(
+                AttenuationLayer::DeployReleasePolicy,
+                required_caveat.clone(),
+            )
+            .unwrap();
+        // These fixtures model facts retained after independent approval validation,
+        // not a claim that the metadata-only builder establishes publisher trust.
+        let root_checkpoint =
+            CapabilityEnvelopeCheckpoint::from_trusted_parts(0, approved_root.tail_tag_hex())
+                .unwrap();
+        let checkpoint = CapabilityEnvelopeCheckpoint::from_trusted_parts(
+            admitted.caveats().len(),
+            admitted.tail_tag_hex(),
         )
         .unwrap();
+        assert!(admitted.verify(Some(&pubkey), &checkpoint).is_ok());
 
+        for changed_field in 0..9 {
+            let RootAuthorityAnchor::VerifiedPublisherApproval {
+                publisher_public_key_hex,
+                mut manifest_sha256,
+                mut artifact_sha256,
+                mut capsule_digest,
+                mut graph_input_hash,
+                mut policy_revision,
+                mut authority_commitment,
+                mut initial_capabilities,
+            } = approved_root.root.clone()
+            else {
+                panic!("expected a publisher-approval fixture");
+            };
+            assert_eq!(publisher_public_key_hex, hex::encode(pubkey.as_bytes()));
+            let foreign_digest = format!("sha256:{}", "f".repeat(64));
+            match changed_field {
+                0 => manifest_sha256 = foreign_digest,
+                1 => artifact_sha256 = foreign_digest,
+                2 => capsule_digest = foreign_digest,
+                3 => graph_input_hash = foreign_digest,
+                4 => policy_revision = "foreign-policy".to_string(),
+                5 => authority_commitment = foreign_digest,
+                6 => initial_capabilities[0].max_calls_per_epoch = 100,
+                7 => initial_capabilities[0].scope = "runtime:foreign-console".to_string(),
+                _ => initial_capabilities.push(CapabilityEntry {
+                    capability_id: "network_egress".to_string(),
+                    scope: "network:egress".to_string(),
+                    max_calls_per_epoch: 100,
+                }),
+            }
+            // Public metadata and the same publisher key are sufficient to build
+            // a self-consistent candidate, but cannot replace the admitted facts.
+            let candidate_root = MacaroonCapabilityEnvelope::from_verified_publisher_approval(
+                &pubkey,
+                manifest_sha256,
+                artifact_sha256,
+                capsule_digest,
+                graph_input_hash,
+                policy_revision,
+                authority_commitment,
+                initial_capabilities,
+            )
+            .unwrap();
+            assert_eq!(
+                candidate_root.verify(Some(&pubkey), &root_checkpoint),
+                Err(AttenuationError::RequiredPrefixMismatch {
+                    required_caveat_count: 0,
+                })
+            );
+            let candidate = candidate_root
+                .attenuate(
+                    AttenuationLayer::DeployReleasePolicy,
+                    required_caveat.clone(),
+                )
+                .unwrap();
+            assert_eq!(
+                candidate.verify(Some(&pubkey), &checkpoint),
+                Err(AttenuationError::RequiredPrefixMismatch {
+                    required_caveat_count: 1,
+                }),
+                "substituted approval field {changed_field} must fail"
+            );
+        }
+    }
+
+    #[test]
+    fn macaroon_envelope_materializes_drift_free_enforcement_engine() {
+        let (pubkey, root) = locally_approved_publisher_envelope_fixture();
+        let env = root
+            .attenuate(
+                AttenuationLayer::DeployReleasePolicy,
+                CapabilityCaveat::AllowedCapabilities(["console".to_string()].into()),
+            )
+            .unwrap()
+            .attenuate(
+                AttenuationLayer::DeployReleasePolicy,
+                CapabilityCaveat::MaxCallsPerEpoch {
+                    capability_id: "console".to_string(),
+                    max_calls: 2,
+                },
+            )
+            .unwrap();
+
+        // The fixture models metadata retained by an independently authenticated
+        // admission decision; the builder itself does not authenticate approval.
+        let checkpoint = CapabilityEnvelopeCheckpoint::from_trusted_parts(
+            env.caveats().len(),
+            env.tail_tag_hex(),
+        )
+        .unwrap();
         let mut engine = env
-            .to_enforcement_engine(Some(&pubkey))
+            .to_enforcement_engine(Some(&pubkey), &checkpoint)
             .expect("materialize enforcement engine");
         assert!(!engine.is_permitted("process_spawn"));
         assert_eq!(

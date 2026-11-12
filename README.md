@@ -1748,7 +1748,7 @@ feature.
 | **Counterfactual simulator** | `tools::counterfactual_replay`, `replay::time_travel_engine` + `sdk/verifier` | Re-decide a recorded incident under an alternative `--policy`; emit diff of decisions, blocked actions, and evidence | `incident counterfactual`: `--model production` re-decides run-captured host effects with the run path's per-profile capability table; `--model synthetic` scores recorded evidence. `time_travel_engine` is library only |
 | **Compatibility lockstep oracle** | `runtime::lockstep_harness`, `api::compat_gate` | `verify lockstep` defaults to Bun+franken dyad; corpus L1 treats Node as spec (matching only Bun stays fail; `child_process` aborts remain fail) | `lockstep_harness`: yes (`verify lockstep`). `compat_gate`: `feature:control-plane` |
 | **Migration autopilot** | `migration::*`, BPET migration gate | Audit → rewrite → validate → rollout; Ed25519-signed `migrate rollout` transitions synced with `DeploymentStore`; unsigned JSON `MigrationRollbackPlan`; `migrate validate` is static+smoke, not `verify lockstep` | `migration::*`: yes (`migrate`). BPET migration gate: `feature:admin-tools` |
-| **Signed extension registry** | `supply_chain::extension_registry`; `registry::*`, `extensions::artifact_contract` | Ed25519-signed artifacts, Macaroon-style HMAC-SHA256 attenuated capability envelopes (`MacaroonCapabilityEnvelope`), schema enforcement, assurance levels, GC, search | Yes: `registry`, `run --registry-artifact`, and `deploy` enforce `extensions::artifact_contract` + `supply_chain::extension_registry`. `registry::*`: `feature:admin-tools` |
+| **Signed extension registry** | `supply_chain::extension_registry`; `registry::*`, `extensions::artifact_contract` | Ed25519-signed artifacts, capability-envelope commitments (`MacaroonCapabilityEnvelope`) verified against independently retained required-prefix checkpoints (`CapabilityEnvelopeCheckpoint`), schema enforcement, assurance levels, GC, search | Yes: `registry`, `run --registry-artifact`, and `deploy` enforce `extensions::artifact_contract` + `supply_chain::extension_registry`. `registry::*`: `feature:admin-tools` |
 | **Threshold signature verification** | `security::threshold_sig` | k-of-n quorum, cached configurations, domain-separated and constant-time verification | Library only |
 | **MMR proofs** | `control_plane::mmr_proofs` | Merkle-Mountain-Range inclusion/prefix proofs, raw-hash internals, rebuild/sync from marker streams | Library only |
 | **Audience tokens** | `control_plane::audience_token` | Expiry, attenuation, domain separation, token chains with depth/root/leaf accessors, replay-resistant nonce window | Library only |
@@ -4153,6 +4153,7 @@ code, not a sandbox for running arbitrary verifier programs.
 | `signed-bundle` | `authenticated_sdk_replay_bundle`: the distinct canonical SDK bundle format | Required detached `signature_hex` (Python), `signatureHex` (JS) or `--signature-hex` (CLI) |
 | `resolution-receipt` | `authenticated_resolution_decision`: signed package admission or rejection, profile, capability-budget mode and module-graph commitment | Embedded Ed25519 signature checked under the caller's resolver-authority key |
 | `publisher-source` | `authenticated_publisher_source_content`: publisher-signed registration, source-capsule byte integrity, and declared execution ceilings | Required detached registration `signature_hex` (Python), `signatureHex` (JS) or `--signature-hex` (CLI), checked under the caller's publisher key |
+| `publisher-source-trust` | `authenticated_publisher_source_trust`: authenticated source, fresh signed revocations, and optional signed version lineage | Publisher signature, independent revocation/provenance authorities, evaluation time, and maximum revocation age |
 
 To audit a module-resolution decision, supply the independently trusted
 resolver key and the original canonical signed receipt:
@@ -4224,6 +4225,74 @@ reconstructing resolution or executing JavaScript. Success does not certify
 current revocation, registry lifecycle, provenance, graph completeness, or
 enforcement of the declared ceilings. Deployment still performs those applicable
 admission and execution checks through the native runtime.
+
+#### Verify publisher revocation and provenance offline
+
+Use `publisher-source-trust` when the audit requires a signed revocation list
+and optional signed provenance. Preserve the exact bytes of each signed document:
+
+```json
+{
+  "schema_version": "franken-verifier/publisher-source-trust-input/v1",
+  "manifest_base64": "<exact signed registration bytes, base64>",
+  "capsule_base64": "<raw FNSGCAP1 capsule, base64>",
+  "revocation_list_base64": "<exact signed revocation list bytes, base64>",
+  "revocation_signature_hex": "<detached revocation signature, lowercase hex>",
+  "provenance": {
+    "chain_base64": "<exact signed provenance chain bytes, base64>",
+    "signature_hex": "<detached provenance signature, lowercase hex>"
+  }
+}
+```
+
+Supply the trusted authorities and freshness policy independently of that packet:
+
+```bash
+franken-verifier verify --format publisher-source-trust \
+  --trusted-key-hex "$TRUSTED_PUBLISHER_PUBLIC_KEY_HEX" \
+  --signature-hex "$REGISTRATION_SIGNATURE_HEX" \
+  --trusted-revocation-key-hex "$TRUSTED_REVOCATION_PUBLIC_KEY_HEX" \
+  --trusted-provenance-key-hex "$TRUSTED_PROVENANCE_PUBLIC_KEY_HEX" \
+  --evaluation-time "$EVALUATION_TIME_RFC3339" \
+  --max-revocation-age-secs 3600 < publisher-source-trust.json
+```
+
+The caller selects the trusted audit time, including a historical time for a
+historical audit. Issuance and evaluation times use non-leap RFC3339 with at most
+nine fractional digits. The verifier requires `issued_at <= evaluation_time` and an
+age strictly less than the positive freshness window, preserving nanosecond
+boundaries. It reports `REVOCATION_NOT_YET_VALID`, `REVOCATION_STALE`, or
+`PUBLISHER_REVOKED` for those refusals. Numeric package-version matching prevents
+leading-zero aliases from escaping revocation, including scoped package names.
+
+For revocation without provenance, omit both the `provenance` member and its
+authority option. Either without the other is rejected. Null provenance,
+duplicate/unknown fields, embedded policy overrides, noncanonical encodings,
+and malformed signatures are rejected. Provenance must bind the same publisher,
+package, registration bytes, and source artifact, with hash-linked versions
+that strictly increase numerically. Each revocation/provenance document is
+bounded to 512 KiB, and a provenance chain contains at most 256 links.
+
+The language bindings expose the same policy. Python accepts
+`trusted_revocation_public_key_hex`, optional
+`trusted_provenance_public_key_hex`, `evaluation_time`, and
+`max_revocation_age_secs`. JavaScript/TypeScript accepts
+`trustedRevocationPublicKeyHex`, optional `trustedProvenancePublicKeyHex`,
+`evaluationTime`, and `maxRevocationAgeSecs`. Select
+`format="publisher-source-trust"` / `format: "publisher-source-trust"` and
+supply the detached registration signature as for `publisher-source`.
+
+Pass the maximum age as a canonical positive `u64` decimal **string**, such as
+`"3600"`; the returned JSON also uses a string to preserve the full range. The
+result places the existing source facts under `facts.source` and adds the exact
+revocation/provenance document hashes, authority public keys, issuance/evaluation
+times, freshness window, and provenance link count. Clients validate those facts
+against the requested authorities and policy and reject a weaker result scope.
+
+The verifier neither consults the host clock nor fetches a newer revocation list.
+This scope establishes freshness relative to the selected inputs; it does not
+establish that a list is the newest published list, reconstruct the native
+module graph, or authorize workload execution.
 
 These scopes do not execute a captured guest or establish original-policy
 equivalence. Integrity-only SDK bundles are never returned as authenticated

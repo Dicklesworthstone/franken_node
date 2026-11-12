@@ -13,8 +13,14 @@
 //! `.env` family, PEM/key/SSH/PKCS#12/credential files) has its bytes retained
 //! as a secret *sample* (bounded). Explicit, capability-authorized environment
 //! read responses are also sensitive sources, regardless of the variable name.
-//! This provider never reads the ambient process environment itself. Descriptor
-//! reads carry the classification captured at successful open and any later
+//! This provider never reads the ambient process environment itself. Install it
+//! outside `EnvironmentSnapshotHostIo`: snapshot reads return directly without
+//! calling the inner provider, so placing the snapshot outside this gate would
+//! skip secret-sample observation. The native product composes cancellation,
+//! flow observation, the optional environment snapshot, SSRF, and the effect WAL
+//! in that order, with the sandboxed mechanism innermost.
+//!
+//! Descriptor reads carry the classification captured at successful open and any later
 //! inherited source classification; unknown descriptors are treated as sensitive.
 //! Copy and rename propagate sensitivity before the effect, including a copy
 //! that writes before failing. Ordinary writes, append and descriptor writes
@@ -304,7 +310,9 @@ impl SecretSample {
     }
 
     fn occurs_in(&self, outbound: &[u8]) -> bool {
-        self.patterns.iter().any(|pattern| pattern.occurs_in(outbound))
+        self.patterns
+            .iter()
+            .any(|pattern| pattern.occurs_in(outbound))
             || encoded_secret::contains(
                 &self.patterns[0].bytes,
                 &self.patterns[0].failure,
@@ -1147,7 +1155,9 @@ mod tests {
 
     #[test]
     fn encoded_samples_block_both_base64_alphabets_padding_and_hex_case() {
-        use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
+        use base64::engine::general_purpose::{
+            STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD,
+        };
         for length in [8, 9, 10] {
             let gate = gate();
             // Force both alphabet-specific characters and all padding lengths.
@@ -1312,10 +1322,11 @@ mod tests {
                 for encoded in [false, true] {
                     let gate = gate();
                     gate.record_secret(b"secret-token");
-                    gate.lineage
-                        .lock()
-                        .expect("lineage")
-                        .prepare_transfer(FsOperation::Symlink, "cache", "alias");
+                    gate.lineage.lock().expect("lineage").prepare_transfer(
+                        FsOperation::Symlink,
+                        "cache",
+                        "alias",
+                    );
                     open_test_descriptor(&gate, "alias", 7);
                     let data = if encoded {
                         hex::encode(b"secret-token").into_bytes()
@@ -1349,7 +1360,10 @@ mod tests {
                             result: FsMetaResult::Unit,
                         })
                     };
-                    assert_eq!(dispatch_outcome(&gate, &request, expected.clone()), expected);
+                    assert_eq!(
+                        dispatch_outcome(&gate, &request, expected.clone()),
+                        expected
+                    );
                     {
                         let lineage = gate.lineage.lock().expect("lineage");
                         assert!(lineage.is_sensitive("cache"));
@@ -1386,7 +1400,10 @@ mod tests {
                     result: FsMetaResult::Unsigned(8),
                 })
             };
-            assert_eq!(dispatch_outcome(&gate, &request, expected.clone()), expected);
+            assert_eq!(
+                dispatch_outcome(&gate, &request, expected.clone()),
+                expected
+            );
             {
                 let lineage = gate.lineage.lock().expect("lineage");
                 assert!(lineage.is_sensitive("cache"));
@@ -1420,7 +1437,10 @@ mod tests {
             let expected = Err(HostIoError::Io {
                 detail: "fixture: descriptor write failed".into(),
             });
-            assert_eq!(dispatch_outcome(&gate, &request, expected.clone()), expected);
+            assert_eq!(
+                dispatch_outcome(&gate, &request, expected.clone()),
+                expected
+            );
             {
                 let lineage = gate.lineage.lock().expect("lineage");
                 assert!(lineage.incomplete);
@@ -1460,7 +1480,10 @@ mod tests {
                 let expected = Err(HostIoError::Io {
                     detail: "fixture: public write failure".into(),
                 });
-                assert_eq!(dispatch_outcome(&gate, &request, expected.clone()), expected);
+                assert_eq!(
+                    dispatch_outcome(&gate, &request, expected.clone()),
+                    expected
+                );
             }
         }
         assert!(!gate.lineage.lock().expect("lineage").is_sensitive("public"));
@@ -1519,11 +1542,13 @@ mod tests {
         for poison in [false, true] {
             let gate = gate();
             if poison {
-                assert!(std::panic::catch_unwind(|| {
-                    let _guard = gate.secrets.lock().expect("sample state");
-                    panic!("fixture: poison sample tracking");
-                })
-                .is_err());
+                assert!(
+                    std::panic::catch_unwind(|| {
+                        let _guard = gate.secrets.lock().expect("sample state");
+                        panic!("fixture: poison sample tracking");
+                    })
+                    .is_err()
+                );
             } else {
                 gate.record_secret(b"x");
             }
@@ -1562,7 +1587,10 @@ mod tests {
         let expected = Ok(HostIoResponse::EnvRead {
             value: Some("secret-token".into()),
         });
-        assert_eq!(dispatch_outcome(&gate, &request, expected.clone()), expected);
+        assert_eq!(
+            dispatch_outcome(&gate, &request, expected.clone()),
+            expected
+        );
         assert_denied(&gate, b"header:secret-token:trailer");
         assert_denied(&gate, STANDARD.encode(b"secret-token").as_bytes());
         assert_denied(&gate, hex::encode_upper(b"secret-token").as_bytes());
@@ -1587,7 +1615,10 @@ mod tests {
                 detail: "fixture: environment unavailable".into(),
             }),
         ] {
-            assert_eq!(dispatch_outcome(&gate, &request, expected.clone()), expected);
+            assert_eq!(
+                dispatch_outcome(&gate, &request, expected.clone()),
+                expected
+            );
         }
         let samples = gate.secrets.lock().expect("sample state");
         assert!(samples.samples.is_empty());
@@ -1605,8 +1636,17 @@ mod tests {
         let outcome = gate.gate(&request, &[], &|_, _| {
             panic!("missing environment capability must never delegate")
         });
-        assert!(matches!(outcome, Err(HostIoError::CapabilityMissing { .. })));
-        assert!(gate.secrets.lock().expect("sample state").samples.is_empty());
+        assert!(matches!(
+            outcome,
+            Err(HostIoError::CapabilityMissing { .. })
+        ));
+        assert!(
+            gate.secrets
+                .lock()
+                .expect("sample state")
+                .samples
+                .is_empty()
+        );
         assert!(gate.gate_outbound(b"public payload").is_ok());
         dispatch_outcome(
             &gate,

@@ -3985,7 +3985,9 @@ fn deploy_supervise_microreboots_across_native_panics_and_certifies_eprocess_pos
 #[test]
 fn native_workspace_release_enforces_attenuated_macaroon_capability_envelope() {
     use frankenengine_node::config::Config;
-    use frankenengine_node::extensions::artifact_contract::{AttenuationLayer, CapabilityCaveat};
+    use frankenengine_node::extensions::artifact_contract::{
+        AttenuationLayer, CapabilityCaveat, CapabilityEnvelopeCheckpoint,
+    };
     use std::collections::BTreeSet;
     use std::os::unix::fs::symlink;
 
@@ -4128,9 +4130,14 @@ fn native_workspace_release_enforces_attenuated_macaroon_capability_envelope() {
         .approval
         .publisher_verifying_key()
         .expect("publisher verifying key");
+    let checkpoint = CapabilityEnvelopeCheckpoint::from_trusted_parts(
+        envelope.caveats().len(),
+        envelope.tail_tag_hex(),
+    )
+    .expect("checkpoint from locally regenerated admitted policy");
     let effective = envelope
-        .verify(Some(&publisher_key))
-        .expect("verify HMAC caveat chain");
+        .verify(Some(&publisher_key), &checkpoint)
+        .expect("verify required prefix and caveat commitment chain");
     assert!(!effective.permits_capability("process_spawn"));
     assert!(effective.permits_capability("module_load"));
 
@@ -4149,7 +4156,7 @@ fn native_workspace_release_enforces_attenuated_macaroon_capability_envelope() {
     let mut tampered = envelope.clone();
     tampered.tail_tag_hex = "00".repeat(32);
     assert!(
-        tampered.verify(Some(&publisher_key)).is_err(),
-        "forged HMAC tail tag must fail closed"
+        tampered.verify(Some(&publisher_key), &checkpoint).is_err(),
+        "modified commitment tail tag must fail closed"
     );
 }

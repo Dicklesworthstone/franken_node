@@ -19,10 +19,14 @@ for case in cases:
         result = verify_artifact(data, case["anchor"], verifier=executable,
                                  format=case["format"], signature_hex=case.get("signature_hex"),
                                  trusted_run_public_key_hex=case.get("run_anchor"),
-                                 trusted_runtime_public_key_hex=case.get("runtime_anchor"))
+                                 trusted_runtime_public_key_hex=case.get("runtime_anchor"),
+                                 trusted_revocation_public_key_hex=case.get("revocation_anchor"),
+                                 trusted_provenance_public_key_hex=case.get("provenance_anchor"),
+                                 evaluation_time=case.get("evaluation_time"),
+                                 max_revocation_age_secs=case.get("max_revocation_age_secs"))
     except VerifierError as error:
         assert error.code == case["expected"], (case["name"], error.code, case["expected"])
-        if case["format"] == "publisher-source":
+        if case["format"] in ("publisher-source", "publisher-source-trust"):
             assert "PRIVATE-" not in str(error)
         print(json.dumps({"case": case["name"], "result": error.code}), flush=True)
     else:
@@ -53,6 +57,10 @@ for case in cases:
             assert result["scope"] == "authenticated_publisher_source_content"
             assert result["facts"] == case["publisher_facts"]
             assert result["facts"]["capsule"]["graph_hash_recomputed"] is False
+        if case["format"] == "publisher-source-trust":
+            assert result["scope"] == "authenticated_publisher_source_trust"
+            assert result["facts"] == case["publisher_trust_facts"]
+            assert result["facts"]["source"]["capsule"]["graph_hash_recomputed"] is False
         if case["format"] == "counterfactual-receipt":
             assert result["scope"] == "authenticated_counterfactual_receipt"
             assert result["facts"]["mode"] == case["cf_mode"]
@@ -156,6 +164,81 @@ for mode in publisher_controls:
         print(json.dumps({"case": f"protocol_{mode}", "result": error.code}), flush=True)
     else:
         raise AssertionError(f"protocol_{mode}")
+publisher_trust_options = {
+    "format": "publisher-source-trust", "signature_hex": "00" * 64,
+    "trusted_revocation_public_key_hex": "11" * 32,
+    "trusted_provenance_public_key_hex": "22" * 32,
+    "evaluation_time": "2026-10-24T00:00:30.123456789Z",
+    "max_revocation_age_secs": "60",
+}
+publisher_trust_inputs = [
+    ("trust_missing_revocation_key", {"trusted_revocation_public_key_hex": None}, "REVOCATION_ANCHOR_INVALID"),
+    ("trust_bad_revocation_key", {"trusted_revocation_public_key_hex": "00"}, "REVOCATION_ANCHOR_INVALID"),
+    ("trust_bad_provenance_key", {"trusted_provenance_public_key_hex": "00"}, "PROVENANCE_ANCHOR_INVALID"),
+    ("trust_missing_time", {"evaluation_time": None}, "EVALUATION_TIME_INVALID"),
+    ("trust_invalid_calendar_date", {"evaluation_time": "2026-02-30T00:00:00Z"}, "EVALUATION_TIME_INVALID"),
+    ("trust_leap_second", {"evaluation_time": "2026-10-24T00:00:60Z"}, "EVALUATION_TIME_INVALID"),
+    ("trust_excess_time_precision", {"evaluation_time": "2026-10-24T00:00:30.1234567890Z"}, "EVALUATION_TIME_INVALID"),
+    ("trust_time_trailing_newline", {"evaluation_time": "2026-10-24T00:00:30Z\n"}, "EVALUATION_TIME_INVALID"),
+    ("trust_missing_window", {"max_revocation_age_secs": None}, "REVOCATION_FRESHNESS_POLICY_INVALID"),
+    ("trust_numeric_window", {"max_revocation_age_secs": 60}, "REVOCATION_FRESHNESS_POLICY_INVALID"),
+    ("trust_zero_window", {"max_revocation_age_secs": "0"}, "REVOCATION_FRESHNESS_POLICY_INVALID"),
+    ("trust_noncanonical_window", {"max_revocation_age_secs": "060"}, "REVOCATION_FRESHNESS_POLICY_INVALID"),
+    ("trust_overflow_window", {"max_revocation_age_secs": "18446744073709551616"}, "REVOCATION_FRESHNESS_POLICY_INVALID"),
+    ("trust_window_trailing_newline", {"max_revocation_age_secs": "60\n"}, "REVOCATION_FRESHNESS_POLICY_INVALID"),
+    ("trust_options_wrong_format", {"format": "publisher-source"}, "INPUT_INVALID"),
+    ("trust_missing_source_signature", {"signature_hex": None}, "SIGNATURE_MALFORMED"),
+]
+for label, overrides, expected in publisher_trust_inputs:
+    try:
+        # Invalid trusted inputs must fail before attempting any child process.
+        verify_artifact(b"{}", cases[0]["anchor"], verifier=str(root / "does-not-exist"),
+                        **{**publisher_trust_options, **overrides})
+    except VerifierError as error:
+        assert error.code == expected and error.exit_code is None, (label, error.code)
+        print(json.dumps({"case": label, "result": error.code}), flush=True)
+    else:
+        raise AssertionError(label)
+publisher_trust_controls = [
+    "publisher_trust_scope_downgrade", "publisher_trust_format_downgrade",
+    "publisher_trust_wrong_revocation_anchor", "publisher_trust_wrong_provenance_anchor",
+    "publisher_trust_missing_provenance", "publisher_trust_unrequested_provenance",
+    "publisher_trust_partial_provenance", "publisher_trust_zero_provenance",
+    "publisher_trust_overflow_provenance", "publisher_trust_unsafe_provenance",
+    "publisher_trust_unknown_field", "publisher_trust_bad_revocation_digest",
+    "publisher_trust_bad_provenance_digest", "publisher_trust_wrong_evaluation_time",
+    "publisher_trust_rounded_evaluation_time", "publisher_trust_wrong_window",
+    "publisher_trust_rounded_window", "publisher_trust_future_revocations",
+    "publisher_trust_stale_revocations", "publisher_trust_malformed_time",
+    "publisher_trust_nested_wrong_signer", "publisher_trust_nested_authority_missing",
+    "publisher_trust_nested_unknown_field", "publisher_trust_nested_non_object",
+]
+for mode in publisher_trust_controls:
+    options = dict(publisher_trust_options)
+    if mode == "publisher_trust_unrequested_provenance":
+        options["trusted_provenance_public_key_hex"] = None
+    try:
+        verify_artifact(json.dumps({"protocol_control": mode}).encode(), cases[0]["anchor"],
+                        verifier=str(root / "fake_verifier"), **options)
+    except VerifierError as error:
+        assert error.code == "PROTOCOL_INVALID", (mode, error.code)
+        print(json.dumps({"case": f"protocol_{mode}", "result": error.code}), flush=True)
+    else:
+        raise AssertionError(f"protocol_{mode}")
+publisher_trust_positives = [
+    ("publisher_trust_valid", {}),
+    ("publisher_trust_valid_no_provenance", {"trusted_provenance_public_key_hex": None}),
+    ("publisher_trust_equivalent_offset", {"evaluation_time": "2026-10-24T01:00:30.123456789+01:00"}),
+    ("publisher_trust_large_window", {"max_revocation_age_secs": "18446744073709551615"}),
+    ("publisher_trust_before_boundary", {}),
+]
+for mode, overrides in publisher_trust_positives:
+    result = verify_artifact(json.dumps({"protocol_control": mode}).encode(), cases[0]["anchor"],
+                             verifier=str(root / "fake_verifier"),
+                             **{**publisher_trust_options, **overrides})
+    assert result["scope"] == "authenticated_publisher_source_trust", mode
+    print(json.dumps({"case": f"protocol_{mode}", "result": "verified"}), flush=True)
+
 counterfactual_controls = ["counterfactual_wrong_scope", "counterfactual_invalid_mode",
                            "counterfactual_single_count_mismatch", "counterfactual_zero_count",
                            "counterfactual_unknown_field"]
@@ -179,7 +262,9 @@ for mode in ltv_controls:
         print(json.dumps({"case": f"protocol_{mode}", "result": error.code}), flush=True)
     else:
         raise AssertionError(f"protocol_{mode}")
-print(json.dumps({"consumer": "python", "matrix_cases": len(cases), "client_cases": len(client_controls),
+print(json.dumps({"consumer": "python", "matrix_cases": len(cases),
+                  "client_cases": len(client_controls) + len(publisher_trust_inputs),
                   "protocol_cases": len(controls) + len(run_controls) + len(runtime_controls)
                   + len(resolution_controls) + len(publisher_controls)
+                  + len(publisher_trust_controls) + len(publisher_trust_positives)
                   + len(counterfactual_controls) + len(ltv_controls) + 1, "passed": True}), flush=True)

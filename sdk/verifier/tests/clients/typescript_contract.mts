@@ -9,6 +9,7 @@ export async function audit(data: Uint8Array, anchor: string, executable: string
     if (verified.format === "capsule") return verified.facts.capsule_id;
     if (verified.format === "resolution-receipt") return verified.facts.receipt_id;
     if (verified.format === "publisher-source") return verified.facts.package_name;
+    if (verified.format === "publisher-source-trust") return verified.facts.source.package_name;
     if (verified.format === "counterfactual-receipt") return verified.facts.baseline_integrity_hash;
     if (verified.format === "ltv-evidence") return verified.facts.artifact_id;
     return verified.facts.bundle_id;
@@ -60,4 +61,24 @@ export async function auditResolution(data: Uint8Array, anchor: string, executab
   if (verified.format !== "resolution-receipt") throw new Error("resolution decision required");
   if (verified.facts.decision === "reject") return verified.facts.selected_version;
   return `${verified.facts.module_graph_hash}:${verified.facts.selected_version}`;
+}
+
+export async function auditPublisherSourceTrust(
+  data: Uint8Array, publisherAnchor: string, signature: string, revocationAnchor: string,
+  provenanceAnchor: string | undefined, evaluationTime: string, maxAgeSecs: string, executable: string,
+): Promise<string> {
+  const verified = await verifyArtifact(data, publisherAnchor, {
+    verifier: executable, format: "publisher-source-trust", signatureHex: signature,
+    trustedRevocationPublicKeyHex: revocationAnchor, trustedProvenancePublicKeyHex: provenanceAnchor,
+    evaluationTime, maxRevocationAgeSecs: maxAgeSecs,
+  });
+  if (verified.format !== "publisher-source-trust"
+      || verified.scope !== "authenticated_publisher_source_trust") throw new Error("publisher trust required");
+  const exactWindow: string = verified.facts.max_revocation_age_secs;
+  if (verified.facts.provenance_authority_public_key_hex === null) {
+    const absent: null = verified.facts.provenance_link_count;
+    return verified.facts.source.artifact_sha256 + ":" + exactWindow + ":" + absent;
+  }
+  const linkCount: number = verified.facts.provenance_link_count;
+  return verified.facts.provenance_chain_sha256 + ":" + exactWindow + ":" + linkCount;
 }

@@ -1,10 +1,14 @@
 import { readFileSync } from "node:fs";
+import assert from "node:assert/strict";
 import { resolve } from "node:path";
 import { verifyArtifact, VerifierError } from "./franken_verifier.mjs";
-import type { Verification, EvidenceFormat } from "./franken_verifier.mjs";
+import type { Verification, EvidenceFormat, PublisherSourceTrustFacts } from "./franken_verifier.mjs";
 
 const cases: Array<{ name: string; input_hex: string; anchor: string; format: EvidenceFormat;
-  signature_hex?: string; run_anchor?: string; runtime_anchor?: string; event_count?: number; expected: string; artifact_sha256: string }> =
+  signature_hex?: string; run_anchor?: string; runtime_anchor?: string; event_count?: number;
+  revocation_anchor?: string; provenance_anchor?: string | null; evaluation_time?: string;
+  max_revocation_age_secs?: string; publisher_trust_facts?: PublisherSourceTrustFacts;
+  expected: string; artifact_sha256: string }> =
   JSON.parse(readFileSync("vectors.json", "utf8"));
 const positive = cases.find((item) => item.name === "genuine_cli_incident")!;
 const result: Verification = await verifyArtifact(Buffer.from(positive.input_hex, "hex"), positive.anchor,
@@ -75,4 +79,33 @@ if (cfVerified.format !== "counterfactual-receipt"
     || cfVerified.facts.result_count !== 2) {
   throw new Error("TypeScript counterfactual receipt mismatch");
 }
-console.log(JSON.stringify({ consumer: "typescript", positive: 8, negative: 2, passed: true }));
+let trustPositive = 0;
+let trustNegative = 0;
+for (const source of cases.filter((item) => item.format === "publisher-source-trust")) {
+  try {
+    const verified = await verifyArtifact(Buffer.from(source.input_hex, "hex"), source.anchor, {
+      verifier: resolve("verifier"), format: "publisher-source-trust", signatureHex: source.signature_hex,
+      trustedRevocationPublicKeyHex: source.revocation_anchor,
+      trustedProvenancePublicKeyHex: source.provenance_anchor ?? undefined,
+      evaluationTime: source.evaluation_time, maxRevocationAgeSecs: source.max_revocation_age_secs,
+    });
+    if (source.expected !== "verified" || verified.format !== "publisher-source-trust"
+        || verified.scope !== "authenticated_publisher_source_trust") {
+      throw new Error("TypeScript publisher trust scope mismatch: " + source.name);
+    }
+    assert.deepEqual(verified.facts, source.publisher_trust_facts, source.name);
+    const exactWindow: string = verified.facts.max_revocation_age_secs;
+    if (exactWindow !== source.max_revocation_age_secs
+        || verified.facts.source.capsule.graph_hash_recomputed !== false) {
+      throw new Error("TypeScript publisher trust precision mismatch: " + source.name);
+    }
+    trustPositive += 1;
+  } catch (error: unknown) {
+    if (source.expected === "verified" || !(error instanceof VerifierError)
+        || error.code !== source.expected) throw error;
+    trustNegative += 1;
+  }
+}
+if (trustPositive === 0 || trustNegative === 0) throw new Error("publisher trust matrix is missing");
+console.log(JSON.stringify({ consumer: "typescript", positive: 8 + trustPositive,
+  negative: 2 + trustNegative, publisher_trust_cases: trustPositive + trustNegative, passed: true }));
