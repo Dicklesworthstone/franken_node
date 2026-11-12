@@ -39289,14 +39289,19 @@ fn handle_trust_vef_prove(args: &TrustVefProveArgs) -> Result<()> {
         verified: true,
         policy_constraints: policy_predicates,
     };
-    ev.receipt_chain_commitment = capsule.derive_receipt_chain_commitment(&ev);
+    let expected_commitment = capsule.derive_receipt_chain_commitment(&ev);
+    ev.receipt_chain_commitment = expected_commitment.clone();
     capsule
         .add_evidence(ev)
         .map_err(|err| anyhow::anyhow!("evidence capsule add failed: {err:?}"))?;
     capsule
         .seal()
         .map_err(|err| anyhow::anyhow!("evidence capsule seal failed: {err:?}"))?;
-    let capsule_verdict = capsule.verify_all();
+    let capsule_verdict =
+        capsule.verify_all_with_context(&vef::evidence_capsule::EvidenceVerificationContext {
+            trusted_receipt_chain_commitments: vec![expected_commitment],
+            accepted_proof_types: vec![VEF_ED25519_BACKEND_NAME.to_string()],
+        });
     anyhow::ensure!(
         capsule_verdict.valid,
         "evidence capsule self-verification failed: {:?}",
@@ -39562,6 +39567,11 @@ fn handle_verify_vef_proof(args: &VerifyVefProofArgs) -> Result<()> {
     let recompiled_set = recompiled
         .predicate_set
         .ok_or_else(|| anyhow::anyhow!("recompiled VEF policy yielded no predicate set"))?;
+    let recompiled_predicates = recompiled_set
+        .predicates
+        .values()
+        .map(|pred| pred.predicate_id.clone())
+        .collect::<Vec<_>>();
     let expected_policy_hash = if recompiled_set.policy_snapshot_hash.starts_with("sha256:") {
         recompiled_set.policy_snapshot_hash
     } else {
@@ -39596,8 +39606,31 @@ fn handle_verify_vef_proof(args: &VerifyVefProofArgs) -> Result<()> {
         sig_valid,
         "VEF Ed25519 receipt-window signature verification failed"
     );
+    anyhow::ensure!(
+        bundle.signed_compliance_proof.receipt_window_ref == bundle.window.window_id,
+        "VEF signed compliance proof window_ref `{}` != bundle window `{}`",
+        bundle.signed_compliance_proof.receipt_window_ref,
+        bundle.window.window_id
+    );
 
-    let capsule_verdict = bundle.evidence_capsule.verify_all();
+    let expected_capsule_ev = vef::evidence_capsule::VefEvidence {
+        receipt_chain_commitment: String::new(),
+        proof_id: bundle.signed_compliance_proof.proof_id.clone(),
+        proof_type: VEF_ED25519_BACKEND_NAME.to_string(),
+        window_start: bundle.window.start_index,
+        window_end: bundle.window.end_index.saturating_add(1),
+        verified: true,
+        policy_constraints: recompiled_predicates,
+    };
+    let trusted_commitment = bundle
+        .evidence_capsule
+        .derive_receipt_chain_commitment(&expected_capsule_ev);
+    let capsule_verdict = bundle.evidence_capsule.verify_all_with_context(
+        &vef::evidence_capsule::EvidenceVerificationContext {
+            trusted_receipt_chain_commitments: vec![trusted_commitment],
+            accepted_proof_types: vec![VEF_ED25519_BACKEND_NAME.to_string()],
+        },
+    );
     anyhow::ensure!(
         capsule_verdict.valid,
         "VEF evidence capsule verification failed: {:?}",
@@ -40105,28 +40138,93 @@ fn handle_ops_swarm_handoff(args: &OpsSwarmHandoffArgs) -> Result<()> {
 
     let mut sanitized_env = BTreeMap::new();
     sanitized_env.insert("FRANKEN_NODE_PROFILE".to_string(), "balanced".to_string());
+    let transcript_specs = [
+        (
+            "swarm-doctor-clean",
+            OperatorTranscriptSurface::Doctor,
+            OperatorTranscriptScenarioKind::Clean,
+            "franken-node doctor --json",
+            "DOCTOR_READY",
+            "inspect readiness telemetry before claiming beads",
+            "franken-node ops swarm-handoff --json",
+        ),
+        (
+            "swarm-readiness-blocked",
+            OperatorTranscriptSurface::Readiness,
+            OperatorTranscriptScenarioKind::Blocked,
+            "franken-node ops swarm-handoff --json",
+            "HANDOFF_BLOCKED_DEPENDENCY",
+            "resolve open dependency blockers before claiming bead",
+            "br show <bead-id>",
+        ),
+        (
+            "swarm-closeout-proxy-only",
+            OperatorTranscriptSurface::ValidationCloseout,
+            OperatorTranscriptScenarioKind::ProxyOnly,
+            "franken-node ops evidence-index --json",
+            "CLOSEOUT_PROXY_EVIDENCE_ONLY",
+            "attach direct RCH verification receipt before closing bead",
+            "rch exec -- cargo test -p frankenengine-node",
+        ),
+        (
+            "swarm-budget-stale-sibling",
+            OperatorTranscriptSurface::CommandBudget,
+            OperatorTranscriptScenarioKind::StaleSibling,
+            "python3 scripts/check_sibling_lock_coherence.py",
+            "SIBLING_LOCK_DRIFT",
+            "reconcile sibling Cargo.lock generation before running suite",
+            "python3 scripts/check_sibling_lock_coherence.py --json",
+        ),
+        (
+            "swarm-impact-rch-unavailable",
+            OperatorTranscriptSurface::ImpactMapper,
+            OperatorTranscriptScenarioKind::RchUnavailable,
+            "rch status",
+            "RCH_WORKER_UNAVAILABLE",
+            "check remote compilation worker pool before cargo invocation",
+            "rch workers list",
+        ),
+        (
+            "swarm-traceability-resource-saturated",
+            OperatorTranscriptSurface::TraceabilityAudit,
+            OperatorTranscriptScenarioKind::ResourceSaturated,
+            "python3 scripts/check_reachability.py",
+            "RESOURCE_PRESSURE_THROTTLED",
+            "serialize heavy verification targets under bounded concurrency",
+            "python3 scripts/check_close_reason_quality.py --strict",
+        ),
+    ];
+    let transcripts = transcript_specs
+        .into_iter()
+        .map(
+            |(name, surface, scenario_kind, command, reason_code, hint, next_step)| {
+                OperatorTranscript {
+                    name: name.to_string(),
+                    surface,
+                    scenario_kind,
+                    command: command.to_string(),
+                    sanitized_env: sanitized_env.clone(),
+                    normalized_human: format!(
+                        "{name}: reason_code={reason_code} hint={hint} next={next_step}"
+                    ),
+                    normalized_json: serde_json::json!({
+                        "surface": surface.as_str(),
+                        "scenario_kind": scenario_kind.as_str(),
+                        "reason_code": reason_code,
+                        "remediation_hint": hint,
+                        "recommended_action": next_step,
+                    }),
+                    expected_reason_codes: vec![reason_code.to_string()],
+                    expected_remediation_hints: vec![hint.to_string()],
+                    expected_next_step: next_step.to_string(),
+                    dynamic_fields: vec!["generated_at_utc".to_string(), "observed_at".to_string()],
+                }
+            },
+        )
+        .collect();
     let transcript_audit = audit_operator_transcript_golden_set(&OperatorTranscriptGoldenSet {
         schema_version: OPERATOR_TRANSCRIPT_GOLDEN_SCHEMA_VERSION.to_string(),
-        transcripts: vec![OperatorTranscript {
-            name: "swarm-handoff-readiness".to_string(),
-            surface: OperatorTranscriptSurface::Readiness,
-            scenario_kind: OperatorTranscriptScenarioKind::Clean,
-            command: "franken-node ops swarm-handoff --json".to_string(),
-            sanitized_env,
-            normalized_human:
-                "ops swarm-handoff: reason_code=HANDOFF_READY next: inspect decisions".to_string(),
-            normalized_json: serde_json::json!({
-                "reason_code": "HANDOFF_READY",
-                "remediation_hint": "inspect decisions before claiming in-progress work",
-                "recommended_action": "br show <bead-id>"
-            }),
-            expected_reason_codes: vec!["HANDOFF_READY".to_string()],
-            expected_remediation_hints: vec![
-                "inspect decisions before claiming in-progress work".to_string(),
-            ],
-            expected_next_step: "br show <bead-id>".to_string(),
-            dynamic_fields: vec!["generated_at_utc".to_string(), "observed_at".to_string()],
-        }],
+        transcripts,
     });
 
     let report = serde_json::json!({
@@ -40941,6 +41039,7 @@ fn main() -> Result<()> {
                         // propagating: a denial must not become invisible merely
                         // because the guest aborted afterwards. The run still
                         // fails — only the evidence is preserved.
+                        let mut json_emitted = false;
                         if let Some(failure) =
                             err.downcast_ref::<ops::engine_dispatcher::NativeRunFailure>()
                         {
@@ -40970,6 +41069,7 @@ fn main() -> Result<()> {
                                 None,
                                 None,
                             )?;
+                            json_emitted = json && !console_only;
                         }
                         #[cfg(feature = "engine")]
                         if let Some(interruption) =
@@ -40982,6 +41082,7 @@ fn main() -> Result<()> {
                                 None,
                                 None,
                             )?;
+                            json_emitted = json && !console_only;
                         }
                         #[cfg(feature = "engine")]
                         if let Some(panic) =
@@ -41027,6 +41128,14 @@ fn main() -> Result<()> {
                         eprintln!("{unavailable}");
                         std::process::exit(127);
                     }
+                        if json && !json_emitted {
+                            return named_cli_fail(
+                                "franken-node/run-error-cli/v1",
+                                "run",
+                                true,
+                                err,
+                            );
+                        }
                         return Err(err);
                     }
                 }

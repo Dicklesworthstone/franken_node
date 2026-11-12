@@ -2195,7 +2195,23 @@ fn run_respects_configured_preferred_runtime_over_bun_heuristics() {
     )
     .expect("write package.json");
     write_runtime_probe_script(workspace.path(), "index.js", "preferred-runtime");
-    fs::write(workspace.path().join("bun.lockb"), "").expect("write bun.lockb");
+    fs::write(
+        workspace.path().join("bun.lock"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "lockfileVersion": 2,
+            "configVersion": 1,
+            "workspaces": {
+                "": {
+                    "name": "trust-gate-e2e",
+                    "version": "1.0.0",
+                    "dependencies": {}
+                }
+            },
+            "packages": {}
+        }))
+        .expect("bun.lock"),
+    )
+    .expect("write bun.lock");
     fs::write(
         workspace.path().join("franken_node.toml"),
         format!(
@@ -2680,12 +2696,12 @@ fn trust_release_missing_app_json_emits_error_report() {
     assert_eq!(payload["ok"], false);
     let error = payload["error"].as_str().unwrap_or_default();
     assert!(
-        error.contains("failed reading run target") && error.contains("missing-app.js"),
+        error.contains("resolve run target") && error.contains("missing-app.js"),
         "missing-app --json must name the unreadable target: {payload}"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        !stderr.contains("Error: failed reading run target"),
+        !stderr.contains("Error: resolve run target"),
         "--json must not append a second human Error line after the JSON report: {stderr}"
     );
 }
@@ -3130,6 +3146,48 @@ fn trust_quarantine_propagates_through_fleet_transport_pipeline() {
         "fleet convergence should be marked converged: {converged_payload:#}"
     );
 
+    let observer_fleet_dir = shared_fleet_dir.clone();
+    let expected_release_incident = incident_id.clone();
+    let release_convergence_agent = std::thread::spawn(move || {
+        let mut observer = shared_fleet_transport(&observer_fleet_dir);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let actions = loop {
+            if let Ok(actions) = observer.list_actions()
+                && actions.iter().any(|record| {
+                    matches!(
+                        &record.action,
+                        FleetAction::Release { incident_id, .. }
+                            if incident_id == &expected_release_incident
+                    )
+                })
+            {
+                break actions;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "fleet release never published expected Release action"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        };
+        let release_checkpoint =
+            frankenengine_node::control_plane::fleet_transport::fleet_application_checkpoint(
+                &actions,
+                "zone-shared",
+            )
+            .expect("release checkpoint for simulated zone");
+        let fresh_seen = chrono::Utc::now() + chrono::Duration::seconds(120);
+        for mut node in observer
+            .list_node_statuses()
+            .expect("retained node statuses for release")
+        {
+            node.last_seen = fresh_seen;
+            node.applied_actions = Some(release_checkpoint.clone());
+            observer
+                .upsert_node_status(&node)
+                .expect("publish release application receipt");
+        }
+    });
+
     let release_output = run_cli_in_workspace_with_env(
         workspace.path(),
         &[
@@ -3141,9 +3199,13 @@ fn trust_quarantine_propagates_through_fleet_transport_pipeline() {
         ],
         &env,
     );
+    release_convergence_agent
+        .join()
+        .expect("simulated release convergence agent");
     assert!(
         release_output.status.success(),
-        "fleet release failed: {}",
+        "fleet release failed: {}\n{}",
+        String::from_utf8_lossy(&release_output.stdout),
         String::from_utf8_lossy(&release_output.stderr)
     );
     let release_payload = parse_json_stdout(&release_output, "fleet release json");
@@ -3158,11 +3220,27 @@ fn trust_quarantine_propagates_through_fleet_transport_pipeline() {
         "fleet release should clear active quarantines: {released_status:#}"
     );
     assert!(
-        released_status["status"]["pending_convergences"]
+        released_status["active_incidents"]
             .as_array()
-            .expect("pending convergences array")
+            .expect("active incidents array")
             .is_empty(),
-        "fleet release should clear pending convergence state: {released_status:#}"
+        "fleet release should clear active incidents: {released_status:#}"
+    );
+    let release_convergences = released_status["status"]["pending_convergences"]
+        .as_array()
+        .expect("pending convergences array");
+    assert_eq!(release_convergences.len(), 1, "{released_status:#}");
+    assert_eq!(
+        release_convergences[0]["phase"], "Converged",
+        "{released_status:#}"
+    );
+    assert_eq!(
+        release_convergences[0]["progress_pct"], 100,
+        "{released_status:#}"
+    );
+    assert_eq!(
+        release_convergences[0]["converged_nodes"], 3,
+        "{released_status:#}"
     );
 }
 

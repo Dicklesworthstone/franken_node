@@ -883,45 +883,48 @@ fn open_inventory(protected_root: &Path, create: bool) -> Result<Option<Connecti
         create_new_runtime_evidence_private_file(&database_path, &[])?;
         validate_private_path_if_present(&database_path)?;
     }
-    protect_sidecars(protected_root)?;
-    let connection =
-        Connection::open(database_name).context("open protected native-session inventory")?;
-    for pragma in [
-        "PRAGMA journal_mode=WAL;",
-        "PRAGMA synchronous=FULL;",
-        "PRAGMA busy_timeout=1000;",
-    ] {
-        connection
-            .query(pragma)
-            .context("configure native-session inventory durability")?;
-    }
-    if create {
-        let mut tx = connection.transaction()?;
-        tx.execute(
-            "CREATE TABLE IF NOT EXISTS native_sessions (
-                session_nonce TEXT PRIMARY KEY NOT NULL,
-                admission_json TEXT NOT NULL,
-                outcome_json TEXT
-            );",
-        )?;
-        tx.execute(
-            "CREATE TABLE IF NOT EXISTS native_session_drains (
-                drain_id TEXT PRIMARY KEY NOT NULL,
-                project_root TEXT NOT NULL,
-                generation INTEGER NOT NULL,
-                state_json TEXT NOT NULL,
-                UNIQUE(project_root, generation)
-            );",
-        )?;
-        tx.execute(
-            "CREATE TABLE IF NOT EXISTS native_session_admission_serialization (
-                project_root TEXT PRIMARY KEY NOT NULL,
-                transaction_nonce TEXT NOT NULL
-            );",
-        )?;
-        tx.commit()?;
-    }
-    protect_sidecars(protected_root)?;
+    let connection = retry_snapshot_conflict(|| {
+        protect_sidecars(protected_root)?;
+        let connection =
+            Connection::open(database_name).context("open protected native-session inventory")?;
+        for pragma in [
+            "PRAGMA busy_timeout=5000;",
+            "PRAGMA journal_mode=WAL;",
+            "PRAGMA synchronous=FULL;",
+        ] {
+            connection
+                .query(pragma)
+                .context("configure native-session inventory durability")?;
+        }
+        if create {
+            let mut tx = connection.transaction()?;
+            tx.execute(
+                "CREATE TABLE IF NOT EXISTS native_sessions (
+                    session_nonce TEXT PRIMARY KEY NOT NULL,
+                    admission_json TEXT NOT NULL,
+                    outcome_json TEXT
+                );",
+            )?;
+            tx.execute(
+                "CREATE TABLE IF NOT EXISTS native_session_drains (
+                    drain_id TEXT PRIMARY KEY NOT NULL,
+                    project_root TEXT NOT NULL,
+                    generation INTEGER NOT NULL,
+                    state_json TEXT NOT NULL,
+                    UNIQUE(project_root, generation)
+                );",
+            )?;
+            tx.execute(
+                "CREATE TABLE IF NOT EXISTS native_session_admission_serialization (
+                    project_root TEXT PRIMARY KEY NOT NULL,
+                    transaction_nonce TEXT NOT NULL
+                );",
+            )?;
+            tx.commit()?;
+        }
+        protect_sidecars(protected_root)?;
+        Ok(connection)
+    })?;
     Ok(Some(connection))
 }
 
@@ -1554,13 +1557,15 @@ fn require_open_admission(drain: Option<&StoredNativeSessionDrain>) -> Result<u6
 }
 
 fn admission_ticket_at(protected_root: &Path, project_root: &Path) -> Result<u64> {
-    let Some(connection) = open_inventory(protected_root, false)? else {
-        return Ok(0);
-    };
-    let mut tx = connection.transaction()?;
-    let drain = latest_drain(&tx, project_root)?;
-    tx.commit()?;
-    require_open_admission(drain.as_ref())
+    retry_snapshot_conflict(|| {
+        let Some(connection) = open_inventory(protected_root, false)? else {
+            return Ok(0);
+        };
+        let mut tx = connection.transaction()?;
+        let drain = latest_drain(&tx, project_root)?;
+        tx.commit()?;
+        require_open_admission(drain.as_ref())
+    })
 }
 
 fn existing_admission_root() -> Result<Option<PathBuf>> {
@@ -1600,16 +1605,18 @@ pub(crate) fn enforce_reference_admission(project_root: &Path) -> Result<()> {
 fn enforce_reference_admission_at(protected_root: &Path, project_root: &Path) -> Result<()> {
     // Validate even when the inventory has not been initialized yet.
     project_key(project_root)?;
-    let Some(connection) = open_inventory(protected_root, false)? else {
-        return Ok(());
-    };
-    let mut tx = connection.transaction()?;
-    for scope in project_root.ancestors() {
-        let drain = latest_drain(&tx, scope)?;
-        require_open_admission(drain.as_ref())?;
-    }
-    tx.commit()?;
-    Ok(())
+    retry_snapshot_conflict(|| {
+        let Some(connection) = open_inventory(protected_root, false)? else {
+            return Ok(());
+        };
+        let mut tx = connection.transaction()?;
+        for scope in project_root.ancestors() {
+            let drain = latest_drain(&tx, scope)?;
+            require_open_admission(drain.as_ref())?;
+        }
+        tx.commit()?;
+        Ok(())
+    })
 }
 
 fn terminal_outcome_observed(

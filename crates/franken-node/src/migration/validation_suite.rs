@@ -57,7 +57,10 @@ const MAX_ENTRIES: usize = 50_000;
 const MAX_PROJECT_BYTES: usize = 256 * 1024 * 1024;
 const MAX_TESTS: usize = 1024;
 const MAX_PATH_BYTES: usize = 4096;
-const MAX_EXECUTABLE_BYTES: u64 = 512 * 1024 * 1024;
+// Unstripped dev/coverage builds with `--features engine,test-support` exceed
+// 512 MiB; `Invocation::identity` hashes in 64 KiB stack chunks under a
+// monotonic deadline, so a 2 GiB ceiling adds zero heap pressure.
+const MAX_EXECUTABLE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(300);
 const LEG_TIMEOUT: Duration = Duration::from_secs(30);
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(1);

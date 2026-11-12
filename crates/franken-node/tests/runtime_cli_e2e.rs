@@ -624,7 +624,7 @@ fn runtime_lane_assign_persists_across_invocations_in_initialized_workspace() {
     assert_eq!(assigned["live_node"], true);
     assert_eq!(assigned["persisted"], true);
     assert_eq!(assigned["assignment"]["lane"], "ControlCritical");
-    assert_eq!(assigned["routed_product_lane"], "cancel");
+    assert_eq!(assigned["routed_product_lane"], "Cancel");
     assert_eq!(assigned["authority_audit_passed"], true);
 
     let mut status_cmd = franken_node();

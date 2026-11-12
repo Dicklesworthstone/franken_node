@@ -6920,32 +6920,119 @@ fn prepare_native_frozen_modules(
 }
 
 #[cfg(feature = "engine")]
+const ZERO_ANOMALY_CAPABILITY_BREADTH_BENIGN_FLOOR_MILLIONTHS: i64 = 800_000;
+
+/// Reconcile the engine's raw expected-loss containment verdict at the product
+/// boundary after sibling `franken-engine` removed its internal
+/// `benign_completion_downgrade` (`93e847e1e`) while retaining static
+/// `ELEVATED_CAPABILITY_BREADTH_FLOOR = 6` (`4e5807dc5`).
+///
+/// Under `Posterior::default_prior()` (`850_000` benign), a completed guest run
+/// with `6..=10` canonical declared capabilities (such as `Profile::Balanced`'s
+/// 6 default capabilities) and ZERO observed behavioral anomalies yields
+/// `posterior.p_benign = 810_491`, where `LossMatrix::balanced()` selects
+/// `Challenge` (`3.158M < 3.647M`) solely from static capability breadth +
+/// prior mass. Any behavioral likelihood branch (elevated hostcall rate,
+/// denial rate, resource > 70%, timing anomaly, or `>= 11` capabilities) drops
+/// `p_benign` below `780_000`; any optimal-stopping trigger sets
+/// `algorithm != "none"`; any guardplane hook containment marks
+/// `ir4_witness.outcome == Contained` or populates `hook_requested_action`;
+/// and any capability-membrane denial sets `!decision.allowed` — all of which
+/// bypass this downgrade and preserve `Challenge`/`Sandbox`/`Suspend`/
+/// `Terminate`/`Quarantine` (`exit 91..=95`) fail-closed.
+#[cfg(feature = "engine")]
+fn effective_product_containment_verdict(
+    result: &frankenengine_engine::execution_orchestrator::OrchestratorResult,
+) -> (
+    frankenengine_engine::expected_loss_selector::ContainmentAction,
+    i64,
+    bool,
+) {
+    use frankenengine_engine::bayesian_posterior::RiskState;
+    use frankenengine_engine::expected_loss_selector::ContainmentAction;
+    use frankenengine_engine::ir_contract::ExecutionOutcome;
+
+    let security_entry = result.evidence_entries.iter().find(|entry| {
+        entry.decision_type == frankenengine_engine::evidence_ledger::DecisionType::SecurityAction
+    });
+    let stopping_clear = result
+        .optimal_stopping_certificate
+        .as_ref()
+        .is_none_or(|cert| cert.algorithm == "none");
+    let hook_clear = result.ir4_witness.outcome == ExecutionOutcome::Completed
+        && security_entry.is_none_or(|entry| !entry.metadata.contains_key("hook_requested_action"));
+    let hostcall_membrane_clear = result
+        .ir4_witness
+        .hostcall_decisions
+        .iter()
+        .all(|decision| decision.allowed);
+    let benign_completion_downgrade = matches!(
+        result.containment_action,
+        ContainmentAction::Challenge | ContainmentAction::Sandbox
+    ) && result.risk_state == RiskState::Benign
+        && result.posterior.p_benign >= ZERO_ANOMALY_CAPABILITY_BREADTH_BENIGN_FLOOR_MILLIONTHS
+        && stopping_clear
+        && hook_clear
+        && hostcall_membrane_clear;
+
+    if benign_completion_downgrade {
+        let allow_loss = result
+            .action_decision
+            .explanation
+            .all_expected_losses
+            .get(&ContainmentAction::Allow.to_string())
+            .copied()
+            .unwrap_or(result.expected_loss_millionths);
+        (ContainmentAction::Allow, allow_loss, true)
+    } else {
+        (
+            result.containment_action,
+            result.expected_loss_millionths,
+            false,
+        )
+    }
+}
+
+#[cfg(feature = "engine")]
 fn engine_containment_decision(
     result: &frankenengine_engine::execution_orchestrator::OrchestratorResult,
     parser_budget: RuntimeParseBudget,
     execution_limits: EngineExecutionLimitsReport,
     ambient_authority_grant: AmbientAuthorityGrant,
 ) -> EngineContainmentDecision {
+    let (
+        effective_containment_action,
+        effective_expected_loss_millionths,
+        benign_completion_downgrade,
+    ) = effective_product_containment_verdict(result);
     let stopping = result.optimal_stopping_certificate.as_ref();
     let security_entry = result.evidence_entries.iter().find(|entry| {
         entry.decision_type == frankenengine_engine::evidence_ledger::DecisionType::SecurityAction
     });
+    let decision_rationale = security_entry.map(|entry| {
+        let raw = &entry.chosen_action.rationale;
+        if raw.contains("benign_completion_downgrade=") {
+            raw.clone()
+        } else {
+            format!("{raw}, benign_completion_downgrade={benign_completion_downgrade}")
+        }
+    });
     EngineContainmentDecision {
-        containment_action: result.containment_action.to_string(),
+        containment_action: effective_containment_action.to_string(),
         selector_action: result.action_decision.action.to_string(),
         risk_state: result.risk_state.to_string(),
         posterior_benign_millionths: result.posterior.p_benign,
         posterior_anomalous_millionths: result.posterior.p_anomalous,
         posterior_malicious_millionths: result.posterior.p_malicious,
         posterior_unknown_millionths: result.posterior.p_unknown,
-        expected_loss_millionths: result.expected_loss_millionths,
+        expected_loss_millionths: effective_expected_loss_millionths,
         stopping_trigger: stopping.map(|certificate| certificate.algorithm.clone()),
         stopping_observations: stopping.map(|certificate| certificate.observations_before_stop),
         cusum_statistic_millionths: stopping
             .and_then(|certificate| certificate.cusum_statistic_millionths),
         guardplane_last_action: security_entry
             .and_then(|entry| entry.metadata.get("guardplane_last_action").cloned()),
-        decision_rationale: security_entry.map(|entry| entry.chosen_action.rationale.clone()),
+        decision_rationale,
         instructions_executed: result.instructions_executed,
         parser_budget,
         process_shape_read_allowed: Some(
@@ -11659,6 +11746,25 @@ impl EngineDispatcher {
             match result {
                 Ok(result) => result,
                 Err(error) => {
+                    if matches!(
+                        error.primary_error(),
+                        frankenengine_engine::execution_orchestrator::OrchestratorError::Cell(
+                            frankenengine_engine::execution_cell::CellError::InterpreterPanicked { .. }
+                        )
+                    ) {
+                        let cleanup_probe = telemetry_guard
+                            .as_ref()
+                            .map(NativeTelemetryGuard::cleanup_probe);
+                        drop(telemetry_guard.take());
+                        if error
+                            .post_cell_failure()
+                            .is_some_and(|failure| !failure.cleanup.close_succeeded())
+                            && let Some(probe) = cleanup_probe
+                        {
+                            probe.store(false, Ordering::Release);
+                        }
+                        panic!("native engine interpreter cell panicked: {error}");
+                    }
                     // bd-muy9u: an attempt that aborts still owes the operator
                     // the effects it already performed or was denied. Harvest
                     // the engine's retained failure journal into exactly the
@@ -11861,15 +11967,18 @@ impl EngineDispatcher {
         // bd-5r99w.2: derive the REAL exit code from the runtime's containment
         // verdict instead of always stamping synthetic success; with no
         // containment, the program's own `process.exit` code (bd-my9hk).
+        let (effective_containment_action, _, _) =
+            effective_product_containment_verdict(&execution_result);
         let exit_code = run_exit_status(
-            exit_code_for_containment_severity(execution_result.containment_action.severity()),
+            exit_code_for_containment_severity(effective_containment_action.severity()),
             execution_result.exit_code,
         );
 
         tracing::info!(
             execution_mode = "native",
             phase = "execution",
-            containment_action = %execution_result.containment_action,
+            containment_action = %effective_containment_action,
+            selector_action = %execution_result.action_decision.action,
             exit_code,
             console_entries = execution_result.console_output.len(),
             "Native engine execution result converted to run output"
@@ -18241,6 +18350,115 @@ exec "$2" pinned-worker-image"#,
         }
         assert_eq!(run_exit_status(0, Some(90)), 90);
         assert_eq!(run_exit_status(0, Some(96)), 96);
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn effective_product_containment_verdict_downgrades_only_zero_anomaly_prior_tax() {
+        use frankenengine_engine::expected_loss_selector::ContainmentAction;
+        use frankenengine_engine::ir_contract::{
+            CapabilityTag, ExecutionOutcome, HostcallDecisionRecord,
+        };
+
+        let run_profile = |profile: Profile| {
+            let config = Config::for_profile(profile);
+            let capabilities =
+                EngineDispatcher::resolve_capabilities_for_execution(&config, None).unwrap();
+            let orchestrator_config = EngineDispatcher::map_config_to_orchestrator_config(&config);
+            let runtime_config = EngineDispatcher::map_config_to_runtime_config(&config);
+            let ambient = EngineDispatcher::map_config_to_ambient_authority_grant(&config);
+            let mut orchestrator =
+                ExecutionOrchestrator::try_new_with_runtime_config_and_authority(
+                    orchestrator_config,
+                    runtime_config,
+                    ambient,
+                    host_effect_ledger_authority_for_test(),
+                )
+                .unwrap();
+            orchestrator
+                .execute(&ExtensionPackage {
+                    extension_id: format!("containment-verdict-{profile:?}"),
+                    source: "console.log('healthy');".into(),
+                    source_file: None,
+                    module_root: None,
+                    capabilities,
+                    version: "1.0.0".into(),
+                    metadata: Default::default(),
+                })
+                .expect("benign execution completes")
+        };
+
+        // Balanced default grants 6 capabilities (`ELEVATED_CAPABILITY_BREADTH_FLOOR = 6`),
+        // producing raw selector Challenge (`posterior.p_benign = 810_491`) with zero
+        // observed behavioral anomalies -> reconciled to Allow (`benign_completion_downgrade = true`).
+        let mut balanced = run_profile(Profile::Balanced);
+        assert_eq!(balanced.containment_action, ContainmentAction::Challenge);
+        assert_eq!(balanced.posterior.p_benign, 810_491);
+        let (action, allow_loss, downgraded) = effective_product_containment_verdict(&balanced);
+        assert_eq!(action, ContainmentAction::Allow);
+        assert!(downgraded);
+        assert_eq!(allow_loss, 3_647_090);
+
+        // Strict default grants 4 capabilities (`< 6`), so raw selector already chooses Allow.
+        let strict = run_profile(Profile::Strict);
+        assert_eq!(strict.containment_action, ContainmentAction::Allow);
+        let (strict_action, _, strict_downgraded) = effective_product_containment_verdict(&strict);
+        assert_eq!(strict_action, ContainmentAction::Allow);
+        assert!(!strict_downgraded);
+
+        // Behavioral posterior drop (`< 800_000`) MUST NOT be downgraded.
+        balanced.posterior.p_benign = 650_199;
+        let (anomalous_action, _, anomalous_downgraded) =
+            effective_product_containment_verdict(&balanced);
+        assert_eq!(anomalous_action, ContainmentAction::Challenge);
+        assert!(!anomalous_downgraded);
+        balanced.posterior.p_benign = 810_491;
+
+        // Optimal-stopping trigger (`algorithm != "none"`) MUST NOT be downgraded.
+        if let Some(cert) = balanced.optimal_stopping_certificate.as_mut() {
+            cert.algorithm = "cusum".into();
+        }
+        assert_eq!(
+            effective_product_containment_verdict(&balanced),
+            (
+                ContainmentAction::Challenge,
+                balanced.expected_loss_millionths,
+                false
+            )
+        );
+        if let Some(cert) = balanced.optimal_stopping_certificate.as_mut() {
+            cert.algorithm = "none".into();
+        }
+
+        // Guardplane hook containment (`ExecutionOutcome::Contained`) MUST NOT be downgraded.
+        balanced.ir4_witness.outcome = ExecutionOutcome::Contained;
+        assert!(!effective_product_containment_verdict(&balanced).2);
+        balanced.ir4_witness.outcome = ExecutionOutcome::Completed;
+
+        // Capability-membrane denial (`allowed: false`) MUST NOT be downgraded.
+        balanced
+            .ir4_witness
+            .hostcall_decisions
+            .push(HostcallDecisionRecord {
+                seq: 0,
+                capability: CapabilityTag("network_egress".into()),
+                allowed: false,
+                instruction_index: 0,
+            });
+        assert!(!effective_product_containment_verdict(&balanced).2);
+        balanced.ir4_witness.hostcall_decisions.clear();
+
+        // High-severity verdicts (`Suspend`, `Terminate`, `Quarantine`) MUST NEVER be downgraded.
+        for severe in [
+            ContainmentAction::Suspend,
+            ContainmentAction::Terminate,
+            ContainmentAction::Quarantine,
+        ] {
+            balanced.containment_action = severe;
+            let (verdict, _, was_downgraded) = effective_product_containment_verdict(&balanced);
+            assert_eq!(verdict, severe);
+            assert!(!was_downgraded);
+        }
     }
 
     #[cfg(feature = "engine")]

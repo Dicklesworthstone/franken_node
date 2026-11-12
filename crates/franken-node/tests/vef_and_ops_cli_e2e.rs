@@ -292,7 +292,7 @@ fn ops_evidence_index_queries_metadata_and_rejects_protected_sources() {
         "franken-node/ops-evidence-index-cli/v1"
     );
     assert_eq!(out["match_count"], 1);
-    assert_eq!(out["matches"][0]["bead_id"], "bd-vef-1");
+    assert_eq!(out["matches"][0]["record"]["bead_id"], "bd-vef-1");
 
     let rejected = out["build_report"]["rejected_sources"]
         .as_array()

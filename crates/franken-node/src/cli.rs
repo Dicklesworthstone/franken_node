@@ -2628,7 +2628,7 @@ pub enum FleetPolicyCommand {
 #[derive(Debug, Parser)]
 pub struct FleetPolicyPublishArgs {
     /// JSON file containing the executable FleetRuntimePolicy fields.
-    #[arg(long, value_parser = parse_safe_content_pathbuf)]
+    #[arg(long, value_parser = parse_safe_binary_pathbuf)]
     pub file: Option<PathBuf>,
     /// Positive, increasing revision within this exact policy zone.
     #[arg(long)]

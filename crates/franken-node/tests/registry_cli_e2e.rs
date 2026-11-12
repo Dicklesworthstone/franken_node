@@ -664,10 +664,9 @@ fn registry_revocation_stops_a_running_native_guest_and_retains_its_effect_obser
 
     for publisher_target in [true, false] {
         let mut authority = publisher_runtime_authority();
-        authority["allowed_capabilities"]
-            .as_array_mut()
-            .unwrap()
-            .push(serde_json::json!("fs_write"));
+        let capabilities = authority["allowed_capabilities"].as_array_mut().unwrap();
+        capabilities.push(serde_json::json!("fs_write"));
+        capabilities.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
         authority["max_instructions"] = serde_json::json!(1_000_000_000_000_u64);
         let fixture = PublishedSourceFixture::with_modules_and_authority(
             "app.cjs",
@@ -1184,7 +1183,7 @@ fn registry_runtime_authority_enforces_output_instruction_and_dependency_parser_
             256,
             "require('./side.cjs'); console.log('PUBLISHER_APPROVED_WORKLOAD');\n".to_owned(),
             format!("{}\nmodule.exports = 42;\n", ";".repeat(512)),
-            "configured parser source-byte budget",
+            "ERR_MODULE_ENGINE_PARSE_LIMIT",
         ),
     ] {
         let mut authority = publisher_runtime_authority();
@@ -1251,7 +1250,10 @@ fn registry_runtime_authority_denies_filesystem_effect_in_loaded_module() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(!output.status.success(), "{diagnostics}");
-    assert!(diagnostics.contains("fs_read"), "{diagnostics}");
+    assert!(
+        diagnostics.contains("capability denied: fs:read"),
+        "{diagnostics}"
+    );
     assert!(
         !diagnostics.contains("PUBLISHER_APPROVED_WORKLOAD"),
         "{diagnostics}"
@@ -1322,10 +1324,20 @@ fn registry_runtime_authority_controls_environment_reads_in_loaded_modules() {
             assert!(transcript.contains("PUBLISHER_TEST_VALUE"), "{transcript}");
             assert!(transcript.contains("VISIBLE_FROM_OPERATOR"), "{transcript}");
         } else {
-            assert!(diagnostics.contains("env_read"), "{diagnostics}");
-            assert!(!diagnostics.contains("ENV_READ_COMPLETED"), "{diagnostics}");
+            let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(report["success"], false, "{diagnostics}");
             assert!(
-                !diagnostics.contains("PUBLISHER_APPROVED_WORKLOAD"),
+                report["error"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("capability denied: env_read"),
+                "{diagnostics}"
+            );
+            assert_eq!(report["captured_output"]["stdout"], "", "{diagnostics}");
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(!stderr.contains("ENV_READ_COMPLETED"), "{diagnostics}");
+            assert!(
+                !stderr.contains("PUBLISHER_APPROVED_WORKLOAD"),
                 "{diagnostics}"
             );
         }

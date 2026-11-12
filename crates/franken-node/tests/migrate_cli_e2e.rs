@@ -337,7 +337,8 @@ mod native_smoke_admission_regressions {
             std::fs::write(
                 project.join("package-lock.json"),
                 "{\"lockfileVersion\":3,\"packages\":{\"\":{}}}\n",
-            ).expect("lockfile");
+            )
+            .expect("lockfile");
             std::fs::write(
                 project.join("package.json"),
                 r#"{"name":"native-smoke","version":"1.0.0","main":"index.js","engines":{"node":">=20 <23"}}"#,
@@ -1087,7 +1088,8 @@ fn migration_demo_pipeline_runs_live_migrate_commands_end_to_end() {
     std::fs::write(
         project_path.join("package-lock.json"),
         "{\"lockfileVersion\":3,\"packages\":{\"\":{}}}\n",
-    ).expect("write lockfile");
+    )
+    .expect("write lockfile");
     std::fs::write(
         project_path.join("package.json"),
         r#"{
@@ -1764,8 +1766,7 @@ fn migrate_rewrite_apply_emits_rollback_plan_and_updates_manifest() {
 
 #[test]
 fn migrate_rewrite_preserves_commonjs_and_checks_reference_migcert_fixture() {
-    let test_name =
-        "migrate_rewrite_preserves_commonjs_and_checks_reference_migcert_fixture";
+    let test_name = "migrate_rewrite_preserves_commonjs_and_checks_reference_migcert_fixture";
     let temp = TempDir::new().expect("temp dir");
     let project_path = temp.path().join("project");
     write_basic_rewrite_project(&project_path);
@@ -2435,7 +2436,7 @@ fn migrate_validate_passes_for_hardened_project() {
     "node": ">=20 <23"
   },
   "scripts": {
-    "test": "node test.js"
+    "test": "node index.js"
   }
 }
 "#,
@@ -2444,7 +2445,8 @@ fn migrate_validate_passes_for_hardened_project() {
     std::fs::write(
         project_path.join("package-lock.json"),
         "{\"lockfileVersion\":3,\"packages\":{\"\":{}}}\n",
-    ).expect("write lockfile");
+    )
+    .expect("write lockfile");
 
     let project_arg = project_path.to_string_lossy().to_string();
     let output = run_cli(&["migrate", "validate", &project_arg]);
@@ -2517,7 +2519,8 @@ fn migrate_validate_native_failure_never_launches_hanging_reference() {
         std::fs::write(
             project_path.join("package-lock.json"),
             "{\"lockfileVersion\":3,\"packages\":{\"\":{}}}\n",
-        ).expect("write lockfile");
+        )
+        .expect("write lockfile");
 
         let project_arg = project_path.to_string_lossy().to_string();
         let started = Instant::now();

@@ -1074,7 +1074,8 @@ fn run_https_untrusted_anchor_fails_closed_bd_3894s() {
     });
 
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
-    let source = format!("require('https').get('https://{addr}/');\n");
+    let source =
+        format!("require('https').get('https://{addr}/').on('error', function () {{}});\n");
     let app_path = create_test_app(temp_dir.path(), "app.js", &source);
 
     // Allowlist the endpoint (SSRF authorizes it) but deliberately do NOT
@@ -2356,13 +2357,9 @@ catch (error) { console.log(error.code); }
     for frozen in [false, true] {
         let mut config = balanced_config();
         config.runtime.frozen_modules = Some(frozen);
-        let output = invoke_product_supervisor(
-            &app,
-            &config,
-            "balanced",
-            Path::new(franken_node_bin()),
-        )
-        .unwrap();
+        let output =
+            invoke_product_supervisor(&app, &config, "balanced", Path::new(franken_node_bin()))
+                .unwrap();
         assert!(
             output.status.success(),
             "frozen={frozen}: stdout={} stderr={}",
@@ -2387,27 +2384,52 @@ fn frozen_module_cli_runs_large_npm_source_with_configured_parser_limits() {
     std::fs::write(
         package_dir.join("package.json"),
         r#"{"name":"frozen-fixture","version":"1.0.0","exports":[null,"./index.js"]}"#,
-    ).unwrap();
+    )
+    .unwrap();
     std::fs::write(
         package_dir.join("index.js"),
         format!("{}\nmodule.exports=42;\n", ";".repeat(70_000)),
-    ).unwrap();
+    )
+    .unwrap();
     let app = create_test_app(
-        workspace.path(), "app.cjs", "console.log(require('frozen-fixture'));\n",
+        workspace.path(),
+        "app.cjs",
+        "console.log(require('frozen-fixture'));\n",
     );
     let mut config = balanced_config();
     let default = invoke_product_supervisor_with_options(
-        &app, &config, "balanced", Path::new(franken_node_bin()), &["--frozen-modules"],
-    ).unwrap();
-    assert!(!default.status.success(), "default token ceiling must still apply");
+        &app,
+        &config,
+        "balanced",
+        Path::new(franken_node_bin()),
+        &["--frozen-modules"],
+    )
+    .unwrap();
+    assert!(
+        !default.status.success(),
+        "default token ceiling must still apply"
+    );
     let diagnostics = format!("{}\n{}", default.stdout, default.stderr);
-    assert!(diagnostics.contains("ERR_MODULE_ENGINE_PARSE_LIMIT"), "{diagnostics}");
+    assert!(
+        diagnostics.contains("ERR_MODULE_ENGINE_PARSE_LIMIT"),
+        "{diagnostics}"
+    );
 
     config.runtime.max_parse_tokens = Some(100_000);
     let admitted = invoke_product_supervisor_with_options(
-        &app, &config, "balanced", Path::new(franken_node_bin()), &["--frozen-modules"],
-    ).unwrap();
-    assert!(admitted.status.success(), "stdout={} stderr={}", admitted.stdout, admitted.stderr);
+        &app,
+        &config,
+        "balanced",
+        Path::new(franken_node_bin()),
+        &["--frozen-modules"],
+    )
+    .unwrap();
+    assert!(
+        admitted.status.success(),
+        "stdout={} stderr={}",
+        admitted.stdout,
+        admitted.stderr
+    );
     let dispatch = parse_product_dispatch(&admitted).unwrap();
     assert_eq!(dispatch.captured_output.stdout, "42\n");
     let decision = dispatch.engine_decision.expect("native engine decision");
@@ -2420,11 +2442,22 @@ fn frozen_module_cli_runs_large_npm_source_with_configured_parser_limits() {
 
     config.runtime.max_parse_source_bytes = Some(1_024);
     let denied = invoke_product_supervisor_with_options(
-        &app, &config, "balanced", Path::new(franken_node_bin()), &["--frozen-modules"],
-    ).unwrap();
-    assert!(!denied.status.success(), "source-byte ceiling must remain independent");
+        &app,
+        &config,
+        "balanced",
+        Path::new(franken_node_bin()),
+        &["--frozen-modules"],
+    )
+    .unwrap();
+    assert!(
+        !denied.status.success(),
+        "source-byte ceiling must remain independent"
+    );
     let diagnostics = format!("{}\n{}", denied.stdout, denied.stderr);
-    assert!(diagnostics.contains("ERR_MODULE_ENGINE_PARSE_LIMIT"), "{diagnostics}");
+    assert!(
+        diagnostics.contains("ERR_MODULE_ENGINE_PARSE_LIMIT"),
+        "{diagnostics}"
+    );
 }
 
 #[test]
@@ -2597,7 +2630,7 @@ fn frozen_module_cli_preserves_captured_package_errors_without_granting_unknown_
         let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(
             report["schema_version"],
-            "franken-node/module-source-graph/v2"
+            "franken-node/module-source-graph/v3"
         );
         assert_eq!(report["fully_resolved"], false);
         assert_eq!(report["execution_performed"], false);
@@ -2889,13 +2922,9 @@ fn frozen_module_cli_executes_immutable_request_bindings() {
         create_test_app(workspace.path(), "alternate.cjs", "module.exports=17;");
         let mut config = balanced_config();
         config.runtime.frozen_modules = Some(true);
-        let output = invoke_product_supervisor(
-            &app,
-            &config,
-            "balanced",
-            Path::new(franken_node_bin()),
-        )
-        .unwrap();
+        let output =
+            invoke_product_supervisor(&app, &config, "balanced", Path::new(franken_node_bin()))
+                .unwrap();
         assert!(
             output.status.success(),
             "{source}: stdout={} stderr={}",
@@ -2907,7 +2936,11 @@ fn frozen_module_cli_executes_immutable_request_bindings() {
         let graph = dispatch.engine_decision.unwrap().frozen_modules.unwrap();
         assert_eq!(
             graph.routes,
-            if source.contains("alternate.cjs") { 2 } else { 1 }
+            if source.contains("alternate.cjs") {
+                2
+            } else {
+                1
+            }
         );
     }
 }
@@ -3081,10 +3114,21 @@ fn frozen_module_symlinks_require_frozen_execution_for_direct_callers() {
     let mut config = balanced_config();
     config.runtime.frozen_module_symlinks = Some(true);
     let dispatcher = EngineDispatcher::new(None, PreferredRuntime::FrankenEngine);
-    let error = dispatcher.dispatch_run(
-        Path::new("workspace-link-must-not-read.cjs"), &config, "balanced", &[], 0,
-    ).expect_err("a frozen-only policy must not silently enable the live loader");
-    assert!(error.to_string().contains("symlinks require frozen modules"), "{error:#}");
+    let error = dispatcher
+        .dispatch_run(
+            Path::new("workspace-link-must-not-read.cjs"),
+            &config,
+            "balanced",
+            &[],
+            0,
+        )
+        .expect_err("a frozen-only policy must not silently enable the live loader");
+    assert!(
+        error
+            .to_string()
+            .contains("symlinks require frozen modules"),
+        "{error:#}"
+    );
 }
 
 #[test]
@@ -3096,27 +3140,49 @@ fn frozen_module_cli_executes_contained_workspace_links_only_after_opt_in() {
     let package = workspace.path().join("packages/shared");
     std::fs::create_dir_all(&package).unwrap();
     std::fs::create_dir_all(workspace.path().join("node_modules")).unwrap();
-    std::fs::write(package.join("package.json"),
-        r#"{"name":"shared","version":"1.0.0","main":"index.cjs"}"#).unwrap();
-    std::fs::write(package.join("index.cjs"),
-        "module.exports=require('./answer.cjs');").unwrap();
+    std::fs::write(
+        package.join("package.json"),
+        r#"{"name":"shared","version":"1.0.0","main":"index.cjs"}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("index.cjs"),
+        "module.exports=require('./answer.cjs');",
+    )
+    .unwrap();
     std::fs::write(package.join("answer.cjs"), "module.exports=42;").unwrap();
-    symlink("../packages/shared", workspace.path().join("node_modules/shared")).unwrap();
-    let app = create_test_app(workspace.path(), "app.cjs",
-        "console.log('workspace',require('shared'));");
+    symlink(
+        "../packages/shared",
+        workspace.path().join("node_modules/shared"),
+    )
+    .unwrap();
+    let app = create_test_app(
+        workspace.path(),
+        "app.cjs",
+        "console.log('workspace',require('shared'));",
+    );
     let mut config = balanced_config();
     config.runtime.frozen_modules = Some(true);
-    let rejected = invoke_product_supervisor(
-        &app, &config, "balanced", Path::new(franken_node_bin()),
-    ).unwrap();
+    let rejected =
+        invoke_product_supervisor(&app, &config, "balanced", Path::new(franken_node_bin()))
+            .unwrap();
     assert!(!rejected.status.success(), "links must be opt-in");
     assert!(!rejected.stdout.contains("workspace 42"));
 
     let accepted = invoke_product_supervisor_with_options(
-        &app, &config, "balanced", Path::new(franken_node_bin()),
+        &app,
+        &config,
+        "balanced",
+        Path::new(franken_node_bin()),
         &["--frozen-module-symlinks"],
-    ).unwrap();
-    assert!(accepted.status.success(), "stdout={} stderr={}", accepted.stdout, accepted.stderr);
+    )
+    .unwrap();
+    assert!(
+        accepted.status.success(),
+        "stdout={} stderr={}",
+        accepted.stdout,
+        accepted.stderr
+    );
     let dispatch = parse_product_dispatch(&accepted).unwrap();
     assert_eq!(dispatch.captured_output.stdout, "workspace 42\n");
     let graph = dispatch.engine_decision.unwrap().frozen_modules.unwrap();
@@ -3124,15 +3190,26 @@ fn frozen_module_cli_executes_contained_workspace_links_only_after_opt_in() {
     assert_eq!(graph.modules, 3);
 
     config.runtime.frozen_module_symlinks = Some(true);
-    let accepted_from_config = invoke_product_supervisor(
-        &app, &config, "balanced", Path::new(franken_node_bin()),
-    ).unwrap();
-    assert!(accepted_from_config.status.success(), "{}", accepted_from_config.stderr);
+    let accepted_from_config =
+        invoke_product_supervisor(&app, &config, "balanced", Path::new(franken_node_bin()))
+            .unwrap();
+    assert!(
+        accepted_from_config.status.success(),
+        "{}",
+        accepted_from_config.stderr
+    );
     let tightened = invoke_product_supervisor_with_options(
-        &app, &config, "balanced", Path::new(franken_node_bin()),
+        &app,
+        &config,
+        "balanced",
+        Path::new(franken_node_bin()),
         &["--frozen-module-symlinks=false"],
-    ).unwrap();
-    assert!(!tightened.status.success(), "CLI false must override configured true");
+    )
+    .unwrap();
+    assert!(
+        !tightened.status.success(),
+        "CLI false must override configured true"
+    );
 }
 
 #[test]
@@ -3144,18 +3221,27 @@ fn frozen_module_symlink_opt_in_never_grants_external_or_cyclic_source_access() 
         let workspace = TempDir::new().unwrap();
         std::fs::create_dir_all(workspace.path().join("node_modules")).unwrap();
         symlink(target, workspace.path().join("node_modules/escape")).unwrap();
-        let app = create_test_app(workspace.path(), "app.cjs",
-            "console.log('WORKSPACE_ESCAPE_MUST_NOT_RUN'); require('escape');");
+        let app = create_test_app(
+            workspace.path(),
+            "app.cjs",
+            "console.log('WORKSPACE_ESCAPE_MUST_NOT_RUN'); require('escape');",
+        );
         let mut config = balanced_config();
         config.runtime.frozen_modules = Some(true);
         config.runtime.frozen_module_symlinks = Some(true);
-        let output = invoke_product_supervisor(
-            &app, &config, "balanced", Path::new(franken_node_bin()),
-        ).unwrap();
+        let output =
+            invoke_product_supervisor(&app, &config, "balanced", Path::new(franken_node_bin()))
+                .unwrap();
         assert!(!output.status.success(), "unsafe target admitted: {target}");
         let diagnostics = format!("{}\n{}", output.stdout, output.stderr);
-        assert!(diagnostics.contains("Frozen module graph capture failed"), "{diagnostics}");
-        assert!(!diagnostics.contains("WORKSPACE_ESCAPE_MUST_NOT_RUN"), "{diagnostics}");
+        assert!(
+            diagnostics.contains("Frozen module graph capture failed"),
+            "{diagnostics}"
+        );
+        assert!(
+            !diagnostics.contains("WORKSPACE_ESCAPE_MUST_NOT_RUN"),
+            "{diagnostics}"
+        );
     }
 }
 
@@ -3168,20 +3254,32 @@ fn frozen_module_cli_executes_native_core_objects_in_installed_packages() {
     std::fs::write(
         package_dir.join("package.json"),
         r#"{"name":"frozen-core","version":"1.0.0","main":"index.cjs"}"#,
-    ).unwrap();
+    )
+    .unwrap();
     std::fs::write(
         package_dir.join("index.cjs"),
         "const Buffer=require('node:buffer').Buffer; const qs=require('querystring'); module.exports={Buffer:Buffer,answer:qs.stringify({answer:42})};",
     ).unwrap();
     let app = create_test_app(
-        workspace.path(), "app.cjs",
+        workspace.path(),
+        "app.cjs",
         "const b=require('buffer'); const value=require('frozen-core'); console.log(value.Buffer===b.Buffer,value.answer);",
     );
     let config = balanced_config();
     let output = invoke_product_supervisor_with_options(
-        &app, &config, "balanced", Path::new(franken_node_bin()), &["--frozen-modules"],
-    ).unwrap();
-    assert!(output.status.success(), "stdout={} stderr={}", output.stdout, output.stderr);
+        &app,
+        &config,
+        "balanced",
+        Path::new(franken_node_bin()),
+        &["--frozen-modules"],
+    )
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        output.stdout,
+        output.stderr
+    );
     let dispatch = parse_product_dispatch(&output).unwrap();
     assert_eq!(dispatch.captured_output.stdout, "true answer=42\n");
     let graph = dispatch.engine_decision.unwrap().frozen_modules.unwrap();
@@ -3312,16 +3410,26 @@ fn native_readline_diagnostics_share_state_with_installed_commonjs_packages() {
         let workspace = TempDir::new().unwrap();
         let package_dir = workspace.path().join("node_modules/line-consumer");
         std::fs::create_dir_all(&package_dir).unwrap();
-        std::fs::write(package_dir.join("package.json"),
-            r#"{"name":"line-consumer","version":"1.0.0","main":"index.cjs"}"#).unwrap();
-        std::fs::write(package_dir.join("index.cjs"), r#"
+        std::fs::write(
+            package_dir.join("package.json"),
+            r#"{"name":"line-consumer","version":"1.0.0","main":"index.cjs"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            package_dir.join("index.cjs"),
+            r#"
 module.exports = {
     readline: require('node:readline'),
     promises: require('node:readline/promises'),
     diagnostics: require('node:diagnostics_channel')
 };
-"#).unwrap();
-        let app = create_test_app(workspace.path(), "app.cjs", r#"
+"#,
+        )
+        .unwrap();
+        let app = create_test_app(
+            workspace.path(),
+            "app.cjs",
+            r#"
 const readline = require('readline');
 const diagnostics = require('diagnostics_channel');
 const events = require('events');
@@ -3343,16 +3451,32 @@ input.emit('end');
 console.log(reader instanceof events.EventEmitter, seen.join('|'), reader.closed);
 readline.promises = {};
 console.log(require('node:readline/promises') === promises);
-"#);
-        let options = if frozen { &["--frozen-modules"][..] } else { &[] };
+"#,
+        );
+        let options = if frozen {
+            &["--frozen-modules"][..]
+        } else {
+            &[]
+        };
         let output = invoke_product_supervisor_with_options(
-            &app, &balanced_config(), "balanced", Path::new(franken_node_bin()), options,
-        ).unwrap();
-        assert!(output.status.success(), "frozen={frozen}: stdout={} stderr={}",
-            output.stdout, output.stderr);
+            &app,
+            &balanced_config(),
+            "balanced",
+            Path::new(franken_node_bin()),
+            options,
+        )
+        .unwrap();
+        assert!(
+            output.status.success(),
+            "frozen={frozen}: stdout={} stderr={}",
+            output.stdout,
+            output.stderr
+        );
         let dispatch = parse_product_dispatch(&output).unwrap();
-        assert_eq!(dispatch.captured_output.stdout,
-            "true true true true\ntrue €|tail true\ntrue\n");
+        assert_eq!(
+            dispatch.captured_output.stdout,
+            "true true true true\ntrue €|tail true\ntrue\n"
+        );
         let graph = dispatch.engine_decision.unwrap().frozen_modules;
         assert_eq!(graph.is_some(), frozen);
         if let Some(graph) = graph {
@@ -3366,9 +3490,15 @@ console.log(require('node:readline/promises') === promises);
 fn native_readline_diagnostics_esm_exports_share_commonjs_identity() {
     for frozen in [false, true] {
         let workspace = TempDir::new().unwrap();
-        create_test_app(workspace.path(), "child.cjs",
-            "module.exports = {readline: require('readline'), promises: require('node:readline/promises'), diagnostics: require('diagnostics_channel')};");
-        let app = create_test_app(workspace.path(), "app.mjs", r#"
+        create_test_app(
+            workspace.path(),
+            "child.cjs",
+            "module.exports = {readline: require('readline'), promises: require('node:readline/promises'), diagnostics: require('diagnostics_channel')};",
+        );
+        let app = create_test_app(
+            workspace.path(),
+            "app.mjs",
+            r#"
 import readline, {createInterface, cursorTo} from 'node:readline';
 import promises, {Readline} from 'readline/promises';
 import diagnostics, {channel, Channel} from 'node:diagnostics_channel';
@@ -3383,17 +3513,36 @@ console.log(seen.join(','), channel('esm').hasSubscribers);
 import('diagnostics_channel').then(function (ns) {
     console.log(ns.default === diagnostics, ns.channel === channel);
 });
-"#);
-        let options = if frozen { &["--frozen-modules"][..] } else { &[] };
+"#,
+        );
+        let options = if frozen {
+            &["--frozen-modules"][..]
+        } else {
+            &[]
+        };
         let output = invoke_product_supervisor_with_options(
-            &app, &balanced_config(), "balanced", Path::new(franken_node_bin()), options,
-        ).unwrap();
-        assert!(output.status.success(), "frozen={frozen}: stdout={} stderr={}",
-            output.stdout, output.stderr);
+            &app,
+            &balanced_config(),
+            "balanced",
+            Path::new(franken_node_bin()),
+            options,
+        )
+        .unwrap();
+        assert!(
+            output.status.success(),
+            "frozen={frozen}: stdout={} stderr={}",
+            output.stdout,
+            output.stderr
+        );
         let dispatch = parse_product_dispatch(&output).unwrap();
-        assert_eq!(dispatch.captured_output.stdout,
-            "true true true true\nfunction function true\n42 true\ntrue true\n");
-        assert_eq!(dispatch.engine_decision.unwrap().frozen_modules.is_some(), frozen);
+        assert_eq!(
+            dispatch.captured_output.stdout,
+            "true true true true\nfunction function true\n42 true\ntrue true\n"
+        );
+        assert_eq!(
+            dispatch.engine_decision.unwrap().frozen_modules.is_some(),
+            frozen
+        );
     }
 }
 
@@ -3402,20 +3551,39 @@ import('diagnostics_channel').then(function (ns) {
 fn native_diagnostics_subscribers_do_not_gain_filesystem_write_authority() {
     for frozen in [false, true] {
         let workspace = TempDir::new().unwrap();
-        let app = create_test_app(workspace.path(), "app.cjs", r#"
+        let app = create_test_app(
+            workspace.path(),
+            "app.cjs",
+            r#"
 const diagnostics = require('diagnostics_channel');
 const fs = require('fs');
 diagnostics.subscribe('attempt', function () { fs.writeFileSync('forbidden.txt', 'wrong'); });
 diagnostics.channel('attempt').publish(42);
 console.log('must not complete');
-"#);
-        let options = if frozen { &["--frozen-modules"][..] } else { &[] };
+"#,
+        );
+        let options = if frozen {
+            &["--frozen-modules"][..]
+        } else {
+            &[]
+        };
         let output = invoke_product_supervisor_with_options(
-            &app, &balanced_config(), "balanced", Path::new(franken_node_bin()), options,
-        ).unwrap();
-        assert!(!output.status.success(), "frozen={frozen}: callback gained fs_write");
+            &app,
+            &balanced_config(),
+            "balanced",
+            Path::new(franken_node_bin()),
+            options,
+        )
+        .unwrap();
+        assert!(
+            !output.status.success(),
+            "frozen={frozen}: callback gained fs_write"
+        );
         let diagnostics = format!("{}\n{}", output.stdout, output.stderr);
-        assert!(diagnostics.contains("capability denied: fs:write"), "{diagnostics}");
+        assert!(
+            diagnostics.contains("capability denied: fs:write"),
+            "{diagnostics}"
+        );
         assert!(!workspace.path().join("forbidden.txt").exists());
         assert!(!diagnostics.contains("must not complete"), "{diagnostics}");
     }
@@ -3885,7 +4053,16 @@ fn frozen_custom_conditions_replay_the_captured_branch_after_package_replacement
         "app.cjs",
         "console.log(require('conditioned'));",
     );
-    let mut config = balanced_config();
+    let initialized = Command::new(franken_node_bin())
+        .current_dir(workspace.path())
+        .args(["init", "--profile", "balanced", "--out-dir", ".", "--json"])
+        .output()
+        .unwrap();
+    assert!(initialized.status.success(), "{initialized:?}");
+    let mut config: Config = toml::from_str(
+        &std::fs::read_to_string(workspace.path().join("franken_node.toml")).unwrap(),
+    )
+    .unwrap();
     config.runtime.frozen_modules = Some(true);
     config.runtime.module_conditions = vec!["development".into()];
     let output = invoke_product_supervisor_with_options(
