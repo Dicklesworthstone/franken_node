@@ -20,7 +20,7 @@ MAX_INPUT_BYTES = 64 * 1024 * 1024
 MAX_RESPONSE_BYTES = 64 * 1024 + 1
 EvidenceFormat = Literal[
     "incident-bundle", "capsule", "signed-bundle", "resolution-receipt",
-    "publisher-source", "counterfactual-receipt", "ltv-evidence",
+    "publisher-source", "publisher-source-trust", "counterfactual-receipt", "ltv-evidence",
 ]
 _SCOPES = {
     "incident-bundle": "authenticated_recorded_incident",
@@ -28,6 +28,7 @@ _SCOPES = {
     "signed-bundle": "authenticated_sdk_replay_bundle",
     "resolution-receipt": "authenticated_resolution_decision",
     "publisher-source": "authenticated_publisher_source_content",
+    "publisher-source-trust": "authenticated_publisher_source_trust",
     "counterfactual-receipt": "authenticated_counterfactual_receipt",
     "ltv-evidence": "authenticated_ltv_anteriority",
 }
@@ -41,6 +42,7 @@ class Verification(TypedDict):
                    "authenticated_runtime_incident",
                    "authenticated_capsule_content", "authenticated_sdk_replay_bundle",
                    "authenticated_resolution_decision", "authenticated_publisher_source_content",
+                   "authenticated_publisher_source_trust",
                    "authenticated_counterfactual_receipt", "authenticated_ltv_anteriority"]
     artifact_sha256: str
     facts: dict[str, Any]
@@ -155,6 +157,72 @@ def _decimal_limit(value: Any, limit: int) -> bool:
             and int(value) <= limit)
 
 
+def _instant_ns(value: Any) -> int | None:
+    """Parse four-digit RFC3339 years and non-leap seconds without rounding."""
+    if not isinstance(value, str) or len(value) > 35:
+        return None
+    match = re.fullmatch(
+        r"([0-9]{4})-([0-9]{2})-([0-9]{2})[Tt]([0-9]{2}):([0-9]{2}):([0-9]{2})"
+        r"(?:\.([0-9]{1,9}))?([Zz]|[+-][0-9]{2}:[0-9]{2})", value,
+    )
+    if match is None:
+        return None
+    year, month, day, hour, minute, second = map(int, match.group(1, 2, 3, 4, 5, 6))
+    leap = year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)
+    months = (31, 29 if leap else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31)
+    if not (1 <= month <= 12 and 1 <= day <= months[month - 1]
+            and hour < 24 and minute < 60 and second < 60):
+        return None
+    zone = match.group(8)
+    offset = 0
+    if zone not in ("Z", "z"):
+        offset_hour, offset_minute = int(zone[1:3]), int(zone[4:6])
+        if offset_hour >= 24 or offset_minute >= 60:
+            return None
+        offset = (offset_hour * 60 + offset_minute) * 60
+        if zone[0] == "-":
+            offset = -offset
+    # Count Gregorian leap years from year zero; supports the whole RFC range.
+    def days_before_year(y: int) -> int:
+        return 365 * y + (y + 3) // 4 - (y + 99) // 100 + (y + 399) // 400
+    days = days_before_year(year) - days_before_year(1970) + sum(months[:month - 1]) + day - 1
+    seconds = days * 86400 + hour * 3600 + minute * 60 + second - offset
+    return seconds * 1_000_000_000 + int((match.group(7) or "").ljust(9, "0"))
+
+
+def _publisher_source_trust_valid(
+    facts: Any, anchor: str, revocation_anchor: str | None, provenance_anchor: str | None,
+    evaluation_time: str | None, max_age: str | None,
+) -> bool:
+    if not isinstance(facts, dict) or set(facts) != {
+        "source", "revocation_list_sha256", "revocation_authority_public_key_hex",
+        "revocation_issued_at", "revocation_evaluated_at", "max_revocation_age_secs",
+        "provenance_chain_sha256", "provenance_authority_public_key_hex", "provenance_link_count",
+    }:
+        return False
+    evaluated = _instant_ns(facts["revocation_evaluated_at"])
+    issued = _instant_ns(facts["revocation_issued_at"])
+    if (revocation_anchor is None or evaluated is None or issued is None
+            or evaluated != _instant_ns(evaluation_time)
+            or not _decimal_limit(max_age, 2**64 - 1)
+            or facts["max_revocation_age_secs"] != max_age
+            or not 0 <= evaluated - issued < int(max_age) * 1_000_000_000
+            or not _digest(facts["revocation_list_sha256"])
+            or facts["revocation_authority_public_key_hex"] != revocation_anchor
+            or not _facts_valid(facts["source"], "publisher-source", anchor, None, None)):
+        return False
+    if provenance_anchor is None:
+        return all(facts[name] is None for name in (
+            "provenance_chain_sha256", "provenance_authority_public_key_hex", "provenance_link_count",
+        ))
+    return (
+        _digest(facts["provenance_chain_sha256"])
+        and facts["provenance_authority_public_key_hex"] == provenance_anchor
+        and type(facts["provenance_link_count"]) is int
+        and 1 <= facts["provenance_link_count"] <= 256
+    )
+
+
 def _publisher_authority_valid(authority: Any) -> bool:
     if not isinstance(authority, dict) or set(authority) != {
         "schema_version", "policy_revision", "allowed_capabilities", "allow_process_shape",
@@ -213,7 +281,13 @@ def _publisher_source_valid(facts: dict[str, Any], anchor: str) -> bool:
 
 
 def _facts_valid(facts: Any, format: str, anchor: str, run_anchor: str | None,
-                 runtime_anchor: str | None) -> bool:
+                 runtime_anchor: str | None, revocation_anchor: str | None = None,
+                 provenance_anchor: str | None = None, evaluation_time: str | None = None,
+                 max_age: str | None = None) -> bool:
+    if format == "publisher-source-trust":
+        return _publisher_source_trust_valid(
+            facts, anchor, revocation_anchor, provenance_anchor, evaluation_time, max_age,
+        )
     if not isinstance(facts, dict) or facts.get("signer_public_key_hex") != anchor:
         return False
     expected = {
@@ -321,6 +395,10 @@ def verify_artifact(
     format: EvidenceFormat = "incident-bundle",
     trusted_run_public_key_hex: str | None = None,
     trusted_runtime_public_key_hex: str | None = None,
+    trusted_revocation_public_key_hex: str | None = None,
+    trusted_provenance_public_key_hex: str | None = None,
+    evaluation_time: str | None = None,
+    max_revocation_age_secs: str | None = None,
     signature_hex: str | None = None,
     timeout: float = 10.0,
 ) -> Verification:
@@ -336,6 +414,11 @@ def verify_artifact(
     Adding ``trusted_runtime_public_key_hex`` requires that run authority plus
     the portable product-root/session signatures over the original effect ledger.
     It does not establish guest replay, external effect completion or quiescence.
+    Publisher-source trust requires an independent revocation authority, an
+    explicit RFC3339 evaluation time, and a positive decimal u64 freshness window.
+    An optional independent provenance authority requires matching chain evidence.
+    Times use four-digit years, non-leap seconds, and at most nine fractional
+    digits; comparison preserves nanoseconds and the exact freshness boundary.
     The supplied executable is part of the caller's trusted verifier
     distribution. It is never inferred from an artifact or run through a shell.
     """
@@ -357,6 +440,21 @@ def verify_artifact(
             raise VerifierError("INPUT_INVALID", "runtime trust requires incident-bundle and original-run trust")
         if not _hex(trusted_runtime_public_key_hex, 64):
             raise VerifierError("RUNTIME_ANCHOR_INVALID", "expected a 32-byte hexadecimal product-root public key")
+    publisher_trust_options = (
+        trusted_revocation_public_key_hex, trusted_provenance_public_key_hex,
+        evaluation_time, max_revocation_age_secs,
+    )
+    if format == "publisher-source-trust":
+        if not _hex(trusted_revocation_public_key_hex, 64):
+            raise VerifierError("REVOCATION_ANCHOR_INVALID", "an independent revocation public key is required")
+        if trusted_provenance_public_key_hex is not None and not _hex(trusted_provenance_public_key_hex, 64):
+            raise VerifierError("PROVENANCE_ANCHOR_INVALID", "expected a 32-byte hexadecimal provenance public key")
+        if _instant_ns(evaluation_time) is None:
+            raise VerifierError("EVALUATION_TIME_INVALID", "a precise RFC3339 evaluation time is required")
+        if not _decimal_limit(max_revocation_age_secs, 2**64 - 1):
+            raise VerifierError("REVOCATION_FRESHNESS_POLICY_INVALID", "freshness must be a positive decimal u64 string")
+    elif any(value is not None for value in publisher_trust_options):
+        raise VerifierError("INPUT_INVALID", "publisher trust options require publisher-source-trust")
     if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not 0 < timeout <= 120 or not math.isfinite(timeout):
         raise VerifierError("TIMEOUT_INVALID", "timeout must be finite and in (0, 120] seconds")
     try:
@@ -368,6 +466,8 @@ def verify_artifact(
     anchor = trusted_public_key_hex.lower()
     run_anchor = trusted_run_public_key_hex.lower() if trusted_run_public_key_hex is not None else None
     runtime_anchor = trusted_runtime_public_key_hex.lower() if trusted_runtime_public_key_hex is not None else None
+    revocation_anchor = trusted_revocation_public_key_hex.lower() if trusted_revocation_public_key_hex is not None else None
+    provenance_anchor = trusted_provenance_public_key_hex.lower() if trusted_provenance_public_key_hex is not None else None
     scope = ("authenticated_runtime_incident" if runtime_anchor is not None else
              "authenticated_run_incident" if run_anchor is not None else _SCOPES[format])
     args = [executable, "verify", "--format", format, "--trusted-key-hex", anchor]
@@ -375,12 +475,17 @@ def verify_artifact(
         args.extend(["--trusted-run-key-hex", run_anchor])
     if runtime_anchor is not None:
         args.extend(["--trusted-runtime-key-hex", runtime_anchor])
-    if format in ("signed-bundle", "publisher-source", "counterfactual-receipt"):
+    if revocation_anchor is not None:
+        args.extend(["--trusted-revocation-key-hex", revocation_anchor,
+                     "--evaluation-time", evaluation_time, "--max-revocation-age-secs", max_revocation_age_secs])
+    if provenance_anchor is not None:
+        args.extend(["--trusted-provenance-key-hex", provenance_anchor])
+    if format in ("signed-bundle", "publisher-source", "publisher-source-trust", "counterfactual-receipt"):
         if not _hex(signature_hex, 128):
             raise VerifierError("SIGNATURE_MALFORMED", "a detached 64-byte signature is required")
         args.extend(["--signature-hex", signature_hex])
     elif signature_hex is not None:
-        raise VerifierError("INPUT_INVALID", "detached signatures apply only to signed-bundle, publisher-source, or counterfactual-receipt")
+        raise VerifierError("INPUT_INVALID", "detached signatures require a signed-bundle, publisher-source format, or counterfactual-receipt")
     try:
         process = subprocess.run(args, input=data, capture_output=True, timeout=timeout,
                                  check=False, shell=False)
@@ -409,6 +514,7 @@ def verify_artifact(
             or set(result) != {"schema_version", "verdict", "format", "scope", "artifact_sha256", "facts"}
             or result.get("format") != format or result.get("scope") != scope
             or result.get("artifact_sha256") != hashlib.sha256(data).hexdigest()
-            or not _facts_valid(result.get("facts"), format, anchor, run_anchor, runtime_anchor)):
+            or not _facts_valid(result.get("facts"), format, anchor, run_anchor, runtime_anchor,
+                                revocation_anchor, provenance_anchor, evaluation_time, max_revocation_age_secs)):
         raise VerifierError("PROTOCOL_INVALID", "verification response does not match the request")
     return result

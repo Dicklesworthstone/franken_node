@@ -432,6 +432,225 @@ add("publisher_source_transport_schema", "publisher-source", JSON.stringify(tran
 const noncanonicalBase64 = JSON.parse(sourceWire); noncanonicalBase64.capsule_base64 += "\n";
 add("publisher_source_noncanonical_base64", "publisher-source", JSON.stringify(noncanonicalBase64), "EVIDENCE_INVALID", { signature_hex: sourceSignature });
 
+// Independently signed publisher trust statements. Publisher, revocation, and
+// provenance authorities are distinct; only caller metadata carries trust keys,
+// evaluation time, and the maximum revocation age.
+const sourceRevocationKey = seedKey(0x71), sourceProvenanceKey = seedKey(0x72);
+const sourceRevocationAnchor = publicBytes(sourceRevocationKey).toString("hex");
+const sourceProvenanceAnchor = publicBytes(sourceProvenanceKey).toString("hex");
+assert.equal(new Set([anchor, sourceRevocationAnchor, sourceProvenanceAnchor]).size, 3);
+const revocationDomain = "franken-node/publisher-revocation-list/v1:";
+const provenanceDomain = "franken-node/publisher-provenance-chain/v1:";
+const trustRevocations = {
+  schema_version: "franken-node/publisher-revocation-list/v1", issued_at: "2026-11-11T00:00:00Z",
+  revoked_publisher_ids: [], revoked_signer_key_ids: [], revoked_package_versions: [],
+};
+function sourceTrustSignature(domain, bytes, authority) {
+  return sign(null, Buffer.concat([Buffer.from(domain), u64(bytes.length), bytes]), authority).toString("hex");
+}
+function sourceProvenance(manifest, manifestBytes) {
+  return {
+    schema_version: "franken-node/publisher-provenance-chain/v1",
+    package_name: manifest.name, publisher_id: manifest.publisher_id,
+    links: [{ version: manifest.initial_version.version, parent_version: manifest.initial_version.parent_version,
+      content_hash: manifest.initial_version.content_hash, manifest_sha256: `sha256:${hash(manifestBytes)}`,
+      previous_link_sha256: null }],
+  };
+}
+function sourceProvenanceLinkDigest(link) {
+  const optional = (value) => value === null ? Buffer.from([0]) : Buffer.concat([Buffer.from([1]), lp(value)]);
+  return `sha256:${hash(Buffer.concat([
+    Buffer.from("franken-node/publisher-provenance-link/v1:"), lp(link.version), optional(link.parent_version),
+    lp(link.content_hash), lp(link.manifest_sha256), optional(link.previous_link_sha256),
+  ]))}`;
+}
+function addSourceTrust(name, expected = "verified", options = {}) {
+  const manifest = options.manifest ?? registration;
+  const manifestBytes = options.manifestBytes ?? Buffer.from(ordered(manifest));
+  const capsuleBytes = options.capsuleBytes ?? sourceBytes;
+  const revocations = options.revocations ?? trustRevocations;
+  const revocationBytes = options.revocationBytes ?? Buffer.from(ordered(revocations));
+  const provenance = options.provenance === null ? null : options.provenance ?? sourceProvenance(manifest, manifestBytes);
+  const provenanceBytes = provenance === null ? null : options.provenanceBytes ?? Buffer.from(ordered(provenance));
+  const transport = {
+    schema_version: "franken-verifier/publisher-source-trust-input/v1",
+    manifest_base64: manifestBytes.toString("base64"), capsule_base64: capsuleBytes.toString("base64"),
+    revocation_list_base64: revocationBytes.toString("base64"),
+    revocation_signature_hex: sourceTrustSignature(revocationDomain, revocationBytes, sourceRevocationKey),
+  };
+  if (provenanceBytes !== null) transport.provenance = {
+    chain_base64: provenanceBytes.toString("base64"),
+    signature_hex: sourceTrustSignature(provenanceDomain, provenanceBytes, sourceProvenanceKey),
+  };
+  options.mutate?.(transport);
+  const metadata = {
+    signature_hex: sign(null, manifestBytes, key).toString("hex"), revocation_anchor: sourceRevocationAnchor,
+    provenance_anchor: provenanceBytes === null ? null : sourceProvenanceAnchor,
+    evaluation_time: "2026-11-11T00:30:00Z", max_revocation_age_secs: "3600", ...options.metadata,
+  };
+  const facts = expected === "verified" ? {
+    source: sourceFacts(manifest, manifestBytes, capsuleBytes),
+    revocation_list_sha256: `sha256:${hash(revocationBytes)}`,
+    revocation_authority_public_key_hex: metadata.revocation_anchor,
+    revocation_issued_at: revocations.issued_at,
+    revocation_evaluated_at: options.evaluatedAt ?? metadata.evaluation_time,
+    max_revocation_age_secs: metadata.max_revocation_age_secs,
+    provenance_chain_sha256: provenanceBytes === null ? null : `sha256:${hash(provenanceBytes)}`,
+    provenance_authority_public_key_hex: provenanceBytes === null ? null : metadata.provenance_anchor,
+    provenance_link_count: provenance === null ? null : provenance.links.length,
+  } : null;
+  add(name, "publisher-source-trust", options.wire?.(transport) ?? JSON.stringify(transport), expected, {
+    ...metadata, ...(facts === null ? {} : { publisher_trust_facts: facts }),
+  });
+}
+addSourceTrust("publisher_trust_fresh_revocation_without_provenance", "verified", { provenance: null });
+addSourceTrust("publisher_trust_independent_revocation_and_provenance");
+const formattedProvenance = sourceProvenance(formattedRegistration, formattedBytes);
+addSourceTrust("publisher_trust_exact_formatted_signed_bytes", "verified", {
+  manifest: formattedRegistration, manifestBytes: formattedBytes,
+  revocationBytes: Buffer.from(JSON.stringify(trustRevocations, null, 2) + "\n"),
+  provenance: formattedProvenance, provenanceBytes: Buffer.from(JSON.stringify(formattedProvenance, null, 2) + "\n"),
+  wire: (transport) => JSON.stringify(transport, null, 2) + "\n",
+});
+addSourceTrust("publisher_trust_timezone_normalizes_evaluation", "verified", {
+  metadata: { evaluation_time: "2026-11-11t01:30:00.000000000+01:00" }, evaluatedAt: "2026-11-11T00:30:00Z",
+});
+addSourceTrust("publisher_trust_last_fresh_nanosecond", "verified", {
+  metadata: { evaluation_time: "2026-11-11T00:59:59.999999999Z" },
+});
+addSourceTrust("publisher_trust_u64_max_age_is_lossless", "verified", {
+  metadata: { max_revocation_age_secs: "18446744073709551615" },
+});
+
+// Two actual source-capsule fixtures anchor a linked history. Node computes
+// each parent-link digest independently; no producer/verifier helper is used.
+const priorSourceBytes = Buffer.from(sourceFixtures.vectors[1].module_sources.capsule_base64, "base64");
+const priorRegistration = sourceManifest(priorSourceBytes, 2); priorRegistration.initial_version.version = "1.0.0";
+const priorRegistrationBytes = Buffer.from(ordered(priorRegistration));
+const linkedRegistration = clone(registration); linkedRegistration.initial_version.parent_version = "1.0.0";
+const linkedRegistrationBytes = Buffer.from(ordered(linkedRegistration));
+const genesisLink = sourceProvenance(priorRegistration, priorRegistrationBytes).links[0];
+const linkedProvenance = sourceProvenance(linkedRegistration, linkedRegistrationBytes);
+linkedProvenance.links[0].previous_link_sha256 = sourceProvenanceLinkDigest(genesisLink);
+linkedProvenance.links.unshift(genesisLink);
+addSourceTrust("publisher_trust_linked_source_history", "verified", {
+  manifest: linkedRegistration, manifestBytes: linkedRegistrationBytes, provenance: linkedProvenance,
+});
+
+for (const [name, metadata] of [
+  ["publisher", { anchor: foreign }],
+  ["revocation", { revocation_anchor: foreign }],
+  ["provenance", { provenance_anchor: foreign }],
+  ["swapped_authorities", { revocation_anchor: sourceProvenanceAnchor, provenance_anchor: sourceRevocationAnchor }],
+]) addSourceTrust(`publisher_trust_foreign_${name}`, "SIGNATURE_INVALID", { metadata });
+for (const [name, mutate] of [
+  ["manifest", (transport) => { transport.manifest_base64 = Buffer.concat([registrationBytes, Buffer.from("\n")]).toString("base64"); }],
+  ["revocations", (transport) => { transport.revocation_list_base64 = Buffer.concat([Buffer.from(transport.revocation_list_base64, "base64"), Buffer.from("\n")]).toString("base64"); }],
+  ["provenance", (transport) => { transport.provenance.chain_base64 = Buffer.concat([Buffer.from(transport.provenance.chain_base64, "base64"), Buffer.from("\n")]).toString("base64"); }],
+]) addSourceTrust(`publisher_trust_changed_signed_${name}`, "SIGNATURE_INVALID", { mutate });
+addSourceTrust("publisher_trust_changed_capsule", "INTEGRITY_MISMATCH", {
+  mutate: (transport) => { transport.capsule_base64 = changedSource.toString("base64"); },
+});
+addSourceTrust("publisher_trust_revocation_signature_domain_is_bound", "SIGNATURE_INVALID", {
+  mutate: (transport) => { transport.revocation_signature_hex = sourceTrustSignature(provenanceDomain,
+    Buffer.from(transport.revocation_list_base64, "base64"), sourceRevocationKey); },
+});
+addSourceTrust("publisher_trust_provenance_signature_domain_is_bound", "SIGNATURE_INVALID", {
+  mutate: (transport) => { transport.provenance.signature_hex = sourceTrustSignature(revocationDomain,
+    Buffer.from(transport.provenance.chain_base64, "base64"), sourceProvenanceKey); },
+});
+
+const sourceSignerId = sourceFacts(registration, registrationBytes, sourceBytes).signer_key_id;
+for (const [name, changes] of [
+  ["publisher", { revoked_publisher_ids: [registration.publisher_id] }],
+  ["signer", { revoked_signer_key_ids: [sourceSignerId] }],
+  ["package", { revoked_package_versions: [`${registration.name}@1.2.3`] }],
+  ["numeric_alias", { revoked_package_versions: [`${registration.name}@01.02.03`] }],
+]) addSourceTrust(`publisher_trust_revoked_${name}`, "PUBLISHER_REVOKED", { revocations: { ...trustRevocations, ...changes } });
+const aliasRegistration = clone(registration); aliasRegistration.initial_version.version = "01.02.03";
+addSourceTrust("publisher_trust_revoked_manifest_numeric_alias", "PUBLISHER_REVOKED", {
+  manifest: aliasRegistration, revocations: { ...trustRevocations, revoked_package_versions: [`${registration.name}@1.2.3`] },
+});
+const scopedRegistration = clone(registration); scopedRegistration.name = "@audit/source-vector";
+addSourceTrust("publisher_trust_revoked_scoped_numeric_alias", "PUBLISHER_REVOKED", {
+  manifest: scopedRegistration, revocations: { ...trustRevocations, revoked_package_versions: ["@audit/source-vector@01.2.03"] },
+});
+addSourceTrust("publisher_trust_unrelated_scoped_revocation_does_not_deny", "verified", {
+  manifest: scopedRegistration, revocations: { ...trustRevocations, revoked_package_versions: ["@other/source-vector@1.2.3"] },
+});
+
+addSourceTrust("publisher_trust_exact_stale_boundary", "REVOCATION_STALE", {
+  metadata: { evaluation_time: "2026-11-11T01:00:00Z" },
+});
+addSourceTrust("publisher_trust_future_revocation_by_one_nanosecond", "REVOCATION_NOT_YET_VALID", {
+  revocations: { ...trustRevocations, issued_at: "2026-11-11T00:30:00.000000001Z" },
+});
+// Sign the invalid timestamp exactly: a valid authority signature cannot make
+// an unrepresentable instant safe to truncate or normalize during verification.
+for (const [name, issuedAt] of [
+  ["sub_nanosecond_future", "2026-11-11T00:30:00.0000000001Z"],
+  ["excess_zero_precision", "2026-11-11T00:00:00.0000000000Z"],
+  ["leap_second", "2026-11-11T00:00:60Z"],
+]) addSourceTrust(`publisher_trust_signed_invalid_issue_time_${name}`, "EVIDENCE_INVALID", {
+  revocations: { ...trustRevocations, issued_at: issuedAt },
+});
+for (const age of ["0", "18446744073709551616"]) addSourceTrust(`publisher_trust_invalid_age_${age}`,
+  "REVOCATION_FRESHNESS_POLICY_INVALID", { metadata: { max_revocation_age_secs: age } });
+addSourceTrust("publisher_trust_invalid_caller_time", "EVALUATION_TIME_INVALID", {
+  metadata: { evaluation_time: "2026-11-11T00:30:60Z" },
+});
+addSourceTrust("publisher_trust_signed_malformed_revocation_identity", "EVIDENCE_INVALID", {
+  revocations: { ...trustRevocations, revoked_package_versions: ["source-vector@1.2"] },
+});
+const wrongTip = sourceProvenance(registration, registrationBytes);
+wrongTip.links[0].manifest_sha256 = `sha256:${hash("different signed registration")}`;
+addSourceTrust("publisher_trust_genuine_signature_over_wrong_tip", "EVIDENCE_INVALID", { provenance: wrongTip });
+const brokenHistory = clone(linkedProvenance);
+brokenHistory.links[1].previous_link_sha256 = `sha256:${hash("different previous link")}`;
+addSourceTrust("publisher_trust_genuine_signature_over_broken_history", "EVIDENCE_INVALID", {
+  manifest: linkedRegistration, manifestBytes: linkedRegistrationBytes, provenance: brokenHistory,
+});
+addSourceTrust("publisher_trust_provenance_requires_external_anchor", "EVIDENCE_INVALID", {
+  metadata: { provenance_anchor: null },
+});
+addSourceTrust("publisher_trust_provenance_anchor_requires_evidence", "EVIDENCE_INVALID", {
+  provenance: null, metadata: { provenance_anchor: sourceProvenanceAnchor },
+});
+addSourceTrust("publisher_trust_null_provenance_is_not_absent", "EVIDENCE_INVALID", {
+  provenance: null, mutate: (transport) => { transport.provenance = null; },
+});
+addSourceTrust("publisher_trust_partial_provenance_is_rejected", "EVIDENCE_INVALID", {
+  mutate: (transport) => { delete transport.provenance.signature_hex; },
+});
+for (const [field, value] of [
+  ["evaluation_time", "1900-01-01T00:00:00Z"], ["max_revocation_age_secs", "18446744073709551615"],
+  ["revocation_authority", sourceRevocationAnchor], ["provenance_authority", sourceProvenanceAnchor],
+]) addSourceTrust(`publisher_trust_cannot_inject_${field}`, "EVIDENCE_INVALID", {
+  mutate: (transport) => { transport[field] = value; },
+});
+addSourceTrust("publisher_trust_cannot_inject_nested_anchor", "EVIDENCE_INVALID", {
+  mutate: (transport) => { transport.provenance.trusted_key = sourceProvenanceAnchor; },
+});
+for (const [name, mutate] of [
+  ["revocation", (transport) => { transport.revocation_list_base64 += "\n"; }],
+  ["provenance", (transport) => { transport.provenance.chain_base64 += "\n"; }],
+]) addSourceTrust(`publisher_trust_noncanonical_${name}_encoding`, "EVIDENCE_INVALID", { mutate });
+addSourceTrust("publisher_trust_duplicate_transport_member", "JSON_INVALID", {
+  wire: (transport) => JSON.stringify(transport).slice(0, -1) + ',"revocation_list_base64":""}',
+});
+addSourceTrust("publisher_trust_signed_duplicate_revocation_member", "EVIDENCE_INVALID", {
+  revocationBytes: Buffer.from(ordered(trustRevocations).slice(0, -1) + ',"issued_at":"2026-11-11T00:00:00Z"}'),
+});
+addSourceTrust("publisher_trust_short_revocation_signature", "EVIDENCE_INVALID", {
+  mutate: (transport) => { transport.revocation_signature_hex = "aa"; },
+});
+addSourceTrust("publisher_trust_short_provenance_signature", "EVIDENCE_INVALID", {
+  mutate: (transport) => { transport.provenance.signature_hex = "aa"; },
+});
+addSourceTrust("publisher_trust_publisher_signature_required", "SIGNATURE_MALFORMED", {
+  metadata: { signature_hex: null },
+});
+
 // Counterfactual receipts: detached Ed25519 signature over canonical output JSON,
 // bound to a caller-expected baseline_integrity_hash.
 const cfBundleHash = hash("counterfactual-baseline-bundle");

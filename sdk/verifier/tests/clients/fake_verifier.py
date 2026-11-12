@@ -19,6 +19,12 @@ run_anchor = (sys.argv[sys.argv.index("--trusted-run-key-hex") + 1]
               if "--trusted-run-key-hex" in sys.argv else "11" * 32)
 runtime_anchor = (sys.argv[sys.argv.index("--trusted-runtime-key-hex") + 1]
                   if "--trusted-runtime-key-hex" in sys.argv else "22" * 32)
+revocation_anchor = (sys.argv[sys.argv.index("--trusted-revocation-key-hex") + 1]
+                     if "--trusted-revocation-key-hex" in sys.argv else "11" * 32)
+provenance_anchor = (sys.argv[sys.argv.index("--trusted-provenance-key-hex") + 1]
+                     if "--trusted-provenance-key-hex" in sys.argv else None)
+max_age = (sys.argv[sys.argv.index("--max-revocation-age-secs") + 1]
+           if "--max-revocation-age-secs" in sys.argv else "60")
 response = {
     "schema_version": "franken-verifier-cli/v1", "verdict": "verified",
     "format": "incident-bundle", "scope": "authenticated_recorded_incident",
@@ -83,6 +89,21 @@ if mode.startswith("publisher_"):
             "metadata_file_count": 0, "directory_count": 1, "missing_count": 1, "symlink_count": 0,
             "symlink_policy": "reject", "condition_count": None, "additional_condition_count": 0,
         },
+    }
+if mode.startswith("publisher_trust_"):
+    source = response["facts"]
+    response["format"] = "publisher-source-trust"
+    response["scope"] = "authenticated_publisher_source_trust"
+    response["facts"] = {
+        "source": source,
+        "revocation_list_sha256": "sha256:" + "a" * 64,
+        "revocation_authority_public_key_hex": revocation_anchor,
+        "revocation_issued_at": "2026-10-24T00:00:00.123456789Z",
+        "revocation_evaluated_at": "2026-10-24T00:00:30.123456789Z",
+        "max_revocation_age_secs": max_age,
+        "provenance_chain_sha256": "sha256:" + "b" * 64 if provenance_anchor else None,
+        "provenance_authority_public_key_hex": provenance_anchor,
+        "provenance_link_count": 2 if provenance_anchor else None,
     }
 if mode.startswith("counterfactual_"):
     response["format"] = "counterfactual-receipt"
@@ -227,6 +248,61 @@ elif mode == "publisher_bad_digest":
     response["facts"]["capsule_digest"] = "sha256:claimed"
 elif mode == "publisher_capsule_not_object":
     response["facts"]["capsule"] = []
+elif mode == "publisher_trust_scope_downgrade":
+    response["scope"] = "authenticated_publisher_source_content"
+elif mode == "publisher_trust_format_downgrade":
+    response["format"] = "publisher-source"
+    response["scope"] = "authenticated_publisher_source_content"
+    response["facts"] = response["facts"]["source"]
+elif mode == "publisher_trust_wrong_revocation_anchor":
+    response["facts"]["revocation_authority_public_key_hex"] = "33" * 32
+elif mode == "publisher_trust_wrong_provenance_anchor":
+    response["facts"]["provenance_authority_public_key_hex"] = revocation_anchor
+elif mode == "publisher_trust_missing_provenance":
+    for key in ("provenance_chain_sha256", "provenance_authority_public_key_hex", "provenance_link_count"):
+        response["facts"][key] = None
+elif mode == "publisher_trust_unrequested_provenance":
+    response["facts"]["provenance_chain_sha256"] = "sha256:" + "b" * 64
+    response["facts"]["provenance_authority_public_key_hex"] = "22" * 32
+    response["facts"]["provenance_link_count"] = 2
+elif mode == "publisher_trust_partial_provenance":
+    response["facts"]["provenance_chain_sha256"] = None
+elif mode == "publisher_trust_zero_provenance":
+    response["facts"]["provenance_link_count"] = 0
+elif mode == "publisher_trust_overflow_provenance":
+    response["facts"]["provenance_link_count"] = 257
+elif mode == "publisher_trust_unsafe_provenance":
+    response["facts"]["provenance_link_count"] = 2**53
+elif mode == "publisher_trust_unknown_field":
+    response["facts"]["execution_authorized"] = True
+elif mode == "publisher_trust_bad_revocation_digest":
+    response["facts"]["revocation_list_sha256"] = "sha256:invalid"
+elif mode == "publisher_trust_bad_provenance_digest":
+    response["facts"]["provenance_chain_sha256"] = "sha256:invalid"
+elif mode == "publisher_trust_wrong_evaluation_time":
+    response["facts"]["revocation_evaluated_at"] = "2026-10-24T00:00:30.123456788Z"
+elif mode == "publisher_trust_rounded_evaluation_time":
+    response["facts"]["revocation_evaluated_at"] = "2026-10-24T00:00:30.123Z"
+elif mode == "publisher_trust_wrong_window":
+    response["facts"]["max_revocation_age_secs"] = "61"
+elif mode == "publisher_trust_rounded_window":
+    response["facts"]["max_revocation_age_secs"] = 60
+elif mode == "publisher_trust_future_revocations":
+    response["facts"]["revocation_issued_at"] = "2026-10-24T00:00:30.123456790Z"
+elif mode == "publisher_trust_stale_revocations":
+    response["facts"]["revocation_issued_at"] = "2026-10-23T23:59:30.123456789Z"
+elif mode == "publisher_trust_malformed_time":
+    response["facts"]["revocation_issued_at"] = "2026-02-30T00:00:00Z"
+elif mode == "publisher_trust_nested_wrong_signer":
+    response["facts"]["source"]["signer_public_key_hex"] = "00" * 32
+elif mode == "publisher_trust_nested_authority_missing":
+    response["facts"]["source"]["runtime_authority"] = None
+elif mode == "publisher_trust_nested_unknown_field":
+    response["facts"]["source"]["provenance_verified"] = True
+elif mode == "publisher_trust_nested_non_object":
+    response["facts"]["source"] = []
+elif mode == "publisher_trust_before_boundary":
+    response["facts"]["revocation_issued_at"] = "2026-10-23T23:59:30.123456790Z"
 elif mode == "counterfactual_wrong_scope":
     response["scope"] = "guest_executed"
 elif mode == "counterfactual_invalid_mode":

@@ -6,6 +6,7 @@ use std::io::{self, Read, Write};
 use std::process::ExitCode;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use chrono::{DateTime, Timelike, Utc};
 use ed25519_dalek::{Signature, VerifyingKey};
 use frankenengine_verifier_sdk::bundle::{self, BundleError};
 use frankenengine_verifier_sdk::capsule::{self, CapsuleError, CapsuleVerdict, ReplayCapsule};
@@ -18,7 +19,8 @@ use frankenengine_verifier_sdk::incident_bundle::{
     verify_incident_bundle_with_runtime_keys,
 };
 use frankenengine_verifier_sdk::publisher_source::{
-    MAX_PUBLISHER_SOURCE_INPUT_BYTES, PublisherSourceError, verify_publisher_source_input,
+    MAX_PUBLISHER_SOURCE_INPUT_BYTES, MAX_PUBLISHER_SOURCE_TRUST_INPUT_BYTES, PublisherSourceError,
+    PublisherTrustAnchors, verify_publisher_source_input, verify_publisher_source_trust_input,
 };
 use frankenengine_verifier_sdk::resolution::{
     ResolutionReceiptError, verify_signed_resolution_receipt,
@@ -37,7 +39,15 @@ const COUNTERFACTUAL_INPUT_SCHEMA: &str = "franken-verifier/counterfactual-recei
 const LTV_INPUT_SCHEMA: &str = "franken-verifier/ltv-evidence-input/v1";
 const LTV_WITNESS_ANCHOR_DOMAIN: &[u8] = b"franken-verifier/ltv-witness-anchor/v1:";
 const MAX_LTV_WITNESS_ANCHOR_BYTES: usize = 64 * 1024;
-const USAGE: &str = "franken-verifier verify --format incident-bundle|capsule|signed-bundle|resolution-receipt|publisher-source|counterfactual-receipt|ltv-evidence --trusted-key-hex HEX [--trusted-run-key-hex HEX [--trusted-runtime-key-hex HEX]] [--signature-hex HEX] < artifact";
+const USAGE: &str = "franken-verifier verify --format incident-bundle|capsule|signed-bundle|resolution-receipt|publisher-source|publisher-source-trust|counterfactual-receipt|ltv-evidence --trusted-key-hex HEX [--trusted-run-key-hex HEX [--trusted-runtime-key-hex HEX]] [--signature-hex HEX] [--trusted-revocation-key-hex HEX --evaluation-time RFC3339 --max-revocation-age-secs SECONDS [--trusted-provenance-key-hex HEX]] < artifact";
+
+#[derive(Debug)]
+struct PublisherTrustRequest {
+    revocation_authority: VerifyingKey,
+    provenance_authority: Option<VerifyingKey>,
+    evaluation_time: DateTime<Utc>,
+    max_revocation_age_secs: u64,
+}
 
 #[derive(Debug)]
 struct Request {
@@ -46,6 +56,7 @@ struct Request {
     run_anchor: Option<VerifyingKey>,
     runtime_anchor: Option<VerifyingKey>,
     signature: Option<[u8; 64]>,
+    publisher_trust: Option<PublisherTrustRequest>,
 }
 
 #[derive(Debug)]
@@ -63,6 +74,42 @@ fn failure(code: &'static str, message: &'static str) -> Failure {
     }
 }
 
+fn trusted_evaluation_time(text: &str) -> Result<DateTime<Utc>, Failure> {
+    let invalid = || {
+        failure(
+            "EVALUATION_TIME_INVALID",
+            "expected non-leap RFC3339 time with at most nine fractional digits",
+        )
+    };
+    let bytes = text.as_bytes();
+    if !(20..=35).contains(&bytes.len())
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || !matches!(bytes[10], b'T' | b't')
+        || bytes[13] != b':'
+        || bytes[16] != b':'
+    {
+        return Err(invalid());
+    }
+    let zone_start = if matches!(bytes.last(), Some(b'Z' | b'z')) {
+        bytes.len() - 1
+    } else {
+        bytes.len() - 6
+    };
+    if zone_start != 19
+        && (!(21..=29).contains(&zone_start)
+            || bytes[19] != b'.'
+            || !bytes[20..zone_start].iter().all(u8::is_ascii_digit))
+    {
+        return Err(invalid());
+    }
+    let parsed = DateTime::parse_from_rfc3339(text).map_err(|_| invalid())?;
+    if parsed.nanosecond() >= 1_000_000_000 {
+        return Err(invalid());
+    }
+    Ok(parsed.with_timezone(&Utc))
+}
+
 fn arguments(args: &[String]) -> Result<Request, Failure> {
     let usage = || Failure {
         code: "USAGE",
@@ -74,6 +121,8 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
     }
     let (mut format, mut anchor, mut run_anchor, mut runtime_anchor, mut signature) =
         (None, None, None, None, None);
+    let (mut revocation_anchor, mut provenance_anchor, mut evaluation_time, mut max_age) =
+        (None, None, None, None);
     let (options, remainder) = args[1..].as_chunks::<2>();
     for option in options {
         let slot = match option[0].as_str() {
@@ -82,6 +131,10 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
             "--trusted-run-key-hex" => &mut run_anchor,
             "--trusted-runtime-key-hex" => &mut runtime_anchor,
             "--signature-hex" => &mut signature,
+            "--trusted-revocation-key-hex" => &mut revocation_anchor,
+            "--trusted-provenance-key-hex" => &mut provenance_anchor,
+            "--evaluation-time" => &mut evaluation_time,
+            "--max-revocation-age-secs" => &mut max_age,
             _ => return Err(usage()),
         };
         if slot.replace(option[1].clone()).is_some() {
@@ -99,6 +152,7 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
             | "signed-bundle"
             | "resolution-receipt"
             | "publisher-source"
+            | "publisher-source-trust"
             | "counterfactual-receipt"
             | "ltv-evidence"
     ) {
@@ -150,7 +204,13 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
         (_, _, None) => None,
     };
     let signature = match (format.as_str(), signature) {
-        ("signed-bundle" | "publisher-source" | "counterfactual-receipt", Some(text)) => {
+        (
+            "signed-bundle"
+            | "publisher-source"
+            | "publisher-source-trust"
+            | "counterfactual-receipt",
+            Some(text),
+        ) => {
             let mut bytes = [0_u8; 64];
             hex::decode_to_slice(text, &mut bytes).map_err(|_| {
                 failure(
@@ -160,7 +220,13 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
             })?;
             Some(bytes)
         }
-        ("signed-bundle" | "publisher-source" | "counterfactual-receipt", None) => {
+        (
+            "signed-bundle"
+            | "publisher-source"
+            | "publisher-source-trust"
+            | "counterfactual-receipt",
+            None,
+        ) => {
             return Err(failure(
                 "SIGNATURE_MALFORMED",
                 "detached signature is required",
@@ -169,12 +235,58 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
         (_, Some(_)) => return Err(usage()),
         (_, None) => None,
     };
+    let publisher_trust = if format == "publisher-source-trust" {
+        let parse_authority = |text: &str, code: &'static str| {
+            let mut key = [0_u8; 32];
+            hex::decode_to_slice(text, &mut key).map_err(|_| {
+                failure(code, "expected a 32-byte hexadecimal authority public key")
+            })?;
+            VerifyingKey::from_bytes(&key)
+                .map_err(|_| failure(code, "invalid Ed25519 authority public key"))
+        };
+        let revocation_authority = parse_authority(
+            &revocation_anchor.ok_or_else(usage)?,
+            "REVOCATION_ANCHOR_INVALID",
+        )?;
+        let provenance_authority = provenance_anchor
+            .as_deref()
+            .map(|text| parse_authority(text, "PROVENANCE_ANCHOR_INVALID"))
+            .transpose()?;
+        let evaluation_time = trusted_evaluation_time(&evaluation_time.ok_or_else(usage)?)?;
+        let max_age = max_age.ok_or_else(usage)?;
+        let max_revocation_age_secs = max_age
+            .parse::<u64>()
+            .ok()
+            .filter(|age| *age > 0 && age.to_string() == max_age)
+            .ok_or_else(|| {
+                failure(
+                    "REVOCATION_FRESHNESS_POLICY_INVALID",
+                    "expected a canonical positive u64 freshness window in seconds",
+                )
+            })?;
+        Some(PublisherTrustRequest {
+            revocation_authority,
+            provenance_authority,
+            evaluation_time,
+            max_revocation_age_secs,
+        })
+    } else {
+        if revocation_anchor.is_some()
+            || provenance_anchor.is_some()
+            || evaluation_time.is_some()
+            || max_age.is_some()
+        {
+            return Err(usage());
+        }
+        None
+    };
     Ok(Request {
         format,
         anchor,
         run_anchor,
         runtime_anchor,
         signature,
+        publisher_trust,
     })
 }
 
@@ -229,6 +341,11 @@ fn publisher_source_failure(error: &PublisherSourceError) -> Failure {
         | PublisherSourceError::ProvenanceSignatureInvalid => "SIGNATURE_INVALID",
         PublisherSourceError::ArtifactHashMismatch => "INTEGRITY_MISMATCH",
         PublisherSourceError::PublisherRevoked => "PUBLISHER_REVOKED",
+        PublisherSourceError::RevocationFreshnessPolicyInvalid => {
+            "REVOCATION_FRESHNESS_POLICY_INVALID"
+        }
+        PublisherSourceError::RevocationListNotYetValid => "REVOCATION_NOT_YET_VALID",
+        PublisherSourceError::RevocationListStale => "REVOCATION_STALE",
         _ => "EVIDENCE_INVALID",
     };
     failure(code, "publisher-signed source verification failed")
@@ -276,6 +393,31 @@ fn counterfactual_failure(error: &CounterfactualReceiptError) -> Failure {
 
 fn verify(request: &Request, bytes: &[u8]) -> Result<Value, Failure> {
     match request.format.as_str() {
+        "publisher-source-trust" => {
+            let signature = request
+                .signature
+                .as_ref()
+                .ok_or_else(|| failure("SIGNATURE_MALFORMED", "detached signature is required"))?;
+            let policy = request.publisher_trust.as_ref().ok_or_else(|| {
+                failure(
+                    "REVOCATION_FRESHNESS_POLICY_INVALID",
+                    "explicit publisher trust policy is required",
+                )
+            })?;
+            let verified = verify_publisher_source_trust_input(
+                bytes,
+                signature,
+                &request.anchor,
+                &PublisherTrustAnchors {
+                    revocation_authority: &policy.revocation_authority,
+                    provenance_authority: policy.provenance_authority.as_ref(),
+                    evaluation_time: policy.evaluation_time,
+                    max_revocation_age_secs: policy.max_revocation_age_secs,
+                },
+            )
+            .map_err(|error| publisher_source_failure(&error))?;
+            Ok(json!({"scope": "authenticated_publisher_source_trust", "facts": verified}))
+        }
         "publisher-source" => {
             let signature = request
                 .signature
@@ -588,10 +730,10 @@ fn verify(request: &Request, bytes: &[u8]) -> Result<Value, Failure> {
 
 fn run(args: &[String], input: &mut impl Read) -> Result<Value, Failure> {
     let request = arguments(args)?;
-    let input_limit = if request.format == "publisher-source" {
-        MAX_PUBLISHER_SOURCE_INPUT_BYTES
-    } else {
-        MAX_INCIDENT_BUNDLE_BYTES
+    let input_limit = match request.format.as_str() {
+        "publisher-source" => MAX_PUBLISHER_SOURCE_INPUT_BYTES,
+        "publisher-source-trust" => MAX_PUBLISHER_SOURCE_TRUST_INPUT_BYTES,
+        _ => MAX_INCIDENT_BUNDLE_BYTES,
     };
     let mut bytes = Vec::new();
     input
@@ -605,7 +747,10 @@ fn run(args: &[String], input: &mut impl Read) -> Result<Value, Failure> {
     if bytes.len() > input_limit {
         return Err(failure(
             "INPUT_TOO_LARGE",
-            if request.format == "publisher-source" {
+            if matches!(
+                request.format.as_str(),
+                "publisher-source" | "publisher-source-trust"
+            ) {
                 "publisher source evidence exceeds its bounded input limit"
             } else {
                 "evidence exceeds the 64 MiB input limit"
@@ -961,6 +1106,228 @@ mod tests {
             1,
             "stop reading at the publisher transport bound"
         );
+    }
+
+    #[test]
+    fn publisher_trust_cli_requires_exact_explicit_policy_options() {
+        let (mut request, _, _) = publisher_source_cli_fixture(false);
+        request[2] = "publisher-source-trust".into();
+        request.extend([
+            "--trusted-revocation-key-hex".into(),
+            ANCHOR.into(),
+            "--evaluation-time".into(),
+            "2026-11-11T00:30:00Z".into(),
+            "--max-revocation-age-secs".into(),
+            "3600".into(),
+        ]);
+        assert!(arguments(&request).is_ok());
+        for option in [
+            "--trusted-revocation-key-hex",
+            "--evaluation-time",
+            "--max-revocation-age-secs",
+        ] {
+            let position = request.iter().position(|arg| arg == option).unwrap();
+            let mut missing = request.clone();
+            missing.drain(position..position + 2);
+            assert_eq!(arguments(&missing).unwrap_err().code, "USAGE");
+            let mut duplicate = request.clone();
+            duplicate.extend([option.into(), "duplicate".into()]);
+            assert_eq!(arguments(&duplicate).unwrap_err().code, "USAGE");
+        }
+        let max_position = request
+            .iter()
+            .position(|arg| arg == "--max-revocation-age-secs")
+            .unwrap()
+            + 1;
+        for invalid in ["0", "01", "+1", " 1", "1.5", "18446744073709551616"] {
+            request[max_position] = invalid.into();
+            assert_eq!(
+                arguments(&request).unwrap_err().code,
+                "REVOCATION_FRESHNESS_POLICY_INVALID"
+            );
+        }
+        request[max_position] = u64::MAX.to_string();
+        assert_eq!(
+            arguments(&request)
+                .unwrap()
+                .publisher_trust
+                .unwrap()
+                .max_revocation_age_secs,
+            u64::MAX
+        );
+        request[2] = "publisher-source".into();
+        assert_eq!(arguments(&request).unwrap_err().code, "USAGE");
+    }
+
+    #[test]
+    fn publisher_trust_time_parser_never_rounds_or_normalizes_invalid_instants() {
+        let expected = trusted_evaluation_time("2026-11-11T00:30:00.123456789Z").unwrap();
+        assert_eq!(
+            trusted_evaluation_time("2026-11-11T01:30:00.123456789+01:00").unwrap(),
+            expected
+        );
+        assert_eq!(expected.nanosecond(), 123_456_789);
+        for invalid in [
+            "",
+            "2026-11-11",
+            "2026-11-11 00:30:00Z",
+            "2026-11-11T00:30:00.1234567891Z",
+            "2026-11-11T00:30:00.0000000000Z",
+            "2026-11-11T00:30:00.Z",
+            "2026-11-11T00:30:60Z",
+            "2026-02-29T00:30:00Z",
+            "2026-11-11T24:00:00Z",
+            "2026-11-11T00:30:00Z\n",
+        ] {
+            assert_eq!(
+                trusted_evaluation_time(invalid).unwrap_err().code,
+                "EVALUATION_TIME_INVALID",
+                "{invalid}"
+            );
+        }
+    }
+
+    fn publisher_trust_cli_fixture(with_provenance: bool) -> (Vec<String>, Vec<u8>) {
+        use ed25519_dalek::{Signer, SigningKey};
+        use frankenengine_verifier_sdk::publisher_source::{
+            PUBLISHER_SOURCE_TRUST_INPUT_SCHEMA, provenance_chain_signing_payload,
+            revocation_list_signing_payload,
+        };
+        let (mut request, input, _) = publisher_source_cli_fixture(true);
+        request[2] = "publisher-source-trust".into();
+        let mut transport: Value = serde_json::from_slice(&input).unwrap();
+        transport["schema_version"] = json!(PUBLISHER_SOURCE_TRUST_INPUT_SCHEMA);
+        let revocation_bytes = serde_json::to_vec(&json!({
+            "schema_version": "franken-node/publisher-revocation-list/v1",
+            "issued_at": "2026-11-11T00:00:00Z",
+            "revoked_publisher_ids": [], "revoked_signer_key_ids": [], "revoked_package_versions": [],
+        })).unwrap();
+        let revocation_signer = SigningKey::from_bytes(&[0x71; 32]);
+        transport["revocation_list_base64"] = json!(STANDARD.encode(&revocation_bytes));
+        transport["revocation_signature_hex"] = json!(hex::encode(
+            revocation_signer
+                .sign(&revocation_list_signing_payload(&revocation_bytes))
+                .to_bytes()
+        ));
+        request.extend([
+            "--trusted-revocation-key-hex".into(),
+            hex::encode(revocation_signer.verifying_key().as_bytes()),
+            "--evaluation-time".into(),
+            "2026-11-11T00:30:00Z".into(),
+            "--max-revocation-age-secs".into(),
+            "3600".into(),
+        ]);
+        if with_provenance {
+            let manifest_bytes = STANDARD
+                .decode(transport["manifest_base64"].as_str().unwrap())
+                .unwrap();
+            let manifest: Value = serde_json::from_slice(&manifest_bytes).unwrap();
+            let chain_bytes = serde_json::to_vec(&json!({
+                "schema_version": "franken-node/publisher-provenance-chain/v1",
+                "package_name": manifest["name"], "publisher_id": manifest["publisher_id"],
+                "links": [{
+                    "version": manifest["initial_version"]["version"], "parent_version": null,
+                    "content_hash": manifest["initial_version"]["content_hash"],
+                    "manifest_sha256": format!("sha256:{}", hex::encode(Sha256::digest(&manifest_bytes))),
+                    "previous_link_sha256": null,
+                }],
+            })).unwrap();
+            let signer = SigningKey::from_bytes(&[0x72; 32]);
+            transport["provenance"] = json!({
+                "chain_base64": STANDARD.encode(&chain_bytes),
+                "signature_hex": hex::encode(signer.sign(&provenance_chain_signing_payload(&chain_bytes)).to_bytes()),
+            });
+            request.extend([
+                "--trusted-provenance-key-hex".into(),
+                hex::encode(signer.verifying_key().as_bytes()),
+            ]);
+        }
+        (request, serde_json::to_vec(&transport).unwrap())
+    }
+
+    #[test]
+    fn publisher_trust_cli_authenticates_source_authorities_and_freshness() {
+        for with_provenance in [false, true] {
+            let (request, input) = publisher_trust_cli_fixture(with_provenance);
+            let verified = run(&request, &mut input.as_slice()).unwrap();
+            assert_eq!(verified["format"], "publisher-source-trust");
+            assert_eq!(verified["scope"], "authenticated_publisher_source_trust");
+            assert_eq!(
+                verified["artifact_sha256"],
+                hex::encode(Sha256::digest(&input))
+            );
+            let facts = &verified["facts"];
+            assert_eq!(facts["source"]["package_name"], "source-audit");
+            assert_eq!(facts["source"]["capsule"]["graph_hash_recomputed"], false);
+            assert_eq!(facts["revocation_issued_at"], "2026-11-11T00:00:00Z");
+            assert_eq!(facts["revocation_evaluated_at"], "2026-11-11T00:30:00Z");
+            assert_eq!(facts["max_revocation_age_secs"], "3600");
+            assert_eq!(
+                facts["provenance_link_count"],
+                if with_provenance {
+                    json!(1)
+                } else {
+                    Value::Null
+                }
+            );
+            assert_eq!(
+                facts["provenance_authority_public_key_hex"].is_null(),
+                !with_provenance
+            );
+            assert!(!verified.to_string().contains("PRIVATE-SOURCE-SENTINEL"));
+        }
+        let (request, input) = publisher_trust_cli_fixture(true);
+        for option in [
+            "--trusted-key-hex",
+            "--trusted-revocation-key-hex",
+            "--trusted-provenance-key-hex",
+        ] {
+            let mut foreign = request.clone();
+            let position = foreign.iter().position(|arg| arg == option).unwrap();
+            foreign[position + 1] = ANCHOR.into();
+            assert_eq!(
+                run(&foreign, &mut input.as_slice()).unwrap_err().code,
+                "SIGNATURE_INVALID"
+            );
+        }
+        let position = request
+            .iter()
+            .position(|arg| arg == "--evaluation-time")
+            .unwrap()
+            + 1;
+        for (time, expected) in [
+            ("2026-11-11T01:00:00Z", "REVOCATION_STALE"),
+            ("2026-11-10T23:59:59.999999999Z", "REVOCATION_NOT_YET_VALID"),
+        ] {
+            let mut timed = request.clone();
+            timed[position] = time.into();
+            assert_eq!(
+                run(&timed, &mut input.as_slice()).unwrap_err().code,
+                expected
+            );
+        }
+        let mut fresh = request.clone();
+        fresh[position] = "2026-11-11T00:59:59.999999999Z".into();
+        assert!(run(&fresh, &mut input.as_slice()).is_ok());
+        let mut missing_provenance_anchor = request;
+        missing_provenance_anchor.truncate(missing_provenance_anchor.len() - 2);
+        assert_eq!(
+            run(&missing_provenance_anchor, &mut input.as_slice())
+                .unwrap_err()
+                .code,
+            "EVIDENCE_INVALID"
+        );
+    }
+
+    #[test]
+    fn publisher_trust_cli_stops_stream_at_the_transport_limit() {
+        let (request, _) = publisher_trust_cli_fixture(false);
+        let mut input = io::repeat(b' ').take(MAX_PUBLISHER_SOURCE_TRUST_INPUT_BYTES as u64 + 2);
+        assert_eq!(
+            run(&request, &mut input).unwrap_err().code,
+            "INPUT_TOO_LARGE"
+        );
+        assert_eq!(input.limit(), 1);
     }
 
     #[test]

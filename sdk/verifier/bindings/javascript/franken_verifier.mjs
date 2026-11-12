@@ -11,6 +11,7 @@ const SCOPES = Object.freeze({
   "signed-bundle": "authenticated_sdk_replay_bundle",
   "resolution-receipt": "authenticated_resolution_decision",
   "publisher-source": "authenticated_publisher_source_content",
+  "publisher-source-trust": "authenticated_publisher_source_trust",
   "counterfactual-receipt": "authenticated_counterfactual_receipt",
   "ltv-evidence": "authenticated_ltv_anteriority",
 });
@@ -25,7 +26,7 @@ export class VerifierError extends Error {
   }
 }
 
-const hex = (value, length) => typeof value === "string" && new RegExp(`^[0-9a-fA-F]{${length}}$`, "u").test(value);
+const hex = (value, length) => typeof value === "string" && value.length === length && new RegExp(`^[0-9a-fA-F]{${length}}$`, "u").test(value);
 const object = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
 const keys = (value, expected) => object(value) && Object.keys(value).length === expected.length && expected.every((key) => Object.hasOwn(value, key));
 const count = (value) => Number.isSafeInteger(value) && value >= 0;
@@ -52,9 +53,62 @@ function runtimeOriginValid(origin, anchor) {
 
 const publisherText = (value, limit) => boundedText(value) && value === value.trim()
   && Buffer.byteLength(value, "utf8") <= limit && !/[\u0000-\u001f\u007f-\u009f]/u.test(value);
-const digest = (value) => typeof value === "string" && /^sha256:[0-9a-f]{64}$/u.test(value);
-const decimalLimit = (value, limit) => typeof value === "string" && /^[1-9][0-9]{0,19}$/u.test(value)
+const digest = (value) => typeof value === "string" && value.length === 71 && /^sha256:[0-9a-f]{64}$/u.test(value);
+const decimalLimit = (value, limit) => typeof value === "string" && value === value.trim() && /^[1-9][0-9]{0,19}$/u.test(value)
   && BigInt(value) <= limit;
+
+// Four-digit RFC3339 years, non-leap seconds, and exact nanosecond precision.
+function instantNs(value) {
+  if (typeof value !== "string" || value.length > 35) return null;
+  const match = /^([0-9]{4})-([0-9]{2})-([0-9]{2})[Tt]([0-9]{2}):([0-9]{2}):([0-9]{2})(?:\.([0-9]{1,9}))?([Zz]|[+-][0-9]{2}:[0-9]{2})$/u.exec(value);
+  if (match === null || match[0] !== value) return null;
+  const [year, month, day, hour, minute, second] = match.slice(1, 7).map(Number);
+  const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const months = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  if (month < 1 || month > 12 || day < 1 || day > months[month - 1]
+      || hour >= 24 || minute >= 60 || second >= 60) return null;
+  const zone = match[8];
+  let offset = 0;
+  if (zone !== "Z" && zone !== "z") {
+    const offsetHour = Number(zone.slice(1, 3));
+    const offsetMinute = Number(zone.slice(4, 6));
+    if (offsetHour >= 24 || offsetMinute >= 60) return null;
+    offset = (offsetHour * 60 + offsetMinute) * 60 * (zone[0] === "-" ? -1 : 1);
+  }
+  // Every integral second in the supported year range is safely representable;
+  // fractions and freshness arithmetic use BigInt exclusively.
+  const daysBeforeYear = (y) => 365 * y + Math.floor((y + 3) / 4)
+    - Math.floor((y + 99) / 100) + Math.floor((y + 399) / 400);
+  const days = daysBeforeYear(year) - daysBeforeYear(1970)
+    + months.slice(0, month - 1).reduce((sum, daysInMonth) => sum + daysInMonth, 0) + day - 1;
+  const seconds = days * 86400 + hour * 3600 + minute * 60 + second - offset;
+  return BigInt(seconds) * 1_000_000_000n + BigInt((match[7] ?? "").padEnd(9, "0"));
+}
+
+function publisherSourceTrustValid(facts, anchor, revocationAnchor, provenanceAnchor, evaluationTime, maxAge) {
+  if (!keys(facts, ["source", "revocation_list_sha256", "revocation_authority_public_key_hex",
+    "revocation_issued_at", "revocation_evaluated_at", "max_revocation_age_secs",
+    "provenance_chain_sha256", "provenance_authority_public_key_hex", "provenance_link_count"])) return false;
+  const evaluated = instantNs(facts.revocation_evaluated_at);
+  const issued = instantNs(facts.revocation_issued_at);
+  if (revocationAnchor === undefined || evaluated === null || issued === null
+      || evaluated !== instantNs(evaluationTime)
+      || !decimalLimit(maxAge, 18_446_744_073_709_551_615n)
+      || facts.max_revocation_age_secs !== maxAge
+      || evaluated < issued || evaluated - issued >= BigInt(maxAge) * 1_000_000_000n
+      || !digest(facts.revocation_list_sha256)
+      || facts.revocation_authority_public_key_hex !== revocationAnchor
+      || !factsValid(facts.source, "publisher-source", anchor)) return false;
+  if (provenanceAnchor === undefined) {
+    return facts.provenance_chain_sha256 === null && facts.provenance_authority_public_key_hex === null
+      && facts.provenance_link_count === null;
+  }
+  return digest(facts.provenance_chain_sha256)
+    && facts.provenance_authority_public_key_hex === provenanceAnchor
+    && count(facts.provenance_link_count) && facts.provenance_link_count >= 1
+    && facts.provenance_link_count <= 256;
+}
+
 const PUBLISHER_CAPABILITIES = ["builtin", "console", "env_read", "fs_read", "fs_write", "heap_allocate",
   "module_load", "network_egress", "process_spawn", "random_read", "timer", "vm_dispatch"];
 const PUBLISHER_LIMITS = Object.freeze({
@@ -103,7 +157,11 @@ function publisherSourceValid(facts, anchor) {
     && (summary.condition_count === null || summary.condition_count + summary.additional_condition_count <= 64);
 }
 
-function factsValid(facts, format, anchor, runAnchor, runtimeAnchor) {
+function factsValid(facts, format, anchor, runAnchor, runtimeAnchor,
+  revocationAnchor, provenanceAnchor, evaluationTime, maxAge) {
+  if (format === "publisher-source-trust") {
+    return publisherSourceTrustValid(facts, anchor, revocationAnchor, provenanceAnchor, evaluationTime, maxAge);
+  }
   const expected = {
     "incident-bundle": ["bundle_id", "incident_id", "created_at", "policy_version", "event_count", "integrity_hash", "decision_sequence_hash", "signer_public_key_hex", "signing_identity", "native_capture"],
     capsule: ["capsule_id", "expected_hash", "actual_hash", "signer_public_key_hex"],
@@ -169,9 +227,15 @@ function factsValid(facts, format, anchor, runAnchor, runtimeAnchor) {
  * signature and matching run data. Missing proof or downgraded scope fails.
  * trustedRuntimePublicKeyHex additionally requires the original product-root
  * and session signatures; it does not establish guest execution or cleanup.
+ * Publisher-source trust requires an independent revocation authority, an explicit
+ * RFC3339 time (four-digit year, non-leap seconds, at most nine fraction digits),
+ * and an exact positive decimal u64 freshness window. Optional provenance trust
+ * requires a matching signed chain. Nanosecond comparisons never use Date.
  */
 export async function verifyArtifact(data, trustedPublicKeyHex, options) {
-  const { verifier, format = "incident-bundle", trustedRunPublicKeyHex, trustedRuntimePublicKeyHex, signatureHex, timeoutMs = 10_000 } = options ?? {};
+  const { verifier, format = "incident-bundle", trustedRunPublicKeyHex, trustedRuntimePublicKeyHex,
+    trustedRevocationPublicKeyHex, trustedProvenancePublicKeyHex, evaluationTime, maxRevocationAgeSecs,
+    signatureHex, timeoutMs = 10_000 } = options ?? {};
   if (!(data instanceof Uint8Array)) throw new VerifierError("INPUT_INVALID", "data must contain the original bytes");
   if (data.byteLength > MAX_INPUT_BYTES) throw new VerifierError("INPUT_TOO_LARGE", "evidence exceeds 64 MiB");
   if (typeof format !== "string" || !Object.hasOwn(SCOPES, format)) throw new VerifierError("UNSUPPORTED_FORMAT", "unsupported evidence format");
@@ -184,20 +248,35 @@ export async function verifyArtifact(data, trustedPublicKeyHex, options) {
     if (format !== "incident-bundle" || trustedRunPublicKeyHex === undefined) throw new VerifierError("INPUT_INVALID", "runtime trust requires incident-bundle and original-run trust");
     if (!hex(trustedRuntimePublicKeyHex, 64)) throw new VerifierError("RUNTIME_ANCHOR_INVALID", "expected a 32-byte hexadecimal product-root public key");
   }
+  const publisherTrustOptions = [trustedRevocationPublicKeyHex, trustedProvenancePublicKeyHex,
+    evaluationTime, maxRevocationAgeSecs];
+  if (format === "publisher-source-trust") {
+    if (!hex(trustedRevocationPublicKeyHex, 64)) throw new VerifierError("REVOCATION_ANCHOR_INVALID", "an independent revocation public key is required");
+    if (trustedProvenancePublicKeyHex !== undefined && !hex(trustedProvenancePublicKeyHex, 64)) throw new VerifierError("PROVENANCE_ANCHOR_INVALID", "expected a 32-byte hexadecimal provenance public key");
+    if (instantNs(evaluationTime) === null) throw new VerifierError("EVALUATION_TIME_INVALID", "a precise RFC3339 evaluation time is required");
+    if (!decimalLimit(maxRevocationAgeSecs, 18_446_744_073_709_551_615n)) throw new VerifierError("REVOCATION_FRESHNESS_POLICY_INVALID", "freshness must be a positive decimal u64 string");
+  } else if (publisherTrustOptions.some((value) => value !== undefined)) {
+    throw new VerifierError("INPUT_INVALID", "publisher trust options require publisher-source-trust");
+  }
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > 120_000) throw new VerifierError("TIMEOUT_INVALID", "timeoutMs must be finite and in (0, 120000]");
   if (typeof verifier !== "string" || verifier.length === 0 || verifier.includes("\0")) throw new VerifierError("EXECUTABLE_INVALID", "verifier must be a trusted executable path");
   const bytes = Buffer.from(data);
   const anchor = trustedPublicKeyHex.toLowerCase();
   const runAnchor = trustedRunPublicKeyHex?.toLowerCase();
   const runtimeAnchor = trustedRuntimePublicKeyHex?.toLowerCase();
+  const revocationAnchor = trustedRevocationPublicKeyHex?.toLowerCase();
+  const provenanceAnchor = trustedProvenancePublicKeyHex?.toLowerCase();
   const scope = runtimeAnchor !== undefined ? "authenticated_runtime_incident" : runAnchor === undefined ? SCOPES[format] : "authenticated_run_incident";
   const args = ["verify", "--format", format, "--trusted-key-hex", anchor];
   if (runAnchor !== undefined) args.push("--trusted-run-key-hex", runAnchor);
   if (runtimeAnchor !== undefined) args.push("--trusted-runtime-key-hex", runtimeAnchor);
-  if (format === "signed-bundle" || format === "publisher-source" || format === "counterfactual-receipt") {
+  if (revocationAnchor !== undefined) args.push("--trusted-revocation-key-hex", revocationAnchor,
+    "--evaluation-time", evaluationTime, "--max-revocation-age-secs", maxRevocationAgeSecs);
+  if (provenanceAnchor !== undefined) args.push("--trusted-provenance-key-hex", provenanceAnchor);
+  if (["signed-bundle", "publisher-source", "publisher-source-trust", "counterfactual-receipt"].includes(format)) {
     if (!hex(signatureHex, 128)) throw new VerifierError("SIGNATURE_MALFORMED", "a detached 64-byte signature is required");
     args.push("--signature-hex", signatureHex);
-  } else if (signatureHex !== undefined) throw new VerifierError("INPUT_INVALID", "detached signatures apply only to signed-bundle, publisher-source, or counterfactual-receipt");
+  } else if (signatureHex !== undefined) throw new VerifierError("INPUT_INVALID", "detached signatures require a signed-bundle, publisher-source format, or counterfactual-receipt");
   return new Promise((resolve, reject) => {
     const child = execFile(verifier, args, {
       encoding: "buffer", shell: false, timeout: Math.ceil(timeoutMs),
@@ -226,7 +305,9 @@ export async function verifyArtifact(data, trustedPublicKeyHex, options) {
       }
       if (exitCode !== 0 || !keys(result, ["schema_version", "verdict", "format", "scope", "artifact_sha256", "facts"])
           || result.verdict !== "verified" || result.format !== format || result.scope !== scope
-          || result.artifact_sha256 !== createHash("sha256").update(bytes).digest("hex") || !factsValid(result.facts, format, anchor, runAnchor, runtimeAnchor)) {
+          || result.artifact_sha256 !== createHash("sha256").update(bytes).digest("hex")
+          || !factsValid(result.facts, format, anchor, runAnchor, runtimeAnchor,
+            revocationAnchor, provenanceAnchor, evaluationTime, maxRevocationAgeSecs)) {
         return reject(new VerifierError("PROTOCOL_INVALID", "verification response does not match the request"));
       }
       resolve(result);
