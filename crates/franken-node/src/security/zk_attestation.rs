@@ -6,7 +6,7 @@
 //! `ERR_ZKA_VERIFIER_UNAVAILABLE` on unauthenticated legacy records so historical
 //! registrations never gain compliance authority.
 //!
-//! Authenticated `zka-ristretto255-v2.0` attestations prove selective compliance
+//! Authenticated `zka-ristretto255-v3.0` attestations prove selective compliance
 //! over prime-order Ristretto255 (`curve25519-dalek`) with zero trusted setup:
 //! - Pedersen commitments `C = v * G + r * H` with hash-to-group generator `H`.
 //! - `ThresholdAtLeast`: homomorphic shift `C - tau * G == sum(2^j * C_j)` plus
@@ -49,7 +49,7 @@ use crate::push_bounded;
 pub const SCHEMA_VERSION: &str = "zka-v1.0";
 
 /// Schema version for authenticated Ristretto255 zero-knowledge compliance payloads.
-pub const CRYPTO_SCHEMA_VERSION: &str = "zka-ristretto255-v2.0";
+pub const CRYPTO_SCHEMA_VERSION: &str = "zka-ristretto255-v3.0";
 
 /// Maximum hex character length accepted for a serialized cryptographic proof (32 KiB raw).
 pub const MAX_CRYPTO_PROOF_HEX_LEN: usize = 65_536;
@@ -418,15 +418,15 @@ pub struct AttestationLedger {
 
 const PEDERSEN_H_DOMAIN: &[u8] = b"franken-node/zka-ristretto255/pedersen-generator-h/v1";
 const POLICY_BINDING_DOMAIN: &[u8] = b"franken-node/zka-ristretto255/policy-binding/v2";
-const PARAMS_HASH_DOMAIN: &[u8] = b"franken-node/zka-ristretto255/verifier-params/v2";
+const PARAMS_HASH_DOMAIN: &[u8] = b"franken-node/zka-ristretto255/verifier-params/v3";
 const ALLOWLIST_LEAF_DOMAIN: &[u8] = b"franken-node/zka-ristretto255/allowlist-leaf/v2";
 const ALLOWLIST_NODE_DOMAIN: &[u8] = b"franken-node/zka-ristretto255/allowlist-node/v2";
 const ALLOWLIST_ODD_DOMAIN: &[u8] = b"franken-node/zka-ristretto255/allowlist-odd/v2";
-const FIAT_SHAMIR_DOMAIN: &[u8] = b"franken-node/zka-ristretto255/fiat-shamir/v2";
-const HEDGED_NONCE_DOMAIN: &[u8] = b"franken-node/zka-ristretto255/hedged-nonce-seed/v2";
-const ZKRP2_MAGIC: &[u8; 5] = b"ZKRP2";
-const ZKRP2_TAG_THRESHOLD: u8 = 0x01;
-const ZKRP2_TAG_ALLOWLIST: u8 = 0x02;
+const FIAT_SHAMIR_DOMAIN: &[u8] = b"franken-node/zka-ristretto255/fiat-shamir/v3";
+const HEDGED_NONCE_DOMAIN: &[u8] = b"franken-node/zka-ristretto255/hedged-nonce-seed/v3";
+const ZKRP3_MAGIC: &[u8; 5] = b"ZKRP3";
+const ZKRP3_TAG_THRESHOLD: u8 = 0x01;
+const ZKRP3_TAG_ALLOWLIST: u8 = 0x02;
 
 /// Zeroized private witness `(value, blinding)` for Ristretto255 Pedersen commitments.
 ///
@@ -586,7 +586,7 @@ impl ZkComplianceRelation {
                 threshold,
                 range_bits,
             } => {
-                hasher.update([ZKRP2_TAG_THRESHOLD]);
+                hasher.update([ZKRP3_TAG_THRESHOLD]);
                 hasher.update(threshold.to_le_bytes());
                 hasher.update([*range_bits]);
             }
@@ -594,7 +594,7 @@ impl ZkComplianceRelation {
                 allowed_values,
                 merkle_root_hex,
             } => {
-                hasher.update([ZKRP2_TAG_ALLOWLIST]);
+                hasher.update([ZKRP3_TAG_ALLOWLIST]);
                 hasher.update((allowed_values.len() as u64).to_le_bytes());
                 for v in allowed_values {
                     hasher.update(v.to_le_bytes());
@@ -611,7 +611,7 @@ impl ZkComplianceRelation {
 /// INV-ZKA-POLICY-BOUND
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ZkVerifierParams {
-    /// Schema version (`zka-ristretto255-v2.0`).
+    /// Schema version (`zka-ristretto255-v3.0`).
     pub schema_version: String,
     /// Policy identifier bound to these parameters.
     pub policy_id: String,
@@ -707,7 +707,7 @@ impl ZkVerifierParams {
 /// Deterministic verification telemetry derived from `AttestationLedger` state.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ZkVerificationTelemetry {
-    /// Count of `zka-ristretto255-v2.0` attestations in the ledger.
+    /// Count of `zka-ristretto255-v3.0` attestations in the ledger.
     pub crypto_proofs_generated: usize,
     /// Count of legacy `zka-v1.0` registrations in the ledger.
     pub legacy_registrations: usize,
@@ -814,7 +814,13 @@ impl Drop for DeterministicScalarPrf {
 }
 
 impl DeterministicScalarPrf {
-    fn hedged(witness: &ZkPrivateWitness, params_digest: &[u8; 32], attestation_id: &str) -> Self {
+    fn hedged(
+        witness: &ZkPrivateWitness,
+        params_digest: &[u8; 32],
+        attestation_id: &str,
+        generated_at_ms: u64,
+        expires_at_ms: u64,
+    ) -> Self {
         let mut os_entropy = [0u8; 32];
         rand::rngs::OsRng.fill_bytes(&mut os_entropy);
         let mut hasher = Sha512::new();
@@ -823,6 +829,8 @@ impl DeterministicScalarPrf {
         hasher.update(witness.value.to_le_bytes());
         hasher.update(params_digest);
         update_len_prefixed_512(&mut hasher, attestation_id.as_bytes());
+        hasher.update(generated_at_ms.to_le_bytes());
+        hasher.update(expires_at_ms.to_le_bytes());
         hasher.update(os_entropy);
         os_entropy.zeroize();
         Self {
@@ -972,6 +980,8 @@ fn verify_cds94_or(
 
 fn build_fiat_shamir_context(
     attestation_id: &str,
+    generated_at_ms: u64,
+    expires_at_ms: u64,
     params_digest: &[u8; 32],
     compressed_commitment: &[u8; 32],
     extra_commitments: &[[u8; 32]],
@@ -979,6 +989,8 @@ fn build_fiat_shamir_context(
     let mut hasher = Sha256::new();
     hasher.update(FIAT_SHAMIR_DOMAIN);
     update_len_prefixed(&mut hasher, attestation_id.as_bytes());
+    hasher.update(generated_at_ms.to_le_bytes());
+    hasher.update(expires_at_ms.to_le_bytes());
     hasher.update(params_digest);
     hasher.update(compressed_commitment);
     hasher.update((extra_commitments.len() as u64).to_le_bytes());
@@ -1002,6 +1014,8 @@ fn decode_canonical_point(bytes: &[u8]) -> Option<(CompressedRistretto, Ristrett
 
 fn prove_compliance_wire_bytes(
     attestation_id: &str,
+    generated_at_ms: u64,
+    expires_at_ms: u64,
     verifier_params: &ZkVerifierParams,
     witness: &ZkPrivateWitness,
 ) -> Result<(String, String), String> {
@@ -1011,7 +1025,13 @@ fn prove_compliance_wire_bytes(
     let commitment_compressed = commitment_point.compress();
     let commitment_bytes = commitment_compressed.to_bytes();
     let commitment_hex = hex::encode(commitment_bytes);
-    let mut prf = DeterministicScalarPrf::hedged(witness, &params_digest, attestation_id);
+    let mut prf = DeterministicScalarPrf::hedged(
+        witness,
+        &params_digest,
+        attestation_id,
+        generated_at_ms,
+        expires_at_ms,
+    );
 
     match &verifier_params.relation {
         ZkComplianceRelation::ThresholdAtLeast {
@@ -1054,14 +1074,16 @@ fn prove_compliance_wire_bytes(
 
             let ctx = build_fiat_shamir_context(
                 attestation_id,
+                generated_at_ms,
+                expires_at_ms,
                 &params_digest,
                 &commitment_bytes,
                 &bit_compressed_bytes,
             );
 
             let mut out = Vec::with_capacity(72 + bit_count * 160);
-            out.extend_from_slice(ZKRP2_MAGIC);
-            out.push(ZKRP2_TAG_THRESHOLD);
+            out.extend_from_slice(ZKRP3_MAGIC);
+            out.push(ZKRP3_TAG_THRESHOLD);
             out.extend_from_slice(&params_digest);
             out.extend_from_slice(&commitment_bytes);
             out.extend_from_slice(&u16::from(*range_bits).to_le_bytes());
@@ -1099,8 +1121,14 @@ fn prove_compliance_wire_bytes(
                     error_codes::ERR_ZKA_POLICY_MISMATCH
                 )
             })?;
-            let ctx =
-                build_fiat_shamir_context(attestation_id, &params_digest, &commitment_bytes, &[]);
+            let ctx = build_fiat_shamir_context(
+                attestation_id,
+                generated_at_ms,
+                expires_at_ms,
+                &params_digest,
+                &commitment_bytes,
+                &[],
+            );
             let or_proof = prove_cds94_or(
                 &mut prf,
                 &ctx,
@@ -1112,8 +1140,8 @@ fn prove_compliance_wire_bytes(
             );
 
             let mut out = Vec::with_capacity(72 + branch_count * 64);
-            out.extend_from_slice(ZKRP2_MAGIC);
-            out.push(ZKRP2_TAG_ALLOWLIST);
+            out.extend_from_slice(ZKRP3_MAGIC);
+            out.push(ZKRP3_TAG_ALLOWLIST);
             out.extend_from_slice(&params_digest);
             out.extend_from_slice(&commitment_bytes);
             out.extend_from_slice(&branch_count_u16.to_le_bytes());
@@ -1127,12 +1155,14 @@ fn prove_compliance_wire_bytes(
     }
 }
 
-/// Stateless cryptographic verification of a `zka-ristretto255-v2.0` compliance proof
+/// Stateless cryptographic verification of a `zka-ristretto255-v3.0` compliance proof
 /// against `policy` and authenticated `verifier_params` at `now_ms`.
 ///
 /// Does not rely on ledger membership; enforces full policy/parameter binding,
-/// validity window, canonical Ristretto255 point/scalar decoding, Pedersen
-/// homomorphic relation, and CDS94 Schnorr verification.
+/// authenticated validity window, canonical Ristretto255 point/scalar decoding,
+/// Pedersen homomorphic relation, and CDS94 Schnorr verification. The caller must
+/// supply trusted current policy, verifier parameters, and time; use the ledger
+/// wrapper when retained revocation and expiry state must also be enforced.
 #[must_use]
 pub fn verify_compliance_proof_stateless(
     attestation: &ZkAttestation,
@@ -1164,6 +1194,33 @@ pub fn verify_compliance_proof_stateless(
             trace_id,
             reason: "Attestation has been revoked".to_string(),
             error_code: error_codes::ERR_ZKA_REVOKED.to_string(),
+        };
+    }
+
+    if attestation.status == AttestationStatus::Expired {
+        return ZkVerificationResult::Rejected {
+            attestation_id: aid,
+            policy_id: pid,
+            trace_id,
+            reason: "Attestation has been marked expired".to_string(),
+            error_code: error_codes::ERR_ZKA_EXPIRED.to_string(),
+        };
+    }
+
+    if !attestation
+        .generated_at_ms
+        .checked_add(policy.validity_ms)
+        .is_some_and(|latest_expiry| {
+            attestation.expires_at_ms > attestation.generated_at_ms
+                && attestation.expires_at_ms <= latest_expiry
+        })
+    {
+        return ZkVerificationResult::Rejected {
+            attestation_id: aid,
+            policy_id: pid,
+            trace_id,
+            reason: "Proof validity interval is empty, overflows, or exceeds policy".to_string(),
+            error_code: error_codes::ERR_ZKA_INVALID_PROOF.to_string(),
         };
     }
 
@@ -1270,12 +1327,12 @@ pub fn verify_compliance_proof_stateless(
         };
     };
 
-    if wire.len() < 72 || &wire[0..5] != ZKRP2_MAGIC {
+    if wire.len() < 72 || &wire[0..5] != ZKRP3_MAGIC {
         return ZkVerificationResult::Rejected {
             attestation_id: aid,
             policy_id: pid,
             trace_id,
-            reason: "Proof envelope missing ZKRP2 header".to_string(),
+            reason: "Proof envelope missing ZKRP3 header".to_string(),
             error_code: error_codes::ERR_ZKA_INVALID_PROOF.to_string(),
         };
     }
@@ -1310,7 +1367,7 @@ pub fn verify_compliance_proof_stateless(
             range_bits,
         } => {
             let expected_bits = usize::from(*range_bits);
-            if variant_tag != ZKRP2_TAG_THRESHOLD || declared_count != expected_bits {
+            if variant_tag != ZKRP3_TAG_THRESHOLD || declared_count != expected_bits {
                 return ZkVerificationResult::Rejected {
                     attestation_id: aid,
                     policy_id: pid,
@@ -1395,6 +1452,8 @@ pub fn verify_compliance_proof_stateless(
 
             let ctx = build_fiat_shamir_context(
                 &aid,
+                attestation.generated_at_ms,
+                attestation.expires_at_ms,
                 &expected_params_digest,
                 &compressed_commitment.to_bytes(),
                 &bit_compressed,
@@ -1422,7 +1481,7 @@ pub fn verify_compliance_proof_stateless(
             }
         }
         ZkComplianceRelation::AllowlistMembership { allowed_values, .. } => {
-            if variant_tag != ZKRP2_TAG_ALLOWLIST || declared_count != allowed_values.len() {
+            if variant_tag != ZKRP3_TAG_ALLOWLIST || declared_count != allowed_values.len() {
                 return ZkVerificationResult::Rejected {
                     attestation_id: aid,
                     policy_id: pid,
@@ -1464,6 +1523,8 @@ pub fn verify_compliance_proof_stateless(
 
             let ctx = build_fiat_shamir_context(
                 &aid,
+                attestation.generated_at_ms,
+                attestation.expires_at_ms,
                 &expected_params_digest,
                 &compressed_commitment.to_bytes(),
                 &[],
@@ -2103,7 +2164,7 @@ impl AttestationLedger {
 
     // ── Authenticated Ristretto255 Zero-Knowledge Operations ────────────────
 
-    /// Generate a real `zka-ristretto255-v2.0` zero-knowledge compliance proof
+    /// Generate a real `zka-ristretto255-v3.0` zero-knowledge compliance proof
     /// over `witness` bound to `policy` and `verifier_params`, and register it
     /// in the ledger. Emits `FN-ZK-001`.
     pub fn prove_compliance(
@@ -2137,8 +2198,23 @@ impl AttestationLedger {
             ));
         }
 
-        let (metadata_commitment, proof_bytes_hex) =
-            prove_compliance_wire_bytes(&attestation_id, verifier_params, witness)?;
+        let expires_at_ms = now_ms
+            .checked_add(policy.validity_ms)
+            .filter(|expires_at_ms| *expires_at_ms > now_ms)
+            .ok_or_else(|| {
+                format!(
+                    "{}: proof validity interval is empty or overflows",
+                    error_codes::ERR_ZKA_INVALID_PROOF
+                )
+            })?;
+
+        let (metadata_commitment, proof_bytes_hex) = prove_compliance_wire_bytes(
+            &attestation_id,
+            now_ms,
+            expires_at_ms,
+            verifier_params,
+            witness,
+        )?;
 
         if self.seen_commitments.contains_key(&metadata_commitment) {
             return Err(format!(
@@ -2159,7 +2235,7 @@ impl AttestationLedger {
             outcome: PredicateOutcome::Pass,
             status: AttestationStatus::Active,
             generated_at_ms: now_ms,
-            expires_at_ms: now_ms.saturating_add(policy.validity_ms),
+            expires_at_ms,
             trace_id: trace_id.clone(),
         };
 

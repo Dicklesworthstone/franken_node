@@ -1,7 +1,7 @@
 //! End-to-end CLI integration tests for:
 //! - `franken-node trust-card reputation` (`tools::reputation_graph_apis`, IBD-9)
 //! - `franken-node trust zk-attest` and `franken-node verify zk-attestation`
-//!   (`security::zk_attestation`, `zka-ristretto255-v2.0` + fail-closed `zka-v1.0`).
+//!   (`security::zk_attestation`, `zka-ristretto255-v3.0` + fail-closed `zka-v1.0`).
 
 use std::path::Path;
 use std::process::{Command, Output};
@@ -263,7 +263,7 @@ fn zk_attest_and_verify_roundtrip_threshold_and_allowlist_without_witness_disclo
     );
     assert_eq!(
         issued["bundle"]["attestation"]["payload"]["schema_version"],
-        "zka-ristretto255-v2.0"
+        "zka-ristretto255-v3.0"
     );
 
     let verified = json_ok(

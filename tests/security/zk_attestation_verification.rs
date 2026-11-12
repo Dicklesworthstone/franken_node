@@ -663,6 +663,334 @@ fn compliance_report_counts() {
 // ── Ristretto255 Cryptographic Compliance Verification (bd-reality-20260923-26n9r.18) ──
 
 #[test]
+fn ristretto_stateless_validity_interval_is_authenticated_for_both_relations() {
+    let policy = test_policy();
+    let relations = [
+        (
+            "threshold",
+            ZkComplianceRelation::threshold_at_least(100, 8).unwrap(),
+        ),
+        (
+            "allowlist",
+            ZkComplianceRelation::allowlist(vec![100, 142, 200]).unwrap(),
+        ),
+    ];
+    let mut accepted_mutations = Vec::new();
+
+    for (name, relation) in relations {
+        let params = ZkVerifierParams::for_policy(
+            &policy,
+            "vk-independent-validity",
+            7,
+            "nonce-independent-validity",
+            relation,
+        )
+        .unwrap();
+        let witness = ZkPrivateWitness::new(142, [0x43; 32]).unwrap();
+        let mut ledger = AttestationLedger::new();
+        let generated = ledger
+            .prove_compliance(
+                format!("att-independent-validity-{name}"),
+                &policy,
+                &params,
+                &witness,
+                1_000_000,
+                "trace-independent-validity".to_string(),
+            )
+            .unwrap();
+        let att: ZkAttestation =
+            serde_json::from_str(&serde_json::to_string(&generated).unwrap()).unwrap();
+        drop(ledger);
+
+        // An independent consumer has no authoritative ledger to repair an
+        // attacker's timestamps. Honest serialized proofs still work.
+        for now_ms in [att.generated_at_ms, att.expires_at_ms - 1] {
+            let result = verify_compliance_proof_stateless(
+                &att,
+                &policy,
+                &params,
+                now_ms,
+                "trace-honest".to_string(),
+            );
+            assert!(result.is_verified(), "{name} honest proof: {result:?}");
+        }
+        for now_ms in [att.generated_at_ms - 1, att.expires_at_ms] {
+            assert!(
+                !verify_compliance_proof_stateless(
+                    &att,
+                    &policy,
+                    &params,
+                    now_ms,
+                    "trace-outside-interval".to_string(),
+                )
+                .is_verified()
+            );
+        }
+
+        for (mutation, generated_at_ms, expires_at_ms, now_ms) in [
+            (
+                "extend_expiry",
+                att.generated_at_ms,
+                att.expires_at_ms + 1,
+                att.expires_at_ms,
+            ),
+            (
+                "postpone_interval",
+                att.generated_at_ms + policy.validity_ms,
+                att.expires_at_ms + policy.validity_ms,
+                att.expires_at_ms,
+            ),
+            (
+                "backdate_interval",
+                att.generated_at_ms - 1,
+                att.expires_at_ms - 1,
+                att.generated_at_ms - 1,
+            ),
+            (
+                "shorten_interval",
+                att.generated_at_ms,
+                att.expires_at_ms - 1,
+                att.generated_at_ms + 1,
+            ),
+            (
+                "move_generation",
+                att.generated_at_ms + 1,
+                att.expires_at_ms,
+                att.generated_at_ms + 1,
+            ),
+        ] {
+            let mut forged = att.clone();
+            forged.generated_at_ms = generated_at_ms;
+            forged.expires_at_ms = expires_at_ms;
+            assert_eq!(forged.payload, att.payload);
+            if verify_compliance_proof_stateless(
+                &forged,
+                &policy,
+                &params,
+                now_ms,
+                format!("trace-forged-{mutation}"),
+            )
+            .is_verified()
+            {
+                accepted_mutations.push(format!("{name}/{mutation}"));
+            }
+        }
+    }
+
+    assert!(
+        accepted_mutations.is_empty(),
+        "stateless verifier accepted unauthenticated validity edits: {accepted_mutations:?}"
+    );
+}
+
+#[test]
+fn ristretto_v2_proof_cannot_be_upgraded_by_relabeling_its_envelope() {
+    // Generated and successfully verified with the unchanged v2 implementation
+    // at dcd2e62f88526106c9605c45ce42821fbeb336fa. This authentic historical
+    // proof has no lifetime in its transcript; changing labels cannot repair it.
+    let mut att = ZkAttestation {
+        attestation_id: "att-legacy-v2".to_string(),
+        policy_id: "pol-compliance-01".to_string(),
+        payload: ZkProofPayload {
+            schema_version: "zka-ristretto255-v2.0".to_string(),
+            proof_bytes_hex: concat!(
+                "5a4b52503202a8254a69c4a6c094a1aa9235ba73c17a3db26ce93bcaa942ff86aed794146753",
+                "4683189fe925243aeb34e040ca6dc6cfdd49fae2ea9185dbf7d2309f40f214040300",
+                "34e80d18e0ced72b87738e627c5dce0a8e67ed98ed19fe098661129f6665d504",
+                "1b1fa0df4595698c91de354f6e55af6513fd0800a583eacc4824e3353e29ed05",
+                "4d42795a4144d470a24514b8a663c94fab3ebc9289fa4e8aa26f1142ce13af06",
+                "cfdc7681979a1a5046922d3a35e4d0596c806ba3e4e4a791f550c96b43f09b03",
+                "2d45158b45f69375a3bd2c4c72a2853c16fbac141128aa296c5add69853bdc04",
+                "c001579c5ca3d2f58c35eea355461d13a38b29fb51ddbd05b33bdc9e5a10e104",
+            )
+            .to_string(),
+            metadata_commitment: "4683189fe925243aeb34e040ca6dc6cfdd49fae2ea9185dbf7d2309f40f21404"
+                .to_string(),
+        },
+        outcome: PredicateOutcome::Pass,
+        status: AttestationStatus::Active,
+        generated_at_ms: 1_000_000,
+        expires_at_ms: 1_600_000,
+        trace_id: "trace-legacy-v2".to_string(),
+    };
+    let policy = test_policy();
+    let params = ZkVerifierParams::for_policy(
+        &policy,
+        "vk-independent-validity",
+        7,
+        "nonce-independent-validity",
+        ZkComplianceRelation::allowlist(vec![100, 142, 200]).unwrap(),
+    )
+    .unwrap();
+    let verify = |candidate: &ZkAttestation| {
+        verify_compliance_proof_stateless(
+            candidate,
+            &policy,
+            &params,
+            1_000_001,
+            "trace-reject-v2".to_string(),
+        )
+    };
+
+    assert!(matches!(
+        verify(&att),
+        ZkVerificationResult::Rejected { error_code, .. }
+            if error_code == error_codes::ERR_ZKA_INVALID_PROOF
+    ));
+    att.payload.schema_version = CRYPTO_SCHEMA_VERSION.to_string();
+    assert!(matches!(
+        verify(&att),
+        ZkVerificationResult::Rejected { error_code, .. }
+            if error_code == error_codes::ERR_ZKA_INVALID_PROOF
+    ));
+    let mut wire = hex::decode(&att.payload.proof_bytes_hex).unwrap();
+    wire[..5].copy_from_slice(b"ZKRP3");
+    att.payload.proof_bytes_hex = hex::encode(&wire);
+    assert!(matches!(
+        verify(&att),
+        ZkVerificationResult::Rejected { error_code, .. }
+            if error_code == error_codes::ERR_ZKA_POLICY_MISMATCH
+    ));
+    wire[6..38].copy_from_slice(&hex::decode(params.params_sha256()).unwrap());
+    att.payload.proof_bytes_hex = hex::encode(wire);
+    assert!(matches!(
+        verify(&att),
+        ZkVerificationResult::Rejected { error_code, .. }
+            if error_code == error_codes::ERR_ZKA_WITNESS_INVALID
+    ));
+}
+
+#[test]
+fn ristretto_rejects_empty_and_overflowing_lifetimes_without_registering_a_proof() {
+    for (validity_ms, now_ms) in [(0, 1_000_000), (2, u64::MAX - 1), (1, u64::MAX)] {
+        let mut policy = test_policy();
+        policy.validity_ms = validity_ms;
+        let params = ZkVerifierParams::for_policy(
+            &policy,
+            "vk-lifetime-bounds",
+            7,
+            "nonce-lifetime-bounds",
+            ZkComplianceRelation::allowlist(vec![142]).unwrap(),
+        )
+        .unwrap();
+        let witness = ZkPrivateWitness::new(142, [0x44; 32]).unwrap();
+        let mut ledger = AttestationLedger::new();
+        let before = serde_json::to_value(&ledger).unwrap();
+        let error = ledger
+            .prove_compliance(
+                "att-invalid-lifetime".to_string(),
+                &policy,
+                &params,
+                &witness,
+                now_ms,
+                "trace-invalid-lifetime".to_string(),
+            )
+            .unwrap_err();
+        assert!(error.starts_with(error_codes::ERR_ZKA_INVALID_PROOF));
+        assert_eq!(serde_json::to_value(&ledger).unwrap(), before);
+    }
+
+    let mut policy = test_policy();
+    policy.validity_ms = 1;
+    let params = ZkVerifierParams::for_policy(
+        &policy,
+        "vk-lifetime-boundary",
+        7,
+        "nonce-lifetime-boundary",
+        ZkComplianceRelation::allowlist(vec![142]).unwrap(),
+    )
+    .unwrap();
+    let witness = ZkPrivateWitness::new(142, [0x45; 32]).unwrap();
+    let mut ledger = AttestationLedger::new();
+    let att = ledger
+        .prove_compliance(
+            "att-lifetime-boundary".to_string(),
+            &policy,
+            &params,
+            &witness,
+            u64::MAX - 1,
+            "trace-lifetime-boundary".to_string(),
+        )
+        .unwrap();
+    assert_eq!(att.expires_at_ms, u64::MAX);
+    assert!(
+        verify_compliance_proof_stateless(
+            &att,
+            &policy,
+            &params,
+            u64::MAX - 1,
+            "trace-boundary-live".to_string(),
+        )
+        .is_verified()
+    );
+    assert!(matches!(
+        verify_compliance_proof_stateless(
+            &att,
+            &policy,
+            &params,
+            u64::MAX,
+            "trace-boundary-expired".to_string(),
+        ),
+        ZkVerificationResult::Rejected { error_code, .. }
+            if error_code == error_codes::ERR_ZKA_EXPIRED
+    ));
+}
+
+#[test]
+fn ristretto_retained_expired_status_cannot_be_reactivated_with_an_earlier_clock() {
+    let policy = test_policy();
+    let params = ZkVerifierParams::for_policy(
+        &policy,
+        "vk-terminal-expiry",
+        7,
+        "nonce-terminal-expiry",
+        ZkComplianceRelation::allowlist(vec![142]).unwrap(),
+    )
+    .unwrap();
+    let witness = ZkPrivateWitness::new(142, [0x46; 32]).unwrap();
+    let mut ledger = AttestationLedger::new();
+    let att = ledger
+        .prove_compliance(
+            "att-terminal-expiry".to_string(),
+            &policy,
+            &params,
+            &witness,
+            1_000_000,
+            "trace-terminal-expiry".to_string(),
+        )
+        .unwrap();
+    ledger.sweep_expired(att.expires_at_ms);
+    let retained = ledger.attestations[&att.attestation_id].clone();
+    assert_eq!(retained.status, AttestationStatus::Expired);
+    for result in [
+        ledger.verify_authenticated_proof(
+            &att,
+            &policy,
+            &params,
+            att.generated_at_ms,
+            "trace-stale-active".to_string(),
+        ),
+        verify_compliance_proof_stateless(
+            &retained,
+            &policy,
+            &params,
+            att.generated_at_ms,
+            "trace-retained-expired".to_string(),
+        ),
+    ] {
+        assert!(matches!(
+            result,
+            ZkVerificationResult::Rejected { error_code, .. }
+                if error_code == error_codes::ERR_ZKA_EXPIRED
+        ));
+    }
+    assert_eq!(
+        ledger.attestations[&att.attestation_id].status,
+        AttestationStatus::Expired
+    );
+}
+
+#[test]
 fn ristretto_threshold_above_and_exact_boundary_verify_and_64bit_range_works() {
     let mut ledger = AttestationLedger::new();
     let policy = test_policy();

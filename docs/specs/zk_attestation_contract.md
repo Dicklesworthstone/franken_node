@@ -9,19 +9,47 @@ records continue to fail closed with `ERR_ZKA_VERIFIER_UNAVAILABLE` and `FN-ZK-0
 so historical registrations can never confer compliance authority.
 
 Authenticated selective-compliance verification (`bd-reality-20260923-26n9r.18`)
-uses schema `zka-ristretto255-v2.0` (`CRYPTO_SCHEMA_VERSION`) over prime-order
+uses schema `zka-ristretto255-v3.0` (`CRYPTO_SCHEMA_VERSION`, `ZKRP3` wire prefix) over prime-order
 Ristretto255 (`curve25519-dalek`, `#![forbid(unsafe_code)]`, zero trusted setup):
 - Pedersen commitments `C = v * G + r * H` with nothing-up-my-sleeve generator
   `H = RistrettoPoint::from_uniform_bytes(SHA512("franken-node/zka-ristretto255/pedersen-generator-h/v1"))`.
 - `ZkComplianceRelation::ThresholdAtLeast { threshold, range_bits }`: homomorphic
   shift `C - threshold * G == sum_{j=0}^{k-1} 2^j * C_j` paired with `k` parallel
-  CDS94 1-of-2 Schnorr OR-proofs bound via Fiat-Shamir to `(attestation_id, params_sha256, C, C_0..C_{k-1})`.
+  CDS94 1-of-2 Schnorr OR-proofs bound via Fiat-Shamir to
+  `(attestation_id, generated_at_ms, expires_at_ms, params_sha256, C, C_0..C_{k-1})`.
 - `ZkComplianceRelation::AllowlistMembership { allowed_values, merkle_root_hex }`:
-  domain-separated binary Merkle root check paired with a CDS94 1-of-N Schnorr OR-proof.
-- `ZkVerifierParams` binds the full `ZkPolicy` content (`policy_binding_sha256`),
-  `verifier_key_id`, `epoch`, `challenge_nonce`, and `relation`; invalid witness
+  domain-separated binary Merkle root check paired with a CDS94 1-of-N Schnorr
+  OR-proof bound to the same attestation identity, exact timestamps, parameters,
+  and Pedersen commitment.
+- `ZkVerifierParams` binds the policy identity, predicate, issuer, validity, and
+  schema (`policy_binding_sha256`), plus `verifier_key_id`, `epoch`,
+  `challenge_nonce`, and `relation`; invalid witness
   or Schnorr transcripts fail deterministically with `ERR_ZKA_WITNESS_INVALID`
   (`ERR_ZK_WITNESS_INVALID`).
+
+### Authenticated proof lifetime
+
+Both proof relations authenticate the exact half-open interval
+`[generated_at_ms, expires_at_ms)`. The verifier requires a nonempty interval,
+checked addition of `generated_at_ms + policy.validity_ms`, and an expiry no later
+than that policy limit. Generation rejects empty or overflowing lifetimes before
+registering a proof. An honest proof verifies from its generation timestamp through
+the instant before expiry; a future-generated or expired proof fails admission.
+Changing either timestamp, including shifting both by the same amount, requires
+a new cryptographic proof. Retained `Expired` and `Revoked` lifecycle states remain
+terminal even when verification receives an earlier clock.
+
+The v3 parameter, Fiat-Shamir, and hedged nonce domains separate authenticated
+lifetimes from the old transcript. Historical `zka-ristretto255-v2.0` / `ZKRP2`
+proofs do not authenticate their timestamps and are rejected; they must be
+regenerated. Relabeling the schema, wire prefix, or parameter digest cannot upgrade
+an old proof. Pedersen generator derivation, allowlist Merkle derivation, and the
+underlying proof relations are unchanged.
+
+The independent stateless verifier requires trusted current policy, verifier
+parameters, and time from its caller. It cannot discover revocations absent from
+the submitted record. Use the authoritative ledger wrapper to enforce retained
+revocations and expiry state.
 
 ## Section
 
