@@ -11,6 +11,7 @@
 //! commitment is recorded and authenticated, not rederived by this SDK.
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use chrono::{DateTime, SecondsFormat, Utc};
 use ed25519_dalek::{Signature, VerifyingKey};
 use serde::{Deserialize, Serialize, Serializer};
 use serde_json::Value;
@@ -69,6 +70,9 @@ pub enum PublisherSourceError {
     CapsuleInvalid,
     RevocationSignatureInvalid,
     RevocationListInvalid,
+    RevocationFreshnessPolicyInvalid,
+    RevocationListNotYetValid,
+    RevocationListStale,
     PublisherRevoked,
     ProvenanceSignatureInvalid,
     ProvenanceChainInvalid,
@@ -90,6 +94,15 @@ impl std::fmt::Display for PublisherSourceError {
                 "revocation list signature does not verify under the trusted revocation authority"
             }
             Self::RevocationListInvalid => "invalid signed publisher revocation list",
+            Self::RevocationFreshnessPolicyInvalid => {
+                "publisher revocation freshness window must be greater than zero"
+            }
+            Self::RevocationListNotYetValid => {
+                "publisher revocation list was issued after the trusted evaluation time"
+            }
+            Self::RevocationListStale => {
+                "publisher revocation list is outside the trusted freshness window"
+            }
             Self::PublisherRevoked => {
                 "publisher, signing key, or package version is revoked by the signed revocation list"
             }
@@ -200,18 +213,24 @@ fn text_is_bounded(value: &str, maximum: usize) -> bool {
         && !value.chars().any(char::is_control)
 }
 
-fn valid_version(value: &str) -> bool {
+fn version_components(value: &str) -> Option<[u64; 3]> {
     if value.is_empty() || value.len() > 128 {
-        return false;
+        return None;
     }
-    let parts: Vec<_> = value.split('.').collect();
-    parts.len() == 3
-        && parts.iter().all(|part| {
-            !part.is_empty()
-                && part.len() <= 20
-                && part.bytes().all(|byte| byte.is_ascii_digit())
-                && part.parse::<u64>().is_ok()
-        })
+    let mut parts = value.split('.');
+    let mut version = [0_u64; 3];
+    for component in &mut version {
+        let part = parts.next()?;
+        if part.is_empty() || part.len() > 20 || !part.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        *component = part.parse().ok()?;
+    }
+    parts.next().is_none().then_some(version)
+}
+
+fn valid_version(value: &str) -> bool {
+    version_components(value).is_some()
 }
 
 fn valid_digest(value: &str) -> bool {
@@ -495,10 +514,16 @@ pub struct PublisherProvenanceChain {
 }
 
 /// Independently anchored trust inputs for offline revocation + provenance verification.
+/// The caller supplies the evaluation time and maximum age from its own policy,
+/// never from the untrusted artifact. Historical verification can use a retained
+/// trusted time; this verifier does not read a wall clock or fetch a newer list.
 pub struct PublisherTrustPolicy<'a> {
     pub revocation_authority: &'a VerifyingKey,
     pub revocation_list_bytes: &'a [u8],
     pub revocation_signature: &'a [u8; 64],
+    pub evaluation_time: DateTime<Utc>,
+    /// Nonzero exclusive validity window: age equal to this limit is stale.
+    pub max_revocation_age_secs: u64,
     pub provenance: Option<(&'a VerifyingKey, &'a [u8], &'a [u8; 64])>,
 }
 
@@ -508,6 +533,10 @@ pub struct VerifiedPublisherSourceWithTrust {
     pub source: VerifiedPublisherSource,
     pub revocation_list_sha256: String,
     pub revocation_authority_public_key_hex: String,
+    pub revocation_issued_at: String,
+    pub revocation_evaluated_at: String,
+    #[serde(serialize_with = "serialize_decimal")]
+    pub max_revocation_age_secs: u64,
     pub provenance_chain_sha256: Option<String>,
     pub provenance_authority_public_key_hex: Option<String>,
     pub provenance_link_count: Option<usize>,
@@ -564,7 +593,12 @@ pub fn provenance_link_digest(link: &PublisherProvenanceLink) -> String {
 }
 
 /// Verify publisher-signed source bytes together with a signed revocation list
-/// and optional hash-linked provenance lineage.
+/// and optional hash-linked, strictly increasing numeric-version lineage.
+///
+/// Revocation issuance must be valid RFC 3339, no later than the caller's
+/// evaluation time, and younger than its nonzero maximum age. This establishes
+/// freshness relative to those explicit inputs, not that the supplied list is
+/// the newest published list or that the artifact is authorized to execute.
 pub fn verify_publisher_source_with_trust_policy(
     manifest_bytes: &[u8],
     signature: &[u8; 64],
@@ -572,6 +606,9 @@ pub fn verify_publisher_source_with_trust_policy(
     trusted_publisher: &VerifyingKey,
     policy: &PublisherTrustPolicy<'_>,
 ) -> Result<VerifiedPublisherSourceWithTrust> {
+    if policy.max_revocation_age_secs == 0 {
+        return Err(PublisherSourceError::RevocationFreshnessPolicyInvalid);
+    }
     if policy.revocation_list_bytes.len() > MAX_REVOCATION_LIST_BYTES {
         return Err(PublisherSourceError::InputTooLarge);
     }
@@ -609,6 +646,16 @@ pub fn verify_publisher_source_with_trust_policy(
             .any(|entry| !text_is_bounded(entry, 385))
     {
         return Err(PublisherSourceError::RevocationListInvalid);
+    }
+    let issued_at = DateTime::parse_from_rfc3339(&revocation_list.issued_at)
+        .map_err(|_| PublisherSourceError::RevocationListInvalid)?;
+    let age = policy
+        .evaluation_time
+        .signed_duration_since(issued_at)
+        .to_std()
+        .map_err(|_| PublisherSourceError::RevocationListNotYetValid)?;
+    if age >= std::time::Duration::from_secs(policy.max_revocation_age_secs) {
+        return Err(PublisherSourceError::RevocationListStale);
     }
 
     let source =
@@ -653,9 +700,12 @@ pub fn verify_publisher_source_with_trust_policy(
                 return Err(PublisherSourceError::ProvenanceChainInvalid);
             }
             let mut prev_version: Option<&str> = None;
+            let mut prev_components = None;
             let mut prev_digest: Option<String> = None;
             for (idx, link) in chain.links.iter().enumerate() {
-                if !valid_version(&link.version)
+                let components = version_components(&link.version)
+                    .ok_or(PublisherSourceError::ProvenanceChainInvalid)?;
+                if prev_components.is_some_and(|previous| components <= previous)
                     || !valid_digest(&link.content_hash)
                     || !link
                         .manifest_sha256
@@ -674,6 +724,7 @@ pub fn verify_publisher_source_with_trust_policy(
                     return Err(PublisherSourceError::ProvenanceChainInvalid);
                 }
                 prev_version = Some(&link.version);
+                prev_components = Some(components);
                 prev_digest = Some(provenance_link_digest(link));
             }
             let tip = chain
@@ -714,6 +765,11 @@ pub fn verify_publisher_source_with_trust_policy(
             hex::encode(Sha256::digest(policy.revocation_list_bytes))
         ),
         revocation_authority_public_key_hex: hex::encode(policy.revocation_authority.as_bytes()),
+        revocation_issued_at: revocation_list.issued_at,
+        revocation_evaluated_at: policy
+            .evaluation_time
+            .to_rfc3339_opts(SecondsFormat::AutoSi, true),
+        max_revocation_age_secs: policy.max_revocation_age_secs,
         provenance_chain_sha256,
         provenance_authority_public_key_hex,
         provenance_link_count,
@@ -728,6 +784,12 @@ mod tests {
 
     fn key() -> SigningKey {
         SigningKey::from_bytes(&[0x5b; 32])
+    }
+
+    fn evaluation_time() -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339("2026-11-11T00:30:00Z")
+            .unwrap()
+            .with_timezone(&Utc)
     }
 
     fn producer_vectors() -> Vec<Value> {
@@ -1331,6 +1393,8 @@ mod tests {
                 revocation_authority: &rev_signer.verifying_key(),
                 revocation_list_bytes: &rev_raw,
                 revocation_signature: &rev_sig,
+                evaluation_time: evaluation_time(),
+                max_revocation_age_secs: 3600,
                 provenance: Some((&prov_signer.verifying_key(), &prov_raw, &prov_sig)),
             },
         )
@@ -1349,6 +1413,8 @@ mod tests {
                     revocation_authority: &prov_signer.verifying_key(),
                     revocation_list_bytes: &rev_raw,
                     revocation_signature: &rev_sig,
+                    evaluation_time: evaluation_time(),
+                    max_revocation_age_secs: 3600,
                     provenance: None,
                 },
             ),
@@ -1384,6 +1450,8 @@ mod tests {
                         revocation_authority: &rev_signer.verifying_key(),
                         revocation_list_bytes: &bytes,
                         revocation_signature: &sig,
+                        evaluation_time: evaluation_time(),
+                        max_revocation_age_secs: 3600,
                         provenance: None,
                     },
                 ),
@@ -1408,10 +1476,202 @@ mod tests {
                     revocation_authority: &rev_signer.verifying_key(),
                     revocation_list_bytes: &rev_raw,
                     revocation_signature: &rev_sig,
+                    evaluation_time: evaluation_time(),
+                    max_revocation_age_secs: 3600,
                     provenance: Some((&prov_signer.verifying_key(), &broken_bytes, &broken_sig)),
                 },
             ),
             Err(PublisherSourceError::ProvenanceChainInvalid)
         );
+    }
+
+    #[test]
+    fn trust_policy_checks_revocation_freshness_at_exact_caller_boundaries() {
+        let rev_signer = SigningKey::from_bytes(&[0x71; 32]);
+        let capsule_bytes = capsule();
+        let manifest_raw = serde_json::to_vec(&manifest(&capsule_bytes, true)).unwrap();
+        let manifest_sig = key().sign(&manifest_raw).to_bytes();
+        let verify_at = |issued_at: &str, at: DateTime<Utc>, maximum_age: u64| {
+            let revocations = PublisherRevocationList {
+                schema_version: PUBLISHER_REVOCATION_LIST_SCHEMA.into(),
+                issued_at: issued_at.into(),
+                revoked_publisher_ids: vec![],
+                revoked_signer_key_ids: vec![],
+                revoked_package_versions: vec![],
+            };
+            let raw = serde_json::to_vec(&revocations).unwrap();
+            let signature = rev_signer
+                .sign(&revocation_list_signing_payload(&raw))
+                .to_bytes();
+            verify_publisher_source_with_trust_policy(
+                &manifest_raw,
+                &manifest_sig,
+                &capsule_bytes,
+                &key().verifying_key(),
+                &PublisherTrustPolicy {
+                    revocation_authority: &rev_signer.verifying_key(),
+                    revocation_list_bytes: &raw,
+                    revocation_signature: &signature,
+                    evaluation_time: at,
+                    max_revocation_age_secs: maximum_age,
+                    provenance: None,
+                },
+            )
+        };
+
+        // Each list has a genuine signature from the independently trusted
+        // revocation authority. Authenticity alone cannot make its time valid.
+        for (issued_at, expected) in [
+            ("trusted-time", PublisherSourceError::RevocationListInvalid),
+            (
+                "2026-02-30T00:00:00Z",
+                PublisherSourceError::RevocationListInvalid,
+            ),
+            (
+                "2026-11-11T00:30:00.000000001Z",
+                PublisherSourceError::RevocationListNotYetValid,
+            ),
+            (
+                "2100-01-01T00:00:00Z",
+                PublisherSourceError::RevocationListNotYetValid,
+            ),
+            (
+                "2026-11-10T23:30:00Z",
+                PublisherSourceError::RevocationListStale,
+            ),
+            (
+                "2026-11-10T23:29:59.999999999Z",
+                PublisherSourceError::RevocationListStale,
+            ),
+            (
+                "2000-01-01T00:00:00Z",
+                PublisherSourceError::RevocationListStale,
+            ),
+        ] {
+            assert_eq!(
+                verify_at(issued_at, evaluation_time(), 3600),
+                Err(expected),
+                "issued_at={issued_at}"
+            );
+        }
+        for issued_at in [
+            "2026-11-11T00:30:00Z",
+            "2026-11-11T01:30:00+01:00",
+            "2026-11-10T23:30:00.000000001Z",
+        ] {
+            let verified = verify_at(issued_at, evaluation_time(), 3600).unwrap();
+            assert_eq!(verified.revocation_issued_at, issued_at);
+            assert_eq!(verified.revocation_evaluated_at, "2026-11-11T00:30:00Z");
+            assert_eq!(verified.max_revocation_age_secs, 3600);
+            assert_eq!(verified.provenance_link_count, None);
+            assert_eq!(
+                serde_json::to_value(verified).unwrap()["max_revocation_age_secs"],
+                "3600"
+            );
+        }
+        assert_eq!(
+            verify_at("2026-11-11T00:30:00Z", evaluation_time(), 0),
+            Err(PublisherSourceError::RevocationFreshnessPolicyInvalid)
+        );
+
+        // Historical verification uses the supplied time, not the host clock;
+        // an operator-selected large window never wraps a signed time interval.
+        let historical_time = DateTime::parse_from_rfc3339("2000-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        verify_at("2000-01-01T00:00:00Z", historical_time, 1).unwrap();
+        let wide = verify_at("1900-01-01T00:00:00Z", evaluation_time(), u64::MAX).unwrap();
+        assert_eq!(
+            serde_json::to_value(wide).unwrap()["max_revocation_age_secs"],
+            u64::MAX.to_string()
+        );
+    }
+
+    #[test]
+    fn trust_policy_rejects_signed_nonmonotonic_provenance_versions() {
+        let rev_signer = SigningKey::from_bytes(&[0x71; 32]);
+        let prov_signer = SigningKey::from_bytes(&[0x72; 32]);
+        let capsule_bytes = capsule();
+        let revocations = PublisherRevocationList {
+            schema_version: PUBLISHER_REVOCATION_LIST_SCHEMA.into(),
+            issued_at: "2026-11-11T00:00:00Z".into(),
+            revoked_publisher_ids: vec![],
+            revoked_signer_key_ids: vec![],
+            revoked_package_versions: vec![],
+        };
+        let rev_raw = serde_json::to_vec(&revocations).unwrap();
+        let rev_sig = rev_signer
+            .sign(&revocation_list_signing_payload(&rev_raw))
+            .to_bytes();
+
+        for (versions, accepted) in [
+            (vec!["1.2.3"], true),
+            (vec!["1.2.9", "1.2.10"], true),
+            (vec!["1.9.99", "2.0.0"], true),
+            (
+                vec!["18446744073709551615.0.0", "18446744073709551615.0.1"],
+                true,
+            ),
+            (vec!["1.2.3", "1.2.3"], false),
+            (vec!["1.2.3", "01.2.3"], false),
+            (vec!["2.0.0", "1.9.99"], false),
+            (vec!["1.0.0", "2.0.0", "1.0.1"], false),
+            (vec!["1.0.0", "2.0.0", "1.0.0"], false),
+        ] {
+            let mut links: Vec<PublisherProvenanceLink> = Vec::new();
+            let mut tip_raw = Vec::new();
+            for version in &versions {
+                let parent_version = links.last().map(|link| link.version.clone());
+                let previous_link_sha256 = links.last().map(provenance_link_digest);
+                let mut registration = manifest(&capsule_bytes, true);
+                registration["initial_version"]["version"] = json!(version);
+                registration["initial_version"]["parent_version"] = json!(parent_version);
+                tip_raw = serde_json::to_vec(&registration).unwrap();
+                links.push(PublisherProvenanceLink {
+                    version: (*version).into(),
+                    parent_version,
+                    content_hash: hex::encode(Sha256::digest(&capsule_bytes)),
+                    manifest_sha256: format!("sha256:{}", hex::encode(Sha256::digest(&tip_raw))),
+                    previous_link_sha256,
+                });
+            }
+            let chain = PublisherProvenanceChain {
+                schema_version: PUBLISHER_PROVENANCE_CHAIN_SCHEMA.into(),
+                package_name: "publisher-package".into(),
+                publisher_id: "publisher-1".into(),
+                links,
+            };
+            let prov_raw = serde_json::to_vec(&chain).unwrap();
+            let prov_sig = prov_signer
+                .sign(&provenance_chain_signing_payload(&prov_raw))
+                .to_bytes();
+            let result = verify_publisher_source_with_trust_policy(
+                &tip_raw,
+                &key().sign(&tip_raw).to_bytes(),
+                &capsule_bytes,
+                &key().verifying_key(),
+                &PublisherTrustPolicy {
+                    revocation_authority: &rev_signer.verifying_key(),
+                    revocation_list_bytes: &rev_raw,
+                    revocation_signature: &rev_sig,
+                    evaluation_time: evaluation_time(),
+                    max_revocation_age_secs: 3600,
+                    provenance: Some((&prov_signer.verifying_key(), &prov_raw, &prov_sig)),
+                },
+            );
+            if accepted {
+                assert_eq!(
+                    result.unwrap().provenance_link_count,
+                    Some(versions.len()),
+                    "versions={versions:?}"
+                );
+            } else {
+                assert_eq!(
+                    result,
+                    Err(PublisherSourceError::ProvenanceChainInvalid),
+                    "versions={versions:?}"
+                );
+            }
+        }
     }
 }
