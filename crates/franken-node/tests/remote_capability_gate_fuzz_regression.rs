@@ -390,12 +390,6 @@ fn capability_provider_rejects_empty_port_and_query_string_prefixes() -> Result<
 #[test]
 fn checked_in_fuzz_crash_artifacts_replay_deterministically_without_panicking() -> Result<(), String>
 {
-    use frankenengine_node::api::fleet_quarantine::QuarantineRequest;
-    use frankenengine_node::security::decision_receipt::SignedReceipt;
-    use frankenengine_node::supply_chain::artifact_signing::ChecksumManifest;
-    use frankenengine_node::supply_chain::extension_registry::ExtensionRegistrationManifest;
-    use frankenengine_node::supply_chain::trust_card::TrustCard;
-
     let artifacts_root =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fuzz/artifacts");
     let mut crash_files = Vec::new();
@@ -424,23 +418,161 @@ fn checked_in_fuzz_crash_artifacts_replay_deterministically_without_panicking() 
 
     for crash_path in crash_files {
         let bytes = std::fs::read(&crash_path).map_err(|err| err.to_string())?;
-        let r1 = serde_json::from_slice::<RemoteCap>(&bytes);
-        let r2 = serde_json::from_slice::<RemoteCap>(&bytes);
-        assert_eq!(r1.is_ok(), r2.is_ok());
+        exercise_domain_parsers(&bytes);
+    }
 
-        let _ = serde_json::from_slice::<RemoteScope>(&bytes);
-        let _ = serde_json::from_slice::<QuarantineRequest>(&bytes);
-        let _ = serde_json::from_slice::<ExtensionRegistrationManifest>(&bytes);
-        let _ = serde_json::from_slice::<SignedReceipt>(&bytes);
-        let _ = serde_json::from_slice::<TrustCard>(&bytes);
+    Ok(())
+}
 
-        if let Ok(text) = std::str::from_utf8(&bytes) {
-            let _ = ChecksumManifest::parse_canonical(text);
-            if let Some((last_char_idx, _)) = text.char_indices().next_back()
-                && last_char_idx > 0
-            {
-                let truncated = &text[..last_char_idx];
-                let _ = serde_json::from_str::<serde_json::Value>(truncated);
+fn exercise_domain_parsers(bytes: &[u8]) {
+    use frankenengine_node::api::fleet_quarantine::QuarantineRequest;
+    use frankenengine_node::replay::time_travel_engine::WorkflowTrace;
+    use frankenengine_node::runtime::checkpoint::{
+        CheckpointBackend, CheckpointContract, CheckpointRecord, CheckpointWriter,
+        InMemoryCheckpointBackend,
+    };
+    use frankenengine_node::security::decision_receipt::SignedReceipt;
+    use frankenengine_node::supply_chain::artifact_signing::ChecksumManifest;
+    use frankenengine_node::supply_chain::extension_registry::ExtensionRegistrationManifest;
+    use frankenengine_node::supply_chain::provenance::{
+        ProvenanceAttestation, VerificationPolicy, verify_and_project_gates,
+    };
+    use frankenengine_node::supply_chain::trust_card::{TrustCard, TrustCardRegistrySnapshot};
+    use frankenengine_node::tools::replay_bundle::{ReplayBundle, to_canonical_json};
+
+    let r1 = serde_json::from_slice::<RemoteCap>(bytes);
+    let r2 = serde_json::from_slice::<RemoteCap>(bytes);
+    assert_eq!(r1.is_ok(), r2.is_ok());
+
+    if let Ok(scope) = serde_json::from_slice::<RemoteScope>(bytes) {
+        let _ = scope.allows_endpoint("https://api.example.com/v1/health");
+    }
+    let _ = serde_json::from_slice::<QuarantineRequest>(bytes);
+    let _ = serde_json::from_slice::<ExtensionRegistrationManifest>(bytes);
+    let _ = serde_json::from_slice::<SignedReceipt>(bytes);
+    let _ = serde_json::from_slice::<TrustCard>(bytes);
+    let _ = serde_json::from_slice::<TrustCardRegistrySnapshot>(bytes);
+    let _ = serde_json::from_slice::<WorkflowTrace>(bytes);
+
+    if let Ok(record) = serde_json::from_slice::<CheckpointRecord>(bytes) {
+        let mut writer = CheckpointWriter::new(InMemoryCheckpointBackend::default());
+        let _ = writer.backend_mut().save(record.clone());
+        let _ = writer.read_latest_valid("fuzz-regression", &record.orchestration_id);
+        let _ = writer.list_checkpoints(&record.orchestration_id);
+    }
+    if let Ok(bundle) = serde_json::from_slice::<ReplayBundle>(bytes) {
+        let _ = to_canonical_json(&bundle);
+    }
+    if let Ok(attestation) = serde_json::from_slice::<ProvenanceAttestation>(bytes) {
+        let _ = verify_and_project_gates(
+            &attestation,
+            &VerificationPolicy::production_default(),
+            ISSUED_AT,
+            "fuzz-regression",
+        );
+    }
+
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        let _ = ChecksumManifest::parse_canonical(text);
+        let _ = toml::from_str::<toml::Value>(text);
+        if let Some((last_char_idx, _)) = text.char_indices().next_back()
+            && last_char_idx > 0
+        {
+            let truncated = &text[..last_char_idx];
+            let _ = serde_json::from_str::<serde_json::Value>(truncated);
+        }
+    }
+}
+
+#[test]
+fn promoted_fuzz_regression_manifest_and_146_target_seed_corpora_replay_cleanly()
+-> Result<(), String> {
+    use sha2::{Digest, Sha256};
+
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let manifest_bytes = std::fs::read(repo_root.join("fuzz/regression/manifest.json"))
+        .map_err(|err| err.to_string())?;
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&manifest_bytes).map_err(|err| err.to_string())?;
+    assert_eq!(
+        manifest["schema_version"],
+        "franken-node/fuzz-regression-manifest/v1"
+    );
+    assert_eq!(manifest["registered_targets"], 146);
+    assert_eq!(manifest["seeded_targets"], 146);
+
+    let promoted = manifest["promoted_target_regressions"]
+        .as_array()
+        .ok_or_else(|| "promoted_target_regressions must be an array".to_string())?;
+    assert!(
+        promoted.len() >= 9,
+        "expected >=9 promoted target regressions, got {}",
+        promoted.len()
+    );
+
+    let mut replayed_regression_inputs = 0usize;
+    for entry in promoted {
+        let reg_rel = entry["regression_input"]
+            .as_str()
+            .ok_or_else(|| "missing regression_input".to_string())?;
+        let reg_bytes =
+            std::fs::read(repo_root.join(reg_rel)).map_err(|err| format!("{reg_rel}: {err}"))?;
+        let actual_sha = hex::encode(Sha256::digest(&reg_bytes));
+        assert_eq!(
+            Some(actual_sha.as_str()),
+            entry["original_sha256"].as_str(),
+            "sha256 mismatch on {reg_rel}"
+        );
+        exercise_domain_parsers(&reg_bytes);
+        replayed_regression_inputs += 1;
+
+        if let Some(min_rel) = entry["minimized_input"].as_str() {
+            let min_bytes = std::fs::read(repo_root.join(min_rel))
+                .map_err(|err| format!("{min_rel}: {err}"))?;
+            assert!(
+                min_bytes.len() < reg_bytes.len(),
+                "minimized input {min_rel} must be strictly smaller than {reg_rel}"
+            );
+            let min_sha = hex::encode(Sha256::digest(&min_bytes));
+            assert_eq!(
+                Some(min_sha.as_str()),
+                entry["minimized_sha256"].as_str(),
+                "sha256 mismatch on {min_rel}"
+            );
+            exercise_domain_parsers(&min_bytes);
+            replayed_regression_inputs += 1;
+        }
+    }
+    assert!(replayed_regression_inputs >= 16);
+
+    let fuzz_toml_text = std::fs::read_to_string(repo_root.join("fuzz/Cargo.toml"))
+        .map_err(|err| err.to_string())?;
+    let fuzz_toml: toml::Value = toml::from_str(&fuzz_toml_text).map_err(|err| err.to_string())?;
+    let bins = fuzz_toml["bin"]
+        .as_array()
+        .ok_or_else(|| "fuzz/Cargo.toml missing [[bin]]".to_string())?;
+    assert_eq!(bins.len(), 146);
+
+    for bin in bins {
+        let name = bin["name"]
+            .as_str()
+            .ok_or_else(|| "bin missing name".to_string())?;
+        let target_corpus = repo_root.join("fuzz/corpus").join(name);
+        let mut seeds: Vec<std::path::PathBuf> = std::fs::read_dir(&target_corpus)
+            .map_err(|err| format!("corpus dir {}: {err}", target_corpus.display()))?
+            .filter_map(|e| e.ok().map(|entry| entry.path()))
+            .filter(|p| p.is_file())
+            .collect();
+        seeds.sort();
+        assert!(
+            !seeds.is_empty(),
+            "target {name} must have at least 1 seed in fuzz/corpus/{name}"
+        );
+        // Replay bounded sample (first 4 seeds per target) so test stays sub-second across 18k+ files.
+        for seed_path in seeds.into_iter().take(4) {
+            let bytes = std::fs::read(&seed_path).map_err(|err| err.to_string())?;
+            if bytes.len() <= 65_536 {
+                exercise_domain_parsers(&bytes);
             }
         }
     }

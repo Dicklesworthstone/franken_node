@@ -132,7 +132,11 @@ def shard_command(
     exact: bool,
     rch_bin: str,
     override_cfg: str,
+    target_kind: str = "lib",
+    bin_name: str = "franken-node",
+    features: str = "extended-surfaces,test-support",
 ) -> list[str]:
+    target_args = ["--lib"] if target_kind == "lib" else ["--bin", bin_name]
     command = [
         rch_bin,
         "exec",
@@ -144,9 +148,9 @@ def shard_command(
         "test",
         "-p",
         "frankenengine-node",
-        "--lib",
+        *target_args,
         "--features",
-        "extended-surfaces,test-support",
+        features,
         test_filter,
     ]
     if exact:
@@ -160,21 +164,35 @@ def build_shard_plan(
     rch_bin: str = "rch",
     override_cfg: str = DEFAULT_OVERRIDE_CFG,
     timeout_seconds: int = DEFAULT_SHARD_TIMEOUT_SECONDS,
+    target_kind: str = "lib",
+    bin_name: str = "franken-node",
+    features: str = "extended-surfaces,test-support",
 ) -> dict[str, object]:
     if timeout_seconds < 1:
         raise ValueError("timeout_seconds must be at least 1")
+    if target_kind not in {"lib", "bin"}:
+        raise ValueError("target_kind must be 'lib' or 'bin'")
 
     tests = inline_test_names(cargo_list_output)
     groups = group_tests_by_prefix(tests, max_tests_per_shard)
     total_shards = len(groups)
     plan_id = target_hash(tests)
     shards: list[dict[str, object]] = []
+    prefix = "inline-lib" if target_kind == "lib" else f"inline-bin-{bin_name}"
 
     for index, group in enumerate(groups, start=1):
         exact = len(group) == 1
         test_filter = group[0] if exact else common_test_prefix(group)
-        command = shard_command(test_filter, exact, rch_bin, override_cfg)
-        shard_id = f"inline-lib-{index:04d}"
+        command = shard_command(
+            test_filter,
+            exact,
+            rch_bin,
+            override_cfg,
+            target_kind=target_kind,
+            bin_name=bin_name,
+            features=features,
+        )
+        shard_id = f"{prefix}-{index:04d}"
         shards.append(
             {
                 "shard_id": shard_id,
@@ -195,6 +213,9 @@ def build_shard_plan(
         "schema_version": SCHEMA_SHARD_PLAN,
         "plan_id": plan_id,
         "generated_at": utc_timestamp(),
+        "target_kind": target_kind,
+        "target_name": "frankenengine-node::lib" if target_kind == "lib" else bin_name,
+        "features": features,
         "total_tests": len(tests),
         "total_shards": total_shards,
         "max_tests_per_shard": max_tests_per_shard,
@@ -388,6 +409,52 @@ def cargo_lib_test_enabled(cargo_toml: Path) -> bool:
     return isinstance(enabled, bool) and enabled
 
 
+def cargo_has_bin(cargo_toml: Path, bin_name: str) -> bool:
+    data = tomllib.loads(cargo_toml.read_text(encoding="utf-8"))
+    return any(entry.get("name") == bin_name for entry in data.get("bin", []))
+
+
+def cargo_bin_test_enabled(cargo_toml: Path, bin_name: str = "franken-node") -> bool:
+    data = tomllib.loads(cargo_toml.read_text(encoding="utf-8"))
+    for entry in data.get("bin", []):
+        if entry.get("name") == bin_name:
+            enabled = entry.get("test", True)
+            return isinstance(enabled, bool) and enabled
+    return False
+
+
+def summarize_shard_execution(
+    plan: dict[str, object],
+    receipt_jsonl: Path,
+    exit_code: int,
+) -> dict[str, object]:
+    observed_ok = 0
+    if receipt_jsonl.is_file():
+        for raw_line in receipt_jsonl.read_text(encoding="utf-8").splitlines():
+            if not raw_line.strip():
+                continue
+            try:
+                rec = json.loads(raw_line)
+            except json.JSONDecodeError:
+                continue
+            if rec.get("plan_id") != plan.get("plan_id"):
+                continue
+            results = rec.get("observed_results", {})
+            if isinstance(results, dict):
+                observed_ok += sum(1 for status in results.values() if status == "ok")
+    return {
+        "schema_version": "franken-node/inline-test-execution-summary/v1",
+        "target_name": plan.get("target_name", "frankenengine-node::lib"),
+        "target_kind": plan.get("target_kind", "lib"),
+        "discovered_tests": int(plan.get("total_tests", 0)),
+        "executed_tests": observed_ok,
+        "crash_inputs_replayed": 0,
+        "seed_count": 0,
+        "total_shards": int(plan.get("total_shards", 0)),
+        "exit_code": exit_code,
+    }
+
+
 def cargo_lints_allow_override_cfg(cargo_toml: Path, override_cfg: str) -> bool:
     data = tomllib.loads(cargo_toml.read_text(encoding="utf-8"))
     check_cfgs = (
@@ -422,6 +489,8 @@ def preflight(
     lib_rs: Path,
     override_cfg: str = DEFAULT_OVERRIDE_CFG,
     readme: Path | None = None,
+    main_rs: Path | None = None,
+    bin_name: str = "franken-node",
 ) -> dict[str, object]:
     checks = {
         "cargo_lib_test_true": cargo_lib_test_enabled(cargo_toml),
@@ -430,6 +499,11 @@ def preflight(
             cargo_toml, override_cfg
         ),
     }
+    if main_rs is not None and (main_rs.is_file() or cargo_has_bin(cargo_toml, bin_name)):
+        checks["cargo_bin_test_true"] = cargo_bin_test_enabled(cargo_toml, bin_name)
+        checks["main_rs_override_gate"] = (
+            main_rs.is_file() and lib_rs_uses_override_gate(main_rs, override_cfg)
+        )
     if readme is not None:
         checks["readme_documents_inline_lane_compiled_out"] = (
             readme_documents_inline_lane_compiled_out(readme)
@@ -506,6 +580,33 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         default=Path("crates/franken-node/src/lib.rs"),
     )
+    parser.add_argument(
+        "--main-rs",
+        type=Path,
+        default=None,
+        help="Binary crate root checked during --preflight (defaults to <lib-rs-dir>/main.rs).",
+    )
+    parser.add_argument(
+        "--target",
+        choices=("lib", "bin"),
+        default="lib",
+        help="Cargo inline test target kind (`lib` or `bin`).",
+    )
+    parser.add_argument(
+        "--bin-name",
+        default="franken-node",
+        help="Binary target name when `--target bin` is selected.",
+    )
+    parser.add_argument(
+        "--features",
+        default="extended-surfaces,test-support",
+        help="Cargo feature list passed to shard commands.",
+    )
+    parser.add_argument(
+        "--summary-json",
+        type=Path,
+        help="Optional path for structured shard execution summary JSON.",
+    )
     parser.add_argument("--override-cfg", default=DEFAULT_OVERRIDE_CFG)
     parser.add_argument(
         "--readme",
@@ -516,11 +617,16 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.preflight:
+        resolved_main_rs = (
+            args.main_rs if args.main_rs is not None else (args.lib_rs.parent / "main.rs")
+        )
         result = preflight(
             args.cargo_toml,
             args.lib_rs,
             args.override_cfg,
             readme=args.readme,
+            main_rs=resolved_main_rs,
+            bin_name=args.bin_name,
         )
         if args.json:
             print(json.dumps(result, indent=2, sort_keys=True))
@@ -545,6 +651,9 @@ def main(argv: list[str] | None = None) -> int:
             rch_bin=args.rch_bin,
             override_cfg=args.override_cfg,
             timeout_seconds=args.shard_timeout_seconds,
+            target_kind=args.target,
+            bin_name=args.bin_name,
+            features=args.features,
         )
         if args.plan_jsonl_out:
             write_plan_jsonl(plan, args.plan_jsonl_out)
@@ -558,13 +667,21 @@ def main(argv: list[str] | None = None) -> int:
                 )
         if not args.run_shards:
             return 0 if plan["total_shards"] else 1
-        return run_shards(
+        rc = run_shards(
             plan,
             receipt_jsonl=args.receipt_jsonl,
             output_dir=args.output_dir,
             resume=args.resume,
             fail_fast=args.fail_fast,
         )
+        if args.summary_json:
+            summary = summarize_shard_execution(plan, args.receipt_jsonl, rc)
+            args.summary_json.parent.mkdir(parents=True, exist_ok=True)
+            args.summary_json.write_text(
+                json.dumps(summary, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+        return rc
 
     result = evaluate(output, args.min_tests)
     if args.json:

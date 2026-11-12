@@ -1,0 +1,2 @@
+[security.network_policy]
+ssrf_protection_enabled = true

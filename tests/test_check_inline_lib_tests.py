@@ -424,6 +424,29 @@ class InlineLibShardReceiptTest(unittest.TestCase):
             "rch_infra_failure",
         )
 
+    def test_bin_target_plan_and_live_repo_preflight_enforce_main_rs(self) -> None:
+        live = preflight(
+            ROOT / "crates/franken-node/Cargo.toml",
+            ROOT / "crates/franken-node/src/lib.rs",
+            readme=ROOT / "README.md",
+            main_rs=ROOT / "crates/franken-node/src/main.rs",
+        )
+        self.assertTrue(live["passed"], live["issues"])
+        self.assertTrue(live["checks"]["cargo_bin_test_true"])
+        self.assertTrue(live["checks"]["main_rs_override_gate"])
+
+        bin_plan = build_shard_plan(
+            LIST_OUTPUT,
+            max_tests_per_shard=2,
+            target_kind="bin",
+            bin_name="franken-node",
+            features="extended-surfaces,asupersync-transport,test-support",
+        )
+        self.assertEqual(bin_plan["target_kind"], "bin")
+        self.assertEqual(bin_plan["target_name"], "franken-node")
+        self.assertIn("--bin", bin_plan["shards"][0]["command"])
+        self.assertIn("franken-node", bin_plan["shards"][0]["command"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -1,0 +1,155 @@
+{
+  "canonical_fuzz_manifest": "fuzz/Cargo.toml",
+  "legacy_category_seeds": [
+    {
+      "bytes": 23,
+      "category": "migration",
+      "classification": "legacy_simulated_category_seed",
+      "path": "fuzz/regression/migration/crash_20260215_a1b2c3d4.bin",
+      "sha256": "9966528d6dd0456d66d4ba5b0484904727874280e2df98fed97715f242b8c991"
+    },
+    {
+      "bytes": 256,
+      "category": "migration",
+      "classification": "legacy_simulated_category_seed",
+      "path": "fuzz/regression/migration/crash_20260216_e5f6a7b8.bin",
+      "sha256": "5341e6b2646979a70e57653007a1f310169421ec9bdd9f1a5648f75ade005af1"
+    },
+    {
+      "bytes": 10036,
+      "category": "migration",
+      "classification": "legacy_simulated_category_seed",
+      "path": "fuzz/regression/migration/crash_20260217_c9d0e1f2.bin",
+      "sha256": "10c3033cf835eaea0eefdb4840dee72e74e3e52e4a266c9c0e823900a4cb7dd3"
+    },
+    {
+      "bytes": 50025,
+      "category": "shim",
+      "classification": "legacy_simulated_category_seed",
+      "path": "fuzz/regression/shim/crash_20260215_1a2b3c4d.bin",
+      "sha256": "a2e9a51ce07e3d6a8327b6da0003d795a5f2fc393c9942c7ce044179c01c39fe"
+    },
+    {
+      "bytes": 35,
+      "category": "shim",
+      "classification": "legacy_simulated_category_seed",
+      "path": "fuzz/regression/shim/crash_20260216_5e6f7a8b.bin",
+      "sha256": "602df3ca05a5ec3d089fab1f1f84cb8d0dc375d132f480505e91c8f2e9b5e79b"
+    }
+  ],
+  "promoted_crash_artifacts": 9,
+  "promoted_target_regressions": [
+    {
+      "minimized_bytes": 2,
+      "minimized_input": "fuzz/regression/fuzz_api_request_deserialization/minimized-1be98445f228a3ce5f1ca7566208bdf3af02cb1c",
+      "minimized_sha256": "e1f879ddfa1a3df5014efcfc8f6758254cd4687e9d2ef1a0dbb1a674c4558573",
+      "note": "HDD delta-shrunk 8B -> 2B invalid UTF-8 / truncated arbitrary stream",
+      "original_bytes": 8,
+      "original_sha256": "7d12f1ea704763dfc0d2568cdb9a75eb8d144ad4325c867dfeda16dd43e421de",
+      "regression_input": "fuzz/regression/fuzz_api_request_deserialization/crash-62b47edb8420986578f22e020df314431dc813b1",
+      "remediation_commit": "8ad4ad907",
+      "source_artifact": "fuzz/artifacts/fuzz_api_request_deserialization/crash-62b47edb8420986578f22e020df314431dc813b1",
+      "target": "fuzz_api_request_deserialization"
+    },
+    {
+      "minimized_bytes": 4,
+      "minimized_input": "fuzz/regression/fuzz_capability_token_parser/minimized-6d73e9a66fb8a38b3a8b7d8ca281e3d123419652",
+      "minimized_sha256": "b50d58271b88feae50d70807c22ab695d77dbbe8e81f9527a2c50d8a42500f38",
+      "note": "HDD delta-shrunk 14B -> 4B NUL + high-bit arbitrary token stream",
+      "original_bytes": 14,
+      "original_sha256": "3d3e79d1efe80c53109d622a190e98e7252f2ef0e55c4ec416410e4a1a1f7c89",
+      "regression_input": "fuzz/regression/fuzz_capability_token_parser/crash-081d20138a9edb90b5f802ef207976ddd78bbb7f",
+      "remediation_commit": "8ad4ad907",
+      "source_artifact": "fuzz/artifacts/fuzz_capability_token_parser/crash-081d20138a9edb90b5f802ef207976ddd78bbb7f",
+      "target": "fuzz_capability_token_parser"
+    },
+    {
+      "minimized_bytes": 4,
+      "minimized_input": "fuzz/regression/fuzz_capability_token_parser/minimized-628985b94c65f3163264d406734de9f8fdb1a2e8",
+      "minimized_sha256": "ee06fc0bf8849d4796449cc6ab4577589dc0f060dbdd89f9e12077d49dae6dcd",
+      "note": "HDD delta-shrunk 11B -> 4B leading continuation byte + NUL token stream",
+      "original_bytes": 11,
+      "original_sha256": "09701b21e72bd6d4e69926924d5e4b85bda1dbd7b0a54332e2ab93ab6ea3163e",
+      "regression_input": "fuzz/regression/fuzz_capability_token_parser/crash-88b587e166d3c813b9ee709d2862b83464222828",
+      "remediation_commit": "8ad4ad907",
+      "source_artifact": "fuzz/artifacts/fuzz_capability_token_parser/crash-88b587e166d3c813b9ee709d2862b83464222828",
+      "target": "fuzz_capability_token_parser"
+    },
+    {
+      "minimized_bytes": 4,
+      "minimized_input": "fuzz/regression/fuzz_extension_registration_manifest_parse/minimized-ae1a1fc36c88779ccec061e07dd2116b2a256448",
+      "minimized_sha256": "fbb71af91fb4367bfa4ebb2bdcb6cfa8904464164e9e47975fb60333b8b39872",
+      "note": "HDD delta-shrunk 53B -> 4B multi-byte Cyrillic UTF-8 boundary in manifest parser",
+      "original_bytes": 53,
+      "original_sha256": "1f7c1865ae6d434525f4a1f1357fa8a4d31b7fdc08ca47924e7d9c3c9436f9a3",
+      "regression_input": "fuzz/regression/fuzz_extension_registration_manifest_parse/crash-042c08b9bde40c065f082bb5f0984d1145e85669",
+      "remediation_commit": "8ad4ad907",
+      "source_artifact": "fuzz/artifacts/fuzz_extension_registration_manifest_parse/crash-042c08b9bde40c065f082bb5f0984d1145e85669",
+      "target": "fuzz_extension_registration_manifest_parse"
+    },
+    {
+      "minimized_bytes": 4,
+      "minimized_input": "fuzz/regression/fuzz_receipt_trust_card_roundtrip/minimized-56d9256a8b0fcae18773397de793ef1a8717089a",
+      "minimized_sha256": "eddef11d9ed5d9ded88ae3816852f9337b9040e7cc0683d0ed3c5415b1fdfdc8",
+      "note": "HDD delta-shrunk 25B -> 4B non-UTF8 receipt/trust-card roundtrip input",
+      "original_bytes": 25,
+      "original_sha256": "c1aef430f1387ea870cb5d1309d2df6c7209f041df3daa70e162baf233aae390",
+      "regression_input": "fuzz/regression/fuzz_receipt_trust_card_roundtrip/crash-c6a21dd88fbe58f85c6fba76a9f384ed15a2627b",
+      "remediation_commit": "8ad4ad907",
+      "source_artifact": "fuzz/artifacts/fuzz_receipt_trust_card_roundtrip/crash-c6a21dd88fbe58f85c6fba76a9f384ed15a2627b",
+      "target": "fuzz_receipt_trust_card_roundtrip"
+    },
+    {
+      "minimized_bytes": 0,
+      "minimized_input": null,
+      "minimized_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "note": "0B empty canonical checksum manifest (already minimal)",
+      "original_bytes": 0,
+      "original_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "regression_input": "fuzz/regression/fuzz_release_manifest_parse/crash-da39a3ee5e6b4b0d3255bfef95601890afd80709",
+      "remediation_commit": "8ad4ad907",
+      "source_artifact": "fuzz/artifacts/fuzz_release_manifest_parse/crash-da39a3ee5e6b4b0d3255bfef95601890afd80709",
+      "target": "fuzz_release_manifest_parse"
+    },
+    {
+      "minimized_bytes": 4,
+      "minimized_input": "fuzz/regression/fuzz_remote_cap_scope_check/minimized-7fa65e8047e6d912b3ef8c697ed5ed686fb69e71",
+      "minimized_sha256": "74af5762b61429acbbd7cf2386259b621dfaf3ddd65724fd5f1ef709bb77357e",
+      "note": "HDD delta-shrunk 8B -> 4B query-delimiter endpoint prefix boundary (RemoteCap scope check)",
+      "original_bytes": 8,
+      "original_sha256": "ed1f55b9badcf61eb7b538c029d5d2d5fb734961ee3794f03bb937f11352f727",
+      "regression_input": "fuzz/regression/fuzz_remote_cap_scope_check/crash-dce3961bca30d95692919de56a67e48ee5b72936",
+      "remediation_commit": "8ad4ad907",
+      "source_artifact": "fuzz/artifacts/fuzz_remote_cap_scope_check/crash-dce3961bca30d95692919de56a67e48ee5b72936",
+      "target": "fuzz_remote_cap_scope_check"
+    },
+    {
+      "minimized_bytes": 2,
+      "minimized_input": null,
+      "minimized_sha256": "07dbc966f948d8a2faf71b827656931cce3a6ba74498b862ea6b40cea0581741",
+      "note": "2B multi-byte UTF-8 boundary char (already 1-codepoint minimal)",
+      "original_bytes": 2,
+      "original_sha256": "07dbc966f948d8a2faf71b827656931cce3a6ba74498b862ea6b40cea0581741",
+      "regression_input": "fuzz/regression/fuzz_trust_card_envelope_parsing/crash-16c9a3d2ad1673d855918bee5fdc400e23d8521e",
+      "remediation_commit": "8ad4ad907",
+      "source_artifact": "fuzz/artifacts/fuzz_trust_card_envelope_parsing/crash-16c9a3d2ad1673d855918bee5fdc400e23d8521e",
+      "target": "fuzz_trust_card_envelope_parsing"
+    },
+    {
+      "minimized_bytes": 3,
+      "minimized_input": "fuzz/regression/fuzz_trust_card_envelope_parsing/minimized-ca08415e42f5891a8835acb07b8a7cbba8cec551",
+      "minimized_sha256": "5bc61c3c78ca004ba5b572082f38851ba0b250ee32a5bc314451e46b69f08661",
+      "note": "HDD delta-shrunk 4B -> 3B CJK UTF-8 codepoint boundary slice",
+      "original_bytes": 4,
+      "original_sha256": "813fdc127536407ee1ca09686555a1b7436d1fd0502f04db6e207aa8b3ef1900",
+      "regression_input": "fuzz/regression/fuzz_trust_card_envelope_parsing/crash-5bf74894a928158b07b36907299f1fbf7d7195f5",
+      "remediation_commit": "8ad4ad907",
+      "source_artifact": "fuzz/artifacts/fuzz_trust_card_envelope_parsing/crash-5bf74894a928158b07b36907299f1fbf7d7195f5",
+      "target": "fuzz_trust_card_envelope_parsing"
+    }
+  ],
+  "reconciled_crate_local_manifest": "crates/franken-node/fuzz/Cargo.toml",
+  "registered_targets": 146,
+  "schema_version": "franken-node/fuzz-regression-manifest/v1",
+  "seeded_targets": 146
+}

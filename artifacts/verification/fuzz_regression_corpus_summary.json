@@ -1,0 +1,1181 @@
+{
+  "crash_inputs_replayed": 16,
+  "exit_code": 0,
+  "issues": [],
+  "raw_crash_artifacts": 9,
+  "registered_targets": 146,
+  "schema_version": "franken-node/fuzz-regression-gate/v1",
+  "seeded_targets": 146,
+  "targets": [
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_constant_time_comparison"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_threshold_signature_verification"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_epoch_key_derivation"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 941,
+      "target_name": "fuzz_epoch_validity"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_intent_firewall"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_ssrf_policy"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_replay_bundle_deserialization"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 1620,
+      "target_name": "fuzz_sdk_verifier_bundle_parsing"
+    },
+    {
+      "crash_inputs_replayed": 2,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 242,
+      "target_name": "fuzz_api_request_deserialization"
+    },
+    {
+      "crash_inputs_replayed": 3,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 119,
+      "target_name": "fuzz_trust_card_envelope_parsing"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 111,
+      "target_name": "fuzz_ed25519_signature_boundaries"
+    },
+    {
+      "crash_inputs_replayed": 4,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 1463,
+      "target_name": "fuzz_capability_token_parser"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 1897,
+      "target_name": "fuzz_remote_cap_token_parse"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 332,
+      "target_name": "fuzz_trust_card_compare_cbor"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_trust_card_canonicalize"
+    },
+    {
+      "crash_inputs_replayed": 2,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 791,
+      "target_name": "fuzz_remote_cap_scope_check"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 1741,
+      "target_name": "fuzz_sandbox_policy_parse"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_connector_lifecycle_inputs"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 1461,
+      "target_name": "fuzz_canonical_serializer_roundtrip"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_canonical_serializer_deserialize"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 299,
+      "target_name": "fuzz_replay_bundle_chunking_export"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_replay_bundle_adversarial_parse"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_migration_rewrite_rules"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 1936,
+      "target_name": "fuzz_incident_bundle_parse"
+    },
+    {
+      "crash_inputs_replayed": 2,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 595,
+      "target_name": "fuzz_receipt_trust_card_roundtrip"
+    },
+    {
+      "crash_inputs_replayed": 1,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_release_manifest_parse"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 779,
+      "target_name": "fuzz_migration_report_serialization"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 1992,
+      "target_name": "fuzz_migration_rollback"
+    },
+    {
+      "crash_inputs_replayed": 2,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 12,
+      "target_name": "fuzz_extension_registration_manifest_parse"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_parse_signed_registration_manifest"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_vef_proof_input_envelope"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_fleet_decision_receipt_parse"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_evidence_ledger_entry_parse"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_counterfactual_receipt_verify"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 192,
+      "target_name": "fuzz_engine_dispatcher_capability_validation"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 351,
+      "target_name": "fuzz_doctor_input_parsing"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_config_toml_parse"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 1555,
+      "target_name": "fuzz_compromise_reduction_report_json"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 1,
+      "target_name": "fuzz_evidence_ledger_jsonl_spill"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_network_allowlist_entry_toml_parse"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_quarantine_audit_timestamp_rfc3339"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_crypto_scheme_roundtrip"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_crypto_scheme_cross_domain"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_crypto_signer_chain"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_audience_token_deserialize"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_blocked_proof_rehydration_input"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_vef_execution_receipt_validate"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_checksum_manifest_parse_canonical"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_decision_receipt_verify"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_contagion_graph_validate"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_vef_policy_constraints_compile"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_repair_proof_verify"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_ed25519_preparsed_parity"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_threshold_sig_parity"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_canonical_encoder_parity"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_claim_compiler_external_claim"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_deterministic_seed_derivation"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_transparency_verifier_inclusion"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_cuckoo_filter_insert_contains_remove"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_fleet_decision_receipt_payload_hash"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_replay_trace_canonical_digest"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_interface_hash_compute_verify"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_reputation_deterministic_score"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_revocation_registry_monotonic"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_adversary_graph_replay"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_fleet_canonical_payload_float_rejection"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_safe_mode_parse_args"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_fork_detection_state_hash"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_metrics_registry_record"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_perf_budget_guard_evaluate"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_hardening_state_machine_escalate"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_degraded_mode_audit_validate"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_network_guard_egress_rule_match"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_connector_method_validator_contract"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_lease_coordinator_select"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_quarantine_controller_action"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 5,
+      "target_name": "fuzz_frankensqlite_adapter_auth_ops"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 5,
+      "target_name": "fuzz_retrievability_gate_proof_verification"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 5,
+      "target_name": "fuzz_witness_ref_validation"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 5,
+      "target_name": "fuzz_validation_proof_economics"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 5,
+      "target_name": "fuzz_rewrite_suggestion_engine"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 5,
+      "target_name": "fuzz_cleanup_receipts_storage"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 5,
+      "target_name": "fuzz_system_metrics_exporter"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_cancellation_protocol_transitions"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_time_travel_engine_replay_validation"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_storage_content_hash"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_migration_smoke_hash"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_migration_format_parse"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_api_traceparent_parse"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_observability_hash_update"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_dgis_spof_detection"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_federation_atc_sketches"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_federation_participation_weighting"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_federation_atc_reciprocity"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_remote_idempotency_derivation"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_remote_computation_registry"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_frame_parser_guardrails"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_cli_path_validation"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_config_toml_parsing"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_operator_json_validation"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_schema_byte_layout_canonical"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_deterministic_seed_encoding"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_crypto_signature_verification"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_config_env_parsing"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_git_status_parser"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_replay_signature_decode"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_baseline_csv_parser"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_signing_key_parser"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_js_string_literal_parser"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_merkle_hash_hex_decoder"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_threshold_sig_parser"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_fleet_operation_slot_parser"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_session_mac_deserialize"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_swarm_timestamp_parser"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_policy_override_spec_parser"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_compat_gates_key_id_from_bytes"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_ed25519_public_key_hex_decode"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_canonical_decode_boundary"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_proc_cmdline_decoder"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_signing_key_blob_parser"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_fragility_fixture_json_loader"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_trajectory_gaming_camouflage_kind_parse"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_product_lane_parse_label"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_ssrf_ipv4_parser"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_mmr_hash_hex_decoder"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_federation_signal_kind_parser"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_fork_detection_divergence_compare"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_key_role_separation_validation"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_signed_extension_manifest"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_metrics_exporter_statistics"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_blocked_proof_rehydration_plan"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_cmdline_parse"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_cookie_parse"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_crypto_base64_decode"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_crypto_hex_decode"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_email_validate"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_env_var_parse"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_http_header_parse"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_ip_address_parse"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_json_parse_value"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_path_validation"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_regex_parse"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_timestamp_parse"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_toml_parse_value"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_url_parse"
+    },
+    {
+      "crash_inputs_replayed": 0,
+      "discovered_tests": 1,
+      "executed_tests": 1,
+      "exit_code": 0,
+      "seed_count": 2,
+      "target_name": "fuzz_version_parse"
+    }
+  ],
+  "total_seed_files": 18701,
+  "verdict": "PASS"
+}

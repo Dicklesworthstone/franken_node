@@ -1,0 +1,3 @@
+profile = "strict"
+[runtime]
+max_instructions = 100000

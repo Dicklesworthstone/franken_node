@@ -1,6 +1,19 @@
 name: Inline Library Tests Gate
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/franken-node/Cargo.toml"
+      - "crates/franken-node/src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "packaging/source-siblings.tsv"
+      - "rust-toolchain.toml"
+      - "scripts/bootstrap_source.sh"
+      - "scripts/check_inline_lib_tests.py"
+      - "tests/test_check_inline_lib_tests.py"
+      - ".github/workflows/inline-lib-tests-gate.yml"
   pull_request:
     paths:
       - "crates/franken-node/Cargo.toml"
@@ -38,8 +51,93 @@ jobs:
       - name: Gate parser unit tests
         run: python3 tests/test_check_inline_lib_tests.py
 
-      - name: Assert inline library test override wiring
+      - name: Assert inline library and binary test override wiring
         run: python3 scripts/check_inline_lib_tests.py --preflight --json
+
+  main-bin-inline-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    needs: inline-lib-test-preflight
+    defaults:
+      run:
+        shell: bash
+        working-directory: franken_node
+    steps:
+      - name: Check out franken_node
+        uses: actions/checkout@v4
+        with:
+          path: franken_node
+
+      - name: Materialize the complete pinned test source set
+        run: |
+          set -euo pipefail
+          bash scripts/bootstrap_source.sh --workspace "$PWD" \
+            --engine-ref eccb440d246089086106c02be5a0acea84147f4e \
+            --receipt "$RUNNER_TEMP/inline-bin-source-inputs.tsv"
+
+      - name: Install pinned Rust nightly
+        uses: dtolnay/rust-toolchain@7c8d7d138f5c09cef361f8214cf96882cd029cdb
+        with:
+          toolchain: nightly-2026-09-21
+          components: clippy, rustfmt
+
+      - name: Cache cargo home and target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: inline-bin-tests
+          key: ${{ hashFiles('franken_node/Cargo.lock', 'franken_node/crates/franken-node/Cargo.toml') }}
+          workspaces: |
+            franken_node -> target
+          cache-all-crates: "true"
+
+      - name: Discover and execute all >=558 main.rs inline unit tests
+        run: |
+          set -euo pipefail
+          env CARGO_INCREMENTAL=0 RUSTFLAGS="--cfg franken_node_inline_tests" cargo test \
+            --locked \
+            -p frankenengine-node \
+            --bin franken-node \
+            --features extended-surfaces,asupersync-transport,test-support \
+            -- --list \
+            | tee inline-bin-tests.list
+          python3 scripts/check_inline_lib_tests.py inline-bin-tests.list --min-tests 558 --json
+          env CARGO_INCREMENTAL=0 RUSTFLAGS="--cfg franken_node_inline_tests" cargo test \
+            --locked \
+            -p frankenengine-node \
+            --bin franken-node \
+            --features extended-surfaces,asupersync-transport,test-support \
+            | tee inline-bin-tests.stdout.txt
+          python3 -c '
+          import json, pathlib, sys
+          sys.path.insert(0, "scripts")
+          import check_inline_lib_tests as g
+          listed = g.inline_test_names(pathlib.Path("inline-bin-tests.list").read_text())
+          observed = g.test_results_from_run(pathlib.Path("inline-bin-tests.stdout.txt").read_text())
+          ok_count = sum(1 for v in observed.values() if v == "ok")
+          summary = {
+              "schema_version": "franken-node/inline-test-execution-summary/v1",
+              "target_name": "franken-node",
+              "target_kind": "bin",
+              "discovered_tests": len(listed),
+              "executed_tests": ok_count,
+              "crash_inputs_replayed": 0,
+              "seed_count": 0,
+              "exit_code": 0 if ok_count >= 558 else 1,
+          }
+          pathlib.Path("inline-bin-tests.summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+          assert ok_count >= 558, summary
+          '
+
+      - name: Upload inline binary test summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: inline-bin-test-evidence
+          path: |
+            ${{ runner.temp }}/inline-bin-source-inputs.tsv
+            franken_node/inline-bin-tests.list
+            franken_node/inline-bin-tests.stdout.txt
+            franken_node/inline-bin-tests.summary.json
 
   full-inline-lib-tests:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_full_inline_tests }}

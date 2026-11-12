@@ -58,6 +58,15 @@ jobs:
         run: |
           python3 scripts/test_remediation_log.py
           python3 scripts/test_check_verification_targets_compile.py
+          python3 tests/test_check_fuzz_regression_corpus.py
+          mkdir -p artifacts/verification
+          python3 scripts/check_fuzz_regression_corpus.py \
+            --summary-out artifacts/verification/fuzz_regression_corpus_summary.json
+      - name: Replay promoted fuzz regressions and 146-target seed corpora
+        run: |
+          cargo test -p frankenengine-node \
+            --features extended-surfaces,test-support \
+            --test remote_capability_gate_fuzz_regression
       - name: Census — conformance [[test]] targets
         run: |
           set +e
@@ -86,5 +95,6 @@ jobs:
           name: verification-compile-census
           path: |
             artifacts/verification/*.jsonl
+            artifacts/verification/fuzz_regression_corpus_summary.json
             conf_census.log
             fuzz_census.log

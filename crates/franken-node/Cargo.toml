@@ -9,7 +9,7 @@ autobins = false
 [[bin]]
 name = "franken-node"
 path = "src/main.rs"
-test = false
+test = true
 
 [[bin]]
 name = "test-engine"
