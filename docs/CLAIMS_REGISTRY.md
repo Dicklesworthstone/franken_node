@@ -324,13 +324,15 @@ Each claim entry uses this structure:
   `tests/conformance/verifier_sdk_capsule_replay.rs`;
   `tests/conformance/verifier_session_monotonic.rs`
 - **Verification command**: `cargo test -p frankenengine-verifier-sdk`;
-  standalone proof `.github/workflows/verifier-sdk-standalone.yml` (sparse
-  checkout of `sdk/verifier/` + committed evidence only, no workspace
-  manifest, no product crates; `cargo tree` must not reach any franken-node
-  crate; stable toolchain)
-- **Last verified**: 2026-09-24 (standalone copy without the workspace:
-  full SDK suite green on stable and nightly, zero franken-node crates in the
-  dependency graph)
+  `python3 scripts/check_verifier_sdk_independence.py` (stages sparse standalone
+  tree in `TemporaryDirectory` without root `Cargo.toml` or `crates/` and runs
+  offline `cargo metadata` graph exclusion); standalone CI proof
+  `.github/workflows/verifier-sdk-standalone.yml` (sparse checkout of
+  `sdk/verifier/` + committed evidence only; `cargo tree` must not reach any
+  franken-node crate; stable toolchain)
+- **Last verified**: 2026-11-12 (standalone sparse tree without the workspace:
+  full SDK suite + TOML/cargo-metadata graph gate green, zero franken-node or
+  franken-engine crates in the dependency graph)
 - **Status**: verified
 - **Notes**: `sdk/verifier/Cargo.toml` no longer inherits workspace fields, so
   it builds from its own directory. Before 7e97be752 the SDK could not parse CLI incident bundles

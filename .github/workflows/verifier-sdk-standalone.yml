@@ -16,6 +16,7 @@ on:
       - artifacts/migration/**
       - docs/honesty_manifest.json
       - docs/honesty_manifest_evidence.json
+      - scripts/check_verifier_sdk_independence.py
       - .github/workflows/verifier-sdk-standalone.yml
   pull_request:
     paths:
@@ -23,6 +24,7 @@ on:
       - artifacts/migration/**
       - docs/honesty_manifest.json
       - docs/honesty_manifest_evidence.json
+      - scripts/check_verifier_sdk_independence.py
       - .github/workflows/verifier-sdk-standalone.yml
   workflow_dispatch: {}
 
@@ -45,6 +47,8 @@ jobs:
             /artifacts/migration/
             /docs/honesty_manifest.json
             /docs/honesty_manifest_evidence.json
+            /scripts/check_verifier_sdk_independence.py
+            /Cargo.lock
             /LICENSE
 
       - name: Prove the product workspace is absent
@@ -53,6 +57,7 @@ jobs:
           test ! -e Cargo.toml
           test ! -e crates
           test -f sdk/verifier/Cargo.toml
+          python3 scripts/check_verifier_sdk_independence.py --sparse-checkout
 
       # Stable on purpose: an auditor should not need the product's nightly.
       - name: Show toolchain
