@@ -8,6 +8,8 @@ Usage: franken-node fleet <COMMAND>
 Commands:
   status     Show fleet and quarantine state from the configured store
   sessions   Inspect locally recorded native sessions and unresolved supervision
+  hold       Drain native sessions and retain a durable admission hold for maintenance
+  resume     Resume one maintenance owner without clearing other owners' holds
   describe   Describe one node from the configured fleet store
   release    Lift quarantine[PATH] controls with receipts
   reconcile  Reconcile the fleet-action log; timeout fails closed

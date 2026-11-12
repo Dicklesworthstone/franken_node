@@ -671,8 +671,15 @@ fn ed25519_scheme_verify_record_us(elapsed_us: u64) {
 /// the perf-round skill or a process-exit Drop hook) trigger this on
 /// demand. Idempotent and non-destructive — does NOT reset the histograms.
 #[cfg(feature = "profiling")]
+type PerfHistogramEntry<'a> = (
+    &'a str,
+    &'a str,
+    Option<&'a Mutex<hdrhistogram::Histogram<u64>>>,
+);
+
+#[cfg(feature = "profiling")]
 pub fn dump_ed25519_scheme_perf_histogram() {
-    let entries: [(&str, &str, Option<&Mutex<hdrhistogram::Histogram<u64>>>); 2] = [
+    let entries: [PerfHistogramEntry<'_>; 2] = [
         (
             "sign",
             "ed25519_scheme_sign_raw.us",
@@ -844,7 +851,7 @@ impl SignatureScheme for Ed25519Scheme {
             let signature = signing_key.sign(message);
             let elapsed_us = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
             ed25519_scheme_sign_record_us(elapsed_us);
-            return Ok(signature.to_bytes());
+            Ok(signature.to_bytes())
         }
         #[cfg(not(feature = "profiling"))]
         {
@@ -884,7 +891,7 @@ impl SignatureScheme for Ed25519Scheme {
             .unwrap_or(false);
             let elapsed_us = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
             ed25519_scheme_verify_record_us(elapsed_us);
-            return result;
+            result
         }
         #[cfg(not(feature = "profiling"))]
         {

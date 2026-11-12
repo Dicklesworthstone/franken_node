@@ -20,13 +20,13 @@ pub mod external_replication_claims;
 pub mod frontier_demo_gate;
 pub mod incident_timeline;
 pub mod metrics_collection;
-pub mod operator_screens;
 #[cfg(feature = "admin-tools")]
 pub mod migration_incident_datasets;
 #[cfg(feature = "admin-tools")]
 pub mod migration_speed_failure_metrics;
 #[cfg(feature = "admin-tools")]
 pub mod migration_validation_cohorts;
+pub mod operator_screens;
 #[cfg(feature = "admin-tools")]
 pub mod partner_lighthouse_programs;
 #[cfg(feature = "advanced-features")]
@@ -44,7 +44,6 @@ pub mod replay_determinism_metrics;
 pub mod report_output_contract;
 #[cfg(feature = "advanced-features")]
 pub mod repro_bundle_export;
-#[cfg(feature = "advanced-features")]
 pub mod reputation_graph_apis;
 #[cfg(feature = "admin-tools")]
 pub mod safe_extension_onboarding;

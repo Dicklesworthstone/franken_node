@@ -122,10 +122,11 @@ use crate::cli::{
     ProofQueueCommand, ProofQueueStatusArgs, ProofWorkersCommand, ProofWorkersRestartArgs,
     ProofsCommand, RegistryCommand, RemoteCapCommand, RemoteCapIssueArgs, RemoteCapRevokeArgs,
     RemoteCapUseArgs, RemoteCapVerifyArgs, RuntimeCommand, RuntimeLaneCommand, SafeModeCommand,
-    SafeModeEnterArgs, SafeModeExitArgs, SafeModeStatusArgs, TrustCardCommand, TrustCommand,
-    VerifyCommand, VerifyCompatibilityArgs, VerifyCorpusArgs, VerifyMigrationArgs,
-    VerifyModuleArgs, VerifyRecoveryRunbookArgs, VerifyReleaseArgs, VerifySourceGraphArgs,
-    VerifyTransparencyLogArgs, load_doctor_policy_activation_input,
+    SafeModeEnterArgs, SafeModeExitArgs, SafeModeStatusArgs, TrustCardCommand,
+    TrustCardReputationArgs, TrustCommand, TrustZkAttestArgs, VerifyCommand,
+    VerifyCompatibilityArgs, VerifyCorpusArgs, VerifyMigrationArgs, VerifyModuleArgs,
+    VerifyRecoveryRunbookArgs, VerifyReleaseArgs, VerifySourceGraphArgs, VerifyTransparencyLogArgs,
+    VerifyZkAttestationArgs, load_doctor_policy_activation_input,
 };
 use crate::ops::workspace_pressure_policy::WorkspacePressureInputs;
 use crate::policy::{
@@ -183,6 +184,7 @@ use frankenengine_node::{
         revocation_freshness::{
             FreshnessPolicy, SafetyTier, registry_revocation_freshness_denial, snapshot_age_secs,
         },
+        zk_attestation,
     },
     supply_chain::category_shift::validate_benchmark_thresholds_with_config,
     supply_chain::{
@@ -224,6 +226,7 @@ use frankenengine_node::{
             replay_bundle_with_trusted_keys, sign_replay_bundle, validate_bundle_integrity,
             write_bundle_to_path_with_trusted_key,
         },
+        reputation_graph_apis,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -37278,6 +37281,680 @@ fn handle_trust_card_command(command: TrustCardCommand) -> Result<()> {
                 println!("{}", render_comparison_human(&response.data));
             }
         }
+        TrustCardCommand::Reputation(args) => {
+            handle_trust_card_reputation(&args, now_secs, trace_id)?;
+        }
+    }
+
+    Ok(())
+}
+
+const TRUST_CARD_REPUTATION_CLI_SCHEMA_VERSION: &str = "franken-node/trust-card-reputation-cli/v1";
+const MAX_REPUTATION_DECAY_STEPS: u32 = 1_000;
+
+#[derive(Debug, serde::Serialize)]
+struct TrustCardReputationNodeEntry {
+    node_id: String,
+    node_type: reputation_graph_apis::NodeType,
+    display_name: String,
+    base_score: f64,
+    composite_score: f64,
+    meets_threshold: bool,
+    edge_count: usize,
+    neighbors: Vec<String>,
+    content_hash: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct TrustCardReputationSubgraph {
+    nodes: Vec<reputation_graph_apis::ReputationNode>,
+    edges: Vec<reputation_graph_apis::ReputationEdge>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct TrustCardReputationCliReport {
+    schema_version: &'static str,
+    command: &'static str,
+    rga_schema_version: &'static str,
+    min_trust_score: f64,
+    decay_steps: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lockfile: Option<String>,
+    snapshot: reputation_graph_apis::GraphSnapshot,
+    scores: Vec<TrustCardReputationNodeEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    focused_subgraph: Option<TrustCardReputationSubgraph>,
+    audit_record_count: usize,
+}
+
+fn handle_trust_card_reputation(
+    args: &TrustCardReputationArgs,
+    now_secs: u64,
+    trace_id: &str,
+) -> Result<()> {
+    anyhow::ensure!(
+        args.decay_steps <= MAX_REPUTATION_DECAY_STEPS,
+        "`trust-card reputation` --decay-steps must be <= {MAX_REPUTATION_DECAY_STEPS}"
+    );
+    let mut state = trust_card_cli_registry(now_secs)?;
+    let cards = state
+        .registry
+        .list(&TrustCardListFilter::empty(), trace_id, now_secs)
+        .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+    let (lockfile_path, lockfile_graph) = load_project_lockfile_graph(Path::new("."))?;
+
+    let mut engine = reputation_graph_apis::ReputationGraphApis::default();
+    let created_now = Utc::now().to_rfc3339();
+    if !cards.is_empty() {
+        engine
+            .add_node(
+                reputation_graph_apis::ReputationNode {
+                    node_id: "verifier:local-trust-registry".to_string(),
+                    node_type: reputation_graph_apis::NodeType::Verifier,
+                    display_name: "Local Trust-Card Registry".to_string(),
+                    base_score: 1.0,
+                    created_at: created_now.clone(),
+                },
+                trace_id,
+            )
+            .map_err(|err| anyhow::anyhow!(err))?;
+    }
+
+    let mut by_publisher: std::collections::BTreeMap<String, Vec<&TrustCard>> =
+        std::collections::BTreeMap::new();
+    for card in &cards {
+        by_publisher
+            .entry(card.publisher.publisher_id.clone())
+            .or_default()
+            .push(card);
+    }
+
+    for (publisher_id, pub_cards) in &by_publisher {
+        let sum_bps: u64 = pub_cards
+            .iter()
+            .map(|c| u64::from(c.reputation_score_basis_points.min(1_000)))
+            .sum();
+        let count_f64 = u32::try_from(pub_cards.len()).map_or(1.0, f64::from);
+        let raw_mean = (sum_bps as f64 / count_f64 / 1_000.0).clamp(0.0, 1.0);
+        let has_incident = pub_cards.iter().any(|c| {
+            c.active_quarantine || matches!(c.revocation_status, RevocationStatus::Revoked { .. })
+        });
+        let publisher_base = if has_incident {
+            raw_mean.min(0.4)
+        } else {
+            raw_mean
+        };
+        let display_name = pub_cards
+            .first()
+            .map(|c| c.publisher.display_name.trim())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(publisher_id.as_str())
+            .to_string();
+        engine
+            .add_node(
+                reputation_graph_apis::ReputationNode {
+                    node_id: format!("publisher:{publisher_id}"),
+                    node_type: reputation_graph_apis::NodeType::Operator,
+                    display_name,
+                    base_score: publisher_base,
+                    created_at: created_now.clone(),
+                },
+                trace_id,
+            )
+            .map_err(|err| anyhow::anyhow!(err))?;
+    }
+
+    for card in &cards {
+        let ext_id = &card.extension.extension_id;
+        let is_revoked = matches!(card.revocation_status, RevocationStatus::Revoked { .. });
+        let normalized_bps =
+            (f64::from(card.reputation_score_basis_points.min(1_000)) / 1_000.0).clamp(0.0, 1.0);
+        let ext_base = if is_revoked {
+            0.0
+        } else if card.active_quarantine {
+            normalized_bps.min(0.1)
+        } else {
+            normalized_bps
+        };
+        let created_at = if card.last_verified_timestamp.trim().is_empty() {
+            created_now.clone()
+        } else {
+            card.last_verified_timestamp.clone()
+        };
+        engine
+            .add_node(
+                reputation_graph_apis::ReputationNode {
+                    node_id: ext_id.clone(),
+                    node_type: reputation_graph_apis::NodeType::Extension,
+                    display_name: format!("{ext_id}@{}", card.extension.version),
+                    base_score: ext_base,
+                    created_at: created_at.clone(),
+                },
+                trace_id,
+            )
+            .map_err(|err| anyhow::anyhow!(err))?;
+
+        let pub_edge_weight = if is_revoked {
+            -1.0
+        } else if card.active_quarantine {
+            -0.8
+        } else if !card.camouflage_hints.is_empty() {
+            let max_sev = card
+                .camouflage_hints
+                .iter()
+                .map(|h| h.severity)
+                .fold(0.0_f64, f64::max)
+                .clamp(0.1, 1.0);
+            -max_sev
+        } else {
+            (2.0 * ext_base - 1.0).clamp(-1.0, 1.0)
+        };
+        engine
+            .add_edge(
+                reputation_graph_apis::ReputationEdge {
+                    edge_id: format!("edge:pub:{}->{ext_id}", card.publisher.publisher_id),
+                    source: format!("publisher:{}", card.publisher.publisher_id),
+                    target: ext_id.clone(),
+                    weight: pub_edge_weight,
+                    evidence: format!(
+                        "trust card v{} publisher={} card_hash={}",
+                        card.trust_card_version, card.publisher.publisher_id, card.card_hash
+                    ),
+                    created_at: created_at.clone(),
+                },
+                trace_id,
+            )
+            .map_err(|err| anyhow::anyhow!(err))?;
+
+        let verifier_weight = if is_revoked {
+            -1.0
+        } else if card.active_quarantine {
+            -0.85
+        } else {
+            match card.user_facing_risk_assessment.level {
+                RiskLevel::Critical => -0.7,
+                RiskLevel::High => -0.3,
+                RiskLevel::Medium => 0.4,
+                RiskLevel::Low => 0.9,
+            }
+        };
+        engine
+            .add_edge(
+                reputation_graph_apis::ReputationEdge {
+                    edge_id: format!("edge:verifier->{ext_id}"),
+                    source: "verifier:local-trust-registry".to_string(),
+                    target: ext_id.clone(),
+                    weight: verifier_weight,
+                    evidence: format!(
+                        "verified posture risk={:?} cert={:?} audit_entries={}",
+                        card.user_facing_risk_assessment.level,
+                        card.certification_level,
+                        card.audit_history.len()
+                    ),
+                    created_at,
+                },
+                trace_id,
+            )
+            .map_err(|err| anyhow::anyhow!(err))?;
+    }
+
+    for (pkg, deps) in &lockfile_graph.dependencies {
+        let parent_id = supply_chain::trust_graph::npm_extension_id(pkg);
+        if !engine.nodes().contains_key(&parent_id) {
+            continue;
+        }
+        for dep in deps {
+            let dep_id = supply_chain::trust_graph::npm_extension_id(dep);
+            if dep_id == parent_id {
+                continue;
+            }
+            let Some(dep_node) = engine.nodes().get(&dep_id) else {
+                continue;
+            };
+            let dep_weight = (2.0 * dep_node.base_score - 1.0).clamp(-1.0, 1.0);
+            let _ = engine.add_edge(
+                reputation_graph_apis::ReputationEdge {
+                    edge_id: format!("edge:dep:{dep_id}->{parent_id}"),
+                    source: dep_id,
+                    target: parent_id.clone(),
+                    weight: dep_weight,
+                    evidence: "lockfile dependency posture".to_string(),
+                    created_at: created_now.clone(),
+                },
+                trace_id,
+            );
+        }
+    }
+
+    for _ in 0..args.decay_steps {
+        engine.apply_decay(trace_id);
+    }
+
+    let focus_target = args
+        .extension
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let target_ids: Vec<String> = if let Some(target) = focus_target {
+        if !engine.nodes().contains_key(target) {
+            return Err(trust_card_not_found_error(target).into());
+        }
+        vec![target.to_string()]
+    } else {
+        engine.nodes().keys().cloned().collect()
+    };
+
+    let mut scores = Vec::with_capacity(target_ids.len());
+    let mut focused_subgraph = None;
+
+    for node_id in &target_ids {
+        let node_meta = engine
+            .nodes()
+            .get(node_id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("missing reputation node `{node_id}`"))?;
+        let computed = engine
+            .compute_score(node_id, trace_id)
+            .map_err(|err| anyhow::anyhow!(err))?;
+        let neighbors = engine.neighbors(node_id, trace_id);
+        if focus_target.is_some() {
+            let mut sub_refs: Vec<&str> = Vec::with_capacity(neighbors.len().saturating_add(1));
+            sub_refs.push(node_id.as_str());
+            for nb in &neighbors {
+                sub_refs.push(nb.as_str());
+            }
+            let (sub_nodes, sub_edges) = engine.subgraph(&sub_refs, trace_id);
+            focused_subgraph = Some(TrustCardReputationSubgraph {
+                nodes: sub_nodes,
+                edges: sub_edges,
+            });
+        }
+        scores.push(TrustCardReputationNodeEntry {
+            node_id: node_meta.node_id,
+            node_type: node_meta.node_type,
+            display_name: node_meta.display_name,
+            base_score: node_meta.base_score,
+            composite_score: computed.composite_score,
+            meets_threshold: computed.meets_threshold,
+            edge_count: computed.edge_count,
+            neighbors,
+            content_hash: computed.content_hash,
+        });
+    }
+
+    let snapshot = engine.export_snapshot(trace_id);
+    let audit_record_count = engine.audit_log().len();
+    let report = TrustCardReputationCliReport {
+        schema_version: TRUST_CARD_REPUTATION_CLI_SCHEMA_VERSION,
+        command: "trust-card.reputation",
+        rga_schema_version: reputation_graph_apis::SCHEMA_VERSION,
+        min_trust_score: reputation_graph_apis::MIN_TRUST_SCORE,
+        decay_steps: args.decay_steps,
+        lockfile: lockfile_path,
+        snapshot,
+        scores,
+        focused_subgraph,
+        audit_record_count,
+    };
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        let mut lines = vec![format!(
+            "trust-card reputation ({}): nodes={} edges={} decay_steps={} min_threshold={:.2} snapshot_hash={}",
+            report.rga_schema_version,
+            report.snapshot.node_count,
+            report.snapshot.edge_count,
+            report.decay_steps,
+            report.min_trust_score,
+            report.snapshot.content_hash
+        )];
+        for entry in &report.scores {
+            let status = if entry.meets_threshold {
+                "PASS"
+            } else {
+                "BELOW_THRESHOLD"
+            };
+            lines.push(format!(
+                "  [{status}] {} ({}) base={:.3} composite={:.3} incoming_edges={} neighbors={}",
+                entry.node_id,
+                entry.node_type.label(),
+                entry.base_score,
+                entry.composite_score,
+                entry.edge_count,
+                entry.neighbors.len()
+            ));
+        }
+        println!("{}", lines.join("\n"));
+    }
+
+    Ok(())
+}
+
+const ZK_ATTESTATION_BUNDLE_SCHEMA_VERSION: &str = "franken-node/zk-attestation-bundle/v1";
+const TRUST_ZK_ATTEST_CLI_SCHEMA_VERSION: &str = "franken-node/trust-zk-attest-cli/v1";
+const VERIFY_ZK_ATTESTATION_CLI_SCHEMA_VERSION: &str = "franken-node/verify-zk-attestation-cli/v1";
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct ZkAttestationBundle {
+    schema_version: String,
+    policy: zk_attestation::ZkPolicy,
+    verifier_params: zk_attestation::ZkVerifierParams,
+    attestation: zk_attestation::ZkAttestation,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct TrustZkAttestCliReport {
+    schema_version: &'static str,
+    command: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output_path: Option<String>,
+    params_sha256: String,
+    bundle: ZkAttestationBundle,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct VerifyZkAttestationCliReport {
+    schema_version: &'static str,
+    command: &'static str,
+    verified: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+    attestation_id: String,
+    policy_id: String,
+    payload_schema_version: String,
+    metadata_commitment: String,
+    evaluated_at_ms: u64,
+    result: zk_attestation::ZkVerificationResult,
+}
+
+fn now_unix_millis() -> u64 {
+    let ts = Utc::now().timestamp_millis();
+    u64::try_from(ts).unwrap_or(0)
+}
+
+fn handle_trust_zk_attest(args: &TrustZkAttestArgs) -> Result<()> {
+    let policy_id = args.policy_id.trim();
+    anyhow::ensure!(
+        !policy_id.is_empty(),
+        "`trust zk-attest` requires --policy-id"
+    );
+    let issuer = args.issuer.trim();
+    anyhow::ensure!(!issuer.is_empty(), "`trust zk-attest` requires --issuer");
+    let verifier_key_id = args.verifier_key_id.trim();
+    anyhow::ensure!(
+        !verifier_key_id.is_empty(),
+        "`trust zk-attest` requires non-empty --verifier-key-id"
+    );
+    anyhow::ensure!(
+        args.validity_ms > 0,
+        "`trust zk-attest` requires --validity-ms > 0"
+    );
+    let private_value = args
+        .private_value
+        .ok_or_else(|| anyhow::anyhow!("`trust zk-attest` requires --private-value"))?;
+
+    let (relation, predicate_description) = match (args.threshold, args.allowlist.as_deref()) {
+        (Some(_), Some(_)) => {
+            anyhow::bail!("`trust zk-attest` accepts either --threshold or --allowlist, not both");
+        }
+        (None, None) => {
+            anyhow::bail!("`trust zk-attest` requires either --threshold or --allowlist");
+        }
+        (Some(threshold), None) => {
+            let rel = zk_attestation::ZkComplianceRelation::threshold_at_least(
+                threshold,
+                args.range_bits,
+            )
+            .map_err(|err| anyhow::anyhow!(err))?;
+            let desc = format!(
+                "threshold_at_least(threshold={threshold}, range_bits={})",
+                args.range_bits
+            );
+            (rel, desc)
+        }
+        (None, Some(raw_allowlist)) => {
+            let mut values = Vec::new();
+            for token in raw_allowlist.split(',') {
+                let trimmed = token.trim();
+                anyhow::ensure!(
+                    !trimmed.is_empty(),
+                    "`trust zk-attest` --allowlist contains an empty element"
+                );
+                let parsed: u64 = trimmed.parse().map_err(|_| {
+                    anyhow::anyhow!("`trust zk-attest` --allowlist elements must be u64 integers")
+                })?;
+                values.push(parsed);
+            }
+            let rel = zk_attestation::ZkComplianceRelation::allowlist(values)
+                .map_err(|err| anyhow::anyhow!(err))?;
+            (
+                rel,
+                "allowlist_membership(merkle_authenticated)".to_string(),
+            )
+        }
+    };
+
+    let now_ms = args.now_ms.unwrap_or_else(now_unix_millis);
+    let challenge_nonce = args
+        .challenge_nonce
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map_or_else(|| uuid::Uuid::now_v7().to_string(), str::to_string);
+
+    let policy = zk_attestation::ZkPolicy {
+        policy_id: policy_id.to_string(),
+        predicate_description,
+        issuer: issuer.to_string(),
+        validity_ms: args.validity_ms,
+        schema_version: zk_attestation::CRYPTO_SCHEMA_VERSION.to_string(),
+        active: true,
+        registered_at_ms: now_ms,
+    };
+    let verifier_params = zk_attestation::ZkVerifierParams::for_policy(
+        &policy,
+        verifier_key_id.to_string(),
+        args.epoch,
+        challenge_nonce,
+        relation,
+    )
+    .map_err(|err| anyhow::anyhow!(err))?;
+
+    let witness = zk_attestation::ZkPrivateWitness::random(private_value);
+    let mut ledger = zk_attestation::AttestationLedger::new();
+    let attestation_id = format!("zka-{}", uuid::Uuid::now_v7());
+    let trace_id = format!("trace-zk-attest-{}", uuid::Uuid::now_v7());
+    let attestation = ledger
+        .prove_compliance(
+            attestation_id,
+            &policy,
+            &verifier_params,
+            &witness,
+            now_ms,
+            trace_id,
+        )
+        .map_err(|err| anyhow::anyhow!(err))?;
+    drop(witness);
+
+    let params_sha256 = verifier_params.params_sha256();
+    let bundle = ZkAttestationBundle {
+        schema_version: ZK_ATTESTATION_BUNDLE_SCHEMA_VERSION.to_string(),
+        policy,
+        verifier_params,
+        attestation,
+    };
+
+    let output_path = if let Some(out) = &args.output {
+        anyhow::ensure!(
+            !out.as_os_str().is_empty(),
+            "`trust zk-attest` --output path must not be empty"
+        );
+        let serialized = serde_json::to_vec_pretty(&bundle)?;
+        write_bytes_atomically(out, &serialized)?;
+        Some(out.display().to_string())
+    } else {
+        None
+    };
+
+    let report = TrustZkAttestCliReport {
+        schema_version: TRUST_ZK_ATTEST_CLI_SCHEMA_VERSION,
+        command: "trust.zk-attest",
+        output_path,
+        params_sha256,
+        bundle,
+    };
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!(
+            "zk compliance attestation issued: id={} policy={} schema={} commitment={} expires_at_ms={}{}",
+            report.bundle.attestation.attestation_id,
+            report.bundle.policy.policy_id,
+            report.bundle.attestation.payload.schema_version,
+            report.bundle.attestation.payload.metadata_commitment,
+            report.bundle.attestation.expires_at_ms,
+            report
+                .output_path
+                .as_deref()
+                .map_or_else(String::new, |p| format!(" output={p}"))
+        );
+    }
+
+    Ok(())
+}
+
+fn handle_verify_zk_attestation(args: &VerifyZkAttestationArgs) -> Result<()> {
+    if args.bundle_path.as_os_str().is_empty() {
+        anyhow::bail!("`verify zk-attestation` requires a bundle path");
+    }
+    let bundle_path = &args.bundle_path;
+    let raw = bounded_read_to_string(bundle_path, MAX_GENERAL_FILE_BYTES).with_context(|| {
+        format!(
+            "failed reading ZK attestation bundle: {}",
+            bundle_path.display()
+        )
+    })?;
+    let parsed_value: serde_json::Value = serde_json::from_str(&raw)
+        .with_context(|| format!("invalid ZK attestation JSON in {}", bundle_path.display()))?;
+
+    let now_ms = args.now_ms.unwrap_or_else(now_unix_millis);
+    let trace_id = format!("trace-verify-zk-{}", uuid::Uuid::now_v7());
+
+    let (attestation_id, policy_id, payload_schema_version, metadata_commitment, result) =
+        if parsed_value.get("attestation").is_some()
+            && parsed_value.get("policy").is_some()
+            && parsed_value.get("verifier_params").is_some()
+        {
+            let bundle: ZkAttestationBundle =
+                serde_json::from_value(parsed_value).with_context(|| {
+                    format!("malformed ZkAttestationBundle in {}", bundle_path.display())
+                })?;
+            let aid = bundle.attestation.attestation_id.clone();
+            let pid = bundle.attestation.policy_id.clone();
+            let pschema = bundle.attestation.payload.schema_version.clone();
+            let commit = bundle.attestation.payload.metadata_commitment.clone();
+            let res = if bundle.schema_version != ZK_ATTESTATION_BUNDLE_SCHEMA_VERSION {
+                zk_attestation::ZkVerificationResult::Rejected {
+                    attestation_id: aid.clone(),
+                    policy_id: pid.clone(),
+                    trace_id,
+                    reason: format!(
+                        "Unsupported ZK attestation bundle schema: {}",
+                        bundle.schema_version
+                    ),
+                    error_code: zk_attestation::error_codes::ERR_ZKA_INVALID_PROOF.to_string(),
+                }
+            } else if pschema == zk_attestation::SCHEMA_VERSION {
+                zk_attestation::ZkVerificationResult::Rejected {
+                    attestation_id: aid.clone(),
+                    policy_id: pid.clone(),
+                    trace_id,
+                    reason: "Legacy zka-v1.0 registration carries no cryptographic proof"
+                        .to_string(),
+                    error_code: zk_attestation::error_codes::ERR_ZKA_VERIFIER_UNAVAILABLE
+                        .to_string(),
+                }
+            } else {
+                zk_attestation::verify_compliance_proof_stateless(
+                    &bundle.attestation,
+                    &bundle.policy,
+                    &bundle.verifier_params,
+                    now_ms,
+                    trace_id,
+                )
+            };
+            (aid, pid, pschema, commit, res)
+        } else {
+            let legacy: zk_attestation::ZkAttestation = serde_json::from_value(parsed_value)
+                .with_context(|| {
+                    format!(
+                        "expected ZkAttestationBundle or ZkAttestation JSON in {}",
+                        bundle_path.display()
+                    )
+                })?;
+            let aid = legacy.attestation_id.clone();
+            let pid = legacy.policy_id.clone();
+            let pschema = legacy.payload.schema_version.clone();
+            let commit = legacy.payload.metadata_commitment.clone();
+            let res = zk_attestation::ZkVerificationResult::Rejected {
+                attestation_id: aid.clone(),
+                policy_id: pid.clone(),
+                trace_id,
+                reason:
+                    "Unparameterized or legacy zka-v1.0 attestation carries no authenticated cryptographic verifier parameters"
+                        .to_string(),
+                error_code: zk_attestation::error_codes::ERR_ZKA_VERIFIER_UNAVAILABLE.to_string(),
+            };
+            (aid, pid, pschema, commit, res)
+        };
+
+    let (verified, error_code, reason) = match &result {
+        zk_attestation::ZkVerificationResult::Verified { .. } => (true, None, None),
+        zk_attestation::ZkVerificationResult::Rejected {
+            error_code, reason, ..
+        } => (false, Some(error_code.clone()), Some(reason.clone())),
+    };
+
+    let report = VerifyZkAttestationCliReport {
+        schema_version: VERIFY_ZK_ATTESTATION_CLI_SCHEMA_VERSION,
+        command: "verify.zk-attestation",
+        verified,
+        error_code,
+        reason,
+        attestation_id,
+        policy_id,
+        payload_schema_version,
+        metadata_commitment,
+        evaluated_at_ms: now_ms,
+        result,
+    };
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        if !report.verified {
+            fail_closed_after_json();
+        }
+    } else if report.verified {
+        println!(
+            "verify zk-attestation: PASS attestation={} policy={} schema={} commitment={}",
+            report.attestation_id,
+            report.policy_id,
+            report.payload_schema_version,
+            report.metadata_commitment
+        );
+    } else {
+        eprintln!(
+            "verify zk-attestation: REJECTED attestation={} policy={} code={} reason={}",
+            report.attestation_id,
+            report.policy_id,
+            report.error_code.as_deref().unwrap_or("UNKNOWN"),
+            report.reason.as_deref().unwrap_or("rejected")
+        );
+        std::process::exit(1);
     }
 
     Ok(())
@@ -37825,6 +38502,7 @@ fn clap_json_error_surface() -> (&'static str, &'static str) {
         ("trust", Some("revoke")) => ("franken-node/trust-error-cli/v1", "trust.revoke"),
         ("trust", Some("quarantine")) => ("franken-node/trust-error-cli/v1", "trust.quarantine"),
         ("trust", Some("release")) => ("franken-node/trust-release-error/v1", "trust.release"),
+        ("trust", Some("zk-attest")) => ("franken-node/trust-error-cli/v1", "trust.zk-attest"),
         ("trust-card", Some("show")) => ("franken-node/trust-card-error-cli/v1", "trust-card.show"),
         ("trust-card", Some("export")) => {
             ("franken-node/trust-card-error-cli/v1", "trust-card.export")
@@ -37833,6 +38511,10 @@ fn clap_json_error_surface() -> (&'static str, &'static str) {
             ("franken-node/trust-card-error-cli/v1", "trust-card.compare")
         }
         ("trust-card", Some("diff")) => ("franken-node/trust-card-error-cli/v1", "trust-card.diff"),
+        ("trust-card", Some("reputation")) => (
+            "franken-node/trust-card-error-cli/v1",
+            "trust-card.reputation",
+        ),
         ("fleet", Some("release")) => (FLEET_CLI_ERROR_SCHEMA_VERSION, "fleet.release"),
         ("fleet", Some("agent")) => (FLEET_CLI_ERROR_SCHEMA_VERSION, "fleet.agent"),
         ("fleet", Some("describe")) => (FLEET_CLI_ERROR_SCHEMA_VERSION, "fleet.describe"),
@@ -37919,6 +38601,9 @@ fn clap_json_error_surface() -> (&'static str, &'static str) {
             "franken-node/verify-error-cli/v1",
             "verify.recovery-runbook",
         ),
+        ("verify", Some("zk-attestation")) => {
+            ("franken-node/verify-error-cli/v1", "verify.zk-attestation")
+        }
         ("proofs", Some("queue")) => (PROOFS_ERROR_CLI_SCHEMA_VERSION, "proofs.queue.status"),
         ("proofs", Some("workers")) => (PROOFS_ERROR_CLI_SCHEMA_VERSION, "proofs.workers.restart"),
         ("bench", Some("run")) => (BENCH_RUN_ERROR_CLI_SCHEMA_VERSION, "bench.run"),
@@ -39442,6 +40127,16 @@ fn main() -> Result<()> {
                     );
                 }
             }
+            VerifyCommand::ZkAttestation(args) => {
+                if let Err(err) = handle_verify_zk_attestation(&args) {
+                    return named_cli_fail(
+                        "franken-node/verify-error-cli/v1",
+                        "verify.zk-attestation",
+                        args.json,
+                        err,
+                    );
+                }
+            }
         },
 
         Command::Trust(sub) => match sub {
@@ -39781,6 +40476,11 @@ fn main() -> Result<()> {
                     render_trust_sync_summary_from_report(&report)
                 })?;
             }
+            TrustCommand::ZkAttest(args) => {
+                if let Err(err) = handle_trust_zk_attest(&args) {
+                    return trust_fail("trust.zk-attest", args.json, err);
+                }
+            }
         },
 
         Command::Remotecap(sub) => match sub {
@@ -39813,6 +40513,7 @@ fn main() -> Result<()> {
                 TrustCardCommand::List(args) => args.json,
                 TrustCardCommand::Compare(args) => args.json,
                 TrustCardCommand::Diff(args) => args.json,
+                TrustCardCommand::Reputation(args) => args.json,
             };
             let command_name = match &sub {
                 TrustCardCommand::Show(_) => "trust-card.show",
@@ -39820,6 +40521,7 @@ fn main() -> Result<()> {
                 TrustCardCommand::List(_) => "trust-card.list",
                 TrustCardCommand::Compare(_) => "trust-card.compare",
                 TrustCardCommand::Diff(_) => "trust-card.diff",
+                TrustCardCommand::Reputation(_) => "trust-card.reputation",
             };
             if let Err(err) = handle_trust_card_command(sub) {
                 return trust_card_fail(command_name, json, err);

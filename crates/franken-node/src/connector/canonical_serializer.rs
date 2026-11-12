@@ -1119,7 +1119,7 @@ pub fn write_canonical_value<W: std::io::Write>(value: &Value, out: &mut W) -> s
         let result = write_canonical_value_inner(value, out);
         let elapsed_us = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
         trust_card_canonical_record_us(elapsed_us);
-        return result;
+        result
     }
     #[cfg(not(feature = "profiling"))]
     write_canonical_value_inner(value, out)

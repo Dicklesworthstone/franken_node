@@ -1667,6 +1667,26 @@ pub enum VerifyCommand {
     /// Generate a recovery runbook from a `--readiness-input` snapshot (not a live broker).
     #[command(name = "recovery-runbook")]
     RecoveryRunbook(VerifyRecoveryRunbookArgs),
+
+    /// Verify a zero-knowledge compliance attestation bundle without disclosing witness values.
+    #[command(name = "zk-attestation")]
+    ZkAttestation(VerifyZkAttestationArgs),
+}
+
+#[derive(Debug, Parser)]
+pub struct VerifyZkAttestationArgs {
+    /// Path to the zero-knowledge attestation bundle or legacy attestation JSON.
+    /// Handler-required so `--json` errors emit `franken-node/verify-error-cli/v1`.
+    #[arg(default_value = "", value_parser = parse_handler_required_pathbuf)]
+    pub bundle_path: PathBuf,
+
+    /// Optional evaluation timestamp in epoch milliseconds (defaults to current UTC clock).
+    #[arg(long)]
+    pub now_ms: Option<u64>,
+
+    /// Emit `franken-node/verify-zk-attestation-cli/v1` JSON.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -1928,6 +1948,68 @@ pub enum TrustCommand {
     /// Reputation graph: publishers, extensions and lockfile dependencies,
     /// with propagated trust, explanations, transitions and blast radius.
     Graph(TrustGraphArgs),
+
+    /// Issue a zero-knowledge Ristretto255 compliance attestation over a private witness.
+    #[command(name = "zk-attest")]
+    ZkAttest(TrustZkAttestArgs),
+}
+
+#[derive(Debug, Parser)]
+pub struct TrustZkAttestArgs {
+    /// Unique policy identifier bound into the Ristretto255 Fiat-Shamir transcript.
+    #[arg(long, default_value = "")]
+    pub policy_id: String,
+
+    /// Issuer identity bound into the compliance policy.
+    #[arg(long, default_value = "")]
+    pub issuer: String,
+
+    /// Authenticated verifier parameter identifier.
+    #[arg(long, default_value = "local-cli-verifier-v1")]
+    pub verifier_key_id: String,
+
+    /// Monotonic security epoch bound into the verifier parameters.
+    #[arg(long, default_value_t = 1)]
+    pub epoch: u64,
+
+    /// Optional explicit challenge nonce (defaults to a fresh UUIDv7 nonce).
+    #[arg(long)]
+    pub challenge_nonce: Option<String>,
+
+    /// Threshold lower bound (`private_value >= threshold` within `range_bits`).
+    /// Mutually exclusive with `--allowlist`.
+    #[arg(long)]
+    pub threshold: Option<u64>,
+
+    /// Bit width (`1..=64`) for the threshold range decomposition.
+    #[arg(long, default_value_t = 16)]
+    pub range_bits: u8,
+
+    /// Comma-separated allowlist of permitted `u64` values (`1..=64` unique integers).
+    /// Mutually exclusive with `--threshold`.
+    #[arg(long)]
+    pub allowlist: Option<String>,
+
+    /// Private `u64` attribute committed under a fresh OS-random Pedersen blinding factor
+    /// and zeroized after proof generation; never written to output or bundle JSON.
+    #[arg(long)]
+    pub private_value: Option<u64>,
+
+    /// Proof validity window in milliseconds.
+    #[arg(long, default_value_t = 600_000)]
+    pub validity_ms: u64,
+
+    /// Optional evaluation/generation timestamp in epoch milliseconds (defaults to UTC clock).
+    #[arg(long)]
+    pub now_ms: Option<u64>,
+
+    /// Optional path where the portable attestation bundle JSON is written atomically.
+    #[arg(long)]
+    pub output: Option<PathBuf>,
+
+    /// Emit `franken-node/trust-zk-attest-cli/v1` JSON.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -2302,6 +2384,9 @@ pub enum TrustCardCommand {
 
     /// Diff two trust-card versions for the same extension.
     Diff(TrustCardDiffArgs),
+
+    /// Score ecosystem reputation graph nodes and edges from the local trust-card registry.
+    Reputation(TrustCardReputationArgs),
 }
 
 #[derive(Debug, Parser)]
@@ -2396,6 +2481,22 @@ pub struct TrustCardDiffArgs {
 
     /// Emit the version diff as JSON, or `franken-node/trust-card-error-cli/v1`
     /// then exit 1 without a second human `Error:` line.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Parser)]
+pub struct TrustCardReputationArgs {
+    /// Focus on one extension or publisher node identifier (e.g., npm:@example/plugin).
+    #[arg(long)]
+    pub extension: Option<String>,
+
+    /// Apply temporal edge-weight decay steps (`DECAY_FACTOR = 0.95` per step) before scoring.
+    #[arg(long, default_value_t = 0)]
+    pub decay_steps: u32,
+
+    /// Emit `franken-node/trust-card-reputation-cli/v1` JSON, or
+    /// `franken-node/trust-card-error-cli/v1` then exit 1 without a second human `Error:` line.
     #[arg(long)]
     pub json: bool,
 }

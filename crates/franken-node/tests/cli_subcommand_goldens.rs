@@ -723,6 +723,7 @@ fn doctor_process_spawn_readiness_fails_closed_for_missing_backend() -> Result<(
 #[test]
 fn remotecap_help_output() {
     let mut cmd = Command::cargo_bin("franken-node").expect("franken-node binary");
+    disable_cli_color(&mut cmd);
     let assertion = cmd.args(["remotecap", "--help"]).assert().success();
 
     let stdout = String::from_utf8_lossy(&assertion.get_output().stdout);
@@ -734,6 +735,7 @@ fn remotecap_help_output() {
 #[test]
 fn verify_help_output() {
     let mut cmd = Command::cargo_bin("franken-node").expect("franken-node binary");
+    disable_cli_color(&mut cmd);
     let assertion = cmd.args(["verify", "--help"]).assert().success();
 
     let stdout = String::from_utf8_lossy(&assertion.get_output().stdout);
@@ -745,6 +747,7 @@ fn verify_help_output() {
 #[test]
 fn registry_help_output() {
     let mut cmd = Command::cargo_bin("franken-node").expect("franken-node binary");
+    disable_cli_color(&mut cmd);
     let assertion = cmd.args(["registry", "--help"]).assert().success();
 
     let stdout = String::from_utf8_lossy(&assertion.get_output().stdout);
