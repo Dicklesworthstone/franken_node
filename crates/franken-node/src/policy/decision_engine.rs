@@ -1424,7 +1424,7 @@ mod tests {
         use crate::security::constant_time;
 
         let engine = engine();
-        let mut system_state = healthy_state();
+        let system_state = healthy_state();
 
         // Unicode injection attempts in guardrail IDs and candidate references
         let malicious_candidates = vec![

@@ -8102,7 +8102,6 @@ mod tests {
             let signing_key = SigningKey::from_bytes(&[seed; 32]);
             let verifying_key = signing_key.verifying_key();
             let mut drain = super::NativeSessionDrainCheckpoint {
-                schema_version: super::NATIVE_SESSION_DRAIN_CHECKPOINT_SCHEMA.to_string(),
                 applied_actions: expected.clone(),
                 session_set_sha256: format!("{seed:02x}").repeat(32),
                 admitted_sessions: 2,

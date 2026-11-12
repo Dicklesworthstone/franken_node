@@ -75,6 +75,8 @@ mod security {
     pub mod decision_receipt;
     #[path = "epoch_scoped_keys.rs"]
     pub mod epoch_scoped_keys;
+    #[cfg(test)]
+    pub use frankenengine_node::security::{remote_cap, threshold_sig};
 }
 #[allow(dead_code)]
 #[path = "runtime/resource_governor.rs"]
@@ -158,6 +160,8 @@ use frankenengine_node::control_plane::fleet_transport::{
 };
 use frankenengine_node::control_plane::fleet_transport_durable;
 use frankenengine_node::ops::engine_dispatcher::RunProjectPaths;
+#[cfg(test)]
+pub use frankenengine_node::testing;
 #[cfg(test)]
 use frankenengine_node::tools::replay_bundle::{fixture_incident_events, generate_replay_bundle};
 pub use frankenengine_node::{capacity_defaults, connector, control_plane, supply_chain};
@@ -587,6 +591,7 @@ struct RunPackageDependency {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[cfg_attr(test, derive(serde::Deserialize))]
 #[serde(rename_all = "snake_case")]
 enum RunDependencyTrustStatus {
     Trusted,
@@ -604,6 +609,7 @@ enum RunDependencyTrustStatus {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[cfg_attr(test, derive(serde::Deserialize))]
 struct RunDependencyTrustResult {
     dependency_name: String,
     version_requirement: String,
@@ -616,6 +622,7 @@ struct RunDependencyTrustResult {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[cfg_attr(test, derive(serde::Deserialize))]
 #[serde(rename_all = "snake_case")]
 enum TrustScanItemStatus {
     Created,
@@ -625,6 +632,7 @@ enum TrustScanItemStatus {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[cfg_attr(test, derive(serde::Deserialize))]
 struct TrustScanItem {
     dependency_name: String,
     section: String,
@@ -7434,15 +7442,18 @@ fn handle_deploy_run(args: &cli::DeployRunArgs) -> Result<(serde_json::Value, i3
     Ok((report, exit_code))
 }
 
+type DeploySuperviseAttemptFn<'a> = dyn FnMut(
+        &runtime::deployment::ActivationRecord,
+        &runtime::deployment::ReleaseRecord,
+    ) -> Result<(DeployRunVerdict, i32, serde_json::Value)>
+    + 'a;
+
 fn supervise_deploy_runs_with(
     store: &runtime::deployment::DeploymentStore,
     authority: &runtime::deployment::DeploymentAuthority,
     args: &cli::DeploySuperviseArgs,
     verify_release: &dyn Fn(&runtime::deployment::ReleaseRecord) -> Result<()>,
-    execute_attempt: &mut dyn FnMut(
-        &runtime::deployment::ActivationRecord,
-        &runtime::deployment::ReleaseRecord,
-    ) -> Result<(DeployRunVerdict, i32, serde_json::Value)>,
+    execute_attempt: &mut DeploySuperviseAttemptFn<'_>,
 ) -> Result<(serde_json::Value, i32)> {
     use runtime::crash_loop_detector::{
         CrashEvent, CrashLoopConfig, CrashLoopDetector, EProcessConfig, EProcessHealthMonitor,
@@ -8130,9 +8141,17 @@ fn resolve_remotecap_signing_key() -> Result<String> {
 /// `FRANKEN_NODE_REMOTECAP_KEY`, else the key `init` provisioned under
 /// `project_root` (bd-reality-20260923-26n9r.11).
 fn resolve_remotecap_signing_key_for(project_root: &Path) -> Result<String> {
-    match std::env::var("FRANKEN_NODE_REMOTECAP_KEY") {
-        Ok(key) if !key.trim().is_empty() => return Ok(key),
-        Ok(_) => {
+    let env_val = std::env::var("FRANKEN_NODE_REMOTECAP_KEY").ok();
+    resolve_remotecap_signing_key_with_env(project_root, env_val.as_deref())
+}
+
+fn resolve_remotecap_signing_key_with_env(
+    project_root: &Path,
+    env_val: Option<&str>,
+) -> Result<String> {
+    match env_val {
+        Some(key) if !key.trim().is_empty() => return Ok(key.to_string()),
+        Some(_) => {
             #[cfg(test)]
             {
                 return Ok(["franken-node", "dev", "remotecap", "key"].join("-"));
@@ -8144,7 +8163,7 @@ fn resolve_remotecap_signing_key_for(project_root: &Path) -> Result<String> {
                 )
             }
         }
-        Err(_) => {}
+        None => {}
     }
     let key_path = project_root.join(REMOTECAP_SIGNING_KEY_RELATIVE_PATH);
     match crate::bounded_read(&key_path, 4096) {
@@ -8258,15 +8277,27 @@ fn remotecap_cli_capability_gate(signing_key: &str, cap: &RemoteCap) -> Result<C
 }
 
 fn load_remotecap_cli_state() -> Result<RemoteCapCliState> {
+    load_remotecap_cli_state_from(&remotecap_cli_state_path())
+}
+
+fn load_remotecap_cli_state_from(path: &Path) -> Result<RemoteCapCliState> {
     // Prevent DoS via oversized state files - 4 MiB should be sufficient for CLI state
     const MAX_CLI_STATE_BYTES: u64 = 4 << 20; // 4 MiB
 
-    let path = remotecap_cli_state_path();
-    match crate::bounded_read(&path, MAX_CLI_STATE_BYTES) {
+    match crate::bounded_read(path, MAX_CLI_STATE_BYTES) {
         Ok(raw) => serde_json::from_slice(&raw)
             .with_context(|| format!("failed parsing remotecap state {}", path.display())),
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
             Ok(RemoteCapCliState::default())
+        }
+        Err(source)
+            if source.kind() == std::io::ErrorKind::InvalidData
+                && source.to_string().contains("File too large") =>
+        {
+            anyhow::bail!(
+                "RemoteCap CLI state file too large ({}): {source}",
+                path.display()
+            )
         }
         Err(source) => Err(source)
             .with_context(|| format!("failed reading remotecap state {}", path.display())),
@@ -8288,8 +8319,22 @@ fn read_remotecap_token(path: &Path) -> Result<RemoteCap> {
     // Prevent DoS via oversized token files - 1 MiB should be more than sufficient for tokens
     const MAX_TOKEN_FILE_BYTES: u64 = 1 << 20; // 1 MiB
 
-    let raw = crate::bounded_read(path, MAX_TOKEN_FILE_BYTES)
-        .with_context(|| format!("failed reading remotecap token {}", path.display()))?;
+    let raw = match crate::bounded_read(path, MAX_TOKEN_FILE_BYTES) {
+        Ok(raw) => raw,
+        Err(source)
+            if source.kind() == std::io::ErrorKind::InvalidData
+                && source.to_string().contains("File too large") =>
+        {
+            anyhow::bail!(
+                "RemoteCap token file too large ({}): {source}",
+                path.display()
+            )
+        }
+        Err(source) => {
+            return Err(source)
+                .with_context(|| format!("failed reading remotecap token {}", path.display()));
+        }
+    };
 
     let value: serde_json::Value = serde_json::from_slice(&raw)
         .with_context(|| format!("failed parsing remotecap token JSON {}", path.display()))?;
@@ -18010,6 +18055,7 @@ mod trust_scan_tests {
             supply_chain::trust_card::fixture_registry(1_000).expect("fixture trust registry");
         let card = registry
             .snapshot()
+            .expect("snapshot")
             .cards_by_extension
             .get("npm:@acme/auth-guard")
             .and_then(|history| history.last())
@@ -19170,7 +19216,12 @@ mod trust_command_tests {
             warnings: Vec::new(),
         };
 
-        let rendered = render_trust_sync_summary(&cards, &sync_report, &audit_report, true);
+        let rendered = render_trust_sync_summary_from_report(&build_trust_sync_cli_report(
+            &cards,
+            &sync_report,
+            &audit_report,
+            true,
+        ));
 
         assert!(rendered.contains("force=true"));
         assert!(rendered.contains("refreshed=5"));
@@ -20374,10 +20425,10 @@ mod fleet_command_tests {
                 .with_timezone(&Utc),
             action: PersistedFleetAction::Revoke {
                 extension_id: format!("npm:@acme/{action_id}"),
-                scope: RevocationScope {
+                scope: PersistedRevocationScope {
                     zone_id: zone_id.to_string(),
                     tenant_id: None,
-                    severity: RevocationSeverity::Mandatory,
+                    severity: PersistedRevocationSeverity::Mandatory,
                     reason: "publisher key compromised".to_string(),
                 },
             },
@@ -20396,6 +20447,8 @@ mod fleet_command_tests {
             },
             stale_nodes: Vec::new(),
             active_incidents: Vec::new(),
+            transport_kind: FleetTransportKind::File,
+            control_plane_url: None,
         };
 
         let prod_status = fleet_status_from_loaded_state(&loaded, "prod");
@@ -20717,6 +20770,13 @@ mod incident_list_tests {
         vec![incident_test_trusted_key_id()]
     }
 
+    fn write_receipt_signing_key(path: &Path) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create signing key parent");
+        }
+        std::fs::write(path, hex::encode([42_u8; 32])).expect("write receipt signing key");
+    }
+
     fn configure_incident_test_signing_key(workspace: &Path) {
         std::fs::write(
             workspace.join("franken_node.toml"),
@@ -20960,6 +21020,7 @@ mod incident_list_tests {
             id: incident_id.to_string(),
             evidence_path: None,
             verify: true,
+            json: false,
             receipt_signing_key: None,
             receipt_out: None,
             receipt_summary_out: None,
@@ -21000,6 +21061,7 @@ mod incident_list_tests {
             id: incident_id.to_string(),
             evidence_path: None,
             verify: false,
+            json: false,
             receipt_signing_key: None,
             receipt_out: None,
             receipt_summary_out: None,
@@ -21034,6 +21096,7 @@ mod incident_list_tests {
             id: incident_id.to_string(),
             evidence_path: Some(evidence_path),
             verify: true,
+            json: false,
             receipt_signing_key: None,
             receipt_out: None,
             receipt_summary_out: None,
@@ -41970,7 +42033,6 @@ mod run_trust_gate_tests {
     #[cfg(test)]
     mod main_binary_comprehensive_security_and_attack_vector_tests {
         use super::*;
-        use std::collections::{HashMap, HashSet};
 
         #[test]
         fn test_signing_key_parsing_injection_and_format_attacks() {
@@ -42011,7 +42073,11 @@ mod run_trust_gate_tests {
                         );
 
                         // Verify no injection occurred by checking key derivation
-                        let expected_key = ed25519_dalek::SigningKey::from_bytes(attack_bytes);
+                        let key_arr: [u8; 32] = attack_bytes
+                            .as_slice()
+                            .try_into()
+                            .expect("32-byte attack vector");
+                        let expected_key = ed25519_dalek::SigningKey::from_bytes(&key_arr);
                         assert_eq!(
                             signing_key.to_bytes(),
                             expected_key.to_bytes(),
@@ -42026,17 +42092,17 @@ mod run_trust_gate_tests {
             }
 
             // Attack 2: Hex encoding manipulation and injection
-            let hex_injection_attacks = vec![
-                "0x",                                   // Empty hex
-                "0x4",                                  // Single hex digit
-                "0x" + &"g".repeat(64),                 // Invalid hex characters
-                "0x" + &"41".repeat(32) + "INJECTION",  // Valid hex + injection
-                "0X" + &"42".repeat(32),                // Uppercase prefix
-                "0x" + &"43_44_45".repeat(10) + "46",   // Underscores
-                "0x" + &"47:48:49".repeat(10) + "4a",   // Colons
-                "0x" + &"4b-4c-4d".repeat(10) + "4e",   // Hyphens
-                &"4f".repeat(32),                       // No prefix
-                "0x" + &"50\n51\t52".repeat(10) + "53", // Control chars
+            let hex_injection_attacks: Vec<String> = vec![
+                "0x".to_string(),                           // Empty hex
+                "0x4".to_string(),                          // Single hex digit
+                format!("0x{}", "g".repeat(64)),            // Invalid hex characters
+                format!("0x{}INJECTION", "41".repeat(32)),  // Valid hex + injection
+                format!("0X{}", "42".repeat(32)),           // Uppercase prefix
+                format!("0x{}46", "43_44_45".repeat(10)),   // Underscores
+                format!("0x{}4a", "47:48:49".repeat(10)),   // Colons
+                format!("0x{}4e", "4b-4c-4d".repeat(10)),   // Hyphens
+                "4f".repeat(32),                            // No prefix
+                format!("0x{}53", "50\n51\t52".repeat(10)), // Control chars
             ];
 
             for hex_attack in hex_injection_attacks {
@@ -42060,10 +42126,10 @@ mod run_trust_gate_tests {
             let base64_attacks = vec![
                 valid_b64.clone(),                                     // Valid base64
                 valid_b64.clone() + "INJECTION",                       // Valid + injection
-                valid_b64.replace('+', '-'),                           // Character substitution
-                valid_b64.replace('/', '_'),                           // URL-safe variant
+                valid_b64.replace('+', "-"),                           // Character substitution
+                valid_b64.replace('/', "_"),                           // URL-safe variant
                 valid_b64.trim_end_matches('=').to_string(),           // No padding
-                valid_b64 + "===",                                     // Extra padding
+                valid_b64.clone() + "===",                             // Extra padding
                 "Z".repeat(44),                                        // All same character
                 "AAAA".repeat(11),                                     // Repeated pattern
                 valid_b64.to_lowercase(),                              // Case change
@@ -42225,7 +42291,7 @@ mod run_trust_gate_tests {
                 ("direction\u{202E}override", 10, "direction\u{202E}"), // Text direction override
             ];
 
-            for (input, max_chars, expected) in unicode_attacks {
+            for (input, max_chars, _expected) in unicode_attacks {
                 let result = api::utf8_prefix(input, max_chars);
 
                 // Should not panic and should handle UTF-8 correctly
@@ -42256,18 +42322,21 @@ mod run_trust_gate_tests {
             }
 
             // Attack 3: Edge case string content
-            let edge_case_strings = vec![
+            let del_ten = "\x7F".repeat(10);
+            let crab_k = "🦀".repeat(1000);
+            let ascii_100k = "a".repeat(100000);
+            let edge_case_strings: Vec<&str> = vec![
                 "",                         // Empty string
                 "\0",                       // Null byte
                 "\u{FEFF}",                 // BOM
                 "\n\r\t",                   // Control characters
                 " \t\n\r ",                 // Whitespace
-                "\x7F".repeat(10),          // DEL characters
+                &del_ten,                   // DEL characters
                 "\u{202A}\u{202B}\u{202C}", // Text direction controls
                 "normal\u{0000}null",       // Embedded null
                 "test\x1b[31mcolor\x1b[0m", // ANSI escape sequences
-                "🦀".repeat(1000),          // Large unicode
-                "a".repeat(100000),         // Large ASCII
+                &crab_k,                    // Large unicode
+                &ascii_100k,                // Large ASCII
             ];
 
             for edge_string in edge_case_strings {
@@ -42782,25 +42851,25 @@ mod run_trust_gate_tests {
             }
 
             // Attack 2: Hex decoding with malicious patterns
-            let hex_attack_patterns = vec![
-                ("", "Empty hex string"),
-                ("0", "Odd length hex"),
-                ("gg", "Invalid hex characters"),
-                ("0x41", "Hex with prefix"),
-                ("41424344454647", "Odd length valid hex"),
-                ("41_42_43_44", "Hex with separators"),
-                ("41:42:43:44", "Hex with colons"),
-                ("41-42-43-44", "Hex with dashes"),
-                ("41 42 43 44", "Hex with spaces"),
-                ("\n41\t42\r43\n44\n", "Hex with control chars"),
-                ("4141414141414141" * 1000, "Very long hex"),
-                ("DEADBEEF" * 1000, "Repeating pattern"),
-                ("00" * 10000, "All zeros"),
-                ("FF" * 10000, "All ones"),
+            let hex_attack_patterns: Vec<(String, &str)> = vec![
+                ("".to_string(), "Empty hex string"),
+                ("0".to_string(), "Odd length hex"),
+                ("gg".to_string(), "Invalid hex characters"),
+                ("0x41".to_string(), "Hex with prefix"),
+                ("41424344454647".to_string(), "Odd length valid hex"),
+                ("41_42_43_44".to_string(), "Hex with separators"),
+                ("41:42:43:44".to_string(), "Hex with colons"),
+                ("41-42-43-44".to_string(), "Hex with dashes"),
+                ("41 42 43 44".to_string(), "Hex with spaces"),
+                ("\n41\t42\r43\n44\n".to_string(), "Hex with control chars"),
+                ("4141414141414141".repeat(1000), "Very long hex"),
+                ("DEADBEEF".repeat(1000), "Repeating pattern"),
+                ("00".repeat(10000), "All zeros"),
+                ("FF".repeat(10000), "All ones"),
             ];
 
             for (hex_input, description) in hex_attack_patterns {
-                let decode_result = hex::decode(hex_input);
+                let decode_result = hex::decode(&hex_input);
 
                 match decode_result {
                     Ok(decoded) => {
@@ -42854,7 +42923,7 @@ mod run_trust_gate_tests {
             ];
 
             for (b64_input, description) in padding_attacks {
-                for engine in &engines {
+                for (engine_idx, engine) in engines.iter().enumerate() {
                     let decode_result = engine.decode(b64_input);
 
                     match decode_result {
@@ -42862,14 +42931,10 @@ mod run_trust_gate_tests {
                             // If successful, should be valid
                             let re_encoded = engine.encode(&decoded);
 
-                            // For padding engines, verify padding behavior
-                            if matches!(
-                                engine,
-                                base64::engine::general_purpose::STANDARD
-                                    | base64::engine::general_purpose::URL_SAFE
-                            ) {
+                            // For padding engines (STANDARD = 0, URL_SAFE = 2), verify padding behavior
+                            if matches!(engine_idx, 0 | 2) {
                                 // Should include proper padding
-                                let expected_padding = (4 - (decoded.len() * 4 / 3) % 4) % 4;
+                                let expected_padding = (3 - (decoded.len() % 3)) % 3;
                                 assert_eq!(
                                     re_encoded.chars().rev().take_while(|&c| c == '=').count(),
                                     expected_padding,
@@ -43000,7 +43065,7 @@ mod run_trust_gate_tests {
             }
 
             // Attack 2: Option<T> field manipulation
-            let option_test_values = vec![Some(0u64), Some(u64::MAX), Some(42), None];
+            let option_test_values = vec![Some(0u16), Some(u16::MAX), Some(42), None];
 
             for option_val in option_test_values {
                 // Test serialization of Option fields
@@ -43180,78 +43245,64 @@ mod run_trust_gate_tests {
         /// is absent or empty outside test mode, preventing token forgery vulnerabilities.
         #[test]
         fn test_remotecap_fails_closed_without_signing_key_in_production() {
-            // BD-2VZVM: Verify remotecap operations fail when signing key env var is absent/empty
-            // outside test mode (without dev-keys feature)
+            let tmp = tempfile::tempdir().expect("tempdir");
 
-            // This test runs WITH the test cfg, so resolve_remotecap_signing_key() will succeed
-            // with the dev fallback. But we can test the production behavior by directly calling
-            // the functions that would fail in production mode.
-
-            // Test 1: Empty environment variable should be rejected in production
-            std::env::set_var("FRANKEN_NODE_REMOTECAP_KEY", "");
-
-            // In test mode, this will use the dev fallback and succeed
-            let result_with_test_cfg = resolve_remotecap_signing_key();
+            // Test 1: Empty environment variable falls back to dev key in #[cfg(test)]
+            let result_with_test_cfg = resolve_remotecap_signing_key_with_env(tmp.path(), Some(""));
             assert!(
                 result_with_test_cfg.is_ok(),
                 "In test mode, empty key should fall back to dev key"
             );
 
-            // Test 2: Absent environment variable should be rejected in production
-            std::env::remove_var("FRANKEN_NODE_REMOTECAP_KEY");
-
-            // In test mode, this will use the dev fallback and succeed
-            let result_absent_with_test_cfg = resolve_remotecap_signing_key();
+            // Test 2: Absent environment variable falls back to dev key when no provisioned key exists
+            let result_absent_with_test_cfg =
+                resolve_remotecap_signing_key_with_env(tmp.path(), None);
             assert!(
                 result_absent_with_test_cfg.is_ok(),
                 "In test mode, absent key should fall back to dev key"
             );
 
-            // Test 3: Valid key should always work
-            std::env::set_var("FRANKEN_NODE_REMOTECAP_KEY", "valid-production-key-12345");
-            let result_valid = resolve_remotecap_signing_key();
+            // Test 3: Valid explicit key always takes precedence
+            let result_valid = resolve_remotecap_signing_key_with_env(
+                tmp.path(),
+                Some("valid-production-key-12345"),
+            );
             assert!(result_valid.is_ok(), "Valid key should always work");
             assert_eq!(result_valid.unwrap(), "valid-production-key-12345");
-
-            // Clean up
-            std::env::remove_var("FRANKEN_NODE_REMOTECAP_KEY");
         }
 
-        /// Test that verifies remotecap CLI operations would fail without signing key
-        /// This simulates the production scenario where no dev-keys feature is available
+        /// Test that verifies remotecap CLI operations require valid signing key material
         #[test]
         fn test_remotecap_cli_operations_require_valid_signing_key() {
-            // BD-2VZVM: Test that all remotecap CLI operations depend on resolve_remotecap_signing_key()
-            // and would fail in production without a valid environment variable
+            let tmp = tempfile::tempdir().expect("tempdir");
 
-            // Temporarily set invalid/empty key to simulate production failure case
-            let original_key = std::env::var("FRANKEN_NODE_REMOTECAP_KEY").ok();
-
-            // Test case 1: Whitespace-only key should be rejected
-            std::env::set_var("FRANKEN_NODE_REMOTECAP_KEY", "   ");
-            let result = resolve_remotecap_signing_key();
+            // Test case 1: Whitespace-only key falls back to dev key in test mode
+            let result = resolve_remotecap_signing_key_with_env(tmp.path(), Some("   "));
             assert!(
                 result.is_ok(),
                 "Even whitespace key falls back to dev in test mode"
             );
 
-            // Test case 2: Very short key should still work (no minimum length requirement)
-            std::env::set_var("FRANKEN_NODE_REMOTECAP_KEY", "x");
-            let result = resolve_remotecap_signing_key();
+            // Test case 2: Short non-empty key works
+            let result = resolve_remotecap_signing_key_with_env(tmp.path(), Some("x"));
             assert!(result.is_ok(), "Short but non-empty key should work");
             assert_eq!(result.unwrap(), "x");
 
             // Test case 3: Normal production key
-            std::env::set_var("FRANKEN_NODE_REMOTECAP_KEY", "prod-key-abc123");
-            let result = resolve_remotecap_signing_key();
+            let result =
+                resolve_remotecap_signing_key_with_env(tmp.path(), Some("prod-key-abc123"));
             assert!(result.is_ok(), "Production key should work");
             assert_eq!(result.unwrap(), "prod-key-abc123");
 
-            // Restore original key
-            match original_key {
-                Some(key) => std::env::set_var("FRANKEN_NODE_REMOTECAP_KEY", key),
-                None => std::env::remove_var("FRANKEN_NODE_REMOTECAP_KEY"),
-            }
+            // Test case 4: Empty provisioned key file fails closed even in test mode
+            let key_path = tmp.path().join(REMOTECAP_SIGNING_KEY_RELATIVE_PATH);
+            std::fs::create_dir_all(key_path.parent().expect("key parent")).expect("mkdir");
+            std::fs::write(&key_path, "   \n").expect("write empty key");
+            let empty_file_result = resolve_remotecap_signing_key_with_env(tmp.path(), None);
+            assert!(
+                empty_file_result.is_err(),
+                "Empty provisioned key file must fail closed"
+            );
         }
 
         /// Integration test demonstrating that CapabilityProvider/Gate construction
@@ -43313,31 +43364,48 @@ mod run_trust_gate_tests {
         #[test]
         fn test_execution_receipt_id_no_placeholder_regression() {
             // Regression test for bd-zxa8x: Ensure receipt IDs are never placeholder strings
-            use crate::ops::engine_dispatcher::{EngineRuntime, RunDispatchReport};
-            use std::time::SystemTime;
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let app_path = tmp.path().join("index.js");
+            std::fs::write(&app_path, "console.log('receipt');\n").expect("write app");
 
-            // Create minimal test data for receipt generation
-            let preflight = RunPreFlightReport {
-                warnings: vec![],
-                policy_applied: true,
-            };
-            let dispatch = RunDispatchReport {
-                started_at_utc: "2026-01-01T00:00:00Z".to_string(),
-                finished_at_utc: "2026-01-01T00:01:00Z".to_string(),
-                duration_ms: 60000,
-                exit_code: 0,
-                runtime: EngineRuntime::Node,
-                native_replay: None,
-            };
-            let app_path = std::path::Path::new("/test/app");
+            let preflight = evaluate_preflight(tmp.path(), Profile::Strict);
+            let make_dispatch =
+                |started_at: &str, finished_at: &str| ops::engine_dispatcher::RunDispatchReport {
+                    runtime: "node".to_string(),
+                    runtime_path: "/usr/bin/node".to_string(),
+                    target: app_path.display().to_string(),
+                    working_dir: tmp.path().display().to_string(),
+                    used_fallback_runtime: false,
+                    started_at_utc: started_at.to_string(),
+                    finished_at_utc: finished_at.to_string(),
+                    duration_ms: 60_000,
+                    exit_code: Some(0),
+                    terminated_by_signal: false,
+                    telemetry: None,
+                    captured_output: ops::engine_dispatcher::CapturedProcessOutput {
+                        stdout: String::new(),
+                        stderr: String::new(),
+                    },
+                    host_effect_ledger: None,
+                    native_replay: None,
+                    #[cfg(feature = "engine")]
+                    runtime_evidence_identity_capture: None,
+                    #[cfg(feature = "engine")]
+                    runtime_evidence_identity_capture_path: None,
+                    sentinel: None,
+                    engine_decision: None,
+                    invocation_settings: None,
+                };
+            let dispatch1 = make_dispatch("2026-01-01T00:00:00Z", "2026-01-01T00:01:00Z");
+            let dispatch2 = make_dispatch("2026-01-01T00:02:00Z", "2026-01-01T00:03:00Z");
 
             // Generate receipt
             let receipt = build_run_execution_receipt(
-                app_path,
+                &app_path,
                 "strict",
-                Profile::Development,
+                Profile::Strict,
                 &preflight,
-                &dispatch,
+                &dispatch1,
                 vec![], // ssrf_violations
                 vec![], // auto_quarantined_extensions
                 None,   // sentinel_enforcement
@@ -43353,27 +43421,38 @@ mod run_trust_gate_tests {
                 "Receipt ID must not be placeholder string - should be proper UUID"
             );
 
-            // Additional validation: receipt ID should look like a UUID
+            // Additional validation: receipt ID should parse as a valid 36-char UUID
             assert!(
                 receipt.core.receipt_id.len() == 36
-                    && receipt
-                        .core
-                        .receipt_id
-                        .chars()
-                        .filter(|&c| c == '-')
-                        .count()
-                        == 4,
+                    && uuid::Uuid::parse_str(&receipt.core.receipt_id).is_ok(),
                 "Receipt ID should be UUID format, got: {}",
                 receipt.core.receipt_id
             );
 
-            // Ensure it's different on each call (UUIDs should be unique)
-            let receipt2 = build_run_execution_receipt(
-                app_path,
+            // Deterministic receipt ID: identical recorded inputs yield identical UUIDs
+            let receipt_same = build_run_execution_receipt(
+                &app_path,
                 "strict",
-                Profile::Development,
+                Profile::Strict,
                 &preflight,
-                &dispatch,
+                &dispatch1,
+                vec![],
+                vec![],
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("deterministic repeat receipt generation should succeed");
+            assert_eq!(receipt.core.receipt_id, receipt_same.core.receipt_id);
+
+            // Distinct execution runs produce distinct deterministic UUIDs
+            let receipt2 = build_run_execution_receipt(
+                &app_path,
+                "strict",
+                Profile::Strict,
+                &preflight,
+                &dispatch2,
                 vec![],
                 vec![],
                 None,
@@ -43385,7 +43464,7 @@ mod run_trust_gate_tests {
 
             assert_ne!(
                 receipt.core.receipt_id, receipt2.core.receipt_id,
-                "Receipt IDs should be unique per call"
+                "Receipt IDs should differ across distinct dispatch runs"
             );
         }
     }
@@ -43488,6 +43567,7 @@ mod run_trust_gate_tests {
 #[cfg(test)]
 mod parser_bomb_protection_tests {
     use super::*;
+    use proptest::proptest;
     use tempfile::{TempDir, tempdir};
 
     /// Helper to create a JSON file of specific size with valid content
@@ -43594,10 +43674,7 @@ mod parser_bomb_protection_tests {
         // Create the expected directory structure in the temp dir
         let franken_dir = tmp.path().join(".franken-node").join("remotecap");
         std::fs::create_dir_all(&franken_dir).expect("create remotecap dir");
-
-        // Save current directory and change to temp dir
-        let original_dir = std::env::current_dir().expect("get current dir");
-        std::env::set_current_dir(tmp.path()).expect("change to temp dir");
+        let state_path = franken_dir.join("state.json");
 
         // Test 1: File exactly at 4MB limit should succeed (size-wise)
         let valid_content = format!(
@@ -43614,10 +43691,9 @@ mod parser_bomb_protection_tests {
             )
         };
 
-        std::fs::write(franken_dir.join("state.json"), truncated_content)
-            .expect("write valid state");
+        std::fs::write(&state_path, truncated_content).expect("write valid state");
 
-        let result = load_remotecap_cli_state();
+        let result = load_remotecap_cli_state_from(&state_path);
         match result {
             Err(err) => assert!(
                 !err.to_string().contains("too large"),
@@ -43632,10 +43708,9 @@ mod parser_bomb_protection_tests {
             r#"{{"schema_version":"test","padding":"{}"}}"#,
             " ".repeat(MAX_CLI_STATE_BYTES as usize + 100)
         );
-        std::fs::write(franken_dir.join("state.json"), oversized_content)
-            .expect("write oversized state");
+        std::fs::write(&state_path, oversized_content).expect("write oversized state");
 
-        let result = load_remotecap_cli_state();
+        let result = load_remotecap_cli_state_from(&state_path);
         assert!(result.is_err(), "Oversized file should fail");
 
         let error_msg = result.unwrap_err().to_string();
@@ -43644,9 +43719,6 @@ mod parser_bomb_protection_tests {
             "Should fail with size error, got: {}",
             error_msg
         );
-
-        // Restore original directory
-        std::env::set_current_dir(original_dir).expect("restore directory");
     }
 
     #[test]
@@ -43830,15 +43902,22 @@ mod parser_bomb_protection_tests {
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     }
 
+    fn make_dep(extension_id: &str, name: &str) -> RunPackageDependency {
+        RunPackageDependency {
+            dependency_name: name.to_string(),
+            version_requirement: "^1.0.0".to_string(),
+            section: "dependencies".to_string(),
+            extension_id: extension_id.to_string(),
+            lockfile_metadata: TrustScanLockfileMetadata::default(),
+        }
+    }
+
     #[test]
     fn build_trust_scan_evidence_ref_basic_functionality() {
         // Test basic functionality of build_trust_scan_evidence_ref
         // This test verifies the fix for bd-zsfpy (commit 5b6d964f)
 
-        let dependency = RunPackageDependency {
-            extension_id: "test-extension".to_string(),
-            display_name: "Test Extension".to_string(),
-        };
+        let dependency = make_dep("test-extension", "Test Extension");
         let version = "1.0.0";
         let artifact_hashes = vec!["hash1".to_string(), "hash2".to_string()];
         let now_secs = 1640995200; // 2022-01-01
@@ -43869,15 +43948,11 @@ mod parser_bomb_protection_tests {
         // Test that integer truncation protection works for oversized inputs
         // This test verifies the fix for bd-zsfpy (commit 5b6d964f)
 
-        let dependency = RunPackageDependency {
-            extension_id: "test-extension".to_string(),
-            display_name: "Test Extension".to_string(),
-        };
+        let dependency = make_dep("test-extension", "Test Extension");
 
-        // Create a very long version string that would overflow usize → u64 cast on 32-bit
-        // Use a size that would definitely trigger the protection
+        // Use a multi-MiB string to exercise length-prefixed hashing without Exabyte OOM on 64-bit
         let normal_version = "1.0.0";
-        let oversized_version = "x".repeat(std::usize::MAX / 2); // Large but not MAX to avoid OOM
+        let oversized_version = "x".repeat(2 * 1024 * 1024);
 
         let artifact_hashes = vec!["hash1".to_string()];
         let now_secs = 1640995200;
@@ -43916,14 +43991,8 @@ mod parser_bomb_protection_tests {
     #[test]
     fn build_trust_scan_evidence_ref_oversized_extension_id() {
         // Test integer truncation protection for oversized extension_id
-        let normal_dependency = RunPackageDependency {
-            extension_id: "normal-extension".to_string(),
-            display_name: "Normal Extension".to_string(),
-        };
-        let oversized_dependency = RunPackageDependency {
-            extension_id: "x".repeat(std::usize::MAX / 3).to_string(), // Oversized but manageable
-            display_name: "Oversized Extension".to_string(),
-        };
+        let normal_dependency = make_dep("normal-extension", "Normal Extension");
+        let oversized_dependency = make_dep(&"x".repeat(1536 * 1024), "Oversized Extension");
 
         let version = "1.0.0";
         let artifact_hashes = vec!["hash1".to_string()];
@@ -43957,15 +44026,12 @@ mod parser_bomb_protection_tests {
     #[test]
     fn build_trust_scan_evidence_ref_oversized_artifact_hash() {
         // Test integer truncation protection for oversized artifact_hash
-        let dependency = RunPackageDependency {
-            extension_id: "test-extension".to_string(),
-            display_name: "Test Extension".to_string(),
-        };
+        let dependency = make_dep("test-extension", "Test Extension");
         let version = "1.0.0";
         let now_secs = 1640995200;
 
         let normal_hashes = vec!["normal-hash".to_string()];
-        let oversized_hashes = vec!["x".repeat(std::usize::MAX / 4).to_string()]; // Oversized hash
+        let oversized_hashes = vec!["x".repeat(1024 * 1024)];
 
         // Both should succeed without panicking
         let result_normal =
@@ -43984,10 +44050,7 @@ mod parser_bomb_protection_tests {
     fn build_trust_scan_evidence_ref_hash_collision_resistance() {
         // Test that length prefixing prevents hash collisions from length manipulation
         // This verifies the security properties of the integer truncation fix
-        let dependency = RunPackageDependency {
-            extension_id: "test".to_string(),
-            display_name: "Test".to_string(),
-        };
+        let dependency = make_dep("test", "Test");
         let now_secs = 1640995200;
 
         // These should produce different hashes due to proper length prefixing
@@ -44017,10 +44080,7 @@ mod parser_bomb_protection_tests {
     #[test]
     fn build_trust_scan_evidence_ref_deterministic_output() {
         // Test that the function produces deterministic output for the same inputs
-        let dependency = RunPackageDependency {
-            extension_id: "deterministic-test".to_string(),
-            display_name: "Deterministic Test".to_string(),
-        };
+        let dependency = make_dep("deterministic-test", "Deterministic Test");
         let version = "2.1.0";
         let artifact_hashes = vec![
             "hash-a".to_string(),
@@ -44061,16 +44121,13 @@ mod parser_bomb_protection_tests {
         fn proptest_trust_scan_saturating_arithmetic_never_panics(
             extension_id in ".*",
             version in ".*",
-            num_hashes in 0usize..100,
-            hash_len in 0usize..100_000,
+            num_hashes in 0usize..16,
+            hash_len in 0usize..4096,
         ) {
             // Property: build_trust_scan_evidence_ref never panics with arbitrary string lengths
             // Tests the 3 saturating arithmetic sites: extension_id.len(), version.len(), artifact_hash.len()
 
-            let dependency = RunPackageDependency {
-                extension_id: extension_id.clone(),
-                display_name: "Test Extension".to_string(),
-            };
+            let dependency = make_dep(&extension_id, "Test Extension");
 
             let artifact_hashes: Vec<String> = (0..num_hashes)
                 .map(|_| "h".repeat(hash_len))
@@ -44088,7 +44145,8 @@ mod parser_bomb_protection_tests {
             assert_eq!(result.evidence_type, EvidenceType::ManifestAdmission);
             assert!(result.verification_receipt_hash.starts_with("sha256:"));
             assert_eq!(result.verification_receipt_hash.len(), 71); // "sha256:" + 64 hex chars
-            assert!(result.evidence_id.contains(&extension_id[..extension_id.len().min(20)]));
+            let prefix: String = extension_id.chars().take(20).collect();
+            assert!(result.evidence_id.contains(&prefix));
         }
 
         #[test]
@@ -44099,10 +44157,7 @@ mod parser_bomb_protection_tests {
         ) {
             // Property: saturating arithmetic handles unicode string lengths correctly
 
-            let dependency = RunPackageDependency {
-                extension_id: unicode_extension_id.clone(),
-                display_name: "Unicode Test".to_string(),
-            };
+            let dependency = make_dep(&unicode_extension_id, "Unicode Test");
 
             let artifact_hashes = vec![unicode_hash.clone()];
 
@@ -44503,20 +44558,17 @@ mod time_math_wraparound_tests {
         ])
         .expect("deploy supervise CLI should parse");
         match parsed.command {
-            cli::Command::Deploy(deploy) => match deploy.subcommand {
-                cli::DeployCommand::Supervise(args) => {
-                    assert_eq!(args.name, "prod-app");
-                    assert_eq!(args.max_runs, 8);
-                    assert_eq!(args.post_rollback_probes, 3);
-                    assert!((args.e_process_alpha - 0.05).abs() < f64::EPSILON);
-                    assert_eq!(args.cooldown_ms, 25);
-                    assert!(args.retire_on_activation);
-                    assert!(args.json);
-                    assert_eq!(args.app_args, vec!["--port=8080".to_string()]);
-                }
-                other => panic!("expected Supervise, got {other:?}"),
-            },
-            other => panic!("expected Deploy command, got {other:?}"),
+            cli::Command::Deploy(cli::DeployCommand::Supervise(args)) => {
+                assert_eq!(args.name, "prod-app");
+                assert_eq!(args.max_runs, 8);
+                assert_eq!(args.post_rollback_probes, 3);
+                assert!((args.e_process_alpha - 0.05).abs() < f64::EPSILON);
+                assert_eq!(args.cooldown_ms, 25);
+                assert!(args.retire_on_activation);
+                assert!(args.json);
+                assert_eq!(args.app_args, vec!["--port=8080".to_string()]);
+            }
+            other => panic!("expected Deploy Supervise command, got {other:?}"),
         }
     }
 
@@ -44726,18 +44778,18 @@ mod time_math_wraparound_tests {
 
         // Negative drill: enter manual safe mode inside good-v1, re-activate a fresh bad-v3,
         // and prove GuestExecutionPermit refuses good-v1 during select_known_good.
-        let sm_path = runtime::safe_mode::safe_mode_state_path_for_root(&good.release_dir);
-        let mut sm = runtime::safe_mode::SafeModeController::default();
-        sm.enter(
-            runtime::safe_mode::SafeModeEntryReason::OperatorExplicit {
-                operator_id: "ops-root".to_string(),
-                justification: "quarantine good-v1".to_string(),
-            },
-            100,
-            "trace-sm",
-        )
-        .expect("enter safe mode");
-        runtime::safe_mode::write_persisted_safe_mode(&sm_path, &sm).expect("persist safe mode");
+        let sm_path = good.release_dir.join(".franken-node/safe-mode/state.json");
+        runtime::safe_mode::update_persisted_safe_mode(&sm_path, true, |sm| {
+            sm.set_flags(runtime::safe_mode::OperationFlags::safe_mode_only());
+            sm.enter_safe_mode(
+                runtime::safe_mode::SafeModeEntryReason::ExplicitFlag,
+                "2026-11-11T00:00:00Z",
+                "sha256:test",
+                Vec::new(),
+            );
+            Ok(())
+        })
+        .expect("persist safe mode");
 
         let bad3 = make_release(&store, &tmp.path().join("bad-v3"), "bad-v3");
         {

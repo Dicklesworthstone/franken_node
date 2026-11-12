@@ -8105,6 +8105,8 @@ fn fleet_reconcile_with_complete_transport_verification() {
 
 #[test]
 fn fleet_http_epoch_barrier_certifies_quiescence_across_enrolled_supervisors_and_aborts_on_fault() {
+    use std::sync::Arc;
+
     use ed25519_dalek::{Signer, SigningKey};
     use frankenengine_node::control_plane::fleet_http_server::{
         FLEET_HTTP_LISTENING, FleetControlPlaneService, FleetHttpServerConfig,
@@ -8112,11 +8114,11 @@ fn fleet_http_epoch_barrier_certifies_quiescence_across_enrolled_supervisors_and
     };
     use frankenengine_node::control_plane::fleet_transport::{
         FLEET_EPOCH_BARRIER_CERTIFIED_DRAIN_SCOPE, NATIVE_SESSION_DRAIN_ATTESTATION_SCHEMA,
-        NATIVE_SESSION_DRAIN_CHECKPOINT_SCHEMA, NativeSessionDrainAttestation,
-        NativeSessionDrainCheckpoint, SeqlockControlPage, fleet_application_checkpoint,
+        NativeSessionDrainAttestation, NativeSessionDrainCheckpoint, SeqlockControlPage,
+        fleet_application_checkpoint,
     };
     use frankenengine_node::control_plane::fleet_transport_http::{
-        FleetControlPlaneUrl, FleetHttpEpochBarrierRequest, HttpFleetTransport,
+        FleetHttpEpochBarrierRequest, HttpFleetTransport,
     };
     use sha2::{Digest, Sha256};
 
@@ -8176,11 +8178,14 @@ fn fleet_http_epoch_barrier_certifies_quiescence_across_enrolled_supervisors_and
     let bound = addr_rx
         .recv_timeout(Duration::from_secs(5))
         .expect("server listening");
-    let base_url = FleetControlPlaneUrl::parse(&format!("http://{bound}")).expect("loopback url");
+    let base_url = format!("http://{bound}");
 
-    let mut operator = HttpFleetTransport::new(base_url.clone(), operator_token).expect("operator");
-    let mut agent_a = HttpFleetTransport::new(base_url.clone(), node_a_token).expect("agent a");
-    let mut agent_b = HttpFleetTransport::new(base_url, node_b_token).expect("agent b");
+    let mut operator = HttpFleetTransport::new(&base_url, operator_token, Duration::from_secs(5))
+        .expect("operator");
+    let mut agent_a =
+        HttpFleetTransport::new(&base_url, node_a_token, Duration::from_secs(5)).expect("agent a");
+    let mut agent_b =
+        HttpFleetTransport::new(&base_url, node_b_token, Duration::from_secs(5)).expect("agent b");
     operator.initialize().expect("operator init");
 
     let quarantine = FleetActionRecord {
@@ -8205,7 +8210,6 @@ fn fleet_http_epoch_barrier_certifies_quiescence_across_enrolled_supervisors_and
     let make_heartbeat = |node_id: &str, key: &SigningKey, generation: u64, indeterminate: u64| {
         let now = Utc::now();
         let mut drain = NativeSessionDrainCheckpoint {
-            schema_version: NATIVE_SESSION_DRAIN_CHECKPOINT_SCHEMA.to_string(),
             applied_actions: expected.clone(),
             session_set_sha256: format!("{generation:02x}").repeat(32),
             admitted_sessions: 3,
