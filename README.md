@@ -1753,7 +1753,7 @@ feature.
 | **Fork detection** | `control_plane::fork_detection` | State-vector hashing, rollback proofs, marker-proof verifier, `DetectionResult` (`Converged`/`Forked`/`GapDetected`/`RollbackDetected`) | Library only |
 | **Control epoch barriers** | `control_plane::control_epoch`, `epoch_transition_barrier`, `fleet_transport::SeqlockControlPage` | Validity-window policy, `EpochRejectionReason` enum, enrolled supervisor Ed25519 drain attestations, 80-byte lock-free seqlock control page | Yes: `fleet serve` (`POST /v2/fleet/epoch-barrier` + `seqlock.page`) and `runtime epoch` (reads live `seqlock.page` when present; compares caller integers otherwise) |
 | **Operator copilot (IBD-8)** | `security::copilot_engine`, `ops::doctor` | Value-of-Information (`VoI = L_wait - L_act`) action ranking over observed workspace pressure, incidents, safe-mode containment, stale trust state, quarantines, and pending deployments | Yes: `doctor expected-loss-actions` (`--from-report` and live `.franken-node/` probe) |
-| **Zero-knowledge compliance attestations** | `security::zk_attestation` | Zero-trusted-setup Ristretto255 Pedersen commitments + Fiat–Shamir CDS94 Schnorr OR-proofs (`zka-ristretto255-v2.0`) | Yes: `trust zk-attest` and `verify zk-attestation` (`zka-v1.0` fails closed with `ERR_ZKA_VERIFIER_UNAVAILABLE`) |
+| **Zero-knowledge compliance attestations** | `security::zk_attestation` | Zero-trusted-setup Ristretto255 Pedersen commitments + Fiat–Shamir CDS94 Schnorr OR-proofs with authenticated validity windows (`zka-ristretto255-v3.0`) | Yes: `trust zk-attest` and `verify zk-attestation`; verification requires independently approved parameters through `--trusted-params-sha256` |
 | **Evidence ledger** | `observability::evidence_ledger` | Append-only Ed25519-signed decision log, hash-chain prev-entry linkage, replay-attack detection, bounded capacity with eviction, optional spill-to-disk | Yes: `run` (including preflight refusals), `trust revoke`, `trust quarantine`, `trust release` and `fleet release` append signed, hash-chained entries to `.franken-node/state/evidence-ledger.db` (fleet decisions go beside the fleet state directory); `verify transparency-log` checks it |
 | **Remote capability tokens** | `security::remote_cap`, `remote::*` | Scope-bound, single-use-optional Ed25519 tokens with endpoint binding | Yes: `remotecap`, `trust scan --deep/--audit`, `trust sync`, `init` |
 | **DGIS adversarial topology** | `security::dgis`, `dgis::*` | Dependency contagion simulator, fragility model, SPOF detection, immunization planner | Partly: the fragility model scores npm maintainer data in `trust scan --deep`; the contagion simulator, SPOF detection and immunization planner are library only |
@@ -1761,6 +1761,34 @@ feature.
 | **ATC adversarial trajectory checker** | `security::trajectory_gaming` + `federation::atc_*` | Camouflage detection severity, ATC participation weighting, reciprocity tracking | Partly: `trust observe` authenticates collector-attributed package measurements and persists BPET camouflage findings on trust cards; federation weighting/reciprocity remains library only (`feature:advanced-features`) |
 | **VEF execution receipts** | `vef::*` | Proof service / generator / scheduler / verifier, linked receipt chain, fail-closed verification | Partly: `debug evidence` verifies `vef::evidence_capsule`; the proof service, scheduler, verifier and receipt chain are library only |
 | **Verifier SDK** | `sdk/verifier` (`frankenengine-verifier-sdk`) | Independent bundle replay, capsule verification, counterfactual reasoning outside the producing runtime | Yes: `ltv attest/verify-as-of` call it; incident bundles the CLI writes verify with its `verify_incident_bundle`; it also builds standalone |
+
+### Verify ZK compliance under approved parameters
+
+Supply the parameter digest retained from your trusted policy or issuance
+workflow when verifying a candidate proof:
+
+```bash
+franken-node verify zk-attestation attestation.json \
+  --trusted-params-sha256 "$APPROVED_ZK_PARAMS_SHA256" \
+  --json
+```
+
+The digest must contain exactly 64 lowercase hexadecimal characters. It binds
+the policy statement, threshold or allowlist relation, verifier key identifier,
+epoch, and challenge nonce. A valid proof under a different or weaker policy
+is rejected even when it uses the same policy identifier. Missing, malformed,
+or mismatched pins cannot produce a successful verification result.
+
+`trust zk-attest --json` reports `params_sha256`, and its human output includes
+the same digest. Retain that value separately when the policy and issuance
+operation are trusted. Reading a digest from an untrusted candidate and passing
+it straight back as the approval pin does not establish trust. A successful
+verification reports `verified_params_sha256`; rejected evidence omits it.
+
+The v3 proof authenticates its generation and expiration times. Historical v2
+proofs require regeneration. The command verifies the approved cryptographic
+statement and its validity interval; it does not discover remote revocations
+or establish that a workload executed.
 
 ---
 

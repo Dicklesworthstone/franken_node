@@ -606,8 +606,10 @@ impl ZkComplianceRelation {
     }
 }
 
-/// Authenticated public verifier parameters binding a `ZkPolicy`'s full content,
-/// verifier key identity, epoch, challenge nonce, and compliance relation.
+/// Public verifier parameters binding a `ZkPolicy`'s statement, verifier key
+/// identity, epoch, challenge nonce, and compliance relation. Constructing these
+/// parameters does not establish trust in the policy or issuer; consumers of
+/// untrusted parameters must independently pin their digest.
 /// INV-ZKA-POLICY-BOUND
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ZkVerifierParams {
@@ -628,7 +630,7 @@ pub struct ZkVerifierParams {
 }
 
 impl ZkVerifierParams {
-    /// Construct authenticated verifier parameters bound to `policy`.
+    /// Construct verifier parameters bound to `policy`, without establishing trust.
     pub fn for_policy(
         policy: &ZkPolicy,
         verifier_key_id: impl Into<String>,
@@ -668,8 +670,9 @@ impl ZkVerifierParams {
         })
     }
 
-    /// Verify that these parameters are authentic, structurally valid, and bound
-    /// to the exact `ZkPolicy` content (not merely a matching `policy_id` string).
+    /// Verify that these parameters are structurally valid and bound to the
+    /// `ZkPolicy` statement (not merely a matching `policy_id` string).
+    /// This does not authenticate the caller's choice of policy or issuer.
     #[must_use]
     pub fn matches_policy(&self, policy: &ZkPolicy) -> bool {
         if self.schema_version != CRYPTO_SCHEMA_VERSION
@@ -1155,6 +1158,54 @@ fn prove_compliance_wire_bytes(
     }
 }
 
+/// Verify a compliance proof against an independently trusted verifier-parameter
+/// digest, then enforce the complete stateless cryptographic and lifecycle checks.
+///
+/// `expected_digest` must be a canonical 64-character lowercase SHA-256 hex digest
+/// supplied by the verifier's trusted configuration or another authenticated
+/// channel. Deriving it from the candidate's own parameters provides no trust
+/// anchor. The digest binds the policy statement, relation, verifier key identity,
+/// epoch, and challenge nonce, so a valid proof for an attacker-selected weaker
+/// policy cannot satisfy the original pin.
+///
+/// Missing, malformed, or mismatched digests fail with `ERR_ZKA_POLICY_MISMATCH`
+/// before proof verification. This stateless API does not discover revocations;
+/// the caller must still supply trusted current time and policy lifecycle state.
+#[must_use]
+pub fn verify_compliance_proof_with_trusted_params_sha256(
+    attestation: &ZkAttestation,
+    policy: &ZkPolicy,
+    verifier_params: &ZkVerifierParams,
+    expected_digest: &str,
+    now_ms: u64,
+    trace_id: String,
+) -> ZkVerificationResult {
+    if expected_digest.len() != 64
+        || !expected_digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return ZkVerificationResult::Rejected {
+            attestation_id: attestation.attestation_id.clone(),
+            policy_id: policy.policy_id.clone(),
+            trace_id,
+            reason: "Trusted verifier parameter digest must be 64 lowercase hexadecimal characters"
+                .to_string(),
+            error_code: error_codes::ERR_ZKA_POLICY_MISMATCH.to_string(),
+        };
+    }
+    if !constant_time_str_eq(expected_digest, &verifier_params.params_sha256()) {
+        return ZkVerificationResult::Rejected {
+            attestation_id: attestation.attestation_id.clone(),
+            policy_id: policy.policy_id.clone(),
+            trace_id,
+            reason: "Verifier parameters do not match the independently trusted digest".to_string(),
+            error_code: error_codes::ERR_ZKA_POLICY_MISMATCH.to_string(),
+        };
+    }
+    verify_compliance_proof_stateless(attestation, policy, verifier_params, now_ms, trace_id)
+}
+
 /// Stateless cryptographic verification of a `zka-ristretto255-v3.0` compliance proof
 /// against `policy` and authenticated `verifier_params` at `now_ms`.
 ///
@@ -1163,6 +1214,8 @@ fn prove_compliance_wire_bytes(
 /// Pedersen homomorphic relation, and CDS94 Schnorr verification. The caller must
 /// supply trusted current policy, verifier parameters, and time; use the ledger
 /// wrapper when retained revocation and expiry state must also be enforced.
+/// For parameters received in an untrusted bundle, use
+/// [`verify_compliance_proof_with_trusted_params_sha256`] with an independent pin.
 #[must_use]
 pub fn verify_compliance_proof_stateless(
     attestation: &ZkAttestation,

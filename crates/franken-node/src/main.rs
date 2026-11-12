@@ -37659,6 +37659,8 @@ struct VerifyZkAttestationCliReport {
     command: &'static str,
     verified: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    verified_params_sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     error_code: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
@@ -37811,11 +37813,12 @@ fn handle_trust_zk_attest(args: &TrustZkAttestArgs) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
         println!(
-            "zk compliance attestation issued: id={} policy={} schema={} commitment={} expires_at_ms={}{}",
+            "zk compliance attestation issued: id={} policy={} schema={} commitment={} params_sha256={} expires_at_ms={}{}",
             report.bundle.attestation.attestation_id,
             report.bundle.policy.policy_id,
             report.bundle.attestation.payload.schema_version,
             report.bundle.attestation.payload.metadata_commitment,
+            report.params_sha256,
             report.bundle.attestation.expires_at_ms,
             report
                 .output_path
@@ -37831,6 +37834,14 @@ fn handle_verify_zk_attestation(args: &VerifyZkAttestationArgs) -> Result<()> {
     if args.bundle_path.as_os_str().is_empty() {
         anyhow::bail!("`verify zk-attestation` requires a bundle path");
     }
+    anyhow::ensure!(
+        args.trusted_params_sha256.len() == 64
+            && args
+                .trusted_params_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+        "`verify zk-attestation` requires --trusted-params-sha256 as 64 lowercase hexadecimal characters from an independently trusted policy authority"
+    );
     let bundle_path = &args.bundle_path;
     let raw = bounded_read_to_string(bundle_path, MAX_GENERAL_FILE_BYTES).with_context(|| {
         format!(
@@ -37879,10 +37890,11 @@ fn handle_verify_zk_attestation(args: &VerifyZkAttestationArgs) -> Result<()> {
                         .to_string(),
                 }
             } else {
-                zk_attestation::verify_compliance_proof_stateless(
+                zk_attestation::verify_compliance_proof_with_trusted_params_sha256(
                     &bundle.attestation,
                     &bundle.policy,
                     &bundle.verifier_params,
+                    &args.trusted_params_sha256,
                     now_ms,
                     trace_id,
                 )
@@ -37923,6 +37935,7 @@ fn handle_verify_zk_attestation(args: &VerifyZkAttestationArgs) -> Result<()> {
         schema_version: VERIFY_ZK_ATTESTATION_CLI_SCHEMA_VERSION,
         command: "verify.zk-attestation",
         verified,
+        verified_params_sha256: verified.then(|| args.trusted_params_sha256.clone()),
         error_code,
         reason,
         attestation_id,
@@ -37940,11 +37953,12 @@ fn handle_verify_zk_attestation(args: &VerifyZkAttestationArgs) -> Result<()> {
         }
     } else if report.verified {
         println!(
-            "verify zk-attestation: PASS attestation={} policy={} schema={} commitment={}",
+            "verify zk-attestation: PASS attestation={} policy={} schema={} commitment={} params_sha256={}",
             report.attestation_id,
             report.policy_id,
             report.payload_schema_version,
-            report.metadata_commitment
+            report.metadata_commitment,
+            args.trusted_params_sha256
         );
     } else {
         eprintln!(

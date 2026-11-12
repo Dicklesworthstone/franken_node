@@ -1,7 +1,8 @@
 //! End-to-end CLI integration tests for:
 //! - `franken-node trust-card reputation` (`tools::reputation_graph_apis`, IBD-9)
 //! - `franken-node trust zk-attest` and `franken-node verify zk-attestation`
-//!   (`security::zk_attestation`, `zka-ristretto255-v3.0` + fail-closed `zka-v1.0`).
+//!   (`security::zk_attestation`, independently pinned `zka-ristretto255-v3.0`
+//!   + fail-closed `zka-v1.0`).
 
 use std::path::Path;
 use std::process::{Command, Output};
@@ -265,6 +266,10 @@ fn zk_attest_and_verify_roundtrip_threshold_and_allowlist_without_witness_disclo
         issued["bundle"]["attestation"]["payload"]["schema_version"],
         "zka-ristretto255-v3.0"
     );
+    // Retain the pin from trusted issuance, independently of the candidate file.
+    let trusted_threshold_params = issued["params_sha256"]
+        .as_str()
+        .expect("issued params hash");
 
     let verified = json_ok(
         dir.path(),
@@ -272,6 +277,8 @@ fn zk_attest_and_verify_roundtrip_threshold_and_allowlist_without_witness_disclo
             "verify",
             "zk-attestation",
             &thresh_bundle_str,
+            "--trusted-params-sha256",
+            trusted_threshold_params,
             "--now-ms",
             "1700000100000",
             "--json",
@@ -282,6 +289,7 @@ fn zk_attest_and_verify_roundtrip_threshold_and_allowlist_without_witness_disclo
         "franken-node/verify-zk-attestation-cli/v1"
     );
     assert_eq!(verified["verified"], true);
+    assert_eq!(verified["verified_params_sha256"], trusted_threshold_params);
     assert!(verified.get("error_code").is_none());
 
     // AllowlistMembership roundtrip: two distinct members produce indistinguishable valid proofs.
@@ -338,6 +346,8 @@ fn zk_attest_and_verify_roundtrip_threshold_and_allowlist_without_witness_disclo
         out_a["bundle"]["attestation"]["payload"]["metadata_commitment"],
         out_b["bundle"]["attestation"]["payload"]["metadata_commitment"]
     );
+    assert_eq!(out_a["params_sha256"], out_b["params_sha256"]);
+    let trusted_allowlist_params = out_a["params_sha256"].as_str().expect("issued params hash");
     assert_eq!(
         out_a["bundle"]["attestation"]["payload"]["proof_bytes_hex"]
             .as_str()
@@ -357,12 +367,18 @@ fn zk_attest_and_verify_roundtrip_threshold_and_allowlist_without_witness_disclo
                 "verify",
                 "zk-attestation",
                 bundle_arg,
+                "--trusted-params-sha256",
+                trusted_allowlist_params,
                 "--now-ms",
                 "1700000050000",
                 "--json",
             ],
         );
         assert_eq!(verified_allow["verified"], true);
+        assert_eq!(
+            verified_allow["verified_params_sha256"],
+            trusted_allowlist_params
+        );
     }
 }
 
@@ -403,7 +419,7 @@ fn zk_verify_rejects_tampered_proof_unsatisfied_witness_and_legacy_v1_fail_close
     // 2. Tampered proof bytes fail closed with ERR_ZKA_WITNESS_INVALID.
     let bundle_path = dir.path().join("valid.json");
     let bundle_str = bundle_path.display().to_string();
-    json_ok(
+    let issued = json_ok(
         dir.path(),
         &[
             "trust",
@@ -423,6 +439,9 @@ fn zk_verify_rejects_tampered_proof_unsatisfied_witness_and_legacy_v1_fail_close
             "--json",
         ],
     );
+    let trusted_params = issued["params_sha256"]
+        .as_str()
+        .expect("issued params hash");
 
     let mut tampered: Value =
         serde_json::from_slice(&std::fs::read(&bundle_path).expect("read")).expect("json");
@@ -449,6 +468,8 @@ fn zk_verify_rejects_tampered_proof_unsatisfied_witness_and_legacy_v1_fail_close
             "verify",
             "zk-attestation",
             &tampered_path.display().to_string(),
+            "--trusted-params-sha256",
+            trusted_params,
             "--now-ms",
             "1700000010000",
             "--json",
@@ -456,6 +477,7 @@ fn zk_verify_rejects_tampered_proof_unsatisfied_witness_and_legacy_v1_fail_close
     );
     assert_eq!(rejected_tamper["verified"], false);
     assert_eq!(rejected_tamper["error_code"], "ERR_ZKA_WITNESS_INVALID");
+    assert!(rejected_tamper.get("verified_params_sha256").is_none());
 
     // 3. Legacy zka-v1.0 attestation fails closed with ERR_ZKA_VERIFIER_UNAVAILABLE.
     let legacy_path = dir.path().join("legacy-v1.json");
@@ -485,6 +507,8 @@ fn zk_verify_rejects_tampered_proof_unsatisfied_witness_and_legacy_v1_fail_close
             "verify",
             "zk-attestation",
             &legacy_path.display().to_string(),
+            "--trusted-params-sha256",
+            trusted_params,
             "--now-ms",
             "1700000010000",
             "--json",
@@ -495,4 +519,173 @@ fn zk_verify_rejects_tampered_proof_unsatisfied_witness_and_legacy_v1_fail_close
         rejected_legacy["error_code"],
         "ERR_ZKA_VERIFIER_UNAVAILABLE"
     );
+    assert!(rejected_legacy.get("verified_params_sha256").is_none());
+}
+
+#[test]
+fn zk_verify_requires_independent_policy_relation_issuer_epoch_and_challenge_pin() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut trusted_params = String::new();
+    let mut trusted_bundle_path = String::new();
+
+    // Every variant has a genuine valid proof and the same policy ID. Only the
+    // first statement was selected by the verifier's independent trust policy.
+    for (label, threshold, private_value, issuer, epoch, challenge) in [
+        ("trusted", "100", "150", "ops-ca", "7", "expected-challenge"),
+        ("weaker", "0", "1", "ops-ca", "7", "expected-challenge"),
+        (
+            "issuer",
+            "100",
+            "150",
+            "foreign-ca",
+            "7",
+            "expected-challenge",
+        ),
+        ("epoch", "100", "150", "ops-ca", "6", "expected-challenge"),
+        (
+            "challenge",
+            "100",
+            "150",
+            "ops-ca",
+            "7",
+            "foreign-challenge",
+        ),
+    ] {
+        let bundle_path = dir.path().join(format!("{label}.json"));
+        let bundle_arg = bundle_path.display().to_string();
+        let issued = json_ok(
+            dir.path(),
+            &[
+                "trust",
+                "zk-attest",
+                "--policy-id",
+                "same-policy-id",
+                "--issuer",
+                issuer,
+                "--threshold",
+                threshold,
+                "--range-bits",
+                "8",
+                "--private-value",
+                private_value,
+                "--epoch",
+                epoch,
+                "--challenge-nonce",
+                challenge,
+                "--now-ms",
+                "1700000000000",
+                "--output",
+                &bundle_arg,
+                "--json",
+            ],
+        );
+        let issued_params = issued["params_sha256"]
+            .as_str()
+            .expect("issued params hash");
+        assert_eq!(issued["bundle"]["policy"]["policy_id"], "same-policy-id");
+        if label == "trusted" {
+            trusted_params = issued_params.to_owned();
+            trusted_bundle_path.clone_from(&bundle_arg);
+        } else {
+            assert_ne!(issued_params, trusted_params, "variant={label}");
+        }
+
+        if label == "weaker" {
+            // An attacker may advertise its own pin inside the candidate. It
+            // cannot replace the separately supplied verifier expectation.
+            let mut candidate = issued["bundle"].clone();
+            candidate["trusted_params_sha256"] = json!(issued_params);
+            std::fs::write(
+                &bundle_path,
+                serde_json::to_vec(&candidate).expect("candidate JSON"),
+            )
+            .expect("write candidate pin");
+        }
+
+        // Positive control: each proof is cryptographically valid when its
+        // complete statement is explicitly approved by the caller.
+        let own_statement = json_ok(
+            dir.path(),
+            &[
+                "verify",
+                "zk-attestation",
+                &bundle_arg,
+                "--trusted-params-sha256",
+                issued_params,
+                "--now-ms",
+                "1700000000001",
+                "--json",
+            ],
+        );
+        assert_eq!(own_statement["verified"], true);
+        assert_eq!(own_statement["verified_params_sha256"], issued_params);
+
+        if label != "trusted" {
+            for (candidate, expected_pin) in [
+                (bundle_arg.as_str(), trusted_params.as_str()),
+                (trusted_bundle_path.as_str(), issued_params),
+            ] {
+                let rejected = json_fail(
+                    dir.path(),
+                    &[
+                        "verify",
+                        "zk-attestation",
+                        candidate,
+                        "--trusted-params-sha256",
+                        expected_pin,
+                        "--now-ms",
+                        "1700000000001",
+                        "--json",
+                    ],
+                );
+                assert_eq!(rejected["verified"], false, "variant={label}");
+                assert_eq!(rejected["error_code"], "ERR_ZKA_POLICY_MISMATCH");
+                assert!(rejected.get("verified_params_sha256").is_none());
+            }
+        }
+    }
+}
+
+#[test]
+fn zk_verify_requires_canonical_external_pin_before_reading_candidate() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let missing_bundle = dir.path().join("not-present.json").display().to_string();
+    let mut cases = vec![vec![
+        "verify".to_owned(),
+        "zk-attestation".to_owned(),
+        missing_bundle.clone(),
+        "--json".to_owned(),
+    ]];
+    for malformed in [
+        String::new(),
+        "a".repeat(63),
+        "a".repeat(65),
+        "A".repeat(64),
+        "g".repeat(64),
+        format!("sha256:{}", "a".repeat(64)),
+        format!(" {}", "a".repeat(64)),
+    ] {
+        cases.push(vec![
+            "verify".to_owned(),
+            "zk-attestation".to_owned(),
+            missing_bundle.clone(),
+            "--trusted-params-sha256".to_owned(),
+            malformed,
+            "--json".to_owned(),
+        ]);
+    }
+    for arguments in cases {
+        let borrowed: Vec<_> = arguments.iter().map(String::as_str).collect();
+        let rejected = json_fail(dir.path(), &borrowed);
+        assert_eq!(
+            rejected["schema_version"],
+            "franken-node/verify-error-cli/v1"
+        );
+        assert_eq!(rejected["command"], "verify.zk-attestation");
+        assert_eq!(rejected["ok"], false);
+        let message = rejected["error"].as_str().expect("structured error");
+        assert!(message.contains("--trusted-params-sha256"), "{message}");
+        assert!(!message.contains("failed reading"), "{message}");
+        assert!(rejected.get("verified_params_sha256").is_none());
+    }
 }
