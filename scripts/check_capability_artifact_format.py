@@ -20,6 +20,7 @@ SPEC_FILE = ROOT / "docs/specs/capability_artifact_format.md"
 IMPL_FILE = ROOT / "crates/franken-node/src/extensions/artifact_contract.rs"
 MOD_FILE = ROOT / "crates/franken-node/src/extensions/mod.rs"
 MAIN_FILE = ROOT / "crates/franken-node/src/main.rs"
+LIB_FILE = ROOT / "crates/franken-node/src/lib.rs"
 CONFORMANCE_TEST = ROOT / "tests/conformance/capability_artifact_admission.rs"
 UNIT_TEST_FILE = ROOT / "tests/test_check_capability_artifact_format.py"
 REPORT_FILE = ROOT / "artifacts/10.17/capability_artifact_vectors.json"
@@ -66,15 +67,29 @@ def _checks() -> list[dict]:
     impl_src = _read(IMPL_FILE)
     mod_src = _read(MOD_FILE)
     main_src = _read(MAIN_FILE)
+    lib_src = _read(LIB_FILE)
     spec_src = _read(SPEC_FILE)
+
+    lib_lines = [line.strip() for line in lib_src.splitlines()]
+    extensions_unconditional_in_lib = False
+    for idx, line in enumerate(lib_lines):
+        if line == "pub mod extensions;":
+            prev = lib_lines[idx - 1] if idx > 0 else ""
+            extensions_unconditional_in_lib = not prev.startswith("#[cfg(")
+            break
+    main_wires_extensions = (
+        "pub mod extensions;" in main_src
+        or "extensions," in main_src
+        or "extensions}" in main_src
+    )
 
     checks.append(_check("Spec file exists", SPEC_FILE.exists(), str(SPEC_FILE)))
     checks.append(_check("Implementation file exists", IMPL_FILE.exists(), str(IMPL_FILE)))
     checks.append(_check("Extensions mod file exists", MOD_FILE.exists(), str(MOD_FILE)))
     checks.append(_check(
         "Main module wired",
-        "pub mod extensions;" in main_src,
-        "pub mod extensions; in main.rs",
+        extensions_unconditional_in_lib and main_wires_extensions,
+        "pub mod extensions; unconditional in lib.rs and wired in main.rs",
     ))
     checks.append(_check(
         "Extensions mod exports artifact_contract",

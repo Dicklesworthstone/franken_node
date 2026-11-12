@@ -164,7 +164,9 @@ use frankenengine_node::ops::engine_dispatcher::RunProjectPaths;
 pub use frankenengine_node::testing;
 #[cfg(test)]
 use frankenengine_node::tools::replay_bundle::{fixture_incident_events, generate_replay_bundle};
-pub use frankenengine_node::{capacity_defaults, connector, control_plane, supply_chain};
+pub use frankenengine_node::{
+    capacity_defaults, connector, control_plane, extensions, supply_chain,
+};
 use frankenengine_node::{
     config::{self, CliOverrides, Profile},
     migration, ops, runtime,
@@ -6630,6 +6632,10 @@ fn verify_deploy_release(release: &runtime::deployment::ReleaseRecord) -> Result
             &runtime.module_conditions,
             runtime.frozen_module_graph_hash.as_deref(),
         )?;
+        release
+            .approval
+            .enforce_attenuated_capability_envelope(&release_config.config)
+            .context("release fails capability envelope attenuation")?;
         let options = GraphOptions {
             symlink_policy: if contained_symlinks {
                 SymlinkPolicy::Contained
@@ -26725,7 +26731,11 @@ fn validate_run_registry_artifact(
         config.runtime.frozen_module_symlinks == Some(true),
         &config.runtime.module_conditions,
         config.runtime.frozen_module_graph_hash.as_deref(),
-    )
+    )?;
+    approval
+        .enforce_attenuated_capability_envelope(config)
+        .context("registry-approved capability envelope attenuation failed")?;
+    Ok(())
 }
 
 fn validate_publisher_key_placement(

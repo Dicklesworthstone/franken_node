@@ -1635,7 +1635,10 @@ pub mod crypto;
 pub mod dgis;
 #[cfg(feature = "advanced-features")]
 pub mod encoding;
-#[cfg(feature = "advanced-features")]
+// bd-reality-20260923-26n9r.28: `extensions` (`artifact_contract` + Macaroon
+// capability attenuation) is compiled unconditionally so default-feature
+// registry admission, `run --registry-artifact`, and `deploy` share one
+// authenticated capability envelope.
 pub mod extensions;
 #[cfg(feature = "advanced-features")]
 pub mod federation;

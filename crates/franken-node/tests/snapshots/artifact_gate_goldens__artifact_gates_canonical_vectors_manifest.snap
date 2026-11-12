@@ -141,7 +141,7 @@ source: crates/franken-node/tests/artifact_gate_goldens.rs
         ]
       },
       "schema_version": "capability-artifact-v1.0",
-      "scrubbed_sha256": "31d4d4812d8f11ff86b023d7bcde3270ac330f13e5ec722e86bf30e4d098aa27",
+      "scrubbed_sha256": "c38c93b9ca73d60033c0eef002fe442af276c2429cce99190face635ad0414de",
       "section": "10.17",
       "status": "PASS",
       "top_level_keys": [
@@ -184,7 +184,7 @@ source: crates/franken-node/tests/artifact_gate_goldens.rs
         ]
       },
       "schema_version": "zk-attestation-v1.0",
-      "scrubbed_sha256": "a13f09028462353650ed3bafa9b1efaba0e27c05adff3cdabc63303b5fe3d4f3",
+      "scrubbed_sha256": "1cdfa962fe89d1477f37ddf36de331b00d10a35bfa75d936e05a92b2bc842290",
       "section": "10.17",
       "status": "pass",
       "top_level_keys": [

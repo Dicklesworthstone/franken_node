@@ -26,7 +26,7 @@
     {
       "check": "Main module wired",
       "passed": true,
-      "detail": "pub mod extensions; in main.rs"
+      "detail": "pub mod extensions; unconditional in lib.rs and wired in main.rs"
     },
     {
       "check": "Extensions mod exports artifact_contract",
@@ -206,7 +206,7 @@
     {
       "check": "Rust unit tests >= 8",
       "passed": true,
-      "detail": "found 15"
+      "detail": "found 92"
     },
     {
       "check": "Conformance test exists",

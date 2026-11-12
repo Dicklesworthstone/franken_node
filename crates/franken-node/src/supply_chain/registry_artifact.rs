@@ -149,6 +149,51 @@ impl ArtifactRuntimeAuthority {
         digest.update(bytes);
         Ok(format!("sha256:{}", hex::encode(digest.finalize())))
     }
+
+    /// Canonical `extensions::artifact_contract` scope token for a runtime capability ID.
+    pub fn canonical_capability_scope(capability_id: &str) -> &'static str {
+        match capability_id {
+            "builtin" => "runtime:builtin",
+            "console" => "runtime:console",
+            "env_read" => "env:read",
+            "fs_read" => "filesystem:read",
+            "fs_write" => "filesystem:write",
+            "heap_allocate" => "heap:allocate",
+            "module_load" => "module:load",
+            "network_egress" => "network:egress",
+            "process_spawn" => "process:spawn",
+            "random_read" => "runtime:random",
+            "timer" => "runtime:timer",
+            "vm_dispatch" => "vm:dispatch",
+            _ => "runtime:unknown",
+        }
+    }
+
+    /// Project this publisher-signed ceiling into canonical [`CapabilityEntry`] bounds
+    /// for root [`crate::extensions::artifact_contract::MacaroonCapabilityEnvelope`] minting.
+    pub fn to_capability_entries(
+        &self,
+    ) -> Result<Vec<crate::extensions::artifact_contract::CapabilityEntry>> {
+        self.validate()?;
+        let mut sorted = self.allowed_capabilities.clone();
+        sorted.sort();
+        Ok(sorted
+            .into_iter()
+            .map(|capability_id| {
+                let max_calls_per_epoch = match capability_id.as_str() {
+                    "console" => u64::from(self.max_console_entries),
+                    "heap_allocate" => u64::from(self.max_heap_objects),
+                    _ => self.max_instructions,
+                };
+                let scope = Self::canonical_capability_scope(&capability_id).to_string();
+                crate::extensions::artifact_contract::CapabilityEntry {
+                    capability_id,
+                    scope,
+                    max_calls_per_epoch,
+                }
+            })
+            .collect())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -872,6 +917,251 @@ impl PublisherSourceGraphApproval {
             "explicit frozen module graph pin conflicts with publisher-approved source capsule"
         );
         Ok(())
+    }
+
+    /// Decode the retained Ed25519 publisher public key bound to this approval.
+    pub fn publisher_verifying_key(&self) -> Result<VerifyingKey> {
+        let bytes =
+            hex::decode(&self.publisher_public_key_hex).context("invalid publisher key hex")?;
+        let key_bytes: [u8; 32] = bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("publisher public key must be 32 bytes"))?;
+        VerifyingKey::from_bytes(&key_bytes).context("invalid Ed25519 publisher public key")
+    }
+
+    /// Synthesize a Macaroon-style monotonically attenuated capability envelope
+    /// (`PublisherRoot -> RegistryAdmission -> DeployReleasePolicy`) for v2
+    /// publisher-approved artifacts (`Ok(None)` for legacy v1 source-only capsules).
+    pub fn attenuated_capability_envelope(
+        &self,
+        config: &crate::config::Config,
+    ) -> Result<Option<crate::extensions::artifact_contract::MacaroonCapabilityEnvelope>> {
+        use crate::extensions::artifact_contract::{
+            AttenuationLayer, CapabilityCaveat, MacaroonCapabilityEnvelope,
+        };
+        use std::collections::BTreeSet;
+
+        self.validate()?;
+        let Some(authority) = self.runtime_authority() else {
+            return Ok(None);
+        };
+        let publisher_key = self.publisher_verifying_key()?;
+        let initial_entries = authority.to_capability_entries()?;
+        let commitment = authority.commitment()?;
+
+        let mut envelope = MacaroonCapabilityEnvelope::from_verified_publisher_approval(
+            &publisher_key,
+            &self.manifest_sha256,
+            &self.identity.artifact_sha256,
+            &self.capsule_digest,
+            &self.graph_input_hash,
+            &authority.policy_revision,
+            &commitment,
+            initial_entries,
+        )
+        .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+
+        // Layer 1 (RegistryAdmission): pin root closure module scope and deny env keys if env_read absent.
+        envelope = envelope
+            .attenuate(
+                AttenuationLayer::RegistryAdmission,
+                CapabilityCaveat::ModuleScopePrefix(String::new()),
+            )
+            .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+        if !authority
+            .allowed_capabilities
+            .iter()
+            .any(|cap| cap == "env_read")
+        {
+            envelope = envelope
+                .attenuate(
+                    AttenuationLayer::RegistryAdmission,
+                    CapabilityCaveat::EnvKeys(BTreeSet::new()),
+                )
+                .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+        }
+
+        // Layer 2 (DeployReleasePolicy): intersect with operator config/profile authority.
+        let mut narrowed_caps: BTreeSet<String> =
+            authority.allowed_capabilities.iter().cloned().collect();
+        if config.security.child_process_spawn.is_none() {
+            narrowed_caps.remove("process_spawn");
+        }
+        envelope = envelope
+            .attenuate(
+                AttenuationLayer::DeployReleasePolicy,
+                CapabilityCaveat::AllowedCapabilities(narrowed_caps.clone()),
+            )
+            .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+
+        if narrowed_caps.contains("network_egress")
+            && !config.security.network_policy.allowlist.is_empty()
+        {
+            let mut host_ports = BTreeSet::new();
+            for entry in &config.security.network_policy.allowlist {
+                let token = match entry.port {
+                    Some(port) => format!("{}:{port}", entry.host.trim()),
+                    None => entry.host.trim().to_string(),
+                };
+                if !token.is_empty() {
+                    host_ports.insert(token);
+                }
+            }
+            if !host_ports.is_empty() {
+                envelope = envelope
+                    .attenuate(
+                        AttenuationLayer::DeployReleasePolicy,
+                        CapabilityCaveat::HostPorts(host_ports),
+                    )
+                    .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+            }
+        }
+
+        if let Some(limit) = config.runtime.max_console_entries
+            && narrowed_caps.contains("console")
+        {
+            let capped = u64::try_from(limit)
+                .unwrap_or(u64::MAX)
+                .min(u64::from(authority.max_console_entries));
+            envelope = envelope
+                .attenuate(
+                    AttenuationLayer::DeployReleasePolicy,
+                    CapabilityCaveat::MaxCallsPerEpoch {
+                        capability_id: "console".to_string(),
+                        max_calls: capped,
+                    },
+                )
+                .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+        }
+
+        if let Some(limit) = config.runtime.max_heap_objects
+            && narrowed_caps.contains("heap_allocate")
+        {
+            let capped = u64::from(limit).min(u64::from(authority.max_heap_objects));
+            envelope = envelope
+                .attenuate(
+                    AttenuationLayer::DeployReleasePolicy,
+                    CapabilityCaveat::MaxCallsPerEpoch {
+                        capability_id: "heap_allocate".to_string(),
+                        max_calls: capped,
+                    },
+                )
+                .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+        }
+
+        if let Some(limit) = config.runtime.max_instructions
+            && limit < authority.max_instructions
+        {
+            for cap_id in &narrowed_caps {
+                if !matches!(cap_id.as_str(), "console" | "heap_allocate") {
+                    envelope = envelope
+                        .attenuate(
+                            AttenuationLayer::DeployReleasePolicy,
+                            CapabilityCaveat::MaxCallsPerEpoch {
+                                capability_id: cap_id.clone(),
+                                max_calls: limit,
+                            },
+                        )
+                        .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+                }
+            }
+        }
+
+        Ok(Some(envelope))
+    }
+
+    /// Further attenuate an operator-bound envelope across a `ModuleImportEdge`,
+    /// scoping module resolution to the imported `node_modules/<pkg>` boundary
+    /// (or directory prefix) and intersecting any caller-supplied capability subset.
+    pub fn attenuate_for_module_edge(
+        &self,
+        config: &crate::config::Config,
+        imported_module_path: &str,
+        narrowed_capabilities: Option<&std::collections::BTreeSet<String>>,
+    ) -> Result<Option<crate::extensions::artifact_contract::MacaroonCapabilityEnvelope>> {
+        use crate::extensions::artifact_contract::{AttenuationLayer, CapabilityCaveat};
+
+        let Some(mut envelope) = self.attenuated_capability_envelope(config)? else {
+            return Ok(None);
+        };
+        let scope_prefix = derive_module_edge_scope_prefix(imported_module_path)?;
+        if !scope_prefix.is_empty() {
+            envelope = envelope
+                .attenuate(
+                    AttenuationLayer::ModuleImportEdge,
+                    CapabilityCaveat::ModuleScopePrefix(scope_prefix),
+                )
+                .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+        }
+        if let Some(subset) = narrowed_capabilities {
+            envelope = envelope
+                .attenuate(
+                    AttenuationLayer::ModuleImportEdge,
+                    CapabilityCaveat::AllowedCapabilities(subset.clone()),
+                )
+                .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+        }
+        Ok(Some(envelope))
+    }
+
+    /// Synthesize, cryptographically verify, and check zero-drift runtime enforcement
+    /// of the attenuated Macaroon capability envelope at execution/deploy admission.
+    pub fn enforce_attenuated_capability_envelope(
+        &self,
+        config: &crate::config::Config,
+    ) -> Result<Option<crate::extensions::artifact_contract::EffectiveCapabilityCeiling>> {
+        use crate::extensions::artifact_contract::{DriftCheckResult, EnforcementEngine};
+
+        let Some(envelope) = self.attenuated_capability_envelope(config)? else {
+            return Ok(None);
+        };
+        let publisher_key = self.publisher_verifying_key()?;
+        let ceiling = envelope
+            .verify(Some(&publisher_key))
+            .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+        let engine = EnforcementEngine::from_ceiling(&ceiling);
+        let active: Vec<String> = ceiling.allowed_capabilities.iter().cloned().collect();
+        match engine.check_drift(&active) {
+            DriftCheckResult::NoDrift { .. } => Ok(Some(ceiling)),
+            DriftCheckResult::DriftDetected { missing, extra, .. } => {
+                anyhow::bail!(
+                    "attenuated capability envelope drift detected (missing={missing:?}, extra={extra:?})"
+                );
+            }
+        }
+    }
+}
+
+fn derive_module_edge_scope_prefix(imported_module_path: &str) -> Result<String> {
+    anyhow::ensure!(
+        !imported_module_path.is_empty()
+            && !imported_module_path.starts_with('/')
+            && !imported_module_path.contains('\\'),
+        "imported module path must be normalized relative capsule path"
+    );
+    let parts: Vec<&str> = imported_module_path.split('/').collect();
+    anyhow::ensure!(
+        parts.iter().all(|part| !matches!(*part, "" | "." | "..")),
+        "imported module path contains invalid segment"
+    );
+    if let Some(idx) = parts.iter().rposition(|part| *part == "node_modules")
+        && idx + 1 < parts.len()
+    {
+        let end = idx
+            + if parts[idx + 1].starts_with('@') {
+                3
+            } else {
+                2
+            };
+        if end <= parts.len() {
+            return Ok(parts[..end].join("/"));
+        }
+    }
+    if parts.len() > 1 {
+        Ok(parts[..parts.len() - 1].join("/"))
+    } else {
+        Ok(String::new())
     }
 }
 
@@ -2198,6 +2488,94 @@ mod tests {
         assert_eq!(
             std::fs::read(&path).unwrap(),
             b"explicit private source export"
+        );
+    }
+
+    #[test]
+    fn publisher_approval_synthesizes_and_enforces_macaroon_attenuated_capability_envelope() {
+        use crate::config::{Config, NetworkAllowlistEntry, Profile};
+        use crate::extensions::artifact_contract::{AttenuationLayer, CapabilityCaveat};
+        use std::collections::BTreeSet;
+
+        // Legacy v1 source-only approval preserves `None` without claiming authority.
+        let v1_fixture = Fixture::new("console.log(42);\n");
+        let strict_cfg = Config::for_profile(Profile::Strict);
+        assert!(
+            v1_fixture
+                .approval()
+                .enforce_attenuated_capability_envelope(&strict_cfg)
+                .unwrap()
+                .is_none()
+        );
+
+        // v2 publisher runtime authority requesting `process_spawn` and `network_egress`:
+        let mut authority = runtime_authority();
+        authority.allowed_capabilities.push("process_spawn".into());
+        authority.allowed_capabilities.push("network_egress".into());
+        let v2_fixture = Fixture::with_modules(
+            "app.cjs",
+            "console.log(require('dep'));\n",
+            &[
+                (
+                    "node_modules/dep/package.json",
+                    "{\"name\":\"dep\",\"version\":\"1.0.0\",\"main\":\"index.js\"}\n",
+                ),
+                ("node_modules/dep/index.js", "module.exports = 'ok';\n"),
+            ],
+        )
+        .with_runtime_authority(&authority);
+        let approval = v2_fixture.approval();
+
+        let mut cfg = Config::for_profile(Profile::Strict);
+        cfg.runtime.max_console_entries = Some(16);
+        cfg.security.network_policy.allowlist = vec![NetworkAllowlistEntry {
+            host: "api.internal.example".into(),
+            port: Some(8443),
+            reason: "pinned telemetry endpoint".into(),
+        }];
+
+        let ceiling = approval
+            .enforce_attenuated_capability_envelope(&cfg)
+            .expect("enforce attenuated envelope")
+            .expect("v2 approval produces attenuated ceiling");
+        // `child_process_spawn` is None on `cfg`, so `process_spawn` is monotonically stripped!
+        assert!(!ceiling.permits_capability("process_spawn"));
+        assert!(ceiling.permits_capability("network_egress"));
+        assert_eq!(ceiling.call_budget_for("console"), Some(16));
+        assert!(ceiling.permits_host_port("api.internal.example:8443"));
+        assert!(!ceiling.permits_host_port("api.internal.example:443"));
+        assert!(!ceiling.permits_env_key("HOME"));
+
+        // Attenuate across a `ModuleImportEdge` into `node_modules/dep/index.js`:
+        let dep_caps: BTreeSet<String> = ["console", "heap_allocate", "vm_dispatch"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        let edge_env = approval
+            .attenuate_for_module_edge(&cfg, "node_modules/dep/index.js", Some(&dep_caps))
+            .expect("module edge attenuation")
+            .expect("v2 module edge envelope");
+        let edge_ceiling = edge_env
+            .verify(Some(&approval.publisher_verifying_key().unwrap()))
+            .expect("verify module edge envelope");
+        assert!(!edge_ceiling.permits_capability("network_egress"));
+        assert!(!edge_ceiling.permits_capability("fs_read"));
+        assert!(edge_ceiling.permits_module_path("node_modules/dep/index.js"));
+        assert!(!edge_ceiling.permits_module_path("app.cjs"));
+
+        // Imported module cannot re-escalate `network_egress` or widen module scope!
+        assert!(
+            edge_env
+                .attenuate(
+                    AttenuationLayer::ModuleImportEdge,
+                    CapabilityCaveat::AllowedCapabilities(
+                        ["console", "network_egress"]
+                            .into_iter()
+                            .map(str::to_owned)
+                            .collect()
+                    ),
+                )
+                .is_err()
         );
     }
 }

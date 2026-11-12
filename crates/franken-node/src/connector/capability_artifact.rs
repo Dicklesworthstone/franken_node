@@ -1,8 +1,14 @@
-//! bd-3ku8: Capability-carrying extension artifact format and enforcement.
+//! bd-3ku8: Legacy `cart-v1.0` digest-bound capability artifact model.
 //!
-//! Defines the canonical format for extension artifacts that carry explicit
-//! capability contracts. Implements admission control (fail-closed) and
-//! runtime envelope enforcement (no drift).
+//! **Security note (`bd-reality-20260923-26n9r.28`):** This module binds an
+//! envelope to an `ArtifactIdentity` with an unkeyed SHA-256 integrity digest
+//! (`INV-CART-DIGEST-BOUND`) and is retained strictly for `cart-v1.0` vector
+//! and conformance coverage. It does **not** authenticate a publisher key and
+//! must never be used as a trust or execution-authority gate. Live publisher
+//! authentication and monotonically attenuated runtime authority are enforced
+//! through [`crate::extensions::artifact_contract`] (`CapabilityContract` +
+//! `MacaroonCapabilityEnvelope`) and
+//! [`crate::supply_chain::registry_artifact::PublisherSourceGraphApproval`].
 //!
 //! # Artifact Format
 //!

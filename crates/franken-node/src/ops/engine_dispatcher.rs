@@ -4080,6 +4080,11 @@ pub fn validate_execution_trust(
             revocation.reason,
         );
     }
+    if let Some(approval) = requirements.registry_artifact_approval.as_ref() {
+        approval
+            .enforce_attenuated_capability_envelope(config)
+            .context("Execution blocked: publisher capability envelope attenuation failed")?;
+    }
     let mut warnings = Vec::new();
     let mut admitted_tracked_card = false;
     for extension_id in &requirements.dependency_ids {

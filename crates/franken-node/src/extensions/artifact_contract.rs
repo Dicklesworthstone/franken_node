@@ -6,6 +6,7 @@
 //! envelope must match the admitted contract without drift.
 
 use ed25519_dalek::{SigningKey, VerifyingKey};
+use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -17,11 +18,20 @@ use crate::capacity_defaults::bounded_input::{
 use crate::supply_chain::artifact_signing::{sign_bytes, verify_signature};
 use crate::supply_chain::trust_card::{RevocationStatus, TrustCardRegistry};
 
+type HmacSha256 = Hmac<Sha256>;
+
 /// Report schema version for capability artifact vectors.
 pub const SCHEMA_VERSION: &str = "capability-artifact-v1.0";
+/// Schema version for Macaroon-style monotonically attenuated capability envelopes.
+pub const MACAROON_ENVELOPE_SCHEMA: &str = "franken-node/macaroon-capability-envelope/v1";
 
 const CONTRACT_SIGNATURE_PREFIX: &str = "ed25519-v1:";
 const CONTRACT_SIGNATURE_DOMAIN: &[u8] = b"franken-node/capability-contract-signature/v1:";
+const MACAROON_ROOT_DOMAIN: &[u8] = b"franken-node/macaroon-capability-root/v1:";
+const MACAROON_CAVEAT_DOMAIN: &[u8] = b"franken-node/macaroon-capability-caveat/v1:";
+const MAX_CAVEATS_PER_ENVELOPE: usize = 64;
+const MAX_CAVEAT_SET_ENTRIES: usize = 128;
+const MAX_CAVEAT_PATH_BYTES: usize = 512;
 
 /// Reserved placeholder for unknown artifact identifiers.
 const RESERVED_ARTIFACT_ID: &str = "<unknown>";
@@ -119,6 +129,8 @@ pub mod error_codes {
     pub const ERR_ARTIFACT_ENFORCEMENT_DRIFT: &str = "ERR_ARTIFACT_ENFORCEMENT_DRIFT";
     pub const ERR_ARTIFACT_ADMISSION_DENIED: &str = "ERR_ARTIFACT_ADMISSION_DENIED";
     pub const ERR_ARTIFACT_TRUSTED_SIGNER_CAPACITY: &str = "ERR_ARTIFACT_TRUSTED_SIGNER_CAPACITY";
+    pub const ERR_ARTIFACT_PRIVILEGE_AMPLIFICATION: &str = "ERR_ARTIFACT_PRIVILEGE_AMPLIFICATION";
+    pub const ERR_ARTIFACT_MACAROON_TAG_MISMATCH: &str = "ERR_ARTIFACT_MACAROON_TAG_MISMATCH";
 }
 
 // ---------------------------------------------------------------------------
@@ -1071,6 +1083,1084 @@ pub fn make_artifact(
         capability_contract: Some(contract),
         payload_hash,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Macaroon-Style Monotonically Attenuated Capability Envelope (.28)
+// ---------------------------------------------------------------------------
+
+/// Ordered authority boundary at which a capability caveat is appended.
+///
+/// Authority can only advance monotonically across layers
+/// (`PublisherRoot <= RegistryAdmission <= DeployReleasePolicy <= ModuleImportEdge`)
+/// and can never widen an already-narrowed capability, scope, or quota.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttenuationLayer {
+    PublisherRoot,
+    RegistryAdmission,
+    DeployReleasePolicy,
+    ModuleImportEdge,
+}
+
+impl AttenuationLayer {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::PublisherRoot => "publisher_root",
+            Self::RegistryAdmission => "registry_admission",
+            Self::DeployReleasePolicy => "deploy_release_policy",
+            Self::ModuleImportEdge => "module_import_edge",
+        }
+    }
+}
+
+/// First-party capability attenuation caveat chained by RFC-2104 `HMAC-SHA256`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum CapabilityCaveat {
+    /// Intersect allowed capabilities with this subset (cannot introduce new IDs).
+    AllowedCapabilities(BTreeSet<String>),
+    /// Restrict filesystem operations to paths under these normalized prefixes.
+    PathPrefixes(BTreeSet<String>),
+    /// Restrict network egress to exact `host` or `host:port` patterns (or `*.domain`).
+    HostPorts(BTreeSet<String>),
+    /// Restrict environment reads to these exact variable names.
+    EnvKeys(BTreeSet<String>),
+    /// Lower the per-epoch call ceiling for an admitted capability (`<= current`).
+    MaxCallsPerEpoch {
+        capability_id: String,
+        max_calls: u64,
+    },
+    /// Restrict module resolution/execution authority to a normalized relative prefix.
+    ModuleScopePrefix(String),
+}
+
+/// A caveat bound into the envelope's chained `HMAC-SHA256` tag sequence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignedCaveat {
+    pub layer: AttenuationLayer,
+    pub caveat: CapabilityCaveat,
+    pub caveat_tag_hex: String,
+}
+
+/// Cryptographically authenticated root authority from which caveats attenuate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "anchor_kind", rename_all = "snake_case")]
+pub enum RootAuthorityAnchor {
+    /// Rooted in an Ed25519-signed [`CapabilityContract`].
+    SignedCapabilityContract { contract: CapabilityContract },
+    /// Rooted in a publisher-signed v2 registry manifest + `FNSGCAP1` capsule approval.
+    VerifiedPublisherApproval {
+        publisher_public_key_hex: String,
+        manifest_sha256: String,
+        artifact_sha256: String,
+        capsule_digest: String,
+        graph_input_hash: String,
+        policy_revision: String,
+        authority_commitment: String,
+        initial_capabilities: Vec<CapabilityEntry>,
+    },
+}
+
+/// Effective runtime capability ceiling after verifying root + all caveats.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EffectiveCapabilityCeiling {
+    pub contract_id: String,
+    pub allowed_capabilities: BTreeSet<String>,
+    pub max_calls_per_epoch: BTreeMap<String, u64>,
+    pub capability_scopes: BTreeMap<String, String>,
+    pub path_prefixes: Option<BTreeSet<String>>,
+    pub host_ports: Option<BTreeSet<String>>,
+    pub env_keys: Option<BTreeSet<String>>,
+    pub module_scope_prefix: Option<String>,
+}
+
+impl EffectiveCapabilityCeiling {
+    pub fn permits_capability(&self, capability_id: &str) -> bool {
+        self.allowed_capabilities.contains(capability_id)
+    }
+
+    pub fn call_budget_for(&self, capability_id: &str) -> Option<u64> {
+        self.allowed_capabilities
+            .contains(capability_id)
+            .then(|| self.max_calls_per_epoch.get(capability_id).copied())
+            .flatten()
+    }
+
+    pub fn permits_path(&self, candidate_path: &str) -> bool {
+        if validate_caveat_path_prefix(candidate_path, true).is_err() {
+            return false;
+        }
+        match &self.path_prefixes {
+            None => true,
+            Some(prefixes) => prefixes
+                .iter()
+                .any(|allowed| path_is_within_prefix(candidate_path, allowed)),
+        }
+    }
+
+    pub fn permits_host_port(&self, candidate_host_port: &str) -> bool {
+        if validate_host_port_token(candidate_host_port).is_err() {
+            return false;
+        }
+        match &self.host_ports {
+            None => true,
+            Some(allowed_set) => allowed_set
+                .iter()
+                .any(|pattern| host_port_is_covered_by(candidate_host_port, pattern)),
+        }
+    }
+
+    pub fn permits_env_key(&self, env_key: &str) -> bool {
+        if validate_env_key_token(env_key).is_err() {
+            return false;
+        }
+        match &self.env_keys {
+            None => true,
+            Some(keys) => keys.contains(env_key),
+        }
+    }
+
+    pub fn permits_module_path(&self, module_path: &str) -> bool {
+        if validate_caveat_path_prefix(module_path, false).is_err() {
+            return false;
+        }
+        match &self.module_scope_prefix {
+            None => true,
+            Some(prefix) if prefix.is_empty() => true,
+            Some(prefix) => path_is_within_prefix(module_path, prefix),
+        }
+    }
+}
+
+/// Errors produced when minting, attenuating, or verifying a [`MacaroonCapabilityEnvelope`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttenuationError {
+    SchemaMismatch {
+        expected: String,
+        actual: String,
+    },
+    MissingTrustAnchor,
+    InvalidRootSignature,
+    InvalidRootAnchor {
+        detail: String,
+    },
+    CaveatLimitExceeded {
+        max_caveats: usize,
+    },
+    LayerOrderViolation {
+        previous: AttenuationLayer,
+        attempted: AttenuationLayer,
+    },
+    InvalidCaveat {
+        detail: String,
+    },
+    PrivilegeAmplification {
+        layer: AttenuationLayer,
+        detail: String,
+    },
+    TagMismatch {
+        step: Option<usize>,
+    },
+}
+
+impl AttenuationError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::SchemaMismatch { .. } => error_codes::ERR_ARTIFACT_SCHEMA_MISMATCH,
+            Self::MissingTrustAnchor | Self::InvalidRootSignature => {
+                error_codes::ERR_ARTIFACT_SIGNATURE_INVALID
+            }
+            Self::InvalidRootAnchor { .. }
+            | Self::CaveatLimitExceeded { .. }
+            | Self::LayerOrderViolation { .. }
+            | Self::InvalidCaveat { .. } => error_codes::ERR_ARTIFACT_INVALID_CONTRACT,
+            Self::PrivilegeAmplification { .. } => {
+                error_codes::ERR_ARTIFACT_PRIVILEGE_AMPLIFICATION
+            }
+            Self::TagMismatch { .. } => error_codes::ERR_ARTIFACT_MACAROON_TAG_MISMATCH,
+        }
+    }
+}
+
+impl std::fmt::Display for AttenuationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SchemaMismatch { expected, actual } => {
+                write!(
+                    f,
+                    "{}: expected envelope schema '{expected}', got '{actual}'",
+                    self.code()
+                )
+            }
+            Self::MissingTrustAnchor => {
+                write!(
+                    f,
+                    "{}: independent trusted publisher key required",
+                    self.code()
+                )
+            }
+            Self::InvalidRootSignature => {
+                write!(
+                    f,
+                    "{}: root Ed25519 publisher signature verification failed",
+                    self.code()
+                )
+            }
+            Self::InvalidRootAnchor { detail } => {
+                write!(f, "{}: invalid root anchor: {detail}", self.code())
+            }
+            Self::CaveatLimitExceeded { max_caveats } => {
+                write!(
+                    f,
+                    "{}: caveat chain exceeds maximum length ({max_caveats})",
+                    self.code()
+                )
+            }
+            Self::LayerOrderViolation {
+                previous,
+                attempted,
+            } => {
+                write!(
+                    f,
+                    "{}: attenuation layer regressed from {} to {}",
+                    self.code(),
+                    previous.as_str(),
+                    attempted.as_str()
+                )
+            }
+            Self::InvalidCaveat { detail } => {
+                write!(f, "{}: invalid capability caveat: {detail}", self.code())
+            }
+            Self::PrivilegeAmplification { layer, detail } => {
+                write!(
+                    f,
+                    "{}: privilege amplification refused at {}: {detail}",
+                    self.code(),
+                    layer.as_str()
+                )
+            }
+            Self::TagMismatch { step: Some(idx) } => {
+                write!(
+                    f,
+                    "{}: chained HMAC-SHA256 caveat tag mismatch at step {idx}",
+                    self.code()
+                )
+            }
+            Self::TagMismatch { step: None } => {
+                write!(f, "{}: envelope tail HMAC-SHA256 tag mismatch", self.code())
+            }
+        }
+    }
+}
+
+impl std::error::Error for AttenuationError {}
+
+impl EnforcementEngine {
+    /// Construct a runtime [`EnforcementEngine`] from a verified [`EffectiveCapabilityCeiling`].
+    pub fn from_ceiling(ceiling: &EffectiveCapabilityCeiling) -> Self {
+        let mut admitted = BTreeMap::new();
+        for cap_id in &ceiling.allowed_capabilities {
+            let scope = ceiling
+                .capability_scopes
+                .get(cap_id)
+                .cloned()
+                .unwrap_or_else(|| format!("runtime:{cap_id}"));
+            let max_calls_per_epoch = ceiling
+                .max_calls_per_epoch
+                .get(cap_id)
+                .copied()
+                .unwrap_or(0);
+            admitted.insert(
+                cap_id.clone(),
+                CapabilityEntry {
+                    capability_id: cap_id.clone(),
+                    scope,
+                    max_calls_per_epoch,
+                },
+            );
+        }
+        Self {
+            admitted_capabilities: admitted,
+            calls_in_epoch: BTreeMap::new(),
+            contract_id: ceiling.contract_id.clone(),
+        }
+    }
+}
+
+/// Macaroon-style capability envelope combining an Ed25519-authenticated publisher root
+/// with chained RFC-2104 `HMAC-SHA256` caveats that monotonically narrow authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MacaroonCapabilityEnvelope {
+    pub schema_version: String,
+    pub root: RootAuthorityAnchor,
+    pub caveats: Vec<SignedCaveat>,
+    pub tail_tag_hex: String,
+}
+
+impl MacaroonCapabilityEnvelope {
+    /// Mint a root envelope from an Ed25519-signed [`CapabilityContract`] verified
+    /// against an independently configured `trusted_publisher` public key.
+    pub fn from_signed_contract(
+        contract: CapabilityContract,
+        trusted_publisher: &VerifyingKey,
+    ) -> Result<Self, AttenuationError> {
+        let root = RootAuthorityAnchor::SignedCapabilityContract { contract };
+        let (_, root_tag) = verify_and_seed_root(&root, Some(trusted_publisher))?;
+        Ok(Self {
+            schema_version: MACAROON_ENVELOPE_SCHEMA.to_string(),
+            root,
+            caveats: Vec::new(),
+            tail_tag_hex: hex::encode(root_tag),
+        })
+    }
+
+    /// Mint a root envelope from an authenticated v2 publisher source-graph approval.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_verified_publisher_approval(
+        publisher_public_key: &VerifyingKey,
+        manifest_sha256: impl Into<String>,
+        artifact_sha256: impl Into<String>,
+        capsule_digest: impl Into<String>,
+        graph_input_hash: impl Into<String>,
+        policy_revision: impl Into<String>,
+        authority_commitment: impl Into<String>,
+        initial_capabilities: Vec<CapabilityEntry>,
+    ) -> Result<Self, AttenuationError> {
+        let root = RootAuthorityAnchor::VerifiedPublisherApproval {
+            publisher_public_key_hex: hex::encode(publisher_public_key.as_bytes()),
+            manifest_sha256: manifest_sha256.into(),
+            artifact_sha256: artifact_sha256.into(),
+            capsule_digest: capsule_digest.into(),
+            graph_input_hash: graph_input_hash.into(),
+            policy_revision: policy_revision.into(),
+            authority_commitment: authority_commitment.into(),
+            initial_capabilities,
+        };
+        let (_, root_tag) = verify_and_seed_root(&root, Some(publisher_public_key))?;
+        Ok(Self {
+            schema_version: MACAROON_ENVELOPE_SCHEMA.to_string(),
+            root,
+            caveats: Vec::new(),
+            tail_tag_hex: hex::encode(root_tag),
+        })
+    }
+
+    /// Append a monotonically narrowing caveat at `layer` and chain its `HMAC-SHA256` tag.
+    pub fn attenuate(
+        &self,
+        layer: AttenuationLayer,
+        caveat: CapabilityCaveat,
+    ) -> Result<Self, AttenuationError> {
+        if self.caveats.len() >= MAX_CAVEATS_PER_ENVELOPE {
+            return Err(AttenuationError::CaveatLimitExceeded {
+                max_caveats: MAX_CAVEATS_PER_ENVELOPE,
+            });
+        }
+        if let Some(last) = self.caveats.last()
+            && layer < last.layer
+        {
+            return Err(AttenuationError::LayerOrderViolation {
+                previous: last.layer,
+                attempted: layer,
+            });
+        }
+        let (mut ceiling, mut current_tag) = verify_root_without_external_key(&self.root)?;
+        for (idx, existing) in self.caveats.iter().enumerate() {
+            apply_caveat_monotonically(&mut ceiling, existing.layer, &existing.caveat)?;
+            current_tag = compute_caveat_hmac(&current_tag, idx, existing.layer, &existing.caveat)?;
+            let expected_bytes = decode_hex_tag(&existing.caveat_tag_hex)
+                .ok_or(AttenuationError::TagMismatch { step: Some(idx) })?;
+            if !crate::security::constant_time::ct_eq_bytes(&current_tag, &expected_bytes) {
+                return Err(AttenuationError::TagMismatch { step: Some(idx) });
+            }
+        }
+        let tail_bytes = decode_hex_tag(&self.tail_tag_hex)
+            .ok_or(AttenuationError::TagMismatch { step: None })?;
+        if !crate::security::constant_time::ct_eq_bytes(&current_tag, &tail_bytes) {
+            return Err(AttenuationError::TagMismatch { step: None });
+        }
+
+        // Enforce monotonic narrowing before signing the new caveat into the chain.
+        apply_caveat_monotonically(&mut ceiling, layer, &caveat)?;
+        let next_idx = self.caveats.len();
+        let next_tag = compute_caveat_hmac(&current_tag, next_idx, layer, &caveat)?;
+        let next_tag_hex = hex::encode(next_tag);
+
+        let mut next = self.clone();
+        next.caveats.push(SignedCaveat {
+            layer,
+            caveat,
+            caveat_tag_hex: next_tag_hex.clone(),
+        });
+        next.tail_tag_hex = next_tag_hex;
+        Ok(next)
+    }
+
+    /// Cryptographically verify the root publisher anchor, every chained `HMAC-SHA256`
+    /// caveat tag in constant time, layer order, and strict monotonic non-escalation.
+    pub fn verify(
+        &self,
+        trusted_publisher: Option<&VerifyingKey>,
+    ) -> Result<EffectiveCapabilityCeiling, AttenuationError> {
+        if self.schema_version != MACAROON_ENVELOPE_SCHEMA {
+            return Err(AttenuationError::SchemaMismatch {
+                expected: MACAROON_ENVELOPE_SCHEMA.to_string(),
+                actual: self.schema_version.clone(),
+            });
+        }
+        if self.caveats.len() > MAX_CAVEATS_PER_ENVELOPE {
+            return Err(AttenuationError::CaveatLimitExceeded {
+                max_caveats: MAX_CAVEATS_PER_ENVELOPE,
+            });
+        }
+
+        let (mut ceiling, mut current_tag) = verify_and_seed_root(&self.root, trusted_publisher)?;
+        let mut prev_layer: Option<AttenuationLayer> = None;
+        for (idx, signed) in self.caveats.iter().enumerate() {
+            if let Some(previous) = prev_layer
+                && signed.layer < previous
+            {
+                return Err(AttenuationError::LayerOrderViolation {
+                    previous,
+                    attempted: signed.layer,
+                });
+            }
+            prev_layer = Some(signed.layer);
+
+            apply_caveat_monotonically(&mut ceiling, signed.layer, &signed.caveat)?;
+            current_tag = compute_caveat_hmac(&current_tag, idx, signed.layer, &signed.caveat)?;
+            let step_tag = decode_hex_tag(&signed.caveat_tag_hex)
+                .ok_or(AttenuationError::TagMismatch { step: Some(idx) })?;
+            if !crate::security::constant_time::ct_eq_bytes(&current_tag, &step_tag) {
+                return Err(AttenuationError::TagMismatch { step: Some(idx) });
+            }
+        }
+
+        let tail_tag = decode_hex_tag(&self.tail_tag_hex)
+            .ok_or(AttenuationError::TagMismatch { step: None })?;
+        if !crate::security::constant_time::ct_eq_bytes(&current_tag, &tail_tag) {
+            return Err(AttenuationError::TagMismatch { step: None });
+        }
+
+        Ok(ceiling)
+    }
+
+    /// Verify the envelope and materialize a runtime [`EnforcementEngine`] bound to
+    /// the resulting attenuated ceiling.
+    pub fn to_enforcement_engine(
+        &self,
+        trusted_publisher: Option<&VerifyingKey>,
+    ) -> Result<EnforcementEngine, AttenuationError> {
+        let ceiling = self.verify(trusted_publisher)?;
+        Ok(EnforcementEngine::from_ceiling(&ceiling))
+    }
+
+    pub fn tail_tag_hex(&self) -> &str {
+        &self.tail_tag_hex
+    }
+
+    pub fn caveats(&self) -> &[SignedCaveat] {
+        &self.caveats
+    }
+}
+
+fn hmac_sha256_array(key: &[u8], payload: &[u8]) -> Result<[u8; 32], AttenuationError> {
+    let mut mac =
+        HmacSha256::new_from_slice(key).map_err(|_| AttenuationError::InvalidRootAnchor {
+            detail: "HMAC-SHA256 key initialization failed".to_string(),
+        })?;
+    mac.update(payload);
+    Ok(mac.finalize().into_bytes().into())
+}
+
+fn decode_hex_tag(encoded: &str) -> Option<[u8; 32]> {
+    if !is_hex_sha256(encoded) {
+        return None;
+    }
+    hex::decode(encoded).ok()?.try_into().ok()
+}
+
+fn is_sha256_prefixed(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(is_hex_sha256)
+}
+
+fn push_lp_str(buf: &mut Vec<u8>, s: &str) {
+    buf.extend_from_slice(&len_to_u64(s.len()).to_le_bytes());
+    buf.extend_from_slice(s.as_bytes());
+}
+
+fn build_ceiling_from_entries(
+    contract_id: String,
+    entries: &[CapabilityEntry],
+) -> Result<EffectiveCapabilityCeiling, AttenuationError> {
+    if entries.is_empty() || entries.len() > MAX_CAPABILITIES_PER_CONTRACT {
+        return Err(AttenuationError::InvalidRootAnchor {
+            detail: "root capability list must be non-empty and within contract bounds".to_string(),
+        });
+    }
+    let mut allowed_capabilities = BTreeSet::new();
+    let mut max_calls_per_epoch = BTreeMap::new();
+    let mut capability_scopes = BTreeMap::new();
+    for entry in entries {
+        if let Some(detail) = invalid_token_detail("capability_id", &entry.capability_id) {
+            return Err(AttenuationError::InvalidRootAnchor { detail });
+        }
+        if let Some(detail) = invalid_token_detail("capability scope", &entry.scope) {
+            return Err(AttenuationError::InvalidRootAnchor { detail });
+        }
+        if entry.max_calls_per_epoch == 0 {
+            return Err(AttenuationError::InvalidRootAnchor {
+                detail: format!(
+                    "root capability '{}' must have positive max_calls_per_epoch",
+                    entry.capability_id
+                ),
+            });
+        }
+        if !allowed_capabilities.insert(entry.capability_id.clone()) {
+            return Err(AttenuationError::InvalidRootAnchor {
+                detail: format!("duplicate root capability '{}'", entry.capability_id),
+            });
+        }
+        max_calls_per_epoch.insert(entry.capability_id.clone(), entry.max_calls_per_epoch);
+        capability_scopes.insert(entry.capability_id.clone(), entry.scope.clone());
+    }
+    Ok(EffectiveCapabilityCeiling {
+        contract_id,
+        allowed_capabilities,
+        max_calls_per_epoch,
+        capability_scopes,
+        path_prefixes: None,
+        host_ports: None,
+        env_keys: None,
+        module_scope_prefix: None,
+    })
+}
+
+fn verify_and_seed_root(
+    root: &RootAuthorityAnchor,
+    trusted_publisher: Option<&VerifyingKey>,
+) -> Result<(EffectiveCapabilityCeiling, [u8; 32]), AttenuationError> {
+    match root {
+        RootAuthorityAnchor::SignedCapabilityContract { contract } => {
+            let publisher_key = trusted_publisher.ok_or(AttenuationError::MissingTrustAnchor)?;
+            if let Some(detail) = invalid_token_detail("contract_id", &contract.contract_id) {
+                return Err(AttenuationError::InvalidRootAnchor { detail });
+            }
+            if !verify_contract_signature(contract, publisher_key) {
+                return Err(AttenuationError::InvalidRootSignature);
+            }
+            compute_signed_contract_root(contract)
+        }
+        RootAuthorityAnchor::VerifiedPublisherApproval {
+            publisher_public_key_hex,
+            manifest_sha256,
+            artifact_sha256,
+            capsule_digest,
+            graph_input_hash,
+            policy_revision,
+            authority_commitment,
+            initial_capabilities,
+        } => {
+            let publisher_key = trusted_publisher.ok_or(AttenuationError::MissingTrustAnchor)?;
+            let expected_pub_hex = hex::encode(publisher_key.as_bytes());
+            if !crate::security::constant_time::ct_eq(&expected_pub_hex, publisher_public_key_hex) {
+                return Err(AttenuationError::InvalidRootSignature);
+            }
+            validate_publisher_approval_fields(
+                publisher_public_key_hex,
+                manifest_sha256,
+                artifact_sha256,
+                capsule_digest,
+                graph_input_hash,
+                policy_revision,
+                authority_commitment,
+            )?;
+            let ceiling =
+                build_ceiling_from_entries(authority_commitment.clone(), initial_capabilities)?;
+            let root_tag = compute_publisher_approval_root_tag(
+                publisher_public_key_hex,
+                manifest_sha256,
+                artifact_sha256,
+                capsule_digest,
+                graph_input_hash,
+                policy_revision,
+                authority_commitment,
+                &ceiling,
+            )?;
+            Ok((ceiling, root_tag))
+        }
+    }
+}
+
+fn verify_root_without_external_key(
+    root: &RootAuthorityAnchor,
+) -> Result<(EffectiveCapabilityCeiling, [u8; 32]), AttenuationError> {
+    match root {
+        RootAuthorityAnchor::SignedCapabilityContract { contract } => {
+            if let Some(detail) = invalid_token_detail("contract_id", &contract.contract_id) {
+                return Err(AttenuationError::InvalidRootAnchor { detail });
+            }
+            if contract_signature_hex(&contract.signature).is_none() {
+                return Err(AttenuationError::InvalidRootSignature);
+            }
+            compute_signed_contract_root(contract)
+        }
+        RootAuthorityAnchor::VerifiedPublisherApproval {
+            publisher_public_key_hex,
+            manifest_sha256,
+            artifact_sha256,
+            capsule_digest,
+            graph_input_hash,
+            policy_revision,
+            authority_commitment,
+            initial_capabilities,
+        } => {
+            validate_publisher_approval_fields(
+                publisher_public_key_hex,
+                manifest_sha256,
+                artifact_sha256,
+                capsule_digest,
+                graph_input_hash,
+                policy_revision,
+                authority_commitment,
+            )?;
+            let ceiling =
+                build_ceiling_from_entries(authority_commitment.clone(), initial_capabilities)?;
+            let root_tag = compute_publisher_approval_root_tag(
+                publisher_public_key_hex,
+                manifest_sha256,
+                artifact_sha256,
+                capsule_digest,
+                graph_input_hash,
+                policy_revision,
+                authority_commitment,
+                &ceiling,
+            )?;
+            Ok((ceiling, root_tag))
+        }
+    }
+}
+
+fn compute_signed_contract_root(
+    contract: &CapabilityContract,
+) -> Result<(EffectiveCapabilityCeiling, [u8; 32]), AttenuationError> {
+    let ceiling = build_ceiling_from_entries(contract.contract_id.clone(), &contract.capabilities)?;
+    let mut payload = Vec::new();
+    push_lp_str(&mut payload, "signed_capability_contract");
+    push_lp_str(&mut payload, &contract.signer_id);
+    push_lp_str(&mut payload, &compute_contract_digest(contract));
+    push_lp_str(&mut payload, &contract.signature);
+    let root_tag = hmac_sha256_array(MACAROON_ROOT_DOMAIN, &payload)?;
+    Ok((ceiling, root_tag))
+}
+
+fn validate_publisher_approval_fields(
+    publisher_public_key_hex: &str,
+    manifest_sha256: &str,
+    artifact_sha256: &str,
+    capsule_digest: &str,
+    graph_input_hash: &str,
+    policy_revision: &str,
+    authority_commitment: &str,
+) -> Result<(), AttenuationError> {
+    if !is_hex_sha256(publisher_public_key_hex) {
+        return Err(AttenuationError::InvalidRootAnchor {
+            detail: "publisher_public_key_hex must be 64 lowercase hex digits".to_string(),
+        });
+    }
+    for (label, digest) in [
+        ("manifest_sha256", manifest_sha256),
+        ("artifact_sha256", artifact_sha256),
+        ("capsule_digest", capsule_digest),
+        ("graph_input_hash", graph_input_hash),
+        ("authority_commitment", authority_commitment),
+    ] {
+        if !is_sha256_prefixed(digest) {
+            return Err(AttenuationError::InvalidRootAnchor {
+                detail: format!("{label} must be sha256:<64 lowercase hex digits>"),
+            });
+        }
+    }
+    if policy_revision.is_empty()
+        || policy_revision.len() > 128
+        || policy_revision.trim() != policy_revision
+        || policy_revision.chars().any(char::is_control)
+    {
+        return Err(AttenuationError::InvalidRootAnchor {
+            detail: "policy_revision must be non-empty, trimmed, bounded, and control-free"
+                .to_string(),
+        });
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compute_publisher_approval_root_tag(
+    publisher_public_key_hex: &str,
+    manifest_sha256: &str,
+    artifact_sha256: &str,
+    capsule_digest: &str,
+    graph_input_hash: &str,
+    policy_revision: &str,
+    authority_commitment: &str,
+    ceiling: &EffectiveCapabilityCeiling,
+) -> Result<[u8; 32], AttenuationError> {
+    let mut payload = Vec::new();
+    push_lp_str(&mut payload, "verified_publisher_approval");
+    for field in [
+        publisher_public_key_hex,
+        manifest_sha256,
+        artifact_sha256,
+        capsule_digest,
+        graph_input_hash,
+        policy_revision,
+        authority_commitment,
+    ] {
+        push_lp_str(&mut payload, field);
+    }
+    payload.extend_from_slice(&len_to_u64(ceiling.allowed_capabilities.len()).to_le_bytes());
+    for cap_id in &ceiling.allowed_capabilities {
+        push_lp_str(&mut payload, cap_id);
+        let scope = ceiling
+            .capability_scopes
+            .get(cap_id)
+            .map_or("", String::as_str);
+        push_lp_str(&mut payload, scope);
+        let budget = ceiling
+            .max_calls_per_epoch
+            .get(cap_id)
+            .copied()
+            .unwrap_or(0);
+        payload.extend_from_slice(&budget.to_le_bytes());
+    }
+    hmac_sha256_array(MACAROON_ROOT_DOMAIN, &payload)
+}
+
+fn compute_caveat_hmac(
+    prior_tag: &[u8; 32],
+    step_index: usize,
+    layer: AttenuationLayer,
+    caveat: &CapabilityCaveat,
+) -> Result<[u8; 32], AttenuationError> {
+    let mut payload = MACAROON_CAVEAT_DOMAIN.to_vec();
+    payload.extend_from_slice(&len_to_u64(step_index).to_le_bytes());
+    push_lp_str(&mut payload, layer.as_str());
+    match caveat {
+        CapabilityCaveat::AllowedCapabilities(caps) => {
+            push_lp_str(&mut payload, "allowed_capabilities");
+            payload.extend_from_slice(&len_to_u64(caps.len()).to_le_bytes());
+            for cap in caps {
+                push_lp_str(&mut payload, cap);
+            }
+        }
+        CapabilityCaveat::PathPrefixes(prefixes) => {
+            push_lp_str(&mut payload, "path_prefixes");
+            payload.extend_from_slice(&len_to_u64(prefixes.len()).to_le_bytes());
+            for prefix in prefixes {
+                push_lp_str(&mut payload, prefix);
+            }
+        }
+        CapabilityCaveat::HostPorts(hosts) => {
+            push_lp_str(&mut payload, "host_ports");
+            payload.extend_from_slice(&len_to_u64(hosts.len()).to_le_bytes());
+            for host in hosts {
+                push_lp_str(&mut payload, host);
+            }
+        }
+        CapabilityCaveat::EnvKeys(keys) => {
+            push_lp_str(&mut payload, "env_keys");
+            payload.extend_from_slice(&len_to_u64(keys.len()).to_le_bytes());
+            for key in keys {
+                push_lp_str(&mut payload, key);
+            }
+        }
+        CapabilityCaveat::MaxCallsPerEpoch {
+            capability_id,
+            max_calls,
+        } => {
+            push_lp_str(&mut payload, "max_calls_per_epoch");
+            push_lp_str(&mut payload, capability_id);
+            payload.extend_from_slice(&max_calls.to_le_bytes());
+        }
+        CapabilityCaveat::ModuleScopePrefix(prefix) => {
+            push_lp_str(&mut payload, "module_scope_prefix");
+            push_lp_str(&mut payload, prefix);
+        }
+    }
+    hmac_sha256_array(prior_tag, &payload)
+}
+
+fn validate_caveat_path_prefix(prefix: &str, allow_leading_slash: bool) -> Result<(), String> {
+    if prefix.is_empty() {
+        return Err("path prefix must not be empty".to_string());
+    }
+    if prefix.len() > MAX_CAVEAT_PATH_BYTES {
+        return Err(format!("path prefix exceeds {MAX_CAVEAT_PATH_BYTES} bytes"));
+    }
+    if prefix.trim() != prefix || prefix.chars().any(char::is_control) {
+        return Err("path prefix contains whitespace padding or control characters".to_string());
+    }
+    if prefix.contains('\\') {
+        return Err("path prefix must use '/' separators without '\\'".to_string());
+    }
+    if !allow_leading_slash && prefix.starts_with('/') {
+        return Err("module scope prefix must be relative (no leading '/')".to_string());
+    }
+    let body = if allow_leading_slash {
+        prefix.strip_prefix('/').unwrap_or(prefix)
+    } else {
+        prefix
+    };
+    let body = body.strip_suffix('/').unwrap_or(body);
+    if body.is_empty() && !allow_leading_slash {
+        return Err("relative scope prefix must contain at least one path segment".to_string());
+    }
+    if !body.is_empty()
+        && body
+            .split('/')
+            .any(|segment| matches!(segment, "" | "." | ".."))
+    {
+        return Err("path prefix contains empty, '.', or '..' traversal segment".to_string());
+    }
+    Ok(())
+}
+
+fn path_is_within_prefix(candidate: &str, prefix: &str) -> bool {
+    let normalized_prefix = if prefix == "/" {
+        "/"
+    } else {
+        prefix.strip_suffix('/').unwrap_or(prefix)
+    };
+    let normalized_candidate = if candidate == "/" {
+        "/"
+    } else {
+        candidate.strip_suffix('/').unwrap_or(candidate)
+    };
+    if normalized_prefix == "/" {
+        return normalized_candidate.starts_with('/');
+    }
+    if normalized_candidate == normalized_prefix {
+        return true;
+    }
+    normalized_candidate
+        .strip_prefix(normalized_prefix)
+        .is_some_and(|rest| rest.starts_with('/'))
+}
+
+fn validate_host_port_token(token: &str) -> Result<(), String> {
+    if token.is_empty() || token.len() > 256 {
+        return Err("host:port pattern must be 1..=256 bytes".to_string());
+    }
+    if token.trim() != token || !token.is_ascii() || token.bytes().any(|b| b.is_ascii_control()) {
+        return Err("host:port pattern must be trimmed printable ASCII".to_string());
+    }
+    if token.contains(['/', '\\', ' ', '@', '?']) {
+        return Err("host:port pattern must not contain URL path, query, or userinfo".to_string());
+    }
+    Ok(())
+}
+
+fn split_host_and_port(pattern: &str) -> (&str, Option<&str>) {
+    if let Some((host, port)) = pattern.rsplit_once(':')
+        && !port.is_empty()
+        && port.bytes().all(|b| b.is_ascii_digit())
+    {
+        return (host, Some(port));
+    }
+    (pattern, None)
+}
+
+fn host_port_is_covered_by(candidate: &str, allowed_pattern: &str) -> bool {
+    let (cand_host, cand_port) = split_host_and_port(candidate);
+    let (allow_host, allow_port) = split_host_and_port(allowed_pattern);
+    if let Some(expected_port) = allow_port
+        && cand_port != Some(expected_port)
+    {
+        return false;
+    }
+    let cand_lower = cand_host.to_ascii_lowercase();
+    let allow_lower = allow_host.to_ascii_lowercase();
+    if cand_lower == allow_lower {
+        return true;
+    }
+    if let Some(domain_suffix) = allow_lower.strip_prefix("*.") {
+        return cand_lower
+            .strip_suffix(domain_suffix)
+            .is_some_and(|head| head.ends_with('.') && head.len() > 1);
+    }
+    false
+}
+
+fn validate_env_key_token(key: &str) -> Result<(), String> {
+    if key.is_empty() || key.len() > 128 {
+        return Err("env key must be 1..=128 bytes".to_string());
+    }
+    if !key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+        return Err("env key must contain only ASCII alphanumeric or '_' characters".to_string());
+    }
+    Ok(())
+}
+
+fn apply_caveat_monotonically(
+    ceiling: &mut EffectiveCapabilityCeiling,
+    layer: AttenuationLayer,
+    caveat: &CapabilityCaveat,
+) -> Result<(), AttenuationError> {
+    match caveat {
+        CapabilityCaveat::AllowedCapabilities(next_caps) => {
+            if next_caps.len() > MAX_CAPABILITIES_PER_CONTRACT {
+                return Err(AttenuationError::InvalidCaveat {
+                    detail: "AllowedCapabilities exceeds contract fanout bound".to_string(),
+                });
+            }
+            for cap in next_caps {
+                if let Some(detail) = invalid_token_detail("capability_id", cap) {
+                    return Err(AttenuationError::InvalidCaveat { detail });
+                }
+                if !ceiling.allowed_capabilities.contains(cap) {
+                    return Err(AttenuationError::PrivilegeAmplification {
+                        layer,
+                        detail: format!(
+                            "cannot grant unadmitted or previously stripped capability '{cap}'"
+                        ),
+                    });
+                }
+            }
+            ceiling
+                .allowed_capabilities
+                .retain(|cap| next_caps.contains(cap));
+            ceiling
+                .max_calls_per_epoch
+                .retain(|cap, _| next_caps.contains(cap));
+            ceiling
+                .capability_scopes
+                .retain(|cap, _| next_caps.contains(cap));
+        }
+        CapabilityCaveat::PathPrefixes(next_prefixes) => {
+            if next_prefixes.len() > MAX_CAVEAT_SET_ENTRIES {
+                return Err(AttenuationError::InvalidCaveat {
+                    detail: "PathPrefixes exceeds maximum caveat set size".to_string(),
+                });
+            }
+            for prefix in next_prefixes {
+                validate_caveat_path_prefix(prefix, true)
+                    .map_err(|detail| AttenuationError::InvalidCaveat { detail })?;
+            }
+            if let Some(current_prefixes) = &ceiling.path_prefixes {
+                for next in next_prefixes {
+                    if !current_prefixes
+                        .iter()
+                        .any(|allowed| path_is_within_prefix(next, allowed))
+                    {
+                        return Err(AttenuationError::PrivilegeAmplification {
+                            layer,
+                            detail: format!(
+                                "path prefix '{next}' escapes already-narrowed path ceiling"
+                            ),
+                        });
+                    }
+                }
+            }
+            ceiling.path_prefixes = Some(next_prefixes.clone());
+        }
+        CapabilityCaveat::HostPorts(next_hosts) => {
+            if next_hosts.len() > MAX_CAVEAT_SET_ENTRIES {
+                return Err(AttenuationError::InvalidCaveat {
+                    detail: "HostPorts exceeds maximum caveat set size".to_string(),
+                });
+            }
+            for host in next_hosts {
+                validate_host_port_token(host)
+                    .map_err(|detail| AttenuationError::InvalidCaveat { detail })?;
+            }
+            if let Some(current_hosts) = &ceiling.host_ports {
+                for next in next_hosts {
+                    if !current_hosts
+                        .iter()
+                        .any(|allowed| host_port_is_covered_by(next, allowed))
+                    {
+                        return Err(AttenuationError::PrivilegeAmplification {
+                            layer,
+                            detail: format!(
+                                "host:port '{next}' escapes already-narrowed egress ceiling"
+                            ),
+                        });
+                    }
+                }
+            }
+            ceiling.host_ports = Some(next_hosts.clone());
+        }
+        CapabilityCaveat::EnvKeys(next_keys) => {
+            if next_keys.len() > MAX_CAVEAT_SET_ENTRIES {
+                return Err(AttenuationError::InvalidCaveat {
+                    detail: "EnvKeys exceeds maximum caveat set size".to_string(),
+                });
+            }
+            for key in next_keys {
+                validate_env_key_token(key)
+                    .map_err(|detail| AttenuationError::InvalidCaveat { detail })?;
+            }
+            if let Some(current_keys) = &ceiling.env_keys {
+                for next in next_keys {
+                    if !current_keys.contains(next) {
+                        return Err(AttenuationError::PrivilegeAmplification {
+                            layer,
+                            detail: format!(
+                                "env key '{next}' is outside already-narrowed env ceiling"
+                            ),
+                        });
+                    }
+                }
+            }
+            ceiling.env_keys = Some(next_keys.clone());
+        }
+        CapabilityCaveat::MaxCallsPerEpoch {
+            capability_id,
+            max_calls,
+        } => {
+            if let Some(detail) = invalid_token_detail("capability_id", capability_id) {
+                return Err(AttenuationError::InvalidCaveat { detail });
+            }
+            let Some(current_max) = ceiling.max_calls_per_epoch.get_mut(capability_id) else {
+                return Err(AttenuationError::PrivilegeAmplification {
+                    layer,
+                    detail: format!(
+                        "cannot set call quota for unadmitted capability '{capability_id}'"
+                    ),
+                });
+            };
+            if *max_calls > *current_max {
+                return Err(AttenuationError::PrivilegeAmplification {
+                    layer,
+                    detail: format!(
+                        "max_calls_per_epoch for '{capability_id}' ({max_calls}) exceeds ceiling ({current_max})"
+                    ),
+                });
+            }
+            *current_max = *max_calls;
+        }
+        CapabilityCaveat::ModuleScopePrefix(next_scope) => {
+            if !next_scope.is_empty() {
+                validate_caveat_path_prefix(next_scope, false)
+                    .map_err(|detail| AttenuationError::InvalidCaveat { detail })?;
+            }
+            if let Some(current_scope) = &ceiling.module_scope_prefix
+                && !current_scope.is_empty()
+                && (next_scope.is_empty() || !path_is_within_prefix(next_scope, current_scope))
+            {
+                return Err(AttenuationError::PrivilegeAmplification {
+                    layer,
+                    detail: format!(
+                        "module scope prefix '{next_scope}' widens current module prefix '{current_scope}'"
+                    ),
+                });
+            }
+            ceiling.module_scope_prefix = Some(next_scope.clone());
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -3693,5 +4783,380 @@ mod tests {
                 outcome
             ),
         }
+    }
+
+    #[test]
+    fn macaroon_envelope_attenuates_monotonically_across_all_four_layers() {
+        let key = test_signing_key();
+        let pubkey = key.verifying_key();
+        let contract = make_contract(
+            "contract-macaroon-root",
+            "ext-macaroon",
+            vec![
+                CapabilityEntry {
+                    capability_id: "fs_read".to_string(),
+                    scope: "filesystem:read".to_string(),
+                    max_calls_per_epoch: 500,
+                },
+                CapabilityEntry {
+                    capability_id: "network_egress".to_string(),
+                    scope: "network:egress".to_string(),
+                    max_calls_per_epoch: 100,
+                },
+                CapabilityEntry {
+                    capability_id: "env_read".to_string(),
+                    scope: "env:read".to_string(),
+                    max_calls_per_epoch: 50,
+                },
+                CapabilityEntry {
+                    capability_id: "process_spawn".to_string(),
+                    scope: "process:spawn".to_string(),
+                    max_calls_per_epoch: 5,
+                },
+            ],
+            "signer-A",
+            SCHEMA_VERSION,
+            1_700_000_000_000,
+        );
+
+        let root_env = MacaroonCapabilityEnvelope::from_signed_contract(contract, &pubkey)
+            .expect("mint root macaroon envelope");
+        let l1 = root_env
+            .attenuate(
+                AttenuationLayer::PublisherRoot,
+                CapabilityCaveat::PathPrefixes(
+                    ["/srv/app", "config/public"]
+                        .into_iter()
+                        .map(str::to_owned)
+                        .collect(),
+                ),
+            )
+            .expect("publisher root path prefix");
+        let l2 = l1
+            .attenuate(
+                AttenuationLayer::RegistryAdmission,
+                CapabilityCaveat::ModuleScopePrefix("packages/core".to_string()),
+            )
+            .expect("registry admission module scope");
+        let l3 = l2
+            .attenuate(
+                AttenuationLayer::DeployReleasePolicy,
+                CapabilityCaveat::AllowedCapabilities(
+                    ["fs_read", "network_egress", "env_read"]
+                        .into_iter()
+                        .map(str::to_owned)
+                        .collect(),
+                ),
+            )
+            .expect("deploy strips process_spawn")
+            .attenuate(
+                AttenuationLayer::DeployReleasePolicy,
+                CapabilityCaveat::HostPorts(
+                    ["api.example.com:443", "*.cdn.example.com:443"]
+                        .into_iter()
+                        .map(str::to_owned)
+                        .collect(),
+                ),
+            )
+            .expect("deploy narrows host:ports")
+            .attenuate(
+                AttenuationLayer::DeployReleasePolicy,
+                CapabilityCaveat::EnvKeys(
+                    ["NODE_ENV", "APP_REGION"]
+                        .into_iter()
+                        .map(str::to_owned)
+                        .collect(),
+                ),
+            )
+            .expect("deploy narrows env keys")
+            .attenuate(
+                AttenuationLayer::DeployReleasePolicy,
+                CapabilityCaveat::MaxCallsPerEpoch {
+                    capability_id: "network_egress".to_string(),
+                    max_calls: 25,
+                },
+            )
+            .expect("deploy lowers network_egress call budget");
+        let l4 = l3
+            .attenuate(
+                AttenuationLayer::ModuleImportEdge,
+                CapabilityCaveat::PathPrefixes(["/srv/app/readonly".to_string()].into()),
+            )
+            .expect("module edge narrows path prefix")
+            .attenuate(
+                AttenuationLayer::ModuleImportEdge,
+                CapabilityCaveat::ModuleScopePrefix(
+                    "packages/core/node_modules/helper".to_string(),
+                ),
+            )
+            .expect("module edge narrows module scope");
+
+        let ceiling = l4.verify(Some(&pubkey)).expect("verify full caveat chain");
+        assert!(!ceiling.permits_capability("process_spawn"));
+        assert!(ceiling.permits_capability("fs_read"));
+        assert_eq!(ceiling.call_budget_for("network_egress"), Some(25));
+        assert!(ceiling.permits_path("/srv/app/readonly/index.json"));
+        assert!(!ceiling.permits_path("/srv/app/secrets.json"));
+        assert!(!ceiling.permits_path("/srv/app/readonly/../secrets.json"));
+        assert!(ceiling.permits_host_port("api.example.com:443"));
+        assert!(ceiling.permits_host_port("assets.cdn.example.com:443"));
+        assert!(!ceiling.permits_host_port("api.example.com:80"));
+        assert!(!ceiling.permits_host_port("evil.example.org:443"));
+        assert!(ceiling.permits_env_key("NODE_ENV"));
+        assert!(!ceiling.permits_env_key("AWS_SECRET_ACCESS_KEY"));
+        assert!(ceiling.permits_module_path("packages/core/node_modules/helper/lib/a.js"));
+        assert!(!ceiling.permits_module_path("packages/core/index.js"));
+    }
+
+    #[test]
+    fn macaroon_envelope_rejects_privilege_amplification_in_every_dimension() {
+        let key = test_signing_key();
+        let pubkey = key.verifying_key();
+        let contract = make_contract(
+            "contract-no-amplify",
+            "ext-no-amplify",
+            vec![
+                CapabilityEntry {
+                    capability_id: "fs_read".to_string(),
+                    scope: "filesystem:read".to_string(),
+                    max_calls_per_epoch: 20,
+                },
+                CapabilityEntry {
+                    capability_id: "network_egress".to_string(),
+                    scope: "network:egress".to_string(),
+                    max_calls_per_epoch: 10,
+                },
+            ],
+            "signer-A",
+            SCHEMA_VERSION,
+            1,
+        );
+        let narrowed = MacaroonCapabilityEnvelope::from_signed_contract(contract, &pubkey)
+            .unwrap()
+            .attenuate(
+                AttenuationLayer::RegistryAdmission,
+                CapabilityCaveat::AllowedCapabilities(["fs_read".to_string()].into()),
+            )
+            .unwrap()
+            .attenuate(
+                AttenuationLayer::DeployReleasePolicy,
+                CapabilityCaveat::PathPrefixes(["/srv/app/sub".to_string()].into()),
+            )
+            .unwrap()
+            .attenuate(
+                AttenuationLayer::DeployReleasePolicy,
+                CapabilityCaveat::HostPorts(["api.example.com:443".to_string()].into()),
+            )
+            .unwrap()
+            .attenuate(
+                AttenuationLayer::DeployReleasePolicy,
+                CapabilityCaveat::EnvKeys(["SAFE_KEY".to_string()].into()),
+            )
+            .unwrap()
+            .attenuate(
+                AttenuationLayer::DeployReleasePolicy,
+                CapabilityCaveat::ModuleScopePrefix("pkg/sub".to_string()),
+            )
+            .unwrap();
+
+        // 1. Re-introducing stripped capability `network_egress`
+        assert!(matches!(
+            narrowed.attenuate(
+                AttenuationLayer::ModuleImportEdge,
+                CapabilityCaveat::AllowedCapabilities(
+                    ["fs_read", "network_egress"]
+                        .into_iter()
+                        .map(str::to_owned)
+                        .collect()
+                ),
+            ),
+            Err(AttenuationError::PrivilegeAmplification { .. })
+        ));
+        // 2. Raising call quota above 20
+        assert!(matches!(
+            narrowed.attenuate(
+                AttenuationLayer::ModuleImportEdge,
+                CapabilityCaveat::MaxCallsPerEpoch {
+                    capability_id: "fs_read".to_string(),
+                    max_calls: 21,
+                },
+            ),
+            Err(AttenuationError::PrivilegeAmplification { .. })
+        ));
+        // 3. Widening path prefix from `/srv/app/sub` back to `/srv/app`
+        assert!(matches!(
+            narrowed.attenuate(
+                AttenuationLayer::ModuleImportEdge,
+                CapabilityCaveat::PathPrefixes(["/srv/app".to_string()].into()),
+            ),
+            Err(AttenuationError::PrivilegeAmplification { .. })
+        ));
+        // 4. Widening host:port to portless or foreign host
+        assert!(matches!(
+            narrowed.attenuate(
+                AttenuationLayer::ModuleImportEdge,
+                CapabilityCaveat::HostPorts(["api.example.com".to_string()].into()),
+            ),
+            Err(AttenuationError::PrivilegeAmplification { .. })
+        ));
+        // 5. Widening env keys
+        assert!(matches!(
+            narrowed.attenuate(
+                AttenuationLayer::ModuleImportEdge,
+                CapabilityCaveat::EnvKeys(["SECRET_KEY".to_string()].into()),
+            ),
+            Err(AttenuationError::PrivilegeAmplification { .. })
+        ));
+        // 6. Widening module scope prefix from `pkg/sub` back to `pkg`
+        assert!(matches!(
+            narrowed.attenuate(
+                AttenuationLayer::ModuleImportEdge,
+                CapabilityCaveat::ModuleScopePrefix("pkg".to_string()),
+            ),
+            Err(AttenuationError::PrivilegeAmplification { .. })
+        ));
+        // 7. Regressing attenuation layer order (`DeployReleasePolicy` -> `RegistryAdmission`)
+        assert!(matches!(
+            narrowed.attenuate(
+                AttenuationLayer::RegistryAdmission,
+                CapabilityCaveat::MaxCallsPerEpoch {
+                    capability_id: "fs_read".to_string(),
+                    max_calls: 5,
+                },
+            ),
+            Err(AttenuationError::LayerOrderViolation { .. })
+        ));
+    }
+
+    #[test]
+    fn macaroon_envelope_rejects_tampered_caveats_truncated_chains_and_wrong_keys() {
+        let key = test_signing_key();
+        let pubkey = key.verifying_key();
+        let foreign_key = SigningKey::from_bytes(&[99; 32]).verifying_key();
+        let contract = make_contract(
+            "contract-tamper",
+            "ext-tamper",
+            test_capabilities(),
+            "signer-A",
+            SCHEMA_VERSION,
+            10,
+        );
+        let env = MacaroonCapabilityEnvelope::from_signed_contract(contract, &pubkey)
+            .unwrap()
+            .attenuate(
+                AttenuationLayer::DeployReleasePolicy,
+                CapabilityCaveat::AllowedCapabilities(["fs.read".to_string()].into()),
+            )
+            .unwrap()
+            .attenuate(
+                AttenuationLayer::ModuleImportEdge,
+                CapabilityCaveat::MaxCallsPerEpoch {
+                    capability_id: "fs.read".to_string(),
+                    max_calls: 3,
+                },
+            )
+            .unwrap();
+
+        // Missing trust anchor and foreign publisher key fail closed.
+        assert_eq!(env.verify(None), Err(AttenuationError::MissingTrustAnchor));
+        assert_eq!(
+            env.verify(Some(&foreign_key)),
+            Err(AttenuationError::InvalidRootSignature)
+        );
+
+        // Truncating the final caveat (attempting to recover higher call budget) fails tail HMAC check!
+        let mut truncated = env.clone();
+        truncated.caveats.pop();
+        assert_eq!(
+            truncated.verify(Some(&pubkey)),
+            Err(AttenuationError::TagMismatch { step: None })
+        );
+        // Even copying the previous caveat tag into `tail_tag_hex` only replays a valid prefix if
+        // the attacker strips a caveat they received — which is why runtime admission recomputes
+        // operator DeployReleasePolicy caveats locally; mutating a caveat payload in place fails step HMAC:
+        let mut mutated = env.clone();
+        mutated.caveats[1].caveat = CapabilityCaveat::MaxCallsPerEpoch {
+            capability_id: "fs.read".to_string(),
+            max_calls: 99,
+        };
+        assert!(matches!(
+            mutated.verify(Some(&pubkey)),
+            Err(AttenuationError::TagMismatch { step: Some(1) })
+        ));
+    }
+
+    #[test]
+    fn macaroon_envelope_materializes_drift_free_enforcement_engine() {
+        let key = test_signing_key();
+        let pubkey = key.verifying_key();
+        let env = MacaroonCapabilityEnvelope::from_verified_publisher_approval(
+            &pubkey,
+            format!("sha256:{}", "1".repeat(64)),
+            format!("sha256:{}", "2".repeat(64)),
+            format!("sha256:{}", "3".repeat(64)),
+            format!("sha256:{}", "4".repeat(64)),
+            "policy-rev-1",
+            format!("sha256:{}", "5".repeat(64)),
+            vec![
+                CapabilityEntry {
+                    capability_id: "console".to_string(),
+                    scope: "runtime:console".to_string(),
+                    max_calls_per_epoch: 10,
+                },
+                CapabilityEntry {
+                    capability_id: "process_spawn".to_string(),
+                    scope: "process:spawn".to_string(),
+                    max_calls_per_epoch: 2,
+                },
+            ],
+        )
+        .unwrap()
+        .attenuate(
+            AttenuationLayer::DeployReleasePolicy,
+            CapabilityCaveat::AllowedCapabilities(["console".to_string()].into()),
+        )
+        .unwrap()
+        .attenuate(
+            AttenuationLayer::DeployReleasePolicy,
+            CapabilityCaveat::MaxCallsPerEpoch {
+                capability_id: "console".to_string(),
+                max_calls: 2,
+            },
+        )
+        .unwrap();
+
+        let mut engine = env
+            .to_enforcement_engine(Some(&pubkey))
+            .expect("materialize enforcement engine");
+        assert!(!engine.is_permitted("process_spawn"));
+        assert_eq!(
+            engine.check_drift(&["console".to_string()]),
+            DriftCheckResult::NoDrift {
+                event_code: event_codes::ARTIFACT_ENFORCEMENT_CHECK.to_string(),
+            }
+        );
+        assert!(matches!(
+            engine.permit_invocation("console", "runtime:console"),
+            InvocationDecision::Permitted {
+                remaining_calls_in_epoch: 1,
+                ..
+            }
+        ));
+        assert!(matches!(
+            engine.permit_invocation("console", "runtime:console"),
+            InvocationDecision::Permitted {
+                remaining_calls_in_epoch: 0,
+                ..
+            }
+        ));
+        assert!(matches!(
+            engine.permit_invocation("console", "runtime:console"),
+            InvocationDecision::Denied {
+                reason: InvocationDenialReason::CallBudgetExceeded {
+                    max_calls_per_epoch: 2
+                },
+                ..
+            }
+        ));
     }
 }
