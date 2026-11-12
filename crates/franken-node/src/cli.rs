@@ -1680,6 +1680,12 @@ pub struct VerifyZkAttestationArgs {
     #[arg(default_value = "", value_parser = parse_handler_required_pathbuf)]
     pub bundle_path: PathBuf,
 
+    /// Expected verifier-parameter SHA-256 from an independently trusted policy authority.
+    /// Required as 64 lowercase hexadecimal characters; never read from the bundle.
+    /// Handler-required so missing or malformed pins retain structured JSON errors.
+    #[arg(long, default_value = "")]
+    pub trusted_params_sha256: String,
+
     /// Optional evaluation timestamp in epoch milliseconds (defaults to current UTC clock).
     #[arg(long)]
     pub now_ms: Option<u64>,
