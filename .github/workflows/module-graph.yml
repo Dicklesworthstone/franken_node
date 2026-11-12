@@ -90,7 +90,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: Dicklesworthstone/franken_engine
-          ref: eccb440d246089086106c02be5a0acea84147f4e
+          ref: bbc96b724d68cb9cb0cb3de25b1c494a490eb71d
           path: franken_engine
           persist-credentials: false
       - uses: actions/setup-node@v4

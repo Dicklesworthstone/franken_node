@@ -125,6 +125,82 @@ dependencies = ["asupersync 0.5.0"]
         self.assertIn("siblings_tsv_well_formed", failed)
         self.assertIn("sibling_pinned:sqlmodel_rust", failed)
 
+    def test_duplicate_fastapi_or_fsqlite_generation_and_engine_pin_drift_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            lock_path = Path(tmp) / "Cargo.lock"
+            lock_path.write_text(
+                """
+version = 4
+
+[[package]]
+name = "asupersync"
+version = "0.6.2"
+
+[[package]]
+name = "fastapi-core"
+version = "0.4.4"
+
+[[package]]
+name = "fastapi-core"
+version = "0.5.0"
+
+[[package]]
+name = "fastapi-http"
+version = "0.5.0"
+dependencies = ["asupersync 0.6.2"]
+
+[[package]]
+name = "franken-kernel"
+version = "0.6.0"
+
+[[package]]
+name = "franken-decision"
+version = "0.6.0"
+
+[[package]]
+name = "franken-evidence"
+version = "0.6.0"
+
+[[package]]
+name = "fsqlite-error"
+version = "0.1.19"
+
+[[package]]
+name = "fsqlite-error"
+version = "0.4.1"
+
+[[package]]
+name = "frankenengine-node"
+version = "0.2.0"
+dependencies = ["asupersync 0.6.2"]
+""".lstrip(),
+                encoding="utf-8",
+            )
+            wf_dir = Path(tmp) / "workflows"
+            wf_dir.mkdir()
+            for wf in mod.REQUIRED_MAIN_PUSH_WORKFLOWS:
+                shutil.copy2(ROOT / ".github" / "workflows" / wf, wf_dir / wf)
+            mutants_path = wf_dir / "mutants-gate.yml"
+            mutants_path.write_text(
+                mutants_path.read_text(encoding="utf-8").replace(
+                    "bbc96b724d68cb9cb0cb3de25b1c494a490eb71d",
+                    "1" * 40,
+                ),
+                encoding="utf-8",
+            )
+            report = mod.run_checks(
+                cargo_lock=lock_path,
+                workflows_dir=wf_dir,
+                check_local_git=False,
+            )
+        self.assertFalse(report["overall_pass"])
+        self.assertEqual(report["locked_metadata_status"], "drift_detected")
+        self.assertIsNotNone(report["failure_code"])
+        failed = {c["check"] for c in report["checks"] if not c["pass"]}
+        self.assertIn("cargo_lock:generation_bound:fastapi-core", failed)
+        self.assertIn("cargo_lock:generation_bound:fsqlite-error", failed)
+        self.assertIn("engine_pin:workflow_matches_action:mutants-gate.yml", failed)
+
     def test_cli_json_and_self_test(self) -> None:
         proc = subprocess.run(
             [sys.executable, str(SCRIPT), "--json"],

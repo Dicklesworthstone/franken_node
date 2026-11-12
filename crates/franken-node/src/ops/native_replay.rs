@@ -618,7 +618,7 @@ mod supervised {
         // to close the race where the supervisor died before PR_SET_PDEATHSIG.
         set_parent_process_death_signal(Some(Signal::KILL))
             .map_err(|error| format!("bind native replay worker lifetime: {error}"))?;
-        if getppid().map(|pid| pid.as_raw()) != Some(parent_pid) {
+        if getppid().map(|pid| pid.as_raw_pid()) != Some(parent_pid) {
             return Err("native replay supervisor exited before worker startup".to_string());
         }
         let frame = read_frame(&mut io::stdin().lock())?;

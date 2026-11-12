@@ -36,41 +36,41 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: Dicklesworthstone/franken_engine
-          ref: main
+          ref: bbc96b724d68cb9cb0cb3de25b1c494a490eb71d
           path: franken_engine
           persist-credentials: false
       - name: Install Rust and identify both source revisions
         run: |
-          rustup toolchain install nightly --profile minimal --component clippy --component rustfmt
-          rustc +nightly --version
+          rustup toolchain install nightly-2026-09-21 --profile minimal --component clippy --component rustfmt
+          rustc +nightly-2026-09-21 --version
           git rev-parse HEAD
           git -C ../franken_engine rev-parse HEAD
       - name: Execute production IPv6 classifier and allocation boundary tests
         run: |
           set -euo pipefail
           source=crates/franken-node/src/security/ssrf_policy/ipv6.rs
-          rustc +nightly --edition 2024 --test "$source" -D warnings -o "$RUNNER_TEMP/ipv6-policy-tests"
+          rustc +nightly-2026-09-21 --edition 2024 --test "$source" -D warnings -o "$RUNNER_TEMP/ipv6-policy-tests"
           "$RUNNER_TEMP/ipv6-policy-tests" --nocapture | tee ipv6-policy-tests.log
       - name: Execute actual production egress modules and registered socket tests
         run: |
           status=0
-          cargo +nightly test --manifest-path tools/egress-validation/Cargo.toml --test ssrf_gated_host_io_egress -- --nocapture > native-egress-tests.log 2>&1 || status=$?
+          cargo +nightly-2026-09-21 test --manifest-path tools/egress-validation/Cargo.toml --test ssrf_gated_host_io_egress -- --nocapture > native-egress-tests.log 2>&1 || status=$?
           tail -n 160 native-egress-tests.log
           exit "$status"
       - name: Check actual egress library and registered tests
         if: always()
         run: |
           status=0
-          cargo +nightly check --manifest-path tools/egress-validation/Cargo.toml --all-targets > native-egress-check.log 2>&1 || status=$?
+          cargo +nightly-2026-09-21 check --manifest-path tools/egress-validation/Cargo.toml --all-targets > native-egress-check.log 2>&1 || status=$?
           tail -n 100 native-egress-check.log
           test "$status" -eq 0 || exit "$status"
-          cargo +nightly clippy --manifest-path tools/egress-validation/Cargo.toml --all-targets -- -D warnings > native-egress-clippy.log 2>&1 || status=$?
+          cargo +nightly-2026-09-21 clippy --manifest-path tools/egress-validation/Cargo.toml --all-targets -- -D warnings > native-egress-clippy.log 2>&1 || status=$?
           tail -n 160 native-egress-clippy.log
           exit "$status"
       - name: Check touched formatting and retain rustfmt output
         if: always()
         run: |
-          rustfmt +nightly --edition 2024 crates/franken-node/src/security/ssrf_policy.rs crates/franken-node/src/ops/ssrf_gated_host_io.rs crates/franken-node/tests/ssrf_gated_host_io_egress.rs tools/egress-validation/build.rs tools/egress-validation/harness.rs
+          rustfmt +nightly-2026-09-21 --edition 2024 crates/franken-node/src/security/ssrf_policy.rs crates/franken-node/src/ops/ssrf_gated_host_io.rs crates/franken-node/tests/ssrf_gated_host_io_egress.rs tools/egress-validation/build.rs tools/egress-validation/harness.rs
           git diff --exit-code -- crates/franken-node/src/security/ssrf_policy.rs crates/franken-node/src/security/ssrf_policy crates/franken-node/src/ops/ssrf_gated_host_io.rs crates/franken-node/tests/ssrf*.rs tools/egress-validation
       - name: Retain exact validation output and policy/transport sources
         if: always()

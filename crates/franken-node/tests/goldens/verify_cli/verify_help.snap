@@ -16,6 +16,7 @@ Commands:
   transparency-log  Verify transparency log auditability and hash chain integrity
   recovery-runbook  Generate a recovery runbook from a `--readiness-input` snapshot (not a live broker)
   zk-attestation    Verify a zero-knowledge compliance attestation bundle without disclosing witness values
+  vef-proof         Verify an Ed25519-signed VEF receipt-window compliance proof bundle against a trusted anchor
   help              Print this message or the help of the given subcommand(s)
 
 Options:

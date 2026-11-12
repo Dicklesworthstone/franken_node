@@ -1671,6 +1671,30 @@ pub enum VerifyCommand {
     /// Verify a zero-knowledge compliance attestation bundle without disclosing witness values.
     #[command(name = "zk-attestation")]
     ZkAttestation(VerifyZkAttestationArgs),
+
+    /// Verify an Ed25519-signed VEF receipt-window compliance proof bundle against a trusted anchor.
+    #[command(name = "vef-proof")]
+    VefProof(VerifyVefProofArgs),
+}
+
+#[derive(Debug, Parser)]
+pub struct VerifyVefProofArgs {
+    /// Path to the VEF compliance proof bundle JSON.
+    /// Handler-required so `--json` errors emit `franken-node/verify-error-cli/v1`.
+    #[arg(default_value = "", value_parser = parse_handler_required_pathbuf)]
+    pub bundle_path: PathBuf,
+
+    /// Trusted Ed25519 public key file (falls back to `.franken-node/keys/receipt-signing.key` when present).
+    #[arg(long)]
+    pub trusted_public_key: Option<PathBuf>,
+
+    /// Optional evaluation timestamp in epoch milliseconds (defaults to current UTC clock).
+    #[arg(long)]
+    pub now_ms: Option<u64>,
+
+    /// Emit `franken-node/verify-vef-proof-cli/v1` JSON.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -1952,6 +1976,49 @@ pub enum TrustCommand {
     /// Issue a zero-knowledge Ristretto255 compliance attestation over a private witness.
     #[command(name = "zk-attest")]
     ZkAttest(TrustZkAttestArgs),
+
+    /// Compile policy constraints, chain execution receipts, and issue an Ed25519-signed VEF compliance proof bundle.
+    #[command(name = "vef-prove")]
+    VefProve(TrustVefProveArgs),
+}
+
+#[derive(Debug, Parser)]
+pub struct TrustVefProveArgs {
+    /// Policy identifier compiled into VEF predicates.
+    #[arg(long, default_value = "franken-node-runtime-policy")]
+    pub policy_id: String,
+
+    /// Actor identity recorded in chained VEF execution receipts and transition checks.
+    #[arg(long, default_value = "operator:local")]
+    pub actor_identity: String,
+
+    /// Artifact identity bound into chained VEF execution receipts.
+    #[arg(long, default_value = "workspace:current")]
+    pub artifact_identity: String,
+
+    /// Optional JSON file containing a `vef::constraint_compiler::PolicyDefinition`.
+    #[arg(long)]
+    pub policy_file: Option<PathBuf>,
+
+    /// Ed25519 signing key file (defaults to `.franken-node/keys/receipt-signing.key`).
+    #[arg(long)]
+    pub signing_key: Option<PathBuf>,
+
+    /// Proof validity window in milliseconds.
+    #[arg(long, default_value_t = 600_000)]
+    pub validity_ms: u64,
+
+    /// Optional generation timestamp in epoch milliseconds (defaults to current UTC clock).
+    #[arg(long)]
+    pub now_ms: Option<u64>,
+
+    /// Optional path where the portable VEF compliance bundle JSON is written atomically.
+    #[arg(long)]
+    pub output: Option<PathBuf>,
+
+    /// Emit `franken-node/trust-vef-prove-cli/v1` JSON.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -2018,6 +2085,11 @@ pub struct TrustGraphArgs {
     /// extensions whose trust rests on it (blast radius).
     #[arg(long)]
     pub extension: Option<String>,
+
+    /// Synthesize DGIS critical-node immunization barrier plans, BPET×DGIS priority
+    /// escalations, and trust-complexity replay verification over the graph.
+    #[arg(long)]
+    pub immunize: bool,
 
     /// Emit `franken-node/trust-graph-cli/v1` JSON.
     #[arg(long)]
@@ -2818,6 +2890,70 @@ pub enum OpsCommand {
     /// captured and is replayable from a verified bundle.
     #[command(name = "incident-coverage")]
     IncidentCoverage(OpsIncidentCoverageArgs),
+    /// Build and query the bounded metadata-only repo evidence index, failing closed on protected paths.
+    #[command(name = "evidence-index")]
+    EvidenceIndex(OpsEvidenceIndexArgs),
+    /// Evaluate deterministic read-only swarm handoff readiness, overlap risk, and blocker templates.
+    #[command(name = "swarm-handoff")]
+    SwarmHandoff(OpsSwarmHandoffArgs),
+}
+
+#[derive(Debug, Parser)]
+pub struct OpsEvidenceIndexArgs {
+    /// Repository root from which approved metadata surfaces are indexed.
+    #[arg(long, default_value = ".")]
+    pub root: PathBuf,
+
+    /// Optional search term query over indexed records.
+    #[arg(long)]
+    pub query: Option<String>,
+
+    /// Optional exact bead identifier filter.
+    #[arg(long)]
+    pub bead_id: Option<String>,
+
+    /// Optional tag filter.
+    #[arg(long)]
+    pub tag: Option<String>,
+
+    /// Maximum query results returned (`1..=128`).
+    #[arg(long, default_value_t = 25)]
+    pub limit: usize,
+
+    /// Additional candidate repo-relative source paths to probe against index safety policy.
+    #[arg(long = "probe-source")]
+    pub probe_sources: Vec<String>,
+
+    /// Emit `franken-node/ops-evidence-index-cli/v1` JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Parser)]
+pub struct OpsSwarmHandoffArgs {
+    /// Optional JSON snapshot (`SwarmHandoffEvidenceInput`); defaults to read-only `.beads/issues.jsonl` scan.
+    #[arg(long)]
+    pub input: Option<PathBuf>,
+
+    /// Repository root used when scanning `.beads/issues.jsonl`.
+    #[arg(long, default_value = ".")]
+    pub root: PathBuf,
+
+    /// Correlation trace identifier.
+    #[arg(long, default_value = "ops-swarm-handoff")]
+    pub trace_id: String,
+
+    /// Optional candidate bead identifier for cross-agent overlap risk scoring.
+    #[arg(long)]
+    pub candidate_bead: Option<String>,
+
+    /// Candidate repo-relative file paths for cross-agent overlap risk scoring.
+    #[arg(long = "candidate-path")]
+    pub candidate_paths: Vec<String>,
+
+    /// Emit `franken-node/ops-swarm-handoff-cli/v1` JSON.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Parser)]

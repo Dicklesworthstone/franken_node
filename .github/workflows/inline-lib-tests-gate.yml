@@ -72,7 +72,7 @@ jobs:
         run: |
           set -euo pipefail
           bash scripts/bootstrap_source.sh --workspace "$PWD" \
-            --engine-ref eccb440d246089086106c02be5a0acea84147f4e \
+            --engine-ref bbc96b724d68cb9cb0cb3de25b1c494a490eb71d \
             --receipt "$RUNNER_TEMP/inline-bin-source-inputs.tsv"
 
       - name: Install pinned Rust nightly
@@ -158,7 +158,7 @@ jobs:
         run: |
           set -euo pipefail
           bash scripts/bootstrap_source.sh --workspace "$PWD" \
-            --engine-ref eccb440d246089086106c02be5a0acea84147f4e \
+            --engine-ref bbc96b724d68cb9cb0cb3de25b1c494a490eb71d \
             --receipt "$RUNNER_TEMP/inline-source-inputs.tsv"
 
       - name: Install pinned Rust nightly

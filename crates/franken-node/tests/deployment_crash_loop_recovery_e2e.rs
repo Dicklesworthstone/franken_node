@@ -3889,3 +3889,265 @@ mod external_release_live_control {
         );
     }
 }
+
+#[test]
+fn deploy_supervise_microreboots_across_native_panics_and_certifies_eprocess_post_rollback_health()
+{
+    let drill = Drill::new();
+    let good = drill.install("1.0.0", HEALTHY_V1);
+    drill.activate("1.0.0");
+    let (code, initial) = drill.run();
+    assert_eq!(code, Some(0), "{initial}");
+    assert_eq!(initial["phase"], "healthy", "{initial}");
+    assert_eq!(guest_stdout(&initial["run"]), "RELEASE_ONE_HEALTHY\n");
+
+    drill.policy("rollback", "automatic");
+    let failed = drill.install("2.0.0", &crashing_v2());
+    drill.activate("2.0.0");
+
+    let supervised = drill.ok(
+        drill.root.path(),
+        &[
+            "deploy",
+            "supervise",
+            "app",
+            "--max-runs",
+            "6",
+            "--post-rollback-probes",
+            "2",
+            "--cooldown-ms",
+            "0",
+            "--json",
+        ],
+    );
+    assert_eq!(supervised["ok"], true, "{supervised}");
+    assert_eq!(
+        supervised["phase"], "rolled_back_sustained_healthy",
+        "{supervised}"
+    );
+    assert_eq!(supervised["attempts_executed"], 5, "{supervised}");
+    assert_eq!(supervised["release_id"], "1.0.0", "{supervised}");
+    assert_eq!(
+        supervised["crash_loop_detector"]["triggered"], true,
+        "{supervised}"
+    );
+    assert_eq!(
+        supervised["crash_loop_detector"]["rollback_allowed"], true,
+        "{supervised}"
+    );
+    assert_eq!(
+        supervised["crash_loop_detector"]["target_version"], "1.0.0",
+        "{supervised}"
+    );
+    assert_eq!(
+        supervised["recovery"]["outcome"], "rolled_back",
+        "{supervised}"
+    );
+    assert_eq!(
+        supervised["recovery"]["selected_release_id"], "1.0.0",
+        "{supervised}"
+    );
+    assert_eq!(
+        supervised["e_process_monitor"]["state"], "sustained_health_certified",
+        "{supervised}"
+    );
+    assert_eq!(
+        supervised["e_process_monitor"]["healthy_runs"], 2,
+        "{supervised}"
+    );
+
+    let attempts = supervised["attempts"].as_array().expect("attempts array");
+    assert_eq!(attempts.len(), 5);
+    assert_eq!(attempts[0]["release_id"], "2.0.0");
+    assert_eq!(attempts[0]["verdict"], "crashed_microreboot_pending");
+    assert_eq!(attempts[1]["release_id"], "2.0.0");
+    assert_eq!(attempts[1]["verdict"], "crashed_microreboot_pending");
+    assert_eq!(attempts[2]["release_id"], "2.0.0");
+    assert_eq!(attempts[2]["verdict"], "crash_loop_recovery_evaluated");
+    assert_eq!(attempts[3]["release_id"], "1.0.0");
+    assert_eq!(attempts[3]["verdict"], "healthy");
+    assert_eq!(guest_stdout(&attempts[3]["run"]), "RELEASE_ONE_HEALTHY\n");
+    assert_eq!(attempts[4]["release_id"], "1.0.0");
+    assert_eq!(attempts[4]["verdict"], "healthy");
+    assert_eq!(guest_stdout(&attempts[4]["run"]), "RELEASE_ONE_HEALTHY\n");
+
+    let status = drill.status();
+    assert_eq!(status["active"]["release_id"], "1.0.0", "{status}");
+    assert!(good.join("app.js").is_file());
+    assert!(failed.join("app.js").is_file());
+    let failed_state: Value = serde_json::from_slice(
+        &fs::read(failed.join(".franken-node/safe-mode/state.json")).expect("failed safe-mode"),
+    )
+    .expect("failed safe-mode JSON");
+    assert_eq!(failed_state["active"], true, "{failed_state}");
+}
+
+#[test]
+fn native_workspace_release_enforces_attenuated_macaroon_capability_envelope() {
+    use frankenengine_node::config::Config;
+    use frankenengine_node::extensions::artifact_contract::{AttenuationLayer, CapabilityCaveat};
+    use std::collections::BTreeSet;
+    use std::os::unix::fs::symlink;
+
+    let drill = Drill::new();
+    let dir = drill.root.path().join("releases").join("1.0.0");
+    let package = dir.join("packages/shared");
+    fs::create_dir_all(&package).expect("package dir");
+    fs::create_dir_all(dir.join("node_modules")).expect("node_modules");
+    fs::write(
+        dir.join("package.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "name": "deployed-app",
+            "version": "1.0.0",
+            "private": true,
+            "type": "commonjs",
+            "workspaces": ["packages/*"],
+            "dependencies": {"shared": "workspace:*"},
+        }))
+        .expect("package.json bytes"),
+    )
+    .expect("write package.json");
+    fs::write(
+        package.join("package.json"),
+        r#"{"name":"shared","version":"1.0.0","exports":{"deployment":{"require":"./selected.cjs"},"require":"./default.cjs"}}"#,
+    )
+    .expect("write shared package.json");
+    fs::write(
+        package.join("selected.cjs"),
+        "module.exports = require('./value.cjs');\n",
+    )
+    .expect("selected.cjs");
+    fs::write(
+        package.join("value.cjs"),
+        "module.exports = 'MACAROON_ENVELOPE_NATIVE_OK';\n",
+    )
+    .expect("value.cjs");
+    fs::write(
+        package.join("default.cjs"),
+        "throw Error('UNAPPROVED_DEFAULT_BRANCH');\n",
+    )
+    .expect("default.cjs");
+    symlink("../packages/shared", dir.join("node_modules/shared")).expect("workspace symlink");
+    fs::write(dir.join("app.js"), "console.log(require('shared'));\n").expect("app.js");
+    drill.init_project(&dir);
+
+    let authority_path = drill.registry.path().join("runtime-authority.json");
+    fs::write(
+        &authority_path,
+        serde_json::to_vec(&serde_json::json!({
+            "schema_version": "franken-node/artifact-runtime-authority/v1",
+            "policy_revision": "publisher-policy-macaroon-v2",
+            "allowed_capabilities": [
+                "builtin",
+                "console",
+                "fs_read",
+                "heap_allocate",
+                "module_load",
+                "timer",
+                "vm_dispatch"
+            ],
+            "allow_process_shape": false,
+            "max_instructions": 2_000_000,
+            "max_registers": 1_024,
+            "max_call_depth": 32,
+            "max_heap_objects": 4_096,
+            "max_total_memory_bytes": 33_554_432,
+            "max_console_entries": 16,
+            "max_parse_source_bytes": 65_536,
+            "max_parse_tokens": 16_384,
+            "max_parse_recursion_depth": 128
+        }))
+        .expect("authority json"),
+    )
+    .expect("write authority json");
+
+    let graph = drill.ok(
+        drill.registry.path(),
+        &[
+            "verify",
+            "source-graph",
+            dir.to_str().expect("utf-8"),
+            "app.js",
+            "--write-source-capsule",
+            "app-1.0.0.capsule",
+            "--allow-contained-symlinks",
+            "--conditions",
+            "deployment",
+            "--json",
+        ],
+    );
+    assert_eq!(graph["fully_resolved"], true, "{graph}");
+    let published = drill.ok(
+        drill.registry.path(),
+        &[
+            "registry",
+            "publish",
+            "app-1.0.0.capsule",
+            "--version",
+            "1.0.0",
+            "--signing-key",
+            "publisher.ed25519",
+            "--runtime-authority",
+            authority_path.to_str().expect("utf-8"),
+            "--json",
+        ],
+    );
+    let manifest = drill
+        .registry
+        .path()
+        .join(published["manifest_path"].as_str().expect("manifest path"));
+
+    set_release_runtime(&dir, "frozen_modules", toml::Value::Boolean(true));
+    set_release_runtime(&dir, "frozen_module_symlinks", toml::Value::Boolean(true));
+    set_release_runtime(
+        &dir,
+        "module_conditions",
+        toml::Value::Array(vec![toml::Value::String("deployment".into())]),
+    );
+    set_release_runtime(
+        &dir,
+        "frozen_module_graph_hash",
+        toml::Value::String(graph["input_hash"].as_str().expect("input_hash").into()),
+    );
+
+    drill.install_published("1.0.0", &dir, &manifest);
+    drill.activate("1.0.0");
+    let admitted = drill.admitted_release("1.0.0");
+    let (code, healthy) = drill.run();
+    assert_eq!(code, Some(0), "{healthy}");
+    assert_eq!(healthy["phase"], "healthy", "{healthy}");
+    assert_workspace_run(
+        &healthy["run"],
+        &admitted,
+        "MACAROON_ENVELOPE_NATIVE_OK\n",
+    );
+
+    let cfg = Config::load_from_path(&dir.join("franken_node.toml")).expect("load release config");
+    let envelope = admitted
+        .approval
+        .attenuated_capability_envelope(&cfg)
+        .expect("synthesize macaroon envelope")
+        .expect("v2 approval yields macaroon envelope");
+    let publisher_key = admitted
+        .approval
+        .publisher_verifying_key()
+        .expect("publisher verifying key");
+    let effective = envelope
+        .verify_and_evaluate(&publisher_key)
+        .expect("verify HMAC caveat chain");
+    assert!(!effective.allowed_capabilities.contains("process_spawn"));
+    assert!(effective.allowed_capabilities.contains("module_load"));
+
+    let mut widening = BTreeSet::new();
+    widening.insert("process_spawn".to_string());
+    let narrowed = envelope
+        .attenuate(
+            AttenuationLayer::ModuleImportEdge,
+            CapabilityCaveat::AllowedCapabilities(widening),
+        )
+        .expect("append import-edge caveat");
+    assert!(
+        narrowed.verify_and_evaluate(&publisher_key).is_err(),
+        "import-edge caveat must fail closed on monotonic capability widening"
+    );
+}

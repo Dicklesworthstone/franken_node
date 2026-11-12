@@ -173,7 +173,13 @@ fs2 = "0.4.3"
 # builder and verifies it via verify_as_of_ltv, so all LTV crypto stays in one
 # crate. The SDK never depends on the product; verifier independence holds.
 frankenengine-verifier-sdk = { path = "../../sdk/verifier" }
-frankenengine-engine = { path = "../../../franken_engine/crates/franken-engine", optional = true }
+# default-features = false: franken-node uses franken-engine's core parser,
+# module resolver, TS normalizer, lowering pipeline, baseline interpreter, and
+# execution orchestrator directly; disabling franken-engine's optional sibling
+# features (`asupersync-integration`, `sibling-persistence`, `sibling-service-api`)
+# eliminates multi-generation splits across `asupersync`, `franken-*`,
+# `fastapi-core`, and `fsqlite` in Cargo.lock (bd-reality-20260923-26n9r.32).
+frankenengine-engine = { path = "../../../franken_engine/crates/franken-engine", default-features = false, optional = true }
 frankenengine-extension-host = { path = "../../../franken_engine/crates/franken-extension-host", optional = true }
 tracing = { workspace = true }
 subtle = "2.6.1"
