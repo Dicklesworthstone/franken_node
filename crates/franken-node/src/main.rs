@@ -19216,7 +19216,7 @@ mod trust_command_tests {
             warnings: Vec::new(),
         };
 
-        let rendered = render_trust_sync_summary_from_report(&build_trust_sync_cli_report(
+        let rendered = render_trust_sync_summary_from_report(&trust_sync_cli_report(
             &cards,
             &sync_report,
             &audit_report,
@@ -42641,6 +42641,7 @@ mod run_trust_gate_tests {
             // Attack 2: TrustScanItemStatus variant manipulation
             let scan_statuses = vec![
                 TrustScanItemStatus::Created,
+                TrustScanItemStatus::Refreshed,
                 TrustScanItemStatus::SkippedExisting,
             ];
 
@@ -42660,6 +42661,12 @@ mod run_trust_gate_tests {
                         assert!(
                             json_str.contains("created"),
                             "Created status should serialize as 'created'"
+                        );
+                    }
+                    TrustScanItemStatus::Refreshed => {
+                        assert!(
+                            json_str.contains("refreshed"),
+                            "Refreshed status should serialize as 'refreshed'"
                         );
                     }
                     TrustScanItemStatus::SkippedExisting => {
@@ -43167,7 +43174,7 @@ mod run_trust_gate_tests {
                     i
                 );
 
-                if let Some(ref detail_value) = details {
+                if let Some(detail_value) = details {
                     let json_str = serialization.unwrap();
 
                     // Verify details are properly nested and escaped
