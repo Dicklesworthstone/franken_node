@@ -229,6 +229,20 @@ fn version_components(value: &str) -> Option<[u64; 3]> {
     parts.next().is_none().then_some(version)
 }
 
+fn package_version_identity(value: &str) -> Option<(&str, [u64; 3])> {
+    if !text_is_bounded(value, 385) {
+        return None;
+    }
+    // Scoped package names may contain '@'; only the last separator marks
+    // the version. Preserve the signed spelling while comparing its numeric
+    // identity so leading zeroes cannot bypass revocation.
+    let (package, version) = value.rsplit_once('@')?;
+    if !text_is_bounded(package, 256) {
+        return None;
+    }
+    Some((package, version_components(version)?))
+}
+
 fn valid_version(value: &str) -> bool {
     version_components(value).is_some()
 }
@@ -643,7 +657,7 @@ pub fn verify_publisher_source_with_trust_policy(
         || revocation_list
             .revoked_package_versions
             .iter()
-            .any(|entry| !text_is_bounded(entry, 385))
+            .any(|entry| package_version_identity(entry).is_none())
     {
         return Err(PublisherSourceError::RevocationListInvalid);
     }
@@ -661,7 +675,8 @@ pub fn verify_publisher_source_with_trust_policy(
     let source =
         verify_publisher_source(manifest_bytes, signature, capsule_bytes, trusted_publisher)?;
     let (parsed_manifest, _) = parse_manifest(manifest_bytes)?;
-    let package_version_key = format!("{}@{}", source.package_name, source.version);
+    let source_version =
+        version_components(&source.version).ok_or(PublisherSourceError::ManifestInvalid)?;
     if revocation_list
         .revoked_publisher_ids
         .iter()
@@ -673,7 +688,12 @@ pub fn verify_publisher_source_with_trust_policy(
         || revocation_list
             .revoked_package_versions
             .iter()
-            .any(|entry| bool::from(entry.as_bytes().ct_eq(package_version_key.as_bytes())))
+            .any(|entry| {
+                package_version_identity(entry).is_some_and(|(package, version)| {
+                    bool::from(package.as_bytes().ct_eq(source.package_name.as_bytes()))
+                        && version == source_version
+                })
+            })
     {
         return Err(PublisherSourceError::PublisherRevoked);
     }
@@ -1483,6 +1503,74 @@ mod tests {
             ),
             Err(PublisherSourceError::ProvenanceChainInvalid)
         );
+    }
+
+    #[test]
+    fn trust_policy_revokes_numeric_version_aliases_and_scoped_packages() {
+        let revocation_signer = SigningKey::from_bytes(&[0x71; 32]);
+        let capsule_bytes = capsule();
+        for package in ["publisher-package", "@audit/publisher-package"] {
+            for (version, revoked_version) in [
+                ("1.2.3", "01.02.03"),
+                ("01.02.03", "1.2.3"),
+                ("1.2.3", "1.2.3"),
+                ("18446744073709551615.0.1", "18446744073709551615.00.01"),
+            ] {
+                let mut source_manifest = manifest(&capsule_bytes, true);
+                source_manifest["name"] = json!(package);
+                source_manifest["initial_version"]["version"] = json!(version);
+                let manifest_raw = serde_json::to_vec(&source_manifest).unwrap();
+                let manifest_signature = key().sign(&manifest_raw).to_bytes();
+                let verify_entry = |entry: &str| {
+                    let revocations = PublisherRevocationList {
+                        schema_version: PUBLISHER_REVOCATION_LIST_SCHEMA.into(),
+                        issued_at: "2026-11-11T00:00:00Z".into(),
+                        revoked_publisher_ids: vec![],
+                        revoked_signer_key_ids: vec![],
+                        revoked_package_versions: vec![entry.into()],
+                    };
+                    let revocation_raw = serde_json::to_vec(&revocations).unwrap();
+                    let revocation_signature = revocation_signer
+                        .sign(&revocation_list_signing_payload(&revocation_raw))
+                        .to_bytes();
+                    verify_publisher_source_with_trust_policy(
+                        &manifest_raw,
+                        &manifest_signature,
+                        &capsule_bytes,
+                        &key().verifying_key(),
+                        &PublisherTrustPolicy {
+                            revocation_authority: &revocation_signer.verifying_key(),
+                            revocation_list_bytes: &revocation_raw,
+                            revocation_signature: &revocation_signature,
+                            evaluation_time: evaluation_time(),
+                            max_revocation_age_secs: 3600,
+                            provenance: None,
+                        },
+                    )
+                };
+                assert_eq!(
+                    verify_entry(&format!("{package}@{revoked_version}")),
+                    Err(PublisherSourceError::PublisherRevoked),
+                    "numeric identity must match: {package}@{version} vs {revoked_version}",
+                );
+                assert!(verify_entry("other-package@1.2.3").is_ok());
+                assert!(verify_entry(&format!("{package}@1.2.4")).is_ok());
+                for invalid in [
+                    "missing-version",
+                    "@1.2.3",
+                    "package@",
+                    "package@1.2",
+                    "package@1.2.3.4",
+                    "package@+1.2.3",
+                    "package@18446744073709551616.0.0",
+                ] {
+                    assert_eq!(
+                        verify_entry(invalid),
+                        Err(PublisherSourceError::RevocationListInvalid)
+                    );
+                }
+            }
+        }
     }
 
     #[test]
