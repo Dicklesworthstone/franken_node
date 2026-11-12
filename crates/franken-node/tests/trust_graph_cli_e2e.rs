@@ -126,13 +126,22 @@ fn quarantine_propagates_through_lockfile_edges_with_explanations_and_blast_radi
     lock["packages"]["node_modules/lib-core"]["dependencies"]["late-helper"] =
         serde_json::json!("^0.1.0");
     lock["packages"]["node_modules/late-helper"] = serde_json::json!({"version": "0.1.3"});
-    std::fs::write(&lock_path, serde_json::to_vec_pretty(&lock).expect("encode")).expect("write");
+    std::fs::write(
+        &lock_path,
+        serde_json::to_vec_pretty(&lock).expect("encode"),
+    )
+    .expect("write");
     let drifted = json_ok(workspace.path(), &["trust", "graph", "--json"]);
     let graph = &drifted["graph"];
     let late = node(graph, "npm:late-helper");
     assert_eq!(late["kind"], "untracked_dependency", "{late}");
     assert!(late["effective_score"].is_null(), "{late}");
-    assert!(has_edge(graph, "npm:lib-core", "npm:late-helper", "depends_on"));
+    assert!(has_edge(
+        graph,
+        "npm:lib-core",
+        "npm:late-helper",
+        "depends_on"
+    ));
     assert_eq!(graph["summary"]["untracked_dependencies"], 1, "{graph}");
 
     let web_kit_before = node(graph, "npm:web-kit")["effective_score"]
@@ -223,4 +232,42 @@ fn quarantine_propagates_through_lockfile_edges_with_explanations_and_blast_radi
         ],
     );
     assert!(!unknown.status.success());
+
+    // `--immunize` synthesizes DGIS topological risk surfaces, BPET-DGIS priority
+    // fusion, BPET trajectory trust surfaces, and deterministic complexity replay.
+    let immunized = json_ok(
+        workspace.path(),
+        &["trust", "graph", "--immunize", "--json"],
+    );
+    let imm = &immunized["immunization"];
+    assert!(
+        imm.is_object(),
+        "expected immunization payload: {immunized}"
+    );
+    assert_eq!(imm["complexity_gate_pass"], true, "{imm}");
+    assert_eq!(imm["complexity_replay_deterministic"], true, "{imm}");
+    assert_eq!(
+        imm["risk_surfaces"]
+            .as_array()
+            .expect("risk_surfaces")
+            .len(),
+        3,
+        "{imm}"
+    );
+    assert_eq!(
+        imm["bpet_dgis_priorities"]
+            .as_array()
+            .expect("bpet_dgis_priorities")
+            .len(),
+        3,
+        "{imm}"
+    );
+    assert_eq!(
+        imm["bpet_trust_surfaces"]
+            .as_array()
+            .expect("bpet_trust_surfaces")
+            .len(),
+        3,
+        "{imm}"
+    );
 }

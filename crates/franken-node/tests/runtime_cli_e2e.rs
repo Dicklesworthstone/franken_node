@@ -624,6 +624,8 @@ fn runtime_lane_assign_persists_across_invocations_in_initialized_workspace() {
     assert_eq!(assigned["live_node"], true);
     assert_eq!(assigned["persisted"], true);
     assert_eq!(assigned["assignment"]["lane"], "ControlCritical");
+    assert_eq!(assigned["routed_product_lane"], "cancel");
+    assert_eq!(assigned["authority_audit_passed"], true);
 
     let mut status_cmd = franken_node();
     status_cmd.current_dir(dir.path()).args([
@@ -636,6 +638,8 @@ fn runtime_lane_assign_persists_across_invocations_in_initialized_workspace() {
     ]);
     let status = stdout_json(status_cmd);
     assert_eq!(status["live_node"], true);
+    assert_eq!(status["authority_audit_passed"], true);
+    assert_eq!(status["router_metrics"]["total_in_flight"], 1);
     let counters = status["telemetry"]["counters"]
         .as_array()
         .expect("counters array");
@@ -669,4 +673,7 @@ fn runtime_epoch_reads_live_seqlock_control_page_when_present() {
     assert_eq!(payload["epoch_delta"], 0);
     assert_eq!(payload["live_seqlock_sequence"], 2);
     assert_eq!(payload["live_quarantine_version"], 3);
+    assert_eq!(payload["epoch_guard_accepted"], true);
+    assert_eq!(payload["checkpoint_guard_ok"], true);
+    assert_eq!(payload["evidence_replay_verified"], true);
 }

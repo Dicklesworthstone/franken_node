@@ -117,16 +117,17 @@ use crate::cli::{
     DoctorEvidenceReadinessArgs, DoctorExpectedLossActionsArgs, DoctorPolicyActivationInput,
     DoctorProcessSpawnReadinessArgs, DoctorWorkspacePressureArgs, FleetAgentArgs, FleetCommand,
     IncidentCommand, LtvCommand, MigrateCommand, MigrateReportArgs, OpsCommand,
-    OpsCompatCorpusRunArgs, OpsConfigAuditArgs, OpsMetricsFormat, OpsProofCarryingEvidenceArgs,
-    OpsResourceGovernorArgs, OpsValidationCloseoutArgs, OpsValidationReadinessArgs,
-    ProofQueueCommand, ProofQueueStatusArgs, ProofWorkersCommand, ProofWorkersRestartArgs,
-    ProofsCommand, RegistryCommand, RemoteCapCommand, RemoteCapIssueArgs, RemoteCapRevokeArgs,
-    RemoteCapUseArgs, RemoteCapVerifyArgs, RuntimeCommand, RuntimeLaneCommand, SafeModeCommand,
-    SafeModeEnterArgs, SafeModeExitArgs, SafeModeStatusArgs, TrustCardCommand,
-    TrustCardReputationArgs, TrustCommand, TrustZkAttestArgs, VerifyCommand,
-    VerifyCompatibilityArgs, VerifyCorpusArgs, VerifyMigrationArgs, VerifyModuleArgs,
-    VerifyRecoveryRunbookArgs, VerifyReleaseArgs, VerifySourceGraphArgs, VerifyTransparencyLogArgs,
-    VerifyZkAttestationArgs, load_doctor_policy_activation_input,
+    OpsCompatCorpusRunArgs, OpsConfigAuditArgs, OpsEvidenceIndexArgs, OpsMetricsFormat,
+    OpsProofCarryingEvidenceArgs, OpsResourceGovernorArgs, OpsSwarmHandoffArgs,
+    OpsValidationCloseoutArgs, OpsValidationReadinessArgs, ProofQueueCommand, ProofQueueStatusArgs,
+    ProofWorkersCommand, ProofWorkersRestartArgs, ProofsCommand, RegistryCommand, RemoteCapCommand,
+    RemoteCapIssueArgs, RemoteCapRevokeArgs, RemoteCapUseArgs, RemoteCapVerifyArgs, RuntimeCommand,
+    RuntimeLaneCommand, SafeModeCommand, SafeModeEnterArgs, SafeModeExitArgs, SafeModeStatusArgs,
+    TrustCardCommand, TrustCardReputationArgs, TrustCommand, TrustVefProveArgs, TrustZkAttestArgs,
+    VerifyCommand, VerifyCompatibilityArgs, VerifyCorpusArgs, VerifyMigrationArgs,
+    VerifyModuleArgs, VerifyRecoveryRunbookArgs, VerifyReleaseArgs, VerifySourceGraphArgs,
+    VerifyTransparencyLogArgs, VerifyVefProofArgs, VerifyZkAttestationArgs,
+    load_doctor_policy_activation_input,
 };
 use crate::ops::workspace_pressure_policy::WorkspacePressureInputs;
 use crate::policy::{
@@ -166,17 +167,19 @@ pub use frankenengine_node::testing;
 #[cfg(test)]
 use frankenengine_node::tools::replay_bundle::{fixture_incident_events, generate_replay_bundle};
 pub use frankenengine_node::{
-    capacity_defaults, connector, control_plane, extensions, supply_chain,
+    capacity_defaults, connector, control_plane, extensions, supply_chain, vef,
 };
 use frankenengine_node::{
     config::{self, CliOverrides, Profile},
     migration, ops, runtime,
     security::{
+        bpet as lib_bpet,
         decision_receipt::{
             DECISION_RECEIPT_CRYPTO_SUITE, DECISION_RECEIPT_SIGNATURE_VERSION, Decision, Receipt,
             ReceiptQuery, append_signed_receipt, export_receipts_to_path, sign_receipt,
             write_receipts_markdown,
         },
+        dgis as lib_dgis,
         remote_cap::{
             CapabilityGate, CapabilityProvider, RemoteCap, RemoteCapError, RemoteOperation,
             RemoteScope,
@@ -184,7 +187,7 @@ use frankenengine_node::{
         revocation_freshness::{
             FreshnessPolicy, SafetyTier, registry_revocation_freshness_denial, snapshot_age_secs,
         },
-        zk_attestation,
+        trust_complexity, zk_attestation,
     },
     supply_chain::category_shift::validate_benchmark_thresholds_with_config,
     supply_chain::{
@@ -5996,6 +5999,9 @@ struct RuntimeLaneStatusReport {
     live_node: bool,
     policy: runtime::lane_scheduler::LaneMappingPolicy,
     telemetry: runtime::lane_scheduler::LaneTelemetrySnapshot,
+    router_metrics: runtime::lane_router::RouterMetricsSnapshot,
+    control_lane_policy: control_plane::control_lane_mapping::ControlLanePolicy,
+    authority_audit_passed: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -6008,6 +6014,9 @@ struct RuntimeLaneAssignmentReport {
     persisted: bool,
     assignment: runtime::lane_scheduler::TaskAssignment,
     telemetry: runtime::lane_scheduler::LaneTelemetrySnapshot,
+    routed_product_lane: runtime::lane_router::ProductLane,
+    router_metrics: runtime::lane_router::RouterMetricsSnapshot,
+    authority_audit_passed: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -6025,6 +6034,12 @@ struct RuntimeEpochReport {
     live_seqlock_sequence: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     live_quarantine_version: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    epoch_guard_accepted: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    checkpoint_guard_ok: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    evidence_replay_verified: Option<bool>,
 }
 
 const RUNTIME_LANE_STATE_SCHEMA_VERSION: &str = "franken-node/runtime-lane-state/v1";
@@ -8141,6 +8156,62 @@ fn runtime_fail(command: &str, json: bool, error: impl std::fmt::Display) -> Res
     anyhow::bail!("{message}")
 }
 
+fn map_scheduler_lane_to_product_lane(
+    lane: runtime::lane_scheduler::SchedulerLane,
+) -> runtime::lane_router::ProductLane {
+    match lane {
+        runtime::lane_scheduler::SchedulerLane::ControlCritical => {
+            runtime::lane_router::ProductLane::Cancel
+        }
+        runtime::lane_scheduler::SchedulerLane::RemoteEffect => {
+            runtime::lane_router::ProductLane::Timed
+        }
+        runtime::lane_scheduler::SchedulerLane::Maintenance => {
+            runtime::lane_router::ProductLane::Realtime
+        }
+        runtime::lane_scheduler::SchedulerLane::Background => {
+            runtime::lane_router::ProductLane::Background
+        }
+    }
+}
+
+fn replay_lane_router_from_persisted(
+    persisted_state: &PersistedLaneSchedulerState,
+    policy: &runtime::lane_scheduler::LaneMappingPolicy,
+) -> Result<runtime::lane_router::LaneRouter> {
+    let mut router = runtime::lane_router::LaneRouter::from_runtime_config(
+        &config::RuntimeConfig::balanced_defaults(),
+    )
+    .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+    for (idx, event) in persisted_state.entries.iter().enumerate() {
+        let Some(&sched_lane) = policy.mapping_rules.get(&event.task_class) else {
+            continue;
+        };
+        let product_lane = map_scheduler_lane_to_product_lane(sched_lane);
+        let cx = runtime::bounded_mask::CapabilityContext::with_scopes(
+            format!("cx-persisted-{idx}"),
+            "operator:local",
+            [format!("lane.{}", product_lane.as_str())],
+        );
+        let op_id = format!("persisted-op-{idx}");
+        let _ =
+            router.assign_operation(&cx, &op_id, Some(product_lane.as_str()), event.timestamp_ms);
+    }
+    Ok(router)
+}
+
+fn runtime_authority_audit_passed(trace_id: &str) -> bool {
+    let mut guard = runtime::authority_audit::AuthorityAuditGuard::with_default_inventory(true);
+    let ctx = runtime::authority_audit::CapabilityContext::new(
+        runtime::authority_audit::Capability::all(),
+        trace_id,
+        "operator:local",
+    );
+    guard
+        .check_context("crate::security::epoch_guard", &ctx)
+        .is_ok()
+}
+
 fn handle_runtime_command(command: RuntimeCommand) -> Result<()> {
     let project_root = Path::new(".");
     match command {
@@ -8149,8 +8220,18 @@ fn handle_runtime_command(command: RuntimeCommand) -> Result<()> {
                 let policy = runtime::lane_scheduler::default_policy();
                 let mut scheduler = runtime::lane_scheduler::LaneScheduler::new(policy.clone())
                     .map_err(|err| anyhow::anyhow!(err.to_string()))?;
-                let (live_node, _) =
+                let (live_node, persisted_state) =
                     load_and_replay_runtime_lane_state(project_root, &mut scheduler)?;
+                let router = replay_lane_router_from_persisted(&persisted_state, &policy)?;
+                let router_metrics = router.metrics_snapshot();
+                let control_lane_policy =
+                    control_plane::control_lane_mapping::default_control_lane_policy();
+                control_lane_policy
+                    .validate()
+                    .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+                let _ = control_plane::control_lane_policy::ControlTaskClass::all();
+                let authority_audit_passed =
+                    runtime_authority_audit_passed("trace-runtime-lane-status");
                 let telemetry =
                     scheduler.telemetry_snapshot(runtime_cli_timestamp_ms(args.timestamp_ms));
                 let report = RuntimeLaneStatusReport {
@@ -8159,6 +8240,9 @@ fn handle_runtime_command(command: RuntimeCommand) -> Result<()> {
                     live_node,
                     policy,
                     telemetry,
+                    router_metrics,
+                    control_lane_policy,
+                    authority_audit_passed,
                 };
                 emit_json_or_human(&report, args.json, || {
                     let lane_count = report.policy.lane_configs.len();
@@ -8169,8 +8253,8 @@ fn handle_runtime_command(command: RuntimeCommand) -> Result<()> {
                         "local default policy (not a running node)"
                     };
                     format!(
-                        "runtime lane status: {scope}: lanes={lane_count} mapping_rules={rule_count} schema={}",
-                        report.schema_version
+                        "runtime lane status: {scope}: lanes={lane_count} mapping_rules={rule_count} router_in_flight={} schema={}",
+                        report.router_metrics.total_in_flight, report.schema_version
                     )
                 })?;
             }
@@ -8179,15 +8263,32 @@ fn handle_runtime_command(command: RuntimeCommand) -> Result<()> {
                     anyhow::bail!("runtime lane assign requires a task class");
                 }
                 let policy = runtime::lane_scheduler::default_policy();
-                let mut scheduler = runtime::lane_scheduler::LaneScheduler::new(policy)
+                let mut scheduler = runtime::lane_scheduler::LaneScheduler::new(policy.clone())
                     .map_err(|err| anyhow::anyhow!(err.to_string()))?;
                 let (live_node, mut persisted_state) =
                     load_and_replay_runtime_lane_state(project_root, &mut scheduler)?;
+                let mut router = replay_lane_router_from_persisted(&persisted_state, &policy)?;
                 let timestamp_ms = runtime_cli_timestamp_ms(args.timestamp_ms);
                 let task_class = runtime::lane_scheduler::TaskClass::new(&args.task_class);
                 let assignment = scheduler
                     .assign_task(&task_class, timestamp_ms, &args.trace_id)
                     .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+                let routed_product_lane = map_scheduler_lane_to_product_lane(assignment.lane);
+                let cx = runtime::bounded_mask::CapabilityContext::with_scopes(
+                    format!("cx-{}", args.trace_id),
+                    "operator:local",
+                    [format!("lane.{}", routed_product_lane.as_str())],
+                );
+                let router_outcome = router
+                    .assign_operation(
+                        &cx,
+                        &assignment.task_id,
+                        Some(routed_product_lane.as_str()),
+                        timestamp_ms,
+                    )
+                    .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+                let router_metrics = router.metrics_snapshot();
+                let authority_audit_passed = runtime_authority_audit_passed(&args.trace_id);
                 if live_node {
                     crate::push_bounded(
                         &mut persisted_state.entries,
@@ -8208,6 +8309,9 @@ fn handle_runtime_command(command: RuntimeCommand) -> Result<()> {
                     persisted: live_node,
                     assignment,
                     telemetry,
+                    routed_product_lane: router_outcome.lane,
+                    router_metrics,
+                    authority_audit_passed,
                 };
                 emit_json_or_human(&report, args.json, || {
                     let scope = if report.persisted {
@@ -8216,10 +8320,11 @@ fn handle_runtime_command(command: RuntimeCommand) -> Result<()> {
                         "local default scheduler (not persisted)"
                     };
                     format!(
-                        "runtime lane assignment: {scope}: task_id={} task_class={} lane={}",
+                        "runtime lane assignment: {scope}: task_id={} task_class={} lane={} product_lane={}",
                         report.assignment.task_id,
                         report.assignment.task_class,
-                        report.assignment.lane
+                        report.assignment.lane,
+                        report.routed_product_lane
                     )
                 })?;
             }
@@ -8258,6 +8363,56 @@ fn handle_runtime_command(command: RuntimeCommand) -> Result<()> {
                 Some(peer) => ("mismatch", Some(local_epoch.abs_diff(peer))),
                 None => ("local_only", None),
             };
+            let (epoch_guard_accepted, checkpoint_guard_ok, evidence_replay_verified) = if live_node
+            {
+                let source = runtime::epoch_guard::StaticEpochSource::available(
+                    control_plane::control_epoch::ControlEpoch::new(local_epoch),
+                );
+                let presented = control_plane::control_epoch::ControlEpoch::new(
+                    peer_epoch.unwrap_or(local_epoch),
+                );
+                let guard_ok = runtime::epoch_guard::EpochGuard::default()
+                    .validate_operation_epoch(presented, &source, "trace-runtime-epoch")
+                    .is_ok();
+
+                let mut ck_guard = runtime::checkpoint_guard::CheckpointGuard::new(
+                    "runtime-epoch",
+                    "trace-runtime-epoch",
+                    runtime::checkpoint_guard::CheckpointGuardConfig::default(),
+                );
+                ck_guard.checkpoint(1);
+                let ck_ok = ck_guard.on_iteration(1).is_ok();
+
+                let mut replay_gate =
+                    control_plane::evidence_replay_gate::EvidenceReplayGate::new();
+                let mut input_ctx = BTreeMap::new();
+                input_ctx.insert("local_epoch".to_string(), local_epoch.to_string());
+                if let Some(peer) = peer_epoch {
+                    input_ctx.insert("peer_epoch".to_string(), peer.to_string());
+                }
+                let mut captured = control_plane::evidence_replay_gate::CapturedEvidence {
+                    decision_id: format!("epoch-check-{local_epoch}"),
+                    decision_type: control_plane::evidence_replay_gate::DecisionType::Fencing,
+                    epoch_id: local_epoch,
+                    timestamp: Utc::now().to_rfc3339(),
+                    chosen_action: verdict.to_string(),
+                    input_entries: vec![format!("seqlock_epoch={local_epoch}")],
+                    input_context: input_ctx,
+                    input_hash: String::new(),
+                    trace_id: "trace-runtime-epoch".to_string(),
+                };
+                captured.input_hash = captured.compute_input_hash();
+                let ts = captured.timestamp.clone();
+                replay_gate.capture_evidence(captured.clone());
+                let replay_res = replay_gate.replay_decision(&captured, verdict, &ts);
+                let replay_ok = matches!(
+                    replay_res.verdict,
+                    control_plane::evidence_replay_gate::ReplayVerdict::Reproduced
+                );
+                (Some(guard_ok), Some(ck_ok), Some(replay_ok))
+            } else {
+                (None, None, None)
+            };
             let report = RuntimeEpochReport {
                 schema_version: "runtime-epoch-v1",
                 command: "runtime.epoch",
@@ -8269,6 +8424,9 @@ fn handle_runtime_command(command: RuntimeCommand) -> Result<()> {
                 epoch_delta,
                 live_seqlock_sequence: live_snapshot.as_ref().map(|s| s.sequence),
                 live_quarantine_version: live_snapshot.as_ref().map(|s| s.quarantine_version),
+                epoch_guard_accepted,
+                checkpoint_guard_ok,
+                evidence_replay_verified,
             };
             emit_json_or_human(&report, args.json, || {
                 let scope = if report.compares_live_control_epoch {
@@ -14311,6 +14469,16 @@ struct TrustGraphFocus {
 }
 
 #[derive(Debug, Serialize)]
+struct TrustGraphImmunizationReport {
+    planner_catalog: Option<lib_dgis::immunization_planner::BarrierPlanCatalog>,
+    risk_surfaces: Vec<lib_dgis::risk_surface_integration::RiskSurfaceSnapshot>,
+    bpet_dgis_priorities: Vec<lib_bpet::dgis_fusion::BpetDgisPriorityEscalation>,
+    bpet_trust_surfaces: Vec<lib_bpet::trust_surface_integration::BpetTrustSurfaceAssessment>,
+    complexity_gate_pass: bool,
+    complexity_replay_deterministic: bool,
+}
+
+#[derive(Debug, Serialize)]
 struct TrustGraphCliReport {
     schema_version: &'static str,
     command: &'static str,
@@ -14320,6 +14488,197 @@ struct TrustGraphCliReport {
     graph: supply_chain::trust_graph::TrustGraph,
     #[serde(skip_serializing_if = "Option::is_none")]
     focus: Option<TrustGraphFocus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    immunization: Option<TrustGraphImmunizationReport>,
+}
+
+fn build_trust_graph_immunization(
+    graph: &supply_chain::trust_graph::TrustGraph,
+    trace_id: &str,
+) -> Result<TrustGraphImmunizationReport> {
+    use lib_bpet::dgis_fusion::{BpetDgisFusionInput, BpetDgisFusionPolicy, prioritize_with_dgis};
+    use lib_bpet::economic_integration::{
+        BpetEconomicEngine, PhenotypeObservation, PhenotypeTrajectory,
+    };
+    use lib_bpet::trust_surface_integration::assess_guidance_for_trust_surface;
+    use lib_dgis::immunization_planner::{
+        CriticalNodeInput, ImmunizationPlanner, ImmunizationPlannerConfig,
+        ImmunizationPlannerError, PlanningInput,
+    };
+    use lib_dgis::risk_surface_integration::{
+        PlannedChangeKind, PlannedTopologyChange, RiskSurfaceInput, build_risk_surface_snapshot,
+    };
+    use lib_dgis::update_copilot::TopologyRiskMetrics;
+
+    let mut critical_nodes = Vec::new();
+    let mut risk_surfaces = Vec::new();
+    let mut bpet_dgis_priorities = Vec::new();
+    let mut bpet_trust_surfaces = Vec::new();
+    let mut complexity_gate = trust_complexity::TrustComplexityGate::new(
+        trust_complexity::ComplexityBudget::default(),
+        300,
+    );
+    let mut complexity_replay_deterministic = true;
+
+    let total_extensions = graph.summary.extensions.max(1) as f64;
+    for node in &graph.nodes {
+        if node.kind != supply_chain::trust_graph::TrustNodeKind::Extension {
+            continue;
+        }
+        let dependents = supply_chain::trust_graph::blast_radius(graph, &node.node_id);
+        let direct_deps = graph
+            .edges
+            .iter()
+            .filter(|edge| {
+                edge.source == node.node_id
+                    && edge.relation == supply_chain::trust_graph::TrustRelation::DependsOn
+            })
+            .count();
+        let max_depth = dependents
+            .iter()
+            .map(|entry| u32::try_from(entry.depth).unwrap_or(u32::MAX))
+            .max()
+            .unwrap_or(0);
+        let effective_score_1000 = node
+            .effective_score
+            .unwrap_or(500)
+            .min(supply_chain::trust_graph::TRUST_SCORE_SCALE);
+        let trust_deficit = (1.0
+            - (f64::from(effective_score_1000)
+                / f64::from(supply_chain::trust_graph::TRUST_SCORE_SCALE)))
+        .clamp(0.0, 1.0);
+        let effective_bps = effective_score_1000.saturating_mul(10);
+        let centrality = ((dependents.len() as f64) / total_extensions).clamp(0.0, 1.0);
+        let bottleneck = ((trust_deficit * 0.6) + (centrality * 0.4)).clamp(0.0, 1.0);
+        let metrics = TopologyRiskMetrics {
+            fan_out: direct_deps as f64,
+            betweenness_centrality: centrality,
+            articulation_point: !dependents.is_empty() && direct_deps > 0,
+            trust_bottleneck_score: bottleneck,
+            transitive_dependency_count: u32::try_from(dependents.len()).unwrap_or(u32::MAX),
+            max_depth_in_graph: max_depth,
+        };
+        let expected_cascade_loss =
+            (0.28 + (trust_deficit * 0.45) + (centrality * 0.25)).clamp(0.05, 0.99);
+        critical_nodes.push(CriticalNodeInput::new(
+            node.node_id.clone(),
+            metrics.clone(),
+            expected_cascade_loss,
+        ));
+
+        let post_metrics = TopologyRiskMetrics {
+            trust_bottleneck_score: (metrics.trust_bottleneck_score * 0.5).clamp(0.0, 1.0),
+            ..metrics.clone()
+        };
+        let surface = build_risk_surface_snapshot(RiskSurfaceInput {
+            extension_id: node.node_id.clone(),
+            trace_id: trace_id.to_string(),
+            base_adversary_posterior: trust_deficit.clamp(0.01, 0.99),
+            current_metrics: metrics.clone(),
+            planned_changes: vec![PlannedTopologyChange {
+                change_kind: PlannedChangeKind::UpdateVersion,
+                package_name: node.node_id.clone(),
+                from_version: "current".to_string(),
+                to_version: "immunized".to_string(),
+                post_update_metrics: post_metrics,
+            }],
+        })
+        .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+        risk_surfaces.push(surface);
+
+        let priority = prioritize_with_dgis(
+            &BpetDgisFusionInput {
+                package_id: node.node_id.clone(),
+                bpet_risk_score: trust_deficit,
+                bpet_confidence: 0.90,
+                expected_loss_if_compromised_usd: 50_000.0 * (1.0 + (dependents.len() as f64)),
+                topology_metrics: metrics,
+                trace_id: trace_id.to_string(),
+            },
+            &BpetDgisFusionPolicy::default(),
+        )
+        .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+        bpet_dgis_priorities.push(priority);
+
+        let trajectory = PhenotypeTrajectory {
+            package_name: node.node_id.clone(),
+            observations: vec![PhenotypeObservation {
+                timestamp: "2026-01-01T00:00:00Z".to_string(),
+                maintainer_activity_score: (1.0 - trust_deficit * 0.5).clamp(0.05, 1.0),
+                commit_velocity: 6.0,
+                issue_response_time_hours: 12.0 + trust_deficit * 36.0,
+                dependency_churn_rate: (0.04 + trust_deficit * 0.25).clamp(0.0, 1.0),
+                security_patch_latency_hours: 24.0 + trust_deficit * 72.0,
+                contributor_diversity_index: (0.85 - trust_deficit * 0.4).clamp(0.05, 1.0),
+            }],
+        };
+        let mut econ_engine = BpetEconomicEngine::new(Vec::new());
+        let guidance = econ_engine
+            .generate_guidance(
+                &trajectory,
+                50_000.0 * (1.0 + (dependents.len() as f64)),
+                0.85,
+                trace_id,
+            )
+            .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+        let bpet_surface = assess_guidance_for_trust_surface(&guidance, effective_bps, None)
+            .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+        bpet_trust_surfaces.push(bpet_surface);
+
+        let chain_depth = max_depth.min(5);
+        let outcome = if node.revoked || node.quarantined {
+            trust_complexity::TrustOutcome::Deny
+        } else {
+            trust_complexity::TrustOutcome::Grant
+        };
+        let ctx = trust_complexity::TrustDecisionContext {
+            decision_id: format!("dgis-{}", node.node_id),
+            endpoint_group: "trust.graph".to_string(),
+            token: "local-cli".to_string(),
+            epoch: 1,
+            capability_set: vec!["trust.graph.immunize".to_string()],
+            clock_value: "2026-01-01T00:00:00Z".to_string(),
+            chain_depth,
+        };
+        complexity_gate
+            .record_decision(trust_complexity::TrustDecision {
+                context: ctx.clone(),
+                outcome,
+                reason: format!("effective_score={effective_bps}"),
+                decided_at: "2026-01-01T00:00:00Z".to_string(),
+            })
+            .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+        let replay = complexity_gate.verify_replay(&ctx, |_| outcome);
+        if !replay.deterministic {
+            complexity_replay_deterministic = false;
+        }
+    }
+
+    let planner_catalog = if critical_nodes.is_empty() {
+        None
+    } else {
+        let planner_cfg = ImmunizationPlannerConfig {
+            max_total_overhead_ms: 240,
+            ..ImmunizationPlannerConfig::default()
+        };
+        let planner = ImmunizationPlanner::new(planner_cfg)
+            .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+        let planning_input = PlanningInput::new(critical_nodes.into_iter().take(18).collect());
+        match planner.plan_catalog(&planning_input) {
+            Ok(catalog) => Some(catalog),
+            Err(ImmunizationPlannerError::NoFeasiblePlan { .. }) => None,
+            Err(err) => return Err(anyhow::anyhow!(err.to_string())),
+        }
+    };
+
+    Ok(TrustGraphImmunizationReport {
+        planner_catalog,
+        risk_surfaces,
+        bpet_dgis_priorities,
+        bpet_trust_surfaces,
+        complexity_gate_pass: complexity_gate.gate_pass(),
+        complexity_replay_deterministic,
+    })
 }
 
 fn load_project_lockfile_graph(
@@ -14348,7 +14707,7 @@ fn load_project_lockfile_graph(
     ))
 }
 
-fn trust_graph_report(extension: Option<&str>) -> Result<TrustGraphCliReport> {
+fn trust_graph_report(extension: Option<&str>, immunize: bool) -> Result<TrustGraphCliReport> {
     use supply_chain::trust_graph::{blast_radius, build_trust_graph};
 
     let now_secs = now_unix_secs();
@@ -14389,12 +14748,21 @@ fn trust_graph_report(extension: Option<&str>) -> Result<TrustGraphCliReport> {
             })
         }
     };
+    let immunization = if immunize {
+        Some(build_trust_graph_immunization(
+            &graph,
+            "trace-cli-trust-graph-immunize",
+        )?)
+    } else {
+        None
+    };
     Ok(TrustGraphCliReport {
         schema_version: TRUST_GRAPH_CLI_SCHEMA_VERSION,
         command: "trust.graph",
         lockfile,
         graph,
         focus,
+        immunization,
     })
 }
 
@@ -14487,6 +14855,18 @@ fn render_trust_graph_human(report: &TrustGraphCliReport) -> String {
                 }
             ));
         }
+    }
+    if let Some(immunization) = &report.immunization {
+        let plan_count = immunization
+            .planner_catalog
+            .as_ref()
+            .map_or(0, |catalog| catalog.plans.len());
+        lines.push(format!(
+            "immunization: plans={plan_count} risk_surfaces={} bpet_priorities={} complexity_gate_pass={}",
+            immunization.risk_surfaces.len(),
+            immunization.bpet_dgis_priorities.len(),
+            immunization.complexity_gate_pass
+        ));
     }
     lines.join("\n")
 }
@@ -38474,6 +38854,1303 @@ fn handle_debug_evidence(args: &DebugEvidenceArgs) -> Result<()> {
     }
 }
 
+const VEF_SIGNED_PROOF_BUNDLE_SCHEMA_VERSION: &str = "franken-node/vef-signed-proof-bundle/v1";
+const VEF_ED25519_BACKEND_NAME: &str = "ed25519-receipt-window-v1";
+const VEF_ED25519_DOMAIN: &[u8] = b"franken_node:vef:ed25519_receipt_window:v1:";
+
+struct Ed25519ReceiptWindowBackend {
+    signing_key: Option<ed25519_dalek::SigningKey>,
+    verifying_key: ed25519_dalek::VerifyingKey,
+    policy_snapshot_hash: String,
+}
+
+impl Ed25519ReceiptWindowBackend {
+    fn from_signing_key(
+        signing_key: ed25519_dalek::SigningKey,
+        policy_snapshot_hash: impl Into<String>,
+    ) -> Self {
+        let verifying_key = signing_key.verifying_key();
+        Self {
+            signing_key: Some(signing_key),
+            verifying_key,
+            policy_snapshot_hash: policy_snapshot_hash.into(),
+        }
+    }
+
+    fn from_verifying_key(
+        verifying_key: ed25519_dalek::VerifyingKey,
+        policy_snapshot_hash: impl Into<String>,
+    ) -> Self {
+        Self {
+            signing_key: None,
+            verifying_key,
+            policy_snapshot_hash: policy_snapshot_hash.into(),
+        }
+    }
+
+    fn window_signing_digest(
+        entries: &[vef::receipt_chain::ReceiptChainEntry],
+        policy_snapshot_hash: &str,
+    ) -> Result<[u8; 32], vef::proof_generator::ProofGeneratorError> {
+        if entries.is_empty() {
+            return Err(vef::proof_generator::ProofGeneratorError::window_empty(
+                "cannot sign an empty VEF receipt window",
+            ));
+        }
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(VEF_ED25519_DOMAIN);
+        hasher.update(
+            u64::try_from(policy_snapshot_hash.len())
+                .unwrap_or(u64::MAX)
+                .to_le_bytes(),
+        );
+        hasher.update(policy_snapshot_hash.as_bytes());
+        hasher.update(
+            u64::try_from(entries.len())
+                .unwrap_or(u64::MAX)
+                .to_le_bytes(),
+        );
+        for entry in entries {
+            hasher.update(entry.index.to_le_bytes());
+            hasher.update(
+                u64::try_from(entry.chain_hash.len())
+                    .unwrap_or(u64::MAX)
+                    .to_le_bytes(),
+            );
+            hasher.update(entry.chain_hash.as_bytes());
+            hasher.update(
+                u64::try_from(entry.receipt_hash.len())
+                    .unwrap_or(u64::MAX)
+                    .to_le_bytes(),
+            );
+            hasher.update(entry.receipt_hash.as_bytes());
+        }
+        Ok(hasher.finalize().into())
+    }
+}
+
+impl vef::proof_generator::ProofBackend for Ed25519ReceiptWindowBackend {
+    fn backend_name(&self) -> &str {
+        VEF_ED25519_BACKEND_NAME
+    }
+
+    fn generate(
+        &self,
+        request: &vef::proof_generator::ProofRequest,
+    ) -> std::result::Result<
+        vef::proof_generator::ComplianceProof,
+        vef::proof_generator::ProofGeneratorError,
+    > {
+        use ed25519_dalek::Signer as _;
+        let Some(signing_key) = &self.signing_key else {
+            return Err(
+                vef::proof_generator::ProofGeneratorError::backend_unavailable(
+                    "Ed25519 signing key not loaded in verification-only mode",
+                ),
+            );
+        };
+        let digest = Self::window_signing_digest(&request.entries, &self.policy_snapshot_hash)?;
+        let sig = signing_key.sign(&digest);
+        let proof_data = sig.to_bytes().to_vec();
+        let mut data_hasher = sha2::Sha256::new();
+        data_hasher.update(b"vef_ed25519_proof_data_v1:");
+        data_hasher.update(&proof_data);
+        let proof_data_hash = format!("sha256:{}", hex::encode(data_hasher.finalize()));
+        let mut metadata = BTreeMap::new();
+        metadata.insert(
+            "signer_public_key_hex".to_string(),
+            hex::encode(self.verifying_key.to_bytes()),
+        );
+        metadata.insert(
+            "policy_snapshot_hash".to_string(),
+            self.policy_snapshot_hash.clone(),
+        );
+        metadata.insert("window_digest_hex".to_string(), hex::encode(digest));
+        Ok(vef::proof_generator::ComplianceProof {
+            proof_id: format!("vef-ed25519-{}", request.request_id),
+            format_version: vef::proof_generator::PROOF_FORMAT_VERSION.to_string(),
+            receipt_window_ref: request.window.window_id.clone(),
+            proof_data,
+            proof_data_hash,
+            generated_at_millis: request.created_at_millis,
+            backend_name: VEF_ED25519_BACKEND_NAME.to_string(),
+            metadata,
+            trace_id: request.trace_id.clone(),
+        })
+    }
+
+    fn verify(
+        &self,
+        proof: &vef::proof_generator::ComplianceProof,
+        entries: &[vef::receipt_chain::ReceiptChainEntry],
+    ) -> std::result::Result<bool, vef::proof_generator::ProofGeneratorError> {
+        if proof.backend_name != VEF_ED25519_BACKEND_NAME {
+            return Ok(false);
+        }
+        if proof.proof_data.len() != 64 {
+            return Ok(false);
+        }
+        let mut data_hasher = sha2::Sha256::new();
+        data_hasher.update(b"vef_ed25519_proof_data_v1:");
+        data_hasher.update(&proof.proof_data);
+        let expected_data_hash = format!("sha256:{}", hex::encode(data_hasher.finalize()));
+        if !crate::security::constant_time::ct_eq(&proof.proof_data_hash, &expected_data_hash) {
+            return Ok(false);
+        }
+        let Some(recorded_policy) = proof.metadata.get("policy_snapshot_hash") else {
+            return Ok(false);
+        };
+        if !crate::security::constant_time::ct_eq(recorded_policy, &self.policy_snapshot_hash) {
+            return Ok(false);
+        }
+        let Some(recorded_pk_hex) = proof.metadata.get("signer_public_key_hex") else {
+            return Ok(false);
+        };
+        let expected_pk_hex = hex::encode(self.verifying_key.to_bytes());
+        if !crate::security::constant_time::ct_eq(recorded_pk_hex, &expected_pk_hex) {
+            return Ok(false);
+        }
+        let digest = Self::window_signing_digest(entries, &self.policy_snapshot_hash)?;
+        let mut sig_arr = [0u8; 64];
+        sig_arr.copy_from_slice(&proof.proof_data);
+        let sig = ed25519_dalek::Signature::from_bytes(&sig_arr);
+        Ok(self.verifying_key.verify_strict(&digest, &sig).is_ok())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct VefSignedProofBundle {
+    schema_version: String,
+    policy_definition: vef::constraint_compiler::PolicyDefinition,
+    predicate_set: vef::constraint_compiler::PredicateSet,
+    policy_snapshot_hash: String,
+    actor_identity: String,
+    artifact_identity: String,
+    receipt_entries: Vec<vef::receipt_chain::ReceiptChainEntry>,
+    checkpoints: Vec<vef::receipt_chain::ReceiptCheckpoint>,
+    window: vef::proof_scheduler::ProofWindow,
+    scheduler_job: vef::proof_scheduler::ProofJob,
+    service_input: vef::proof_service::ProofInputEnvelope,
+    service_output: vef::proof_service::ProofOutputEnvelope,
+    signed_compliance_proof: vef::proof_generator::ComplianceProof,
+    signer_public_key_hex: String,
+    evidence_capsule: vef::evidence_capsule::EvidenceCapsule,
+    capsule_embedding: vef::sdk_integration::CapsuleEmbedding,
+    gate_verification_report: vef::proof_verifier::VerificationReport,
+    control_transition_allowed: bool,
+    verification_state_allowed: bool,
+    validity_ms: u64,
+    generated_at_millis: u64,
+    expires_at_millis: u64,
+    trace_id: String,
+}
+
+fn load_vef_signing_key(explicit_path: Option<&Path>) -> Result<ed25519_dalek::SigningKey> {
+    if let Some(path) = explicit_path {
+        let meta = std::fs::metadata(path)
+            .with_context(|| format!("failed reading VEF signing key {}", path.display()))?;
+        anyhow::ensure!(
+            meta.is_file(),
+            "VEF signing key path is not a regular file: {}",
+            path.display()
+        );
+        let raw = bounded_read(path, MAX_SIGNING_KEY_BYTES)
+            .with_context(|| format!("failed reading VEF signing key {}", path.display()))?;
+        return parse_signing_key_from_blob(&raw).ok_or_else(|| {
+            anyhow::anyhow!(
+                "invalid Ed25519 signing key material in {} (PEM and malformed blobs are refused)",
+                path.display()
+            )
+        });
+    }
+    let default_key_path = Path::new(".franken-node/keys/decision-receipt-signing.key");
+    if let Ok(meta) = std::fs::metadata(default_key_path)
+        && meta.is_file()
+    {
+        let raw = bounded_read(default_key_path, MAX_SIGNING_KEY_BYTES).with_context(|| {
+            format!(
+                "failed reading workspace signing key {}",
+                default_key_path.display()
+            )
+        })?;
+        return parse_signing_key_from_blob(&raw).ok_or_else(|| {
+            anyhow::anyhow!(
+                "invalid Ed25519 workspace signing key in {}",
+                default_key_path.display()
+            )
+        });
+    }
+    anyhow::bail!(
+        "trust vef-prove requires an Ed25519 signing key via --signing-key <PATH> or an initialized workspace key (.franken-node/keys/decision-receipt-signing.key)"
+    )
+}
+
+fn default_vef_policy_definition(policy_id: &str) -> vef::constraint_compiler::PolicyDefinition {
+    use vef::constraint_compiler::{
+        ActionClass, ComparisonOp, Condition, PolicyDefinition, PolicyEffect, PolicyRule,
+    };
+    let rules = ActionClass::ALL
+        .iter()
+        .enumerate()
+        .map(|(idx, &action_class)| PolicyRule {
+            rule_id: format!("{policy_id}-rule-{}", idx + 1),
+            action_class,
+            description: format!(
+                "Enforce VEF receipt attestation on {}",
+                action_class.as_str()
+            ),
+            conditions: vec![Condition {
+                field: "capability.verified".to_string(),
+                op: ComparisonOp::Equals,
+                value: "true".to_string(),
+            }],
+            effect: PolicyEffect::Allow,
+            priority: u32::try_from(idx + 1).unwrap_or(1),
+        })
+        .collect();
+    PolicyDefinition {
+        policy_id: policy_id.to_string(),
+        name: format!("VEF Policy {policy_id}"),
+        version: "1.0.0".to_string(),
+        rules,
+    }
+}
+
+fn handle_trust_vef_prove(args: &TrustVefProveArgs) -> Result<()> {
+    if args.policy_id.trim().is_empty() {
+        anyhow::bail!("trust vef-prove requires a non-empty --policy-id");
+    }
+    if args.actor_identity.trim().is_empty() {
+        anyhow::bail!("trust vef-prove requires a non-empty --actor-identity");
+    }
+    if args.artifact_identity.trim().is_empty() {
+        anyhow::bail!("trust vef-prove requires a non-empty --artifact-identity");
+    }
+    if args.validity_ms == 0 {
+        anyhow::bail!("trust vef-prove requires --validity-ms > 0");
+    }
+
+    let signing_key = load_vef_signing_key(args.signing_key.as_deref())?;
+    let verifying_key = signing_key.verifying_key();
+    let now_millis = args
+        .now_ms
+        .unwrap_or_else(|| now_unix_secs().saturating_mul(1_000));
+    let expires_at_millis = now_millis.saturating_add(args.validity_ms);
+    let trace_id = format!("trace-vef-prove-{}", args.policy_id.trim());
+
+    let policy_def = if let Some(policy_path) = &args.policy_file {
+        let raw = bounded_read_to_string(policy_path, MAX_POLICY_FILE_BYTES)
+            .with_context(|| format!("failed reading VEF policy {}", policy_path.display()))?;
+        serde_json::from_str::<vef::constraint_compiler::PolicyDefinition>(&raw).with_context(
+            || format!("invalid PolicyDefinition JSON in {}", policy_path.display()),
+        )?
+    } else {
+        default_vef_policy_definition(args.policy_id.trim())
+    };
+
+    let compiler = vef::constraint_compiler::ConstraintCompiler::new(&trace_id);
+    let compiled = compiler.compile(&policy_def);
+    if !compiled.success {
+        let errs = compiled
+            .errors
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("; ");
+        anyhow::bail!("VEF policy constraint compilation failed: {errs}");
+    }
+    let predicate_set = compiled
+        .predicate_set
+        .ok_or_else(|| anyhow::anyhow!("VEF constraint compiler produced no predicate set"))?;
+    let policy_snapshot_hash = if predicate_set.policy_snapshot_hash.starts_with("sha256:") {
+        predicate_set.policy_snapshot_hash.clone()
+    } else {
+        format!("sha256:{}", predicate_set.policy_snapshot_hash)
+    };
+
+    let action_types = connector::vef_execution_receipt::ExecutionActionType::all();
+    let mut receipt_chain =
+        vef::receipt_chain::ReceiptChain::new(vef::receipt_chain::ReceiptChainConfig {
+            checkpoint_every_entries: action_types.len(),
+            checkpoint_every_millis: 0,
+        });
+    for (seq, &action_type) in action_types.iter().enumerate() {
+        let mut cap_ctx = BTreeMap::new();
+        cap_ctx.insert("capability.verified".to_string(), "true".to_string());
+        cap_ctx.insert("action_class".to_string(), action_type.as_str().to_string());
+        let receipt = connector::vef_execution_receipt::ExecutionReceipt {
+            schema_version: connector::vef_execution_receipt::RECEIPT_SCHEMA_VERSION.to_string(),
+            action_type,
+            capability_context: cap_ctx,
+            actor_identity: args.actor_identity.clone(),
+            artifact_identity: args.artifact_identity.clone(),
+            policy_snapshot_hash: policy_snapshot_hash.clone(),
+            timestamp_millis: now_millis.saturating_add(u64::try_from(seq).unwrap_or(0)),
+            sequence_number: u64::try_from(seq).unwrap_or(0),
+            witness_references: vec![format!("witness-vef-{seq}")],
+            trace_id: trace_id.clone(),
+        };
+        connector::vef_execution_receipt::validate_receipt(&receipt)
+            .map_err(|err| anyhow::anyhow!("receipt validation failed: {err}"))?;
+        receipt_chain
+            .append(receipt, now_millis, &trace_id)
+            .map_err(|err| anyhow::anyhow!("receipt chain append failed: {err}"))?;
+    }
+    receipt_chain
+        .verify_integrity()
+        .map_err(|err| anyhow::anyhow!("receipt chain integrity check failed: {err}"))?;
+
+    let mut scheduler = vef::proof_scheduler::VefProofScheduler::new(
+        vef::proof_scheduler::SchedulerPolicy::default(),
+    );
+    let windows = scheduler
+        .select_windows(
+            receipt_chain.entries(),
+            receipt_chain.checkpoints(),
+            now_millis,
+            &trace_id,
+        )
+        .map_err(|err| anyhow::anyhow!("proof scheduler window selection failed: {err}"))?;
+    let window = windows
+        .first()
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("proof scheduler produced no receipt window"))?;
+    scheduler
+        .enqueue_windows(std::slice::from_ref(&window), now_millis)
+        .map_err(|err| anyhow::anyhow!("proof scheduler enqueue failed: {err}"))?;
+    let dispatched = scheduler
+        .dispatch_jobs(now_millis)
+        .map_err(|err| anyhow::anyhow!("proof scheduler dispatch failed: {err}"))?;
+    let job = dispatched
+        .first()
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("proof scheduler dispatched no proof job"))?;
+
+    let policy_predicates = predicate_set
+        .predicates
+        .values()
+        .map(|pred| pred.predicate_id.clone())
+        .collect::<Vec<_>>();
+    let mut input_meta = BTreeMap::new();
+    input_meta.insert("actor_identity".to_string(), args.actor_identity.clone());
+    input_meta.insert(
+        "artifact_identity".to_string(),
+        args.artifact_identity.clone(),
+    );
+    let service_input = vef::proof_service::ProofInputEnvelope::from_scheduler_job(
+        &job,
+        &window,
+        receipt_chain.entries(),
+        receipt_chain.checkpoints(),
+        &policy_snapshot_hash,
+        policy_predicates.clone(),
+        input_meta,
+    )
+    .map_err(|err| anyhow::anyhow!("proof service input envelope failed: {err}"))?;
+
+    let mut service = vef::proof_service::VefProofService::new(
+        vef::proof_service::ProofServiceConfig::reference_attestation_defaults(),
+    );
+    let service_output = service
+        .generate_proof(&service_input, None, now_millis)
+        .map_err(|err| anyhow::anyhow!("proof service generation failed: {err}"))?;
+    service
+        .verify_proof(&service_input, &service_output)
+        .map_err(|err| anyhow::anyhow!("proof service self-verification failed: {err}"))?;
+    scheduler
+        .mark_completed(&job.job_id, now_millis)
+        .map_err(|err| anyhow::anyhow!("proof scheduler completion failed: {err}"))?;
+
+    let backend = std::sync::Arc::new(Ed25519ReceiptWindowBackend::from_signing_key(
+        signing_key,
+        &policy_snapshot_hash,
+    ));
+    let mut generator = vef::proof_generator::ProofGenerator::new(
+        backend,
+        vef::proof_generator::ProofGeneratorConfig::default(),
+    );
+    let req_id = generator
+        .submit_request(&window, receipt_chain.entries(), now_millis, &trace_id)
+        .map_err(|err| anyhow::anyhow!("proof generator submit failed: {err}"))?;
+    let signed_compliance_proof = generator
+        .generate_proof(&req_id, &window, receipt_chain.entries(), now_millis)
+        .map_err(|err| anyhow::anyhow!("Ed25519 proof generation failed: {err}"))?;
+
+    let mut capsule = vef::evidence_capsule::EvidenceCapsule::new(
+        format!("capsule-{}", signed_compliance_proof.proof_id),
+        now_millis / 1_000,
+    );
+    let mut ev = vef::evidence_capsule::VefEvidence {
+        receipt_chain_commitment: String::new(),
+        proof_id: signed_compliance_proof.proof_id.clone(),
+        proof_type: VEF_ED25519_BACKEND_NAME.to_string(),
+        window_start: window.start_index,
+        window_end: window.end_index.saturating_add(1),
+        verified: true,
+        policy_constraints: policy_predicates,
+    };
+    ev.receipt_chain_commitment = capsule.derive_receipt_chain_commitment(&ev);
+    capsule
+        .add_evidence(ev)
+        .map_err(|err| anyhow::anyhow!("evidence capsule add failed: {err:?}"))?;
+    capsule
+        .seal()
+        .map_err(|err| anyhow::anyhow!("evidence capsule seal failed: {err:?}"))?;
+    let capsule_verdict = capsule.verify_all();
+    anyhow::ensure!(
+        capsule_verdict.valid,
+        "evidence capsule self-verification failed: {:?}",
+        capsule_verdict.failures
+    );
+
+    let capsule_json = serde_json::to_string(&capsule)?;
+    let mut embedder = vef::sdk_integration::VefCapsuleEmbed::new();
+    let capsule_embedding = embedder
+        .embed(
+            &signed_compliance_proof.proof_id,
+            &capsule_json,
+            BTreeMap::new(),
+            now_millis,
+            &trace_id,
+        )
+        .map_err(|err| anyhow::anyhow!("SDK capsule embed failed: {err}"))?;
+
+    let proof_hash_hex = signed_compliance_proof
+        .proof_data_hash
+        .strip_prefix("sha256:")
+        .unwrap_or(&signed_compliance_proof.proof_data_hash)
+        .to_string();
+    let mut ver_gate =
+        vef::proof_verifier::VerificationGate::new(vef::proof_verifier::VerificationGateConfig {
+            max_proof_age_millis: args.validity_ms.saturating_add(1),
+            degrade_threshold: 80,
+            enforce_policy_version: true,
+        });
+    ver_gate.register_predicate(vef::proof_verifier::PolicyPredicate {
+        predicate_id: format!("{}-artifact-promotion", policy_def.policy_id),
+        action_class: "artifact_promotion".to_string(),
+        max_proof_age_millis: args.validity_ms.saturating_add(1),
+        min_confidence: 90,
+        require_witnesses: true,
+        min_witness_count: 1,
+        policy_version_hash: policy_snapshot_hash.clone(),
+    });
+    let gate_verification_report = ver_gate
+        .verify(&vef::proof_verifier::VerificationRequest {
+            request_id: format!("ver-req-{}", signed_compliance_proof.proof_id),
+            proof: vef::proof_verifier::ComplianceProof {
+                proof_id: signed_compliance_proof.proof_id.clone(),
+                action_class: "artifact_promotion".to_string(),
+                proof_hash: proof_hash_hex,
+                confidence: 100,
+                generated_at_millis: now_millis,
+                expires_at_millis,
+                witness_references: vec!["witness-vef-0".to_string()],
+                policy_version_hash: policy_snapshot_hash.clone(),
+                trace_id: trace_id.clone(),
+            },
+            now_millis,
+            trace_id: trace_id.clone(),
+        })
+        .map_err(|err| anyhow::anyhow!("proof verifier gate failed: {err}"))?;
+    anyhow::ensure!(
+        gate_verification_report.decision == vef::proof_verifier::TrustDecision::Allow,
+        "proof verifier gate denied generated VEF proof: {}",
+        gate_verification_report.decision
+    );
+
+    let mut ctl_gate = vef::control_integration::ControlTransitionGate::new(
+        vef::control_integration::GatePolicy {
+            max_evidence_age_millis: args.validity_ms.saturating_add(1),
+            ..vef::control_integration::GatePolicy::default()
+        },
+        now_millis,
+    );
+    let ctl_decision = ctl_gate.evaluate(
+        &vef::control_integration::TransitionRequest {
+            request_id: format!("ctl-req-{}", signed_compliance_proof.proof_id),
+            transition_type: vef::control_integration::TransitionType::ArtifactPromotion,
+            actor_identity: args.actor_identity.clone(),
+            target_identity: args.artifact_identity.clone(),
+            evidence_refs: vec![vef::control_integration::VefEvidenceRef {
+                evidence_id: signed_compliance_proof.proof_id.clone(),
+                evidence_hash: signed_compliance_proof.proof_data_hash.clone(),
+                scope: vef::control_integration::TransitionType::ALL.to_vec(),
+                state: vef::control_integration::VerificationState::Verified,
+                created_at_millis: now_millis,
+                expires_at_millis,
+                trace_id: trace_id.clone(),
+            }],
+            context: BTreeMap::new(),
+            trace_id: trace_id.clone(),
+            requested_at_millis: now_millis,
+        },
+        &vef::control_integration::ActorTrustContext {
+            actor_identity: args.actor_identity.clone(),
+            trust_level: 100,
+            capabilities: vec!["vef.prove".to_string()],
+        },
+    );
+    let control_transition_allowed = ctl_decision.is_authorized();
+
+    let mut state_mgr = vef::verification_state::VerificationStateManager::new();
+    state_mgr.register_entity(&args.artifact_identity);
+    state_mgr
+        .attach_proof(
+            &args.artifact_identity,
+            vef::verification_state::ProofStatus {
+                proof_id: signed_compliance_proof.proof_id.clone(),
+                verified: true,
+                verified_at_epoch: now_millis / 1_000,
+                max_age_seconds: (args.validity_ms / 1_000).max(1).saturating_add(1),
+            },
+        )
+        .map_err(|err| anyhow::anyhow!("verification state attach failed: {err:?}"))?;
+    let state_decision = state_mgr
+        .request_transition(&vef::verification_state::TransitionRequest {
+            entity_id: args.artifact_identity.clone(),
+            target_risk_level: vef::verification_state::RiskLevel::High,
+            action: "artifact_promotion".to_string(),
+            requested_at_epoch: now_millis / 1_000,
+        })
+        .map_err(|err| anyhow::anyhow!("verification state transition failed: {err}"))?;
+    let verification_state_allowed = matches!(
+        state_decision,
+        vef::verification_state::TransitionResult::Approved
+    );
+
+    let bundle = VefSignedProofBundle {
+        schema_version: VEF_SIGNED_PROOF_BUNDLE_SCHEMA_VERSION.to_string(),
+        policy_definition: policy_def,
+        predicate_set,
+        policy_snapshot_hash,
+        actor_identity: args.actor_identity.clone(),
+        artifact_identity: args.artifact_identity.clone(),
+        receipt_entries: receipt_chain.entries().to_vec(),
+        checkpoints: receipt_chain.checkpoints().to_vec(),
+        window,
+        scheduler_job: job,
+        service_input,
+        service_output,
+        signed_compliance_proof,
+        signer_public_key_hex: hex::encode(verifying_key.to_bytes()),
+        evidence_capsule: capsule,
+        capsule_embedding,
+        gate_verification_report,
+        control_transition_allowed,
+        verification_state_allowed,
+        validity_ms: args.validity_ms,
+        generated_at_millis: now_millis,
+        expires_at_millis,
+        trace_id,
+    };
+
+    if let Some(output_path) = &args.output {
+        if let Some(parent) = output_path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("failed creating directory {}", parent.display()))?;
+        }
+        std::fs::write(output_path, serde_json::to_vec_pretty(&bundle)?).with_context(|| {
+            format!("failed writing VEF proof bundle {}", output_path.display())
+        })?;
+    }
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&bundle)?);
+    } else {
+        println!(
+            "trust vef-prove: proof_id={} backend={} entries={} signer={} control_gate={}",
+            bundle.signed_compliance_proof.proof_id,
+            bundle.signed_compliance_proof.backend_name,
+            bundle.receipt_entries.len(),
+            bundle.signer_public_key_hex,
+            bundle.control_transition_allowed
+        );
+    }
+    Ok(())
+}
+
+fn load_vef_verifying_key(
+    explicit_path: Option<&Path>,
+    bundle_pk_hex: &str,
+) -> Result<(ed25519_dalek::VerifyingKey, &'static str)> {
+    if let Some(path) = explicit_path {
+        let meta = std::fs::metadata(path)
+            .with_context(|| format!("failed reading VEF trusted public key {}", path.display()))?;
+        anyhow::ensure!(
+            meta.is_file(),
+            "VEF trusted public key path is not a regular file: {}",
+            path.display()
+        );
+        let raw = bounded_read(path, MAX_SIGNING_KEY_BYTES)
+            .with_context(|| format!("failed reading VEF trusted public key {}", path.display()))?;
+        let key = parse_verifying_key_from_blob(&raw).ok_or_else(|| {
+            anyhow::anyhow!(
+                "invalid Ed25519 verifying key material in {} (PEM and malformed blobs are refused)",
+                path.display()
+            )
+        })?;
+        return Ok((key, "explicit_flag"));
+    }
+    let default_key_path = Path::new(".franken-node/keys/decision-receipt-signing.key");
+    if let Ok(meta) = std::fs::metadata(default_key_path)
+        && meta.is_file()
+    {
+        let raw = bounded_read(default_key_path, MAX_SIGNING_KEY_BYTES)?;
+        if let Some(signing_key) = parse_signing_key_from_blob(&raw) {
+            return Ok((signing_key.verifying_key(), "workspace_signing_key"));
+        }
+    }
+    anyhow::bail!(
+        "verify vef-proof refuses self-asserted signer_public_key_hex ({bundle_pk_hex}): supply --trusted-public-key <PATH> or run in an initialized workspace with .franken-node/keys/decision-receipt-signing.key"
+    )
+}
+
+fn handle_verify_vef_proof(args: &VerifyVefProofArgs) -> Result<()> {
+    use vef::proof_generator::ProofBackend as _;
+
+    let raw =
+        bounded_read_to_string(&args.bundle_path, MAX_EVIDENCE_INPUT_BYTES).with_context(|| {
+            format!(
+                "failed reading VEF proof bundle {}",
+                args.bundle_path.display()
+            )
+        })?;
+    let bundle: VefSignedProofBundle = serde_json::from_str(&raw).with_context(|| {
+        format!(
+            "invalid VEF signed proof bundle JSON in {}",
+            args.bundle_path.display()
+        )
+    })?;
+    anyhow::ensure!(
+        bundle.schema_version == VEF_SIGNED_PROOF_BUNDLE_SCHEMA_VERSION,
+        "unsupported VEF bundle schema_version `{}` (expected `{}`)",
+        bundle.schema_version,
+        VEF_SIGNED_PROOF_BUNDLE_SCHEMA_VERSION
+    );
+    anyhow::ensure!(
+        bundle.signed_compliance_proof.backend_name == VEF_ED25519_BACKEND_NAME,
+        "unauthenticated VEF proof backend `{}` refused: only `{}` with Ed25519 signature verification is accepted",
+        bundle.signed_compliance_proof.backend_name,
+        VEF_ED25519_BACKEND_NAME
+    );
+
+    let (trusted_vk, trust_anchor_source) = load_vef_verifying_key(
+        args.trusted_public_key.as_deref(),
+        &bundle.signer_public_key_hex,
+    )?;
+    let trusted_vk_hex = hex::encode(trusted_vk.to_bytes());
+    anyhow::ensure!(
+        crate::security::constant_time::ct_eq(&trusted_vk_hex, &bundle.signer_public_key_hex),
+        "VEF signer public key mismatch: bundle claims `{}` but trusted anchor is `{}`",
+        bundle.signer_public_key_hex,
+        trusted_vk_hex
+    );
+
+    let now_millis = args
+        .now_ms
+        .unwrap_or_else(|| now_unix_secs().saturating_mul(1_000));
+
+    let compiler = vef::constraint_compiler::ConstraintCompiler::new(&bundle.trace_id);
+    let recompiled = compiler.compile(&bundle.policy_definition);
+    anyhow::ensure!(
+        recompiled.success,
+        "VEF policy definition in bundle failed constraint recompilation"
+    );
+    let recompiled_set = recompiled
+        .predicate_set
+        .ok_or_else(|| anyhow::anyhow!("recompiled VEF policy yielded no predicate set"))?;
+    let expected_policy_hash = if recompiled_set.policy_snapshot_hash.starts_with("sha256:") {
+        recompiled_set.policy_snapshot_hash
+    } else {
+        format!("sha256:{}", recompiled_set.policy_snapshot_hash)
+    };
+    anyhow::ensure!(
+        crate::security::constant_time::ct_eq(&expected_policy_hash, &bundle.policy_snapshot_hash),
+        "VEF policy snapshot hash mismatch: bundle `{}` != recompiled `{}`",
+        bundle.policy_snapshot_hash,
+        expected_policy_hash
+    );
+
+    vef::receipt_chain::ReceiptChain::verify_entries_and_checkpoints(
+        &bundle.receipt_entries,
+        &bundle.checkpoints,
+    )
+    .map_err(|err| anyhow::anyhow!("VEF receipt chain verification failed: {err}"))?;
+
+    let service = vef::proof_service::VefProofService::new(
+        vef::proof_service::ProofServiceConfig::reference_attestation_defaults(),
+    );
+    service
+        .verify_proof(&bundle.service_input, &bundle.service_output)
+        .map_err(|err| anyhow::anyhow!("VEF proof service envelope verification failed: {err}"))?;
+
+    let ed_backend =
+        Ed25519ReceiptWindowBackend::from_verifying_key(trusted_vk, &bundle.policy_snapshot_hash);
+    let sig_valid = ed_backend
+        .verify(&bundle.signed_compliance_proof, &bundle.receipt_entries)
+        .map_err(|err| anyhow::anyhow!("VEF Ed25519 verification error: {err}"))?;
+    anyhow::ensure!(
+        sig_valid,
+        "VEF Ed25519 receipt-window signature verification failed"
+    );
+
+    let capsule_verdict = bundle.evidence_capsule.verify_all();
+    anyhow::ensure!(
+        capsule_verdict.valid,
+        "VEF evidence capsule verification failed: {:?}",
+        capsule_verdict.failures
+    );
+
+    let capsule_json = serde_json::to_string(&bundle.evidence_capsule)?;
+    let mut embedder = vef::sdk_integration::VefCapsuleEmbed::new();
+    let embedding_valid = embedder
+        .validate_embedding(&bundle.capsule_embedding, &capsule_json, &bundle.trace_id)
+        .map_err(|err| anyhow::anyhow!("VEF SDK capsule embedding invalid: {err}"))?;
+    anyhow::ensure!(embedding_valid, "VEF SDK capsule embedding digest mismatch");
+
+    let mut ext_endpoint = vef::sdk_integration::ExternalVerificationEndpoint::new();
+    let submission_res = ext_endpoint
+        .submit(&vef::sdk_integration::EvidenceSubmission {
+            submission_id: format!("sub-{}", bundle.signed_compliance_proof.proof_id),
+            proof_ref: bundle.signed_compliance_proof.proof_id.clone(),
+            format_version: vef::sdk_integration::VSI_FORMAT_VERSION.to_string(),
+            proof_payload: hex::encode(&bundle.signed_compliance_proof.proof_data),
+            metadata: bundle.signed_compliance_proof.metadata.clone(),
+            trace_id: bundle.trace_id.clone(),
+            submitted_at_millis: now_millis,
+        })
+        .map_err(|err| {
+            anyhow::anyhow!("VEF external verification endpoint rejected bundle: {err}")
+        })?;
+    let queried = ext_endpoint.query(
+        &vef::sdk_integration::EvidenceQuery {
+            proof_ref: Some(bundle.signed_compliance_proof.proof_id.clone()),
+            status_filter: None,
+            limit: 4,
+        },
+        &bundle.trace_id,
+    );
+    anyhow::ensure!(
+        !queried.is_empty(),
+        "VEF external verification endpoint query returned empty set"
+    );
+
+    let max_age_ms = bundle.validity_ms.saturating_add(1);
+    let proof_hash_hex = bundle
+        .signed_compliance_proof
+        .proof_data_hash
+        .strip_prefix("sha256:")
+        .unwrap_or(&bundle.signed_compliance_proof.proof_data_hash)
+        .to_string();
+    let mut ver_gate =
+        vef::proof_verifier::VerificationGate::new(vef::proof_verifier::VerificationGateConfig {
+            max_proof_age_millis: max_age_ms,
+            degrade_threshold: 80,
+            enforce_policy_version: true,
+        });
+    ver_gate.register_predicate(vef::proof_verifier::PolicyPredicate {
+        predicate_id: format!("{}-artifact-promotion", bundle.policy_definition.policy_id),
+        action_class: "artifact_promotion".to_string(),
+        max_proof_age_millis: max_age_ms,
+        min_confidence: 90,
+        require_witnesses: true,
+        min_witness_count: 1,
+        policy_version_hash: bundle.policy_snapshot_hash.clone(),
+    });
+    let gate_report = ver_gate
+        .verify(&vef::proof_verifier::VerificationRequest {
+            request_id: format!("verify-cli-{}", bundle.signed_compliance_proof.proof_id),
+            proof: vef::proof_verifier::ComplianceProof {
+                proof_id: bundle.signed_compliance_proof.proof_id.clone(),
+                action_class: "artifact_promotion".to_string(),
+                proof_hash: proof_hash_hex,
+                confidence: 100,
+                generated_at_millis: bundle.generated_at_millis,
+                expires_at_millis: bundle.expires_at_millis,
+                witness_references: vec!["witness-vef-0".to_string()],
+                policy_version_hash: bundle.policy_snapshot_hash.clone(),
+                trace_id: bundle.trace_id.clone(),
+            },
+            now_millis,
+            trace_id: bundle.trace_id.clone(),
+        })
+        .map_err(|err| anyhow::anyhow!("VEF verification gate failed: {err}"))?;
+    anyhow::ensure!(
+        gate_report.decision == vef::proof_verifier::TrustDecision::Allow,
+        "VEF verification gate denied proof at now_ms={now_millis}: {}",
+        gate_report.decision
+    );
+
+    let mut ctl_gate = vef::control_integration::ControlTransitionGate::new(
+        vef::control_integration::GatePolicy {
+            max_evidence_age_millis: max_age_ms,
+            ..vef::control_integration::GatePolicy::default()
+        },
+        now_millis,
+    );
+    let ctl_decision = ctl_gate.evaluate(
+        &vef::control_integration::TransitionRequest {
+            request_id: format!("ctl-verify-{}", bundle.signed_compliance_proof.proof_id),
+            transition_type: vef::control_integration::TransitionType::ArtifactPromotion,
+            actor_identity: bundle.actor_identity.clone(),
+            target_identity: bundle.artifact_identity.clone(),
+            evidence_refs: vec![vef::control_integration::VefEvidenceRef {
+                evidence_id: bundle.signed_compliance_proof.proof_id.clone(),
+                evidence_hash: bundle.signed_compliance_proof.proof_data_hash.clone(),
+                scope: vef::control_integration::TransitionType::ALL.to_vec(),
+                state: vef::control_integration::VerificationState::Verified,
+                created_at_millis: bundle.generated_at_millis,
+                expires_at_millis: bundle.expires_at_millis,
+                trace_id: bundle.trace_id.clone(),
+            }],
+            context: BTreeMap::new(),
+            trace_id: bundle.trace_id.clone(),
+            requested_at_millis: now_millis,
+        },
+        &vef::control_integration::ActorTrustContext {
+            actor_identity: bundle.actor_identity.clone(),
+            trust_level: 100,
+            capabilities: vec!["vef.verify".to_string()],
+        },
+    );
+    let ctl_verdict_label = match &ctl_decision {
+        vef::control_integration::AuthorizationDecision::Authorized { .. } => "ALLOW",
+        vef::control_integration::AuthorizationDecision::Denied { detail, .. } => {
+            anyhow::bail!("VEF control transition gate denied bundle: {detail}");
+        }
+        vef::control_integration::AuthorizationDecision::PendingVerification { detail, .. } => {
+            anyhow::bail!("VEF control transition gate left bundle pending: {detail}");
+        }
+    };
+
+    let report = serde_json::json!({
+        "schema_version": "franken-node/verify-vef-proof-cli/v1",
+        "command": "verify.vef-proof",
+        "ok": true,
+        "proof_id": bundle.signed_compliance_proof.proof_id,
+        "backend_name": bundle.signed_compliance_proof.backend_name,
+        "signer_public_key_hex": trusted_vk_hex,
+        "trust_anchor_source": trust_anchor_source,
+        "policy_snapshot_hash": bundle.policy_snapshot_hash,
+        "receipt_entry_count": bundle.receipt_entries.len(),
+        "checkpoint_count": bundle.checkpoints.len(),
+        "capsule_verified": capsule_verdict.valid,
+        "sdk_submission_status": format!("{:?}", submission_res.status),
+        "gate_decision": format!("{}", gate_report.decision),
+        "control_transition_verdict": ctl_verdict_label,
+    });
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!(
+            "verify vef-proof: ok=true proof_id={} entries={} anchor={} signer={}",
+            bundle.signed_compliance_proof.proof_id,
+            bundle.receipt_entries.len(),
+            trust_anchor_source,
+            trusted_vk_hex
+        );
+    }
+    Ok(())
+}
+
+fn handle_ops_evidence_index(args: &OpsEvidenceIndexArgs) -> Result<()> {
+    use ops::evidence_index::{
+        EvidenceIndex, EvidenceIndexPolicy, EvidenceQuery, EvidenceRecord, EvidenceSafetyClass,
+        EvidenceSourceKind,
+    };
+
+    let root = &args.root;
+    anyhow::ensure!(
+        root.is_dir(),
+        "ops evidence-index --root does not exist or is not a directory: {}",
+        root.display()
+    );
+
+    let mut records = Vec::new();
+    let beads_jsonl = root.join(".beads/issues.jsonl");
+    if beads_jsonl.is_file() {
+        let raw = bounded_read_to_string(&beads_jsonl, MAX_GENERAL_FILE_BYTES)
+            .with_context(|| format!("failed reading {}", beads_jsonl.display()))?;
+        for (line_idx, line) in raw.lines().take(500).enumerate() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+                continue;
+            };
+            let Some(bead_id) = val.get("id").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            let title = val
+                .get("title")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(bead_id);
+            let status = val
+                .get("status")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown");
+            let mut rec = EvidenceRecord::new(
+                format!("bead-{bead_id}-{line_idx}"),
+                EvidenceSourceKind::BeadsIssue,
+                EvidenceSafetyClass::PublicMetadata,
+                ".beads/issues.jsonl",
+                title,
+            )
+            .with_bead_id(bead_id)
+            .with_tags([format!("status:{status}"), "beads".to_string()]);
+            if let Some(desc) = val.get("description").and_then(serde_json::Value::as_str) {
+                let bounded: String = desc.chars().take(240).collect();
+                if !bounded.is_empty() {
+                    rec = rec.with_summary(bounded);
+                }
+            }
+            records.push(rec);
+        }
+    }
+
+    for (rel_dir, kind, safety, tag) in [
+        (
+            "docs/specs",
+            EvidenceSourceKind::DocsSpec,
+            EvidenceSafetyClass::RepoContract,
+            "spec",
+        ),
+        (
+            "artifacts",
+            EvidenceSourceKind::ArtifactManifest,
+            EvidenceSafetyClass::ProofReceipt,
+            "artifact",
+        ),
+        (
+            "scripts",
+            EvidenceSourceKind::SourceFile,
+            EvidenceSafetyClass::SourceReference,
+            "script",
+        ),
+    ] {
+        let dir_path = root.join(rel_dir);
+        let Ok(entries) = std::fs::read_dir(&dir_path) else {
+            continue;
+        };
+        let mut names = entries
+            .filter_map(std::result::Result::ok)
+            .filter(|entry| entry.file_type().is_ok_and(|ft| ft.is_file()))
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .collect::<Vec<_>>();
+        names.sort();
+        for name in names.into_iter().take(64) {
+            let rel_path = format!("{rel_dir}/{name}");
+            records.push(
+                EvidenceRecord::new(
+                    format!("file-{tag}-{name}"),
+                    kind,
+                    safety,
+                    rel_path,
+                    format!("{rel_dir}/{name}"),
+                )
+                .with_tags([tag.to_string()]),
+            );
+        }
+    }
+
+    for (probe_idx, probe_path) in args.probe_sources.iter().enumerate() {
+        records.push(
+            EvidenceRecord::new(
+                format!("probe-{probe_idx}"),
+                EvidenceSourceKind::SourceFile,
+                EvidenceSafetyClass::SourceReference,
+                probe_path.clone(),
+                format!("Probe {probe_path}"),
+            )
+            .with_tags(["probe".to_string()]),
+        );
+    }
+
+    let index = EvidenceIndex::from_records(EvidenceIndexPolicy::default(), records)
+        .map_err(|err| anyhow::anyhow!("evidence index build failed: {err}"))?;
+    let snapshot = index.snapshot();
+
+    let mut query = EvidenceQuery::new();
+    if let Some(q) = &args.query {
+        for term in q.split_whitespace().filter(|t| !t.is_empty()) {
+            query = query.with_term(term);
+        }
+    }
+    if let Some(bead_id) = &args.bead_id {
+        query = query.with_bead_id(bead_id);
+    }
+    if let Some(tag) = &args.tag {
+        query.tag = Some(tag.clone());
+    }
+    query.limit = Some(args.limit.clamp(1, 128));
+    let matches = index.query(&query);
+
+    let report = serde_json::json!({
+        "schema_version": "franken-node/ops-evidence-index-cli/v1",
+        "command": "ops.evidence-index",
+        "root": root.display().to_string(),
+        "build_report": snapshot.report,
+        "match_count": matches.len(),
+        "matches": matches,
+    });
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!(
+            "ops evidence-index: accepted={} rejected={} matches={}",
+            snapshot.report.accepted_records,
+            snapshot.report.rejected_sources.len(),
+            matches.len()
+        );
+    }
+    Ok(())
+}
+
+fn parse_handoff_issue_status(raw: &str) -> ops::swarm_handoff::SwarmHandoffIssueStatus {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "open" => ops::swarm_handoff::SwarmHandoffIssueStatus::Open,
+        "in_progress" | "in-progress" => ops::swarm_handoff::SwarmHandoffIssueStatus::InProgress,
+        "blocked" | "deferred" => ops::swarm_handoff::SwarmHandoffIssueStatus::Blocked,
+        "closed" => ops::swarm_handoff::SwarmHandoffIssueStatus::Closed,
+        _ => ops::swarm_handoff::SwarmHandoffIssueStatus::Unknown,
+    }
+}
+
+fn handle_ops_swarm_handoff(args: &OpsSwarmHandoffArgs) -> Result<()> {
+    use ops::closed_bead_compliance::{
+        ClosedBeadComplianceInput, ClosedBeadEvidenceCoverage, ClosedBeadEvidenceKind,
+        ClosedBeadEvidenceRef, ClosedBeadEvidenceStatus, ClosedBeadMetadata,
+        audit_closed_bead_compliance,
+    };
+    use ops::operator_transcripts::{
+        OPERATOR_TRANSCRIPT_GOLDEN_SCHEMA_VERSION, OperatorTranscript, OperatorTranscriptGoldenSet,
+        OperatorTranscriptScenarioKind, OperatorTranscriptSurface,
+        audit_operator_transcript_golden_set,
+    };
+    use ops::swarm_bead_templates::{
+        ExistingBeadRef, SWARM_BEAD_TEMPLATE_INPUT_SCHEMA_VERSION, SwarmBeadTemplateInput,
+        SwarmBlockerKind, SwarmProofObservation, generate_swarm_bead_templates,
+    };
+    use ops::swarm_handoff::{
+        SWARM_HANDOFF_EVIDENCE_SCHEMA_VERSION, SwarmHandoffEvidenceInput,
+        SwarmHandoffIssueEvidence, SwarmHandoffPolicyConfig, SwarmOverlapCandidateWork,
+        build_swarm_handoff_readiness_report, score_cross_agent_overlap_risk,
+    };
+
+    let now = Utc::now();
+    let mut closed_audits = Vec::new();
+    let mut template_observations = Vec::new();
+    let mut existing_bead_refs = Vec::new();
+
+    let evidence_input = if let Some(input_path) = &args.input {
+        let raw =
+            bounded_read_to_string(input_path, MAX_EVIDENCE_INPUT_BYTES).with_context(|| {
+                format!(
+                    "failed reading swarm handoff input {}",
+                    input_path.display()
+                )
+            })?;
+        serde_json::from_str::<SwarmHandoffEvidenceInput>(&raw).with_context(|| {
+            format!(
+                "invalid SwarmHandoffEvidenceInput JSON in {}",
+                input_path.display()
+            )
+        })?
+    } else {
+        let beads_jsonl = args.root.join(".beads/issues.jsonl");
+        let mut issues = Vec::new();
+        if beads_jsonl.is_file() {
+            let raw = bounded_read_to_string(&beads_jsonl, MAX_GENERAL_FILE_BYTES)
+                .with_context(|| format!("failed reading {}", beads_jsonl.display()))?;
+            for line in raw.lines().take(256) {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+                    continue;
+                };
+                let Some(bead_id) = val.get("id").and_then(serde_json::Value::as_str) else {
+                    continue;
+                };
+                let title = val
+                    .get("title")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(bead_id)
+                    .to_string();
+                let status_str = val
+                    .get("status")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("unknown");
+                let status = parse_handoff_issue_status(status_str);
+                let desc = val
+                    .get("description")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+                existing_bead_refs.push(ExistingBeadRef {
+                    bead_id: bead_id.to_string(),
+                    title: title.clone(),
+                    description: desc.chars().take(512).collect(),
+                });
+
+                if status == ops::swarm_handoff::SwarmHandoffIssueStatus::Closed
+                    && closed_audits.len() < 8
+                {
+                    let close_reason = val
+                        .get("close_reason")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("");
+                    let mut meta = ClosedBeadMetadata::new(
+                        bead_id,
+                        title.clone(),
+                        "closed",
+                        desc.chars().take(512).collect::<String>(),
+                    );
+                    if !close_reason.is_empty() {
+                        meta = meta
+                            .with_close_reason(close_reason.chars().take(512).collect::<String>());
+                    }
+                    let mut ev_refs = Vec::new();
+                    if !close_reason.trim().is_empty() {
+                        ev_refs.push(ClosedBeadEvidenceRef::new(
+                            format!("ev-close-{bead_id}"),
+                            bead_id,
+                            ClosedBeadEvidenceKind::BrComment,
+                            ClosedBeadEvidenceCoverage::Direct,
+                            ClosedBeadEvidenceStatus::Fresh,
+                            "Close reason recorded in .beads/issues.jsonl",
+                        ));
+                    }
+                    closed_audits.push(audit_closed_bead_compliance(
+                        ClosedBeadComplianceInput::new(meta, ev_refs),
+                    ));
+                } else if status != ops::swarm_handoff::SwarmHandoffIssueStatus::Closed {
+                    let updated_at = val
+                        .get("updated_at")
+                        .and_then(serde_json::Value::as_str)
+                        .and_then(|ts| DateTime::parse_from_rfc3339(ts).ok())
+                        .map(|dt| dt.with_timezone(&Utc));
+                    let assignee = val
+                        .get("assignee")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                        .filter(|s| !s.trim().is_empty());
+                    if status == ops::swarm_handoff::SwarmHandoffIssueStatus::InProgress
+                        && assignee.is_some()
+                        && template_observations.len() < 8
+                    {
+                        template_observations.push(SwarmProofObservation {
+                            observation_id: format!("obs-{bead_id}"),
+                            source_bead_id: bead_id.to_string(),
+                            blocker_kind: SwarmBlockerKind::StaleAssignee,
+                            command: "franken-node ops swarm-handoff".to_string(),
+                            error_code: Some("HANDOFF_CHECK".to_string()),
+                            file_path: Some(".beads/issues.jsonl".to_string()),
+                            evidence_excerpt: format!("in_progress bead {bead_id} assigned"),
+                            resolution_pattern: "verify active reservation before handoff"
+                                .to_string(),
+                        });
+                    }
+                    issues.push(SwarmHandoffIssueEvidence {
+                        bead_id: bead_id.to_string(),
+                        title,
+                        status,
+                        assignee,
+                        updated_at,
+                        last_comment_at: None,
+                        dependency_ids: Vec::new(),
+                        dependent_ids: Vec::new(),
+                        blocker_summary: None,
+                    });
+                }
+            }
+        }
+        SwarmHandoffEvidenceInput {
+            schema_version: SWARM_HANDOFF_EVIDENCE_SCHEMA_VERSION.to_string(),
+            observed_at: now,
+            issues,
+            agents: Vec::new(),
+            reservations: Vec::new(),
+            rch_builds: Vec::new(),
+            proof_leases: Vec::new(),
+            git_activity: Vec::new(),
+            cross_repo_blockers: Vec::new(),
+        }
+    };
+
+    let policy =
+        SwarmHandoffPolicyConfig::default().with_local_project_key(args.root.display().to_string());
+    let readiness =
+        build_swarm_handoff_readiness_report(&evidence_input, &policy, &args.trace_id, now);
+
+    let overlap_risk = args.candidate_bead.as_ref().map(|bead_id| {
+        let candidate =
+            SwarmOverlapCandidateWork::new(bead_id, args.candidate_paths.iter().cloned());
+        score_cross_agent_overlap_risk(&evidence_input, &candidate, &[], &policy)
+    });
+
+    let bead_templates = if template_observations.is_empty() {
+        None
+    } else {
+        Some(generate_swarm_bead_templates(&SwarmBeadTemplateInput {
+            schema_version: SWARM_BEAD_TEMPLATE_INPUT_SCHEMA_VERSION.to_string(),
+            observations: template_observations,
+            existing_beads: existing_bead_refs,
+        }))
+    };
+
+    let mut sanitized_env = BTreeMap::new();
+    sanitized_env.insert("FRANKEN_NODE_PROFILE".to_string(), "balanced".to_string());
+    let transcript_audit = audit_operator_transcript_golden_set(&OperatorTranscriptGoldenSet {
+        schema_version: OPERATOR_TRANSCRIPT_GOLDEN_SCHEMA_VERSION.to_string(),
+        transcripts: vec![OperatorTranscript {
+            name: "swarm-handoff-readiness".to_string(),
+            surface: OperatorTranscriptSurface::Readiness,
+            scenario_kind: OperatorTranscriptScenarioKind::Clean,
+            command: "franken-node ops swarm-handoff --json".to_string(),
+            sanitized_env,
+            normalized_human:
+                "ops swarm-handoff: reason_code=HANDOFF_READY next: inspect decisions".to_string(),
+            normalized_json: serde_json::json!({
+                "reason_code": "HANDOFF_READY",
+                "remediation_hint": "inspect decisions before claiming in-progress work",
+                "recommended_action": "br show <bead-id>"
+            }),
+            expected_reason_codes: vec!["HANDOFF_READY".to_string()],
+            expected_remediation_hints: vec![
+                "inspect decisions before claiming in-progress work".to_string(),
+            ],
+            expected_next_step: "br show <bead-id>".to_string(),
+            dynamic_fields: vec!["generated_at_utc".to_string(), "observed_at".to_string()],
+        }],
+    });
+
+    let report = serde_json::json!({
+        "schema_version": "franken-node/ops-swarm-handoff-cli/v1",
+        "command": "ops.swarm-handoff",
+        "readiness": readiness,
+        "overlap_risk": overlap_risk,
+        "closed_bead_audits": closed_audits,
+        "bead_templates": bead_templates,
+        "operator_transcript_audit": transcript_audit,
+    });
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!(
+            "ops swarm-handoff: decisions={} closed_audits={} transcript_audit={}",
+            readiness.decisions.len(),
+            closed_audits.len(),
+            transcript_audit.status_label
+        );
+    }
+    Ok(())
+}
+
 fn clap_error_should_emit_json(err: &clap::Error) -> bool {
     use clap::error::ErrorKind;
     if matches!(
@@ -38517,6 +40194,7 @@ fn clap_json_error_surface() -> (&'static str, &'static str) {
         ("trust", Some("quarantine")) => ("franken-node/trust-error-cli/v1", "trust.quarantine"),
         ("trust", Some("release")) => ("franken-node/trust-release-error/v1", "trust.release"),
         ("trust", Some("zk-attest")) => ("franken-node/trust-error-cli/v1", "trust.zk-attest"),
+        ("trust", Some("vef-prove")) => ("franken-node/trust-error-cli/v1", "trust.vef-prove"),
         ("trust-card", Some("show")) => ("franken-node/trust-card-error-cli/v1", "trust-card.show"),
         ("trust-card", Some("export")) => {
             ("franken-node/trust-card-error-cli/v1", "trust-card.export")
@@ -38569,6 +40247,8 @@ fn clap_json_error_surface() -> (&'static str, &'static str) {
         ("ops", Some("proof-carrying-evidence")) => {
             (OPS_ERROR_CLI_SCHEMA_VERSION, "ops.proof-carrying-evidence")
         }
+        ("ops", Some("evidence-index")) => (OPS_ERROR_CLI_SCHEMA_VERSION, "ops.evidence-index"),
+        ("ops", Some("swarm-handoff")) => (OPS_ERROR_CLI_SCHEMA_VERSION, "ops.swarm-handoff"),
         ("doctor", Some("evidence-readiness")) => {
             (DOCTOR_ERROR_CLI_SCHEMA_VERSION, "doctor.evidence-readiness")
         }
@@ -38618,6 +40298,7 @@ fn clap_json_error_surface() -> (&'static str, &'static str) {
         ("verify", Some("zk-attestation")) => {
             ("franken-node/verify-error-cli/v1", "verify.zk-attestation")
         }
+        ("verify", Some("vef-proof")) => ("franken-node/verify-error-cli/v1", "verify.vef-proof"),
         ("proofs", Some("queue")) => (PROOFS_ERROR_CLI_SCHEMA_VERSION, "proofs.queue.status"),
         ("proofs", Some("workers")) => (PROOFS_ERROR_CLI_SCHEMA_VERSION, "proofs.workers.restart"),
         ("bench", Some("run")) => (BENCH_RUN_ERROR_CLI_SCHEMA_VERSION, "bench.run"),
@@ -40151,6 +41832,16 @@ fn main() -> Result<()> {
                     );
                 }
             }
+            VerifyCommand::VefProof(args) => {
+                if let Err(err) = handle_verify_vef_proof(&args) {
+                    return named_cli_fail(
+                        "franken-node/verify-error-cli/v1",
+                        "verify.vef-proof",
+                        args.json,
+                        err,
+                    );
+                }
+            }
         },
 
         Command::Trust(sub) => match sub {
@@ -40400,7 +42091,7 @@ fn main() -> Result<()> {
                 }
             }
             TrustCommand::Graph(args) => {
-                let report = match trust_graph_report(args.extension.as_deref()) {
+                let report = match trust_graph_report(args.extension.as_deref(), args.immunize) {
                     Ok(report) => report,
                     Err(err) => return trust_fail("trust.graph", args.json, err),
                 };
@@ -40493,6 +42184,11 @@ fn main() -> Result<()> {
             TrustCommand::ZkAttest(args) => {
                 if let Err(err) = handle_trust_zk_attest(&args) {
                     return trust_fail("trust.zk-attest", args.json, err);
+                }
+            }
+            TrustCommand::VefProve(args) => {
+                if let Err(err) = handle_trust_vef_prove(&args) {
+                    return trust_fail("trust.vef-prove", args.json, err);
                 }
             }
         },
@@ -41069,6 +42765,16 @@ fn main() -> Result<()> {
             OpsCommand::IncidentCoverage(args) => {
                 if let Err(err) = handle_ops_incident_coverage(&args) {
                     return ops_fail("ops.incident-coverage", args.json, err);
+                }
+            }
+            OpsCommand::EvidenceIndex(args) => {
+                if let Err(err) = handle_ops_evidence_index(&args) {
+                    return ops_fail("ops.evidence-index", args.json, err);
+                }
+            }
+            OpsCommand::SwarmHandoff(args) => {
+                if let Err(err) = handle_ops_swarm_handoff(&args) {
+                    return ops_fail("ops.swarm-handoff", args.json, err);
                 }
             }
         },

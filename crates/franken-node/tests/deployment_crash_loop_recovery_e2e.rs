@@ -4116,13 +4116,9 @@ fn native_workspace_release_enforces_attenuated_macaroon_capability_envelope() {
     let (code, healthy) = drill.run();
     assert_eq!(code, Some(0), "{healthy}");
     assert_eq!(healthy["phase"], "healthy", "{healthy}");
-    assert_workspace_run(
-        &healthy["run"],
-        &admitted,
-        "MACAROON_ENVELOPE_NATIVE_OK\n",
-    );
+    assert_workspace_run(&healthy["run"], &admitted, "MACAROON_ENVELOPE_NATIVE_OK\n");
 
-    let cfg = Config::load_from_path(&dir.join("franken_node.toml")).expect("load release config");
+    let cfg = Config::load(&dir.join("franken_node.toml")).expect("load release config");
     let envelope = admitted
         .approval
         .attenuated_capability_envelope(&cfg)
@@ -4133,21 +4129,27 @@ fn native_workspace_release_enforces_attenuated_macaroon_capability_envelope() {
         .publisher_verifying_key()
         .expect("publisher verifying key");
     let effective = envelope
-        .verify_and_evaluate(&publisher_key)
+        .verify(Some(&publisher_key))
         .expect("verify HMAC caveat chain");
-    assert!(!effective.allowed_capabilities.contains("process_spawn"));
-    assert!(effective.allowed_capabilities.contains("module_load"));
+    assert!(!effective.permits_capability("process_spawn"));
+    assert!(effective.permits_capability("module_load"));
 
     let mut widening = BTreeSet::new();
     widening.insert("process_spawn".to_string());
-    let narrowed = envelope
-        .attenuate(
-            AttenuationLayer::ModuleImportEdge,
-            CapabilityCaveat::AllowedCapabilities(widening),
-        )
-        .expect("append import-edge caveat");
     assert!(
-        narrowed.verify_and_evaluate(&publisher_key).is_err(),
+        envelope
+            .attenuate(
+                AttenuationLayer::ModuleImportEdge,
+                CapabilityCaveat::AllowedCapabilities(widening),
+            )
+            .is_err(),
         "import-edge caveat must fail closed on monotonic capability widening"
+    );
+
+    let mut tampered = envelope.clone();
+    tampered.tail_tag_hex = "00".repeat(32);
+    assert!(
+        tampered.verify(Some(&publisher_key)).is_err(),
+        "forged HMAC tail tag must fail closed"
     );
 }
