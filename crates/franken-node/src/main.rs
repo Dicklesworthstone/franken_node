@@ -6011,13 +6011,91 @@ struct RuntimeLaneAssignmentReport {
 struct RuntimeEpochReport {
     schema_version: &'static str,
     command: &'static str,
-    /// Compares caller-supplied integers; does not inspect a live ControlEpoch.
+    /// True when backed by a live `.franken-node/state/fleet/seqlock.page` snapshot.
     live_node: bool,
     compares_live_control_epoch: bool,
     local_epoch: u64,
     peer_epoch: Option<u64>,
     verdict: &'static str,
     epoch_delta: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    live_seqlock_sequence: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    live_quarantine_version: Option<u64>,
+}
+
+const RUNTIME_LANE_STATE_SCHEMA_VERSION: &str = "franken-node/runtime-lane-state/v1";
+const MAX_PERSISTED_LANE_EVENTS: usize = 1_024;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedLaneEvent {
+    task_class: String,
+    timestamp_ms: u64,
+    trace_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedLaneSchedulerState {
+    schema_version: String,
+    entries: Vec<PersistedLaneEvent>,
+}
+
+impl Default for PersistedLaneSchedulerState {
+    fn default() -> Self {
+        Self {
+            schema_version: RUNTIME_LANE_STATE_SCHEMA_VERSION.to_owned(),
+            entries: Vec::new(),
+        }
+    }
+}
+
+fn load_and_replay_runtime_lane_state(
+    project_root: &Path,
+    scheduler: &mut runtime::lane_scheduler::LaneScheduler,
+) -> Result<(bool, PersistedLaneSchedulerState)> {
+    let state_root = project_root.join(".franken-node/state");
+    if !state_root.is_dir() {
+        return Ok((false, PersistedLaneSchedulerState::default()));
+    }
+    let state_path = state_root.join("runtime/lane_assignments.json");
+    if !state_path.is_file() {
+        return Ok((true, PersistedLaneSchedulerState::default()));
+    }
+    let raw = std::fs::read_to_string(&state_path)
+        .with_context(|| format!("failed reading {}", state_path.display()))?;
+    let persisted: PersistedLaneSchedulerState = serde_json::from_str(&raw)
+        .with_context(|| format!("invalid runtime lane state {}", state_path.display()))?;
+    anyhow::ensure!(
+        persisted.schema_version == RUNTIME_LANE_STATE_SCHEMA_VERSION,
+        "unsupported runtime lane state schema `{}` in {}",
+        persisted.schema_version,
+        state_path.display()
+    );
+    for event in &persisted.entries {
+        let tc = runtime::lane_scheduler::TaskClass::new(&event.task_class);
+        match scheduler.assign_task(&tc, event.timestamp_ms, &event.trace_id) {
+            Ok(_) | Err(runtime::lane_scheduler::LaneSchedulerError::CapExceeded { .. }) => {}
+            Err(err) => return Err(anyhow::anyhow!(err.to_string())),
+        }
+    }
+    Ok((true, persisted))
+}
+
+fn persist_runtime_lane_state(
+    project_root: &Path,
+    state: &PersistedLaneSchedulerState,
+) -> Result<()> {
+    let runtime_dir = project_root.join(".franken-node/state/runtime");
+    std::fs::create_dir_all(&runtime_dir)
+        .with_context(|| format!("failed creating {}", runtime_dir.display()))?;
+    let final_path = runtime_dir.join("lane_assignments.json");
+    let tmp_path = runtime_dir.join(format!("lane_assignments.{}.tmp", Uuid::now_v7()));
+    let encoded = serde_json::to_vec_pretty(state)?;
+    std::fs::write(&tmp_path, encoded)
+        .with_context(|| format!("failed writing {}", tmp_path.display()))?;
+    std::fs::rename(&tmp_path, &final_path)
+        .with_context(|| format!("failed committing {}", final_path.display()))?;
+    Ok(())
 }
 
 fn runtime_cli_timestamp_ms(timestamp_ms: Option<u64>) -> u64 {
@@ -8061,26 +8139,34 @@ fn runtime_fail(command: &str, json: bool, error: impl std::fmt::Display) -> Res
 }
 
 fn handle_runtime_command(command: RuntimeCommand) -> Result<()> {
+    let project_root = Path::new(".");
     match command {
         RuntimeCommand::Lane(lane_command) => match lane_command {
             RuntimeLaneCommand::Status(args) => {
                 let policy = runtime::lane_scheduler::default_policy();
-                let scheduler = runtime::lane_scheduler::LaneScheduler::new(policy.clone())
+                let mut scheduler = runtime::lane_scheduler::LaneScheduler::new(policy.clone())
                     .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+                let (live_node, _) =
+                    load_and_replay_runtime_lane_state(project_root, &mut scheduler)?;
                 let telemetry =
                     scheduler.telemetry_snapshot(runtime_cli_timestamp_ms(args.timestamp_ms));
                 let report = RuntimeLaneStatusReport {
                     schema_version: runtime::lane_scheduler::SCHEMA_VERSION,
                     command: "runtime.lane.status",
-                    live_node: false,
+                    live_node,
                     policy,
                     telemetry,
                 };
                 emit_json_or_human(&report, args.json, || {
                     let lane_count = report.policy.lane_configs.len();
                     let rule_count = report.policy.mapping_rules.len();
+                    let scope = if report.live_node {
+                        "persisted workspace state"
+                    } else {
+                        "local default policy (not a running node)"
+                    };
                     format!(
-                        "runtime lane status: local default policy (not a running node): lanes={lane_count} mapping_rules={rule_count} schema={}",
+                        "runtime lane status: {scope}: lanes={lane_count} mapping_rules={rule_count} schema={}",
                         report.schema_version
                     )
                 })?;
@@ -8092,23 +8178,42 @@ fn handle_runtime_command(command: RuntimeCommand) -> Result<()> {
                 let policy = runtime::lane_scheduler::default_policy();
                 let mut scheduler = runtime::lane_scheduler::LaneScheduler::new(policy)
                     .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+                let (live_node, mut persisted_state) =
+                    load_and_replay_runtime_lane_state(project_root, &mut scheduler)?;
                 let timestamp_ms = runtime_cli_timestamp_ms(args.timestamp_ms);
                 let task_class = runtime::lane_scheduler::TaskClass::new(&args.task_class);
                 let assignment = scheduler
                     .assign_task(&task_class, timestamp_ms, &args.trace_id)
                     .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+                if live_node {
+                    crate::push_bounded(
+                        &mut persisted_state.entries,
+                        PersistedLaneEvent {
+                            task_class: args.task_class.clone(),
+                            timestamp_ms,
+                            trace_id: args.trace_id.clone(),
+                        },
+                        MAX_PERSISTED_LANE_EVENTS,
+                    );
+                    persist_runtime_lane_state(project_root, &persisted_state)?;
+                }
                 let telemetry = scheduler.telemetry_snapshot(timestamp_ms);
                 let report = RuntimeLaneAssignmentReport {
                     schema_version: runtime::lane_scheduler::SCHEMA_VERSION,
                     command: "runtime.lane.assign",
-                    live_node: false,
-                    persisted: false,
+                    live_node,
+                    persisted: live_node,
                     assignment,
                     telemetry,
                 };
                 emit_json_or_human(&report, args.json, || {
+                    let scope = if report.persisted {
+                        "persisted workspace scheduler"
+                    } else {
+                        "local default scheduler (not persisted)"
+                    };
                     format!(
-                        "runtime lane assignment: local default scheduler (not persisted): task_id={} task_class={} lane={}",
+                        "runtime lane assignment: {scope}: task_id={} task_class={} lane={}",
                         report.assignment.task_id,
                         report.assignment.task_class,
                         report.assignment.lane
@@ -8117,27 +8222,59 @@ fn handle_runtime_command(command: RuntimeCommand) -> Result<()> {
             }
         },
         RuntimeCommand::Epoch(args) => {
-            let local_epoch = args
-                .local_epoch
-                .ok_or_else(|| anyhow::anyhow!("--local-epoch is required"))?;
-            let (verdict, epoch_delta) = match args.peer_epoch {
-                Some(peer_epoch) if peer_epoch == local_epoch => ("matched", Some(0)),
-                Some(peer_epoch) => ("mismatch", Some(local_epoch.abs_diff(peer_epoch))),
+            let fleet_state_dir = resolve_ops_metrics_fleet_state_dir(project_root)?;
+            let seqlock_path = fleet_state_dir.join("seqlock.page");
+            let live_snapshot = if seqlock_path.is_file() {
+                Some(
+                    control_plane::fleet_transport::SeqlockControlPage::read_shared_page(
+                        &seqlock_path,
+                    )
+                    .map_err(|err| anyhow::anyhow!(err.to_string()))?,
+                )
+            } else {
+                None
+            };
+
+            let (local_epoch, peer_epoch, live_node, compares_live_control_epoch) =
+                match (live_snapshot.as_ref(), args.local_epoch, args.peer_epoch) {
+                    (Some(snap), None, peer) => (snap.control_epoch, peer, true, true),
+                    (Some(snap), Some(caller_epoch), None) => {
+                        (snap.control_epoch, Some(caller_epoch), true, true)
+                    }
+                    (Some(_), Some(local), Some(peer)) => (local, Some(peer), true, true),
+                    (None, Some(local), peer) => (local, peer, false, false),
+                    (None, None, _) => {
+                        return Err(anyhow::anyhow!(
+                            "--local-epoch is required when no live seqlock.page is present"
+                        ));
+                    }
+                };
+
+            let (verdict, epoch_delta) = match peer_epoch {
+                Some(peer) if peer == local_epoch => ("matched", Some(0)),
+                Some(peer) => ("mismatch", Some(local_epoch.abs_diff(peer))),
                 None => ("local_only", None),
             };
             let report = RuntimeEpochReport {
                 schema_version: "runtime-epoch-v1",
                 command: "runtime.epoch",
-                live_node: false,
-                compares_live_control_epoch: false,
+                live_node,
+                compares_live_control_epoch,
                 local_epoch,
-                peer_epoch: args.peer_epoch,
+                peer_epoch,
                 verdict,
                 epoch_delta,
+                live_seqlock_sequence: live_snapshot.as_ref().map(|s| s.sequence),
+                live_quarantine_version: live_snapshot.as_ref().map(|s| s.quarantine_version),
             };
             emit_json_or_human(&report, args.json, || {
+                let scope = if report.compares_live_control_epoch {
+                    "live seqlock ControlEpoch"
+                } else {
+                    "caller-supplied integers (not a live ControlEpoch)"
+                };
                 format!(
-                    "runtime epoch: caller-supplied integers (not a live ControlEpoch): local={} peer={} verdict={}",
+                    "runtime epoch: {scope}: local={} peer={} verdict={}",
                     report.local_epoch,
                     report
                         .peer_epoch
@@ -8998,7 +9135,7 @@ fn handle_doctor_expected_loss_actions(
 ) -> Result<()> {
     use crate::ops::doctor::{
         DOCTOR_EXPECTED_LOSS_ACTIONS_SCHEMA_VERSION, DoctorOutput, WorkspacePressureDoctor,
-        rank_doctor_actions_by_expected_loss,
+        rank_doctor_actions_by_expected_loss, rank_doctor_actions_by_expected_loss_with_workspace,
     };
     use crate::ops::workspace_pressure_policy::PolicyThresholds;
 
@@ -9043,21 +9180,44 @@ fn handle_doctor_expected_loss_actions(
         trace_id.to_owned()
     };
 
-    let response = rank_doctor_actions_by_expected_loss(
-        &report,
-        &args.operator,
-        &recommendation_id,
-        &effective_trace,
-        args.top_k,
-    );
+    let (response, workspace_telemetry) = if args.from_report.is_some() {
+        (
+            rank_doctor_actions_by_expected_loss(
+                &report,
+                &args.operator,
+                &recommendation_id,
+                &effective_trace,
+                args.top_k,
+            ),
+            None,
+        )
+    } else {
+        let (resp, telemetry) = rank_doctor_actions_by_expected_loss_with_workspace(
+            &report,
+            Path::new("."),
+            &args.operator,
+            &recommendation_id,
+            &effective_trace,
+            args.top_k,
+        );
+        (resp, Some(telemetry))
+    };
 
     if json {
-        let envelope = serde_json::json!({
+        let mut envelope = serde_json::json!({
             "schema_version": DOCTOR_EXPECTED_LOSS_ACTIONS_SCHEMA_VERSION,
             "source": if args.from_report.is_some() { "report" } else { "live" },
             "doctor_status": report.status.as_str(),
             "response": response,
         });
+        if let Some(telemetry) = workspace_telemetry
+            && let Some(obj) = envelope.as_object_mut()
+        {
+            obj.insert(
+                "workspace_telemetry".to_owned(),
+                serde_json::to_value(telemetry)?,
+            );
+        }
         println!("{}", serde_json::to_string_pretty(&envelope)?);
     } else {
         print_expected_loss_actions_human(&report, &response);

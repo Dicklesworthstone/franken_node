@@ -602,3 +602,71 @@ fn k9_duplicate_id_precedence_and_fingerprint_helpers() {
         k9_entry("y", "a", "bc", true).executor_fingerprint()
     );
 }
+
+#[test]
+fn runtime_lane_assign_persists_across_invocations_in_initialized_workspace() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    std::fs::create_dir_all(dir.path().join(".franken-node/state")).expect("create state dir");
+
+    let mut assign_cmd = franken_node();
+    assign_cmd.current_dir(dir.path()).args([
+        "runtime",
+        "lane",
+        "assign",
+        "epoch_transition",
+        "--timestamp-ms",
+        "1700000000000",
+        "--trace-id",
+        "runtime-persisted-1",
+        "--json",
+    ]);
+    let assigned = stdout_json(assign_cmd);
+    assert_eq!(assigned["live_node"], true);
+    assert_eq!(assigned["persisted"], true);
+    assert_eq!(assigned["assignment"]["lane"], "ControlCritical");
+
+    let mut status_cmd = franken_node();
+    status_cmd.current_dir(dir.path()).args([
+        "runtime",
+        "lane",
+        "status",
+        "--timestamp-ms",
+        "1700000001000",
+        "--json",
+    ]);
+    let status = stdout_json(status_cmd);
+    assert_eq!(status["live_node"], true);
+    let counters = status["telemetry"]["counters"]
+        .as_array()
+        .expect("counters array");
+    let cc = counters
+        .iter()
+        .find(|c| c["lane"] == "ControlCritical" || c["lane"] == "control_critical")
+        .expect("ControlCritical counter");
+    assert_eq!(cc["active_count"], 1);
+}
+
+#[test]
+fn runtime_epoch_reads_live_seqlock_control_page_when_present() {
+    use frankenengine_node::control_plane::fleet_transport::SeqlockControlPage;
+
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let seqlock_path = dir.path().join(".franken-node/state/fleet/seqlock.page");
+    let page = SeqlockControlPage::new();
+    page.publish(14, 3, 0, 5, [0xAB; 32]);
+    page.write_shared_page(&seqlock_path)
+        .expect("write shared seqlock page");
+
+    let mut cmd = franken_node();
+    cmd.current_dir(dir.path())
+        .args(["runtime", "epoch", "--peer-epoch", "14", "--json"]);
+    let payload = stdout_json(cmd);
+    assert_eq!(payload["live_node"], true);
+    assert_eq!(payload["compares_live_control_epoch"], true);
+    assert_eq!(payload["local_epoch"], 14);
+    assert_eq!(payload["peer_epoch"], 14);
+    assert_eq!(payload["verdict"], "matched");
+    assert_eq!(payload["epoch_delta"], 0);
+    assert_eq!(payload["live_seqlock_sequence"], 2);
+    assert_eq!(payload["live_quarantine_version"], 3);
+}

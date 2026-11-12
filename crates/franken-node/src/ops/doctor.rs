@@ -1868,6 +1868,646 @@ pub fn rank_doctor_actions_by_expected_loss(
     )
 }
 
+/// Trust-card registry staleness horizon (1 hour) matching default `TrustCardRegistry` TTL.
+pub const TRUST_STATE_STALE_AFTER_SECS: u64 = 3_600;
+
+/// Maximum operational entries retained per workspace telemetry vector.
+const MAX_WORKSPACE_TELEMETRY_ITEMS: usize = 64;
+
+/// Live operational telemetry observed from `<workspace_root>/.franken-node/` for IBD-8 VoI ranking.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceTelemetrySnapshot {
+    /// True when `<workspace_root>/.franken-node/state` exists on disk.
+    pub state_dir_present: bool,
+    /// Captured incident IDs under `.franken-node/state/incidents/`.
+    pub active_incidents: Vec<String>,
+    /// True when `.franken-node/safe-mode/state.json` (or `.franken-node/state/safe-mode/state.json`)
+    /// is present and active, or unreadable/corrupt (fail-closed containment).
+    pub safe_mode_active: bool,
+    /// Entry reason or fail-closed read error when `safe_mode_active` is true.
+    pub safe_mode_reason: Option<String>,
+    /// True when `trust-card-registry.v1.db` or `trust-card-registry.v1.json` exists.
+    pub trust_state_present: bool,
+    /// Age in seconds of the newest trust-card registry artifact (`0` when absent).
+    pub trust_state_age_secs: u64,
+    /// True when `trust_state_present && trust_state_age_secs > TRUST_STATE_STALE_AFTER_SECS`.
+    pub trust_state_stale: bool,
+    /// Count of active fleet quarantine holds observed in `fleet-state.db` or `actions.jsonl`.
+    pub active_fleet_quarantines: u64,
+    /// Pending deployment, quarantine, or queued runtime-lane operations.
+    pub pending_operations: Vec<String>,
+}
+
+fn push_sorted_bounded(target: &mut Vec<String>, entries: std::collections::BTreeSet<String>) {
+    for entry in entries {
+        push_bounded(target, entry, MAX_WORKSPACE_TELEMETRY_ITEMS);
+    }
+}
+
+fn probe_fleet_active_quarantines(fleet_state_dir: &Path) -> u64 {
+    if fleet_state_dir.join("fleet-state.db").is_file()
+        && let Ok(count) =
+            crate::control_plane::fleet_transport_durable::count_active_quarantine_actions(
+                fleet_state_dir,
+            )
+    {
+        return count;
+    }
+
+    let actions_path = fleet_state_dir.join("actions.jsonl");
+    let Ok(raw) = fs::read_to_string(actions_path) else {
+        return 0;
+    };
+    let mut active = std::collections::BTreeSet::new();
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+            continue;
+        };
+        let action = value.get("action").unwrap_or(&value);
+        let kind = action
+            .get("type")
+            .or_else(|| action.get("kind"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if let Some(incident_id) = action
+            .get("incident_id")
+            .and_then(serde_json::Value::as_str)
+        {
+            if kind.contains("quarantine") {
+                active.insert(incident_id.to_owned());
+            } else if kind.contains("release") {
+                active.remove(incident_id);
+            }
+        }
+    }
+    u64::try_from(active.len()).unwrap_or(u64::MAX)
+}
+
+/// Probe `<workspace_root>/.franken-node/` for live incidents, safe-mode containment,
+/// trust-card registry freshness, fleet quarantines, and deployment recovery work.
+#[must_use]
+pub fn collect_workspace_operational_telemetry(
+    workspace_root: &Path,
+    now: DateTime<Utc>,
+) -> WorkspaceTelemetrySnapshot {
+    let dot_dir = workspace_root.join(".franken-node");
+    let state_dir = dot_dir.join("state");
+    let state_dir_present = state_dir.is_dir();
+
+    // 1. Active incidents under `.franken-node/state/incidents/`.
+    let mut incident_ids = std::collections::BTreeSet::new();
+    let incidents_dir = state_dir.join("incidents");
+    if let Ok(entries) = fs::read_dir(&incidents_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if path.join("incident_evidence.json").is_file()
+                    && let Some(name) = path.file_name().and_then(|n| n.to_str())
+                    && !name.trim().is_empty()
+                {
+                    incident_ids.insert(name.to_owned());
+                }
+            } else if path.extension().and_then(|ext| ext.to_str()) == Some("json")
+                && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+                && !stem.trim().is_empty()
+            {
+                incident_ids.insert(stem.to_owned());
+            }
+        }
+    }
+    let mut active_incidents = Vec::new();
+    push_sorted_bounded(&mut active_incidents, incident_ids);
+
+    // 2. Safe-mode containment (fail closed if unreadable/malformed).
+    let mut safe_mode_active = false;
+    let mut safe_mode_reason = None;
+    for candidate in [
+        dot_dir.join("safe-mode/state.json"),
+        state_dir.join("safe-mode/state.json"),
+    ] {
+        match crate::runtime::safe_mode::read_persisted_safe_mode(&candidate) {
+            Ok(Some(controller)) if controller.is_active() => {
+                safe_mode_active = true;
+                safe_mode_reason = Some(
+                    controller
+                        .entry_reason()
+                        .map_or_else(|| "SafeModeActive".to_owned(), |r| format!("{r:?}")),
+                );
+                break;
+            }
+            Ok(_) => {}
+            Err(err) => {
+                safe_mode_active = true;
+                safe_mode_reason = Some(format!("unreadable safe-mode state: {err}"));
+                break;
+            }
+        }
+    }
+
+    // 3. Trust-card registry freshness (`trust-card-registry.v1.db` or `.json`).
+    let now_secs = u64::try_from(now.timestamp().max(0)).unwrap_or(0);
+    let mut newest_trust_mtime_secs: Option<u64> = None;
+    for candidate in [
+        state_dir.join("trust-card-registry.v1.db"),
+        state_dir.join("trust-card-registry.v1.json"),
+    ] {
+        if let Ok(meta) = fs::metadata(&candidate)
+            && meta.is_file()
+            && let Ok(modified) = meta.modified()
+            && let Ok(dur) = modified.duration_since(std::time::UNIX_EPOCH)
+        {
+            let mtime = dur.as_secs();
+            newest_trust_mtime_secs =
+                Some(newest_trust_mtime_secs.map_or(mtime, |cur| cur.max(mtime)));
+        }
+    }
+    let trust_state_present = newest_trust_mtime_secs.is_some();
+    let trust_state_age_secs =
+        newest_trust_mtime_secs.map_or(0, |mtime| now_secs.saturating_sub(mtime));
+    let trust_state_stale =
+        trust_state_present && trust_state_age_secs > TRUST_STATE_STALE_AFTER_SECS;
+
+    // 4. Active fleet quarantines + pending deployment/quarantine/lane operations.
+    let fleet_state_dir = state_dir.join("fleet");
+    let active_fleet_quarantines = probe_fleet_active_quarantines(&fleet_state_dir);
+
+    let mut pending_set = std::collections::BTreeSet::new();
+    if active_fleet_quarantines > 0 {
+        pending_set.insert(format!("fleet:quarantine-holds={active_fleet_quarantines}"));
+    }
+
+    let deployments_dir = state_dir.join("deployments");
+    if let Ok(entries) = fs::read_dir(&deployments_dir) {
+        for entry in entries.flatten() {
+            let dep_path = entry.path();
+            if !dep_path.is_dir() {
+                continue;
+            }
+            let Some(dep_name) = dep_path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            let has_releases = dep_path.join("releases").is_dir();
+            let has_active_pointer = dep_path.join("current.json").is_file()
+                || dep_path.join("active.json").is_file()
+                || dep_path.join("activations").is_dir();
+            if dep_path.join("transaction.json").is_file() {
+                pending_set.insert(format!("deploy:{dep_name}:incomplete-activation-txn"));
+            } else if has_releases && !has_active_pointer {
+                pending_set.insert(format!("deploy:{dep_name}:staged-unactivated"));
+            }
+        }
+    }
+
+    let lane_state_path = state_dir.join("runtime/lane_assignments.json");
+    if let Ok(raw) = fs::read_to_string(&lane_state_path)
+        && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&raw)
+        && let Some(entries) = parsed.get("entries").and_then(serde_json::Value::as_array)
+        && !entries.is_empty()
+    {
+        pending_set.insert(format!("runtime:lane-active-tasks={}", entries.len()));
+    }
+
+    let mut pending_operations = Vec::new();
+    push_sorted_bounded(&mut pending_operations, pending_set);
+
+    WorkspaceTelemetrySnapshot {
+        state_dir_present,
+        active_incidents,
+        safe_mode_active,
+        safe_mode_reason,
+        trust_state_present,
+        trust_state_age_secs,
+        trust_state_stale,
+        active_fleet_quarantines,
+        pending_operations,
+    }
+}
+
+/// Rank doctor actions AND live `.franken-node/` operational telemetry by expected loss (IBD-8).
+///
+/// Used by `franken-node doctor expected-loss-actions` on live workspace probes so
+/// active incidents, safe-mode containment, stale trust-card state, fleet quarantines,
+/// and pending deployment transactions enter the copilot `SystemState` and compete
+/// directly on Value-of-Information (`VoI = L_wait - L_act`).
+#[must_use]
+pub fn rank_doctor_actions_by_expected_loss_with_workspace(
+    report: &DoctorOutput,
+    workspace_root: &Path,
+    operator_identity: &str,
+    recommendation_id: &str,
+    trace_id: &str,
+    top_k: usize,
+) -> (
+    crate::security::copilot_engine::CopilotResponse,
+    WorkspaceTelemetrySnapshot,
+) {
+    use crate::security::copilot_engine::{
+        ActionCandidate, ActionRecommendationEngine, ConfidenceContext, ConfidenceInterval,
+        DataSourceInfo, DegradedModeInfo, ExpectedLossVector, StaleInput, SystemState,
+    };
+    use std::time::Duration;
+
+    let telemetry = collect_workspace_operational_telemetry(workspace_root, report.timestamp);
+    let served_at = report.timestamp.to_rfc3339();
+
+    // Seed with the pure workspace-pressure candidates by scoring unlimited top-k first,
+    // then merge live operational candidates before running the unified VoI engine.
+    let base_unlimited = rank_doctor_actions_by_expected_loss(
+        report,
+        operator_identity,
+        recommendation_id,
+        trace_id,
+        usize::MAX,
+    );
+    let mut candidates: Vec<ActionCandidate> = base_unlimited
+        .recommendations
+        .into_iter()
+        .map(|rec| {
+            // Reconstruct the exact wait vector (`total = act.total() + voi_score`) while
+            // preserving dominant-dimension attribution from the pure doctor scorer.
+            let act = rec.expected_loss;
+            let wait_avail = act.availability_loss * 5.0;
+            let wait_integ = act.integrity_loss * 5.0;
+            let wait_fin = (act.financial_loss - 0.05).max(0.0) * 5.0;
+            ActionCandidate {
+                action_id: rec.action_id,
+                display_name: rec.display_name,
+                description: rec.description,
+                expected_loss_if_act: act,
+                expected_loss_if_wait: ExpectedLossVector {
+                    availability_loss: wait_avail,
+                    integrity_loss: wait_integ,
+                    confidentiality_loss: 0.0,
+                    financial_loss: wait_fin,
+                    reputation_loss: 0.0,
+                },
+                uncertainty_band: rec.uncertainty_band,
+                preconditions: rec.preconditions,
+                estimated_duration: rec.estimated_duration,
+                rollback_command: rec.rollback_command,
+                rollback_validated: rec.rollback_validated,
+                confidence: rec.confidence,
+            }
+        })
+        .collect();
+
+    if telemetry.safe_mode_active {
+        let reason = telemetry
+            .safe_mode_reason
+            .as_deref()
+            .unwrap_or("SafeModeActive");
+        let wait = ExpectedLossVector {
+            availability_loss: 6.5,
+            integrity_loss: 4.5,
+            confidentiality_loss: 0.5,
+            financial_loss: 1.5,
+            reputation_loss: 1.0,
+        };
+        let act = ExpectedLossVector {
+            availability_loss: 0.8,
+            integrity_loss: 0.5,
+            confidentiality_loss: 0.1,
+            financial_loss: 0.25,
+            reputation_loss: 0.15,
+        };
+        let wait_total = wait.total();
+        candidates.push(ActionCandidate {
+            action_id: "doctor-live-safe-mode-containment".to_owned(),
+            display_name: "Reconcile safe-mode containment".to_owned(),
+            description: format!(
+                "Safe-mode containment is active ({reason}); inspect deployment status and \
+                 reconcile or roll back to a verified known-good release via `franken-node deploy status --json`."
+            ),
+            expected_loss_if_act: act,
+            expected_loss_if_wait: wait,
+            uncertainty_band: ConfidenceInterval {
+                lower_bound: wait_total * 0.8,
+                upper_bound: wait_total * 1.2 + 0.1,
+                confidence_level: 0.9,
+            },
+            preconditions: vec!["safe-mode state verified on disk".to_owned()],
+            estimated_duration: Duration::from_secs(30),
+            rollback_command:
+                "franken-node deploy rollback --deployment default --reason copilot-safe-mode-guard"
+                    .to_owned(),
+            rollback_validated: true,
+            confidence: ConfidenceContext {
+                data_sources: vec![DataSourceInfo {
+                    source_id: "runtime.safe_mode".to_owned(),
+                    freshness: served_at.clone(),
+                    is_stale: false,
+                    staleness_secs: 0,
+                }],
+                assumptions: vec![format!("safe_mode_reason = {reason}")],
+                sensitivity: "Clears once safe-mode state exits cleanly and known-good release passes supervision"
+                    .to_owned(),
+            },
+        });
+    }
+
+    if !telemetry.active_incidents.is_empty() {
+        let count = telemetry.active_incidents.len() as f64;
+        let first_id = &telemetry.active_incidents[0];
+        let wait = ExpectedLossVector {
+            availability_loss: 2.0 + 0.75 * count,
+            integrity_loss: 3.5 + 1.25 * count,
+            confidentiality_loss: 0.5 * count,
+            financial_loss: 0.5 * count,
+            reputation_loss: 0.75 * count,
+        };
+        let act = ExpectedLossVector {
+            availability_loss: 0.35 * count.min(3.0),
+            integrity_loss: 0.45 * count.min(3.0),
+            confidentiality_loss: 0.1,
+            financial_loss: 0.15,
+            reputation_loss: 0.1,
+        };
+        let wait_total = wait.total();
+        candidates.push(ActionCandidate {
+            action_id: "doctor-live-incident-triage".to_owned(),
+            display_name: format!(
+                "Replay and bundle {} active incident(s)",
+                telemetry.active_incidents.len()
+            ),
+            description: format!(
+                "Captured incident evidence present (starting with `{first_id}`); run \
+                 `franken-node incident list --json` and `franken-node incident replay` to isolate root cause."
+            ),
+            expected_loss_if_act: act,
+            expected_loss_if_wait: wait,
+            uncertainty_band: ConfidenceInterval {
+                lower_bound: wait_total * 0.75,
+                upper_bound: wait_total * 1.25 + 0.1,
+                confidence_level: 0.85,
+            },
+            preconditions: Vec::new(),
+            estimated_duration: Duration::from_secs(45),
+            rollback_command: "none: read-only incident bundle and replay verification".to_owned(),
+            rollback_validated: false,
+            confidence: ConfidenceContext {
+                data_sources: vec![DataSourceInfo {
+                    source_id: "ops.incident_evidence".to_owned(),
+                    freshness: served_at.clone(),
+                    is_stale: false,
+                    staleness_secs: 0,
+                }],
+                assumptions: vec![format!(
+                    "active_incidents = {}",
+                    telemetry.active_incidents.len()
+                )],
+                sensitivity: "Drops to zero once active incidents are resolved and archived".to_owned(),
+            },
+        });
+    }
+
+    if telemetry.trust_state_stale {
+        let staleness_hours = (telemetry.trust_state_age_secs as f64 / 3_600.0).clamp(1.0, 12.0);
+        let wait = ExpectedLossVector {
+            availability_loss: 0.5,
+            integrity_loss: 2.2 * staleness_hours.sqrt(),
+            confidentiality_loss: 1.4 * staleness_hours.sqrt(),
+            financial_loss: 0.4,
+            reputation_loss: 0.8 * staleness_hours.sqrt(),
+        };
+        let act = ExpectedLossVector {
+            availability_loss: 0.1,
+            integrity_loss: 0.3,
+            confidentiality_loss: 0.2,
+            financial_loss: 0.1,
+            reputation_loss: 0.1,
+        };
+        let wait_total = wait.total();
+        candidates.push(ActionCandidate {
+            action_id: "doctor-live-trust-sync".to_owned(),
+            display_name: "Refresh stale trust-card registry".to_owned(),
+            description: format!(
+                "Local trust-card registry is {}s old (> {}s freshness SLA); run \
+                 `franken-node trust sync` to pull fresh revocation and publisher state.",
+                telemetry.trust_state_age_secs, TRUST_STATE_STALE_AFTER_SECS
+            ),
+            expected_loss_if_act: act,
+            expected_loss_if_wait: wait,
+            uncertainty_band: ConfidenceInterval {
+                lower_bound: wait_total * 0.7,
+                upper_bound: wait_total * 1.3 + 0.1,
+                confidence_level: 0.8,
+            },
+            preconditions: Vec::new(),
+            estimated_duration: Duration::from_secs(15),
+            rollback_command: "franken-node trust list --json".to_owned(),
+            rollback_validated: true,
+            confidence: ConfidenceContext {
+                data_sources: vec![DataSourceInfo {
+                    source_id: "supply_chain.trust_card_registry".to_owned(),
+                    freshness: served_at.clone(),
+                    is_stale: true,
+                    staleness_secs: telemetry.trust_state_age_secs,
+                }],
+                assumptions: vec![format!(
+                    "trust_state_age_secs = {} (threshold {}s)",
+                    telemetry.trust_state_age_secs, TRUST_STATE_STALE_AFTER_SECS
+                )],
+                sensitivity: "Clears as soon as trust-card registry mtime falls within 3600s"
+                    .to_owned(),
+            },
+        });
+    }
+
+    if telemetry.active_fleet_quarantines > 0 {
+        let q = (telemetry.active_fleet_quarantines as f64).min(10.0);
+        let wait = ExpectedLossVector {
+            availability_loss: 1.8 + 0.6 * q,
+            integrity_loss: 2.5 + 0.8 * q,
+            confidentiality_loss: 0.3 * q,
+            financial_loss: 0.5 * q,
+            reputation_loss: 0.5 * q,
+        };
+        let act = ExpectedLossVector {
+            availability_loss: 0.35,
+            integrity_loss: 0.4,
+            confidentiality_loss: 0.05,
+            financial_loss: 0.1,
+            reputation_loss: 0.1,
+        };
+        let wait_total = wait.total();
+        candidates.push(ActionCandidate {
+            action_id: "doctor-live-fleet-reconcile".to_owned(),
+            display_name: format!(
+                "Reconcile {} active fleet quarantine hold(s)",
+                telemetry.active_fleet_quarantines
+            ),
+            description: "Durable fleet store holds active quarantine actions; run \
+                          `franken-node fleet reconcile --json` and verify epoch quiescence."
+                .to_owned(),
+            expected_loss_if_act: act,
+            expected_loss_if_wait: wait,
+            uncertainty_band: ConfidenceInterval {
+                lower_bound: wait_total * 0.75,
+                upper_bound: wait_total * 1.25 + 0.1,
+                confidence_level: 0.85,
+            },
+            preconditions: Vec::new(),
+            estimated_duration: Duration::from_secs(20),
+            rollback_command: "franken-node fleet status --json".to_owned(),
+            rollback_validated: true,
+            confidence: ConfidenceContext {
+                data_sources: vec![DataSourceInfo {
+                    source_id: "control_plane.fleet_state".to_owned(),
+                    freshness: served_at.clone(),
+                    is_stale: false,
+                    staleness_secs: 0,
+                }],
+                assumptions: vec![format!(
+                    "active_fleet_quarantines = {}",
+                    telemetry.active_fleet_quarantines
+                )],
+                sensitivity: "Clears once fleet quarantine incidents are reconciled or released"
+                    .to_owned(),
+            },
+        });
+    }
+
+    if telemetry
+        .pending_operations
+        .iter()
+        .any(|op| op.starts_with("deploy:"))
+    {
+        let wait = ExpectedLossVector {
+            availability_loss: 2.8,
+            integrity_loss: 3.0,
+            confidentiality_loss: 0.0,
+            financial_loss: 0.6,
+            reputation_loss: 0.4,
+        };
+        let act = ExpectedLossVector {
+            availability_loss: 0.4,
+            integrity_loss: 0.35,
+            confidentiality_loss: 0.0,
+            financial_loss: 0.1,
+            reputation_loss: 0.05,
+        };
+        let wait_total = wait.total();
+        candidates.push(ActionCandidate {
+            action_id: "doctor-live-deploy-reconcile".to_owned(),
+            display_name: "Reconcile pending deployment transaction".to_owned(),
+            description: "Deployment state contains an incomplete activation transaction or \
+                          staged unactivated release; run `franken-node deploy reconcile`."
+                .to_owned(),
+            expected_loss_if_act: act,
+            expected_loss_if_wait: wait,
+            uncertainty_band: ConfidenceInterval {
+                lower_bound: wait_total * 0.75,
+                upper_bound: wait_total * 1.25 + 0.1,
+                confidence_level: 0.85,
+            },
+            preconditions: Vec::new(),
+            estimated_duration: Duration::from_secs(15),
+            rollback_command:
+                "franken-node deploy rollback --deployment default --reason copilot-reconcile"
+                    .to_owned(),
+            rollback_validated: true,
+            confidence: ConfidenceContext {
+                data_sources: vec![DataSourceInfo {
+                    source_id: "runtime.deployment_store".to_owned(),
+                    freshness: served_at.clone(),
+                    is_stale: false,
+                    staleness_secs: 0,
+                }],
+                assumptions: telemetry
+                    .pending_operations
+                    .iter()
+                    .filter(|op| op.starts_with("deploy:"))
+                    .cloned()
+                    .collect(),
+                sensitivity: "Clears once deployment activation commits or rolls back cleanly"
+                    .to_owned(),
+            },
+        });
+    }
+
+    let mut stale_inputs = Vec::new();
+    if telemetry.trust_state_stale {
+        stale_inputs.push(StaleInput {
+            input_id: "supply_chain.trust_card_registry".to_owned(),
+            staleness_secs: telemetry.trust_state_age_secs,
+            expected_refresh_secs: TRUST_STATE_STALE_AFTER_SECS,
+        });
+    }
+
+    let degraded_mode = matches!(
+        report.status,
+        DoctorStatus::Degraded | DoctorStatus::Critical
+    ) || !report.resources.coordination_healthy
+        || telemetry.safe_mode_active
+        || telemetry.trust_state_stale
+        || !telemetry.active_incidents.is_empty();
+
+    let degraded_details = degraded_mode.then(|| {
+        let mut reasons = Vec::new();
+        if matches!(
+            report.status,
+            DoctorStatus::Degraded | DoctorStatus::Critical
+        ) || !report.resources.coordination_healthy
+        {
+            reasons.push(if report.summary.trim().is_empty() {
+                format!("workspace status {}", report.status.as_str())
+            } else {
+                report.summary.clone()
+            });
+        }
+        if telemetry.safe_mode_active {
+            reasons.push(format!(
+                "safe-mode containment active ({})",
+                telemetry
+                    .safe_mode_reason
+                    .as_deref()
+                    .unwrap_or("SafeModeActive")
+            ));
+        }
+        if !telemetry.active_incidents.is_empty() {
+            reasons.push(format!(
+                "{} active incident(s) pending triage",
+                telemetry.active_incidents.len()
+            ));
+        }
+        if telemetry.trust_state_stale {
+            reasons.push(format!(
+                "trust-card registry stale ({}s > {}s)",
+                telemetry.trust_state_age_secs, TRUST_STATE_STALE_AFTER_SECS
+            ));
+        }
+        DegradedModeInfo {
+            stale_inputs,
+            reason: reasons.join("; "),
+            entered_at: served_at.clone(),
+        }
+    });
+
+    let state = SystemState {
+        degraded_mode,
+        degraded_details,
+        active_incidents: telemetry.active_incidents.clone(),
+        trust_state_age_secs: telemetry.trust_state_age_secs,
+        pending_operations: telemetry.pending_operations.clone(),
+    };
+
+    let mut engine = ActionRecommendationEngine::new(top_k.max(1));
+    let response = engine.recommend(
+        &candidates,
+        &state,
+        operator_identity,
+        recommendation_id,
+        trace_id,
+        &served_at,
+    );
+    (response, telemetry)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2300,5 +2940,122 @@ mod tests {
         let resp = rank_doctor_actions_by_expected_loss(&report, "op", "rec-5", "trace-5", 2);
         assert_eq!(resp.recommendations.len(), 2);
         assert_eq!(resp.recommendations[0].display_name, "a");
+    }
+
+    #[test]
+    fn ibd8_clean_workspace_without_state_dir_synthesizes_no_false_alarms() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let report = ibd8_report(
+            DoctorStatus::Healthy,
+            Vec::new(),
+            ibd8_resources(true, 0.1, 0),
+        );
+        let (resp, telemetry) = rank_doctor_actions_by_expected_loss_with_workspace(
+            &report,
+            tmp.path(),
+            "op",
+            "rec-ws-clean",
+            "trace-ws-clean",
+            5,
+        );
+        assert!(!telemetry.state_dir_present);
+        assert!(telemetry.active_incidents.is_empty());
+        assert!(!telemetry.safe_mode_active);
+        assert!(!telemetry.trust_state_stale);
+        assert_eq!(telemetry.active_fleet_quarantines, 0);
+        assert!(telemetry.pending_operations.is_empty());
+        assert!(resp.recommendations.is_empty());
+        assert!(!resp.system_degraded);
+    }
+
+    #[test]
+    fn ibd8_workspace_telemetry_ranks_safe_mode_incidents_stale_trust_and_pending_ops() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let dot = tmp.path().join(".franken-node");
+        let state = dot.join("state");
+        fs::create_dir_all(state.join("incidents/INC-2026-9001")).expect("incidents dir");
+        fs::write(
+            state.join("incidents/INC-2026-9001/incident_evidence.json"),
+            r#"{"incident_id":"INC-2026-9001"}"#,
+        )
+        .expect("incident evidence");
+
+        // Persist active safe-mode controller.
+        fs::create_dir_all(dot.join("safe-mode")).expect("safe-mode dir");
+        let mut sm = crate::runtime::safe_mode::SafeModeController::with_default_config();
+        sm.enter_safe_mode(
+            crate::runtime::safe_mode::SafeModeEntryReason::CrashLoop {
+                crash_count: 3,
+                window_secs: 60,
+            },
+            "2026-11-12T00:00:00Z",
+            "sha256:trusted",
+            Vec::new(),
+        );
+        fs::write(
+            dot.join("safe-mode/state.json"),
+            serde_json::to_vec(&sm).expect("serialize safe-mode"),
+        )
+        .expect("write safe-mode");
+
+        // Write trust-card registry file, then evaluate 3 hours in the future so it is stale.
+        fs::write(state.join("trust-card-registry.v1.json"), "{}").expect("trust registry");
+
+        // Write active fleet quarantine in actions.jsonl + pending deployment transaction.
+        fs::create_dir_all(state.join("fleet")).expect("fleet dir");
+        fs::write(
+            state.join("fleet/actions.jsonl"),
+            "{\"action\":{\"type\":\"quarantine\",\"incident_id\":\"INC-Q-1\"}}\n",
+        )
+        .expect("fleet actions");
+        fs::create_dir_all(state.join("deployments/default")).expect("deploy dir");
+        fs::write(state.join("deployments/default/transaction.json"), "{}").expect("deploy txn");
+
+        let mut report = ibd8_report(
+            DoctorStatus::Healthy,
+            Vec::new(),
+            ibd8_resources(true, 0.2, 1),
+        );
+        report.timestamp = Utc::now() + chrono::Duration::seconds(10_800);
+
+        let (resp, telemetry) = rank_doctor_actions_by_expected_loss_with_workspace(
+            &report,
+            tmp.path(),
+            "operator-1",
+            "rec-ws-live",
+            "trace-ws-live",
+            10,
+        );
+
+        assert!(telemetry.state_dir_present);
+        assert_eq!(telemetry.active_incidents, vec!["INC-2026-9001"]);
+        assert!(telemetry.safe_mode_active);
+        assert!(telemetry.trust_state_stale);
+        assert!(telemetry.trust_state_age_secs >= 10_000);
+        assert_eq!(telemetry.active_fleet_quarantines, 1);
+        assert!(
+            telemetry
+                .pending_operations
+                .iter()
+                .any(|op| op == "deploy:default:incomplete-activation-txn")
+        );
+
+        assert!(resp.system_degraded);
+        let warning = resp.degraded_warning.as_ref().expect("degraded warning");
+        assert_eq!(warning.stale_inputs.len(), 1);
+        assert_eq!(
+            warning.stale_inputs[0].input_id,
+            "supply_chain.trust_card_registry"
+        );
+
+        assert_eq!(resp.recommendations.len(), 5);
+        assert_eq!(
+            resp.recommendations[0].action_id,
+            "doctor-live-safe-mode-containment"
+        );
+        assert!(resp.recommendations[0].rollback_validated);
+        for pair in resp.recommendations.windows(2) {
+            assert!(pair[0].voi_score >= pair[1].voi_score);
+        }
     }
 }

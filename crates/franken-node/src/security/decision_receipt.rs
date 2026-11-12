@@ -813,7 +813,7 @@ fn encode_cbor_to_vec(value: &impl Serialize) -> Result<Vec<u8>, ReceiptError> {
 }
 
 #[cfg(feature = "cbor-serialization")]
-fn decode_cbor_from_slice<'de, T>(bytes: &'de [u8]) -> Result<T, ReceiptError>
+fn decode_cbor_from_slice<T>(bytes: &[u8]) -> Result<T, ReceiptError>
 where
     T: serde::de::DeserializeOwned,
 {

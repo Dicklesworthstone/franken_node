@@ -243,3 +243,79 @@ fn from_report_human_output_is_readable() {
         "human output missing VoI score:\n{stdout}"
     );
 }
+
+#[test]
+fn live_workspace_telemetry_surfaces_incidents_quarantines_and_pending_deploys_in_voi_order() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let dot = dir.path().join(".franken-node");
+    let state = dot.join("state");
+
+    std::fs::create_dir_all(state.join("incidents/INC-E2E-42")).expect("incidents dir");
+    std::fs::write(
+        state.join("incidents/INC-E2E-42/incident_evidence.json"),
+        r#"{"incident_id":"INC-E2E-42"}"#,
+    )
+    .expect("incident evidence");
+
+    std::fs::create_dir_all(state.join("fleet")).expect("fleet dir");
+    std::fs::write(
+        state.join("fleet/actions.jsonl"),
+        "{\"action\":{\"type\":\"quarantine\",\"incident_id\":\"INC-QUAR-9\"}}\n",
+    )
+    .expect("fleet actions");
+
+    std::fs::create_dir_all(state.join("deployments/default")).expect("deploy dir");
+    std::fs::write(state.join("deployments/default/transaction.json"), "{}").expect("deploy txn");
+
+    let (ok, stdout, stderr) = run_in(
+        dir.path(),
+        &["doctor", "expected-loss-actions", "--json", "--top-k", "10"],
+    );
+    assert!(ok, "live workspace run must exit 0; stderr=\n{stderr}");
+
+    let envelope: serde_json::Value =
+        serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("stdout not JSON: {e}\n{stdout}"));
+    assert_eq!(envelope["schema_version"], ENVELOPE_SCHEMA);
+    assert_eq!(envelope["source"], "live");
+
+    let telemetry = &envelope["workspace_telemetry"];
+    assert_eq!(telemetry["state_dir_present"], true);
+    assert_eq!(
+        telemetry["active_incidents"],
+        serde_json::json!(["INC-E2E-42"])
+    );
+    assert_eq!(telemetry["active_fleet_quarantines"], 1);
+    assert!(
+        telemetry["pending_operations"]
+            .as_array()
+            .expect("pending_operations array")
+            .iter()
+            .any(|v| v == "deploy:default:incomplete-activation-txn")
+    );
+
+    assert_eq!(envelope["response"]["system_degraded"], true);
+    let recs = envelope["response"]["recommendations"]
+        .as_array()
+        .expect("recommendations array");
+    let action_ids: Vec<&str> = recs
+        .iter()
+        .filter_map(|r| r["action_id"].as_str())
+        .collect();
+    assert!(
+        action_ids.contains(&"doctor-live-incident-triage"),
+        "missing live incident triage candidate in {action_ids:?}"
+    );
+    assert!(
+        action_ids.contains(&"doctor-live-fleet-reconcile"),
+        "missing live fleet reconcile candidate in {action_ids:?}"
+    );
+    assert!(
+        action_ids.contains(&"doctor-live-deploy-reconcile"),
+        "missing live deploy reconcile candidate in {action_ids:?}"
+    );
+    for pair in recs.windows(2) {
+        let a = pair[0]["voi_score"].as_f64().expect("voi f64");
+        let b = pair[1]["voi_score"].as_f64().expect("voi f64");
+        assert!(a >= b, "live recommendations not VoI-descending: {recs:?}");
+    }
+}
