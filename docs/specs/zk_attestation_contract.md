@@ -51,6 +51,29 @@ parameters, and time from its caller. It cannot discover revocations absent from
 the submitted record. Use the authoritative ledger wrapper to enforce retained
 revocations and expiry state.
 
+### Independently trusted verifier parameters
+
+For a proof received with caller-selected policy and parameters, use
+`verify_compliance_proof_with_trusted_params_sha256` with an expected parameter
+digest obtained from trusted verifier configuration or another authenticated
+channel. The digest is mandatory canonical lowercase SHA-256 hex (64 characters,
+without a prefix or surrounding whitespace). Missing, malformed, or mismatched
+digests produce `ERR_ZKA_POLICY_MISMATCH` before cryptographic proof verification;
+the digest comparison uses constant-time equality.
+
+`ZkVerifierParams::params_sha256()` commits to the policy statement, mathematical
+relation, verifier key identity, epoch, and challenge nonce. A genuinely valid
+proof under a weaker threshold or expanded allowlist cannot satisfy the original
+trusted digest, even if its policy ID and issuer are unchanged. A matching pin
+still requires successful policy binding, proof verification, and lifetime and
+lifecycle checks. This API retains the stateless verifier's limits concerning
+trusted current time and discovery of revocations.
+
+The expected digest must not be copied from the same untrusted bundle being
+verified. Constructing `ZkVerifierParams` or successfully verifying a proof under
+candidate-supplied parameters establishes the mathematical statement, not the
+authority of the selected policy or issuer.
+
 ## Section
 
 10.17 -- Radical Expansion Execution Track

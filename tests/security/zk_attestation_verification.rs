@@ -53,6 +53,28 @@ fn make_attestation(
         .unwrap()
 }
 
+fn prove_for_independent_verifier(
+    id: &str,
+    policy: &ZkPolicy,
+    params: &ZkVerifierParams,
+    value: u64,
+) -> ZkAttestation {
+    let witness = ZkPrivateWitness::new(value, [0x4b; 32]).unwrap();
+    let attestation = AttestationLedger::new()
+        .prove_compliance(
+            id.to_string(),
+            policy,
+            params,
+            &witness,
+            1_000_000,
+            format!("trace-{id}"),
+        )
+        .unwrap();
+    // Independent verification receives a portable proof, without the issuer's
+    // ledger or private witness and without trusting embedded parameter hashes.
+    serde_json::from_slice(&serde_json::to_vec(&attestation).unwrap()).unwrap()
+}
+
 // ── INV-ZK-NO-DISCLOSURE / INV-ZKA-SELECTIVE ─────────────────────────────────
 
 #[test]
@@ -661,6 +683,292 @@ fn compliance_report_counts() {
 }
 
 // ── Ristretto255 Cryptographic Compliance Verification (bd-reality-20260923-26n9r.18) ──
+
+#[test]
+fn ristretto_trusted_params_pin_accepts_original_and_rejects_weaker_valid_policy() {
+    for (name, original_relation, weaker_relation) in [
+        (
+            "threshold",
+            ZkComplianceRelation::threshold_at_least(100, 8).unwrap(),
+            ZkComplianceRelation::threshold_at_least(10, 8).unwrap(),
+        ),
+        (
+            "allowlist",
+            ZkComplianceRelation::allowlist(vec![142]).unwrap(),
+            ZkComplianceRelation::allowlist(vec![15, 142]).unwrap(),
+        ),
+    ] {
+        let policy = test_policy();
+        let params = ZkVerifierParams::for_policy(
+            &policy,
+            "vk-independent-pin",
+            7,
+            "nonce-independent-pin",
+            original_relation,
+        )
+        .unwrap();
+        // Capture the expected digest from the verifier's original policy,
+        // before receiving either the honest or attacker-selected statement.
+        let expected_digest = params.params_sha256();
+        let honest =
+            prove_for_independent_verifier(&format!("att-pinned-{name}"), &policy, &params, 142);
+        assert!(
+            verify_compliance_proof_with_trusted_params_sha256(
+                &honest,
+                &policy,
+                &params,
+                &expected_digest,
+                1_000_001,
+                "trace-pinned-honest".to_string(),
+            )
+            .is_verified()
+        );
+
+        let lower_witness = ZkPrivateWitness::new(15, [0x4c; 32]).unwrap();
+        let error = AttestationLedger::new()
+            .prove_compliance(
+                format!("att-unsatisfied-{name}"),
+                &policy,
+                &params,
+                &lower_witness,
+                1_000_000,
+                "trace-unsatisfied-original-policy".to_string(),
+            )
+            .unwrap_err();
+        assert!(error.contains(error_codes::ERR_ZKA_PREDICATE_UNSATISFIED));
+
+        // Keep the policy's identity, description, and issuer unchanged while
+        // weakening only the mathematical requirement in its parameters.
+        let weaker_policy = policy.clone();
+        let weaker_params = ZkVerifierParams::for_policy(
+            &weaker_policy,
+            &params.verifier_key_id,
+            params.epoch,
+            &params.challenge_nonce,
+            weaker_relation,
+        )
+        .unwrap();
+        let weaker = prove_for_independent_verifier(
+            &format!("att-weaker-{name}"),
+            &weaker_policy,
+            &weaker_params,
+            15,
+        );
+        assert_ne!(weaker_params.params_sha256(), expected_digest);
+        // This is a genuine proof for the attacker's chosen statement, not
+        // corrupted bytes. The unanchored primitive accepts that statement.
+        assert!(
+            verify_compliance_proof_stateless(
+                &weaker,
+                &weaker_policy,
+                &weaker_params,
+                1_000_001,
+                "trace-weaker-self-verifies".to_string(),
+            )
+            .is_verified()
+        );
+        let result = verify_compliance_proof_with_trusted_params_sha256(
+            &weaker,
+            &weaker_policy,
+            &weaker_params,
+            &expected_digest,
+            1_000_001,
+            "trace-weaker-original-pin".to_string(),
+        );
+        assert!(
+            matches!(
+                result,
+                ZkVerificationResult::Rejected { ref error_code, .. }
+                    if error_code == error_codes::ERR_ZKA_POLICY_MISMATCH
+            ),
+            "{name}: {result:?}"
+        );
+
+        // A verifier may deliberately authorize a different policy using its
+        // independently distributed pin; the original pin never authorizes it.
+        assert!(
+            verify_compliance_proof_with_trusted_params_sha256(
+                &weaker,
+                &weaker_policy,
+                &weaker_params,
+                &weaker_params.params_sha256(),
+                1_000_001,
+                "trace-separately-authorized-policy".to_string(),
+            )
+            .is_verified()
+        );
+    }
+}
+
+#[test]
+fn ristretto_trusted_params_pin_rejects_genuine_proofs_for_swapped_contexts() {
+    let policy = test_policy();
+    let params = ZkVerifierParams::for_policy(
+        &policy,
+        "vk-context-pin",
+        7,
+        "nonce-context-pin",
+        ZkComplianceRelation::allowlist(vec![142]).unwrap(),
+    )
+    .unwrap();
+    let expected_digest = params.params_sha256();
+
+    for changed in ["issuer", "epoch", "nonce", "verifier_key"] {
+        let mut candidate_policy = policy.clone();
+        let mut epoch = params.epoch;
+        let mut nonce = params.challenge_nonce.clone();
+        let mut verifier_key = params.verifier_key_id.clone();
+        match changed {
+            "issuer" => candidate_policy.issuer = "other-issuer".to_string(),
+            "epoch" => epoch += 1,
+            "nonce" => nonce = "other-nonce".to_string(),
+            "verifier_key" => verifier_key = "other-verifier-key".to_string(),
+            _ => unreachable!(),
+        }
+        let candidate_params = ZkVerifierParams::for_policy(
+            &candidate_policy,
+            verifier_key,
+            epoch,
+            nonce,
+            params.relation.clone(),
+        )
+        .unwrap();
+        let candidate = prove_for_independent_verifier(
+            &format!("att-context-{changed}"),
+            &candidate_policy,
+            &candidate_params,
+            142,
+        );
+        assert!(
+            verify_compliance_proof_stateless(
+                &candidate,
+                &candidate_policy,
+                &candidate_params,
+                1_000_001,
+                "trace-context-self-verifies".to_string(),
+            )
+            .is_verified()
+        );
+        let result = verify_compliance_proof_with_trusted_params_sha256(
+            &candidate,
+            &candidate_policy,
+            &candidate_params,
+            &expected_digest,
+            1_000_001,
+            "trace-context-original-pin".to_string(),
+        );
+        assert!(
+            matches!(
+                result,
+                ZkVerificationResult::Rejected { ref error_code, .. }
+                    if error_code == error_codes::ERR_ZKA_POLICY_MISMATCH
+            ),
+            "changed={changed}: {result:?}"
+        );
+    }
+}
+
+#[test]
+fn ristretto_trusted_params_pin_rejects_malformed_digest_and_preserves_proof_checks() {
+    let policy = test_policy();
+    let params = ZkVerifierParams::for_policy(
+        &policy,
+        "vk-pin-format",
+        7,
+        "nonce-pin-format",
+        ZkComplianceRelation::allowlist(vec![142]).unwrap(),
+    )
+    .unwrap();
+    let att = prove_for_independent_verifier("att-pin-format", &policy, &params, 142);
+    let expected_digest = params.params_sha256();
+    let uppercase = expected_digest.to_ascii_uppercase();
+    assert_ne!(uppercase, expected_digest);
+    let mut wrong_digest = expected_digest.clone();
+    wrong_digest.replace_range(
+        ..1,
+        if expected_digest.starts_with('0') {
+            "1"
+        } else {
+            "0"
+        },
+    );
+    for bad_digest in [
+        String::new(),
+        "0".repeat(63),
+        "0".repeat(65),
+        "g".repeat(64),
+        uppercase,
+        format!("sha256:{expected_digest}"),
+        format!(" {expected_digest}"),
+        format!("{expected_digest}\n"),
+        wrong_digest,
+    ] {
+        assert!(matches!(
+            verify_compliance_proof_with_trusted_params_sha256(
+                &att,
+                &policy,
+                &params,
+                &bad_digest,
+                1_000_001,
+                "trace-invalid-pin".to_string(),
+            ),
+            ZkVerificationResult::Rejected { error_code, .. }
+                if error_code == error_codes::ERR_ZKA_POLICY_MISMATCH
+        ));
+    }
+    assert!(
+        verify_compliance_proof_with_trusted_params_sha256(
+            &att,
+            &policy,
+            &params,
+            &expected_digest,
+            1_000_001,
+            "trace-valid-pin".to_string(),
+        )
+        .is_verified()
+    );
+
+    assert!(matches!(
+        verify_compliance_proof_with_trusted_params_sha256(
+            &att,
+            &policy,
+            &params,
+            &expected_digest,
+            att.expires_at_ms,
+            "trace-valid-pin-expired-proof".to_string(),
+        ),
+        ZkVerificationResult::Rejected { error_code, .. }
+            if error_code == error_codes::ERR_ZKA_EXPIRED
+    ));
+    let mut wrong_policy = policy.clone();
+    wrong_policy.issuer = "unbound-issuer".to_string();
+    assert!(matches!(
+        verify_compliance_proof_with_trusted_params_sha256(
+            &att,
+            &wrong_policy,
+            &params,
+            &expected_digest,
+            1_000_001,
+            "trace-valid-pin-unbound-policy".to_string(),
+        ),
+        ZkVerificationResult::Rejected { error_code, .. }
+            if error_code == error_codes::ERR_ZKA_POLICY_MISMATCH
+    ));
+    let mut invalid_proof = att.clone();
+    invalid_proof.payload.proof_bytes_hex = "deadbeef".to_string();
+    assert!(matches!(
+        verify_compliance_proof_with_trusted_params_sha256(
+            &invalid_proof,
+            &policy,
+            &params,
+            &expected_digest,
+            1_000_001,
+            "trace-valid-pin-invalid-proof".to_string(),
+        ),
+        ZkVerificationResult::Rejected { error_code, .. }
+            if error_code == error_codes::ERR_ZKA_INVALID_PROOF
+    ));
+}
 
 #[test]
 fn ristretto_stateless_validity_interval_is_authenticated_for_both_relations() {
