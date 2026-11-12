@@ -6,6 +6,8 @@
 
 use std::collections::BTreeMap;
 
+use serde::{Deserialize, Serialize};
+
 use crate::push_bounded;
 
 const DEFAULT_MAX_INCIDENTS: usize = 4096;
@@ -461,6 +463,178 @@ impl CrashLoopDetector {
         };
         self.push_incident(incident);
         Ok(decision)
+    }
+}
+
+pub const E_PROCESS_HEALTH_SCHEMA: &str = "franken-node/e-process-health-monitor/v1";
+const MIN_E_PROCESS_WEALTH: f64 = 1e-300;
+const MAX_E_PROCESS_WEALTH: f64 = 1e300;
+
+/// Configuration for the anytime-valid e-process canary / post-rollback monitor.
+///
+/// Uses Ville's inequality ($\mathbb{P}(\exists t \ge 1 : E_t \ge 1/\alpha) \le \alpha$)
+/// over Bernoulli crash indicators $X_t \in \{0, 1\}$ to certify sustained post-rollback
+/// health (`E_ok >= 1/alpha` after at least `min_healthy_probes` runs) or reject a
+/// degraded candidate (`E_deg >= 1/alpha`) under arbitrary optional stopping.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct EProcessConfig {
+    /// Baseline healthy crash rate $p_0 \in (0, 1)$.
+    pub p0_healthy_crash_rate: f64,
+    /// Degraded crash-loop alternative rate $p_1 \in (p_0, 1)$.
+    pub p1_degraded_crash_rate: f64,
+    /// Anytime-valid Type-I error level $\alpha \in (0, 1)$; threshold is $1/\alpha$.
+    pub alpha: f64,
+    /// Minimum consecutive healthy probe runs required alongside $E_t^{\text{ok}} \ge 1/\alpha$.
+    pub min_healthy_probes: u32,
+}
+
+impl EProcessConfig {
+    #[must_use]
+    pub const fn default_post_rollback(min_healthy_probes: u32) -> Self {
+        Self {
+            p0_healthy_crash_rate: 0.01,
+            p1_degraded_crash_rate: 0.65,
+            alpha: 0.05,
+            min_healthy_probes,
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.p0_healthy_crash_rate.is_finite()
+            || self.p0_healthy_crash_rate <= 0.0
+            || self.p0_healthy_crash_rate >= 1.0
+        {
+            return Err("e-process p0_healthy_crash_rate must be finite in (0, 1)".to_string());
+        }
+        if !self.p1_degraded_crash_rate.is_finite()
+            || self.p1_degraded_crash_rate <= self.p0_healthy_crash_rate
+            || self.p1_degraded_crash_rate >= 1.0
+        {
+            return Err("e-process p1_degraded_crash_rate must be finite in (p0, 1)".to_string());
+        }
+        if !self.alpha.is_finite() || self.alpha <= 0.0 || self.alpha >= 1.0 {
+            return Err("e-process alpha must be finite in (0, 1)".to_string());
+        }
+        if self.min_healthy_probes == 0 {
+            return Err("e-process min_healthy_probes must be at least 1".to_string());
+        }
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn threshold(&self) -> f64 {
+        1.0 / self.alpha
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EProcessState {
+    Observing,
+    SustainedHealthCertified,
+    DegradedRejected,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EProcessObservation {
+    pub schema_version: String,
+    pub release_id: String,
+    pub total_runs: u32,
+    pub healthy_runs: u32,
+    pub consecutive_healthy_runs: u32,
+    pub crash_runs: u32,
+    pub health_wealth: f64,
+    pub degradation_wealth: f64,
+    pub rejection_threshold: f64,
+    pub alpha: f64,
+    pub min_healthy_probes: u32,
+    pub state: EProcessState,
+}
+
+#[derive(Debug, Clone)]
+pub struct EProcessHealthMonitor {
+    release_id: String,
+    config: EProcessConfig,
+    total_runs: u32,
+    healthy_runs: u32,
+    consecutive_healthy_runs: u32,
+    crash_runs: u32,
+    health_wealth: f64,
+    degradation_wealth: f64,
+    state: EProcessState,
+}
+
+impl EProcessHealthMonitor {
+    pub fn new(release_id: impl Into<String>, config: EProcessConfig) -> Result<Self, String> {
+        config.validate()?;
+        let release_id = release_id.into();
+        if release_id.trim().is_empty() {
+            return Err("e-process release_id must not be empty".to_string());
+        }
+        Ok(Self {
+            release_id,
+            config,
+            total_runs: 0,
+            healthy_runs: 0,
+            consecutive_healthy_runs: 0,
+            crash_runs: 0,
+            health_wealth: 1.0,
+            degradation_wealth: 1.0,
+            state: EProcessState::Observing,
+        })
+    }
+
+    /// Observe one completed run (`crashed == false` for clean exit, `true` for crash/containment).
+    pub fn observe_run(&mut self, crashed: bool) -> EProcessObservation {
+        self.total_runs = self.total_runs.saturating_add(1);
+        let p0 = self.config.p0_healthy_crash_rate;
+        let p1 = self.config.p1_degraded_crash_rate;
+        let (health_lr, deg_lr) = if crashed {
+            self.crash_runs = self.crash_runs.saturating_add(1);
+            self.consecutive_healthy_runs = 0;
+            (p0 / p1, p1 / p0)
+        } else {
+            self.healthy_runs = self.healthy_runs.saturating_add(1);
+            self.consecutive_healthy_runs = self.consecutive_healthy_runs.saturating_add(1);
+            ((1.0 - p0) / (1.0 - p1), (1.0 - p1) / (1.0 - p0))
+        };
+        self.health_wealth =
+            (self.health_wealth * health_lr).clamp(MIN_E_PROCESS_WEALTH, MAX_E_PROCESS_WEALTH);
+        self.degradation_wealth =
+            (self.degradation_wealth * deg_lr).clamp(MIN_E_PROCESS_WEALTH, MAX_E_PROCESS_WEALTH);
+        let threshold = self.config.threshold();
+        if self.degradation_wealth >= threshold {
+            self.state = EProcessState::DegradedRejected;
+        } else if self.state != EProcessState::DegradedRejected
+            && self.health_wealth >= threshold
+            && self.consecutive_healthy_runs >= self.config.min_healthy_probes
+        {
+            self.state = EProcessState::SustainedHealthCertified;
+        }
+        self.snapshot()
+    }
+
+    #[must_use]
+    pub fn state(&self) -> EProcessState {
+        self.state
+    }
+
+    #[must_use]
+    pub fn snapshot(&self) -> EProcessObservation {
+        EProcessObservation {
+            schema_version: E_PROCESS_HEALTH_SCHEMA.to_string(),
+            release_id: self.release_id.clone(),
+            total_runs: self.total_runs,
+            healthy_runs: self.healthy_runs,
+            consecutive_healthy_runs: self.consecutive_healthy_runs,
+            crash_runs: self.crash_runs,
+            health_wealth: self.health_wealth,
+            degradation_wealth: self.degradation_wealth,
+            rejection_threshold: self.config.threshold(),
+            alpha: self.config.alpha,
+            min_healthy_probes: self.config.min_healthy_probes,
+            state: self.state,
+        }
     }
 }
 
@@ -4504,5 +4678,44 @@ mod tests {
                 .map(|(_, count, _)| count)
                 .sum::<usize>()
         );
+    }
+
+    #[test]
+    fn e_process_monitor_certifies_sustained_post_rollback_health() {
+        let mut monitor =
+            EProcessHealthMonitor::new("good-v1", EProcessConfig::default_post_rollback(3))
+                .expect("valid default e-process config");
+        let obs1 = monitor.observe_run(false);
+        assert_eq!(obs1.state, EProcessState::Observing);
+        let obs2 = monitor.observe_run(false);
+        assert_eq!(obs2.state, EProcessState::Observing);
+        let obs3 = monitor.observe_run(false);
+        assert_eq!(obs3.state, EProcessState::SustainedHealthCertified);
+        assert_eq!(obs3.consecutive_healthy_runs, 3);
+        assert!(obs3.health_wealth >= obs3.rejection_threshold);
+    }
+
+    #[test]
+    fn e_process_monitor_rejects_degraded_post_rollback_crash_and_invalid_params() {
+        assert!(
+            EProcessHealthMonitor::new(
+                "bad",
+                EProcessConfig {
+                    p0_healthy_crash_rate: 0.7,
+                    p1_degraded_crash_rate: 0.5,
+                    alpha: 0.05,
+                    min_healthy_probes: 1,
+                },
+            )
+            .is_err()
+        );
+        assert!(EProcessHealthMonitor::new("", EProcessConfig::default_post_rollback(1)).is_err());
+
+        let mut monitor =
+            EProcessHealthMonitor::new("rollback-v1", EProcessConfig::default_post_rollback(2))
+                .expect("valid e-process monitor");
+        let obs = monitor.observe_run(true);
+        assert_eq!(obs.state, EProcessState::DegradedRejected);
+        assert!(obs.degradation_wealth >= obs.rejection_threshold);
     }
 }

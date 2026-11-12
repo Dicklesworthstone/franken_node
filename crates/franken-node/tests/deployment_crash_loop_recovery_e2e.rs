@@ -634,7 +634,10 @@ impl Drill {
             assert_ne!(code, Some(0));
             assert_eq!(report["run"]["outcome"], "native_engine_panic", "{report}");
             assert_eq!(report["run"]["crash_loop"]["crashes_in_window"], attempt);
-            assert_eq!(report["observation_authentication"]["verified"], true, "{report}");
+            assert_eq!(
+                report["observation_authentication"]["verified"], true,
+                "{report}"
+            );
             assert_eq!(
                 report["observation_authentication"]["observation"]["session_nonce"],
                 report["run"]["session_nonce"],
@@ -648,8 +651,7 @@ const HEALTHY_V1: &str = "console.log('RELEASE_ONE_HEALTHY');\n";
 
 fn set_release_runtime(dir: &Path, field: &str, value: toml::Value) {
     let path = dir.join("franken_node.toml");
-    let mut document: toml::Value =
-        toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    let mut document: toml::Value = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
     let mut section = &mut document;
     // Exercise effective profile configuration, not just the root document's
     // runtime table. Existing registry and receipt authority stay unchanged.
@@ -698,7 +700,10 @@ fn assert_workspace_run(run: &Value, admitted: &ReleaseRecord, expected: &str) {
     assert_eq!(guest_stdout(run), expected, "{run}");
     let graph = &run["dispatch"]["engine_decision"]["frozen_modules"];
     assert_eq!(graph["contained_symlinks"], true, "{graph}");
-    assert_eq!(graph["graph_input_hash"], admitted.approval.graph_input_hash());
+    assert_eq!(
+        graph["graph_input_hash"],
+        admitted.approval.graph_input_hash()
+    );
     assert_eq!(
         graph["publisher_artifact"],
         serde_json::to_value(admitted.approval.identity()).unwrap(),
@@ -760,7 +765,10 @@ fn workspace_deployment_reconciles_and_executes_the_profile_selected_esm_branch(
     let output = drill
         .command(drill.root.path(), &["deploy", "run", "app", "--json"])
         .env("FRANKEN_NODE_RUNTIME_FROZEN_MODULE_SYMLINKS", "false")
-        .env("FRANKEN_NODE_RUNTIME_MODULE_CONDITIONS", r#"["unapproved"]"#)
+        .env(
+            "FRANKEN_NODE_RUNTIME_MODULE_CONDITIONS",
+            r#"["unapproved"]"#,
+        )
         .env("FRANKEN_NODE_PROFILE", "strict")
         .output()
         .unwrap();
@@ -851,7 +859,12 @@ fn workspace_deployment_keeps_config_source_and_link_retargeting_bound_after_adm
     );
     let (code, blocked) = drill.run();
     assert_ne!(code, Some(0), "{blocked}");
-    assert!(blocked["error"].as_str().unwrap().contains("release config"));
+    assert!(
+        blocked["error"]
+            .as_str()
+            .unwrap()
+            .contains("release config")
+    );
     assert!(blocked.get("run").is_none());
     let child = drill.admitted_child(&admitted, &manifest);
     assert!(!child.status.success());
@@ -1058,9 +1071,13 @@ fn historical_revision_only_deployment_is_readable_but_cannot_run() {
 
     // Construct a genuinely signed historical record with the deployment's
     // own authority. Rejecting an invalid signature would miss this regression.
-    let key_hex =
-        fs::read_to_string(drill.root.path().join(".franken-node/keys/receipt-signing.key"))
-            .expect("deployment authority");
+    let key_hex = fs::read_to_string(
+        drill
+            .root
+            .path()
+            .join(".franken-node/keys/receipt-signing.key"),
+    )
+    .expect("deployment authority");
     let secret: [u8; 32] = hex::decode(key_hex.trim())
         .expect("hex signing key")
         .try_into()
@@ -1200,12 +1217,20 @@ fn effect_free_native_panic_retains_a_terminal_authenticated_observation() {
     assert_eq!(panic["outcome"], "native_engine_panic", "{panic}");
     assert_eq!(panic["cleanup_successful"], true, "{panic}");
     let inventory = drill.sessions(&release);
-    let records = inventory["records"].as_array().expect("retained native sessions");
+    let records = inventory["records"]
+        .as_array()
+        .expect("retained native sessions");
     assert_eq!(records.len(), 1, "{inventory}");
-    assert_eq!(records[0]["admission"]["session_nonce"], panic["session_nonce"]);
+    assert_eq!(
+        records[0]["admission"]["session_nonce"],
+        panic["session_nonce"]
+    );
     assert_eq!(records[0]["outcome"]["kind"], "panicked");
     assert_eq!(records[0]["outcome"]["process"], "worker_reaped");
-    assert_eq!(records[0]["outcome"]["effects"]["kind"], "no_admitted_host_effects");
+    assert_eq!(
+        records[0]["outcome"]["effects"]["kind"],
+        "no_admitted_host_effects"
+    );
     assert_eq!(inventory["terminal_sessions"], 1);
     assert_eq!(inventory["unknown_effect_sessions"], 0);
     assert_eq!(inventory["quiescence_certified"], false);
@@ -1236,7 +1261,10 @@ fn crash_loop_rolls_back_to_the_healthy_release_and_resumes_it() {
         recovered["observation_authentication"]["observation"]["no_admitted_host_effects"],
         true,
     );
-    assert_eq!(recovered["resumed"]["observation_authentication"]["verified"], true);
+    assert_eq!(
+        recovered["resumed"]["observation_authentication"]["verified"],
+        true
+    );
     let recovery = &recovered["recovery"];
     assert_eq!(recovery["outcome"], "rolled_back", "{recovery}");
     assert_eq!(recovery["failed_release_id"], "2.0.0");
@@ -1312,7 +1340,9 @@ fn forged_unsigned_crash_counter_cannot_authorize_a_deployment_rollback() {
     assert_eq!(first["observation_authentication"]["verified"], true);
     let state_path = failed.join(".franken-node/safe-mode/state.json");
     let mut state: Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
-    let crashes = state["native_crashes"].as_array_mut().expect("local crash history");
+    let crashes = state["native_crashes"]
+        .as_array_mut()
+        .expect("local crash history");
     assert_eq!(crashes.len(), 1);
     let mut forged = crashes[0].clone();
     forged["session_nonce"] = serde_json::json!(uuid::Uuid::from_u128(12_345).to_string());
@@ -1321,7 +1351,10 @@ fn forged_unsigned_crash_counter_cannot_authorize_a_deployment_rollback() {
 
     let (code, second) = drill.run();
     assert_ne!(code, Some(0));
-    assert_eq!(second["run"]["crash_loop"]["crashes_in_window"], 3, "{second}");
+    assert_eq!(
+        second["run"]["crash_loop"]["crashes_in_window"], 3,
+        "{second}"
+    );
     assert_eq!(second["run"]["crash_loop"]["safe_mode_active"], true);
     assert_eq!(second["observation_authentication"]["verified"], true);
     assert_eq!(second["phase"], "crashed", "{second}");
@@ -1355,17 +1388,26 @@ fn authenticated_panic_after_real_host_effect_stays_contained_without_restart() 
 
     let (code, report) = drill.crash_until_loop();
     assert_ne!(code, Some(0));
-    assert_eq!(report["phase"], "contained_effects_indeterminate", "{report}");
+    assert_eq!(
+        report["phase"], "contained_effects_indeterminate",
+        "{report}"
+    );
     assert_eq!(report["observation_authentication"]["verified"], true);
     assert_eq!(
         report["observation_authentication"]["observation"]["no_admitted_host_effects"],
         false,
     );
-    assert_eq!(report["recovery"]["outcome"], "contained_effects_indeterminate");
+    assert_eq!(
+        report["recovery"]["outcome"],
+        "contained_effects_indeterminate"
+    );
     assert!(report["recovery"]["selected_release_id"].is_null());
     assert!(report["recovery"]["activation_sequence"].is_null());
     assert!(report.get("resumed").is_none());
-    assert_eq!(fs::read_to_string(failed.join("before-panic")).unwrap(), "admitted effect");
+    assert_eq!(
+        fs::read_to_string(failed.join("before-panic")).unwrap(),
+        "admitted effect"
+    );
     assert_eq!(fs::read_to_string(failed.join("app.js")).unwrap(), source);
 
     let inventory = drill.sessions(&failed);
@@ -1373,15 +1415,18 @@ fn authenticated_panic_after_real_host_effect_stays_contained_without_restart() 
     let records = inventory["records"].as_array().unwrap();
     assert_eq!(records.len(), 3);
     assert!(records.iter().all(|record| {
-        record["outcome"]["kind"] == "panicked"
-            && record["outcome"]["effects"]["kind"] == "unknown"
+        record["outcome"]["kind"] == "panicked" && record["outcome"]["effects"]["kind"] == "unknown"
     }));
     let status = drill.status();
     assert_eq!(status["active"]["release_id"], "2.0.0");
     assert_eq!(status["activations"].as_array().unwrap().len(), 2);
     assert_eq!(status["recoveries"].as_array().unwrap().len(), 1);
-    let good = status["releases"].as_array().unwrap().iter()
-        .find(|release| release["release_id"] == "1.0.0").unwrap();
+    let good = status["releases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|release| release["release_id"] == "1.0.0")
+        .unwrap();
     assert_eq!(good["healthy_runs"], 1);
 }
 
@@ -3033,7 +3078,6 @@ mod external_release_live_control {
         );
     }
 
-
     /// Hold a real approved external release inside an admitted HTTP effect.
     /// The operator command can then change deployment authority while both
     /// the run child and native worker still exist.
@@ -3080,12 +3124,8 @@ mod external_release_live_control {
                  reason = \"real activation retirement regression sink\"\n",
                 address.port()
             );
-            let (old, manifest) = drill.publish_release_with_config(
-                "1.0.0",
-                &source,
-                release.path(),
-                Some(&config),
-            );
+            let (old, manifest) =
+                drill.publish_release_with_config("1.0.0", &source, release.path(), Some(&config));
             assert!(!old.starts_with(drill.root.path()));
             drill.install_published("1.0.0", &old, &manifest);
             let replacement = drill.root.path().join("releases/2.0.0");
@@ -3226,7 +3266,9 @@ mod external_release_live_control {
         }
 
         fn release_http_response(&mut self) -> std::io::Result<()> {
-            self.release_response.send(()).expect("release HTTP response");
+            self.release_response
+                .send(())
+                .expect("release HTTP response");
             self.server
                 .take()
                 .expect("retained HTTP sink")
@@ -3289,7 +3331,12 @@ mod external_release_live_control {
                 "retirement must not automatically follow a new activation"
             );
             assert_eq!(
-                fs::read(self.release.path().join(".franken-node/safe-mode/state.json")).ok(),
+                fs::read(
+                    self.release
+                        .path()
+                        .join(".franken-node/safe-mode/state.json")
+                )
+                .ok(),
                 self.safe_mode_before,
                 "activation retirement is not a native crash"
             );
@@ -3599,8 +3646,9 @@ mod external_release_live_control {
                     drill.root.path().join("retained-original-active.json"),
                 )
                 .expect("retain missing pointer evidence"),
-                "malformed" => fs::write(&pointer, b"{not an activation\n")
-                    .expect("malformed pointer"),
+                "malformed" => {
+                    fs::write(&pointer, b"{not an activation\n").expect("malformed pointer")
+                }
                 "foreign" => {
                     let original_record: Value = serde_json::from_slice(&original).unwrap();
                     let foreign_record: Value = serde_json::from_slice(&foreign_pointer).unwrap();
@@ -3617,10 +3665,7 @@ mod external_release_live_control {
             blocked.assert_retired();
             // A missing pointer can remain inspectable as a pending durable
             // intent. Inspection must never invent a current replacement.
-            let inspected = drill.cli(
-                drill.root.path(),
-                &["deploy", "status", "app", "--json"],
-            );
+            let inspected = drill.cli(drill.root.path(), &["deploy", "status", "app", "--json"]);
             if inspected.status.success() {
                 let status: Value = serde_json::from_slice(&inspected.stdout).unwrap();
                 assert!(status["active"].is_null(), "mutation {mutation}: {status}");
@@ -3737,9 +3782,13 @@ mod external_release_live_control {
         drill.install("2.0.0", HEALTHY_V1);
         drill.activate("1.0.0");
         let admitted = drill.admitted_release("1.0.0");
-        let key_hex =
-            fs::read_to_string(drill.root.path().join(".franken-node/keys/receipt-signing.key"))
-                .expect("deployment authority");
+        let key_hex = fs::read_to_string(
+            drill
+                .root
+                .path()
+                .join(".franken-node/keys/receipt-signing.key"),
+        )
+        .expect("deployment authority");
         let secret: [u8; 32] = hex::decode(key_hex.trim())
             .expect("hex signing key")
             .try_into()
@@ -3818,7 +3867,10 @@ mod external_release_live_control {
                 &serialized,
             ],
         );
-        assert!(!output.status.success(), "stale activation admitted a child");
+        assert!(
+            !output.status.success(),
+            "stale activation admitted a child"
+        );
         let refused: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
             panic!(
                 "stale admission must emit typed JSON: {error}; {}\n{}",

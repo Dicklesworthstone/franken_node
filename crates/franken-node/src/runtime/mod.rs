@@ -7,7 +7,6 @@ pub mod cancellable_task;
 pub mod checkpoint;
 pub mod checkpoint_guard;
 pub mod clock;
-#[cfg(any(test, feature = "admin-tools"))]
 pub mod crash_loop_detector;
 pub mod deployment;
 pub mod effect_receipt;

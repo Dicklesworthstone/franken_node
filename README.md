@@ -3693,18 +3693,22 @@ is undergoing API-drift remediation; the verification-target compile census
 - `fuzz_config_toml_parse`: adversarial TOML cannot crash or trigger
   unbounded allocation in the config loader.
 
-`fuzz/regression/` is meant to keep discovered failure inputs as permanent
-regression cases, but today it holds 5 inputs for 2 of the 146 targets
-(`shim`, `migration`, dated 2026-02). The legacy category adapter reads these
-seeds through simulated functions under `fuzz/targets/`; that does not establish
-regression replay across the 146 registered cargo-fuzz targets
-(bd-fuzz-regression-corpus-f28ac). Coverage data lives in
-`fuzz/coverage/`; fuzz artifacts live in `fuzz/artifacts/`. The
+`fuzz/regression/` stores promoted, delta-shrunk failure inputs under
+`fuzz/regression/<target>/` indexed by `fuzz/regression/manifest.json`
+(alongside the 5 historical `shim`/`migration` category seeds retained under
+`legacy_category_seeds`), while `fuzz/corpus/<target>/` provides non-empty
+domain-matched seed corpora across all 146 registered cargo-fuzz targets
+(`bd-fuzz-regression-corpus-f28ac`, `bd-reality-20260923-26n9r.38`). Both
+`scripts/check_fuzz_regression_corpus.py` and
+`crates/franken-node/tests/remote_capability_gate_fuzz_regression.rs` enforce
+and replay every promoted crasher and per-target seed corpus in
+`verification-target-compile-gate.yml`. Coverage data lives in
+`fuzz/coverage/`; raw discovery crashers live in `fuzz/artifacts/`. The
 `mutants-gate.yml` workflow is configured to run `cargo-mutants` against the test
 surface as a separate effective-coverage signal: a mutant that
 survives indicates a gap in the test surface, not a bug per se. The gate
 requires a **registered mutation-adequacy floor** (`MUTATION_SCORE_FLOOR_BP`)
-on pull requests that touch the focused modules. It also requires nonzero
+on `main` pushes (and pull requests) that touch the focused modules. It also requires nonzero
 inline-test discovery for every focused module and readable, nonempty mutant
 outcomes. Hosted execution and an actual mutation score remain unverified;
 workflow configuration and gate-control tests do not supply that measurement.

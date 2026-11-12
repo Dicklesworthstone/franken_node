@@ -609,6 +609,9 @@ pub enum DeployCommand {
     /// Run the active release natively; on a validated crash loop, recover per policy.
     Run(DeployRunArgs),
 
+    /// Supervise the active release across Crash-Only Microreboots with e-process post-rollback verification.
+    Supervise(DeploySuperviseArgs),
+
     /// Show releases, the activation chain, release health and recoveries.
     Status(DeployStatusArgs),
 
@@ -704,6 +707,41 @@ pub struct DeployRunArgs {
     pub retire_on_activation: bool,
 
     /// Emit `franken-node/deploy-run-cli/v1` JSON.
+    #[arg(long)]
+    pub json: bool,
+
+    /// Arguments for the program itself, after `--`.
+    #[arg(last = true)]
+    pub app_args: Vec<String>,
+}
+
+#[derive(Debug, Parser)]
+pub struct DeploySuperviseArgs {
+    /// Deployment name.
+    #[arg(default_value = "")]
+    pub name: String,
+
+    /// Maximum supervised child runs before exiting (`>= 1`).
+    #[arg(long, default_value_t = 6)]
+    pub max_runs: u32,
+
+    /// Consecutive post-rollback healthy probe runs required by the e-process monitor (`>= 1`).
+    #[arg(long, default_value_t = 3)]
+    pub post_rollback_probes: u32,
+
+    /// Anytime-valid e-process Type-I error level alpha in `(0, 1)`.
+    #[arg(long, default_value_t = 0.05)]
+    pub e_process_alpha: f64,
+
+    /// Cooldown in milliseconds between supervised microreboots (`<= 60000`).
+    #[arg(long, default_value_t = 0)]
+    pub cooldown_ms: u64,
+
+    /// Retire any child run when its admitted activation changes.
+    #[arg(long)]
+    pub retire_on_activation: bool,
+
+    /// Emit `franken-node/deploy-supervise-cli/v1` JSON.
     #[arg(long)]
     pub json: bool,
 
@@ -4318,10 +4356,7 @@ mod parser_contract_extra_tests {
             };
             assert!(args.validate_paths().is_err(), "invalid nonce {invalid:?}");
         }
-        for mut command in [
-            base.clone(),
-            vec!["franken-node", "run", "app.js"],
-        ] {
+        for mut command in [base.clone(), vec!["franken-node", "run", "app.js"]] {
             command.extend(["--admitted-native-session-nonce", nonce]);
             let Command::Run(args) = parse(&command).map_err(|error| error.to_string())?.command
             else {

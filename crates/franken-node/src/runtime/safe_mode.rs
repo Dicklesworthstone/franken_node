@@ -493,7 +493,10 @@ impl AdmittedSafeModeScope {
         #[cfg(feature = "engine")]
         {
             use anyhow::Context as _;
-            let root = self.anchor.parent().context("reference scope has no parent")?;
+            let root = self
+                .anchor
+                .parent()
+                .context("reference scope has no parent")?;
             crate::ops::native_session_inventory::enforce_reference_admission(root)?;
         }
         Ok(())

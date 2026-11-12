@@ -390,15 +390,22 @@ impl LockstepHarness {
         self.verify_lockstep_entry(app_path, emit_fixtures, &input_scope)
     }
 
-    fn capture_input_scope(app_path: &Path) -> Result<crate::runtime::safe_mode::AdmittedSafeModeProject> {
-        let resolved = app_path.canonicalize().with_context(|| {
-            format!("resolve lockstep safe-mode input {}", app_path.display())
-        })?;
+    fn capture_input_scope(
+        app_path: &Path,
+    ) -> Result<crate::runtime::safe_mode::AdmittedSafeModeProject> {
+        let resolved = app_path
+            .canonicalize()
+            .with_context(|| format!("resolve lockstep safe-mode input {}", app_path.display()))?;
         let root = if resolved.is_dir() {
             resolved.as_path()
         } else {
-            anyhow::ensure!(resolved.is_file(), "lockstep input must be a regular file or directory");
-            resolved.parent().context("lockstep input has no parent directory")?
+            anyhow::ensure!(
+                resolved.is_file(),
+                "lockstep input must be a regular file or directory"
+            );
+            resolved
+                .parent()
+                .context("lockstep input has no parent directory")?
         };
         crate::runtime::safe_mode::AdmittedSafeModeProject::capture(root)
     }
@@ -544,10 +551,13 @@ impl LockstepHarness {
                     outputs.insert(rt, leg.comparison);
                 }
                 Ok(Err(error)) => {
-                    execution_error.get_or_insert_with(|| anyhow::anyhow!("Runtime execution error: {error:#}"));
+                    execution_error.get_or_insert_with(|| {
+                        anyhow::anyhow!("Runtime execution error: {error:#}")
+                    });
                 }
                 Err(_) => {
-                    execution_error.get_or_insert_with(|| anyhow::anyhow!("Runtime execution panicked"));
+                    execution_error
+                        .get_or_insert_with(|| anyhow::anyhow!("Runtime execution panicked"));
                 }
             }
         }
@@ -906,13 +916,17 @@ impl LockstepHarness {
         app_path: &Path,
         scopes: &[crate::runtime::safe_mode::AdmittedSafeModeProject],
     ) -> Result<RuntimeLegOutput> {
-        anyhow::ensure!(!scopes.is_empty(), "lockstep execution requires an admitted input scope");
+        anyhow::ensure!(
+            !scopes.is_empty(),
+            "lockstep execution requires an admitted input scope"
+        );
         for scope in scopes {
             scope.enforce_reference_execution()?;
         }
         let bin_path = Self::resolve_runtime_binary(runtime);
         let runtime_target = Self::resolve_runtime_target(runtime, app_path)?
-            .canonicalize().context("resolve admitted lockstep runtime target")?;
+            .canonicalize()
+            .context("resolve admitted lockstep runtime target")?;
         let target_scope = Self::capture_input_scope(&runtime_target)?;
         let enforce_scopes = || -> Result<()> {
             for scope in scopes {
@@ -1580,11 +1594,19 @@ mod tests {
             Vec::new(),
         );
         std::fs::write(&state, serde_json::to_vec(&controller).unwrap()).unwrap();
-        let error = LockstepHarness::execute_runtime_admitted(
-            "/missing/runtime", &alias, &[scope],
-        ).err().expect("the retained original scope must refuse");
-        assert!(error.to_string().contains("run blocked by active safe mode"), "{error:#}");
-        assert!(error.to_string().contains(state.to_str().unwrap()), "{error:#}");
+        let error = LockstepHarness::execute_runtime_admitted("/missing/runtime", &alias, &[scope])
+            .err()
+            .expect("the retained original scope must refuse");
+        assert!(
+            error
+                .to_string()
+                .contains("run blocked by active safe mode"),
+            "{error:#}"
+        );
+        assert!(
+            error.to_string().contains(state.to_str().unwrap()),
+            "{error:#}"
+        );
     }
 
     #[cfg(unix)]

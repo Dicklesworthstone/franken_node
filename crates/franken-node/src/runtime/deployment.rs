@@ -566,8 +566,7 @@ pub struct ActivationRestriction {
     transactions: Option<RestrictedHistory>,
 }
 
-const ACTIVATION_RESTRICTION_SCHEMA: &str =
-    "franken-node/deployment-activation-restriction/v1";
+const ACTIVATION_RESTRICTION_SCHEMA: &str = "franken-node/deployment-activation-restriction/v1";
 const MAX_RESTRICTION_PATH_BYTES: usize = 4096;
 const MAX_RESTRICTION_PATH_COMPONENTS: usize = 128;
 /// Maximum committed record bytes inspected in one history observation.
@@ -688,8 +687,7 @@ impl ActivationRestriction {
     pub fn validate_source(&self, release_root: &Path, approval_sha256: &str) -> Result<()> {
         self.validate()?;
         anyhow::ensure!(
-            release_root == self.release_dir.as_path()
-                && approval_sha256 == self.approval_sha256,
+            release_root == self.release_dir.as_path() && approval_sha256 == self.approval_sha256,
             "deployment activation restriction does not match the admitted source"
         );
         Ok(())
@@ -698,9 +696,10 @@ impl ActivationRestriction {
     fn verifying_key(&self) -> Result<VerifyingKey> {
         anyhow::ensure!(
             self.signer_public_key_hex.len() == 64
-                && self.signer_public_key_hex.bytes().all(|byte| {
-                    byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
-                }),
+                && self
+                    .signer_public_key_hex
+                    .bytes()
+                    .all(|byte| { byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte) }),
             "deployment activation restriction has an invalid public key"
         );
         let bytes: [u8; 32] = hex::decode(&self.signer_public_key_hex)?
@@ -791,7 +790,10 @@ fn restriction_path_shape(path: &Path) -> Result<usize> {
             && path.as_os_str().len() <= MAX_RESTRICTION_PATH_BYTES
             && (1..=MAX_RESTRICTION_PATH_COMPONENTS).contains(&components)
             && path.components().all(|part| {
-                matches!(part, std::path::Component::RootDir | std::path::Component::Normal(_))
+                matches!(
+                    part,
+                    std::path::Component::RootDir | std::path::Component::Normal(_)
+                )
             })
             && normalized.as_os_str() == path.as_os_str(),
         "deployment activation restriction requires a bounded normalized absolute path"
@@ -903,8 +905,14 @@ fn inspect_restricted_history(
             "deployment activation restriction history exceeds its entry bound"
         );
         let entry = entry?;
-        let name = entry.file_name().to_str().context("invalid deployment history filename")?;
-        anyhow::ensure!(name.len() <= 256, "deployment history filename exceeds its byte bound");
+        let name = entry
+            .file_name()
+            .to_str()
+            .context("invalid deployment history filename")?;
+        anyhow::ensure!(
+            name.len() <= 256,
+            "deployment history filename exceeds its byte bound"
+        );
         if matches!(name, "." | "..") {
             continue;
         }
@@ -957,20 +965,24 @@ fn inspect_restricted_history(
         let after = file.metadata()?;
         anyhow::ensure!(
             metadata.len() == after.len()
-                && restricted_directory_identity(&metadata) == restricted_directory_identity(&after)
-                && restricted_directory_revision(&metadata) == restricted_directory_revision(&after),
+                && restricted_directory_identity(&metadata)
+                    == restricted_directory_identity(&after)
+                && restricted_directory_revision(&metadata)
+                    == restricted_directory_revision(&after),
             "deployment history entry changed during inspection"
         );
         anyhow::ensure!(
-            observations.insert(
-                name.to_owned(),
-                (
-                    restricted_directory_identity(&metadata),
-                    restricted_directory_revision(&metadata),
-                    metadata.len(),
-                    content_sha256,
-                ),
-            ).is_none(),
+            observations
+                .insert(
+                    name.to_owned(),
+                    (
+                        restricted_directory_identity(&metadata),
+                        restricted_directory_revision(&metadata),
+                        metadata.len(),
+                        content_sha256,
+                    ),
+                )
+                .is_none(),
             "deployment activation history changed during enumeration"
         );
     }
@@ -2798,11 +2810,25 @@ mod tests {
         f.store = DeploymentStore::open(&f._dir.path().canonicalize().unwrap(), "app").unwrap();
         let (active, restriction) = {
             let lock = f.store.lock().unwrap();
-            f.store.install_release(&lock, &f.authority, test_release(&f.store, "v1")).unwrap();
-            let active = f.store.activate(
-                &lock, &f.authority, "v1", ActivationReason::Operator, Some("ops"), None, 20,
-            ).unwrap();
-            let restriction = f.store.capture_activation_restriction(&lock, &f.authority, &active).unwrap();
+            f.store
+                .install_release(&lock, &f.authority, test_release(&f.store, "v1"))
+                .unwrap();
+            let active = f
+                .store
+                .activate(
+                    &lock,
+                    &f.authority,
+                    "v1",
+                    ActivationReason::Operator,
+                    Some("ops"),
+                    None,
+                    20,
+                )
+                .unwrap();
+            let restriction = f
+                .store
+                .capture_activation_restriction(&lock, &f.authority, &active)
+                .unwrap();
             (active, restriction)
         };
         (f, active, restriction)
@@ -2823,18 +2849,30 @@ mod tests {
         assert_eq!(decoded.activation_sequence(), active.sequence);
         assert_eq!(decoded.release_id(), active.release_id);
         let pointer_bytes = fs::read(f.store.pointer_path()).unwrap();
-        assert_eq!(decoded.pointer_sha256, restriction_bytes_hash(&pointer_bytes));
-        let pointer: SignedRecord<ActivationRecord> = serde_json::from_slice(&pointer_bytes).unwrap();
+        assert_eq!(
+            decoded.pointer_sha256,
+            restriction_bytes_hash(&pointer_bytes)
+        );
+        let pointer: SignedRecord<ActivationRecord> =
+            serde_json::from_slice(&pointer_bytes).unwrap();
         assert_eq!(decoded.activation_digest, record_digest(&pointer).unwrap());
         assert_eq!(decoded.signer_public_key_hex, f.authority.public_key_hex());
         // Replacement with the exact retained bytes does not change activation
         // identity. Directory identity is pinned; active.json inode is not.
-        fs::rename(f.store.pointer_path(), f.store.root().join("retained-active.json")).unwrap();
+        fs::rename(
+            f.store.pointer_path(),
+            f.store.root().join("retained-active.json"),
+        )
+        .unwrap();
         fs::write(f.store.pointer_path(), &pointer_bytes).unwrap();
         decoded.enforce().unwrap();
         let lock = f.store.lock().unwrap();
-        f.store.record_health(&lock, &f.authority, "v1", healthy("healthy-run", 30)).unwrap();
-        f.store.set_policy(&lock, &f.authority, rollback_policy(&f.store)).unwrap();
+        f.store
+            .record_health(&lock, &f.authority, "v1", healthy("healthy-run", 30))
+            .unwrap();
+        f.store
+            .set_policy(&lock, &f.authority, rollback_policy(&f.store))
+            .unwrap();
         decoded.enforce().unwrap();
     }
 
@@ -2844,18 +2882,39 @@ mod tests {
         let (f, active, restriction) = restriction_fixture();
         let old_pointer = fs::read(f.store.pointer_path()).unwrap();
         let lock = f.store.lock().unwrap();
-        let successor = f.store.activate(
-            &lock, &f.authority, "v1", ActivationReason::Operator, Some("ops"), None, 30,
-        ).unwrap();
+        let successor = f
+            .store
+            .activate(
+                &lock,
+                &f.authority,
+                "v1",
+                ActivationReason::Operator,
+                Some("ops"),
+                None,
+                30,
+            )
+            .unwrap();
         assert_eq!(successor.release_id, active.release_id);
         assert_eq!(successor.sequence, active.sequence + 1);
-        assert_eq!(successor.previous_activation_digest.as_deref(), Some(restriction.activation_digest.as_str()));
+        assert_eq!(
+            successor.previous_activation_digest.as_deref(),
+            Some(restriction.activation_digest.as_str())
+        );
         assert!(restriction.enforce().is_err());
-        let next = f.store.capture_activation_restriction(&lock, &f.authority, &successor).unwrap();
+        let next = f
+            .store
+            .capture_activation_restriction(&lock, &f.authority, &successor)
+            .unwrap();
         next.enforce().unwrap();
         fs::write(f.store.pointer_path(), old_pointer).unwrap();
-        assert!(restriction.enforce().is_err(), "retained successor history cannot be hidden by old pointer bytes");
-        assert!(next.enforce().is_err(), "the successor cannot accept the restored predecessor");
+        assert!(
+            restriction.enforce().is_err(),
+            "retained successor history cannot be hidden by old pointer bytes"
+        );
+        assert!(
+            next.enforce().is_err(),
+            "the successor cannot accept the restored predecessor"
+        );
     }
 
     #[cfg(unix)]
@@ -2870,7 +2929,11 @@ mod tests {
         assert_eq!(fs::read(f.store.pointer_path()).unwrap(), old_pointer);
         assert!(restriction.enforce().is_err());
         assert!(f.store.active(&f.authority).is_err());
-        assert!(f.store.capture_activation_restriction(&lock, &f.authority, &active).is_err());
+        assert!(
+            f.store
+                .capture_activation_restriction(&lock, &f.authority, &active)
+                .is_err()
+        );
         // The live observer latches this first refusal. The restriction does
         // not claim to detect an erased intent between periodic observations.
     }
@@ -2881,11 +2944,19 @@ mod tests {
         for change in 0..3 {
             let (f, active, restriction) = restriction_fixture();
             match change {
-                0 => fs::rename(f.store.pointer_path(), f.store.root().join("retained-pointer.json")).unwrap(),
+                0 => fs::rename(
+                    f.store.pointer_path(),
+                    f.store.root().join("retained-pointer.json"),
+                )
+                .unwrap(),
                 1 => fs::write(f.store.pointer_path(), b"{ malformed").unwrap(),
                 _ => {
                     let foreign = authority(9).seal(active).unwrap();
-                    fs::write(f.store.pointer_path(), serde_json::to_vec(&foreign).unwrap()).unwrap();
+                    fs::write(
+                        f.store.pointer_path(),
+                        serde_json::to_vec(&foreign).unwrap(),
+                    )
+                    .unwrap();
                 }
             }
             assert!(restriction.enforce().is_err(), "pointer mutation {change}");
@@ -2914,7 +2985,10 @@ mod tests {
             let retained = f.store.root().join(format!("retained-{component}"));
             fs::rename(&original, &retained).unwrap();
             symlink(&retained, &original).unwrap();
-            assert!(restriction.enforce().is_err(), "must not follow {component}");
+            assert!(
+                restriction.enforce().is_err(),
+                "must not follow {component}"
+            );
         }
     }
 
@@ -2930,16 +3004,32 @@ mod tests {
         assert!(restriction.enforce().is_err());
         // Capture cannot inherit a no-follow guarantee from canonicalize().
         let lock = f.store.lock().unwrap();
-        assert!(f.store.capture_activation_restriction(&lock, &f.authority, &active).is_err());
+        assert!(
+            f.store
+                .capture_activation_restriction(&lock, &f.authority, &active)
+                .is_err()
+        );
 
         let (f, active, _) = restriction_fixture();
         let held = f.store.lock().unwrap();
-        fs::rename(f.store.root().join("deployment.lock"), f.store.root().join("retained-lock")).unwrap();
+        fs::rename(
+            f.store.root().join("deployment.lock"),
+            f.store.root().join("retained-lock"),
+        )
+        .unwrap();
         fs::write(f.store.root().join("deployment.lock"), b"").unwrap();
-        assert!(f.store.capture_activation_restriction(&held, &f.authority, &active).is_err());
+        assert!(
+            f.store
+                .capture_activation_restriction(&held, &f.authority, &active)
+                .is_err()
+        );
         let other = fixture();
         let other_lock = other.store.lock().unwrap();
-        assert!(f.store.capture_activation_restriction(&other_lock, &f.authority, &active).is_err());
+        assert!(
+            f.store
+                .capture_activation_restriction(&other_lock, &f.authority, &active)
+                .is_err()
+        );
     }
 
     #[cfg(unix)]
@@ -2948,17 +3038,45 @@ mod tests {
         let (f, active, restriction) = restriction_fixture();
         let release = f.store.release(&f.authority, &active.release_id).unwrap();
         let approval = release.approval.admission_sha256().unwrap();
-        restriction.validate_release(&release.release_dir, &release.config_sha256, &approval).unwrap();
-        assert!(restriction.validate_source(Path::new("/different-release"), &approval).is_err());
-        assert!(restriction.validate_source(&release.release_dir, &format!("sha256:{}", "f".repeat(64))).is_err());
-        assert!(restriction.validate_release(&release.release_dir, &format!("sha256:{}", "e".repeat(64)), &approval).is_err());
+        restriction
+            .validate_release(&release.release_dir, &release.config_sha256, &approval)
+            .unwrap();
+        assert!(
+            restriction
+                .validate_source(Path::new("/different-release"), &approval)
+                .is_err()
+        );
+        assert!(
+            restriction
+                .validate_source(&release.release_dir, &format!("sha256:{}", "f".repeat(64)))
+                .is_err()
+        );
+        assert!(
+            restriction
+                .validate_release(
+                    &release.release_dir,
+                    &format!("sha256:{}", "e".repeat(64)),
+                    &approval
+                )
+                .is_err()
+        );
         let lock = f.store.lock().unwrap();
-        f.store.activate(
-            &lock, &f.authority, "v1", ActivationReason::Operator, Some("ops"), None, 30,
-        ).unwrap();
+        f.store
+            .activate(
+                &lock,
+                &f.authority,
+                "v1",
+                ActivationReason::Operator,
+                Some("ops"),
+                None,
+                30,
+            )
+            .unwrap();
         // Keep identity validation separate so a stale admitted child reaches
         // the dispatcher's typed activation-interrupted admission boundary.
-        restriction.validate_release(&release.release_dir, &release.config_sha256, &approval).unwrap();
+        restriction
+            .validate_release(&release.release_dir, &release.config_sha256, &approval)
+            .unwrap();
         assert!(restriction.enforce().is_err());
     }
 
@@ -2970,7 +3088,10 @@ mod tests {
         for (field, value) in [
             ("schema_version", serde_json::json!("unsupported")),
             ("activation_sequence", serde_json::json!(0)),
-            ("activation_sequence", serde_json::json!(MAX_ACTIVATIONS + 1)),
+            (
+                "activation_sequence",
+                serde_json::json!(MAX_ACTIVATIONS + 1),
+            ),
             ("directories", serde_json::json!([])),
             ("pointer_sha256", serde_json::json!("invalid")),
             ("store_root", serde_json::json!("/other/state")),
@@ -3005,7 +3126,10 @@ mod tests {
             assert_eq!(before.len(), after.len(), "same record length");
             assert_eq!(fs::read(f.store.pointer_path()).unwrap(), pointer);
             assert!(restriction.enforce().is_err(), "{history}");
-            assert!(f.store.active(&f.authority).is_err(), "corrupt signed history is not an activation");
+            assert!(
+                f.store.active(&f.authority).is_err(),
+                "corrupt signed history is not an activation"
+            );
         }
     }
 
@@ -3018,19 +3142,27 @@ mod tests {
         let first = history.join("0000000001.json");
         // The reader hashes raw records; authentication belongs to capture.
         // Sparse hard links keep this boundary test's disk footprint bounded.
-        File::create(&first).unwrap().set_len(MAX_RECORD_BYTES).unwrap();
+        File::create(&first)
+            .unwrap()
+            .set_len(MAX_RECORD_BYTES)
+            .unwrap();
         let maximum_records = MAX_RESTRICTION_HISTORY_BYTES / MAX_RECORD_BYTES;
         for sequence in 2..=maximum_records {
             fs::hard_link(&first, history.join(format!("{sequence:010}.json"))).unwrap();
         }
         let store = File::open(directory.path()).unwrap();
         let accepted = inspect_restricted_history(&store, "activations", maximum_records)
-            .unwrap().unwrap();
+            .unwrap()
+            .unwrap();
         assert_eq!(accepted.record_count, maximum_records);
         let excessive_sequence = maximum_records + 1;
-        fs::hard_link(&first, history.join(format!("{excessive_sequence:010}.json"))).unwrap();
-        let error = inspect_restricted_history(&store, "activations", excessive_sequence)
-            .unwrap_err();
+        fs::hard_link(
+            &first,
+            history.join(format!("{excessive_sequence:010}.json")),
+        )
+        .unwrap();
+        let error =
+            inspect_restricted_history(&store, "activations", excessive_sequence).unwrap_err();
         assert!(error.to_string().contains("exceeds its byte bound"));
     }
 
@@ -3333,7 +3465,9 @@ mod tests {
             native_panic("v2", 2, 100, true),
             native_panic("v2", 3, 101, true),
         ] {
-            f.store.record_health(&lock, &f.authority, "v2", event).unwrap();
+            f.store
+                .record_health(&lock, &f.authority, "v2", event)
+                .unwrap();
         }
         let mut aggregate = crash("unsigned-counter");
         aggregate.crashes_in_window = 999;
@@ -3342,14 +3476,19 @@ mod tests {
                 &lock,
                 &f.authority,
                 "v2",
-                HealthEvent::CrashLoop { evidence: aggregate },
+                HealthEvent::CrashLoop {
+                    evidence: aggregate,
+                },
             )
             .unwrap();
         let nonce = uuid::Uuid::from_u128(3).to_string();
         let state = Path::new("/releases/v2/.franken-node/safe-mode/state.json");
         let before = f.store.health(&f.authority, "v2").unwrap();
         assert!(
-            before.native_crash_loop_evidence(&nonce, 3, 60, state).unwrap().is_none(),
+            before
+                .native_crash_loop_evidence(&nonce, 3, 60, state)
+                .unwrap()
+                .is_none(),
             "expired panics and aggregate crash marks cannot add authenticated launches"
         );
         assert_eq!(
@@ -3366,14 +3505,22 @@ mod tests {
             native_panic("v1", 4, 102, true),
             native_panic("v2", 0, 102, true),
         ] {
-            assert!(f.store.record_health(&lock, &f.authority, "v2", conflicting).is_err());
+            assert!(
+                f.store
+                    .record_health(&lock, &f.authority, "v2", conflicting)
+                    .is_err()
+            );
             assert_eq!(f.store.health(&f.authority, "v2").unwrap(), before);
         }
-        let health = f.store
+        let health = f
+            .store
             .record_health(&lock, &f.authority, "v2", native_panic("v2", 4, 102, true))
             .unwrap();
         let current = uuid::Uuid::from_u128(4).to_string();
-        let crossing = health.native_crash_loop_evidence(&current, 3, 60, state).unwrap().unwrap();
+        let crossing = health
+            .native_crash_loop_evidence(&current, 3, 60, state)
+            .unwrap()
+            .unwrap();
         assert_eq!(crossing.crashes_in_window, 3);
         assert_eq!(crossing.observed_at_epoch_secs, 102);
         assert_eq!(crossing.session_nonce, current);
@@ -3383,7 +3530,11 @@ mod tests {
             (3, 0),
             (3, 86_401),
         ] {
-            assert!(health.native_crash_loop_evidence(&current, threshold, window, state).is_err());
+            assert!(
+                health
+                    .native_crash_loop_evidence(&current, threshold, window, state)
+                    .is_err()
+            );
         }
     }
 
@@ -3392,21 +3543,47 @@ mod tests {
         let f = fixture();
         let lock = f.store.lock().unwrap();
         for release in ["v1", "v2"] {
-            f.store.install_release(&lock, &f.authority, test_release(&f.store, release)).unwrap();
+            f.store
+                .install_release(&lock, &f.authority, test_release(&f.store, release))
+                .unwrap();
         }
-        f.store.activate(
-            &lock, &f.authority, "v1", ActivationReason::Operator, Some("ops"), None, 20,
-        ).unwrap();
-        f.store.record_health(&lock, &f.authority, "v1", healthy("ready", 25)).unwrap();
-        f.store.activate(
-            &lock, &f.authority, "v2", ActivationReason::Operator, Some("ops"), None, 30,
-        ).unwrap();
+        f.store
+            .activate(
+                &lock,
+                &f.authority,
+                "v1",
+                ActivationReason::Operator,
+                Some("ops"),
+                None,
+                20,
+            )
+            .unwrap();
+        f.store
+            .record_health(&lock, &f.authority, "v1", healthy("ready", 25))
+            .unwrap();
+        f.store
+            .activate(
+                &lock,
+                &f.authority,
+                "v2",
+                ActivationReason::Operator,
+                Some("ops"),
+                None,
+                30,
+            )
+            .unwrap();
         let mut policy = rollback_policy(&f.store);
         policy.restart = RestartPolicy::Automatic;
-        f.store.set_policy(&lock, &f.authority, policy.clone()).unwrap();
+        f.store
+            .set_policy(&lock, &f.authority, policy.clone())
+            .unwrap();
         assert_eq!(
-            f.store.select_known_good(&f.authority, "v2", 202, &|_| Ok(())).unwrap()
-                .selected.unwrap().release_id,
+            f.store
+                .select_known_good(&f.authority, "v2", 202, &|_| Ok(()))
+                .unwrap()
+                .selected
+                .unwrap()
+                .release_id,
             "v1"
         );
         for event in [
@@ -3415,29 +3592,45 @@ mod tests {
             native_panic("v2", 3, 201, true),
             native_panic("v2", 4, 202, true),
         ] {
-            f.store.record_health(&lock, &f.authority, "v2", event).unwrap();
+            f.store
+                .record_health(&lock, &f.authority, "v2", event)
+                .unwrap();
         }
         let health = f.store.health(&f.authority, "v2").unwrap();
         assert!(health.has_indeterminate_native_effects());
-        let crossing = health.native_crash_loop_evidence(
-            &uuid::Uuid::from_u128(4).to_string(), 3, 60,
-            Path::new("/releases/v2/.franken-node/safe-mode/state.json"),
-        ).unwrap().unwrap();
+        let crossing = health
+            .native_crash_loop_evidence(
+                &uuid::Uuid::from_u128(4).to_string(),
+                3,
+                60,
+                Path::new("/releases/v2/.franken-node/safe-mode/state.json"),
+            )
+            .unwrap()
+            .unwrap();
         assert_eq!(crossing.crashes_in_window, 3);
         let pointer = fs::read(f.store.pointer_path()).unwrap();
-        let recovery = f.store.recover_from_crash_loop(
-            &lock, &f.authority, "v2", crossing, &policy, 203, &|_| Ok(()),
-        ).unwrap();
-        assert_eq!(recovery.outcome, RecoveryOutcome::ContainedEffectsIndeterminate);
+        let recovery = f
+            .store
+            .recover_from_crash_loop(&lock, &f.authority, "v2", crossing, &policy, 203, &|_| {
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            recovery.outcome,
+            RecoveryOutcome::ContainedEffectsIndeterminate
+        );
         assert!(recovery.selected_release_id.is_none());
         assert!(recovery.activation_sequence.is_none());
         assert_eq!(fs::read(f.store.pointer_path()).unwrap(), pointer);
         assert_eq!(f.store.recoveries(&f.authority).unwrap(), vec![recovery]);
 
-        f.store.record_health(
-            &lock, &f.authority, "v1", native_panic("v1", 5, 204, false),
-        ).unwrap();
-        let selection = f.store.select_known_good(&f.authority, "v2", 205, &|_| Ok(())).unwrap();
+        f.store
+            .record_health(&lock, &f.authority, "v1", native_panic("v1", 5, 204, false))
+            .unwrap();
+        let selection = f
+            .store
+            .select_known_good(&f.authority, "v2", 205, &|_| Ok(()))
+            .unwrap();
         assert!(selection.selected.is_none());
         assert!(selection.refusals.iter().any(|refusal| {
             refusal.release_id == "v1" && refusal.reason.contains("indeterminate native effects")
@@ -3766,10 +3959,19 @@ mod tests {
                         .unwrap();
                 }
                 "target_effects_indeterminate" | "failed_effects_indeterminate" => {
-                    let release = if case == "target_effects_indeterminate" { "v1" } else { "v2" };
-                    f.store.record_health(
-                        &lock, &f.authority, release, native_panic(release, 9, 100, false),
-                    ).unwrap();
+                    let release = if case == "target_effects_indeterminate" {
+                        "v1"
+                    } else {
+                        "v2"
+                    };
+                    f.store
+                        .record_health(
+                            &lock,
+                            &f.authority,
+                            release,
+                            native_panic(release, 9, 100, false),
+                        )
+                        .unwrap();
                 }
                 _ => unreachable!(),
             }

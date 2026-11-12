@@ -1,5 +1,5 @@
 #![forbid(unsafe_code)]
-#![cfg(not(test))]
+#![cfg(any(not(test), franken_node_inline_tests))]
 
 pub use frankenengine_node::{ActionableError, bounded_read, bounded_read_to_string, lock_utils};
 
@@ -6339,6 +6339,7 @@ fn handle_safe_mode_command(command: SafeModeCommand) -> Result<()> {
 
 const DEPLOY_CLI_SCHEMA_VERSION: &str = "franken-node/deploy-cli/v1";
 const DEPLOY_RUN_CLI_SCHEMA_VERSION: &str = "franken-node/deploy-run-cli/v1";
+const DEPLOY_SUPERVISE_CLI_SCHEMA_VERSION: &str = "franken-node/deploy-supervise-cli/v1";
 
 /// Bind deployment readiness to the actual executable bytes, including the
 /// linked engine and build features. A product Git revision alone cannot
@@ -6900,6 +6901,7 @@ struct DeployReleaseChild {
     safe_mode_state_path: PathBuf,
 }
 
+#[cfg_attr(not(feature = "engine"), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 enum DeployNativeOutcome {
@@ -7432,6 +7434,383 @@ fn handle_deploy_run(args: &cli::DeployRunArgs) -> Result<(serde_json::Value, i3
     Ok((report, exit_code))
 }
 
+fn supervise_deploy_runs_with(
+    store: &runtime::deployment::DeploymentStore,
+    authority: &runtime::deployment::DeploymentAuthority,
+    args: &cli::DeploySuperviseArgs,
+    verify_release: &dyn Fn(&runtime::deployment::ReleaseRecord) -> Result<()>,
+    execute_attempt: &mut dyn FnMut(
+        &runtime::deployment::ActivationRecord,
+        &runtime::deployment::ReleaseRecord,
+    ) -> Result<(DeployRunVerdict, i32, serde_json::Value)>,
+) -> Result<(serde_json::Value, i32)> {
+    use runtime::crash_loop_detector::{
+        CrashEvent, CrashLoopConfig, CrashLoopDetector, EProcessConfig, EProcessHealthMonitor,
+        EProcessState, KnownGoodPin,
+    };
+    use runtime::deployment::{CrashLoopAction, HealthEvent, RecoveryOutcome, RestartPolicy};
+
+    anyhow::ensure!(
+        args.max_runs >= 1 && args.max_runs <= 256,
+        "`deploy supervise --max-runs` must be in 1..=256"
+    );
+    anyhow::ensure!(
+        args.post_rollback_probes >= 1 && args.post_rollback_probes <= args.max_runs,
+        "`deploy supervise --post-rollback-probes` must be in 1..=--max-runs"
+    );
+    anyhow::ensure!(
+        args.cooldown_ms <= 60_000,
+        "`deploy supervise --cooldown-ms` must be at most 60000"
+    );
+    let e_process_cfg = EProcessConfig {
+        alpha: args.e_process_alpha,
+        min_healthy_probes: args.post_rollback_probes,
+        ..EProcessConfig::default_post_rollback(args.post_rollback_probes)
+    };
+    e_process_cfg
+        .validate()
+        .map_err(|err| anyhow::anyhow!("invalid e-process configuration: {err}"))?;
+
+    let cooldown_secs = args.cooldown_ms.div_ceil(1_000);
+    let mut detector = CrashLoopDetector::new(CrashLoopConfig {
+        max_crashes: 3,
+        window_secs: 300,
+        cooldown_secs,
+    });
+    let mut crash_events: Vec<CrashEvent> = Vec::new();
+    let mut attempts: Vec<serde_json::Value> = Vec::new();
+    let mut recovery_json: Option<serde_json::Value> = None;
+    let mut detector_decision_json: Option<serde_json::Value> = None;
+    let mut e_process_monitor: Option<EProcessHealthMonitor> = None;
+    let mut final_phase = "max_runs_completed";
+    let mut final_exit_code = 0_i32;
+    let mut last_release_id = String::new();
+
+    for run_index in 0..args.max_runs {
+        if run_index > 0 && args.cooldown_ms > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(args.cooldown_ms));
+        }
+        let (activation, release) = {
+            let _lock = store.lock()?;
+            let activation = store.active(authority)?.ok_or_else(|| {
+                ActionableError::new(
+                    format!("deployment `{}` has no active release", store.name()),
+                    "franken-node deploy activate <name> --release <id> --operator-id <operator>",
+                )
+            })?;
+            let release = store.release(authority, &activation.release_id)?;
+            enforce_deploy_safe_mode(store)?;
+            verify_release(&release).with_context(|| {
+                format!(
+                    "active release `{}` failed verification and was not started",
+                    release.release_id
+                )
+            })?;
+            (activation, release)
+        };
+        last_release_id = release.release_id.clone();
+
+        let (verdict, child_exit_code, child_report) = execute_attempt(&activation, &release)?;
+        let now_secs = current_unix_secs();
+        let now_rfc3339 = Utc::now().to_rfc3339();
+
+        match verdict {
+            DeployRunVerdict::Healthy { receipt_id } => {
+                {
+                    let lock = store.lock()?;
+                    store.record_health(
+                        &lock,
+                        authority,
+                        &release.release_id,
+                        HealthEvent::HealthyRun {
+                            receipt_id: receipt_id.clone(),
+                            observed_at_epoch_secs: now_secs,
+                        },
+                    )?;
+                }
+                let e_obs = e_process_monitor
+                    .as_mut()
+                    .map(|monitor| monitor.observe_run(false));
+                attempts.push(serde_json::json!({
+                    "attempt": run_index + 1,
+                    "release_id": release.release_id,
+                    "activation_sequence": activation.sequence,
+                    "verdict": "healthy",
+                    "receipt_id": receipt_id,
+                    "exit_code": 0,
+                    "e_process": e_obs,
+                    "run": child_report,
+                }));
+                if let Some(obs) = e_obs
+                    && obs.state == EProcessState::SustainedHealthCertified
+                {
+                    final_phase = "rolled_back_sustained_healthy";
+                    final_exit_code = 0;
+                    break;
+                }
+                final_phase = if e_process_monitor.is_some() {
+                    "post_rollback_observing"
+                } else {
+                    "healthy"
+                };
+                final_exit_code = 0;
+            }
+            DeployRunVerdict::Crashed | DeployRunVerdict::NativePanic(_) => {
+                let ev = CrashEvent {
+                    connector_id: release.release_id.clone(),
+                    timestamp: now_rfc3339,
+                    reason: "supervised_native_crash".to_string(),
+                };
+                let window_count = detector.record_crash(&ev, now_secs);
+                crash_events.push(ev);
+                let e_obs = e_process_monitor
+                    .as_mut()
+                    .map(|monitor| monitor.observe_run(true));
+                attempts.push(serde_json::json!({
+                    "attempt": run_index + 1,
+                    "release_id": release.release_id,
+                    "activation_sequence": activation.sequence,
+                    "verdict": "crashed_microreboot_pending",
+                    "crashes_in_detector_window": window_count,
+                    "exit_code": child_exit_code.max(1),
+                    "e_process": e_obs,
+                    "run": child_report,
+                }));
+                if let Some(obs) = e_obs
+                    && obs.state == EProcessState::DegradedRejected
+                {
+                    final_phase = "post_rollback_degraded_rejected";
+                    final_exit_code = child_exit_code.max(1);
+                    break;
+                }
+                final_phase = "crashed";
+                final_exit_code = child_exit_code.max(1);
+            }
+            DeployRunVerdict::CrashLoop(evidence) => {
+                while detector.crashes_in_window_for(&release.release_id, now_secs) < 3 {
+                    let ev = CrashEvent {
+                        connector_id: release.release_id.clone(),
+                        timestamp: now_rfc3339.clone(),
+                        reason: "supervised_crash_loop_threshold".to_string(),
+                    };
+                    detector.record_crash(&ev, now_secs);
+                    crash_events.push(ev);
+                }
+                if let Some(monitor) = e_process_monitor.as_mut() {
+                    let obs = monitor.observe_run(true);
+                    attempts.push(serde_json::json!({
+                        "attempt": run_index + 1,
+                        "release_id": release.release_id,
+                        "activation_sequence": activation.sequence,
+                        "verdict": "post_rollback_crash_loop",
+                        "exit_code": child_exit_code.max(1),
+                        "e_process": obs,
+                        "run": child_report,
+                    }));
+                    final_phase = "post_rollback_degraded_rejected";
+                    final_exit_code = child_exit_code.max(1);
+                    break;
+                }
+
+                let (recovery, known_good_pin) = {
+                    let lock = store.lock()?;
+                    store.record_health(
+                        &lock,
+                        authority,
+                        &release.release_id,
+                        HealthEvent::CrashLoop {
+                            evidence: evidence.clone(),
+                        },
+                    )?;
+                    let current = store.active(authority)?;
+                    if current.as_ref().map(|active| active.sequence) != Some(activation.sequence) {
+                        final_phase = "contained_activation_changed";
+                        final_exit_code = child_exit_code.max(1);
+                        break;
+                    }
+                    let selection = store.select_known_good(
+                        authority,
+                        &release.release_id,
+                        now_secs,
+                        verify_release,
+                    )?;
+                    let pin = selection.selected.as_ref().map(|candidate| KnownGoodPin {
+                        connector_id: release.release_id.clone(),
+                        version: candidate.release_id.clone(),
+                        pin_hash: candidate.config_sha256.clone(),
+                        trusted: true,
+                    });
+                    let policy = store.policy(authority)?;
+                    let recovery = store.recover_from_crash_loop(
+                        &lock,
+                        authority,
+                        &release.release_id,
+                        evidence,
+                        &policy,
+                        now_secs,
+                        verify_release,
+                    )?;
+                    (recovery, pin)
+                };
+
+                let trace_id = format!("deploy-supervise:{}:{}", store.name(), recovery.sequence);
+                let det_eval = detector.evaluate(
+                    &release.release_id,
+                    &crash_events,
+                    known_good_pin.as_ref(),
+                    now_secs,
+                    &trace_id,
+                    &now_rfc3339,
+                );
+                detector_decision_json = Some(match det_eval {
+                    Ok(decision) => serde_json::json!({
+                        "triggered": decision.triggered,
+                        "crash_count": decision.crash_count,
+                        "rollback_allowed": decision.rollback_allowed,
+                        "target_version": decision.rollback_target.map(|p| p.version),
+                        "reason": decision.reason,
+                    }),
+                    Err(err) => serde_json::json!({
+                        "triggered": true,
+                        "rollback_allowed": false,
+                        "error_code": err.code(),
+                        "reason": err.to_string(),
+                    }),
+                });
+                recovery_json = Some(serde_json::to_value(&recovery)?);
+                attempts.push(serde_json::json!({
+                    "attempt": run_index + 1,
+                    "release_id": release.release_id,
+                    "activation_sequence": activation.sequence,
+                    "verdict": "crash_loop_recovery_evaluated",
+                    "recovery_outcome": recovery.outcome,
+                    "selected_release_id": recovery.selected_release_id,
+                    "exit_code": child_exit_code.max(1),
+                    "run": child_report,
+                }));
+
+                match (
+                    recovery.outcome,
+                    recovery.restart,
+                    &recovery.selected_release_id,
+                ) {
+                    (RecoveryOutcome::RolledBack, RestartPolicy::Automatic, Some(selected)) => {
+                        let policy = store.policy(authority)?;
+                        if policy.on_crash_loop != CrashLoopAction::Rollback
+                            || policy.restart != RestartPolicy::Automatic
+                        {
+                            final_phase = "restart_refused";
+                            final_exit_code = child_exit_code.max(1);
+                            break;
+                        }
+                        e_process_monitor = Some(
+                            EProcessHealthMonitor::new(selected.clone(), e_process_cfg)
+                                .map_err(|err| anyhow::anyhow!(err))?,
+                        );
+                        crash_events.clear();
+                        final_phase = "post_rollback_observing";
+                        final_exit_code = child_exit_code.max(1);
+                    }
+                    (RecoveryOutcome::RolledBack, _, _) => {
+                        final_phase = "rolled_back";
+                        final_exit_code = child_exit_code.max(1);
+                        break;
+                    }
+                    (RecoveryOutcome::ContainedNoKnownGood, _, _) => {
+                        final_phase = "contained_no_known_good";
+                        final_exit_code = child_exit_code.max(1);
+                        break;
+                    }
+                    (RecoveryOutcome::ContainedEffectsIndeterminate, _, _) => {
+                        final_phase = "contained_effects_indeterminate";
+                        final_exit_code = child_exit_code.max(1);
+                        break;
+                    }
+                    (RecoveryOutcome::Contained, _, _) => {
+                        final_phase = "contained";
+                        final_exit_code = child_exit_code.max(1);
+                        break;
+                    }
+                }
+            }
+            DeployRunVerdict::ActivationInterrupted => {
+                attempts.push(serde_json::json!({
+                    "attempt": run_index + 1,
+                    "release_id": release.release_id,
+                    "activation_sequence": activation.sequence,
+                    "verdict": "activation_interrupted",
+                    "exit_code": child_exit_code.max(1),
+                    "run": child_report,
+                }));
+                final_phase = "activation_interrupted";
+                final_exit_code = child_exit_code.max(1);
+                break;
+            }
+            DeployRunVerdict::Failed => {
+                attempts.push(serde_json::json!({
+                    "attempt": run_index + 1,
+                    "release_id": release.release_id,
+                    "activation_sequence": activation.sequence,
+                    "verdict": "failed",
+                    "exit_code": child_exit_code.max(1),
+                    "run": child_report,
+                }));
+                final_phase = "failed";
+                final_exit_code = child_exit_code.max(1);
+                break;
+            }
+        }
+    }
+
+    if final_phase == "post_rollback_observing" {
+        // Ran out of `--max-runs` before reaching sustained post-rollback certification.
+        final_exit_code = 1;
+    }
+
+    let e_process_summary = e_process_monitor
+        .as_ref()
+        .map(EProcessHealthMonitor::snapshot);
+    let report = serde_json::json!({
+        "schema_version": DEPLOY_SUPERVISE_CLI_SCHEMA_VERSION,
+        "command": "deploy.supervise",
+        "deployment": store.name(),
+        "release_id": last_release_id,
+        "phase": final_phase,
+        "ok": final_exit_code == 0,
+        "max_runs": args.max_runs,
+        "post_rollback_probes": args.post_rollback_probes,
+        "attempts_executed": attempts.len(),
+        "attempts": attempts,
+        "crash_loop_detector": detector_decision_json,
+        "recovery": recovery_json,
+        "e_process_monitor": e_process_summary,
+    });
+    Ok((report, final_exit_code))
+}
+
+fn handle_deploy_supervise(args: &cli::DeploySuperviseArgs) -> Result<(serde_json::Value, i32)> {
+    let (store, authority) = deploy_context(&args.name)?;
+    supervise_deploy_runs_with(
+        &store,
+        &authority,
+        args,
+        &verify_deploy_release,
+        &mut |activation, release| {
+            let child = {
+                let lock = store.lock()?;
+                let restriction = args
+                    .retire_on_activation
+                    .then(|| store.capture_activation_restriction(&lock, &authority, activation))
+                    .transpose()?;
+                spawn_deploy_release_child(&store, release, &args.app_args, restriction.as_ref())?
+            };
+            let run = finish_deploy_release_child(child, release)?;
+            let verdict = classify_and_record_deploy_run(&store, &authority, release, &run)?;
+            Ok((verdict, run.exit_code, run.report))
+        },
+    )
+}
+
 fn render_deploy_human(report: &serde_json::Value) -> String {
     let command = report["command"].as_str().unwrap_or("deploy");
     let deployment = report["deployment"].as_str().unwrap_or("");
@@ -7482,6 +7861,12 @@ fn render_deploy_human(report: &serde_json::Value) -> String {
             report["superseded_transaction_digest"]
                 .as_str()
                 .unwrap_or("")
+        ),
+        "deploy.supervise" => format!(
+            "deployment {deployment}: supervised {} run(s), release {} -> {}",
+            report["attempts_executed"],
+            report["release_id"].as_str().unwrap_or(""),
+            report["phase"].as_str().unwrap_or("")
         ),
         "deploy.status" => {
             let mut lines = vec![format!(
@@ -7600,6 +7985,12 @@ fn handle_deploy_command(command: cli::DeployCommand) -> Result<()> {
             DEPLOY_RUN_CLI_SCHEMA_VERSION,
             "deploy.run",
             handle_deploy_run(args),
+        ),
+        cli::DeployCommand::Supervise(args) => (
+            args.json,
+            DEPLOY_SUPERVISE_CLI_SCHEMA_VERSION,
+            "deploy.supervise",
+            handle_deploy_supervise(args),
         ),
     };
     let (report, exit_code) = match outcome {
@@ -23075,12 +23466,18 @@ fn evaluate_run_trust_preflight(
     if !publisher_packages.is_empty() {
         let dependencies = dependencies.get_or_insert_with(Vec::new);
         for package in publisher_packages {
-            if dependencies.iter().any(|dependency| dependency.extension_id == package.extension_id) {
+            if dependencies
+                .iter()
+                .any(|dependency| dependency.extension_id == package.extension_id)
+            {
                 continue;
             }
             dependencies.push(RunPackageDependency {
-                dependency_name: package.extension_id.strip_prefix("npm:")
-                    .context("publisher module identity is not an npm package")?.to_owned(),
+                dependency_name: package
+                    .extension_id
+                    .strip_prefix("npm:")
+                    .context("publisher module identity is not an npm package")?
+                    .to_owned(),
                 extension_id: package.extension_id,
                 version_requirement: package.version.unwrap_or_else(|| "*".to_owned()),
                 section: "publisher source capsule".to_owned(),
@@ -37659,12 +38056,10 @@ fn main() -> Result<()> {
             if let (Some(approval), Some(key)) = (
                 registry_artifact_approval.as_ref(),
                 publisher_public_key.as_deref(),
-            ) {
-                if let Err(err) =
-                    validate_run_registry_artifact(approval, key, &project_paths, &resolved.config)
-                {
-                    return named_cli_fail("franken-node/run-error-cli/v1", "run", json, err);
-                }
+            ) && let Err(err) =
+                validate_run_registry_artifact(approval, key, &project_paths, &resolved.config)
+            {
+                return named_cli_fail("franken-node/run-error-cli/v1", "run", json, err);
             }
             if let Some(expected) = admitted_approval_sha256.as_deref() {
                 let binding = registry_artifact_approval
@@ -44083,5 +44478,320 @@ mod time_math_wraparound_tests {
         if let Some(age) = result {
             assert!(age < 60, "Nested file should have reasonable age");
         }
+    }
+
+    #[test]
+    fn deploy_supervise_cli_parses_all_flags() {
+        use clap::Parser as _;
+        let parsed = cli::Cli::try_parse_from([
+            "franken-node",
+            "deploy",
+            "supervise",
+            "prod-app",
+            "--max-runs",
+            "8",
+            "--post-rollback-probes",
+            "3",
+            "--e-process-alpha",
+            "0.05",
+            "--cooldown-ms",
+            "25",
+            "--retire-on-activation",
+            "--json",
+            "--",
+            "--port=8080",
+        ])
+        .expect("deploy supervise CLI should parse");
+        match parsed.command {
+            cli::Command::Deploy(deploy) => match deploy.subcommand {
+                cli::DeployCommand::Supervise(args) => {
+                    assert_eq!(args.name, "prod-app");
+                    assert_eq!(args.max_runs, 8);
+                    assert_eq!(args.post_rollback_probes, 3);
+                    assert!((args.e_process_alpha - 0.05).abs() < f64::EPSILON);
+                    assert_eq!(args.cooldown_ms, 25);
+                    assert!(args.retire_on_activation);
+                    assert!(args.json);
+                    assert_eq!(args.app_args, vec!["--port=8080".to_string()]);
+                }
+                other => panic!("expected Supervise, got {other:?}"),
+            },
+            other => panic!("expected Deploy command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deploy_supervise_rolls_back_and_certifies_e_process_or_refuses_safe_mode_candidate() {
+        use runtime::deployment::{
+            ActivationReason, CrashLoopAction, CrashLoopEvidence, DeploymentAuthority,
+            DeploymentPolicy, DeploymentStore, HealthEvent, POLICY_SCHEMA, RELEASE_SCHEMA,
+            ReleaseRecord, RestartPolicy,
+        };
+        use supply_chain::registry_artifact::PublisherSourceGraphApproval;
+
+        let make_release = |store: &DeploymentStore, dir: &Path, id: &str| -> ReleaseRecord {
+            std::fs::create_dir_all(dir).expect("create release dir");
+            std::fs::write(dir.join("app.js"), b"console.log('ok');\n").expect("write entrypoint");
+            let canonical_dir = dir.canonicalize().expect("canonical release dir");
+            let approval: PublisherSourceGraphApproval =
+                serde_json::from_value(serde_json::json!({
+                    "manifest_path": "/registry/artifact.manifest.json",
+                    "manifest_sha256": format!("sha256:{}", "1".repeat(64)),
+                    "publisher_public_key_hex": "2".repeat(64),
+                    "identity": {
+                        "publisher_key_id": "key",
+                        "publisher_id": "publisher",
+                        "name": "app",
+                        "version": id,
+                        "artifact_sha256": format!("sha256:{}", "3".repeat(64)),
+                    },
+                    "capsule_digest": format!("sha256:{}", "4".repeat(64)),
+                    "graph_input_hash": format!("sha256:{}", "5".repeat(64)),
+                    "entrypoint": "app.js",
+                    "additional_conditions": [],
+                    "contained_symlinks": false,
+                }))
+                .expect("approval fixture");
+            ReleaseRecord {
+                schema_version: RELEASE_SCHEMA.to_string(),
+                deployment: store.name().to_string(),
+                release_id: id.to_string(),
+                release_dir: canonical_dir,
+                entrypoint: "app.js".to_string(),
+                config_sha256: format!("sha256:{}", "6".repeat(64)),
+                registry_manifest: PathBuf::from("/registry/artifact.manifest.json"),
+                publisher_public_key_path: PathBuf::from("/keys/publisher.pub"),
+                approval,
+                engine_compatibility: "franken-node/test".to_string(),
+                installed_at_epoch_secs: 10,
+            }
+        };
+
+        let verify_with_permit = |release: &ReleaseRecord| -> Result<()> {
+            let _permit = runtime::safe_mode::ContainmentGate::acquire_deploy_release(
+                &release.release_dir,
+                &release.release_dir.join(&release.entrypoint),
+                None,
+            )?;
+            Ok(())
+        };
+
+        let tmp = TempDir::new().expect("tempdir");
+        let deploy_root = tmp.path().join("deploy-root");
+        std::fs::create_dir_all(&deploy_root).expect("deploy root");
+        let deploy_root = deploy_root.canonicalize().expect("canonical deploy root");
+        let store = DeploymentStore::open(&deploy_root, "svc").expect("open store");
+        let authority =
+            DeploymentAuthority::new(ed25519_dalek::SigningKey::from_bytes(&[9_u8; 32]));
+        let good = make_release(&store, &tmp.path().join("good-v1"), "good-v1");
+        let bad = make_release(&store, &tmp.path().join("bad-v2"), "bad-v2");
+
+        {
+            let lock = store.lock().expect("lock");
+            store
+                .install_release(&lock, &authority, good.clone())
+                .expect("install good");
+            store
+                .install_release(&lock, &authority, bad.clone())
+                .expect("install bad");
+            store
+                .set_policy(
+                    &lock,
+                    &authority,
+                    DeploymentPolicy {
+                        schema_version: POLICY_SCHEMA.to_string(),
+                        deployment: "svc".to_string(),
+                        on_crash_loop: CrashLoopAction::Rollback,
+                        restart: RestartPolicy::Automatic,
+                        operator_id: "ops-root".to_string(),
+                        set_at_epoch_secs: 20,
+                    },
+                )
+                .expect("set policy");
+            store
+                .activate(
+                    &lock,
+                    &authority,
+                    "good-v1",
+                    ActivationReason::Operator,
+                    Some("ops-root"),
+                    None,
+                    30,
+                )
+                .expect("activate good");
+            store
+                .record_health(
+                    &lock,
+                    &authority,
+                    "good-v1",
+                    HealthEvent::HealthyRun {
+                        receipt_id: "seed-healthy-1".to_string(),
+                        observed_at_epoch_secs: 35,
+                    },
+                )
+                .expect("record good health");
+            store
+                .activate(
+                    &lock,
+                    &authority,
+                    "bad-v2",
+                    ActivationReason::Operator,
+                    Some("ops-root"),
+                    None,
+                    40,
+                )
+                .expect("activate bad");
+        }
+
+        let supervise_args = cli::DeploySuperviseArgs {
+            name: "svc".to_string(),
+            max_runs: 6,
+            post_rollback_probes: 3,
+            e_process_alpha: 0.05,
+            cooldown_ms: 0,
+            retire_on_activation: false,
+            json: true,
+            app_args: Vec::new(),
+        };
+
+        let mut step = 0_u32;
+        let (report, exit_code) = supervise_deploy_runs_with(
+            &store,
+            &authority,
+            &supervise_args,
+            &verify_with_permit,
+            &mut |_activation, release| {
+                step += 1;
+                if release.release_id == "bad-v2" {
+                    if step < 3 {
+                        Ok((
+                            DeployRunVerdict::Crashed,
+                            1,
+                            serde_json::json!({"crash_step": step}),
+                        ))
+                    } else {
+                        Ok((
+                            DeployRunVerdict::CrashLoop(CrashLoopEvidence {
+                                session_nonce: uuid::Uuid::now_v7().to_string(),
+                                entrypoint: release
+                                    .release_dir
+                                    .join(&release.entrypoint)
+                                    .to_string_lossy()
+                                    .into_owned(),
+                                observed_at_epoch_secs: current_unix_secs(),
+                                crashes_in_window: 3,
+                                threshold: 3,
+                                window_secs: 300,
+                                safe_mode_state_path: release
+                                    .release_dir
+                                    .join(".franken-node/state/safe-mode/state.json")
+                                    .to_string_lossy()
+                                    .into_owned(),
+                            }),
+                            1,
+                            serde_json::json!({"crash_step": step}),
+                        ))
+                    }
+                } else {
+                    Ok((
+                        DeployRunVerdict::Healthy {
+                            receipt_id: format!("probe-{step}"),
+                        },
+                        0,
+                        serde_json::json!({"probe_step": step}),
+                    ))
+                }
+            },
+        )
+        .expect("supervise should succeed");
+
+        assert_eq!(exit_code, 0, "{report}");
+        assert_eq!(report["phase"], "rolled_back_sustained_healthy");
+        assert_eq!(report["release_id"], "good-v1");
+        assert_eq!(report["attempts_executed"], 6);
+        assert_eq!(report["crash_loop_detector"]["rollback_allowed"], true);
+        assert_eq!(report["crash_loop_detector"]["target_version"], "good-v1");
+        assert_eq!(
+            report["e_process_monitor"]["state"],
+            "sustained_health_certified"
+        );
+        assert_eq!(
+            store
+                .active(&authority)
+                .expect("active")
+                .expect("some")
+                .release_id,
+            "good-v1"
+        );
+
+        // Negative drill: enter manual safe mode inside good-v1, re-activate a fresh bad-v3,
+        // and prove GuestExecutionPermit refuses good-v1 during select_known_good.
+        let sm_path = runtime::safe_mode::safe_mode_state_path_for_root(&good.release_dir);
+        let mut sm = runtime::safe_mode::SafeModeController::default();
+        sm.enter(
+            runtime::safe_mode::SafeModeEntryReason::OperatorExplicit {
+                operator_id: "ops-root".to_string(),
+                justification: "quarantine good-v1".to_string(),
+            },
+            100,
+            "trace-sm",
+        )
+        .expect("enter safe mode");
+        runtime::safe_mode::write_persisted_safe_mode(&sm_path, &sm).expect("persist safe mode");
+
+        let bad3 = make_release(&store, &tmp.path().join("bad-v3"), "bad-v3");
+        {
+            let lock = store.lock().expect("lock");
+            store
+                .install_release(&lock, &authority, bad3)
+                .expect("install bad3");
+            store
+                .activate(
+                    &lock,
+                    &authority,
+                    "bad-v3",
+                    ActivationReason::Operator,
+                    Some("ops-root"),
+                    None,
+                    50,
+                )
+                .expect("activate bad3");
+        }
+        let (refused_report, refused_code) = supervise_deploy_runs_with(
+            &store,
+            &authority,
+            &supervise_args,
+            &verify_with_permit,
+            &mut |_activation, release| {
+                Ok((
+                    DeployRunVerdict::CrashLoop(CrashLoopEvidence {
+                        session_nonce: uuid::Uuid::now_v7().to_string(),
+                        entrypoint: release
+                            .release_dir
+                            .join(&release.entrypoint)
+                            .to_string_lossy()
+                            .into_owned(),
+                        observed_at_epoch_secs: current_unix_secs(),
+                        crashes_in_window: 3,
+                        threshold: 3,
+                        window_secs: 300,
+                        safe_mode_state_path: release
+                            .release_dir
+                            .join(".franken-node/state/safe-mode/state.json")
+                            .to_string_lossy()
+                            .into_owned(),
+                    }),
+                    1,
+                    serde_json::json!({}),
+                ))
+            },
+        )
+        .expect("contained outcome returns structured report");
+        assert_ne!(refused_code, 0);
+        assert_eq!(refused_report["phase"], "contained_no_known_good");
+        assert_eq!(
+            refused_report["crash_loop_detector"]["error_code"],
+            "CLD_NO_KNOWN_GOOD"
+        );
     }
 }

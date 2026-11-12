@@ -4736,7 +4736,10 @@ mod tests {
     fn policy_scope_never_repairs_a_failed_guest_verdict() {
         let mut failed_without_diagnostic = completed_policy_candidate();
         failed_without_diagnostic.matched = false;
-        assert_policy_refusal(failed_without_diagnostic, "failed guest without diagnostics");
+        assert_policy_refusal(
+            failed_without_diagnostic,
+            "failed guest without diagnostics",
+        );
 
         let mut failed_with_diagnostic = completed_policy_candidate();
         failed_with_diagnostic.matched = false;
@@ -4782,10 +4785,16 @@ mod tests {
         for (field, value) in [
             ("schema_version", serde_json::json!("unknown-outcome")),
             ("replay_kind", serde_json::json!("recorded_trace")),
-            ("verification_scope", serde_json::json!("guest_failure_prefix")),
+            (
+                "verification_scope",
+                serde_json::json!("guest_failure_prefix"),
+            ),
             ("captured_trace_id", serde_json::json!("")),
             ("replay_trace_id", serde_json::json!("different-trace")),
-            ("captured_terminal_state", serde_json::json!("uncaught_exception")),
+            (
+                "captured_terminal_state",
+                serde_json::json!("uncaught_exception"),
+            ),
             ("replay_terminal_state", serde_json::json!("engine_failure")),
             ("terminal_state_match", serde_json::json!(false)),
             ("console_match", serde_json::json!(false)),
@@ -4801,11 +4810,9 @@ mod tests {
 
     #[test]
     fn policy_scope_requires_frozen_modules_and_available_matching_decisions() {
-        for (module_load_disabled, decisions_match) in [
-            (true, Some(true)),
-            (false, None),
-            (false, Some(false)),
-        ] {
+        for (module_load_disabled, decisions_match) in
+            [(true, Some(true)), (false, None), (false, Some(false))]
+        {
             let mut candidate = completed_policy_candidate();
             candidate.module_load_disabled = module_load_disabled;
             candidate.decisions_match = decisions_match;

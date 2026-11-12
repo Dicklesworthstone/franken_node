@@ -433,6 +433,7 @@ pub(super) fn run_command_cancellable(
 /// Run under a trusted retained operator control. The same check runs before
 /// spawn and on every runtime/output-drain polling round, including silent
 /// guests. Refusal follows the existing owned-group stop/reap error path.
+#[cfg_attr(not(feature = "engine"), allow(dead_code))]
 pub(super) fn run_command_guarded(
     command: &mut Command,
     timing: (Duration, Duration),
