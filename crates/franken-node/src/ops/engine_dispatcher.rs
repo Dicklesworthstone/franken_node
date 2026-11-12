@@ -7166,7 +7166,7 @@ fn decode_failed_guest_output(
 /// preserved *within* each stream (entries are captured in execution order), and
 /// each entry is newline-terminated. This replaces the previous Rust `{:?}`
 /// debug dump so `franken-node run` surfaces the program's real output.
-#[cfg(any(feature = "engine", test))]
+#[cfg(feature = "engine")]
 fn render_console_streams(
     entries: &[frankenengine_engine::baseline_interpreter::ConsoleEntry],
 ) -> (Vec<u8>, Vec<u8>) {
@@ -16911,6 +16911,7 @@ exec "$2" pinned-worker-image"#,
         );
     }
 
+    #[cfg(feature = "engine")]
     #[test]
     fn bd_ztr5v_profiles_never_grant_process_spawn_without_active_containment() {
         let config = Config::for_profile(Profile::LegacyRisky);
@@ -16923,6 +16924,7 @@ exec "$2" pinned-worker-image"#,
         );
     }
 
+    #[cfg(feature = "engine")]
     #[test]
     fn bd_sfr61_active_proof_without_matching_signed_config_is_rejected() {
         let config = Config::for_profile(Profile::Balanced);
@@ -17799,7 +17801,7 @@ exec "$2" pinned-worker-image"#,
                 .expect("new higher-precedence source");
 
             let error = selected
-                .verify_target_with_operator_project(Path::new("app"), root, None)
+                .verify_target_with_operator_project(Path::new("app"), root, None, None)
                 .expect_err("a new resolution winner invalidates preflight");
             assert!(
                 error
@@ -18236,6 +18238,7 @@ exec "$2" pinned-worker-image"#,
         assert_eq!(run_exit_status(0, Some(96)), 96);
     }
 
+    #[cfg(feature = "engine")]
     #[test]
     fn render_console_streams_splits_stdout_stderr_in_order_without_debug_dump() {
         use frankenengine_engine::baseline_interpreter::{ConsoleEntry, ConsoleLevel};
@@ -18732,7 +18735,6 @@ exec "$2" pinned-worker-image"#,
             PreferredRuntime::FrankenEngine,
         );
 
-        let _telemetry_bridge = TelemetryBridge::null();
         let result = dispatcher.dispatch_run(&app, &config, "strict", &[], 0);
 
         assert!(
@@ -23132,6 +23134,7 @@ exec "$2" pinned-worker-image"#,
         }
     }
 
+    #[cfg(feature = "engine")]
     #[test]
     fn security_epoch_redacts_raw_values_in_output() {
         // Test that SecurityEpoch Display/Debug implementations use opaque labels

@@ -1798,6 +1798,7 @@ mod tests {
             rollback_triggered: false,
             validation_confidence: None,
             source_rollback: None,
+            deployment_sync: None,
             message: "canary running smoothly".to_string(),
             history: vec![],
         };

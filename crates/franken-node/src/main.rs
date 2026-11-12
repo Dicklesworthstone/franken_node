@@ -182,7 +182,7 @@ use frankenengine_node::{
             FreshnessPolicy, SafetyTier, registry_revocation_freshness_denial, snapshot_age_secs,
         },
     },
-    supply_chain::category_shift::validate_benchmark_thresholds,
+    supply_chain::category_shift::validate_benchmark_thresholds_with_config,
     supply_chain::{
         certification::{EvidenceType, VerifiedEvidenceRef},
         extension_registry::{
@@ -1216,6 +1216,16 @@ fn parse_signing_key_from_blob(raw: &[u8]) -> Option<ed25519_dalek::SigningKey> 
             if values.len() != 32 && values.len() != 64 {
                 return None;
             }
+            let array_uses_hex_strings = values.iter().any(|value| {
+                value.as_str().is_some_and(|text| {
+                    let text = text.trim();
+                    text.starts_with("0x")
+                        || text.starts_with("0X")
+                        || text
+                            .chars()
+                            .any(|ch| ch.is_ascii_hexdigit() && ch.is_ascii_alphabetic())
+                })
+            });
             let mut bytes = Vec::with_capacity(values.len());
             for value in values {
                 let byte = match value {
@@ -1231,10 +1241,7 @@ fn parse_signing_key_from_blob(raw: &[u8]) -> Option<ed25519_dalek::SigningKey> 
                             text.strip_prefix("0x").or_else(|| text.strip_prefix("0X"))
                         {
                             u8::from_str_radix(hex, 16).ok()?
-                        } else if text
-                            .chars()
-                            .any(|ch| ch.is_ascii_hexdigit() && ch.is_ascii_alphabetic())
-                        {
+                        } else if array_uses_hex_strings {
                             u8::from_str_radix(text, 16).ok()?
                         } else {
                             text.parse::<u8>().ok()?
@@ -2555,7 +2562,11 @@ mod signing_key_parsing_tests {
 
     #[test]
     fn parse_signing_key_accepts_json_byte_array_hex_string_values() {
-        let bytes = [238_u8; 32];
+        let mut bytes = [238_u8; 32];
+        bytes[0] = 0x3b;
+        bytes[2] = 0x27;
+        bytes[8] = 0x62;
+        bytes[15] = 0x73;
         let payload = format!(
             "[{}]",
             bytes
@@ -16897,7 +16908,7 @@ fn build_doctor_report_with_cwd_and_policy_input(
         "DR-BENCH-015",
         "DOC-015",
         "benchmark.validation",
-        || match validate_benchmark_thresholds() {
+        || match validate_benchmark_thresholds_with_config(&resolved.config.benchmark) {
             Ok(result) if result.passed => (
                 DoctorStatus::Pass,
                 result.message,
@@ -18352,12 +18363,21 @@ mod trust_scan_tests {
 }
 
 #[cfg(test)]
+pub(crate) fn test_cwd_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
+#[cfg(test)]
 mod doctor_tests {
     use super::*;
 
     fn resolved_fixture(profile: Profile) -> config::ResolvedConfig {
+        let mut cfg = config::Config::for_profile(profile);
+        cfg.benchmark.summary_path =
+            "__nonexistent_doctor_test_benchmark_summary__.json".to_string();
         config::ResolvedConfig {
-            config: config::Config::for_profile(profile),
+            config: cfg,
             selected_profile: profile,
             source_path: None,
             decisions: vec![
@@ -18501,10 +18521,11 @@ mod doctor_tests {
 
     #[test]
     fn doctor_report_warns_on_legacy_profile() {
+        let tmp = tempfile::tempdir().expect("tempdir");
         let report = build_doctor_report_with_cwd(
             &resolved_fixture(Profile::LegacyRisky),
             "trace-legacy",
-            Ok(PathBuf::from(".")),
+            Ok(tmp.path().to_path_buf()),
         );
         let profile_check = report
             .checks
@@ -18979,10 +19000,24 @@ mod trust_command_tests {
         let rendered = render_trust_card_for_trust_command(&card, true)?;
         let parsed: serde_json::Value = serde_json::from_str(&rendered)?;
 
-        assert_eq!(parsed["schema_version"], "trust-card-v1.0");
+        assert_eq!(parsed["schema_version"], "1.0.0");
         assert_eq!(parsed["extension"]["extension_id"], "npm:@acme/auth-guard");
         assert!(!rendered.contains("extension | publisher | cert"));
         Ok(())
+    }
+
+    fn write_trust_scan_test_config(project_root: &Path) {
+        let mut cfg = config::Config::for_profile(Profile::Balanced);
+        cfg.trust.registry_signing_key =
+            Some(BASE64_STANDARD.encode(b"franken-node-trust-card-registry-key-v1"));
+        cfg.security
+            .authorized_api_keys
+            .insert("test-api-key".to_string());
+        std::fs::write(
+            project_root.join("franken_node.toml"),
+            cfg.to_toml().expect("serialize trust scan test config"),
+        )
+        .expect("write trust scan test config");
     }
 
     #[test]
@@ -19015,6 +19050,7 @@ mod trust_command_tests {
     #[test]
     fn trust_scan_positive_flow_creates_cards_from_manifest_without_network() {
         let tmp = tempfile::tempdir().expect("tempdir");
+        write_trust_scan_test_config(tmp.path());
         std::fs::write(
             tmp.path().join("package.json"),
             r#"{"dependencies":{"left-pad":"1.3.0"},"devDependencies":{"@acme/tool":"^2.0.0"}}"#,
@@ -19085,13 +19121,18 @@ mod trust_command_tests {
 
         let err =
             run_trust_scan(tmp.path(), false, false, false).expect_err("scan should reject JSON");
-
-        assert!(err.to_string().contains("invalid dependency manifest JSON"));
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains("capturing dependencies for trust scan")
+                && rendered.contains("package.json"),
+            "unexpected error: {rendered}"
+        );
     }
 
     #[test]
     fn trust_scan_second_run_skips_existing_cards() {
         let tmp = tempfile::tempdir().expect("tempdir");
+        write_trust_scan_test_config(tmp.path());
         std::fs::write(
             tmp.path().join("package.json"),
             r#"{"dependencies":{"left-pad":"1.3.0","is-odd":"3.0.1"}}"#,
@@ -19358,11 +19399,10 @@ mod trust_command_tests {
 #[cfg(test)]
 mod registry_command_tests {
     use super::*;
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::Mutex;
 
     fn cwd_test_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+        super::test_cwd_lock()
     }
 
     #[test]
@@ -19429,14 +19469,24 @@ mod registry_command_tests {
         )
         .expect("resign downgraded provenance");
 
-        let result = registry.register(request, "trace-registry-dev-profile-reject", 1_700_000_000);
+        let result = registry.register(
+            request,
+            "trace-registry-dev-profile-reject",
+            now_unix_secs(),
+        );
 
         assert!(!result.success);
         assert_eq!(
             result.error_code.as_deref(),
             Some(frankenengine_node::supply_chain::extension_registry::event_codes::SER_ERR_PROVENANCE_CHAIN_INVALID)
         );
-        assert!(result.detail.contains("required 2 links"));
+        assert!(
+            result
+                .detail
+                .contains("provenance chain verification failed"),
+            "unexpected detail: {}",
+            result.detail
+        );
     }
 
     #[test]
@@ -19496,7 +19546,7 @@ mod registry_command_tests {
                 source_dirty,
             },
             builder_identity: builder_identity.to_string(),
-            build_timestamp_epoch: 1_700_000_123,
+            build_timestamp_epoch: now_unix_secs().saturating_sub(60),
         }
     }
 
@@ -19704,7 +19754,7 @@ mod registry_command_tests {
 
         let mut registry = registry_cli_registry().expect("registry");
         registry.register_publisher_key(signing_material.signing_key.verifying_key());
-        let result = registry.register(request.clone(), "trace-registry-test", 1_700_000_999);
+        let result = registry.register(request.clone(), "trace-registry-test", now_unix_secs());
         assert!(
             result.success,
             "registry register failed: {}",
@@ -19847,7 +19897,9 @@ mod registry_command_tests {
 
     #[test]
     fn write_bytes_atomically_supports_relative_target_in_current_directory() {
-        let _guard = cwd_test_lock().lock().expect("cwd lock");
+        let _guard = cwd_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempfile::tempdir().expect("tempdir");
         let previous_cwd = std::env::current_dir().expect("cwd");
         let target_path = Path::new("artifact.bin");
@@ -20731,14 +20783,23 @@ mod migrate_audit_output_tests {
 
     #[test]
     fn emit_migration_audit_report_writes_to_requested_path() {
+        let _lock = test_cwd_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempfile::tempdir().expect("tempdir");
-        let output_path = temp.path().join("reports/migration/audit.txt");
+        let previous_cwd = std::env::current_dir().expect("cwd");
+        let relative_path = PathBuf::from("reports/migration/audit.txt");
         let rendered = "migration-audit-report\nstatus: ok\n";
 
-        let written = emit_migration_audit_report(rendered, Some(&output_path)).expect("written");
-        assert_eq!(written, Some(output_path.clone()));
+        std::env::set_current_dir(temp.path()).expect("set cwd");
+        let write_result = emit_migration_audit_report(rendered, Some(&relative_path));
+        let restore_result = std::env::set_current_dir(&previous_cwd);
+
+        let written = write_result.expect("written");
+        restore_result.expect("restore cwd");
+        assert_eq!(written, Some(relative_path.clone()));
         assert_eq!(
-            std::fs::read_to_string(&output_path).expect("read output"),
+            std::fs::read_to_string(temp.path().join(&relative_path)).expect("read output"),
             rendered
         );
     }
@@ -20749,13 +20810,13 @@ mod incident_list_tests {
     use super::*;
     use frankenengine_node::tools::replay_bundle::{
         EventType, INCIDENT_EVIDENCE_SCHEMA, IncidentEvidenceEvent, IncidentEvidenceMetadata,
-        IncidentEvidencePackage, IncidentSeverity, ReplayBundleSigningMaterial, sign_replay_bundle,
+        IncidentEvidencePackage, IncidentSeverity, ReplayBundleSigningMaterial,
+        sign_incident_evidence_package, sign_replay_bundle,
     };
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::Mutex;
 
     fn cwd_test_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+        super::test_cwd_lock()
     }
 
     fn incident_test_trusted_key_id() -> String {
@@ -20778,9 +20839,17 @@ mod incident_list_tests {
     }
 
     fn configure_incident_test_signing_key(workspace: &Path) {
+        let mut cfg = config::Config::for_profile(Profile::Balanced);
+        cfg.trust.registry_signing_key =
+            Some(BASE64_STANDARD.encode(b"franken-node-trust-card-registry-key-v1"));
+        cfg.security
+            .authorized_api_keys
+            .insert("test-api-key".to_string());
+        cfg.security.decision_receipt_signing_key_path =
+            Some(PathBuf::from("keys/receipt-signing.key"));
         std::fs::write(
             workspace.join("franken_node.toml"),
-            "profile = \"balanced\"\n\n[security]\ndecision_receipt_signing_key_path = \"keys/receipt-signing.key\"\n",
+            cfg.to_toml().expect("serialize signing config"),
         )
         .expect("write signing config");
         write_receipt_signing_key(&workspace.join("keys/receipt-signing.key"));
@@ -20887,9 +20956,12 @@ mod incident_list_tests {
                 tags: vec!["fixture".to_string(), "test".to_string()],
             },
         };
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[42_u8; 32]);
+        let signed =
+            sign_incident_evidence_package(package, &signing_key).expect("sign evidence package");
         std::fs::write(
             &evidence_path,
-            serde_json::to_string_pretty(&package).expect("serialize evidence package"),
+            serde_json::to_string_pretty(&signed).expect("serialize evidence package"),
         )
         .expect("write evidence package");
         evidence_path
@@ -21011,7 +21083,7 @@ mod incident_list_tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempfile::tempdir().expect("tempdir");
         let previous_cwd = std::env::current_dir().expect("cwd");
-        let incident_id = "INC/TEST:001";
+        let incident_id = "INC:TEST:001";
         configure_incident_test_signing_key(dir.path());
         let evidence_path = write_fixture_incident_evidence_package(dir.path(), incident_id);
         std::env::set_current_dir(dir.path()).expect("set cwd");
@@ -21087,7 +21159,7 @@ mod incident_list_tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempfile::tempdir().expect("tempdir");
         let previous_cwd = std::env::current_dir().expect("cwd");
-        let incident_id = "INC/FRESH:001";
+        let incident_id = "INC#FRESH:001";
         configure_incident_test_signing_key(dir.path());
         let evidence_path = write_fixture_incident_evidence_package(dir.path(), incident_id);
         std::env::set_current_dir(dir.path()).expect("set cwd");
@@ -32270,6 +32342,16 @@ fn parse_verifying_key_from_blob(raw: &[u8]) -> Option<ed25519_dalek::VerifyingK
             if values.len() != 32 && values.len() != 64 {
                 return None;
             }
+            let array_uses_hex_strings = values.iter().any(|value| {
+                value.as_str().is_some_and(|text| {
+                    let text = text.trim();
+                    text.starts_with("0x")
+                        || text.starts_with("0X")
+                        || text
+                            .chars()
+                            .any(|ch| ch.is_ascii_hexdigit() && ch.is_ascii_alphabetic())
+                })
+            });
             let mut bytes = Vec::with_capacity(values.len());
             for value in values {
                 let byte = match value {
@@ -32285,10 +32367,7 @@ fn parse_verifying_key_from_blob(raw: &[u8]) -> Option<ed25519_dalek::VerifyingK
                             text.strip_prefix("0x").or_else(|| text.strip_prefix("0X"))
                         {
                             u8::from_str_radix(hex, 16).ok()?
-                        } else if text
-                            .chars()
-                            .any(|ch| ch.is_ascii_hexdigit() && ch.is_ascii_alphabetic())
-                        {
+                        } else if array_uses_hex_strings {
                             u8::from_str_radix(text, 16).ok()?
                         } else {
                             text.parse::<u8>().ok()?
@@ -40868,12 +40947,22 @@ mod run_trust_gate_tests {
             .expect("persist trust registry");
     }
 
+    fn fixture_trust_config(policy_mode: Profile) -> config::Config {
+        let mut cfg = config::Config::for_profile(policy_mode);
+        cfg.trust.registry_signing_key =
+            Some(BASE64_STANDARD.encode(b"franken-node-trust-card-registry-key-v1"));
+        cfg.security
+            .authorized_api_keys
+            .insert("test-api-key".to_string());
+        cfg
+    }
+
     fn evaluate_preflight(root: &Path, policy_mode: Profile) -> RunPreFlightReport {
         evaluate_run_trust_preflight(
             root,
             &RunProjectPaths::resolve(root, root).expect("run project authority"),
             policy_mode,
-            &config::Config::for_profile(policy_mode),
+            &fixture_trust_config(policy_mode),
             None,
             2_000,
         )
@@ -40983,14 +41072,29 @@ mod run_trust_gate_tests {
         let tmp = TempDir::new().expect("tempdir");
         write_demo_project(tmp.path(), &[("@acme/auth-guard", "^1.4.2")]);
 
-        let report = evaluate_preflight(tmp.path(), Profile::Strict);
-
-        match &report.verdict {
+        let legacy_report = evaluate_preflight(tmp.path(), Profile::LegacyRisky);
+        match &legacy_report.verdict {
             PreFlightVerdict::Skipped { reason } => {
                 assert!(reason.contains("authoritative trust registry missing"));
-                assert!(reason.contains("franken-node init --profile strict"));
+                assert!(reason.contains("franken-node init --profile legacy-risky"));
             }
-            other => panic!("expected skipped verdict, got {other:?}"),
+            other => panic!("expected skipped verdict in legacy-risky mode, got {other:?}"),
+        }
+
+        let strict_report = evaluate_preflight(tmp.path(), Profile::Strict);
+        match &strict_report.verdict {
+            PreFlightVerdict::Blocked {
+                reason, violations, ..
+            } => {
+                assert!(reason.contains("authoritative trust registry missing"));
+                assert!(reason.contains("franken-node init --profile strict"));
+                assert!(
+                    violations
+                        .iter()
+                        .any(|violation| violation.kind == TrustViolationKind::RegistryMissing)
+                );
+            }
+            other => panic!("expected blocked verdict in strict mode, got {other:?}"),
         }
         assert!(tmp.path().join(".franken-node/state").is_dir());
     }
@@ -41110,6 +41214,10 @@ mod run_trust_gate_tests {
 
         let mut custom_config = config::Config::for_profile(Profile::Balanced);
         custom_config.trust.registry_signing_key = Some(BASE64_STANDARD.encode([0xA5_u8; 32]));
+        custom_config
+            .security
+            .authorized_api_keys
+            .insert("test-api-key".to_string());
         std::fs::write(
             tmp.path().join("franken_node.toml"),
             custom_config.to_toml().expect("serialize config"),
@@ -41126,7 +41234,7 @@ mod run_trust_gate_tests {
 
         let registry_path =
             supply_chain::trust_card_registry_store::registry_snapshot_path(tmp.path());
-        let default_config = config::Config::for_profile(Profile::Balanced);
+        let default_config = fixture_trust_config(Profile::Balanced);
         let default_key_load = TrustCardRegistry::load_authoritative_state_from_config(
             &registry_path,
             &default_config.trust,
@@ -41967,7 +42075,7 @@ mod run_trust_gate_tests {
         write_demo_project(tmp.path(), &[("@acme/auth-guard", "^1.4.2")]);
         write_fixture_registry_to(tmp.path());
 
-        let config = config::Config::for_profile(Profile::Balanced);
+        let config = fixture_trust_config(Profile::Balanced);
         let preflight = evaluate_preflight(tmp.path(), Profile::Balanced);
         let quarantined = maybe_auto_quarantine_run_dependencies(
             tmp.path(),
@@ -42009,25 +42117,34 @@ mod run_trust_gate_tests {
         write_fixture_registry_to(tmp.path());
         let registry_path =
             supply_chain::trust_card_registry_store::registry_snapshot_path(tmp.path());
-        let mtime = frankenengine_node::security::revocation_freshness::unix_mtime_epoch_secs(
-            &registry_path,
-        )
-        .expect("registry mtime");
+        let store_path =
+            supply_chain::trust_card_registry_store::durable_store_path(&registry_path);
+        let mtime =
+            frankenengine_node::security::revocation_freshness::unix_mtime_epoch_secs(&store_path)
+                .expect("registry store mtime");
         let stale_now = mtime.saturating_add(301);
         let report = evaluate_run_trust_preflight(
             tmp.path(),
             &RunProjectPaths::resolve(tmp.path(), tmp.path()).expect("run project authority"),
             Profile::Strict,
-            &config::Config::for_profile(Profile::Strict),
+            &fixture_trust_config(Profile::Strict),
             None,
             stale_now,
         )
         .expect("preflight");
-        assert!(
-            report.verdict.is_blocked(),
-            "strict run must fail-closed on a stale revocation snapshot: {:?}",
-            report.verdict
-        );
+        match &report.verdict {
+            PreFlightVerdict::Blocked { violations, .. } => {
+                assert!(
+                    violations
+                        .iter()
+                        .any(|violation| violation.kind == TrustViolationKind::RevocationStale),
+                    "expected RevocationStale violation, got {violations:?}"
+                );
+            }
+            other => {
+                panic!("strict run must fail-closed on a stale revocation snapshot: {other:?}")
+            }
+        }
     }
 
     #[cfg(test)]

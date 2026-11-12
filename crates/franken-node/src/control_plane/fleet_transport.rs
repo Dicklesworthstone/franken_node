@@ -8108,7 +8108,7 @@ mod tests {
                 terminal_sessions: if indeterminate == 0 { 2 } else { 1 },
                 pending_sessions: 0,
                 indeterminate_sessions: indeterminate,
-                fence_held: false,
+                fence_held: indeterminate > 0,
                 supervisor_attestation: None,
             };
             let mut attestation = super::NativeSessionDrainAttestation {
@@ -8131,8 +8131,12 @@ mod tests {
                 node_id: node_id.to_string(),
                 last_seen: now,
                 quarantine_version: 1,
-                health: NodeHealth::Healthy,
-                applied_actions: Some(expected.clone()),
+                health: if indeterminate == 0 {
+                    NodeHealth::Healthy
+                } else {
+                    NodeHealth::Degraded
+                },
+                applied_actions: (indeterminate == 0).then(|| expected.clone()),
                 native_session_drain: Some(drain),
             };
             (status, verifying_key)
@@ -8201,6 +8205,6 @@ mod tests {
         .expect_err("indeterminate session must abort epoch barrier");
         assert!(err.to_string().contains("aborted before commit"), "{err}");
         assert_eq!(coordinator.current_epoch(), 1);
-        assert_eq!(coordinator.abort_manager().events().len(), 1);
+        assert_eq!(coordinator.abort_manager().abort_events().len(), 1);
     }
 }

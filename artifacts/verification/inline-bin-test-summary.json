@@ -1,0 +1,12 @@
+{
+  "crash_inputs_replayed": 16,
+  "discovered_tests": 2020,
+  "executed_tests": 2019,
+  "exit_code": 0,
+  "failed_tests": [],
+  "ignored_tests": 1,
+  "schema_version": "franken-node/inline-test-execution-summary/v1",
+  "seed_count": 18701,
+  "target_kind": "bin",
+  "target_name": "franken-node"
+}

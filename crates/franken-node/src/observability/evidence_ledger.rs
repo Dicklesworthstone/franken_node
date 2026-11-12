@@ -8184,8 +8184,6 @@ mod tests {
 
     #[test]
     fn test_replay_detection_timing_regression_position_independence() {
-        use std::time::Instant;
-
         let (signing_key, verifying_key) = test_keys();
         let capacity = LedgerCapacity::new(100, 100_000);
         let mut ledger = EvidenceLedger::with_verifying_key(capacity, verifying_key);
@@ -8204,15 +8202,16 @@ mod tests {
         let mut last_byte_diff = base_signature.clone();
         last_byte_diff.replace_range((base_signature.len() - 2).., "43");
 
+        // Warm caches so first-call L1/TLB misses do not skew the ratio.
+        let _ = ledger.is_replay_attack_ct(9999, &base_signature);
+
         // Time comparison with first-byte difference
-        let start_first = Instant::now();
-        let is_replay_first = ledger.is_replay_attack_ct(9999, &first_byte_diff);
-        let time_first = start_first.elapsed();
+        let (is_replay_first, time_first) =
+            measure_elapsed(|| ledger.is_replay_attack_ct(9999, &first_byte_diff));
 
         // Time comparison with last-byte difference
-        let start_last = Instant::now();
-        let is_replay_last = ledger.is_replay_attack_ct(9999, &last_byte_diff);
-        let time_last = start_last.elapsed();
+        let (is_replay_last, time_last) =
+            measure_elapsed(|| ledger.is_replay_attack_ct(9999, &last_byte_diff));
 
         assert!(
             !is_replay_first,
@@ -8230,6 +8229,11 @@ mod tests {
             time_first.as_nanos() as f64 / time_last.as_nanos() as f64
         };
 
+        // Wall-clock ratio bounds only hold on a quiesced host (bd-m87xv);
+        // the measured comparison paths above run unconditionally.
+        if !crate::testing::timing_assertions_enabled() {
+            return;
+        }
         assert!(
             timing_ratio < 2.0,
             "Position-dependent timing detected: first_diff={}ns last_diff={}ns ratio={}",
@@ -9432,41 +9436,40 @@ mod tests {
             atomic::{AtomicBool, Ordering},
         };
         use std::thread;
-        use std::time::Duration;
 
         // Test that is_poisoned() doesn't return false positives
         // with proper Acquire ordering
 
         let ledger = SharedEvidenceLedger::new(LedgerCapacity::new(10, 1000));
         let false_positive_detected = Arc::new(AtomicBool::new(false));
-        let barrier = Arc::new(Barrier::new(2));
+        let start_barrier = Arc::new(Barrier::new(2));
+        let post_poll_barrier = Arc::new(Barrier::new(2));
 
         let ledger_reader = ledger.clone();
         let false_positive_reader = false_positive_detected.clone();
-        let barrier_reader = barrier.clone();
+        let start_reader = start_barrier.clone();
+        let post_poll_reader = post_poll_barrier.clone();
 
         // Reader thread: checks for false positives
         let reader_handle = thread::spawn(move || {
-            barrier_reader.wait(); // Start simultaneously
+            start_reader.wait(); // Start simultaneously
 
             // Poll before poison is set
             for _ in 0..1000 {
                 if ledger_reader.is_poisoned() {
                     false_positive_reader.store(true, Ordering::Relaxed);
-                    return; // Found false positive
+                    break;
                 }
                 thread::yield_now();
             }
+            post_poll_reader.wait();
         });
 
-        // Writer thread: waits before poisoning
+        // Writer thread: waits until reader finishes pre-poison polls
         let ledger_writer = ledger.clone();
-        let barrier_writer = barrier.clone();
         let writer_handle = thread::spawn(move || {
-            barrier_writer.wait(); // Start simultaneously
-
-            // Wait for reader to finish checking
-            thread::sleep(Duration::from_millis(10));
+            start_barrier.wait(); // Start simultaneously
+            post_poll_barrier.wait(); // Deterministically wait for pre-poison polls
             // Only poison AFTER reader checks
             ledger_writer.mark_poisoned();
         });
