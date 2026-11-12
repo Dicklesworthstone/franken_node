@@ -1105,20 +1105,33 @@ impl PublisherSourceGraphApproval {
         Ok(Some(envelope))
     }
 
-    /// Synthesize, cryptographically verify, and check zero-drift runtime enforcement
-    /// of the attenuated Macaroon capability envelope at execution/deploy admission.
+    /// Synthesize and verify the required capability-envelope prefix and check
+    /// capability-set drift at execution/deploy admission.
+    ///
+    /// The caller must already have authenticated and revalidated this approval's
+    /// publisher signatures and source closure. `validate()` alone checks structure.
+    /// The current trusted configuration determines the required attenuation prefix.
     pub fn enforce_attenuated_capability_envelope(
         &self,
         config: &crate::config::Config,
     ) -> Result<Option<crate::extensions::artifact_contract::EffectiveCapabilityCeiling>> {
-        use crate::extensions::artifact_contract::{DriftCheckResult, EnforcementEngine};
+        use crate::extensions::artifact_contract::{
+            CapabilityEnvelopeCheckpoint, DriftCheckResult, EnforcementEngine,
+        };
 
         let Some(envelope) = self.attenuated_capability_envelope(config)? else {
             return Ok(None);
         };
         let publisher_key = self.publisher_verifying_key()?;
+        // This is locally regenerated from the authenticated approval and trusted
+        // configuration, not a checkpoint copied from a received envelope.
+        let checkpoint = CapabilityEnvelopeCheckpoint::from_trusted_parts(
+            envelope.caveats().len(),
+            envelope.tail_tag_hex(),
+        )
+        .map_err(|err| anyhow::anyhow!(err.to_string()))?;
         let ceiling = envelope
-            .verify(Some(&publisher_key))
+            .verify(Some(&publisher_key), &checkpoint)
             .map_err(|err| anyhow::anyhow!(err.to_string()))?;
         let engine = EnforcementEngine::from_ceiling(&ceiling);
         let active: Vec<String> = ceiling.allowed_capabilities.iter().cloned().collect();
@@ -2494,7 +2507,9 @@ mod tests {
     #[test]
     fn publisher_approval_synthesizes_and_enforces_macaroon_attenuated_capability_envelope() {
         use crate::config::{Config, NetworkAllowlistEntry, Profile};
-        use crate::extensions::artifact_contract::{AttenuationLayer, CapabilityCaveat};
+        use crate::extensions::artifact_contract::{
+            AttenuationLayer, CapabilityCaveat, CapabilityEnvelopeCheckpoint,
+        };
         use std::collections::BTreeSet;
 
         // Legacy v1 source-only approval preserves `None` without claiming authority.
@@ -2555,8 +2570,17 @@ mod tests {
             .attenuate_for_module_edge(&cfg, "node_modules/dep/index.js", Some(&dep_caps))
             .expect("module edge attenuation")
             .expect("v2 module edge envelope");
+        // Pin the locally issued module edge as part of the required policy.
+        let edge_checkpoint = CapabilityEnvelopeCheckpoint::from_trusted_parts(
+            edge_env.caveats().len(),
+            edge_env.tail_tag_hex(),
+        )
+        .expect("trusted module edge checkpoint");
         let edge_ceiling = edge_env
-            .verify(Some(&approval.publisher_verifying_key().unwrap()))
+            .verify(
+                Some(&approval.publisher_verifying_key().unwrap()),
+                &edge_checkpoint,
+            )
             .expect("verify module edge envelope");
         assert!(!edge_ceiling.permits_capability("network_egress"));
         assert!(!edge_ceiling.permits_capability("fs_read"));
