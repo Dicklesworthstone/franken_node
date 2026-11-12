@@ -28,19 +28,24 @@ use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
 use crate::capacity_defaults::aliases::MAX_NODES_CAP;
+use crate::control_plane::control_epoch::EpochSigningKey;
+use crate::control_plane::epoch_transition_barrier::BarrierConfig;
+use crate::runtime::epoch_transition::ProductEpochCoordinator;
 
 use super::fleet_transport::{
     FleetAction, FleetActionRecord, FleetGuardedPolicyObservationScope, FleetTransport,
     FleetTransportError, GuardedFleetPolicyPublication, MAX_GUARDED_POLICY_REQUEST_BYTES,
-    MAX_GUARDED_POLICY_STALE_AFTER, NodeHealth, NodeStatus, validate_action_record, validate_node_id,
-    validate_node_status, validate_zone_id,
+    MAX_GUARDED_POLICY_STALE_AFTER, NodeHealth, NodeStatus, SeqlockControlPage,
+    certify_fleet_epoch_quiescence, fleet_action_log_checkpoint, validate_action_record,
+    validate_node_id, validate_node_status, validate_zone_id,
 };
 use super::fleet_transport_durable::DurableFleetTransport;
 use super::fleet_transport_http::{
-    FLEET_HTTP_ACTIONS_PATH, FLEET_HTTP_API_SCHEMA, FLEET_HTTP_GUARDED_POLICY_PATH,
-    FLEET_HTTP_HEALTH_PATH, FLEET_HTTP_MAX_REQUEST_BYTES, FLEET_HTTP_NODES_PATH,
-    FLEET_HTTP_STATE_PATH, FleetHttpAck, FleetHttpActionList, FleetHttpHealth, FleetHttpNodeList,
-    FleetHttpProblem, FleetHttpState, bearer_token_matches, parse_bearer_header,
+    FLEET_HTTP_ACTIONS_PATH, FLEET_HTTP_API_SCHEMA, FLEET_HTTP_EPOCH_BARRIER_PATH,
+    FLEET_HTTP_GUARDED_POLICY_PATH, FLEET_HTTP_HEALTH_PATH, FLEET_HTTP_MAX_REQUEST_BYTES,
+    FLEET_HTTP_NODES_PATH, FLEET_HTTP_STATE_PATH, FleetHttpAck, FleetHttpActionList,
+    FleetHttpEpochBarrierRequest, FleetHttpEpochBarrierResponse, FleetHttpHealth,
+    FleetHttpNodeList, FleetHttpProblem, FleetHttpState, bearer_token_matches, parse_bearer_header,
     validate_bearer_token,
 };
 
@@ -177,8 +182,12 @@ impl FleetNodeCredentials {
                     "fleet node credentials must not share a bearer token",
                 ));
             }
-            let supervisor_public_key = record.supervisor_public_key_hex.as_deref().map(|pin| {
-                let bytes: [u8; 32] = hex::decode(pin)
+            let supervisor_public_key =
+                record
+                    .supervisor_public_key_hex
+                    .as_deref()
+                    .map(|pin| {
+                        let bytes: [u8; 32] = hex::decode(pin)
                     .ok()
                     .and_then(|bytes| bytes.try_into().ok())
                     .filter(|_| pin.len() == 64 && pin.bytes().all(|byte| {
@@ -187,13 +196,16 @@ impl FleetNodeCredentials {
                     .ok_or_else(|| FleetTransportError::not_initialized(
                         "supervisor public-key pins must be 32-byte lowercase Ed25519 keys",
                     ))?;
-                ed25519_dalek::VerifyingKey::from_bytes(&bytes)
-                    .ok()
-                    .filter(|key| !key.is_weak())
-                    .ok_or_else(|| FleetTransportError::not_initialized(
-                        "invalid supervisor public-key pin",
-                    ))
-            }).transpose()?;
+                        ed25519_dalek::VerifyingKey::from_bytes(&bytes)
+                            .ok()
+                            .filter(|key| !key.is_weak())
+                            .ok_or_else(|| {
+                                FleetTransportError::not_initialized(
+                                    "invalid supervisor public-key pin",
+                                )
+                            })
+                    })
+                    .transpose()?;
             nodes.push(EnrolledNode {
                 zone_id: record.zone_id,
                 node_id: record.node_id,
@@ -412,8 +424,11 @@ pub struct FleetControlPlaneService {
     /// and every request is executed there, serialized; that is also the
     /// single-writer discipline the WAL store wants.
     store: Mutex<mpsc::Sender<StoreJob>>,
+    state_dir: PathBuf,
     token: String,
     node_credentials: Option<Arc<FleetNodeCredentials>>,
+    epoch_coordinator: Arc<Mutex<ProductEpochCoordinator>>,
+    seqlock_page: Arc<SeqlockControlPage>,
     clock: fn() -> DateTime<Utc>,
 }
 
@@ -437,12 +452,23 @@ impl FleetControlPlaneService {
     /// Fails on an unusable token or an unopenable store.
     pub fn open(state_dir: PathBuf, token: &str) -> Result<Self, FleetTransportError> {
         validate_bearer_token(token).map_err(FleetTransportError::not_initialized)?;
+        let epoch_key_material = Sha256::digest(format!("fleet-epoch-signing:{token}").as_bytes());
+        let epoch_signing_key = EpochSigningKey::new(epoch_key_material.as_slice())
+            .map_err(|err| FleetTransportError::not_initialized(err.to_string()))?;
+        let epoch_coordinator = Arc::new(Mutex::new(ProductEpochCoordinator::new(
+            0,
+            2,
+            BarrierConfig::default(),
+            epoch_signing_key,
+        )));
+        let seqlock_page = Arc::new(SeqlockControlPage::new());
+        let store_dir = state_dir.clone();
         let (jobs, inbox) = mpsc::channel::<StoreJob>();
         let (ready, opened) = mpsc::sync_channel::<Result<(), FleetTransportError>>(1);
         std::thread::Builder::new()
             .name("fleet-control-plane-store".to_string())
             .spawn(move || {
-                let mut transport = match DurableFleetTransport::new(state_dir)
+                let mut transport = match DurableFleetTransport::new(store_dir)
                     .and_then(|mut transport| transport.initialize().map(|()| transport))
                 {
                     Ok(transport) => {
@@ -466,8 +492,11 @@ impl FleetControlPlaneService {
             .map_err(|_| FleetTransportError::io("fleet store thread exited during startup"))??;
         Ok(Self {
             store: Mutex::new(jobs),
+            state_dir,
             token: token.to_string(),
             node_credentials: None,
+            epoch_coordinator,
+            seqlock_page,
             clock: Utc::now,
         })
     }
@@ -552,6 +581,7 @@ impl FleetControlPlaneService {
                 | FLEET_HTTP_NODES_PATH
                 | FLEET_HTTP_STATE_PATH
                 | FLEET_HTTP_GUARDED_POLICY_PATH
+                | FLEET_HTTP_EPOCH_BARRIER_PATH
         );
         if !known_path {
             return FleetHttpResponse::problem(
@@ -606,6 +636,7 @@ impl FleetControlPlaneService {
             let permitted = match (&principal, path) {
                 (FleetPrincipal::Operator, FLEET_HTTP_ACTIONS_PATH)
                 | (FleetPrincipal::Operator, FLEET_HTTP_GUARDED_POLICY_PATH)
+                | (FleetPrincipal::Operator, FLEET_HTTP_EPOCH_BARRIER_PATH)
                 | (FleetPrincipal::Node { .. }, FLEET_HTTP_NODES_PATH) => true,
                 (FleetPrincipal::Operator, FLEET_HTTP_NODES_PATH) => {
                     self.node_credentials.is_none()
@@ -705,6 +736,92 @@ impl FleetControlPlaneService {
                     ))
                 })
             }
+            ("POST", FLEET_HTTP_EPOCH_BARRIER_PATH) => {
+                let Some(enrollment) = enrollment else {
+                    return FleetHttpResponse::problem(
+                        409,
+                        "conflict",
+                        "FLEET_HTTP_NODE_ENROLLMENT_REQUIRED",
+                        "epoch-barrier quiescence certification requires enrolled per-node Ed25519 supervisor credentials",
+                    );
+                };
+                let mut roots = BTreeMap::new();
+                for node in &enrollment.nodes {
+                    let Some(key) = node.supervisor_public_key else {
+                        return FleetHttpResponse::problem(
+                            409,
+                            "conflict",
+                            "FLEET_HTTP_SUPERVISOR_KEY_REQUIRED",
+                            format!(
+                                "enrolled participant `{}/{}` lacks a pinned supervisor_public_key_hex",
+                                node.zone_id, node.node_id
+                            ),
+                        );
+                    };
+                    roots.insert((node.zone_id.clone(), node.node_id.clone()), key);
+                }
+                let barrier_req: FleetHttpEpochBarrierRequest = match parse_body(request.body) {
+                    Ok(req) => req,
+                    Err(response) => return response,
+                };
+                let clock = self.clock;
+                let epoch_coordinator = Arc::clone(&self.epoch_coordinator);
+                let seqlock_page = Arc::clone(&self.seqlock_page);
+                let seqlock_path = self.state_dir.join("seqlock.page");
+                self.with_transport(move |transport, authenticated| {
+                    let now = clock();
+                    let mut state = transport.read_shared_state()?;
+                    enrolled_node_view(&mut state.nodes, &enrollment, authenticated, now)?;
+                    let mut coordinator = match epoch_coordinator.lock() {
+                        Ok(guard) => guard,
+                        Err(poisoned) => poisoned.into_inner(),
+                    };
+                    let (evidence, certificate) = certify_fleet_epoch_quiescence(
+                        &mut coordinator,
+                        &state,
+                        &roots,
+                        super::fleet_transport::FleetEpochBarrierParams {
+                            initiator: &barrier_req.initiator,
+                            reason: &barrier_req.reason,
+                            now,
+                            stale_after: barrier_req
+                                .stale_after
+                                .min(MAX_GUARDED_POLICY_STALE_AFTER),
+                            trace_id: &barrier_req.trace_id,
+                        },
+                    )?;
+                    let checkpoint = fleet_action_log_checkpoint(&state.actions)?;
+                    let mut digest_prefix = [0_u8; 32];
+                    if let Ok(decoded) = hex::decode(&checkpoint.actions_sha256)
+                        && decoded.len() == 32
+                    {
+                        digest_prefix.copy_from_slice(&decoded);
+                    }
+                    let max_qv = state
+                        .nodes
+                        .iter()
+                        .map(|n| n.quarantine_version)
+                        .max()
+                        .unwrap_or(0);
+                    seqlock_page.publish(
+                        certificate.committed_epoch,
+                        max_qv,
+                        0,
+                        checkpoint.action_count,
+                        digest_prefix,
+                    );
+                    seqlock_page.write_shared_page(&seqlock_path)?;
+                    Ok(FleetHttpResponse::json(
+                        200,
+                        "ok",
+                        &FleetHttpEpochBarrierResponse {
+                            schema_version: FLEET_HTTP_API_SCHEMA.to_string(),
+                            evidence,
+                            certificate,
+                        },
+                    ))
+                })
+            }
             ("GET", FLEET_HTTP_NODES_PATH) => {
                 let clock = self.clock;
                 self.with_transport(move |transport, authenticated| {
@@ -743,16 +860,21 @@ impl FleetControlPlaneService {
                 }
                 let recorded_at = (self.clock)();
                 if let Some(credentials) = &enrollment
-                    && let Err(error) = verify_supervisor_observation(&status, credentials, recorded_at)
+                    && let Err(error) =
+                        verify_supervisor_observation(&status, credentials, recorded_at)
                 {
                     return invalid_record(&error);
                 }
                 status.last_seen = recorded_at;
                 self.with_transport(move |transport, authenticated| {
                     let root = enrollment.as_ref().and_then(|credentials| {
-                        credentials.nodes.iter().find(|node| {
-                            node.node_id == status.node_id && node.zone_id == status.zone_id
-                        }).and_then(|node| node.supervisor_public_key.as_ref())
+                        credentials
+                            .nodes
+                            .iter()
+                            .find(|node| {
+                                node.node_id == status.node_id && node.zone_id == status.zone_id
+                            })
+                            .and_then(|node| node.supervisor_public_key.as_ref())
                     });
                     if let Some(root) = root {
                         transport.upsert_node_status_with_supervisor(&status, root)?;
@@ -866,12 +988,9 @@ fn store_error(err: &FleetTransportError) -> FleetHttpResponse {
             "FLEET_HTTP_ACTION_CONFLICT",
             err.to_string(),
         ),
-        FleetTransportError::StaleState { .. } => FleetHttpResponse::problem(
-            409,
-            "conflict",
-            "FLEET_HTTP_STALE_STATE",
-            err.to_string(),
-        ),
+        FleetTransportError::StaleState { .. } => {
+            FleetHttpResponse::problem(409, "conflict", "FLEET_HTTP_STALE_STATE", err.to_string())
+        }
         FleetTransportError::LockContention { .. } => {
             FleetHttpResponse::problem(503, "busy", "FLEET_HTTP_STORE_BUSY", err.to_string())
         }
@@ -1141,6 +1260,7 @@ fn build_fleet_app(
         .get(FLEET_HTTP_ACTIONS_PATH, route("GET"))
         .post(FLEET_HTTP_ACTIONS_PATH, route("POST"))
         .post(FLEET_HTTP_GUARDED_POLICY_PATH, route("POST"))
+        .post(FLEET_HTTP_EPOCH_BARRIER_PATH, route("POST"))
         .get(FLEET_HTTP_NODES_PATH, route("GET"))
         .post(FLEET_HTTP_NODES_PATH, route("POST"))
         .get(FLEET_HTTP_STATE_PATH, route("GET"))

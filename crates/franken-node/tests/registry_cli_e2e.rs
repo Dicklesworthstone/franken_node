@@ -1016,8 +1016,13 @@ fn registry_source_capsule_admits_native_cjs_and_esm() {
                 String::from_utf8_lossy(&output.stderr)
             );
             let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-            assert_eq!(report["dispatch"]["captured_output"]["stdout"], expected_output);
-            assert!(!String::from_utf8_lossy(&output.stdout).contains("UNAPPROVED_OPTIONAL_MODULE"));
+            assert_eq!(
+                report["dispatch"]["captured_output"]["stdout"],
+                expected_output
+            );
+            assert!(
+                !String::from_utf8_lossy(&output.stdout).contains("UNAPPROVED_OPTIONAL_MODULE")
+            );
         }
     }
 }
@@ -1233,7 +1238,11 @@ fn registry_runtime_authority_denies_filesystem_effect_in_loaded_module() {
     )
     .unwrap();
     for path in ["app.cjs", "side.cjs"] {
-        fs::rename(fixture.project.path().join(path), fixture.registry.path().join(path)).unwrap();
+        fs::rename(
+            fixture.project.path().join(path),
+            fixture.registry.path().join(path),
+        )
+        .unwrap();
     }
     let output = fixture.run_directory(&[]);
     let diagnostics = format!(
@@ -1541,8 +1550,14 @@ fn registry_source_capsule_executes_original_bytes_after_live_source_replacement
         String::from_utf8_lossy(&output.stderr)
     );
     let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(report["dispatch"]["captured_output"]["stdout"], "PUBLISHER_APPROVED_WORKLOAD 42\n");
-    assert_eq!(report["receipt"]["native_module_graph"]["graph_input_hash"], fixture.graph_hash);
+    assert_eq!(
+        report["dispatch"]["captured_output"]["stdout"],
+        "PUBLISHER_APPROVED_WORKLOAD 42\n"
+    );
+    assert_eq!(
+        report["receipt"]["native_module_graph"]["graph_input_hash"],
+        fixture.graph_hash
+    );
     assert!(!String::from_utf8_lossy(&output.stdout).contains("UNSIGNED_ENTRY_EXECUTED"));
 }
 
@@ -1551,18 +1566,51 @@ fn registry_source_capsule_executes_original_bytes_after_live_source_replacement
 fn registry_source_capsule_directory_runs_without_installed_sources() {
     for esm in [false, true] {
         let (entry, dependency, source, side, expected) = if esm {
-            ("src/app.mjs", "src/side.mjs", "import value from './side.mjs'; console.log('PUBLISHER_APPROVED_WORKLOAD', value); import('./optional.mjs').catch(error => console.log('OPTIONAL', error.code));\n", "export default 42;\n", "PUBLISHER_APPROVED_WORKLOAD 42\nOPTIONAL ERR_MODULE_NOT_FOUND\n")
+            (
+                "src/app.mjs",
+                "src/side.mjs",
+                "import value from './side.mjs'; console.log('PUBLISHER_APPROVED_WORKLOAD', value); import('./optional.mjs').catch(error => console.log('OPTIONAL', error.code));\n",
+                "export default 42;\n",
+                "PUBLISHER_APPROVED_WORKLOAD 42\nOPTIONAL ERR_MODULE_NOT_FOUND\n",
+            )
         } else {
-            ("src/app.cjs", "src/side.cjs", "const value = require('./side.cjs'); console.log('PUBLISHER_APPROVED_WORKLOAD', value); try { require('./optional.cjs'); } catch (error) { console.log('OPTIONAL', error.code); }\n", "module.exports = 42;\n", "PUBLISHER_APPROVED_WORKLOAD 42\nOPTIONAL MODULE_NOT_FOUND\n")
+            (
+                "src/app.cjs",
+                "src/side.cjs",
+                "const value = require('./side.cjs'); console.log('PUBLISHER_APPROVED_WORKLOAD', value); try { require('./optional.cjs'); } catch (error) { console.log('OPTIONAL', error.code); }\n",
+                "module.exports = 42;\n",
+                "PUBLISHER_APPROVED_WORKLOAD 42\nOPTIONAL MODULE_NOT_FOUND\n",
+            )
         };
-        let fixture = PublishedSourceFixture::with_modules(entry, &[(entry, source), (dependency, side)]);
-        fs::rename(fixture.project.path().join("src"), fixture.registry.path().join("retained-sources")).unwrap();
+        let fixture =
+            PublishedSourceFixture::with_modules(entry, &[(entry, source), (dependency, side)]);
+        fs::rename(
+            fixture.project.path().join("src"),
+            fixture.registry.path().join("retained-sources"),
+        )
+        .unwrap();
         for replaced in [false, true] {
             if replaced {
                 fs::create_dir(fixture.project.path().join("src")).unwrap();
-                fs::write(fixture.project.path().join(entry), "console.log('UNSIGNED_ENTRY_EXECUTED');\n").unwrap();
-                fs::write(fixture.project.path().join(dependency), "throw new Error('unsigned dependency');\n").unwrap();
-                fs::write(fixture.project.path().join(if esm { "src/optional.mjs" } else { "src/optional.cjs" }), "console.log('UNSIGNED_OPTIONAL_EXECUTED');\n").unwrap();
+                fs::write(
+                    fixture.project.path().join(entry),
+                    "console.log('UNSIGNED_ENTRY_EXECUTED');\n",
+                )
+                .unwrap();
+                fs::write(
+                    fixture.project.path().join(dependency),
+                    "throw new Error('unsigned dependency');\n",
+                )
+                .unwrap();
+                fs::write(
+                    fixture.project.path().join(if esm {
+                        "src/optional.mjs"
+                    } else {
+                        "src/optional.cjs"
+                    }),
+                    "console.log('UNSIGNED_OPTIONAL_EXECUTED');\n",
+                )
+                .unwrap();
             }
             let output = fixture.run_directory(&["--capture-replay"]);
             assert!(
@@ -1573,7 +1621,10 @@ fn registry_source_capsule_directory_runs_without_installed_sources() {
             );
             let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
             assert_eq!(report["dispatch"]["captured_output"]["stdout"], expected);
-            assert_eq!(report["receipt"]["native_module_graph"]["graph_input_hash"], fixture.graph_hash);
+            assert_eq!(
+                report["receipt"]["native_module_graph"]["graph_input_hash"],
+                fixture.graph_hash
+            );
             assert!(report["dispatch"]["native_replay"]["payload_json"].is_string());
             assert!(!String::from_utf8_lossy(&output.stdout).contains("UNSIGNED_"));
         }
@@ -1598,11 +1649,18 @@ fn registry_source_capsule_quarantine_release_uses_authenticated_source_without_
     let first = fixture.run_directory(&[]);
     assert!(!first.status.success());
     let report: serde_json::Value = serde_json::from_slice(&first.stdout).unwrap();
-    assert_eq!(report["schema_version"], "franken-node/run-failure-effect-evidence/v2");
-    assert_eq!(report["dispatch"]["sentinel"]["escalated"], true, "{report}");
+    assert_eq!(
+        report["schema_version"],
+        "franken-node/run-failure-effect-evidence/v2"
+    );
+    assert_eq!(
+        report["dispatch"]["sentinel"]["escalated"], true,
+        "{report}"
+    );
     let enforcement = &report["receipt"]["sentinel_enforcement"];
     assert_eq!(enforcement["mode"], "enforced");
-    let hash = frankenengine_node::supply_chain::registry_artifact::artifact_sha256(source.as_bytes());
+    let hash =
+        frankenengine_node::supply_chain::registry_artifact::artifact_sha256(source.as_bytes());
     assert_eq!(enforcement["app_content_hash"], hash);
     let record_path = fixture
         .project
@@ -1616,7 +1674,10 @@ fn registry_source_capsule_quarantine_release_uses_authenticated_source_without_
     let blocked = fixture.run_directory(&[]);
     assert!(!blocked.status.success());
     let blocked: serde_json::Value = serde_json::from_slice(&blocked.stdout).unwrap();
-    assert!(blocked.to_string().contains("sentinel_quarantined"), "{blocked}");
+    assert!(
+        blocked.to_string().contains("sentinel_quarantined"),
+        "{blocked}"
+    );
     assert!(blocked["dispatch"].is_null());
 
     let release = |key: &Path| {
@@ -1662,7 +1723,10 @@ fn registry_source_capsule_quarantine_release_uses_authenticated_source_without_
     let retained: serde_json::Value =
         serde_json::from_slice(&fs::read(&record_path).unwrap()).unwrap();
     assert_eq!(retained["released"], true);
-    assert_eq!(retained["escalation_receipt"], original["escalation_receipt"]);
+    assert_eq!(
+        retained["escalation_receipt"],
+        original["escalation_receipt"]
+    );
     assert!(!fixture.project.path().join("app.cjs").exists());
 
     // Releasing the subject permits another evaluation; it does not erase the
@@ -1670,7 +1734,10 @@ fn registry_source_capsule_quarantine_release_uses_authenticated_source_without_
     let rerun = fixture.run_directory(&[]);
     assert!(!rerun.status.success());
     let rerun: serde_json::Value = serde_json::from_slice(&rerun.stdout).unwrap();
-    assert_eq!(rerun["schema_version"], "franken-node/run-failure-effect-evidence/v2");
+    assert_eq!(
+        rerun["schema_version"],
+        "franken-node/run-failure-effect-evidence/v2"
+    );
     assert_eq!(rerun["dispatch"]["sentinel"]["escalated"], true);
 }
 

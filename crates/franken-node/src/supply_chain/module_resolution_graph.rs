@@ -1351,11 +1351,9 @@ fn parse_manifest(
         .map_err(|error| ModuleResolutionGraphError::InvalidMetadata {
             detail: format!("{}: {error:#}", manifest_path.display()),
         })?,
-        _ => serde_json::from_str(text).map_err(|source| {
-            ModuleResolutionGraphError::Json {
-                path: manifest_path.to_path_buf(),
-                source,
-            }
+        _ => serde_json::from_str(text).map_err(|source| ModuleResolutionGraphError::Json {
+            path: manifest_path.to_path_buf(),
+            source,
         })?,
     };
 
@@ -1537,9 +1535,11 @@ fn workspace_patterns(manifest: &Value) -> ModuleResolutionGraphResult<Vec<Strin
     };
     let mut patterns = Vec::new();
     for item in items {
-        let pattern = item.as_str().ok_or_else(|| ModuleResolutionGraphError::InvalidMetadata {
-            detail: "workspace selector must be a string".into(),
-        })?;
+        let pattern = item
+            .as_str()
+            .ok_or_else(|| ModuleResolutionGraphError::InvalidMetadata {
+                detail: "workspace selector must be a string".into(),
+            })?;
         patterns.push(pattern.to_owned());
     }
     patterns.sort();

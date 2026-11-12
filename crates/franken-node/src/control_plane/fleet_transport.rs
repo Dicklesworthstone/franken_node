@@ -2183,17 +2183,24 @@ impl FleetGuardedPolicyReceipt {
         }
         .validate()?;
         let evidence = &self.evidence;
+        let expected_scope = if self.fleet_quiescence_certified {
+            FLEET_EPOCH_BARRIER_CERTIFIED_HOLD_SCOPE
+        } else {
+            "local_supervisor_maintenance_observations"
+        };
         if self.schema_version != FLEET_GUARDED_POLICY_RECEIPT_SCHEMA
-            || self.fleet_quiescence_certified
+            || self.fleet_quiescence_certified != evidence.fleet_quiescence_certified
+            || (self.fleet_quiescence_certified
+                && self.observation_scope
+                    != FleetGuardedPolicyObservationScope::EnrolledNodeObservations)
             || evidence.schema_version != "franken-node/fleet-native-session-hold-evidence/v1"
-            || evidence.scope != "local_supervisor_maintenance_observations"
+            || evidence.scope != expected_scope
             || evidence.observed_at != self.accepted_at
             || evidence.hold_action_id != self.guard.hold_action_id
             || evidence.hold_zone_id != guarded_policy_zone(&self.action)?
             || evidence.target != FleetNativeSessionHoldTarget::Held
             || !evidence.complete
             || evidence.admission_resumed
-            || evidence.fleet_quiescence_certified
             || !evidence.uncovered_zones.is_empty()
             || evidence.action_count != self.guard.expected_action_log.action_count
             || evidence.action_count == 0
@@ -2201,6 +2208,13 @@ impl FleetGuardedPolicyReceipt {
             || evidence.stale_after > self.guard.stale_after
             || evidence.nodes.is_empty()
             || evidence.nodes.len() > MAX_NODES_CAP
+            || (self.fleet_quiescence_certified
+                && evidence.nodes.iter().any(|node| {
+                    node.native_session_drain
+                        .as_ref()
+                        .and_then(|drain| drain.supervisor_attestation.as_ref())
+                        .is_none()
+                }))
         {
             return Err(FleetTransportError::serialization(
                 "guarded policy receipt contradicts its accepted hold evidence",
@@ -2212,7 +2226,9 @@ impl FleetGuardedPolicyReceipt {
         let mut previous_identity = None;
         for node in &evidence.nodes {
             let identity = (node.zone_id.clone(), node.node_id.clone());
-            if previous_identity.as_ref().is_some_and(|previous| previous >= &identity)
+            if previous_identity
+                .as_ref()
+                .is_some_and(|previous| previous >= &identity)
                 || (evidence.hold_zone_id != "all" && node.zone_id != evidence.hold_zone_id)
                 || node.expected_actions.action_count == 0
                 || node.expected_actions.action_count > evidence.action_count
@@ -2223,7 +2239,10 @@ impl FleetGuardedPolicyReceipt {
                 || node.applied_actions.as_ref() != Some(&node.expected_actions)
                 || node.active_hold_ids.is_empty()
                 || node.active_hold_ids.len() > MAX_NATIVE_SESSION_MAINTENANCE_HOLDS
-                || node.active_hold_ids.windows(2).any(|pair| pair[0] >= pair[1])
+                || node
+                    .active_hold_ids
+                    .windows(2)
+                    .any(|pair| pair[0] >= pair[1])
                 || !node.active_hold_ids.contains(&self.guard.hold_action_id)
             {
                 return Err(FleetTransportError::serialization(
@@ -2325,7 +2344,11 @@ pub fn validate_guarded_fleet_policy_publication(
             "guarded policy publication requires the exact retained full action log",
         ));
     }
-    if state.actions.iter().any(|record| record.action_id == request.action.action_id) {
+    if state
+        .actions
+        .iter()
+        .any(|record| record.action_id == request.action.action_id)
+    {
         return Err(FleetTransportError::action_conflict(
             "existing policy action requires its original durable guarded receipt",
         ));
@@ -4230,6 +4253,438 @@ fn read_bounded_jsonl_line<R: BufRead>(
         )));
     }
     Ok(bytes_read)
+}
+
+pub const FLEET_EPOCH_BARRIER_CERTIFIED_DRAIN_SCOPE: &str =
+    "enrolled_epoch_barrier_quiescence_certified";
+pub const FLEET_EPOCH_BARRIER_CERTIFIED_HOLD_SCOPE: &str =
+    "enrolled_epoch_barrier_hold_quiescence_certified";
+pub const FLEET_EPOCH_QUIESCENCE_CERTIFICATE_SCHEMA: &str =
+    "franken-node/fleet-epoch-quiescence-certificate/v1";
+const SEQLOCK_PAGE_MAGIC: &[u8; 8] = b"FNSQLK01";
+const SEQLOCK_PAGE_BYTES: usize = 80;
+
+/// Distinct fleet acknowledgement stages (bd-reality-20260923-26n9r.30).
+///
+/// Separates durable action persistence from policy application, node-local
+/// session drain quiescence, and distributed epoch-barrier certification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FleetAcknowledgementStage {
+    Persisted,
+    PolicyApplied,
+    SessionQuiesced,
+    EpochBarrierCertified,
+}
+
+#[must_use]
+pub fn classify_node_acknowledgement_stage(
+    node: &NodeStatus,
+    expected_actions: &FleetApplicationCheckpoint,
+    epoch_barrier_certified: bool,
+) -> FleetAcknowledgementStage {
+    if node.applied_actions.as_ref() != Some(expected_actions) {
+        return FleetAcknowledgementStage::Persisted;
+    }
+    let Some(drain) = &node.native_session_drain else {
+        return FleetAcknowledgementStage::PolicyApplied;
+    };
+    if &drain.applied_actions != expected_actions
+        || drain.indeterminate_sessions > 0
+        || drain.pending_sessions > 0
+    {
+        return FleetAcknowledgementStage::PolicyApplied;
+    }
+    if epoch_barrier_certified && drain.supervisor_attestation.is_some() {
+        FleetAcknowledgementStage::EpochBarrierCertified
+    } else {
+        FleetAcknowledgementStage::SessionQuiesced
+    }
+}
+
+/// Lock-free `O(1)` control snapshot for worker safepoint checks (`#![forbid(unsafe_code)]`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SeqlockControlSnapshot {
+    pub sequence: u64,
+    pub control_epoch: u64,
+    pub quarantine_version: u64,
+    pub active_hold_count: u64,
+    pub action_count: u64,
+    pub action_log_digest_prefix: [u8; 32],
+}
+
+/// Safe lock-free Seqlock control page using odd/even sequence fencing in-process
+/// plus a fixed-size header/trailer-framed binary file page for cross-process readers.
+pub struct SeqlockControlPage {
+    sequence: std::sync::atomic::AtomicU64,
+    control_epoch: std::sync::atomic::AtomicU64,
+    quarantine_version: std::sync::atomic::AtomicU64,
+    active_hold_count: std::sync::atomic::AtomicU64,
+    action_count: std::sync::atomic::AtomicU64,
+    digest_words: [std::sync::atomic::AtomicU64; 4],
+    writer_gate: Mutex<()>,
+}
+
+impl Default for SeqlockControlPage {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SeqlockControlPage {
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            sequence: std::sync::atomic::AtomicU64::new(0),
+            control_epoch: std::sync::atomic::AtomicU64::new(0),
+            quarantine_version: std::sync::atomic::AtomicU64::new(0),
+            active_hold_count: std::sync::atomic::AtomicU64::new(0),
+            action_count: std::sync::atomic::AtomicU64::new(0),
+            digest_words: [
+                std::sync::atomic::AtomicU64::new(0),
+                std::sync::atomic::AtomicU64::new(0),
+                std::sync::atomic::AtomicU64::new(0),
+                std::sync::atomic::AtomicU64::new(0),
+            ],
+            writer_gate: Mutex::new(()),
+        }
+    }
+
+    pub fn publish(
+        &self,
+        control_epoch: u64,
+        quarantine_version: u64,
+        active_hold_count: u64,
+        action_count: u64,
+        action_log_digest_prefix: [u8; 32],
+    ) -> SeqlockControlSnapshot {
+        use std::sync::atomic::Ordering;
+        let _writer = match self.writer_gate.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let odd = self.sequence.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
+        debug_assert_eq!(odd & 1, 1);
+        self.control_epoch.store(control_epoch, Ordering::Release);
+        self.quarantine_version
+            .store(quarantine_version, Ordering::Release);
+        self.active_hold_count
+            .store(active_hold_count, Ordering::Release);
+        self.action_count.store(action_count, Ordering::Release);
+        for (idx, chunk) in action_log_digest_prefix
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .enumerate()
+        {
+            self.digest_words[idx].store(u64::from_le_bytes(*chunk), Ordering::Release);
+        }
+        let even = self
+            .sequence
+            .fetch_add(1, Ordering::Release)
+            .wrapping_add(1);
+        debug_assert_eq!(even & 1, 0);
+        SeqlockControlSnapshot {
+            sequence: even,
+            control_epoch,
+            quarantine_version,
+            active_hold_count,
+            action_count,
+            action_log_digest_prefix,
+        }
+    }
+
+    /// Lock-free `O(1)` safepoint read; retries automatically if a concurrent writer is active.
+    #[must_use]
+    pub fn read_safepoint(&self) -> SeqlockControlSnapshot {
+        use std::sync::atomic::Ordering;
+        loop {
+            let seq1 = self.sequence.load(Ordering::Acquire);
+            if (seq1 & 1) != 0 {
+                std::hint::spin_loop();
+                continue;
+            }
+            let control_epoch = self.control_epoch.load(Ordering::Acquire);
+            let quarantine_version = self.quarantine_version.load(Ordering::Acquire);
+            let active_hold_count = self.active_hold_count.load(Ordering::Acquire);
+            let action_count = self.action_count.load(Ordering::Acquire);
+            let mut action_log_digest_prefix = [0_u8; 32];
+            for (idx, word_atomic) in self.digest_words.iter().enumerate() {
+                let bytes = word_atomic.load(Ordering::Acquire).to_le_bytes();
+                action_log_digest_prefix[idx * 8..(idx + 1) * 8].copy_from_slice(&bytes);
+            }
+            let seq2 = self.sequence.load(Ordering::Acquire);
+            if seq1 == seq2 {
+                return SeqlockControlSnapshot {
+                    sequence: seq2,
+                    control_epoch,
+                    quarantine_version,
+                    active_hold_count,
+                    action_count,
+                    action_log_digest_prefix,
+                };
+            }
+            std::hint::spin_loop();
+        }
+    }
+
+    /// Persist a binary Seqlock page with leading/trailing even sequence markers for cross-process readers.
+    pub fn write_shared_page(
+        &self,
+        path: &Path,
+    ) -> Result<SeqlockControlSnapshot, FleetTransportError> {
+        let snapshot = self.read_safepoint();
+        let mut buf = [0_u8; SEQLOCK_PAGE_BYTES];
+        buf[0..8].copy_from_slice(SEQLOCK_PAGE_MAGIC);
+        buf[8..16].copy_from_slice(&snapshot.sequence.to_le_bytes());
+        buf[16..24].copy_from_slice(&snapshot.control_epoch.to_le_bytes());
+        buf[24..32].copy_from_slice(&snapshot.quarantine_version.to_le_bytes());
+        buf[32..40].copy_from_slice(&snapshot.active_hold_count.to_le_bytes());
+        buf[40..48].copy_from_slice(&snapshot.action_count.to_le_bytes());
+        buf[48..80].copy_from_slice(&snapshot.action_log_digest_prefix);
+        let parent = normalized_directory(path.parent().unwrap_or_else(|| Path::new(".")));
+        fs::create_dir_all(parent).map_err(|err| {
+            FleetTransportError::io(format!(
+                "create seqlock page parent {}: {err}",
+                parent.display()
+            ))
+        })?;
+        let tmp_path = path.with_extension(format!("seqlock-{}.tmp", Uuid::now_v7()));
+        fs::write(&tmp_path, buf).map_err(|err| {
+            FleetTransportError::io(format!(
+                "write seqlock page temp {}: {err}",
+                tmp_path.display()
+            ))
+        })?;
+        fs::rename(&tmp_path, path).map_err(|err| {
+            FleetTransportError::io(format!("publish seqlock page {}: {err}", path.display()))
+        })?;
+        Ok(snapshot)
+    }
+
+    pub fn read_shared_page(path: &Path) -> Result<SeqlockControlSnapshot, FleetTransportError> {
+        let bytes = fs::read(path).map_err(|err| {
+            FleetTransportError::io(format!("read seqlock page {}: {err}", path.display()))
+        })?;
+        if bytes.len() != SEQLOCK_PAGE_BYTES || &bytes[0..8] != SEQLOCK_PAGE_MAGIC {
+            return Err(FleetTransportError::serialization(
+                "invalid seqlock control page header or byte length",
+            ));
+        }
+        let read_u64 = |offset: usize| -> u64 {
+            let mut word = [0_u8; 8];
+            word.copy_from_slice(&bytes[offset..offset + 8]);
+            u64::from_le_bytes(word)
+        };
+        let sequence = read_u64(8);
+        if (sequence & 1) != 0 {
+            return Err(FleetTransportError::stale_state(
+                "seqlock control page has odd writer-in-progress sequence",
+            ));
+        }
+        let mut action_log_digest_prefix = [0_u8; 32];
+        action_log_digest_prefix.copy_from_slice(&bytes[48..80]);
+        Ok(SeqlockControlSnapshot {
+            sequence,
+            control_epoch: read_u64(16),
+            quarantine_version: read_u64(24),
+            active_hold_count: read_u64(32),
+            action_count: read_u64(40),
+            action_log_digest_prefix,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FleetEpochParticipantQuiescence {
+    pub zone_id: String,
+    pub node_id: String,
+    pub stage: FleetAcknowledgementStage,
+    pub drain_id: String,
+    pub generation: u64,
+    pub admitted_sessions: u64,
+    pub terminal_sessions: u64,
+    pub session_set_sha256: String,
+    pub checkpoint_sha256: String,
+    pub supervisor_key_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FleetEpochQuiescenceCertificate {
+    pub schema_version: String,
+    pub transition_id: String,
+    pub pre_epoch: u64,
+    pub committed_epoch: u64,
+    pub initiator: String,
+    pub reason: String,
+    pub trace_id: String,
+    pub certified_at: DateTime<Utc>,
+    pub action_log_checkpoint: FleetActionLogCheckpoint,
+    pub fleet_quiescence_certified: bool,
+    pub participants: Vec<FleetEpochParticipantQuiescence>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct FleetEpochBarrierParams<'a> {
+    pub initiator: &'a str,
+    pub reason: &'a str,
+    pub now: DateTime<Utc>,
+    pub stale_after: Duration,
+    pub trace_id: &'a str,
+}
+
+/// Drive `ProductEpochCoordinator` (`EpochTransitionBarrier` + `EpochStore`) over
+/// enrolled per-node Ed25519 supervisor drain attestations to certify fleet quiescence.
+///
+/// Fails closed and aborts the active barrier whenever any enrolled node is missing,
+/// stale, unauthenticated, outside `PolicyApplied`, or retains `pending_sessions > 0`
+/// or `indeterminate_sessions > 0`.
+pub fn certify_fleet_epoch_quiescence(
+    coordinator: &mut crate::runtime::epoch_transition::ProductEpochCoordinator,
+    state: &FleetSharedState,
+    enrolled_supervisor_roots: &BTreeMap<(String, String), ed25519_dalek::VerifyingKey>,
+    params: FleetEpochBarrierParams<'_>,
+) -> Result<(FleetNativeDrainEvidence, FleetEpochQuiescenceCertificate), FleetTransportError> {
+    let FleetEpochBarrierParams {
+        initiator,
+        reason,
+        now,
+        stale_after,
+        trace_id,
+    } = params;
+    if enrolled_supervisor_roots.is_empty() {
+        return Err(FleetTransportError::not_initialized(
+            "fleet epoch quiescence certification requires enrolled per-node supervisor keys",
+        ));
+    }
+    if initiator.trim().is_empty() || reason.trim().is_empty() || trace_id.trim().is_empty() {
+        return Err(FleetTransportError::serialization(
+            "fleet epoch quiescence certification requires non-empty initiator, reason, and trace_id",
+        ));
+    }
+    let action_log_checkpoint = fleet_action_log_checkpoint(&state.actions)?;
+    if action_log_checkpoint.action_count == 0 {
+        return Err(FleetTransportError::stale_state(
+            "fleet epoch quiescence certification requires at least one retained fleet action",
+        ));
+    }
+    let required_nodes: BTreeSet<(String, String)> =
+        enrolled_supervisor_roots.keys().cloned().collect();
+    let mut evidence = fleet_native_drain_evidence(state, &required_nodes, now, stale_after)?;
+    for (zone_id, node_id) in &required_nodes {
+        coordinator.register_service(&format!("{zone_id}/{node_id}"));
+    }
+    let timestamp_ms = u64::try_from(now.timestamp_millis().max(0)).unwrap_or(0);
+    let proposal = coordinator
+        .propose_transition(initiator, reason, timestamp_ms, trace_id)
+        .map_err(|err| FleetTransportError::stale_state(err.to_string()))?;
+
+    let mut participants = Vec::with_capacity(evidence.nodes.len());
+    let mut abort_detail: Option<String> = None;
+
+    if !evidence.complete {
+        abort_detail = Some(
+            "not all required fleet participants have fresh terminal native-session drains"
+                .to_string(),
+        );
+    }
+
+    if abort_detail.is_none() {
+        for node in &evidence.nodes {
+            let identity = (node.zone_id.clone(), node.node_id.clone());
+            let Some(root) = enrolled_supervisor_roots.get(&identity) else {
+                abort_detail = Some(format!(
+                    "participant `{}/{}` lacks an enrolled Ed25519 supervisor key",
+                    node.zone_id, node.node_id
+                ));
+                break;
+            };
+            let Some(drain) = &node.native_session_drain else {
+                abort_detail = Some(format!(
+                    "participant `{}/{}` is missing native_session_drain",
+                    node.zone_id, node.node_id
+                ));
+                break;
+            };
+            if drain.indeterminate_sessions > 0 || drain.pending_sessions > 0 {
+                abort_detail = Some(format!(
+                    "participant `{}/{}` retains pending={} indeterminate={} sessions",
+                    node.zone_id,
+                    node.node_id,
+                    drain.pending_sessions,
+                    drain.indeterminate_sessions
+                ));
+                break;
+            }
+            let Some(attestation) = &drain.supervisor_attestation else {
+                abort_detail = Some(format!(
+                    "participant `{}/{}` drain checkpoint is unsigned",
+                    node.zone_id, node.node_id
+                ));
+                break;
+            };
+            if let Err(err) = attestation
+                .verify(drain, &node.node_id, &node.zone_id, root)
+                .and_then(|()| attestation.validate_freshness(now))
+            {
+                abort_detail = Some(format!(
+                    "participant `{}/{}` supervisor attestation failed verification: {err}",
+                    node.zone_id, node.node_id
+                ));
+                break;
+            }
+            let participant_id = format!("{}/{}", node.zone_id, node.node_id);
+            if let Err(err) =
+                coordinator.ack_drain(&participant_id, drain.admitted_sessions, 0, trace_id)
+            {
+                abort_detail = Some(err.to_string());
+                break;
+            }
+            participants.push(FleetEpochParticipantQuiescence {
+                zone_id: node.zone_id.clone(),
+                node_id: node.node_id.clone(),
+                stage: FleetAcknowledgementStage::EpochBarrierCertified,
+                drain_id: attestation.drain_id.clone(),
+                generation: attestation.generation,
+                admitted_sessions: drain.admitted_sessions,
+                terminal_sessions: drain.terminal_sessions,
+                session_set_sha256: drain.session_set_sha256.clone(),
+                checkpoint_sha256: attestation.checkpoint_sha256.clone(),
+                supervisor_key_id: attestation.product_root_key_id.clone(),
+            });
+        }
+    }
+
+    if let Some(detail) = abort_detail {
+        let _ = coordinator.abort_transition_cancellation(&detail, timestamp_ms, trace_id);
+        return Err(FleetTransportError::stale_state(format!(
+            "epoch barrier `{}` aborted before commit: {detail}",
+            proposal.transition_id
+        )));
+    }
+
+    let committed_epoch = coordinator
+        .commit_transition(timestamp_ms, trace_id)
+        .map_err(|err| FleetTransportError::stale_state(err.to_string()))?;
+
+    evidence.scope = FLEET_EPOCH_BARRIER_CERTIFIED_DRAIN_SCOPE.to_string();
+    evidence.fleet_quiescence_certified = true;
+    let certificate = FleetEpochQuiescenceCertificate {
+        schema_version: FLEET_EPOCH_QUIESCENCE_CERTIFICATE_SCHEMA.to_string(),
+        transition_id: proposal.transition_id,
+        pre_epoch: proposal.pre_epoch,
+        committed_epoch,
+        initiator: initiator.to_string(),
+        reason: reason.to_string(),
+        trace_id: trace_id.to_string(),
+        certified_at: now,
+        action_log_checkpoint,
+        fleet_quiescence_certified: true,
+        participants,
+    };
+    Ok((evidence, certificate))
 }
 
 #[cfg(test)]
@@ -7589,5 +8044,164 @@ mod tests {
             "should have retried with backoff (took {:?})",
             duration
         );
+    }
+
+    #[test]
+    fn seqlock_control_page_round_trips_in_memory_and_shared_file() {
+        let tempdir = tempdir().expect("tempdir");
+        let page_path = tempdir.path().join("seqlock.page");
+        let page = super::SeqlockControlPage::new();
+        let digest = [0xAB_u8; 32];
+        let snap = page.publish(7, 3, 2, 11, digest);
+        assert_eq!(snap.sequence, 2);
+        assert_eq!(snap.control_epoch, 7);
+        assert_eq!(snap.quarantine_version, 3);
+        assert_eq!(snap.active_hold_count, 2);
+        assert_eq!(snap.action_count, 11);
+        assert_eq!(snap.action_log_digest_prefix, digest);
+        assert_eq!(page.read_safepoint(), snap);
+
+        page.write_shared_page(&page_path)
+            .expect("write shared seqlock page");
+        let loaded = super::SeqlockControlPage::read_shared_page(&page_path)
+            .expect("read shared seqlock page");
+        assert_eq!(loaded, snap);
+
+        // Odd sequence on disk must fail closed as writer-in-progress.
+        let mut raw = std::fs::read(&page_path).expect("raw bytes");
+        raw[8..16].copy_from_slice(&3_u64.to_le_bytes());
+        std::fs::write(&page_path, raw).expect("tamper odd sequence");
+        assert!(super::SeqlockControlPage::read_shared_page(&page_path).is_err());
+    }
+
+    #[test]
+    fn certify_fleet_epoch_quiescence_advances_epoch_iff_all_enrolled_supervisors_attest() {
+        use crate::control_plane::control_epoch::EpochSigningKey;
+        use crate::control_plane::epoch_transition_barrier::BarrierConfig;
+        use crate::runtime::epoch_transition::ProductEpochCoordinator;
+        use ed25519_dalek::{Signer, SigningKey};
+        use sha2::{Digest, Sha256};
+
+        let now = chrono::Utc::now();
+        let action = FleetActionRecord {
+            action_id: "quarantine-east-1".to_string(),
+            emitted_at: now,
+            action: FleetAction::Quarantine {
+                zone_id: "east".to_string(),
+                incident_id: "inc-east-1".to_string(),
+                target_id: "npm:@acme/bad-pkg".to_string(),
+                target_kind: FleetTargetKind::Extension,
+                quarantine_version: 1,
+                reason: "compromised".to_string(),
+            },
+        };
+        let actions = vec![action];
+        let expected = fleet_application_checkpoint(&actions, "east").expect("checkpoint");
+
+        let make_signed_node = |node_id: &str, seed: u8, indeterminate: u64| {
+            let signing_key = SigningKey::from_bytes(&[seed; 32]);
+            let verifying_key = signing_key.verifying_key();
+            let mut drain = super::NativeSessionDrainCheckpoint {
+                schema_version: super::NATIVE_SESSION_DRAIN_CHECKPOINT_SCHEMA.to_string(),
+                applied_actions: expected.clone(),
+                session_set_sha256: format!("{seed:02x}").repeat(32),
+                admitted_sessions: 2,
+                terminal_sessions: if indeterminate == 0 { 2 } else { 1 },
+                pending_sessions: 0,
+                indeterminate_sessions: indeterminate,
+                fence_held: false,
+                supervisor_attestation: None,
+            };
+            let mut attestation = super::NativeSessionDrainAttestation {
+                schema_version: super::NATIVE_SESSION_DRAIN_ATTESTATION_SCHEMA.to_string(),
+                node_id: node_id.to_string(),
+                zone_id: "east".to_string(),
+                drain_id: uuid::Uuid::now_v7().to_string(),
+                generation: 1,
+                project_root_sha256: hex::encode(Sha256::digest(node_id.as_bytes())),
+                observed_at: now,
+                product_root_key_id: format!("ed25519:{}", hex::encode(verifying_key.as_bytes())),
+                checkpoint_sha256: drain.observation_sha256().expect("checkpoint sha256"),
+                signature_hex: String::new(),
+            };
+            let payload = attestation.signing_payload().expect("signing payload");
+            attestation.signature_hex = hex::encode(signing_key.sign(&payload).to_bytes());
+            drain.supervisor_attestation = Some(attestation);
+            let status = NodeStatus {
+                zone_id: "east".to_string(),
+                node_id: node_id.to_string(),
+                last_seen: now,
+                quarantine_version: 1,
+                health: NodeHealth::Healthy,
+                applied_actions: Some(expected.clone()),
+                native_session_drain: Some(drain),
+            };
+            (status, verifying_key)
+        };
+
+        let (node_a, key_a) = make_signed_node("node-a", 11, 0);
+        let (node_b, key_b) = make_signed_node("node-b", 22, 0);
+        let mut roots = std::collections::BTreeMap::new();
+        roots.insert(("east".to_string(), "node-a".to_string()), key_a);
+        roots.insert(("east".to_string(), "node-b".to_string()), key_b);
+
+        let mut coordinator = ProductEpochCoordinator::new(
+            0,
+            2,
+            BarrierConfig::default(),
+            EpochSigningKey::new(b"fleet-epoch-test-key").expect("signing key"),
+        );
+        let state = FleetSharedState {
+            schema_version: FLEET_SHARED_STATE_SCHEMA.to_string(),
+            actions: actions.clone(),
+            nodes: vec![node_a.clone(), node_b],
+        };
+        let (evidence, cert) = super::certify_fleet_epoch_quiescence(
+            &mut coordinator,
+            &state,
+            &roots,
+            super::FleetEpochBarrierParams {
+                initiator: "operator-root",
+                reason: "quarantine-epoch-advance",
+                now,
+                stale_after: std::time::Duration::from_secs(30),
+                trace_id: "trace-epoch-1",
+            },
+        )
+        .expect("two enrolled signed quiesced nodes must certify");
+        assert!(evidence.fleet_quiescence_certified);
+        assert_eq!(
+            evidence.scope,
+            super::FLEET_EPOCH_BARRIER_CERTIFIED_DRAIN_SCOPE
+        );
+        assert!(cert.fleet_quiescence_certified);
+        assert_eq!(cert.pre_epoch, 0);
+        assert_eq!(cert.committed_epoch, 1);
+        assert_eq!(coordinator.current_epoch(), 1);
+        assert_eq!(cert.participants.len(), 2);
+
+        // Fault cut: indeterminate session on node-b must abort the barrier and preserve epoch 1.
+        let (bad_b, _) = make_signed_node("node-b", 22, 1);
+        let fault_state = FleetSharedState {
+            schema_version: FLEET_SHARED_STATE_SCHEMA.to_string(),
+            actions,
+            nodes: vec![node_a, bad_b],
+        };
+        let err = super::certify_fleet_epoch_quiescence(
+            &mut coordinator,
+            &fault_state,
+            &roots,
+            super::FleetEpochBarrierParams {
+                initiator: "operator-root",
+                reason: "faulted-transition",
+                now,
+                stale_after: std::time::Duration::from_secs(30),
+                trace_id: "trace-epoch-2",
+            },
+        )
+        .expect_err("indeterminate session must abort epoch barrier");
+        assert!(err.to_string().contains("aborted before commit"), "{err}");
+        assert_eq!(coordinator.current_epoch(), 1);
+        assert_eq!(coordinator.abort_manager().events().len(), 1);
     }
 }

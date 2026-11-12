@@ -695,8 +695,10 @@ fn fleet_policy_project_authority_preserves_boundaries_and_rechecks_late_enrollm
     activate_fleet_policy_snapshot(&root, &actions, "east")
         .expect("enroll after selecting the original execution authority");
 
-    let mut config = Config::default();
-    config.profile = Profile::Balanced;
+    let mut config = Config {
+        profile: Profile::Balanced,
+        ..Config::default()
+    };
     let original = serde_json::to_value(&config).expect("original config");
     let error = enforce_execution_fleet_policy(absolute.project_root(), &mut config, None)
         .expect_err("worker admission must notice newly enrolled parent authority")
@@ -1939,9 +1941,9 @@ fn fleet_hold_stops_a_running_migration_reference_before_native_dispatch() {
             .unwrap()
             .iter()
             .any(|error| {
-                error.as_str().is_some_and(|message| {
-                    message.contains("native-session admission is fenced")
-                })
+                error
+                    .as_str()
+                    .is_some_and(|message| message.contains("native-session admission is fenced"))
             }),
         "{report}"
     );
@@ -2088,7 +2090,10 @@ fn live_http_guarded_policy_requires_enrolled_fresh_hold_and_retains_original_re
         refused.contains("HTTP 409") && refused.contains("FLEET_HTTP_NODE_ENROLLMENT_REQUIRED"),
         "{refused}"
     );
-    assert_eq!(operator.list_actions().unwrap(), [hold.clone()]);
+    assert_eq!(
+        operator.list_actions().unwrap(),
+        std::slice::from_ref(&hold)
+    );
     stop.0.request_shutdown();
     assert!(server.join().unwrap().unwrap() > 0);
 
@@ -7436,6 +7441,8 @@ impl TestLogger {
                     "latest_action_type": actions.last().map(|a| match &a.action {
                         FleetAction::Quarantine { .. } => "quarantine",
                         FleetAction::Release { .. } => "release",
+                        FleetAction::NativeSessionHold { .. } => "native_session_hold",
+                        FleetAction::NativeSessionResume { .. } => "native_session_resume",
                         FleetAction::PolicyUpdate { .. } => "policy_update",
                         FleetAction::Revoke { .. } => "revoke",
                     }),
@@ -8094,4 +8101,190 @@ fn fleet_reconcile_with_complete_transport_verification() {
     log.phase("teardown");
     log.transport_snapshot(&transport, "final_state_after_reconcile");
     log.test_end("pass");
+}
+
+#[test]
+fn fleet_http_epoch_barrier_certifies_quiescence_across_enrolled_supervisors_and_aborts_on_fault() {
+    use ed25519_dalek::{Signer, SigningKey};
+    use frankenengine_node::control_plane::fleet_http_server::{
+        FLEET_HTTP_LISTENING, FleetControlPlaneService, FleetHttpServerConfig,
+        FleetHttpServerControl, FleetNodeCredentials, serve_fleet_control_plane,
+    };
+    use frankenengine_node::control_plane::fleet_transport::{
+        FLEET_EPOCH_BARRIER_CERTIFIED_DRAIN_SCOPE, NATIVE_SESSION_DRAIN_ATTESTATION_SCHEMA,
+        NATIVE_SESSION_DRAIN_CHECKPOINT_SCHEMA, NativeSessionDrainAttestation,
+        NativeSessionDrainCheckpoint, SeqlockControlPage, fleet_application_checkpoint,
+    };
+    use frankenengine_node::control_plane::fleet_transport_http::{
+        FleetControlPlaneUrl, FleetHttpEpochBarrierRequest, HttpFleetTransport,
+    };
+    use sha2::{Digest, Sha256};
+
+    let dir = tempdir().expect("tempdir");
+    let state_dir = dir.path().join("coordinator-state");
+    let operator_token = "op-token-0123456789abcdef0123456789abcdef";
+    let node_a_token = "node-a-token-0123456789abcdef0123456789ab";
+    let node_b_token = "node-b-token-0123456789abcdef0123456789ab";
+    let sup_a = SigningKey::from_bytes(&[0x31; 32]);
+    let sup_b = SigningKey::from_bytes(&[0x42; 32]);
+
+    let creds_json = serde_json::to_vec(&serde_json::json!({
+        "schema_version": "franken-node/fleet-node-credentials/v1",
+        "nodes": [
+            {
+                "zone_id": "east",
+                "node_id": "node-a",
+                "token_sha256": hex::encode(Sha256::digest(node_a_token.as_bytes())),
+                "supervisor_public_key_hex": hex::encode(sup_a.verifying_key().as_bytes()),
+            },
+            {
+                "zone_id": "east",
+                "node_id": "node-b",
+                "token_sha256": hex::encode(Sha256::digest(node_b_token.as_bytes())),
+                "supervisor_public_key_hex": hex::encode(sup_b.verifying_key().as_bytes()),
+            }
+        ]
+    }))
+    .expect("credentials json");
+    let creds = FleetNodeCredentials::from_json(&creds_json).expect("valid enrolled credentials");
+    let service = Arc::new(
+        FleetControlPlaneService::open(state_dir.clone(), operator_token)
+            .expect("open service")
+            .with_node_credentials(creds)
+            .expect("attach enrolled node credentials"),
+    );
+    let control = FleetHttpServerControl::new();
+    let server_control = Arc::clone(&control);
+    let (addr_tx, addr_rx) = std::sync::mpsc::sync_channel(1);
+    let server = std::thread::spawn(move || {
+        serve_fleet_control_plane(
+            service,
+            &FleetHttpServerConfig {
+                bind: "127.0.0.1:0".to_string(),
+                max_requests: None,
+            },
+            server_control,
+            Arc::new(move |ev| {
+                if ev.event_code == FLEET_HTTP_LISTENING
+                    && let Some(addr) = &ev.bound_addr
+                {
+                    let _ = addr_tx.send(addr.clone());
+                }
+            }),
+        )
+    });
+    let bound = addr_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("server listening");
+    let base_url = FleetControlPlaneUrl::parse(&format!("http://{bound}")).expect("loopback url");
+
+    let mut operator = HttpFleetTransport::new(base_url.clone(), operator_token).expect("operator");
+    let mut agent_a = HttpFleetTransport::new(base_url.clone(), node_a_token).expect("agent a");
+    let mut agent_b = HttpFleetTransport::new(base_url, node_b_token).expect("agent b");
+    operator.initialize().expect("operator init");
+
+    let quarantine = FleetActionRecord {
+        action_id: "quarantine-epoch-drill".to_string(),
+        emitted_at: Utc::now(),
+        action: FleetAction::Quarantine {
+            zone_id: "east".to_string(),
+            incident_id: "inc-epoch-1".to_string(),
+            target_id: "npm:@acme/compromised".to_string(),
+            target_kind: FleetTargetKind::Extension,
+            quarantine_version: 5,
+            reason: "contain compromised extension".to_string(),
+        },
+    };
+    operator
+        .publish_action(&quarantine)
+        .expect("publish quarantine");
+    let actions = operator.list_actions().expect("actions");
+    let expected = fleet_application_checkpoint(&actions, "east").expect("checkpoint");
+
+    // Fault cut 1: missing node-b drain must abort the epoch barrier (HTTP 409).
+    let make_heartbeat = |node_id: &str, key: &SigningKey, generation: u64, indeterminate: u64| {
+        let now = Utc::now();
+        let mut drain = NativeSessionDrainCheckpoint {
+            schema_version: NATIVE_SESSION_DRAIN_CHECKPOINT_SCHEMA.to_string(),
+            applied_actions: expected.clone(),
+            session_set_sha256: format!("{generation:02x}").repeat(32),
+            admitted_sessions: 3,
+            terminal_sessions: if indeterminate == 0 { 3 } else { 2 },
+            pending_sessions: 0,
+            indeterminate_sessions: indeterminate,
+            fence_held: false,
+            supervisor_attestation: None,
+        };
+        let mut attestation = NativeSessionDrainAttestation {
+            schema_version: NATIVE_SESSION_DRAIN_ATTESTATION_SCHEMA.to_string(),
+            node_id: node_id.to_string(),
+            zone_id: "east".to_string(),
+            drain_id: uuid::Uuid::now_v7().to_string(),
+            generation,
+            project_root_sha256: hex::encode(Sha256::digest(node_id.as_bytes())),
+            observed_at: now,
+            product_root_key_id: format!("ed25519:{}", hex::encode(key.verifying_key().as_bytes())),
+            checkpoint_sha256: drain.observation_sha256().expect("checkpoint sha256"),
+            signature_hex: String::new(),
+        };
+        attestation.signature_hex = hex::encode(
+            key.sign(&attestation.signing_payload().expect("payload"))
+                .to_bytes(),
+        );
+        drain.supervisor_attestation = Some(attestation);
+        NodeStatus {
+            zone_id: "east".to_string(),
+            node_id: node_id.to_string(),
+            last_seen: now,
+            quarantine_version: 5,
+            health: NodeHealth::Healthy,
+            applied_actions: Some(expected.clone()),
+            native_session_drain: Some(drain),
+        }
+    };
+
+    agent_a
+        .upsert_node_status(&make_heartbeat("node-a", &sup_a, 1, 0))
+        .expect("node-a heartbeat");
+    let missing_err = operator
+        .certify_epoch_barrier(&FleetHttpEpochBarrierRequest {
+            initiator: "ops-root".to_string(),
+            reason: "quarantine-epoch-advance".to_string(),
+            trace_id: "trace-http-missing".to_string(),
+            stale_after: Duration::from_secs(30),
+        })
+        .expect_err("missing node-b must abort epoch barrier")
+        .to_string();
+    assert!(missing_err.contains("HTTP 409"), "{missing_err}");
+
+    // Both enrolled supervisors report signed terminal drains -> epoch barrier commits!
+    agent_b
+        .upsert_node_status(&make_heartbeat("node-b", &sup_b, 1, 0))
+        .expect("node-b heartbeat");
+    let certified = operator
+        .certify_epoch_barrier(&FleetHttpEpochBarrierRequest {
+            initiator: "ops-root".to_string(),
+            reason: "quarantine-epoch-advance".to_string(),
+            trace_id: "trace-http-commit".to_string(),
+            stale_after: Duration::from_secs(30),
+        })
+        .expect("both enrolled supervisors attested terminal drains");
+    assert!(certified.evidence.fleet_quiescence_certified);
+    assert_eq!(
+        certified.evidence.scope,
+        FLEET_EPOCH_BARRIER_CERTIFIED_DRAIN_SCOPE
+    );
+    assert!(certified.certificate.fleet_quiescence_certified);
+    assert_eq!(certified.certificate.pre_epoch, 0);
+    assert_eq!(certified.certificate.committed_epoch, 1);
+    assert_eq!(certified.certificate.participants.len(), 2);
+
+    let seqlock = SeqlockControlPage::read_shared_page(&state_dir.join("seqlock.page"))
+        .expect("seqlock page persisted on epoch commit");
+    assert_eq!(seqlock.control_epoch, 1);
+    assert_eq!(seqlock.quarantine_version, 5);
+    assert_eq!(seqlock.action_count, 1);
+
+    control.request_shutdown();
+    assert!(server.join().expect("server thread").expect("server exit") > 0);
 }

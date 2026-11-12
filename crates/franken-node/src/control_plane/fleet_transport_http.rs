@@ -32,10 +32,12 @@ use serde::{Deserialize, Serialize};
 use crate::capacity_defaults::aliases::{MAX_ACTION_LOG_ENTRIES, MAX_NODES_CAP};
 
 use super::fleet_transport::{
-    FLEET_SHARED_STATE_SCHEMA, FleetActionRecord, FleetGuardedPolicyObservationScope,
-    FleetGuardedPolicyReceipt, FleetSharedState, FleetTransport, FleetTransportError,
-    GuardedFleetPolicyPublication, MAX_GUARDED_POLICY_RECEIPT_BYTES,
-    MAX_GUARDED_POLICY_REQUEST_BYTES, NodeStatus, validate_action_record, validate_node_status,
+    FLEET_EPOCH_BARRIER_CERTIFIED_DRAIN_SCOPE, FLEET_EPOCH_QUIESCENCE_CERTIFICATE_SCHEMA,
+    FLEET_SHARED_STATE_SCHEMA, FleetActionRecord, FleetEpochQuiescenceCertificate,
+    FleetGuardedPolicyObservationScope, FleetGuardedPolicyReceipt, FleetNativeDrainEvidence,
+    FleetSharedState, FleetTransport, FleetTransportError, GuardedFleetPolicyPublication,
+    MAX_GUARDED_POLICY_RECEIPT_BYTES, MAX_GUARDED_POLICY_REQUEST_BYTES, NodeStatus,
+    validate_action_record, validate_node_status,
 };
 
 /// Schema tag carried by every response; v2 binds coordinator append order.
@@ -50,6 +52,8 @@ pub const FLEET_HTTP_NODES_PATH: &str = "/v2/fleet/nodes";
 pub const FLEET_HTTP_STATE_PATH: &str = "/v2/fleet/state";
 /// `POST` atomically checks enrolled maintenance observations and publishes a policy.
 pub const FLEET_HTTP_GUARDED_POLICY_PATH: &str = "/v2/fleet/policies/guarded";
+/// `POST` proposes, verifies enrolled supervisor drains, and commits an epoch transition barrier.
+pub const FLEET_HTTP_EPOCH_BARRIER_PATH: &str = "/v2/fleet/epoch-barrier";
 /// Request body bound for ordinary fleet routes. Guarded publication has its
 /// own larger bound because it retains the complete participant identities.
 pub const FLEET_HTTP_MAX_REQUEST_BYTES: usize = 64 * 1024;
@@ -90,6 +94,25 @@ pub struct FleetHttpNodeList {
 pub struct FleetHttpState {
     pub schema_version: String,
     pub state: FleetSharedState,
+}
+
+/// `POST /v2/fleet/epoch-barrier` request body.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FleetHttpEpochBarrierRequest {
+    pub initiator: String,
+    pub reason: String,
+    pub trace_id: String,
+    pub stale_after: Duration,
+}
+
+/// `POST /v2/fleet/epoch-barrier` response body.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FleetHttpEpochBarrierResponse {
+    pub schema_version: String,
+    pub evidence: FleetNativeDrainEvidence,
+    pub certificate: FleetEpochQuiescenceCertificate,
 }
 
 /// Acknowledgement for a successful `POST`.
@@ -636,6 +659,33 @@ impl FleetTransport for HttpFleetTransport {
         validate_action_snapshot(&state.state.actions)?;
         validate_node_snapshot(&mut state.state.nodes)?;
         Ok(state.state)
+    }
+}
+
+impl HttpFleetTransport {
+    /// Request distributed epoch-barrier quiescence certification from the live coordinator.
+    pub fn certify_epoch_barrier(
+        &self,
+        request: &FleetHttpEpochBarrierRequest,
+    ) -> Result<FleetHttpEpochBarrierResponse, FleetTransportError> {
+        let response: FleetHttpEpochBarrierResponse = self.post_json_with_limits(
+            FLEET_HTTP_EPOCH_BARRIER_PATH,
+            request,
+            FLEET_HTTP_MAX_REQUEST_BYTES,
+            MAX_GUARDED_POLICY_RECEIPT_BYTES as u64,
+        )?;
+        self.check_schema(&response.schema_version)?;
+        if !response.evidence.fleet_quiescence_certified
+            || response.evidence.scope != FLEET_EPOCH_BARRIER_CERTIFIED_DRAIN_SCOPE
+            || !response.certificate.fleet_quiescence_certified
+            || response.certificate.schema_version != FLEET_EPOCH_QUIESCENCE_CERTIFICATE_SCHEMA
+            || response.certificate.committed_epoch <= response.certificate.pre_epoch
+        {
+            return Err(FleetTransportError::serialization(
+                "coordinator returned an uncertified or inconsistent epoch-barrier response",
+            ));
+        }
+        Ok(response)
     }
 }
 

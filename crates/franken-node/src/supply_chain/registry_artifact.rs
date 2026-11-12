@@ -1792,8 +1792,11 @@ mod tests {
         };
         let retained = approval.revalidate_source_graph().unwrap();
         assert_original(&retained);
-        std::fs::write(fixture.directory.path().join("side.cjs"), "module.exports = 9001;\n")
-            .unwrap();
+        std::fs::write(
+            fixture.directory.path().join("side.cjs"),
+            "module.exports = 9001;\n",
+        )
+        .unwrap();
         let foreign = tempfile::tempdir().unwrap();
         let foreign_entry = foreign.path().join("unsigned.cjs");
         std::fs::write(&foreign_entry, "throw new Error('unsigned replacement');\n").unwrap();
@@ -1804,12 +1807,25 @@ mod tests {
         // Losing or corrupting the authenticated capsule must never cause a
         // fallback to the installed source tree. An already returned owner
         // continues to contain the exact bytes that were authenticated.
-        let capsule_path = fixture.directory.path().join(&fixture.manifest.artifact_file_name);
-        std::fs::rename(&capsule_path, capsule_path.with_extension("retained-capsule")).unwrap();
+        let capsule_path = fixture
+            .directory
+            .path()
+            .join(&fixture.manifest.artifact_file_name);
+        std::fs::rename(
+            &capsule_path,
+            capsule_path.with_extension("retained-capsule"),
+        )
+        .unwrap();
         assert!(approval.revalidate_source_graph().is_err());
         std::fs::write(&capsule_path, b"substituted capsule").unwrap();
-        let error = approval.revalidate_source_graph().err().expect("artifact hash refusal");
-        assert!(error.to_string().contains("artifact hash mismatch"), "{error:#}");
+        let error = approval
+            .revalidate_source_graph()
+            .err()
+            .expect("artifact hash refusal");
+        assert!(
+            error.to_string().contains("artifact hash mismatch"),
+            "{error:#}"
+        );
         assert_original(&retained);
     }
 
@@ -1819,8 +1835,14 @@ mod tests {
             "app.cjs",
             "console.log(require('alias'));\n",
             &[
-                ("package.json", r#"{"dependencies":{"alias":"npm:real-package@2.3.4"}}"#),
-                ("node_modules/alias/package.json", r#"{"name":"real-package","version":"2.3.4","main":"index.cjs"}"#),
+                (
+                    "package.json",
+                    r#"{"dependencies":{"alias":"npm:real-package@2.3.4"}}"#,
+                ),
+                (
+                    "node_modules/alias/package.json",
+                    r#"{"name":"real-package","version":"2.3.4","main":"index.cjs"}"#,
+                ),
                 ("node_modules/alias/index.cjs", "module.exports = 42;\n"),
             ],
         );
@@ -1835,7 +1857,8 @@ mod tests {
         std::fs::rename(
             fixture.directory.path().join("node_modules"),
             fixture.directory.path().join("retained-modules"),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(approval.module_packages().unwrap(), expected);
     }
 
@@ -1847,10 +1870,16 @@ mod tests {
         ] {
             let path = format!("{location}/index.cjs");
             let source = format!("console.log(require('./{path}'));\n");
-            let fixture = Fixture::with_modules("app.cjs", &source, &[(&path, "module.exports = 42;\n")]);
-            assert_eq!(fixture.approval().module_packages().unwrap(), vec![PublisherModulePackage {
-                extension_id: identity.into(), location: location.into(), version: None,
-            }]);
+            let fixture =
+                Fixture::with_modules("app.cjs", &source, &[(&path, "module.exports = 42;\n")]);
+            assert_eq!(
+                fixture.approval().module_packages().unwrap(),
+                vec![PublisherModulePackage {
+                    extension_id: identity.into(),
+                    location: location.into(),
+                    version: None,
+                }]
+            );
         }
     }
 

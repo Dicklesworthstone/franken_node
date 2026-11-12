@@ -11,7 +11,11 @@ fn policy_equivalence_requires_execution_and_both_origin_anchors_before_reading_
         &[][..],
         &["--execute"][..],
         &["--execute", "--trusted-run-public-key", "absent-run.pub"][..],
-        &["--execute", "--trusted-runtime-public-key", "absent-root.pub"][..],
+        &[
+            "--execute",
+            "--trusted-runtime-public-key",
+            "absent-root.pub",
+        ][..],
         &[
             "--trusted-run-public-key",
             "absent-run.pub",
@@ -143,13 +147,26 @@ mod native {
                 fs::write(producer.path().join("input.txt"), "ORIGINAL").unwrap();
                 let initialized = run_cli_in_workspace_with_state_home(
                     producer.path(),
-                    &["init", "--profile", "legacy-risky", "--out-dir", ".", "--json"],
+                    &[
+                        "init",
+                        "--profile",
+                        "legacy-risky",
+                        "--out-dir",
+                        ".",
+                        "--json",
+                    ],
                     Some(producer_state.path()),
                 );
                 assert!(initialized.status.success(), "{initialized:?}");
                 let recorded = run_cli_in_workspace_with_state_home(
                     producer.path(),
-                    &["run", "app.js", "--frozen-modules", "--capture-replay", "--json"],
+                    &[
+                        "run",
+                        "app.js",
+                        "--frozen-modules",
+                        "--capture-replay",
+                        "--json",
+                    ],
                     Some(producer_state.path()),
                 );
                 assert_eq!(recorded.status.success(), !guest_exception, "{recorded:?}");
@@ -340,8 +357,11 @@ mod native {
             }
             let dependency = self.producer.path().join("replay-dependency.cjs");
             if dependency.exists() {
-                fs::rename(dependency, self.archive.path().join("replay-dependency.cjs"))
-                    .unwrap();
+                fs::rename(
+                    dependency,
+                    self.archive.path().join("replay-dependency.cjs"),
+                )
+                .unwrap();
             }
             fs::rename(
                 self.producer_state.path().join("franken-node"),
@@ -412,7 +432,13 @@ mod native {
         for guest_exception in [false, true] {
             let fixture = Fixture::new_with_frozen_modules(guest_exception, true);
             fixture.archive_original_authority_and_inputs();
-            assert!(!fixture.producer.path().join("replay-dependency.cjs").exists());
+            assert!(
+                !fixture
+                    .producer
+                    .path()
+                    .join("replay-dependency.cjs")
+                    .exists()
+            );
             let output = run_cli_in_workspace_with_state_home(
                 fixture.operator.path(),
                 &[
@@ -438,7 +464,10 @@ mod native {
             assert_eq!(report["runtime_origin_verified"], true);
             assert_eq!(report["replay_result"]["matched"], !guest_exception);
             let execution = &report["execution_result"];
-            assert_eq!(execution["verification_scope"], "guest_execution_and_policy");
+            assert_eq!(
+                execution["verification_scope"],
+                "guest_execution_and_policy"
+            );
             assert_eq!(execution["module_load_disabled"], false);
             assert_eq!(execution["matched"], !guest_exception);
             assert_eq!(execution["console_match"], true);
