@@ -144,7 +144,9 @@ fn captured_payload(run: &Value) -> Value {
         run["receipt"]["native_replay_payload_sha256"],
         capture["payload_sha256"]
     );
-    serde_json::from_str(capture["payload_json"].as_str().unwrap()).unwrap()
+    let payload: Value = serde_json::from_str(capture["payload_json"].as_str().unwrap()).unwrap();
+    assert!(payload["module_sources"].is_object(), "{payload}");
+    payload
 }
 
 fn assert_engine_prefix(output: &Output) -> Value {
@@ -166,10 +168,10 @@ fn assert_engine_prefix(output: &Output) -> Value {
         "terminal_state_match",
         "console_match",
         "host_effects_match",
-        "module_load_disabled",
     ] {
         assert_eq!(execution[field], true, "{field}: {replay}");
     }
+    assert_eq!(execution["module_load_disabled"], false);
     assert_eq!(execution["captured_trace_id"], execution["replay_trace_id"]);
     for unavailable in [
         "ir3_hash_match",
@@ -504,6 +506,13 @@ fn native_engine_stop_cli_keeps_opt_in_and_unsupported_failures_distinct() {
     );
 
     let invalid = Project::new("const = ;");
+    // Keep coverage of the legacy engine parse-failure path. Ordinary replay
+    // capture now refuses this source during immutable graph admission instead.
+    let config_path = invalid.root().join("franken_node.toml");
+    let mut config: frankenengine_node::config::Config =
+        toml::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+    config.runtime.frozen_modules = Some(false);
+    fs::write(config_path, config.to_toml().unwrap()).unwrap();
     let run = invalid.failed_run(true);
     assert!(run["dispatch"].get("native_replay").is_none());
     assert!(run["receipt"]["native_replay_payload_sha256"].is_null());

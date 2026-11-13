@@ -361,10 +361,12 @@ pub struct RunArgs {
     #[arg(long)]
     pub compat_preflight: bool,
 
-    /// Retain the entry source, supplied arguments, process-metadata grant, and
-    /// raw host-I/O results for offline native re-execution with
-    /// `incident replay --execute`. Captured data may contain application
-    /// secrets. Supports completed native runs, certified uncaught-exception
+    /// Retain the bounded module source graph, supplied arguments,
+    /// process-metadata grant, and raw host-I/O results for offline native
+    /// re-execution with `incident replay --execute`. Freezes supported module
+    /// routes before execution unless runtime.frozen_modules is explicitly false
+    /// for an entry-only capture. Captured data may contain application secrets.
+    /// Supports completed native runs, certified uncaught-exception
     /// prefixes, and finalized capability-denial/instruction-budget stops; the
     /// original run's exit status is retained.
     #[arg(long)]
@@ -2721,7 +2723,8 @@ pub struct FleetSessionsArgs {
     #[arg(long)]
     pub project: Option<PathBuf>,
 
-    /// Emit records and counts as JSON, including unresolved observations.
+    /// Emit records and counts as JSON, including unresolved observations
+    /// and retained signed panic details with the parent-observed effect journal.
     #[arg(long)]
     pub json: bool,
 }
@@ -2964,11 +2967,12 @@ pub struct OpsSwarmHandoffArgs {
 
 #[derive(Debug, Parser)]
 pub struct OpsIncidentCoverageArgs {
-    /// Fail (exit non-zero) when replay coverage is below this fraction (0.0-1.0).
+    /// Fail when authenticated native replay input coverage is below this fraction (0.0-1.0).
+    /// Signed trace-only bundles do not count as native replay inputs.
     #[arg(long)]
     pub min_coverage: Option<f64>,
 
-    /// Emit `franken-node/ops-incident-coverage-cli/v1` JSON.
+    /// Emit `franken-node/ops-incident-coverage-cli/v2` JSON.
     #[arg(long)]
     pub json: bool,
 }

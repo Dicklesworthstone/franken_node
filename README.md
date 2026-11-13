@@ -565,9 +565,13 @@ emitted evidence.
 
 #### Re-execute captured native JavaScript
 
-Opt in when recording a run to retain its entry source, execution settings,
-arguments, and raw host-I/O and admitted process results in the signed run
-record. The capture is limited to 4 MiB and may contain application secrets.
+Opt in when recording a run to retain its bounded module source graph,
+execution settings, arguments, and raw host-I/O and admitted process results
+in the signed run record. `--capture-replay` freezes supported module routes
+before guest execution by default, so imported sources remain available when
+the original project changes or disappears. Unsupported or oversized source
+closures fail before guest effects. The complete capture is limited to 4 MiB
+and may contain application secrets.
 
 ```bash
 franken-node init --profile balanced --out-dir .
@@ -651,6 +655,12 @@ journal suffix cannot produce a successful replay verdict, including when the
 guest catches the immediate error. A request refused before journal admission
 may lack replayable preparation and consequently fail replay verification.
 
+Child-process admissions bind the complete resolved configuration. Set
+`runtime.frozen_modules = true` before signing an admission for source-graph
+capture, or explicitly set it to `false` for entry-only capture. A token signed
+with an unspecified source mode cannot authorize the newly resolved frozen
+configuration; it must be issued for that configuration before execution.
+
 Process capture uses the engine's conservative `Unknown` exception provenance
 in the original execution as well as replay. This can restrict flows that an
 ordinary run would allow; it keeps the actual original and replay witnesses
@@ -658,12 +668,13 @@ comparable without making replay data more trusted or waiving any comparison.
 Preparation is limited to 4,096
 unique entries and 2 MiB within the overall 4 MiB capture limit.
 
-Entry-only captures disable runtime module loading during replay. Source now
-implements `--frozen-modules --capture-replay`: it retains the existing bounded
-source capsule, graph pins and original prepared entry binding. Replay restores
-only that captured resolver, retaining the original capability restrictions
-without reading or extracting the original project. Native qualification of
-this new multi-file path is still pending; see the
+`--capture-replay` retains the bounded source capsule, graph pins and original
+prepared entry binding unless configuration explicitly sets
+`runtime.frozen_modules = false`. That opt-out produces an entry-only capture
+and disables runtime module loading during replay; `--frozen-modules` overrides
+the opt-out. Replay restores only the captured resolver, retaining the original
+capability restrictions without reading or extracting the original project.
+Native qualification of this multi-file path is still pending; see the
 [execution TODO](docs/progress/REALITY_CHECK_AND_BRIDGE_PLAN.md#offline-npm-and-native-build-execution--2026-10-22).
 The capture envelope is now `franken-node/native-replay-capture/v3`; historical v2 captures
 are refused rather than treated as authenticating newly added fields.
@@ -1079,7 +1090,7 @@ Every fleet command, and `trust quarantine`, talks to one of two stores:
 |---|---|
 | `franken-node fleet serve` | Run the live coordinator: serves this node's durable fleet store over HTTP (fastapi_rust listener on the asupersync runtime). Routes: `GET /v2/fleet/health` (open), `GET/POST /v2/fleet/actions`, `GET/POST /v2/fleet/nodes`, `GET /v2/fleet/state` (bearer token, constant-time compare). V2 preserves coordinator append order; upgrade coordinator and agents together because legacy routes are refused before mutation. Validates every record, caps bodies at 64 KiB, stamps heartbeats with its own clock. Flags: `--bind` (default `127.0.0.1:9440`; port 0 picks a free port, printed first on stdout), `--token-file` (default `.franken-node/keys/fleet-control-plane.token`), `--generate-token` (create a 0600 256-bit token), `--allow-non-loopback` (plaintext listener; only behind TLS termination or an encrypted overlay), `--max-requests`, `--json` (JSONL `FLEET_HTTP_LISTENING` / `FLEET_HTTP_REQUEST` / `FLEET_HTTP_SHUTDOWN` events). |
 | `franken-node fleet status` | Show fleet/quarantine state from the configured store. `activated` is true only when a live coordinator answered. Flags: `--zone`, `--verbose`, `--json`, `--screen` (the operator screen: frankentui summary, node-heartbeat and pending-convergence panels drawn from the same report, width from `COLUMNS`; excludes `--json`). |
-| `franken-node fleet sessions` | Inspect this operator's durable local native-session inventory, pending admissions, observed worker termination and unknown effects. Flags: `--project <directory>`, `--json`. Requires the native engine. |
+| `franken-node fleet sessions` | Inspect this operator's durable local native-session inventory, pending admissions, observed worker termination and unknown effects. JSON includes retained signed panic details and the parent-observed effect journal. Flags: `--project <directory>`, `--json`. Requires the native engine. |
 | `franken-node fleet hold` | Publish a durable native-admission maintenance owner for `--zone <zone\|all>`, with `--reason`. `--id` makes retries refer to the same owner; `--wait` requires fresh terminal drain observations with admission still fenced. Flags: `--json`. |
 | `franken-node fleet resume` | Remove only the maintenance owner selected by `--hold <action-id>`, retaining its original zone. `--wait` checks application; other owners can keep admission fenced. Optional: `--reason`, `--json`. Does not start workloads. |
 | `franken-node fleet describe <node>` | Describe one fleet node with zone context and incident state. Flags: `--zone`, `--json`. |
@@ -1100,6 +1111,17 @@ authenticated observation. `fleet sessions` remains read-only. A crash before
 a complete receipt is retained leaves the admission unresolved; a missing PID
 or elapsed deadline cannot resolve it. Recovery preserves unknown effects and
 unproven worker or descendant termination, which continue to hold the fence.
+
+Validated native panics also retain `panic_evidence` in the signed outcome,
+including cleanup status and the complete reconciled host-effect journal
+observed by the parent. The panic message is limited to a UTF-8 prefix of
+4,096 bytes; its original byte count and SHA-256 digest commit to the full
+message. `fleet sessions --json` exposes these details after restart. Historical
+outcomes without this optional field continue to verify. If optional details
+fail validation or exceed the storage bound, the original panic classification
+is retained and the run reports the forensic error. Provider-return markers
+still carry no finalized allowed/denied outcome or replay certification, and
+retaining them never clears an unknown-effect classification.
 
 ```bash
 franken-node fleet sessions --json
@@ -1353,7 +1375,7 @@ receipt signing key, and emit `franken-node/deploy-cli/v1` with `--json`
 | `franken-node ops validation-closeout` | Render closeout summary from a `--receipt` snapshot (not a live broker). `--bead-id` and `--receipt` are handler-required so `--json` failures emit `franken-node/ops-error-cli/v1` instead of a human clap error. Flags: `--json`. |
 | `franken-node ops config-audit` | Audit active config across profiles. Flags: `--json` (`franken-node/ops-config-audit-cli/v1`). |
 | `franken-node ops metrics` | Emit operator metrics (Prometheus by default). Flags: `--json` (`franken-node/ops-metrics-cli/v1`). |
-| `franken-node ops incident-coverage` | Replay availability over retained durable run decisions and discoverable run records. Authenticated security outcomes determine the population; each counted capture must authenticate and each replayable bundle must match its source and trusted signature. JSON includes `population_scope`, authentication status, and `source_errors`. `--min-coverage <0..1>` fails when the population is empty, incomplete, unauthenticated, or below the floor. This local inventory does not establish deletion-resistant historical completeness. Flags: `--json` (`franken-node/ops-incident-coverage-cli/v1`). |
+| `franken-node ops incident-coverage` | Native replay input availability over retained durable run decisions and discoverable run records. Authenticated security outcomes determine the population. `bundle_coverage` counts trusted bundles matching their captured source; `replay_coverage` additionally requires the exact native execution inputs authenticated by the original run receipt. Signed trace-only bundles do not satisfy `--min-coverage <0..1>`. The gate also refuses empty, incomplete, or unauthenticated populations. JSON includes `replay_scope`, `native_reexecution_performed=false`, population authentication status, and unavailable incident IDs. This inspection does not execute replay or establish deletion-resistant historical completeness. Flags: `--json` (`franken-node/ops-incident-coverage-cli/v2`). |
 | `franken-node ops compat-corpus-run` | Run the committed compatibility corpus through bun + native franken-engine lockstep and write the digest-bound results artifact. `--corpus-root` and `--out` are handler-required so `--json` failures emit `franken-node/ops-error-cli/v1` instead of a human clap error. `--policy` selects the profile the franken leg runs under (default `legacy-risky`, the artifact of record). The artifact's `run_provenance` block records the binary's sha256, the embedded git revision, the policy and the host's CPU count and load. Flags: `--json` (`franken-node/ops-compat-corpus-run-cli/v1`), `--require-node-reference`, `--policy`, `--case-timeout-secs`. |
 | `franken-node ops proof-carrying-evidence` | Produce a 3-effect host-IO evidence chain from a real native-engine run. This is an **additional L1 conjunct**, not a substitute for corpus ≥95%. L1 GREEN still requires the compatibility corpus floor. Flags: `--json`, `--out`, `--merge-corpus`, `--merge-l1-verdict`. |
 | `franken-node doctor workspace-pressure` | Probe local disk, memory, RCH slots, and build counts; apply balanced/conservative/permissive pressure policy. Default human report is stdout. `--human-output <path>` writes that report to a file (not a boolean flag). Flags: `--json`, `--output`, `--human-output`, `--conservative`, `--permissive` (failures `franken-node/doctor-error-cli/v1`). |

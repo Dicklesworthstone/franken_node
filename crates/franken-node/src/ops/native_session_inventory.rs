@@ -30,7 +30,7 @@ use super::engine_dispatcher::{
     HostEffectLedger, NATIVE_EFFECT_INTERRUPTION_EVIDENCE_SCHEMA,
     NATIVE_SESSION_MAX_DIAGNOSTIC_BYTES, NATIVE_SESSION_MAX_EFFECT_WAL_EVENTS,
     NATIVE_SESSION_MAX_EFFECT_WAL_STREAM_BYTES, NATIVE_SESSION_MAX_REQUEST_BYTES,
-    NativeEffectInterruptionEvidence, NativeEffectWalState,
+    NativeEffectInterruptionEvidence, NativeEffectWalEntry, NativeEffectWalState,
     RUNTIME_EVIDENCE_CAPTURE_DIR_RELATIVE_PATH, RUNTIME_EVIDENCE_PRODUCT_STATE_DIRECTORY,
     RUNTIME_EVIDENCE_ROOT_KEY_RELATIVE_PATH, RUNTIME_EVIDENCE_STATE_DIRECTORY,
     RuntimeEvidenceIdentityCapture, create_new_runtime_evidence_private_file,
@@ -55,6 +55,9 @@ const MAX_OUTCOME_BYTES: usize =
 const OUTCOME_RECEIPT_SCHEMA: &str = "franken-node/native-session-outcome-receipt/v1";
 const OUTCOME_RECEIPT_DIRECTORY: &str = "session-outcomes";
 const MAX_OUTCOME_RECEIPT_BYTES: usize = MAX_OUTCOME_BYTES + 1024;
+// Retain useful panic diagnostics without allowing a large panic payload to
+// displace the complete WAL or the mandatory signed terminal observation.
+const MAX_PANIC_MESSAGE_BYTES: usize = 4096;
 // Reserve the maximum outcome for every pending admission. Recording a
 // terminal/unknown outcome therefore remains possible at admission capacity.
 const MAX_RESERVED_BYTES: usize = crate::capacity_defaults::base::SMALL * 1024 * 1024;
@@ -316,6 +319,53 @@ impl NativeSessionEffectObservation {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct NativeSessionPanicEvidence {
+    /// A bounded UTF-8 prefix; the byte count and digest commit to the exact
+    /// original message, including any suffix omitted from this diagnostic.
+    pub panic_message: String,
+    pub panic_message_bytes: usize,
+    pub panic_message_sha256: String,
+    pub panic_message_truncated: bool,
+    pub cleanup_successful: bool,
+    /// The reconciled parent-observed WAL, never a finalized effect ledger.
+    /// Returned provider calls do not prove their external outcome or replay.
+    pub host_effect_wal: Vec<NativeEffectWalEntry>,
+}
+
+impl NativeSessionPanicEvidence {
+    pub(crate) fn from_validated_response(
+        panic_message: &str,
+        cleanup_successful: bool,
+        host_effect_wal: Vec<NativeEffectWalEntry>,
+    ) -> Self {
+        let mut end = panic_message.len().min(MAX_PANIC_MESSAGE_BYTES);
+        while !panic_message.is_char_boundary(end) {
+            end -= 1;
+        }
+        Self {
+            panic_message: panic_message[..end].to_owned(),
+            panic_message_bytes: panic_message.len(),
+            panic_message_sha256: hex::encode(Sha256::digest(panic_message.as_bytes())),
+            panic_message_truncated: end < panic_message.len(),
+            cleanup_successful,
+            host_effect_wal,
+        }
+    }
+}
+
+fn deserialize_panic_evidence<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<NativeSessionPanicEvidence>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    // Absence is the historical encoding. An explicit null, malformed value,
+    // or unknown field must not disappear before signature verification.
+    NativeSessionPanicEvidence::deserialize(deserializer).map(Some)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NativeSessionOutcome {
     pub observed_at: DateTime<Utc>,
     pub kind: NativeSessionOutcomeKind,
@@ -324,6 +374,14 @@ pub struct NativeSessionOutcome {
     /// this true. Reaping a process-group worker does not establish it.
     pub containment_empty_observed: bool,
     pub effects: NativeSessionEffectObservation,
+    /// Detailed panic evidence is part of the same signed outcome. Historical
+    /// observations omit it, preserving their exact signed representation.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_panic_evidence"
+    )]
+    pub panic_evidence: Option<NativeSessionPanicEvidence>,
 }
 
 /// A product supervisor's observation, authenticated independently of the
@@ -606,6 +664,52 @@ fn validate_outcome(
     use NativeSessionOutcomeKind as Kind;
     use NativeSessionProcessObservation as Process;
 
+    if let Some(evidence) = &outcome.panic_evidence {
+        if outcome.kind != Kind::Panicked
+            || evidence.panic_message.len() > MAX_PANIC_MESSAGE_BYTES
+            || evidence.panic_message_bytes < evidence.panic_message.len()
+            || evidence.panic_message_truncated
+                != (evidence.panic_message_bytes > evidence.panic_message.len())
+            || (evidence.panic_message_truncated
+                && evidence.panic_message_bytes <= MAX_PANIC_MESSAGE_BYTES)
+            || !valid_digest(&evidence.panic_message_sha256)
+            || (!evidence.panic_message_truncated
+                && evidence.panic_message_sha256
+                    != hex::encode(Sha256::digest(evidence.panic_message.as_bytes())))
+            || evidence
+                .host_effect_wal
+                .len()
+                .checked_mul(2)
+                .is_none_or(|events| events > NATIVE_SESSION_MAX_EFFECT_WAL_EVENTS)
+        {
+            bail!("native-session panic evidence is inconsistent");
+        }
+        // A validated Panicked response arrives only after the supervisor has
+        // rejected incomplete, out-of-order, or mismatched WAL frames. Never
+        // broaden this evidence type to generic worker or protocol failures.
+        for (sequence, entry) in evidence.host_effect_wal.iter().enumerate() {
+            if entry.sequence != u64::try_from(sequence)?
+                || entry.state != NativeEffectWalState::ProviderReturned
+                || entry.effect_kind.trim().is_empty()
+                || !entry
+                    .request_hash
+                    .strip_prefix("sha256:")
+                    .is_some_and(valid_digest)
+            {
+                bail!("native-session panic WAL entry is inconsistent");
+            }
+        }
+        bounded_json(
+            &evidence.host_effect_wal,
+            NATIVE_SESSION_MAX_EFFECT_WAL_STREAM_BYTES,
+        )
+        .context("native-session panic WAL exceeds its retained byte bound")?;
+        if outcome.effects == Effects::NoAdmittedHostEffects
+            && (!evidence.cleanup_successful || !evidence.host_effect_wal.is_empty())
+        {
+            bail!("native-session no-effects panic contradicts its retained evidence");
+        }
+    }
     if outcome.process == Process::NotSpawned {
         if outcome.kind != Kind::SupervisionIncomplete
             || outcome.effects != Effects::NotStarted
@@ -1290,6 +1394,7 @@ impl NativeSessionInventoryGuard {
                     process: NativeSessionProcessObservation::NotSpawned,
                     containment_empty_observed: false,
                     effects: NativeSessionEffectObservation::NotStarted,
+                    panic_evidence: None,
                 });
                 SqliteValue::Text(bounded_json(refused, MAX_OUTCOME_BYTES)?.into())
             };
@@ -1359,6 +1464,7 @@ impl NativeSessionInventoryGuard {
             process: self.process,
             containment_empty_observed: self.containment_empty_observed,
             effects,
+            panic_evidence: None,
         };
         if let Err(error) = self.persist_outcome(&outcome) {
             // Preserve execution error/panic/success. The durable admission
@@ -1367,6 +1473,45 @@ impl NativeSessionInventoryGuard {
                 "native-session outcome could not be persisted; admission remains unresolved");
         }
         self.finished = true;
+    }
+
+    /// Retain details from an already validated Panicked response without
+    /// changing its independently established effect classification. Optional
+    /// detail must never displace the mandatory signed terminal observation.
+    pub(crate) fn finish_panicked(
+        &mut self,
+        effects: NativeSessionEffectObservation,
+        evidence: NativeSessionPanicEvidence,
+    ) -> Result<()> {
+        if self.finished {
+            bail!("native-session panic outcome was already finalized");
+        }
+        let mut outcome = NativeSessionOutcome {
+            observed_at: Utc::now(),
+            kind: NativeSessionOutcomeKind::Panicked,
+            process: self.process,
+            containment_empty_observed: self.containment_empty_observed,
+            effects,
+            panic_evidence: Some(evidence),
+        };
+        let detail_error = validate_outcome(&self.admission, &outcome)
+            .and_then(|()| bounded_json(&outcome, MAX_OUTCOME_BYTES).map(|_| ()))
+            .err();
+        if detail_error.is_some() {
+            // Preserve the original caller's validated classification, not a
+            // classification inferred from rejected or truncated WAL entries.
+            // The caller must surface the error; no partial WAL is signed.
+            outcome.panic_evidence = None;
+        }
+        let persisted = self.persist_outcome(&outcome);
+        self.finished = true;
+        persisted.context("failed persisting the authenticated native panic outcome")?;
+        if let Some(error) = detail_error {
+            return Err(error.context(
+                "native panic forensic detail was not retained; the original signed outcome classification was preserved",
+            ));
+        }
+        Ok(())
     }
 
     fn persist_outcome(&self, outcome: &NativeSessionOutcome) -> Result<()> {
@@ -2816,6 +2961,207 @@ mod tests {
     }
 
     #[test]
+    fn signed_panic_forensics_survive_restart_and_reject_detail_tampering() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("evidence");
+        let admission = fixture(&root, 121);
+        let evidence = NativeSessionPanicEvidence::from_validated_response(
+            "native interpreter invariant failed after a returned write",
+            true,
+            vec![NativeEffectWalEntry {
+                sequence: 0,
+                effect_kind: "fs_write".to_string(),
+                request_hash: format!("sha256:{}", "ab".repeat(32)),
+                state: NativeEffectWalState::ProviderReturned,
+            }],
+        );
+        let mut guard = NativeSessionInventoryGuard::admit(&root, admission.clone(), 0).unwrap();
+        guard.worker_started();
+        guard.worker_reaped();
+        guard
+            .finish_panicked(NativeSessionEffectObservation::Unknown, evidence.clone())
+            .unwrap();
+        drop(guard);
+
+        let report = read_inventory_at(&root, None).unwrap();
+        assert_eq!(report.pending_sessions, 0);
+        assert_eq!(report.unknown_effect_sessions, 1);
+        let outcome = report.records[0].outcome.as_ref().unwrap();
+        assert_eq!(outcome.kind, NativeSessionOutcomeKind::Panicked);
+        assert_eq!(outcome.effects, NativeSessionEffectObservation::Unknown);
+        assert_eq!(outcome.panic_evidence.as_ref(), Some(&evidence));
+        assert!(!terminal_outcome_observed(&admission, outcome));
+        let key = ed25519_dalek::SigningKey::from_bytes(&[17; 32]).verifying_key();
+        let receipt = read_outcome_receipt(&root, &admission, &key)
+            .unwrap()
+            .unwrap();
+        for mutation in 0..5 {
+            let mut changed = receipt.clone();
+            match mutation {
+                0 => changed.outcome.panic_evidence = None,
+                1 => {
+                    let detail = changed.outcome.panic_evidence.as_mut().unwrap();
+                    detail.cleanup_successful = false;
+                }
+                2 => {
+                    let detail = changed.outcome.panic_evidence.as_mut().unwrap();
+                    detail.host_effect_wal[0].request_hash = format!("sha256:{}", "cd".repeat(32));
+                }
+                3 => changed
+                    .outcome
+                    .panic_evidence
+                    .as_mut()
+                    .unwrap()
+                    .host_effect_wal
+                    .clear(),
+                _ => {
+                    changed.outcome.panic_evidence =
+                        Some(NativeSessionPanicEvidence::from_validated_response(
+                            "replacement panic with a valid standalone digest",
+                            true,
+                            evidence.host_effect_wal.clone(),
+                        ));
+                }
+            }
+            assert!(
+                changed.verify(&admission, &key).is_err(),
+                "mutation {mutation}"
+            );
+        }
+        for pointer in [
+            "/outcome/panic_evidence",
+            "/outcome/panic_evidence/host_effect_wal/0",
+        ] {
+            let mut changed = serde_json::to_value(&receipt).unwrap();
+            changed.pointer_mut(pointer).unwrap()["unauthenticated_extension"] =
+                serde_json::json!(true);
+            assert!(serde_json::from_value::<NativeSessionOutcomeReceipt>(changed).is_err());
+        }
+        let mut changed = serde_json::to_value(&receipt).unwrap();
+        changed["outcome"]["panic_evidence"] = serde_json::Value::Null;
+        assert!(serde_json::from_value::<NativeSessionOutcomeReceipt>(changed).is_err());
+
+        let mut inconsistent = outcome.clone();
+        inconsistent.effects = NativeSessionEffectObservation::NoAdmittedHostEffects;
+        assert!(validate_outcome(&admission, &inconsistent).is_err());
+        inconsistent = outcome.clone();
+        inconsistent.kind = NativeSessionOutcomeKind::ExecutionFailed;
+        assert!(validate_outcome(&admission, &inconsistent).is_err());
+        inconsistent = outcome.clone();
+        inconsistent
+            .panic_evidence
+            .as_mut()
+            .unwrap()
+            .host_effect_wal[0]
+            .state = NativeEffectWalState::InterruptedIndeterminate;
+        assert!(validate_outcome(&admission, &inconsistent).is_err());
+    }
+
+    #[test]
+    fn historical_panic_outcome_encoding_and_signature_remain_valid() {
+        const HISTORICAL: &str = r#"{"observed_at":"2026-11-13T00:00:00Z","kind":"panicked","process":"worker_reaped","containment_empty_observed":false,"effects":{"kind":"unknown"}}"#;
+        let outcome: NativeSessionOutcome = serde_json::from_str(HISTORICAL).unwrap();
+        assert!(outcome.panic_evidence.is_none());
+        assert_eq!(serde_json::to_string(&outcome).unwrap(), HISTORICAL);
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("evidence");
+        let admission = fixture(&root, 122);
+        let key = ed25519_dalek::SigningKey::from_bytes(&[17; 32]);
+        let receipt = NativeSessionOutcomeReceipt::issue(&admission, &outcome, &key).unwrap();
+        let decoded: NativeSessionOutcomeReceipt =
+            serde_json::from_slice(&serde_json::to_vec(&receipt).unwrap()).unwrap();
+        decoded.verify(&admission, &key.verifying_key()).unwrap();
+        let mut inserted_null = serde_json::to_value(&receipt).unwrap();
+        inserted_null["outcome"]["panic_evidence"] = serde_json::Value::Null;
+        assert!(serde_json::from_value::<NativeSessionOutcomeReceipt>(inserted_null).is_err());
+    }
+
+    #[test]
+    fn maximum_panic_wal_and_bounded_utf8_message_fit_signed_outcome() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("evidence");
+        let admission = fixture(&root, 123);
+        let message = format!(
+            "{}🦀{}",
+            "x".repeat(MAX_PANIC_MESSAGE_BYTES - 1),
+            "y".repeat(8192)
+        );
+        let wal = (0..NATIVE_SESSION_MAX_EFFECT_WAL_EVENTS / 2)
+            .map(|index| NativeEffectWalEntry {
+                sequence: u64::try_from(index).unwrap(),
+                // Still fits a real 1KiB admission frame, including its nonce,
+                // schema, sequence and request hash; no metadata is truncated.
+                effect_kind: "x".repeat(700),
+                request_hash: format!("sha256:{index:064x}"),
+                state: NativeEffectWalState::ProviderReturned,
+            })
+            .collect::<Vec<_>>();
+        let evidence =
+            NativeSessionPanicEvidence::from_validated_response(&message, true, wal.clone());
+        assert!(evidence.panic_message_truncated);
+        assert_eq!(evidence.panic_message.len(), MAX_PANIC_MESSAGE_BYTES - 1);
+        assert_eq!(evidence.panic_message_bytes, message.len());
+        assert_eq!(
+            evidence.panic_message_sha256,
+            hex::encode(Sha256::digest(message.as_bytes()))
+        );
+        let mut guard = NativeSessionInventoryGuard::admit(&root, admission.clone(), 0).unwrap();
+        guard.worker_started();
+        guard.worker_reaped();
+        guard
+            .finish_panicked(NativeSessionEffectObservation::Unknown, evidence)
+            .unwrap();
+        drop(guard);
+        let key = ed25519_dalek::SigningKey::from_bytes(&[17; 32]).verifying_key();
+        let receipt = read_outcome_receipt(&root, &admission, &key)
+            .unwrap()
+            .unwrap();
+        assert!(bounded_json(&receipt, MAX_OUTCOME_RECEIPT_BYTES).is_ok());
+        assert_eq!(receipt.outcome.panic_evidence.unwrap().host_effect_wal, wal);
+    }
+
+    #[test]
+    fn oversized_panic_detail_reports_failure_but_retains_signed_classification() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("evidence");
+        let admission = fixture(&root, 124);
+        let evidence = NativeSessionPanicEvidence::from_validated_response(
+            "panic with oversized forensic metadata",
+            true,
+            vec![NativeEffectWalEntry {
+                sequence: 0,
+                effect_kind: "x".repeat(NATIVE_SESSION_MAX_EFFECT_WAL_STREAM_BYTES + 1),
+                request_hash: format!("sha256:{}", "ef".repeat(32)),
+                state: NativeEffectWalState::ProviderReturned,
+            }],
+        );
+        let mut guard = NativeSessionInventoryGuard::admit(&root, admission.clone(), 0).unwrap();
+        guard.worker_started();
+        guard.worker_reaped();
+        let error = guard
+            .finish_panicked(NativeSessionEffectObservation::Unknown, evidence)
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("classification was preserved"),
+            "{error:#}"
+        );
+        drop(guard);
+        let key = ed25519_dalek::SigningKey::from_bytes(&[17; 32]).verifying_key();
+        let receipt = read_outcome_receipt(&root, &admission, &key)
+            .unwrap()
+            .unwrap();
+        assert_eq!(receipt.outcome.kind, NativeSessionOutcomeKind::Panicked);
+        assert_eq!(
+            receipt.outcome.effects,
+            NativeSessionEffectObservation::Unknown
+        );
+        assert!(receipt.outcome.panic_evidence.is_none());
+        let report = read_inventory_at(&root, None).unwrap();
+        assert_eq!(report.pending_sessions, 0);
+        assert_eq!(report.unknown_effect_sessions, 1);
+    }
+
+    #[test]
     fn no_effects_panic_observation_requires_reap_and_absent_process_authority() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("evidence");
@@ -2826,6 +3172,7 @@ mod tests {
             process: NativeSessionProcessObservation::WorkerReaped,
             containment_empty_observed: false,
             effects: NativeSessionEffectObservation::NoAdmittedHostEffects,
+            panic_evidence: None,
         };
         validate_outcome(&admission, &outcome).unwrap();
         assert!(terminal_outcome_observed(&admission, &outcome));
@@ -3294,6 +3641,7 @@ mod tests {
             effects: NativeSessionEffectObservation::Interrupted {
                 evidence: Box::new(evidence),
             },
+            panic_evidence: None,
         };
         validate_outcome(&admission, &outcome).unwrap();
         let encoded = bounded_json(&outcome, MAX_OUTCOME_BYTES).unwrap();
@@ -3868,6 +4216,7 @@ mod tests {
             process: NativeSessionProcessObservation::WorkerReaped,
             containment_empty_observed: false,
             effects: successful_ledger_observation(),
+            panic_evidence: None,
         }
     }
 
@@ -3941,6 +4290,7 @@ mod tests {
             process: NativeSessionProcessObservation::NotSpawned,
             containment_empty_observed: false,
             effects: NativeSessionEffectObservation::NotStarted,
+            panic_evidence: None,
         };
         abandon_after_receipt(&root, guard, &outcome);
         let started = begin_drain_at(&root, &project, "node-a", "prod", &actions(1)).unwrap();
@@ -4102,6 +4452,7 @@ mod tests {
             process: NativeSessionProcessObservation::WorkerReaped,
             containment_empty_observed: false,
             effects: NativeSessionEffectObservation::Unknown,
+            panic_evidence: None,
         };
         let mut tx = connection.transaction().unwrap();
         tx.execute_with_params(
@@ -4875,6 +5226,7 @@ mod tests {
             process: NativeSessionProcessObservation::Unproven,
             containment_empty_observed: false,
             effects: final_ledger_observation(),
+            panic_evidence: None,
         };
         assert!(guard.persist_outcome(&outcome).is_err());
         outcome.process = NativeSessionProcessObservation::WorkerReaped;
@@ -4905,6 +5257,7 @@ mod tests {
             process: NativeSessionProcessObservation::WorkerReaped,
             containment_empty_observed: true,
             effects: final_ledger_observation(),
+            panic_evidence: None,
         };
         assert!(guard.persist_outcome(&outcome).is_err());
         let report = read_inventory_at(&root, None).unwrap();
@@ -4963,6 +5316,7 @@ mod tests {
             effects: NativeSessionEffectObservation::Interrupted {
                 evidence: Box::new(foreign),
             },
+            panic_evidence: None,
         };
         assert!(guard.persist_outcome(&foreign_outcome).is_err());
         assert!(
@@ -5055,6 +5409,7 @@ mod tests {
             process: NativeSessionProcessObservation::NotSpawned,
             containment_empty_observed: true,
             effects: NativeSessionEffectObservation::Unknown,
+            panic_evidence: None,
         };
         assert!(guard.persist_outcome(&impossible).is_err());
         let mut tx = guard.connection.transaction().unwrap();

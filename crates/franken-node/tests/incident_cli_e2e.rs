@@ -2532,6 +2532,10 @@ mod signed_process_capture {
         )
         .expect("resolve the same configuration shape the CLI signs and admits")
         .config;
+        // Replay capture defaults to immutable source execution. The token
+        // binds the complete effective policy, so choose its source mode before
+        // signing rather than relying on a later execution-time default.
+        config.runtime.frozen_modules = Some(true);
         let executable = Path::new("/usr/bin/touch")
             .canonicalize()
             .expect("canonical marker-writing executable");
@@ -3171,6 +3175,7 @@ fn native_incident_replay_restores_process_arguments_for_completed_and_failed_ru
         )
         .expect("captured invocation inputs");
         assert_eq!(payload["ambient_authority"], "trusted_process_shape");
+        assert!(payload["module_sources"].is_object());
         assert_eq!(payload["process_argv"][2], "argument with spaces");
         assert_eq!(payload["process_argv"][3], "βeta");
         let terminal_state = if expect_success {
@@ -3203,7 +3208,7 @@ fn native_incident_replay_restores_process_arguments_for_completed_and_failed_ru
         assert_eq!(execution["matched"], true, "{replay}");
         assert_eq!(execution["console_match"], true);
         assert_eq!(execution["host_effects_match"], true);
-        assert_eq!(execution["module_load_disabled"], true);
+        assert_eq!(execution["module_load_disabled"], false);
         assert_eq!(execution["captured_terminal_state"], terminal_state);
         assert_eq!(execution["replay_terminal_state"], terminal_state);
         assert!(!workspace.path().join("output.txt").exists());
@@ -3284,7 +3289,7 @@ fn native_incident_replay_uses_captured_code_and_io_after_original_files_change(
             replay["execution_result"]["verification_scope"],
             "guest_execution"
         );
-        assert_eq!(replay["execution_result"]["module_load_disabled"], true);
+        assert_eq!(replay["execution_result"]["module_load_disabled"], false);
         assert!(replay["execution_result"]["decisions_match"].is_boolean());
     }
     assert_eq!(
