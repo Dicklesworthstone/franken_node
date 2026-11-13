@@ -565,9 +565,13 @@ emitted evidence.
 
 #### Re-execute captured native JavaScript
 
-Opt in when recording a run to retain its entry source, execution settings,
-arguments, and raw host-I/O and admitted process results in the signed run
-record. The capture is limited to 4 MiB and may contain application secrets.
+Opt in when recording a run to retain its bounded module source graph,
+execution settings, arguments, and raw host-I/O and admitted process results
+in the signed run record. `--capture-replay` freezes supported module routes
+before guest execution by default, so imported sources remain available when
+the original project changes or disappears. Unsupported or oversized source
+closures fail before guest effects. The complete capture is limited to 4 MiB
+and may contain application secrets.
 
 ```bash
 franken-node init --profile balanced --out-dir .
@@ -651,6 +655,12 @@ journal suffix cannot produce a successful replay verdict, including when the
 guest catches the immediate error. A request refused before journal admission
 may lack replayable preparation and consequently fail replay verification.
 
+Child-process admissions bind the complete resolved configuration. Set
+`runtime.frozen_modules = true` before signing an admission for source-graph
+capture, or explicitly set it to `false` for entry-only capture. A token signed
+with an unspecified source mode cannot authorize the newly resolved frozen
+configuration; it must be issued for that configuration before execution.
+
 Process capture uses the engine's conservative `Unknown` exception provenance
 in the original execution as well as replay. This can restrict flows that an
 ordinary run would allow; it keeps the actual original and replay witnesses
@@ -658,12 +668,13 @@ comparable without making replay data more trusted or waiving any comparison.
 Preparation is limited to 4,096
 unique entries and 2 MiB within the overall 4 MiB capture limit.
 
-Entry-only captures disable runtime module loading during replay. Source now
-implements `--frozen-modules --capture-replay`: it retains the existing bounded
-source capsule, graph pins and original prepared entry binding. Replay restores
-only that captured resolver, retaining the original capability restrictions
-without reading or extracting the original project. Native qualification of
-this new multi-file path is still pending; see the
+`--capture-replay` retains the bounded source capsule, graph pins and original
+prepared entry binding unless configuration explicitly sets
+`runtime.frozen_modules = false`. That opt-out produces an entry-only capture
+and disables runtime module loading during replay; `--frozen-modules` overrides
+the opt-out. Replay restores only the captured resolver, retaining the original
+capability restrictions without reading or extracting the original project.
+Native qualification of this multi-file path is still pending; see the
 [execution TODO](docs/progress/REALITY_CHECK_AND_BRIDGE_PLAN.md#offline-npm-and-native-build-execution--2026-10-22).
 The capture envelope is now `franken-node/native-replay-capture/v3`; historical v2 captures
 are refused rather than treated as authenticating newly added fields.

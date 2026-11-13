@@ -40796,6 +40796,7 @@ fn main() -> Result<()> {
             if !module_conditions.is_empty() {
                 resolved.config.runtime.module_conditions = module_conditions;
             }
+            EngineDispatcher::apply_replay_capture_defaults(&mut resolved.config, capture_replay);
             if let Err(error) = resolved.config.runtime.validate_module_conditions() {
                 return named_cli_fail("franken-node/run-error-cli/v1", "run", json, error);
             }

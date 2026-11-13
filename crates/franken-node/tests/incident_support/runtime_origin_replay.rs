@@ -80,10 +80,7 @@ fn runtime_origin_replay_requires_an_explicit_run_anchor_before_reading_inputs()
 
 #[cfg(all(feature = "engine", target_os = "linux"))]
 mod native {
-    use super::super::{
-        capture_native_run_bundle_with, native_replay_workspace_with_arguments_in_state_home,
-        run_cli_in_workspace_with_state_home,
-    };
+    use super::super::{capture_native_run_bundle_with, run_cli_in_workspace_with_state_home};
     use super::*;
     use ed25519_dalek::{SigningKey, VerifyingKey};
     use frankenengine_node::tools::replay_bundle::{
@@ -103,6 +100,14 @@ mod native {
     const PROGRAM: &str = "const fs = require('fs'); const input = fs.readFileSync('input.txt', 'utf8'); fs.writeFileSync('output.txt', input); console.log(input);";
     const ROOT_KEY_PATH: &str = "franken-node/runtime-evidence/keys/product-root.key";
 
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum SourceMode {
+        EntryOnly,
+        ExplicitFrozen,
+        AutomaticCommonJs,
+        AutomaticEsm,
+    }
+
     struct Fixture {
         producer: tempfile::TempDir,
         producer_state: tempfile::TempDir,
@@ -119,69 +124,135 @@ mod native {
 
     impl Fixture {
         fn new(guest_exception: bool) -> Self {
-            Self::new_with_frozen_modules(guest_exception, false)
+            Self::new_with_sources(guest_exception, SourceMode::EntryOnly)
         }
 
-        fn new_with_frozen_modules(guest_exception: bool, frozen_modules: bool) -> Self {
+        fn new_with_sources(guest_exception: bool, source_mode: SourceMode) -> Self {
             let producer_state = tempfile::tempdir().expect("independent producer authority");
-            let source_text = format!(
-                "{PROGRAM} {}",
-                if guest_exception {
-                    "throw 'captured-stop';"
-                } else {
-                    ""
-                },
-            );
-            let (producer, run) = if frozen_modules {
-                let producer = tempfile::tempdir().expect("frozen native producer");
-                fs::write(
-                    producer.path().join("app.js"),
-                    format!("console.log(require('./replay-dependency.cjs')); {source_text}"),
-                )
-                .unwrap();
-                fs::write(
-                    producer.path().join("replay-dependency.cjs"),
-                    "module.exports = 'captured-dependency';",
-                )
-                .unwrap();
-                fs::write(producer.path().join("input.txt"), "ORIGINAL").unwrap();
-                let initialized = run_cli_in_workspace_with_state_home(
-                    producer.path(),
-                    &[
-                        "init",
-                        "--profile",
-                        "legacy-risky",
-                        "--out-dir",
-                        ".",
-                        "--json",
-                    ],
-                    Some(producer_state.path()),
-                );
-                assert!(initialized.status.success(), "{initialized:?}");
-                let recorded = run_cli_in_workspace_with_state_home(
-                    producer.path(),
-                    &[
-                        "run",
-                        "app.js",
-                        "--frozen-modules",
-                        "--capture-replay",
-                        "--json",
-                    ],
-                    Some(producer_state.path()),
-                );
-                assert_eq!(recorded.status.success(), !guest_exception, "{recorded:?}");
-                let run: Value = serde_json::from_slice(&recorded.stdout).unwrap();
-                (producer, run)
+            let producer = tempfile::tempdir().expect("native replay producer");
+            let stop = if guest_exception {
+                "throw 'captured-stop';"
             } else {
-                native_replay_workspace_with_arguments_in_state_home(
-                    &source_text,
-                    "legacy-risky",
-                    !guest_exception,
-                    false,
-                    &[],
-                    Some(producer_state.path()),
-                )
+                ""
             };
+            let source_text = match source_mode {
+                SourceMode::EntryOnly => format!("{PROGRAM} {stop}"),
+                SourceMode::ExplicitFrozen | SourceMode::AutomaticCommonJs => {
+                    format!("console.log(require('./replay-dependency.cjs')); {PROGRAM} {stop}")
+                }
+                SourceMode::AutomaticEsm => {
+                    fs::write(producer.path().join("package.json"), r#"{"type":"module"}"#)
+                        .unwrap();
+                    format!(
+                        "import value from './replay-dependency.mjs'; console.log(value); {stop}"
+                    )
+                }
+            };
+            if source_mode != SourceMode::EntryOnly {
+                fs::create_dir_all(producer.path().join("replay-modules/nested")).unwrap();
+                fs::write(
+                    producer.path().join("replay-modules/nested/value.cjs"),
+                    "module.exports = 'captured-';",
+                )
+                .unwrap();
+                fs::write(
+                    producer.path().join("replay-modules/settings.json"),
+                    r#"{"suffix":"dependency"}"#,
+                )
+                .unwrap();
+                if source_mode == SourceMode::AutomaticEsm {
+                    fs::write(
+                        producer.path().join("replay-dependency.mjs"),
+                        "import value from './replay-modules/effects.cjs'; export default value;",
+                    )
+                    .unwrap();
+                    fs::write(
+                        producer.path().join("replay-modules/effects.cjs"),
+                        format!(
+                            "const value = require('./nested/value.cjs'); const settings = require('./settings.json'); {PROGRAM} module.exports = value + settings.suffix;"
+                        ),
+                    )
+                    .unwrap();
+                } else {
+                    fs::write(
+                        producer.path().join("replay-dependency.cjs"),
+                        "const value = require('./replay-modules/nested/value.cjs'); const settings = require('./replay-modules/settings.json'); module.exports = value + settings.suffix;",
+                    )
+                    .unwrap();
+                }
+            }
+            fs::write(producer.path().join("app.js"), source_text).unwrap();
+            fs::write(producer.path().join("input.txt"), "ORIGINAL").unwrap();
+            let initialized = run_cli_in_workspace_with_state_home(
+                producer.path(),
+                &[
+                    "init",
+                    "--profile",
+                    "legacy-risky",
+                    "--out-dir",
+                    ".",
+                    "--json",
+                ],
+                Some(producer_state.path()),
+            );
+            assert!(initialized.status.success(), "{initialized:?}");
+            let config_path = producer.path().join("franken_node.toml");
+            let mut config: frankenengine_node::config::Config =
+                toml::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+            assert_eq!(config.runtime.frozen_modules, None);
+            config.runtime.allow_process_shape = Some(false);
+            if matches!(
+                source_mode,
+                SourceMode::EntryOnly | SourceMode::ExplicitFrozen
+            ) {
+                // Preserve explicit entry-only coverage and prove the CLI
+                // frozen flag still overrides a configured false value.
+                config.runtime.frozen_modules = Some(false);
+            }
+            fs::write(config_path, config.to_toml().unwrap()).unwrap();
+            let mut args = vec!["run", "app.js", "--capture-replay", "--json"];
+            if source_mode == SourceMode::ExplicitFrozen {
+                args.push("--frozen-modules");
+            }
+            let recorded = run_cli_in_workspace_with_state_home(
+                producer.path(),
+                &args,
+                Some(producer_state.path()),
+            );
+            assert_eq!(recorded.status.success(), !guest_exception, "{recorded:?}");
+            let run: Value = serde_json::from_slice(&recorded.stdout).unwrap();
+            assert_eq!(run["success"], !guest_exception);
+            let capture = &run["dispatch"]["native_replay"];
+            assert!(capture.is_object(), "{run}");
+            assert_eq!(
+                run["receipt"]["native_replay_payload_sha256"],
+                capture["payload_sha256"]
+            );
+            let payload: Value = serde_json::from_str(capture["payload_json"].as_str().unwrap())
+                .expect("exact retained execution inputs");
+            if source_mode == SourceMode::EntryOnly {
+                assert!(payload["module_sources"].is_null());
+            } else {
+                assert!(payload["module_sources"].is_object(), "{run}");
+                if !guest_exception {
+                    assert_eq!(
+                        run["receipt"]["native_module_graph"]["graph_input_hash"],
+                        payload["module_sources"]["graph_input_hash"],
+                        "the execution receipt must describe the captured source mode"
+                    );
+                }
+            }
+            assert_eq!(
+                run["dispatch"]["captured_output"]["stdout"],
+                match source_mode {
+                    SourceMode::EntryOnly => "ORIGINAL\n",
+                    SourceMode::AutomaticEsm => "ORIGINAL\ncaptured-dependency\n",
+                    SourceMode::ExplicitFrozen | SourceMode::AutomaticCommonJs => {
+                        "captured-dependency\nORIGINAL\n"
+                    }
+                },
+                "the original multi-file program must actually execute"
+            );
             let receipt_id = run["receipt"]["receipt_id"].as_str().unwrap().to_string();
             let (bundle_name, captured) =
                 capture_native_run_bundle_with(producer.path(), &receipt_id, |args| {
@@ -348,26 +419,17 @@ mod native {
         }
 
         fn archive_original_authority_and_inputs(&self) {
-            for name in ["app.js", "input.txt", "output.txt"] {
-                fs::rename(
-                    self.producer.path().join(name),
-                    self.archive.path().join(name),
-                )
-                .unwrap();
-            }
-            let dependency = self.producer.path().join("replay-dependency.cjs");
-            if dependency.exists() {
-                fs::rename(
-                    dependency,
-                    self.archive.path().join("replay-dependency.cjs"),
-                )
-                .unwrap();
-            }
+            fs::rename(
+                self.producer.path(),
+                self.archive.path().join("producer-project"),
+            )
+            .unwrap();
             fs::rename(
                 self.producer_state.path().join("franken-node"),
                 self.archive.path().join("producer-state"),
             )
             .unwrap();
+            assert!(!self.producer.path().exists());
             assert!(!self.producer_state.path().join(ROOT_KEY_PATH).exists());
         }
 
@@ -403,7 +465,8 @@ mod native {
             assert!(!self.operator.path().join("input.txt").exists());
             assert!(!self.operator_state.path().join(ROOT_KEY_PATH).exists());
             assert_eq!(
-                fs::read_to_string(self.archive.path().join("output.txt")).unwrap(),
+                fs::read_to_string(self.archive.path().join("producer-project/output.txt"))
+                    .unwrap(),
                 "ORIGINAL",
             );
         }
@@ -430,7 +493,7 @@ mod native {
     #[test]
     fn policy_equivalence_replays_frozen_modules_offline_and_refuses_failure_prefixes() {
         for guest_exception in [false, true] {
-            let fixture = Fixture::new_with_frozen_modules(guest_exception, true);
+            let fixture = Fixture::new_with_sources(guest_exception, SourceMode::ExplicitFrozen);
             fixture.archive_original_authority_and_inputs();
             assert!(
                 !fixture
@@ -493,6 +556,140 @@ mod native {
             }
             fixture.assert_no_repeated_effects();
         }
+    }
+
+    #[test]
+    fn ordinary_capture_replays_nested_cjs_and_esm_after_sources_change_and_disappear() {
+        for source_mode in [SourceMode::AutomaticCommonJs, SourceMode::AutomaticEsm] {
+            for guest_exception in [false, true] {
+                let fixture = Fixture::new_with_sources(guest_exception, source_mode);
+                let dependency = match source_mode {
+                    SourceMode::AutomaticCommonJs => "replay-dependency.cjs",
+                    SourceMode::AutomaticEsm => "replay-dependency.mjs",
+                    _ => unreachable!(),
+                };
+                fs::write(
+                    fixture.producer.path().join(dependency),
+                    "throw 'LIVE-MODULE-MUTATION-MUST-NOT-EXECUTE';",
+                )
+                .unwrap();
+                fs::write(
+                    fixture
+                        .producer
+                        .path()
+                        .join("replay-modules/nested/value.cjs"),
+                    "module.exports = 'changed-';",
+                )
+                .unwrap();
+                fs::write(
+                    fixture.producer.path().join("replay-modules/settings.json"),
+                    r#"{"suffix":"live-source"}"#,
+                )
+                .unwrap();
+                if source_mode == SourceMode::AutomaticEsm {
+                    fs::write(
+                        fixture.producer.path().join("package.json"),
+                        r#"{"type":"commonjs"}"#,
+                    )
+                    .unwrap();
+                }
+
+                // First refuse all live source and package changes, then prove
+                // the exact same capture works with the entire project and
+                // original runtime authority unavailable to the fresh process.
+                for archived in [false, true] {
+                    if archived {
+                        fixture.archive_original_authority_and_inputs();
+                    }
+                    let output = fixture.replay(&fixture.bundle_name, Some("runtime.pub"), true);
+                    assert!(output.status.success(), "{source_mode:?}: {output:?}");
+                    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+                    assert_eq!(report["run_origin_verified"], true);
+                    assert_eq!(report["runtime_origin_verified"], true);
+                    assert_eq!(report["replay_result"]["matched"], true);
+                    let execution = &report["execution_result"];
+                    assert_eq!(execution["matched"], true, "{report}");
+                    assert_eq!(execution["module_load_disabled"], false);
+                    assert_eq!(execution["console_match"], true);
+                    assert_eq!(execution["host_effects_match"], true);
+                    assert_eq!(
+                        execution["replay_terminal_state"],
+                        if guest_exception {
+                            "uncaught_exception"
+                        } else {
+                            "completed"
+                        }
+                    );
+                    assert_eq!(
+                        execution["verification_scope"],
+                        if guest_exception {
+                            "guest_failure_prefix"
+                        } else {
+                            "guest_execution"
+                        }
+                    );
+                    if guest_exception {
+                        assert_eq!(execution["exception_value_match"], true);
+                    }
+                    assert!(!fixture.operator.path().join("output.txt").exists());
+                    assert!(!fixture.operator.path().join("replay-modules").exists());
+                    if archived {
+                        assert!(!fixture.producer.path().exists());
+                        fixture.assert_no_repeated_effects();
+                    } else {
+                        assert_eq!(
+                            fs::read_to_string(fixture.producer.path().join("output.txt")).unwrap(),
+                            "ORIGINAL"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ordinary_capture_refuses_an_unbounded_module_route_before_guest_effects() {
+        let producer = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let initialized = run_cli_in_workspace_with_state_home(
+            producer.path(),
+            &[
+                "init",
+                "--profile",
+                "legacy-risky",
+                "--out-dir",
+                ".",
+                "--json",
+            ],
+            Some(state.path()),
+        );
+        assert!(initialized.status.success(), "{initialized:?}");
+        fs::write(
+            producer.path().join("app.js"),
+            "const fs = require('fs'); fs.writeFileSync('capture-side-effect.txt', 'must-not-run'); let requested = './dependency.cjs'; require(requested);",
+        )
+        .unwrap();
+        fs::write(
+            producer.path().join("dependency.cjs"),
+            "module.exports = 42;",
+        )
+        .unwrap();
+        let output = run_cli_in_workspace_with_state_home(
+            producer.path(),
+            &["run", "app.js", "--capture-replay", "--json"],
+            Some(state.path()),
+        );
+        assert!(!output.status.success(), "{output:?}");
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(
+            report["error"]
+                .as_str()
+                .unwrap()
+                .contains("Frozen module source admission failed"),
+            "source completeness must fail during admission: {report}"
+        );
+        assert!(report["dispatch"]["native_replay"].is_null());
+        assert!(!producer.path().join("capture-side-effect.txt").exists());
     }
 
     #[test]

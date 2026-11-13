@@ -361,10 +361,12 @@ pub struct RunArgs {
     #[arg(long)]
     pub compat_preflight: bool,
 
-    /// Retain the entry source, supplied arguments, process-metadata grant, and
-    /// raw host-I/O results for offline native re-execution with
-    /// `incident replay --execute`. Captured data may contain application
-    /// secrets. Supports completed native runs, certified uncaught-exception
+    /// Retain the bounded module source graph, supplied arguments,
+    /// process-metadata grant, and raw host-I/O results for offline native
+    /// re-execution with `incident replay --execute`. Freezes supported module
+    /// routes before execution unless runtime.frozen_modules is explicitly false
+    /// for an entry-only capture. Captured data may contain application secrets.
+    /// Supports completed native runs, certified uncaught-exception
     /// prefixes, and finalized capability-denial/instruction-budget stops; the
     /// original run's exit status is retained.
     #[arg(long)]

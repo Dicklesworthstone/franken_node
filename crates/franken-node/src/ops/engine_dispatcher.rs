@@ -314,6 +314,9 @@ struct NativeSessionRequest {
 #[cfg(feature = "engine")]
 impl NativeSessionRequest {
     fn validate_module_requirements(&self) -> Result<()> {
+        if self.capture_replay && self.config.runtime.frozen_modules.is_none() {
+            anyhow::bail!("native-session replay source mode was not resolved before dispatch");
+        }
         if self.frozen_modules
             != self
                 .config
@@ -7795,10 +7798,23 @@ impl EngineDispatcher {
 
     /// Capture source and recorded host I/O for subsequent incident reexecution.
     /// The default leaves these potentially sensitive bytes out of reports.
+    /// Unless explicitly disabled in configuration, capture executes from the
+    /// same immutable module-source closure later retained in the replay.
     #[must_use]
     pub fn with_replay_capture(mut self, enabled: bool) -> Self {
         self.capture_replay = enabled;
         self
+    }
+
+    /// Select immutable module execution for an ordinary replay capture before
+    /// validating source policy, publisher admission or dependency preflight.
+    /// An explicit false keeps the existing entry-only capture mode; callers
+    /// must apply any explicit `--frozen-modules` override before this default.
+    /// This changes no capabilities, package conditions, symlink policy or pin.
+    pub fn apply_replay_capture_defaults(config: &mut Config, capture_replay: bool) {
+        if capture_replay && config.runtime.frozen_modules.is_none() {
+            config.runtime.frozen_modules = Some(true);
+        }
     }
 
     /// Dispatches profile-governed execution to the embedded franken-engine.
@@ -7839,10 +7855,13 @@ impl EngineDispatcher {
 
         // Library callers can construct Config directly, so enforce the same
         // execution and parser budgets as the TOML/environment resolver before
-        // any execution-side effect.
-        config.runtime.validate_execution_budget()?;
-        config.runtime.validate_parse_budget()?;
-        validate_native_frozen_modules(config)?;
+        // any execution-side effect. Resolve capture defaults before admission
+        // and carry that exact configuration through the worker protocol.
+        let mut execution_config = config.clone();
+        Self::apply_replay_capture_defaults(&mut execution_config, self.capture_replay);
+        execution_config.runtime.validate_execution_budget()?;
+        execution_config.runtime.validate_parse_budget()?;
+        validate_native_frozen_modules(&execution_config)?;
 
         // Environment authority is replayable through the same typed host-I/O
         // transcript as filesystem/network effects; no profile needs a replay
@@ -7881,7 +7900,6 @@ impl EngineDispatcher {
             )?,
         };
         project_paths.enforce_safe_mode()?;
-        let mut execution_config = config.clone();
         let active_fleet_policy = enforce_execution_fleet_policy_with_operator(
             project_paths.project_root(),
             &mut execution_config,
@@ -12987,6 +13005,41 @@ impl EngineDispatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn replay_capture_defaults_admit_source_constraints_without_overriding_explicit_false() {
+        let mut config = Config::for_profile(Profile::Balanced);
+        config.runtime.frozen_module_graph_hash = Some("12".repeat(32));
+        config.runtime.frozen_module_symlinks = Some(true);
+        config.runtime.module_conditions = vec!["development".to_string()];
+        let original = config.clone();
+        assert!(validate_native_frozen_modules(&config).is_err());
+
+        EngineDispatcher::apply_replay_capture_defaults(&mut config, false);
+        assert_eq!(
+            config, original,
+            "ordinary runs keep their configured source mode"
+        );
+        assert!(validate_native_frozen_modules(&config).is_err());
+
+        EngineDispatcher::apply_replay_capture_defaults(&mut config, true);
+        validate_native_frozen_modules(&config).expect("capture resolves its source mode first");
+        assert_eq!(config.runtime.frozen_modules, Some(true));
+        config.runtime.frozen_modules = original.runtime.frozen_modules;
+        assert_eq!(
+            config, original,
+            "capture must not change any other authority"
+        );
+
+        config.runtime.frozen_modules = Some(false);
+        EngineDispatcher::apply_replay_capture_defaults(&mut config, true);
+        assert_eq!(config.runtime.frozen_modules, Some(false));
+        assert!(
+            validate_native_frozen_modules(&config).is_err(),
+            "a configured false still refuses graph-pin and symlink requirements"
+        );
+    }
 
     #[cfg(feature = "engine")]
     mod native_host_io_composition {
@@ -23927,7 +23980,11 @@ exec "$2" pinned-worker-image"#,
             .expect("retain operator fleet project in authenticated request"),
             fleet_policy: None,
             policy_mode: "balanced".to_string(),
-            config: Config::for_profile(Profile::Balanced),
+            config: {
+                let mut config = Config::for_profile(Profile::Balanced);
+                config.runtime.frozen_modules = Some(false);
+                config
+            },
             telemetry_socket_path: PathBuf::from("/tmp/native-session-frame.sock"),
             process_spawn_trust_key_hex: Some("11".repeat(32)),
             runtime_evidence_grant: runtime_evidence_grant_for_test(&nonce, [0x21; 32], [0x42; 32]),
@@ -23991,6 +24048,36 @@ exec "$2" pinned-worker-image"#,
                 .unwrap()
                 .get("module_conditions")
                 .is_none()
+        );
+        let mut unresolved = serde_json::to_value(&request).unwrap();
+        unresolved["config"]["runtime"]
+            .as_object_mut()
+            .unwrap()
+            .remove("frozen_modules");
+        let mut automatic: NativeSessionRequest = serde_json::from_value(unresolved).unwrap();
+        assert!(
+            automatic
+                .validate_module_requirements()
+                .unwrap_err()
+                .to_string()
+                .contains("replay source mode was not resolved"),
+            "an unresolved request must not silently fall back to entry-only replay"
+        );
+        EngineDispatcher::apply_replay_capture_defaults(&mut automatic.config, true);
+        assert!(
+            automatic
+                .validate_module_requirements()
+                .unwrap_err()
+                .to_string()
+                .contains("frozen module requirement does not match"),
+            "automatic capture retains the top-level worker compatibility requirement"
+        );
+        automatic.frozen_modules = Some(true);
+        #[cfg(unix)]
+        automatic.validate_module_requirements().unwrap();
+        assert_eq!(
+            serde_json::to_value(&automatic).unwrap()["frozen_modules"],
+            true
         );
         assert_eq!(
             decoded.process_spawn_trust_key_hex,
