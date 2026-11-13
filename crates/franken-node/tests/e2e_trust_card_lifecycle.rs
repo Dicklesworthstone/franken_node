@@ -527,7 +527,12 @@ fn e2e_trust_card_refresh_from_scan_keeps_operator_decisions() {
     )
     .expect("revoke");
     let rescanned_revoked = reg
-        .refresh_from_scan(realistic_input(revoked_id, "1.0.0"), false, now + 2, "trace-rr")
+        .refresh_from_scan(
+            realistic_input(revoked_id, "1.0.0"),
+            false,
+            now + 2,
+            "trace-rr",
+        )
         .expect("refresh revoked card");
     assert!(matches!(
         rescanned_revoked.revocation_status,
@@ -537,7 +542,12 @@ fn e2e_trust_card_refresh_from_scan_keeps_operator_decisions() {
     // A different version is a new artifact, and a missing card has nothing
     // to refresh.
     let err = reg
-        .refresh_from_scan(realistic_input(extension_id, "2.1.0"), false, now + 4, "trace-v")
+        .refresh_from_scan(
+            realistic_input(extension_id, "2.1.0"),
+            false,
+            now + 4,
+            "trace-v",
+        )
         .expect_err("version change is not a refresh");
     assert!(
         matches!(err, TrustCardError::InvalidInput { .. }),

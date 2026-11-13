@@ -16,17 +16,15 @@ use std::{collections::BTreeSet, time::Duration};
 use chrono::{DateTime, Utc};
 use frankenengine_node::capacity_defaults::aliases::{MAX_ACTION_LOG_ENTRIES, MAX_NODES_CAP};
 use frankenengine_node::control_plane::fleet_transport::{
-    FLEET_SHARED_STATE_SCHEMA, FileFleetTransport, FleetAction, FleetActionRecord,
+    FLEET_GUARDED_POLICY_RECEIPT_SCHEMA, FLEET_SHARED_STATE_SCHEMA, FileFleetTransport,
+    FleetAction, FleetActionRecord, FleetGuardedPolicyObservationScope, FleetGuardedPolicyReceipt,
     FleetNativeDrainEvidence, FleetNativeDrainReadiness, FleetNativeSessionHoldTarget,
-    FleetGuardedPolicyObservationScope, FleetGuardedPolicyReceipt, FleetPolicyArtifact,
-    FleetPolicyMaintenanceGuard, FleetRuntimePolicy, FleetSharedState, FleetTargetKind,
-    FleetTransport, FleetTransportError, GuardedFleetPolicyPublication,
-    FLEET_GUARDED_POLICY_RECEIPT_SCHEMA,
+    FleetPolicyArtifact, FleetPolicyMaintenanceGuard, FleetRuntimePolicy, FleetSharedState,
+    FleetTargetKind, FleetTransport, FleetTransportError, GuardedFleetPolicyPublication,
     MAX_NATIVE_SESSION_MAINTENANCE_HOLDS, NativeSessionDrainCheckpoint, NativeSessionDrainState,
     NodeHealth, NodeStatus, fleet_action_log_checkpoint, fleet_action_snapshot_prefix,
-    fleet_application_checkpoint,
-    fleet_native_drain_evidence, fleet_native_session_hold_evidence, fleet_native_session_holds,
-    validate_guarded_fleet_policy_publication, validate_node_status,
+    fleet_application_checkpoint, fleet_native_drain_evidence, fleet_native_session_hold_evidence,
+    fleet_native_session_holds, validate_guarded_fleet_policy_publication, validate_node_status,
 };
 use frankenengine_node::control_plane::fleet_transport_durable::{
     DurableFleetTransport, count_active_quarantine_actions,
@@ -189,10 +187,15 @@ fn guarded_policy_full_log_checkpoint_covers_concrete_zones_and_append_order() {
     let (state, now) = maintenance_state();
     let request = guarded_policy_request(&state, "guarded-policy");
     assert_eq!(request.guard.expected_action_log.action_count, 3);
-    assert_eq!(fleet_application_checkpoint(&state.actions, "all").unwrap().action_count, 0);
-    let evidence = validate_guarded_fleet_policy_publication(
-        &request, &state, now, Duration::from_secs(30),
-    ).unwrap();
+    assert_eq!(
+        fleet_application_checkpoint(&state.actions, "all")
+            .unwrap()
+            .action_count,
+        0
+    );
+    let evidence =
+        validate_guarded_fleet_policy_publication(&request, &state, now, Duration::from_secs(30))
+            .unwrap();
     assert!(evidence.complete);
     assert_eq!(evidence.nodes.len(), 2);
     let mut changed = state.clone();
@@ -203,10 +206,19 @@ fn guarded_policy_full_log_checkpoint_covers_concrete_zones_and_append_order() {
         fleet_application_checkpoint(&changed.actions, "all").unwrap(),
         fleet_application_checkpoint(&state.actions, "all").unwrap(),
     );
-    assert_ne!(fleet_action_log_checkpoint(&changed.actions).unwrap(), request.guard.expected_action_log);
-    assert!(validate_guarded_fleet_policy_publication(&request, &changed, now, Duration::from_secs(30)).is_err());
+    assert_ne!(
+        fleet_action_log_checkpoint(&changed.actions).unwrap(),
+        request.guard.expected_action_log
+    );
+    assert!(
+        validate_guarded_fleet_policy_publication(&request, &changed, now, Duration::from_secs(30))
+            .is_err()
+    );
     changed.actions.swap(0, 1);
-    assert_ne!(fleet_action_log_checkpoint(&changed.actions).unwrap(), request.guard.expected_action_log);
+    assert_ne!(
+        fleet_action_log_checkpoint(&changed.actions).unwrap(),
+        request.guard.expected_action_log
+    );
     changed.actions.push(changed.actions[0].clone());
     assert!(fleet_action_log_checkpoint(&changed.actions).is_err());
 }
@@ -252,24 +264,55 @@ fn guarded_policy_requires_exact_held_scope_and_current_fresh_participants() {
             changed
         },
     ] {
-        assert!(validate_guarded_fleet_policy_publication(&request, &invalid, now, Duration::from_secs(30)).is_err());
+        assert!(
+            validate_guarded_fleet_policy_publication(
+                &request,
+                &invalid,
+                now,
+                Duration::from_secs(30)
+            )
+            .is_err()
+        );
     }
     let mut stale_under_server_policy = state.clone();
     stale_under_server_policy.nodes[0].last_seen = now - chrono::TimeDelta::seconds(10);
-    assert!(validate_guarded_fleet_policy_publication(&request, &stale_under_server_policy, now, Duration::from_secs(10)).is_err());
-    assert!(validate_guarded_fleet_policy_publication(&request, &state, now, Duration::ZERO).is_err());
+    assert!(
+        validate_guarded_fleet_policy_publication(
+            &request,
+            &stale_under_server_policy,
+            now,
+            Duration::from_secs(10)
+        )
+        .is_err()
+    );
+    assert!(
+        validate_guarded_fleet_policy_publication(&request, &state, now, Duration::ZERO).is_err()
+    );
 
     let mut wrong_scope = request.clone();
     if let FleetAction::PolicyUpdate { zone_id, .. } = &mut wrong_scope.action.action {
         *zone_id = "all".to_owned();
     }
-    assert!(validate_guarded_fleet_policy_publication(&wrong_scope, &state, now, Duration::from_secs(30)).is_err());
+    assert!(
+        validate_guarded_fleet_policy_publication(
+            &wrong_scope,
+            &state,
+            now,
+            Duration::from_secs(30)
+        )
+        .is_err()
+    );
     let mut resumed = state.clone();
-    resumed.actions.push(maintenance_action("resume-a", "zone-a", Some("hold-a")));
+    resumed
+        .actions
+        .push(maintenance_action("resume-a", "zone-a", Some("hold-a")));
     acknowledge_maintenance(&mut resumed, now);
     let request = guarded_policy_request(&resumed, "guarded-policy");
-    assert!(validate_guarded_fleet_policy_publication(&request, &resumed, now, Duration::from_secs(30)).is_err(),
-        "another owner's held fence cannot substitute for the requested owner");
+    assert!(
+        validate_guarded_fleet_policy_publication(&request, &resumed, now, Duration::from_secs(30))
+            .is_err(),
+        "another owner's held fence cannot substitute for the requested owner"
+    );
 }
 
 #[test]
@@ -280,7 +323,13 @@ fn guarded_policy_receipt_rejects_contradictory_evidence_and_bounded_payload_ove
         schema_version: FLEET_GUARDED_POLICY_RECEIPT_SCHEMA.to_owned(),
         action: request.action.clone(),
         guard: request.guard.clone(),
-        evidence: validate_guarded_fleet_policy_publication(&request, &state, now, Duration::from_secs(20)).unwrap(),
+        evidence: validate_guarded_fleet_policy_publication(
+            &request,
+            &state,
+            now,
+            Duration::from_secs(20),
+        )
+        .unwrap(),
         accepted_at: now,
         observation_scope: FleetGuardedPolicyObservationScope::LocalSupervisorObservations,
         already_published: false,
@@ -289,15 +338,50 @@ fn guarded_policy_receipt_rejects_contradictory_evidence_and_bounded_payload_ove
     receipt.validate().unwrap();
     assert_eq!(receipt.evidence.stale_after, Duration::from_secs(20));
     let encoded = serde_json::to_vec(&receipt).unwrap();
-    assert_eq!(serde_json::from_slice::<FleetGuardedPolicyReceipt>(&encoded).unwrap(), receipt);
+    assert_eq!(
+        serde_json::from_slice::<FleetGuardedPolicyReceipt>(&encoded).unwrap(),
+        receipt
+    );
     for invalid in [
-        { let mut value = receipt.clone(); value.evidence.nodes.pop(); value },
-        { let mut value = receipt.clone(); value.evidence.nodes[0].native_session_drain.as_mut().unwrap().fence_held = false; value },
-        { let mut value = receipt.clone(); value.evidence.nodes[0].active_hold_ids = vec!["hold-b".into()]; value },
-        { let mut value = receipt.clone(); value.evidence.nodes[0].last_seen = Some(now + chrono::TimeDelta::nanoseconds(1)); value },
-        { let mut value = receipt.clone(); value.evidence.action_count += 1; value },
-        { let mut value = receipt.clone(); value.evidence.target = FleetNativeSessionHoldTarget::Resumed; value },
-        { let mut value = receipt.clone(); value.fleet_quiescence_certified = true; value },
+        {
+            let mut value = receipt.clone();
+            value.evidence.nodes.pop();
+            value
+        },
+        {
+            let mut value = receipt.clone();
+            value.evidence.nodes[0]
+                .native_session_drain
+                .as_mut()
+                .unwrap()
+                .fence_held = false;
+            value
+        },
+        {
+            let mut value = receipt.clone();
+            value.evidence.nodes[0].active_hold_ids = vec!["hold-b".into()];
+            value
+        },
+        {
+            let mut value = receipt.clone();
+            value.evidence.nodes[0].last_seen = Some(now + chrono::TimeDelta::nanoseconds(1));
+            value
+        },
+        {
+            let mut value = receipt.clone();
+            value.evidence.action_count += 1;
+            value
+        },
+        {
+            let mut value = receipt.clone();
+            value.evidence.target = FleetNativeSessionHoldTarget::Resumed;
+            value
+        },
+        {
+            let mut value = receipt.clone();
+            value.fleet_quiescence_certified = true;
+            value
+        },
     ] {
         assert!(invalid.validate().is_err());
     }
@@ -314,7 +398,13 @@ fn guarded_policy_receipt_rejects_contradictory_evidence_and_bounded_payload_ove
     oversized_request.guard.required_nodes = (0..2_500)
         .map(|n| (long_zone.clone(), format!("{n:05}{}", "n".repeat(123))))
         .collect();
-    assert!(oversized_request.validate().unwrap_err().to_string().contains("byte bound"));
+    assert!(
+        oversized_request
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("byte bound")
+    );
 
     let mut oversized_receipt = receipt;
     oversized_receipt.guard.required_nodes.clear();
@@ -324,9 +414,19 @@ fn guarded_policy_receipt_rejects_contradictory_evidence_and_bounded_payload_ove
         .chain(std::iter::once("hold-a".to_owned()))
         .collect();
     oversized_receipt.evidence.nodes = (0..1_200)
-        .map(|n| { let mut node = node.clone(); node.node_id = format!("node-{n:05}"); node })
+        .map(|n| {
+            let mut node = node.clone();
+            node.node_id = format!("node-{n:05}");
+            node
+        })
         .collect();
-    assert!(oversized_receipt.validate().unwrap_err().to_string().contains("byte bound"));
+    assert!(
+        oversized_receipt
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("byte bound")
+    );
 }
 
 fn seed_guarded_policy_transport(
@@ -350,43 +450,70 @@ fn guarded_policy_durable_retry_preserves_original_admission_after_resume_and_re
     let (state, now) = maintenance_state();
     let request = guarded_policy_request(&state, "guarded-policy");
     let mut transport = seed_guarded_policy_transport(temp.path(), &state);
-    let receipt = transport.publish_policy_with_maintenance_guard_projected(
-        &request,
-        FleetGuardedPolicyObservationScope::LocalSupervisorObservations,
-        Duration::from_secs(20),
-        || now,
-        |_| Ok(()),
-    ).unwrap();
+    let receipt = transport
+        .publish_policy_with_maintenance_guard_projected(
+            &request,
+            FleetGuardedPolicyObservationScope::LocalSupervisorObservations,
+            Duration::from_secs(20),
+            || now,
+            |_| Ok(()),
+        )
+        .unwrap();
     receipt.validate().unwrap();
     assert!(!receipt.already_published);
     assert_eq!(receipt.guard, request.guard);
     assert_eq!(receipt.evidence.stale_after, Duration::from_secs(20));
-    assert_eq!(transport.list_actions().unwrap().last(), Some(&request.action));
+    assert_eq!(
+        transport.list_actions().unwrap().last(),
+        Some(&request.action)
+    );
     drop(transport);
 
     let mut transport = DurableFleetTransport::new(temp.path()).unwrap();
     transport.initialize().unwrap();
-    transport.publish_action(&maintenance_action("resume-a", "zone-a", Some("hold-a"))).unwrap();
+    transport
+        .publish_action(&maintenance_action("resume-a", "zone-a", Some("hold-a")))
+        .unwrap();
     let mut retry = request.clone();
-    retry.guard.expected_action_log = fleet_action_log_checkpoint(&transport.list_actions().unwrap()).unwrap();
+    retry.guard.expected_action_log =
+        fleet_action_log_checkpoint(&transport.list_actions().unwrap()).unwrap();
     retry.guard.stale_after = Duration::from_secs(1);
-    retry.guard.required_nodes.insert(("zone-a".to_owned(), "newly-missing".to_owned()));
-    let repeated = transport.publish_policy_with_maintenance_guard_projected(
-        &retry,
-        FleetGuardedPolicyObservationScope::LocalSupervisorObservations,
-        Duration::from_secs(1),
-        || panic!("a retry must not manufacture a new observation"),
-        |_| panic!("a retry must use its original persisted evidence"),
-    ).unwrap();
+    retry
+        .guard
+        .required_nodes
+        .insert(("zone-a".to_owned(), "newly-missing".to_owned()));
+    let repeated = transport
+        .publish_policy_with_maintenance_guard_projected(
+            &retry,
+            FleetGuardedPolicyObservationScope::LocalSupervisorObservations,
+            Duration::from_secs(1),
+            || panic!("a retry must not manufacture a new observation"),
+            |_| panic!("a retry must use its original persisted evidence"),
+        )
+        .unwrap();
     let mut expected = receipt;
     expected.already_published = true;
     assert_eq!(repeated, expected);
-    assert_eq!(transport.list_actions().unwrap().len(), state.actions.len() + 2);
+    assert_eq!(
+        transport.list_actions().unwrap().len(),
+        state.actions.len() + 2
+    );
     for conflict in [
-        { let mut changed = retry.clone(); changed.action.emitted_at += chrono::TimeDelta::seconds(1); changed },
-        { let mut changed = retry.clone(); changed.guard.hold_action_id = "hold-b".to_owned(); changed },
+        {
+            let mut changed = retry.clone();
+            changed.action.emitted_at += chrono::TimeDelta::seconds(1);
+            changed
+        },
+        {
+            let mut changed = retry.clone();
+            changed.guard.hold_action_id = "hold-b".to_owned();
+            changed
+        },
     ] {
-        assert!(matches!(transport.publish_policy_with_maintenance_guard(&conflict), Err(FleetTransportError::ActionConflict { .. })));
+        assert!(matches!(
+            transport.publish_policy_with_maintenance_guard(&conflict),
+            Err(FleetTransportError::ActionConflict { .. })
+        ));
     }
 }
 
@@ -409,10 +536,16 @@ fn guarded_policy_durable_refusals_leave_actions_and_receipts_unchanged() {
             Ok(())
         },
     );
-    assert!(result.is_err(), "an unobserved enrolled participant must block publication");
+    assert!(
+        result.is_err(),
+        "an unobserved enrolled participant must block publication"
+    );
     assert_eq!(transport.list_actions().unwrap(), state.actions);
-    let connection = Connection::open(temp.path().join(FLEET_DB_FILE).to_string_lossy().as_ref()).unwrap();
-    let rows = connection.query("SELECT COUNT(*) FROM fleet_guarded_policy_publications;").unwrap();
+    let connection =
+        Connection::open(temp.path().join(FLEET_DB_FILE).to_string_lossy().as_ref()).unwrap();
+    let rows = connection
+        .query("SELECT COUNT(*) FROM fleet_guarded_policy_publications;")
+        .unwrap();
     assert_eq!(rows[0].values(), &[SqliteValue::Integer(0)]);
     drop(connection);
 
@@ -421,28 +554,42 @@ fn guarded_policy_durable_refusals_leave_actions_and_receipts_unchanged() {
         *zone_id = "zone-b".to_owned();
     }
     transport.publish_action(&changed).unwrap();
-    assert!(transport.publish_policy_with_maintenance_guard_projected(
-        &request,
-        FleetGuardedPolicyObservationScope::LocalSupervisorObservations,
-        Duration::from_secs(30),
-        || now,
-        |_| Ok(()),
-    ).is_err());
-    assert_eq!(transport.list_actions().unwrap().len(), state.actions.len() + 1);
+    assert!(
+        transport
+            .publish_policy_with_maintenance_guard_projected(
+                &request,
+                FleetGuardedPolicyObservationScope::LocalSupervisorObservations,
+                Duration::from_secs(30),
+                || now,
+                |_| Ok(()),
+            )
+            .is_err()
+    );
+    assert_eq!(
+        transport.list_actions().unwrap().len(),
+        state.actions.len() + 1
+    );
 
     // A formerly unguarded action cannot acquire a fabricated historical guard.
     transport.publish_action(&request.action).unwrap();
     let mut existing = request;
-    existing.guard.expected_action_log = fleet_action_log_checkpoint(&transport.list_actions().unwrap()).unwrap();
-    assert!(matches!(transport.publish_policy_with_maintenance_guard_projected(
-        &existing,
-        FleetGuardedPolicyObservationScope::LocalSupervisorObservations,
-        Duration::from_secs(30),
-        || now,
-        |_| Ok(()),
-    ), Err(FleetTransportError::ActionConflict { .. })));
-    let connection = Connection::open(temp.path().join(FLEET_DB_FILE).to_string_lossy().as_ref()).unwrap();
-    let rows = connection.query("SELECT COUNT(*) FROM fleet_guarded_policy_publications;").unwrap();
+    existing.guard.expected_action_log =
+        fleet_action_log_checkpoint(&transport.list_actions().unwrap()).unwrap();
+    assert!(matches!(
+        transport.publish_policy_with_maintenance_guard_projected(
+            &existing,
+            FleetGuardedPolicyObservationScope::LocalSupervisorObservations,
+            Duration::from_secs(30),
+            || now,
+            |_| Ok(()),
+        ),
+        Err(FleetTransportError::ActionConflict { .. })
+    ));
+    let connection =
+        Connection::open(temp.path().join(FLEET_DB_FILE).to_string_lossy().as_ref()).unwrap();
+    let rows = connection
+        .query("SELECT COUNT(*) FROM fleet_guarded_policy_publications;")
+        .unwrap();
     assert_eq!(rows[0].values(), &[SqliteValue::Integer(0)]);
 }
 
@@ -505,8 +652,12 @@ fn guarded_policy_serializes_concurrent_node_and_action_mutations() {
             writer_result_tx.send(result.is_ok()).unwrap();
             result
         });
-        guard_ready_rx.recv_timeout(Duration::from_secs(10)).unwrap();
-        writer_ready_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        guard_ready_rx
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap();
+        writer_ready_rx
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap();
         guard_start_tx.send(()).unwrap();
         snapshot_rx.recv_timeout(Duration::from_secs(10)).unwrap();
         writer_start_tx.send(()).unwrap();
@@ -518,12 +669,22 @@ fn guarded_policy_serializes_concurrent_node_and_action_mutations() {
             .unwrap_or(false);
         release_tx.send(()).unwrap();
         let guarded = guard.join().unwrap();
-        writer.join().unwrap().expect("concurrent mutation eventually commits");
+        writer
+            .join()
+            .unwrap()
+            .expect("concurrent mutation eventually commits");
         let mut transport = DurableFleetTransport::new(temp.path()).unwrap();
         transport.initialize().unwrap();
-        let published = transport.list_actions().unwrap().iter().any(|action| action.action_id == request.action.action_id);
+        let published = transport
+            .list_actions()
+            .unwrap()
+            .iter()
+            .any(|action| action.action_id == request.action.action_id);
         if writer_won_before_guard_commit {
-            assert!(guarded.is_err(), "a stale snapshot committed after a conflicting node/action mutation");
+            assert!(
+                guarded.is_err(),
+                "a stale snapshot committed after a conflicting node/action mutation"
+            );
             assert!(!published);
         } else {
             assert_eq!(published, guarded.is_ok());

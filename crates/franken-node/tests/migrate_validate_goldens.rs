@@ -34,7 +34,11 @@ fn validate_fixture_json(fixture: &str, expect_success: bool) -> String {
 fn migrate_validate_risky_fixture_json_matches_golden() {
     let stdout_json = validate_fixture_json("risky", false);
     with_scrubbed_snapshot_settings("migrate_validate", || {
-        let snapshot = if cfg!(target_os = "linux") { "risky.linux" } else { "risky" };
+        let snapshot = if cfg!(target_os = "linux") {
+            "risky.linux"
+        } else {
+            "risky"
+        };
         assert_snapshot!(snapshot, stdout_json);
     });
 }
@@ -43,7 +47,11 @@ fn migrate_validate_risky_fixture_json_matches_golden() {
 fn migrate_validate_hardened_fixture_json_matches_golden() {
     let stdout_json = validate_fixture_json("hardened", true);
     with_scrubbed_snapshot_settings("migrate_validate", || {
-        let snapshot = if cfg!(target_os = "linux") { "hardened.linux" } else { "hardened" };
+        let snapshot = if cfg!(target_os = "linux") {
+            "hardened.linux"
+        } else {
+            "hardened"
+        };
         assert_snapshot!(snapshot, stdout_json);
     });
 }

@@ -770,13 +770,37 @@ mod tests {
     #[test]
     fn indexed_lookup_matches_linear_selection_across_key_orders_and_unicode() {
         let keys = [
-            "./z", "./a", "./a/", "./*", "./a*", "./a*.js", "./a/*",
-            "./a/*.js", "./a**b", "./é*", "./é*.js", "./😀*", "./😀*.js",
+            "./z",
+            "./a",
+            "./a/",
+            "./*",
+            "./a*",
+            "./a*.js",
+            "./a/*",
+            "./a/*.js",
+            "./a**b",
+            "./é*",
+            "./é*.js",
+            "./😀*",
+            "./😀*.js",
         ];
         let requests = [
-            "./z", "./a", "./a/", "./", "./abc", "./abc.js", "./a/b.js",
-            "./a/*.js", "./a**b", "./é", "./éclair.js", "./😀value.js",
-            "./😀", "./unknown", "./unknown/", "./../private",
+            "./z",
+            "./a",
+            "./a/",
+            "./",
+            "./abc",
+            "./abc.js",
+            "./a/b.js",
+            "./a/*.js",
+            "./a**b",
+            "./é",
+            "./éclair.js",
+            "./😀value.js",
+            "./😀",
+            "./unknown",
+            "./unknown/",
+            "./../private",
         ];
         for reversed in [false, true] {
             for rotation in 0..keys.len() {
@@ -787,7 +811,10 @@ mod tests {
                     .take(keys.len())
                     .enumerate()
                     .map(|(position, key)| {
-                        ((*key).to_owned(), OrderedValue::String(format!("./target-{position}.js")))
+                        (
+                            (*key).to_owned(),
+                            OrderedValue::String(format!("./target-{position}.js")),
+                        )
                     })
                     .collect();
                 if reversed {
@@ -818,9 +845,9 @@ mod tests {
     fn large_indexes_preserve_targets_condition_order_and_clone_identity() {
         let exports = (0..1024)
             .rev()
-            .map(|i| format!(
-                r#""./item-{i}":{{"default":"./default-{i}.js","node":"./node-{i}.js"}}"#
-            ))
+            .map(|i| {
+                format!(r#""./item-{i}":{{"default":"./default-{i}.js","node":"./node-{i}.js"}}"#)
+            })
             .collect::<Vec<_>>()
             .join(",");
         let imports = (0..1024)
@@ -834,11 +861,15 @@ mod tests {
         assert_eq!(map.input_hash(), cloned.input_hash());
         for map in [&map, &cloned] {
             for i in 0..1024 {
-                let selected = map.select(MapKind::Exports, &format!("./item-{i}"), &["node".into()]).unwrap();
+                let selected = map
+                    .select(MapKind::Exports, &format!("./item-{i}"), &["node".into()])
+                    .unwrap();
                 assert_eq!(selected.target, format!("./default-{i}.js"));
                 assert_eq!(selected.matched_key, format!("./item-{i}"));
                 assert_eq!(selected.branch, [BranchStep::Condition("default".into())]);
-                let selected = map.select(MapKind::Imports, &format!("#item-{i}"), &[]).unwrap();
+                let selected = map
+                    .select(MapKind::Imports, &format!("#item-{i}"), &[])
+                    .unwrap();
                 assert_eq!(selected.target, format!("./private-{i}.js"));
                 assert_eq!(selected.matched_key, format!("#item-{i}"));
             }
@@ -856,7 +887,9 @@ mod tests {
         }"##;
         let map = PackageMap::parse(source).unwrap();
         assert_eq!(
-            map.select(MapKind::Imports, "#ok", &["node".into()]).unwrap().target,
+            map.select(MapKind::Imports, "#ok", &["node".into()])
+                .unwrap()
+                .target,
             "./ok.js"
         );
         assert_eq!(
@@ -868,11 +901,15 @@ mod tests {
             config("exports cannot mix condition and subpath keys")
         );
         assert_eq!(
-            map.select(MapKind::Exports, "invalid", &[]).unwrap_err().code,
+            map.select(MapKind::Exports, "invalid", &[])
+                .unwrap_err()
+                .code,
             "ERR_INVALID_MODULE_SPECIFIER"
         );
         assert_eq!(
-            map.select(MapKind::Exports, ".", &["".into()]).unwrap_err().code,
+            map.select(MapKind::Exports, ".", &["".into()])
+                .unwrap_err()
+                .code,
             "ERR_INVALID_PACKAGE_CONDITIONS"
         );
     }
@@ -976,10 +1013,20 @@ mod tests {
             assert_eq!(result.branch, [BranchStep::ArrayIndex(index)], "{source}");
         }
         for (source, code) in [
-            (r#"{"exports":[null,"../bad"]}"#, "ERR_INVALID_PACKAGE_TARGET"),
-            (r#"{"exports":["../bad",null]}"#, "ERR_PACKAGE_PATH_NOT_EXPORTED"),
+            (
+                r#"{"exports":[null,"../bad"]}"#,
+                "ERR_INVALID_PACKAGE_TARGET",
+            ),
+            (
+                r#"{"exports":["../bad",null]}"#,
+                "ERR_PACKAGE_PATH_NOT_EXPORTED",
+            ),
         ] {
-            assert_eq!(select(source, MapKind::Exports, ".", &[]).unwrap_err().code, code, "{source}");
+            assert_eq!(
+                select(source, MapKind::Exports, ".", &[]).unwrap_err().code,
+                code,
+                "{source}"
+            );
         }
         assert_eq!(
             select(
@@ -1231,7 +1278,8 @@ mod tests {
                 let source = serde_json::json!({(key): {
                     (if kind == MapKind::Exports { "./*" } else { "#data/*" }):
                         [pattern, "./fallback.cjs"]
-                }}).to_string();
+                }})
+                .to_string();
                 let selected = select(&source, kind, &specifier, &[]).unwrap();
                 assert_eq!(selected.target, expected);
                 assert_eq!(selected.branch, [BranchStep::ArrayIndex(0)]);
@@ -1252,11 +1300,12 @@ mod tests {
             ("./.%*", "2e/secret.cjs"),
             ("./node_*", "modules/secret.cjs"),
         ] {
-            let source = serde_json::json!({"exports": {"./*": [target, "./fallback.cjs"]}})
-                .to_string();
+            let source =
+                serde_json::json!({"exports": {"./*": [target, "./fallback.cjs"]}}).to_string();
             assert_eq!(
                 select(&source, MapKind::Exports, &format!("./{capture}"), &[])
-                    .unwrap_err().code,
+                    .unwrap_err()
+                    .code,
                 "ERR_INVALID_MODULE_SPECIFIER",
                 "{target:?} with {capture:?}"
             );
@@ -1266,8 +1315,11 @@ mod tests {
         // as errors in that original target.
         let selected = select(
             r#"{"exports":{"./*":["./../outside.cjs","./constant.cjs"]}}"#,
-            MapKind::Exports, "./value", &[],
-        ).unwrap();
+            MapKind::Exports,
+            "./value",
+            &[],
+        )
+        .unwrap();
         assert_eq!(selected.target, "./constant.cjs");
         assert_eq!(selected.branch, [BranchStep::ArrayIndex(1)]);
     }
@@ -1277,23 +1329,33 @@ mod tests {
         for capture in ["%", "%2f", "%5c", "%00", "%ff"] {
             let selected = select(
                 r#"{"exports":{"./*":"./constant.cjs"}}"#,
-                MapKind::Exports, &format!("./{capture}"), &[],
-            ).unwrap();
+                MapKind::Exports,
+                &format!("./{capture}"),
+                &[],
+            )
+            .unwrap();
             assert_eq!(selected.target, "./constant.cjs");
         }
         for capture in ["..", "%2e%2e", "%6eode_modules", "a%2f..%2fb"] {
             assert_eq!(
                 select(
                     r#"{"exports":{"./*":"./constant.cjs"}}"#,
-                    MapKind::Exports, &format!("./{capture}"), &[],
-                ).unwrap_err().code,
+                    MapKind::Exports,
+                    &format!("./{capture}"),
+                    &[],
+                )
+                .unwrap_err()
+                .code,
                 "ERR_INVALID_MODULE_SPECIFIER"
             );
         }
         let selected = select(
             r#"{"exports":{"./*":"./constant.cjs?raw=*"}}"#,
-            MapKind::Exports, "./%", &[],
-        ).unwrap();
+            MapKind::Exports,
+            "./%",
+            &[],
+        )
+        .unwrap();
         assert_eq!(selected.target, "./constant.cjs?raw=%");
     }
 
@@ -1307,12 +1369,23 @@ mod tests {
         assert_eq!(metadata.package_type.as_deref(), Some("module"));
         assert!(metadata.exports && metadata.imports);
         assert_eq!(
-            map.select(MapKind::Exports, ".", &["import".into()]).unwrap().target,
+            map.select(MapKind::Exports, ".", &["import".into()])
+                .unwrap()
+                .target,
             "./import.mjs"
         );
-        assert_eq!(map.select(MapKind::Imports, "#local", &[]).unwrap().target, "./local.mjs");
-        assert_eq!(map.input_hash(), PackageMap::parse(&source).unwrap().input_hash());
-        assert_ne!(map.input_hash(), PackageMap::parse(plain).unwrap().input_hash());
+        assert_eq!(
+            map.select(MapKind::Imports, "#local", &[]).unwrap().target,
+            "./local.mjs"
+        );
+        assert_eq!(
+            map.input_hash(),
+            PackageMap::parse(&source).unwrap().input_hash()
+        );
+        assert_ne!(
+            map.input_hash(),
+            PackageMap::parse(plain).unwrap().input_hash()
+        );
     }
 
     #[test]
@@ -1321,15 +1394,22 @@ mod tests {
         bounded.push_str(&" ".repeat(MAX_MANIFEST_BYTES - bounded.len()));
         PackageMap::parse(&bounded).unwrap();
         bounded.push(' ');
-        assert_eq!(PackageMap::parse(&bounded).unwrap_err().code, "ERR_PACKAGE_MAP_LIMIT");
+        assert_eq!(
+            PackageMap::parse(&bounded).unwrap_err().code,
+            "ERR_PACKAGE_MAP_LIMIT"
+        );
         for source in [
-            "\u{feff}\u{feff}{}", " \u{feff}{}", "\u{feff}{", "\u{feff}{}x",
+            "\u{feff}\u{feff}{}",
+            " \u{feff}{}",
+            "\u{feff}{",
+            "\u{feff}{}x",
             "\u{feff}{\"exports\":\"./a\",\"exports\":\"./b\"}",
             "\u{feff}{\"exports\":{\"node\":\"./a\",\"n\\u006fde\":\"./b\"}}",
         ] {
             assert_eq!(
                 PackageMap::parse(source).unwrap_err().code,
-                "ERR_INVALID_PACKAGE_CONFIG", "{source:?}"
+                "ERR_INVALID_PACKAGE_CONFIG",
+                "{source:?}"
             );
         }
     }

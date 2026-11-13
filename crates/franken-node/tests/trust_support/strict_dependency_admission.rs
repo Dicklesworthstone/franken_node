@@ -1,13 +1,9 @@
 //! Strict dependency admission uses the same signed durable registry at
 //! product preflight, dispatcher admission, and native worker rechecks.
 
-use super::{
-    parse_json_stdout, run_cli_in_workspace_with_env, write_run_package_manifest,
-};
+use super::{parse_json_stdout, run_cli_in_workspace_with_env, write_run_package_manifest};
 use frankenengine_node::config::{CliOverrides, Config, Profile};
-use frankenengine_node::ops::engine_dispatcher::{
-    RunTrustRequirements, validate_execution_trust,
-};
+use frankenengine_node::ops::engine_dispatcher::{RunTrustRequirements, validate_execution_trust};
 use frankenengine_node::supply_chain::trust_card::{
     CapturedDependencyTrust, SnapshotSourceContext, TrustCardRegistry,
 };
@@ -51,7 +47,11 @@ impl Fixture {
         )
         .expect("the same provisioned trust authority the CLI reads")
         .config;
-        Self { project, operator_state, config }
+        Self {
+            project,
+            operator_state,
+            config,
+        }
     }
 
     fn invoke_at(project: &Path, operator_state: &Path, args: &[&str]) -> Output {
@@ -103,11 +103,16 @@ impl Fixture {
     }
 
     fn requirements(&self, retain_card: bool, registry_required: bool) -> RunTrustRequirements {
-        let required = if retain_card { vec![DEPENDENCY_ID.to_string()] } else { Vec::new() };
+        let required = if retain_card {
+            vec![DEPENDENCY_ID.to_string()]
+        } else {
+            Vec::new()
+        };
         RunTrustRequirements::new(&[], &required, registry_required)
             .unwrap()
             .with_dependency_capture(
-                CapturedDependencyTrust::capture(self.project.path()).expect("actual dependency graph"),
+                CapturedDependencyTrust::capture(self.project.path())
+                    .expect("actual dependency graph"),
             )
             .expect("retain every captured identity")
     }
@@ -138,7 +143,8 @@ fn strict_preflight_refuses_untracked_alias_and_reachable_transitive_with_scan_r
             "main": "index.js",
             "dependencies": { "local-alias": "npm:lodash@4.17.21" },
             "devDependencies": { "unused-dev": "1.0.0" },
-        }).to_string(),
+        })
+        .to_string(),
     )
     .unwrap();
     fs::write(
@@ -159,27 +165,50 @@ fn strict_preflight_refuses_untracked_alias_and_reachable_transitive_with_scan_r
                 "node_modules/runtime-child": { "version": "1.0.0" },
                 "node_modules/unused-dev": { "version": "1.0.0", "dev": true },
             },
-        }).to_string(),
+        })
+        .to_string(),
     )
     .unwrap();
 
     let output = fixture.run("strict");
-    assert!(!output.status.success(), "untracked dependencies must stop preflight");
+    assert!(
+        !output.status.success(),
+        "untracked dependencies must stop preflight"
+    );
     let report = parse_json_stdout(&output, "strict untracked dependency refusal");
     assert_eq!(report["verdict"]["status"], "blocked");
-    assert_eq!(report["receipt"]["rollback_command"], "franken-node trust scan .");
+    assert_eq!(
+        report["receipt"]["rollback_command"],
+        "franken-node trust scan ."
+    );
     assert_eq!(report["receipt"]["decision"], "denied");
     let violations = report["verdict"]["violations"].as_array().unwrap();
-    let mut refused = violations.iter().map(|v| {
-        assert_eq!(v["kind"], "untracked", "{report}");
-        assert!(v["detail"].as_str().unwrap().contains("strict policy requires a local trust card"));
-        v["extension_id"].as_str().unwrap()
-    }).collect::<Vec<_>>();
+    let mut refused = violations
+        .iter()
+        .map(|v| {
+            assert_eq!(v["kind"], "untracked", "{report}");
+            assert!(
+                v["detail"]
+                    .as_str()
+                    .unwrap()
+                    .contains("strict policy requires a local trust card")
+            );
+            v["extension_id"].as_str().unwrap()
+        })
+        .collect::<Vec<_>>();
     refused.sort_unstable();
     assert_eq!(refused, vec!["npm:lodash", "npm:runtime-child"]);
     let results = report["verdict"]["results"].as_array().unwrap();
-    assert_eq!(results.len(), 2, "development-only branches are not run dependencies");
-    assert!(results.iter().all(|r| r["status"] == "untracked" && r["trust_card_version"].is_null()));
+    assert_eq!(
+        results.len(),
+        2,
+        "development-only branches are not run dependencies"
+    );
+    assert!(
+        results
+            .iter()
+            .all(|r| r["status"] == "untracked" && r["trust_card_version"].is_null())
+    );
     assert!(report.get("dispatch").is_none());
     assert!(!String::from_utf8_lossy(&output.stdout).contains(GUEST_OUTPUT.trim()));
 
@@ -200,16 +229,30 @@ fn strict_scan_recovery_executes_while_balanced_and_legacy_keep_unknown_card_war
         assert!(output.status.success(), "{profile}: {output:?}");
         let report = parse_json_stdout(&output, "less restrictive unknown-card admission");
         assert_eq!(report["preflight"]["verdict"]["status"], "passed");
-        assert_eq!(report["preflight"]["verdict"]["results"][0]["status"], "untracked");
-        assert!(report["preflight"]["verdict"]["warnings"].as_array().unwrap()
-            .iter().any(|w| w.as_str().unwrap().contains(DEPENDENCY_ID)));
-        assert_eq!(report["dispatch"]["captured_output"]["stdout"], GUEST_OUTPUT);
+        assert_eq!(
+            report["preflight"]["verdict"]["results"][0]["status"],
+            "untracked"
+        );
+        assert!(
+            report["preflight"]["verdict"]["warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|w| w.as_str().unwrap().contains(DEPENDENCY_ID))
+        );
+        assert_eq!(
+            report["dispatch"]["captured_output"]["stdout"],
+            GUEST_OUTPUT
+        );
     }
 
     assert!(!fixture.run("strict").status.success());
     fixture.scan();
     let output = fixture.run("strict");
-    assert!(output.status.success(), "scan must make the real strict run usable: {output:?}");
+    assert!(
+        output.status.success(),
+        "scan must make the real strict run usable: {output:?}"
+    );
     let report = parse_json_stdout(&output, "strict run after local scan");
     assert_eq!(report["preflight"]["verdict"]["status"], "passed");
     let dependency = &report["preflight"]["verdict"]["results"][0];
@@ -218,7 +261,10 @@ fn strict_scan_recovery_executes_while_balanced_and_legacy_keep_unknown_card_war
     // A local inventory card does not attest installed source bytes. Preserve
     // that existing distinction instead of making a stronger provenance claim.
     assert_eq!(dependency["status"], "unverified");
-    assert_eq!(report["dispatch"]["captured_output"]["stdout"], GUEST_OUTPUT);
+    assert_eq!(
+        report["dispatch"]["captured_output"]["stdout"],
+        GUEST_OUTPUT
+    );
 }
 
 #[test]
@@ -237,7 +283,10 @@ fn strict_execution_admission_requires_cards_even_without_a_preflight_card_requi
         .expect_err("the strict profile cannot inherit an unknown-card exception")
         .to_string();
         assert!(error.contains(DEPENDENCY_ID), "{error}");
-        assert!(error.contains("strict policy requires a local trust card"), "{error}");
+        assert!(
+            error.contains("strict policy requires a local trust card"),
+            "{error}"
+        );
         assert!(error.contains("franken-node trust scan ."), "{error}");
 
         for profile in [Profile::Balanced, Profile::LegacyRisky] {
@@ -248,7 +297,11 @@ fn strict_execution_admission_requires_cards_even_without_a_preflight_card_requi
                 Fixture::now(),
             )
             .expect("existing non-strict admission remains warning-only");
-            assert!(warnings.iter().any(|w| w.contains(DEPENDENCY_ID) && w.contains("untracked")));
+            assert!(
+                warnings
+                    .iter()
+                    .any(|w| w.contains(DEPENDENCY_ID) && w.contains("untracked"))
+            );
         }
     }
     write_run_package_manifest(fixture.project.path(), &[]);
@@ -278,20 +331,32 @@ fn strict_execution_admission_rechecks_trusted_card_loss_and_revocation() {
             fixture.replace_registry_with_empty();
         }
 
-        let expected = if revoke { "revoked since preflight" } else { "no longer tracked" };
-        let error = validate_execution_trust(
-            fixture.project.path(), &strict, &retained, Fixture::now(),
-        ).expect_err("a completed preflight cannot authorize changed trust state").to_string();
-        assert!(error.contains(DEPENDENCY_ID) && error.contains(expected), "{error}");
+        let expected = if revoke {
+            "revoked since preflight"
+        } else {
+            "no longer tracked"
+        };
+        let error =
+            validate_execution_trust(fixture.project.path(), &strict, &retained, Fixture::now())
+                .expect_err("a completed preflight cannot authorize changed trust state")
+                .to_string();
+        assert!(
+            error.contains(DEPENDENCY_ID) && error.contains(expected),
+            "{error}"
+        );
 
         // Name-only library callers also retain dependency identities. Losing
         // the separate required-card set must never make strict admission pass.
         let name_only = RunTrustRequirements::new(&[DEPENDENCY_ID.to_string()], &[], true).unwrap();
-        let error = validate_execution_trust(
-            fixture.project.path(), &strict, &name_only, Fixture::now(),
-        ).expect_err("strict still requires current trust for name-only callers").to_string();
+        let error =
+            validate_execution_trust(fixture.project.path(), &strict, &name_only, Fixture::now())
+                .expect_err("strict still requires current trust for name-only callers")
+                .to_string();
         assert!(error.contains(DEPENDENCY_ID), "{error}");
-        assert!(error.contains(if revoke { "revoked" } else { "untracked" }), "{error}");
+        assert!(
+            error.contains(if revoke { "revoked" } else { "untracked" }),
+            "{error}"
+        );
 
         #[cfg(feature = "engine")]
         {
@@ -303,14 +368,20 @@ fn strict_execution_admission_rechecks_trusted_card_loss_and_revocation() {
                     CapturedDependencyTrust::capture(fixture.project.path()).unwrap(),
                 ))
                 .with_preflight_registry_requirement(true);
-            let error = dispatcher.dispatch_run(
-                &fixture.project.path().join("index.js"),
-                &strict,
-                "strict",
-                &[DEPENDENCY_ID.to_string()],
-                Fixture::now(),
-            ).expect_err("dispatcher must refuse before starting its native worker").to_string();
-            assert!(error.contains(DEPENDENCY_ID) && error.contains(expected), "{error}");
+            let error = dispatcher
+                .dispatch_run(
+                    &fixture.project.path().join("index.js"),
+                    &strict,
+                    "strict",
+                    &[DEPENDENCY_ID.to_string()],
+                    Fixture::now(),
+                )
+                .expect_err("dispatcher must refuse before starting its native worker")
+                .to_string();
+            assert!(
+                error.contains(DEPENDENCY_ID) && error.contains(expected),
+                "{error}"
+            );
         }
 
         // Verify the refusal was based on the replacement's authentic state,

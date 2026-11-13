@@ -194,9 +194,13 @@ mod bun_trust {
 
     fn simple_project(version: u32) -> (tempfile::TempDir, Value) {
         let root = tempdir().unwrap();
-        put(root.path(), "package.json", &json!({
-            "dependencies": {"parent": "^1"}, "devDependencies": {"dev": "1"}
-        }));
+        put(
+            root.path(),
+            "package.json",
+            &json!({
+                "dependencies": {"parent": "^1"}, "devDependencies": {"dev": "1"}
+            }),
+        );
         let lock = simple_lock(version);
         put(root.path(), "bun.lock", &lock);
         (root, lock)
@@ -210,34 +214,68 @@ mod bun_trust {
             let mut raw = serde_json::to_string_pretty(&lock).unwrap();
             assert_eq!(raw.pop(), Some('}'));
             raw.push_str(",\n}\n");
-            std::fs::write(root.path().join("bun.lock"), format!("\u{feff}// Bun lock\n{raw}")).unwrap();
+            std::fs::write(
+                root.path().join("bun.lock"),
+                format!("\u{feff}// Bun lock\n{raw}"),
+            )
+            .unwrap();
 
             let graph = build_canonical_module_resolution_graph(root.path()).unwrap();
             assert_eq!(graph.lockfile_pins.len(), 5);
             let topology = dependency_topology::build(root.path()).unwrap();
             let runtime = topology.trust_dependencies(".", false).unwrap();
-            let selected = runtime.iter().find(|entry| entry.package_name == "@scope/real").unwrap();
-            assert_eq!(selected.target.as_deref(), Some("node_modules/parent/node_modules/alias"));
+            let selected = runtime
+                .iter()
+                .find(|entry| entry.package_name == "@scope/real")
+                .unwrap();
+            assert_eq!(
+                selected.target.as_deref(),
+                Some("node_modules/parent/node_modules/alias")
+            );
             assert_eq!(selected.pinned_version.as_deref(), Some("2.3.4"));
             assert_eq!(selected.integrity.as_deref(), Some("sha512-c2VsZWN0ZWQ="));
-            assert!(!runtime.iter().any(|entry| entry.package_name.starts_with("dev")));
-            assert!(topology.trust_dependencies(".", true).unwrap().iter()
-                .any(|entry| entry.package_name == "dev-child"));
+            assert!(
+                !runtime
+                    .iter()
+                    .any(|entry| entry.package_name.starts_with("dev"))
+            );
+            assert!(
+                topology
+                    .trust_dependencies(".", true)
+                    .unwrap()
+                    .iter()
+                    .any(|entry| entry.package_name == "dev-child")
+            );
             for optional in ["optional", "peer"] {
-                assert!(runtime.iter().any(|entry| entry.package_name == optional && entry.target.is_none()));
-                assert!(topology.edges().iter().any(|edge| edge.dependency_name == optional && edge.optional));
+                assert!(
+                    runtime
+                        .iter()
+                        .any(|entry| entry.package_name == optional && entry.target.is_none())
+                );
+                assert!(
+                    topology
+                        .edges()
+                        .iter()
+                        .any(|edge| edge.dependency_name == optional && edge.optional)
+                );
             }
 
             // The exact production trust type now includes a Bun-only
             // transitive artifact and refuses a changed pin before execution.
             let capture = CapturedDependencyTrust::from_topology(&topology).unwrap();
             capture.verify_project(root.path()).unwrap();
-            assert_eq!(capture.packages["npm:@scope/real"][0].version.as_deref(), Some("2.3.4"));
+            assert_eq!(
+                capture.packages["npm:@scope/real"][0].version.as_deref(),
+                Some("2.3.4")
+            );
             lock["packages"]["parent/alias"][0] = json!("@scope/real@2.4.0");
             put(root.path(), "bun.lock", &lock);
             assert!(capture.verify_project(root.path()).is_err());
-            assert_eq!(runtime, topology.trust_dependencies(".", false).unwrap(),
-                "an existing topology must retain its captured pins");
+            assert_eq!(
+                runtime,
+                topology.trust_dependencies(".", false).unwrap(),
+                "an existing topology must retain its captured pins"
+            );
         }
     }
 
@@ -277,15 +315,26 @@ mod bun_trust {
     fn bun_workspace_catalogs_bind_aliases_and_resolve_from_physical_locations() {
         let (root, _, _) = workspace_project();
         let graph = build_canonical_module_resolution_graph(root.path()).unwrap();
-        assert!(graph.dependency_edges.iter().any(|edge|
-            edge.dependency_name == "alias" && edge.requested_range == "npm:@scope/real@^2"));
+        assert!(
+            graph
+                .dependency_edges
+                .iter()
+                .any(|edge| edge.dependency_name == "alias"
+                    && edge.requested_range == "npm:@scope/real@^2")
+        );
         let topology = dependency_topology::build(root.path()).unwrap();
         assert_eq!(topology.closure(".").unwrap().unresolved_required_edges, 0);
         let runtime = topology.trust_dependencies(".", false).unwrap();
-        let private = runtime.iter().find(|entry| entry.package_name == "private").unwrap();
+        let private = runtime
+            .iter()
+            .find(|entry| entry.package_name == "private")
+            .unwrap();
         assert_eq!(private.importer, "packages/app");
         assert_eq!(private.requested_range, "^1");
-        assert_eq!(private.target.as_deref(), Some("packages/app/node_modules/private"));
+        assert_eq!(
+            private.target.as_deref(),
+            Some("packages/app/node_modules/private")
+        );
         assert_eq!(private.pinned_version.as_deref(), Some("1.2.3"));
         let capture = CapturedDependencyTrust::from_topology(&topology).unwrap();
         assert!(capture.packages.contains_key("npm:@scope/real"));
@@ -297,7 +346,12 @@ mod bun_trust {
 
     #[test]
     fn bun_stale_workspaces_and_catalogs_cannot_supply_trust_identity() {
-        for change in ["workspace-version", "workspace-dependencies", "catalog", "workspace-selection"] {
+        for change in [
+            "workspace-version",
+            "workspace-dependencies",
+            "catalog",
+            "workspace-selection",
+        ] {
             let (root, mut workspace, mut lock) = workspace_project();
             match change {
                 "workspace-version" => {
@@ -313,13 +367,20 @@ mod bun_trust {
                     put(root.path(), "bun.lock", &lock);
                 }
                 "workspace-selection" => {
-                    put(root.path(), "packages/unrecorded/package.json", &json!({
-                        "name": "unrecorded", "version": "1.0.0", "dependencies": {"hidden": "1"}
-                    }));
+                    put(
+                        root.path(),
+                        "packages/unrecorded/package.json",
+                        &json!({
+                            "name": "unrecorded", "version": "1.0.0", "dependencies": {"hidden": "1"}
+                        }),
+                    );
                 }
                 _ => unreachable!(),
             }
-            assert!(CapturedDependencyTrust::capture(root.path()).is_err(), "{change}");
+            assert!(
+                CapturedDependencyTrust::capture(root.path()).is_err(),
+                "{change}"
+            );
         }
     }
 
@@ -333,20 +394,35 @@ mod bun_trust {
         ] {
             let (root, _) = simple_project(2);
             std::fs::write(root.path().join("bun.lock"), raw).unwrap();
-            assert!(build_canonical_module_resolution_graph(root.path()).is_err(), "{raw}");
+            assert!(
+                build_canonical_module_resolution_graph(root.path()).is_err(),
+                "{raw}"
+            );
         }
         for filename in ["package-lock.json", "npm-shrinkwrap.json"] {
             let (root, _) = simple_project(2);
-            put(root.path(), filename, &json!({"lockfileVersion":3,"packages":{}}));
+            put(
+                root.path(),
+                filename,
+                &json!({"lockfileVersion":3,"packages":{}}),
+            );
             let error = build_canonical_module_resolution_graph(root.path()).unwrap_err();
-            assert!(error.to_string().contains("select one dependency authority"));
+            assert!(
+                error
+                    .to_string()
+                    .contains("select one dependency authority")
+            );
         }
     }
 
     #[test]
     fn bun_binary_oversized_and_linked_locks_are_not_manifest_only_inventory() {
         let binary = tempdir().unwrap();
-        put(binary.path(), "package.json", &json!({"dependencies":{"parent":"1"}}));
+        put(
+            binary.path(),
+            "package.json",
+            &json!({"dependencies":{"parent":"1"}}),
+        );
         std::fs::write(binary.path().join("bun.lockb"), [0xff, 0x00, 0x01]).unwrap();
         let error = CapturedDependencyTrust::capture(binary.path()).unwrap_err();
         assert!(error.to_string().contains("binary bun.lockb"));
@@ -355,25 +431,44 @@ mod bun_trust {
         put(oversized.path(), "package.json", &json!({}));
         let lock = std::fs::File::create(oversized.path().join("bun.lock")).unwrap();
         lock.set_len(4 * 1024 * 1024 + 1).unwrap();
-        assert!(CapturedDependencyTrust::capture(oversized.path()).unwrap_err()
-            .to_string().contains("byte bound"));
+        assert!(
+            CapturedDependencyTrust::capture(oversized.path())
+                .unwrap_err()
+                .to_string()
+                .contains("byte bound")
+        );
 
         let linked = tempdir().unwrap();
         put(linked.path(), "package.json", &json!({}));
-        std::os::unix::fs::symlink(oversized.path().join("bun.lock"), linked.path().join("bun.lock")).unwrap();
+        std::os::unix::fs::symlink(
+            oversized.path().join("bun.lock"),
+            linked.path().join("bun.lock"),
+        )
+        .unwrap();
         assert!(CapturedDependencyTrust::capture(linked.path()).is_err());
     }
 
     #[test]
     fn npm_shrinkwrap_keeps_precedence_over_ignored_package_lock() {
         let root = tempdir().unwrap();
-        put(root.path(), "package.json", &json!({"dependencies":{"parent":"1"}}));
-        put(root.path(), "npm-shrinkwrap.json", &json!({"lockfileVersion":3,"packages":{
-            "node_modules/parent":{"version":"1.2.3","dependencies":{"leaf":"2"}},
-            "node_modules/leaf":{"version":"2.0.0"}
-        }}));
+        put(
+            root.path(),
+            "package.json",
+            &json!({"dependencies":{"parent":"1"}}),
+        );
+        put(
+            root.path(),
+            "npm-shrinkwrap.json",
+            &json!({"lockfileVersion":3,"packages":{
+                "node_modules/parent":{"version":"1.2.3","dependencies":{"leaf":"2"}},
+                "node_modules/leaf":{"version":"2.0.0"}
+            }}),
+        );
         std::fs::write(root.path().join("package-lock.json"), "not selected JSON").unwrap();
         let capture = CapturedDependencyTrust::capture(root.path()).unwrap();
-        assert_eq!(capture.packages["npm:leaf"][0].version.as_deref(), Some("2.0.0"));
+        assert_eq!(
+            capture.packages["npm:leaf"][0].version.as_deref(),
+            Some("2.0.0")
+        );
     }
 }

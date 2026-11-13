@@ -96,9 +96,9 @@ impl TrustGraphNode {
     /// True when propagation (not the node's own state) lowered its score.
     #[must_use]
     pub fn degraded_by_propagation(&self) -> bool {
-        self.explanation.iter().any(|reason| {
-            reason.rule == RULE_WEAK_DEPENDENCY || reason.rule == RULE_PUBLISHER_CAP
-        })
+        self.explanation
+            .iter()
+            .any(|reason| reason.rule == RULE_WEAK_DEPENDENCY || reason.rule == RULE_PUBLISHER_CAP)
     }
 }
 
@@ -182,7 +182,10 @@ impl LockfileDependencyGraph {
     pub fn from_lockfile_json(lockfile: &serde_json::Value) -> Self {
         let mut graph = Self::default();
         let mut ingested = 0_usize;
-        if let Some(packages) = lockfile.get("packages").and_then(serde_json::Value::as_object) {
+        if let Some(packages) = lockfile
+            .get("packages")
+            .and_then(serde_json::Value::as_object)
+        {
             for (package_path, package) in packages {
                 if ingested >= MAX_GRAPH_PACKAGES {
                     break;
@@ -325,10 +328,7 @@ pub fn build_trust_graph(
             TrustGraphNode {
                 node_id: card.extension.extension_id.clone(),
                 kind: TrustNodeKind::Extension,
-                display_name: format!(
-                    "{}@{}",
-                    card.extension.extension_id, card.extension.version
-                ),
+                display_name: format!("{}@{}", card.extension.extension_id, card.extension.version),
                 base_score: Some(base),
                 effective_score: Some(effective),
                 quarantined: card.active_quarantine,
@@ -386,9 +386,10 @@ pub fn build_trust_graph(
                 cap: Some(PUBLISHER_INCIDENT_CAP),
             });
         }
-        let display_name = published
-            .first()
-            .map_or_else(|| (*publisher_id).to_string(), |card| card.publisher.display_name.clone());
+        let display_name = published.first().map_or_else(
+            || (*publisher_id).to_string(),
+            |card| card.publisher.display_name.clone(),
+        );
         nodes.insert(
             publisher_node_id(publisher_id),
             TrustGraphNode {
@@ -416,14 +417,17 @@ pub fn build_trust_graph(
         if node.kind != TrustNodeKind::Extension {
             continue;
         }
-        let (Some(publisher_id), Some(effective)) = (node.publisher_id.clone(), node.effective_score)
+        let (Some(publisher_id), Some(effective)) =
+            (node.publisher_id.clone(), node.effective_score)
         else {
             continue;
         };
         let Some(publisher_score) = publisher_scores.get(&publisher_id) else {
             continue;
         };
-        let cap = publisher_score.saturating_add(PUBLISHER_MARGIN).min(TRUST_SCORE_SCALE);
+        let cap = publisher_score
+            .saturating_add(PUBLISHER_MARGIN)
+            .min(TRUST_SCORE_SCALE);
         if effective > cap {
             node.effective_score = Some(cap);
             node.explanation.push(TrustExplanation {
@@ -504,7 +508,9 @@ pub fn build_trust_graph(
             let Some(target_score) = nodes.get(target).and_then(|node| node.effective_score) else {
                 continue;
             };
-            let cap = target_score.saturating_add(DEPENDENCY_MARGIN).min(TRUST_SCORE_SCALE);
+            let cap = target_score
+                .saturating_add(DEPENDENCY_MARGIN)
+                .min(TRUST_SCORE_SCALE);
             if let Some(node) = nodes.get_mut(source)
                 && let Some(effective) = node.effective_score
                 && effective > cap
@@ -768,7 +774,10 @@ mod tests {
     #[test]
     fn lockfile_v3_and_v1_dependencies_are_parsed() {
         let v3 = lockfile(&[("a", &["b", "c"]), ("b", &[])]);
-        assert_eq!(v3.root_dependencies, BTreeSet::from(["app-dep".to_string()]));
+        assert_eq!(
+            v3.root_dependencies,
+            BTreeSet::from(["app-dep".to_string()])
+        );
         assert_eq!(
             v3.dependencies.get("a"),
             Some(&BTreeSet::from(["b".to_string(), "c".to_string()]))
@@ -787,8 +796,14 @@ mod tests {
             }
         }));
         assert_eq!(v1.root_dependencies, BTreeSet::from(["a".to_string()]));
-        assert_eq!(v1.dependencies.get("a"), Some(&BTreeSet::from(["b".to_string()])));
-        assert_eq!(v1.dependencies.get("b"), Some(&BTreeSet::from(["c".to_string()])));
+        assert_eq!(
+            v1.dependencies.get("a"),
+            Some(&BTreeSet::from(["b".to_string()]))
+        );
+        assert_eq!(
+            v1.dependencies.get("b"),
+            Some(&BTreeSet::from(["c".to_string()]))
+        );
     }
 
     #[test]
@@ -830,16 +845,16 @@ mod tests {
         );
         let mid = node(&graph, "npm:mid");
         assert_eq!(mid.effective_score, Some(100 + DEPENDENCY_MARGIN));
-        assert!(mid
-            .explanation
-            .iter()
-            .any(|reason| reason.rule == RULE_WEAK_DEPENDENCY && reason.detail.contains("npm:weak")));
+        assert!(mid.explanation.iter().any(
+            |reason| reason.rule == RULE_WEAK_DEPENDENCY && reason.detail.contains("npm:weak")
+        ));
         let app = node(&graph, "npm:app");
         assert_eq!(app.effective_score, Some(100 + 2 * DEPENDENCY_MARGIN));
-        assert!(app
-            .explanation
-            .iter()
-            .any(|reason| reason.detail.contains("npm:mid")));
+        assert!(
+            app.explanation
+                .iter()
+                .any(|reason| reason.detail.contains("npm:mid"))
+        );
         assert_eq!(app.base_score, Some(900));
         assert_eq!(graph.summary.degraded_by_propagation, 2);
 
@@ -847,8 +862,14 @@ mod tests {
         assert_eq!(
             radius,
             vec![
-                BlastRadiusEntry { extension_id: "npm:mid".to_string(), depth: 1 },
-                BlastRadiusEntry { extension_id: "npm:app".to_string(), depth: 2 },
+                BlastRadiusEntry {
+                    extension_id: "npm:mid".to_string(),
+                    depth: 1
+                },
+                BlastRadiusEntry {
+                    extension_id: "npm:app".to_string(),
+                    depth: 2
+                },
             ]
         );
         assert!(blast_radius(&graph, "npm:app").is_empty());
@@ -865,7 +886,10 @@ mod tests {
             &BTreeMap::new(),
             &lockfile(&[("a", &["b"]), ("b", &["a"])]),
         );
-        assert_eq!(node(&graph, "npm:a").effective_score, Some(300 + DEPENDENCY_MARGIN));
+        assert_eq!(
+            node(&graph, "npm:a").effective_score,
+            Some(300 + DEPENDENCY_MARGIN)
+        );
         assert_eq!(node(&graph, "npm:b").effective_score, Some(300));
     }
 
@@ -906,10 +930,11 @@ mod tests {
         assert_eq!(gap.effective_score, None);
         let app = node(&graph, "npm:app");
         assert_eq!(app.effective_score, Some(700));
-        assert!(app
-            .explanation
-            .iter()
-            .any(|reason| reason.rule == RULE_UNTRACKED_DEPENDENCY));
+        assert!(
+            app.explanation
+                .iter()
+                .any(|reason| reason.rule == RULE_UNTRACKED_DEPENDENCY)
+        );
         assert_eq!(graph.summary.untracked_dependencies, 1);
     }
 
@@ -936,15 +961,16 @@ mod tests {
         });
         let mut v3 = v2.clone();
         v3.trust_card_version = 3;
-        let histories = BTreeMap::from([(
-            "npm:app".to_string(),
-            vec![v3.clone(), v1, v2],
-        )]);
+        let histories = BTreeMap::from([("npm:app".to_string(), vec![v3.clone(), v1, v2])]);
         let graph = build_trust_graph(&[v3], &histories, &LockfileDependencyGraph::default());
         assert_eq!(graph.transitions.len(), 1, "v2->v3 changed nothing");
         let transition = &graph.transitions[0];
         assert_eq!((transition.from_version, transition.to_version), (1, 2));
-        let fields: Vec<&str> = transition.changes.iter().map(|change| change.field.as_str()).collect();
+        let fields: Vec<&str> = transition
+            .changes
+            .iter()
+            .map(|change| change.field.as_str())
+            .collect();
         assert_eq!(fields, vec!["reputation_score", "active_quarantine"]);
         assert_eq!(transition.causes.len(), 1);
         assert_eq!(transition.causes[0].event_code, "TRUST_CARD_QUARANTINED");

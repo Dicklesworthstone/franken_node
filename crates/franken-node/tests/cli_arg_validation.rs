@@ -482,11 +482,19 @@ fn source_capsule_export_distinguishes_native_closure_from_source_resolution() {
     let destination = project.path().join("source.capsule");
     let exported = std::process::Command::new(env!("CARGO_BIN_EXE_franken-node"))
         .args(["verify", "source-graph"])
-        .arg(project.path()).arg("app.cjs")
-        .arg("--write-source-capsule").arg(&destination).arg("--json")
-        .output().unwrap();
-    assert!(exported.status.success(), "{}\n{}",
-        String::from_utf8_lossy(&exported.stdout), String::from_utf8_lossy(&exported.stderr));
+        .arg(project.path())
+        .arg("app.cjs")
+        .arg("--write-source-capsule")
+        .arg(&destination)
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert!(
+        exported.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&exported.stdout),
+        String::from_utf8_lossy(&exported.stderr)
+    );
     let report: serde_json::Value = serde_json::from_slice(&exported.stdout).unwrap();
     assert_eq!(report["fully_resolved"], false);
     assert_eq!(report["capsule_closure_verified"], true);
@@ -495,9 +503,15 @@ fn source_capsule_export_distinguishes_native_closure_from_source_resolution() {
     assert_eq!(report["release_certification"], false);
     assert_eq!(report["input_hash"], original["input_hash"]);
     assert!(!String::from_utf8_lossy(&exported.stdout).contains("CAPTURE_MUST_NOT_EXECUTE"));
-    let replayed = capsule::replay(&std::fs::read(&destination).unwrap(),
-        report["capsule_digest"].as_str().unwrap()).unwrap();
-    assert_eq!(replayed.report().input_hash, original["input_hash"].as_str().unwrap());
+    let replayed = capsule::replay(
+        &std::fs::read(&destination).unwrap(),
+        report["capsule_digest"].as_str().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        replayed.report().input_hash,
+        original["input_hash"].as_str().unwrap()
+    );
     assert!(!replayed.report().fully_resolved);
 }
 
@@ -515,14 +529,29 @@ fn source_capsule_export_refuses_unproved_native_routes_without_creating_output(
         let destination = project.path().join("source.capsule");
         let output = std::process::Command::new(env!("CARGO_BIN_EXE_franken-node"))
             .args(["verify", "source-graph"])
-            .arg(project.path()).arg("app.mjs")
-            .arg("--write-source-capsule").arg(&destination).arg("--json")
-            .output().unwrap();
+            .arg(project.path())
+            .arg("app.mjs")
+            .arg("--write-source-capsule")
+            .arg(&destination)
+            .arg("--json")
+            .output()
+            .unwrap();
         assert!(!output.status.success(), "unexpected export for {source}");
-        assert!(!destination.exists(), "refused export wrote a capsule for {source}");
+        assert!(
+            !destination.exists(),
+            "refused export wrote a capsule for {source}"
+        );
         let error: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(error["schema_version"], "franken-node/verify-source-graph-error-cli/v1");
-        assert!(error["error"].as_str().unwrap().contains("ERR_MODULE_REGISTRY_INCOMPLETE"));
+        assert_eq!(
+            error["schema_version"],
+            "franken-node/verify-source-graph-error-cli/v1"
+        );
+        assert!(
+            error["error"]
+                .as_str()
+                .unwrap()
+                .contains("ERR_MODULE_REGISTRY_INCOMPLETE")
+        );
     }
 }
 

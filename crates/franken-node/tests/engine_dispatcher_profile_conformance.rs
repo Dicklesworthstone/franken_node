@@ -282,7 +282,13 @@ fn mjs_entrypoints_select_module_goal_bd_ergy0() {
             "{module_path} must select ModuleGoal"
         );
     }
-    for script_path in ["fixture.js", "fixture.cjs", "fixture.cts", "fixture", "fixture.MJS"] {
+    for script_path in [
+        "fixture.js",
+        "fixture.cjs",
+        "fixture.cts",
+        "fixture",
+        "fixture.MJS",
+    ] {
         std::fs::write(dir.path().join(script_path), "module.exports = 1;\n")
             .expect("write script");
         let script =
@@ -385,7 +391,9 @@ fn run_package_scope_stops_before_node_modules_even_inside_one_project() {
 #[test]
 fn run_package_scope_rejects_invalid_metadata_without_changing_explicit_formats() {
     let dir = tempfile::tempdir().expect("tempdir");
-    for name in ["main.js", "main.ts", "entry", "main.cjs", "main.cts", "main.mjs", "main.mts"] {
+    for name in [
+        "main.js", "main.ts", "entry", "main.cjs", "main.cts", "main.mjs", "main.mts",
+    ] {
         std::fs::write(dir.path().join(name), "console.log('entry');\n").expect("entrypoint");
     }
     let config = config_with_profile(Profile::Balanced);

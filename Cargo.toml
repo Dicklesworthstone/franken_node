@@ -72,6 +72,27 @@ frankentui = { package = "ftui", path = "../frankentui/crates/ftui", default-fea
 # intentional and safe: no franken_node surface exchanges fsqlite types with the
 # engine.
 
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.test]
+debug = "line-tables-only"
+
+[profile.dev.package.sha2]
+opt-level = 2
+
+[profile.dev.package.digest]
+opt-level = 2
+
+[profile.dev.package.cpufeatures]
+opt-level = 2
+
+[profile.dev.package.ed25519-dalek]
+opt-level = 2
+
+[profile.dev.package.curve25519-dalek]
+opt-level = 2
+
 # Profiling-only build profile. DO NOT REMOVE this section without first
 # reading docs/dev/profiling.md (canonical reference) and
 # tests/artifacts/perf/HISTORY.md. Every fingerprint.json under

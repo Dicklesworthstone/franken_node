@@ -313,7 +313,12 @@ fn init_backup_rejects_fifo_sources_without_blocking() {
     let assertion = command.assert().code(1);
     let error = String::from_utf8_lossy(&assertion.get_output().stderr);
     assert!(error.contains("regular file"), "{error}");
-    assert!(std::fs::symlink_metadata(&fifo).unwrap().file_type().is_fifo());
+    assert!(
+        std::fs::symlink_metadata(&fifo)
+            .unwrap()
+            .file_type()
+            .is_fifo()
+    );
     assert!(
         std::fs::read(project.path().join("franken_node.toml")).unwrap() == config,
         "refusing the FIFO changed configured key values"

@@ -901,7 +901,10 @@ mod tests {
         assert_eq!(EffectKind::EnvRead.tag(), 8);
         assert_eq!(EffectKind::EnvRead.label(), "env_read");
         assert_eq!(EffectKind::EnvRead.l1_acceptance_subject(), None);
-        assert_eq!(serde_json::to_string(&EffectKind::EnvRead).unwrap(), "\"env_read\"");
+        assert_eq!(
+            serde_json::to_string(&EffectKind::EnvRead).unwrap(),
+            "\"env_read\""
+        );
         let original = allowed(0);
         let mut environment = original.clone();
         environment.effect_kind = EffectKind::EnvRead;

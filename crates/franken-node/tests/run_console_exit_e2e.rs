@@ -1846,7 +1846,7 @@ mod live_native_containment {
             Some(state_home.path()),
             &["init", "--profile", "legacy-risky", "--out-dir", "."],
         );
-        let mut first_drain = None;
+        let mut first_drain: Option<Value> = None;
         for (revision, marker) in [(1, "first.marker"), (2, "second.marker")] {
             std::fs::write(
                 project.path().join("app.js"),

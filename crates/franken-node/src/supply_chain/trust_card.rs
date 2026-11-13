@@ -290,8 +290,7 @@ fn canonical_artifact_bindings(hashes: &[String]) -> BTreeSet<&str> {
         .iter()
         .filter(|hash| {
             hash.split_once(':').is_some_and(|(algorithm, digest)| {
-                strong_digest_size(algorithm)
-                    .is_some_and(|size| canonical_digest_hex(digest, size))
+                strong_digest_size(algorithm).is_some_and(|size| canonical_digest_hex(digest, size))
             })
         })
         .map(String::as_str)
@@ -2462,7 +2461,10 @@ impl TrustCardRegistry {
             };
             let shown = ids.iter().take(64).copied().collect::<Vec<_>>().join(", ");
             let suffix = if ids.len() > 64 {
-                format!("; {} additional records omitted from display", ids.len() - 64)
+                format!(
+                    "; {} additional records omitted from display",
+                    ids.len() - 64
+                )
             } else {
                 String::new()
             };
@@ -2811,9 +2813,7 @@ impl TrustCardRegistry {
         }
 
         let mut evidence_refs = input.evidence_refs;
-        if accept_artifact_change
-            && let Some(previous) = &latest.derivation_evidence
-        {
+        if accept_artifact_change && let Some(previous) = &latest.derivation_evidence {
             for reference in &previous.evidence_refs {
                 if !evidence_refs.contains(reference) {
                     evidence_refs.push(reference.clone());
@@ -2860,9 +2860,7 @@ impl TrustCardRegistry {
             // Combined reassessment is not source-specific clearance. Even
             // at equal severity it must retain the active overlay's penalty
             // and trend as unattributed floors when invalidating its baseline.
-            if latest.user_facing_risk_assessment.level
-                > next.user_facing_risk_assessment.level
-            {
+            if latest.user_facing_risk_assessment.level > next.user_facing_risk_assessment.level {
                 next.user_facing_risk_assessment = latest.user_facing_risk_assessment.clone();
             }
             next.reputation_score_basis_points = next
@@ -4637,7 +4635,10 @@ mod tests {
             let vulnerable = apply_osv(&mut registry, &ids, false, 1_001);
             let baseline = vulnerable.osv_risk_baseline.as_ref().unwrap();
             assert_eq!(baseline.source_card_hash, initial.card_hash);
-            assert_eq!(baseline.risk_assessment, initial.user_facing_risk_assessment);
+            assert_eq!(
+                baseline.risk_assessment,
+                initial.user_facing_risk_assessment
+            );
             assert_eq!(
                 vulnerable.user_facing_risk_assessment.level,
                 if ids.len() == 3 {
@@ -4647,11 +4648,20 @@ mod tests {
                 }
             );
             let clean = apply_osv(&mut registry, &[], true, 1_002);
-            assert_eq!(clean.user_facing_risk_assessment, initial.user_facing_risk_assessment);
-            assert_eq!(clean.reputation_score_basis_points, initial.reputation_score_basis_points);
+            assert_eq!(
+                clean.user_facing_risk_assessment,
+                initial.user_facing_risk_assessment
+            );
+            assert_eq!(
+                clean.reputation_score_basis_points,
+                initial.reputation_score_basis_points
+            );
             assert_eq!(clean.reputation_trend, initial.reputation_trend);
             assert!(clean.osv_risk_baseline.is_none());
-            assert_eq!(clean.previous_version_hash.as_deref(), Some(vulnerable.card_hash.as_str()));
+            assert_eq!(
+                clean.previous_version_hash.as_deref(),
+                Some(vulnerable.card_hash.as_str())
+            );
             verify_card_signature(&clean, DEFAULT_REGISTRY_KEY).unwrap();
         }
     }
@@ -4678,15 +4688,25 @@ mod tests {
         assert_eq!(retained.osv_risk_baseline, vulnerable.osv_risk_baseline);
         assert_eq!(retained.card_hash, vulnerable.card_hash);
         let mut tampered = retained.clone();
-        tampered.osv_risk_baseline.as_mut().unwrap().risk_assessment.summary =
-            "a forged independent finding".to_owned();
+        tampered
+            .osv_risk_baseline
+            .as_mut()
+            .unwrap()
+            .risk_assessment
+            .summary = "a forged independent finding".to_owned();
         assert!(verify_card_signature(&tampered, DEFAULT_REGISTRY_KEY).is_err());
         tampered = retained.clone();
         tampered.osv_risk_baseline = None;
         assert!(verify_card_signature(&tampered, DEFAULT_REGISTRY_KEY).is_err());
         let clean = apply_osv(&mut restored, &[], true, 1_003);
-        assert_eq!(clean.user_facing_risk_assessment, initial.user_facing_risk_assessment);
-        assert_eq!(clean.reputation_score_basis_points, initial.reputation_score_basis_points);
+        assert_eq!(
+            clean.user_facing_risk_assessment,
+            initial.user_facing_risk_assessment
+        );
+        assert_eq!(
+            clean.reputation_score_basis_points,
+            initial.reputation_score_basis_points
+        );
         restored.persist_authoritative_state(&path).unwrap();
         verify_card_signature(&clean, DEFAULT_REGISTRY_KEY).unwrap();
     }
@@ -4710,8 +4730,14 @@ mod tests {
         assert_eq!(decoded.card_hash, initial.card_hash);
         verify_card_signature(&decoded, DEFAULT_REGISTRY_KEY).unwrap();
         let clean = apply_osv(&mut registry, &[], true, 1_001);
-        assert_eq!(clean.user_facing_risk_assessment, initial.user_facing_risk_assessment);
-        assert_eq!(clean.reputation_score_basis_points, initial.reputation_score_basis_points);
+        assert_eq!(
+            clean.user_facing_risk_assessment,
+            initial.user_facing_risk_assessment
+        );
+        assert_eq!(
+            clean.reputation_score_basis_points,
+            initial.reputation_score_basis_points
+        );
         assert_eq!(clean.reputation_trend, initial.reputation_trend);
         assert!(clean.osv_risk_baseline.is_none());
     }
@@ -4723,17 +4749,35 @@ mod tests {
         let first = apply_osv(&mut registry, &["OSV-1"], false, 1_001);
         let repeated = apply_osv(&mut registry, &["OSV-1", "OSV-1"], false, 1_002);
         assert_eq!(first.reputation_score_basis_points, 810);
-        assert_eq!(repeated.reputation_score_basis_points, first.reputation_score_basis_points);
+        assert_eq!(
+            repeated.reputation_score_basis_points,
+            first.reputation_score_basis_points
+        );
         assert_eq!(repeated.osv_risk_baseline, first.osv_risk_baseline);
         let critical = apply_osv(&mut registry, &["OSV-1", "OSV-2", "OSV-3"], false, 1_003);
         assert_eq!(critical.reputation_score_basis_points, 630);
-        assert_eq!(critical.user_facing_risk_assessment.level, RiskLevel::Critical);
+        assert_eq!(
+            critical.user_facing_risk_assessment.level,
+            RiskLevel::Critical
+        );
         let smaller = apply_osv(&mut registry, &["OSV-1"], false, 1_004);
-        assert_eq!(smaller.reputation_score_basis_points, critical.reputation_score_basis_points);
-        assert_eq!(smaller.user_facing_risk_assessment.level, RiskLevel::Critical);
+        assert_eq!(
+            smaller.reputation_score_basis_points,
+            critical.reputation_score_basis_points
+        );
+        assert_eq!(
+            smaller.user_facing_risk_assessment.level,
+            RiskLevel::Critical
+        );
         let clean = apply_osv(&mut registry, &[], true, 1_005);
-        assert_eq!(clean.reputation_score_basis_points, initial.reputation_score_basis_points);
-        assert_eq!(clean.user_facing_risk_assessment, initial.user_facing_risk_assessment);
+        assert_eq!(
+            clean.reputation_score_basis_points,
+            initial.reputation_score_basis_points
+        );
+        assert_eq!(
+            clean.user_facing_risk_assessment,
+            initial.user_facing_risk_assessment
+        );
     }
 
     #[test]
@@ -4750,10 +4794,19 @@ mod tests {
             registry.create(input, 1_000, "initial").unwrap();
             let vulnerable = apply_osv(&mut registry, &["OSV-1"], false, 1_001);
             let outcome = registry
-                .refresh_osv_risk("npm:@acme/plugin", &[], authenticated, 1_002, "untrusted-clean")
+                .refresh_osv_risk(
+                    "npm:@acme/plugin",
+                    &[],
+                    authenticated,
+                    1_002,
+                    "untrusted-clean",
+                )
                 .unwrap();
             assert_eq!(outcome, OsvRiskRefreshOutcome::ClearanceRefused);
-            let retained = registry.latest_verified_card("npm:@acme/plugin").unwrap().unwrap();
+            let retained = registry
+                .latest_verified_card("npm:@acme/plugin")
+                .unwrap()
+                .unwrap();
             assert_eq!(retained.card_hash, vulnerable.card_hash);
             assert_eq!(retained.trust_card_version, vulnerable.trust_card_version);
         }
@@ -4767,19 +4820,29 @@ mod tests {
             apply_osv(&mut registry, &["OSV-1"], false, 1_001);
             let mut mutation = empty_risk_mutation();
             match field {
-                "risk" => mutation.user_facing_risk_assessment = Some(RiskAssessment {
-                    level: RiskLevel::High,
-                    summary: "new independent publisher finding".to_owned(),
-                }),
+                "risk" => {
+                    mutation.user_facing_risk_assessment = Some(RiskAssessment {
+                        level: RiskLevel::High,
+                        summary: "new independent publisher finding".to_owned(),
+                    })
+                }
                 "score" => mutation.reputation_score_basis_points = Some(500),
                 "trend" => mutation.reputation_trend = Some(ReputationTrend::Improving),
                 _ => unreachable!(),
             }
-            let changed = registry.update("npm:@acme/plugin", mutation, 1_002, "generic").unwrap();
+            let changed = registry
+                .update("npm:@acme/plugin", mutation, 1_002, "generic")
+                .unwrap();
             assert!(changed.osv_risk_baseline.is_none());
             let clean = apply_osv(&mut registry, &[], true, 1_003);
-            assert_eq!(clean.user_facing_risk_assessment, changed.user_facing_risk_assessment);
-            assert_eq!(clean.reputation_score_basis_points, changed.reputation_score_basis_points);
+            assert_eq!(
+                clean.user_facing_risk_assessment,
+                changed.user_facing_risk_assessment
+            );
+            assert_eq!(
+                clean.reputation_score_basis_points,
+                changed.reputation_score_basis_points
+            );
             assert_eq!(clean.reputation_trend, changed.reputation_trend);
         }
     }
@@ -4790,14 +4853,18 @@ mod tests {
             let mut registry = TrustCardRegistry::default();
             let mut input = sample_input();
             input.user_facing_risk_assessment.level = RiskLevel::High;
-            registry.create(input.clone(), 1_000, "independent-high").unwrap();
+            registry
+                .create(input.clone(), 1_000, "independent-high")
+                .unwrap();
             let vulnerable = apply_osv(&mut registry, &["OSV-1"], false, 1_001);
             if explicit {
                 input.extension.version = "2.0.0".to_owned();
                 input.provenance_summary.artifact_hashes =
                     vec![format!("sha256:{}", "a".repeat(64))];
             }
-            let changed = registry.refresh_from_scan(input, explicit, 1_002, "scan").unwrap();
+            let changed = registry
+                .refresh_from_scan(input, explicit, 1_002, "scan")
+                .unwrap();
             assert!(changed.osv_risk_baseline.is_none());
             assert_eq!(changed.user_facing_risk_assessment.level, RiskLevel::High);
             assert_eq!(
@@ -4806,8 +4873,14 @@ mod tests {
             );
             assert_eq!(changed.reputation_trend, ReputationTrend::Declining);
             let clean = apply_osv(&mut registry, &[], true, 1_003);
-            assert_eq!(clean.user_facing_risk_assessment, changed.user_facing_risk_assessment);
-            assert_eq!(clean.reputation_score_basis_points, changed.reputation_score_basis_points);
+            assert_eq!(
+                clean.user_facing_risk_assessment,
+                changed.user_facing_risk_assessment
+            );
+            assert_eq!(
+                clean.reputation_score_basis_points,
+                changed.reputation_score_basis_points
+            );
         }
     }
 
@@ -4847,7 +4920,10 @@ mod tests {
             .unwrap();
         assert!(changed.osv_risk_baseline.is_none());
         let retained = apply_osv(&mut registry, &[], true, 1_006);
-        assert_eq!(retained.user_facing_risk_assessment, changed.user_facing_risk_assessment);
+        assert_eq!(
+            retained.user_facing_risk_assessment,
+            changed.user_facing_risk_assessment
+        );
         assert_eq!(retained.camouflage_hints, changed.camouflage_hints);
     }
 
@@ -4867,15 +4943,25 @@ mod tests {
                 )
                 .unwrap();
             if revoked {
-                registry.update("npm:@acme/plugin", revoke_mutation(), 1_003, "revoke").unwrap();
+                registry
+                    .update("npm:@acme/plugin", revoke_mutation(), 1_003, "revoke")
+                    .unwrap();
             }
             let clean = apply_osv(&mut registry, &[], true, 1_004);
             assert!(clean.active_quarantine);
-            assert!(clean.effective_quarantine_sources().contains(&QuarantineSource::Local));
+            assert!(
+                clean
+                    .effective_quarantine_sources()
+                    .contains(&QuarantineSource::Local)
+            );
             assert_eq!(clean.reputation_trend, ReputationTrend::Declining);
             assert_eq!(
                 clean.user_facing_risk_assessment.level,
-                if revoked { RiskLevel::Critical } else { RiskLevel::High }
+                if revoked {
+                    RiskLevel::Critical
+                } else {
+                    RiskLevel::High
+                }
             );
             assert_eq!(
                 matches!(clean.revocation_status, RevocationStatus::Revoked { .. }),
@@ -5022,14 +5108,16 @@ mod tests {
             }"#,
         )
         .unwrap();
-        let lockfile = |version| serde_json::json!({
-            "lockfileVersion": 3,
-            "packages": {
-                "": {"name":"capture-test", "dependencies":{"plugin":"npm:@acme/plugin@1.0.0"}},
-                "node_modules/plugin": {"name":"@acme/plugin", "version":version,
-                    "integrity":artifact_pin("1.0.0", 0xee).integrity.unwrap()}
-            }
-        });
+        let lockfile = |version| {
+            serde_json::json!({
+                "lockfileVersion": 3,
+                "packages": {
+                    "": {"name":"capture-test", "dependencies":{"plugin":"npm:@acme/plugin@1.0.0"}},
+                    "node_modules/plugin": {"name":"@acme/plugin", "version":version,
+                        "integrity":artifact_pin("1.0.0", 0xee).integrity.unwrap()}
+                }
+            })
+        };
         std::fs::write(
             root.path().join("package-lock.json"),
             serde_json::to_vec(&lockfile("1.0.0")).unwrap(),
@@ -5168,7 +5256,10 @@ mod tests {
             refreshed.previous_version_hash.as_deref(),
             Some(retained.card_hash.as_str())
         );
-        assert_eq!(refreshed.trust_card_version, retained.trust_card_version + 1);
+        assert_eq!(
+            refreshed.trust_card_version,
+            retained.trust_card_version + 1
+        );
         assert_eq!(refreshed.revocation_status, retained.revocation_status);
         assert_eq!(
             refreshed.effective_quarantine_sources(),
@@ -5180,9 +5271,20 @@ mod tests {
                 >= retained.user_facing_risk_assessment.level
         );
         assert_eq!(refreshed.certification_level, CertificationLevel::Unknown);
-        assert_eq!(refreshed.audit_history.len(), retained.audit_history.len() + 1);
-        let evidence = &refreshed.derivation_evidence.as_ref().unwrap().evidence_refs;
-        assert!(evidence.iter().any(|reference| reference.evidence_id == "manifest-new-artifact"));
+        assert_eq!(
+            refreshed.audit_history.len(),
+            retained.audit_history.len() + 1
+        );
+        let evidence = &refreshed
+            .derivation_evidence
+            .as_ref()
+            .unwrap()
+            .evidence_refs;
+        assert!(
+            evidence
+                .iter()
+                .any(|reference| reference.evidence_id == "manifest-new-artifact")
+        );
         for previous in &retained.derivation_evidence.as_ref().unwrap().evidence_refs {
             assert!(evidence.contains(previous));
         }

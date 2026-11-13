@@ -552,9 +552,8 @@ impl ProductionProfileExecutor {
 /// Capability the run path checks for a recorded effect.
 fn required_capability(receipt: &EffectReceipt) -> &'static str {
     let capability_ref = match &receipt.policy_outcome {
-        PolicyOutcome::Allowed { capability_ref } | PolicyOutcome::Failed { capability_ref, .. } => {
-            Some(capability_ref.as_str())
-        }
+        PolicyOutcome::Allowed { capability_ref }
+        | PolicyOutcome::Failed { capability_ref, .. } => Some(capability_ref.as_str()),
         PolicyOutcome::Denied { .. } => None,
     };
     if let Some(capability_ref) = capability_ref {
@@ -2056,7 +2055,11 @@ mod tests {
         let entries = effect_chain(vec![
             allowed(0, EffectKind::FsRead, "host-io:fs_read"),
             allowed(1, EffectKind::HttpRequest, "host-io:network_send"),
-            denied(2, EffectKind::HttpRequest, "ssrf: egress to 169.254.169.254 blocked"),
+            denied(
+                2,
+                EffectKind::HttpRequest,
+                "ssrf: egress to 169.254.169.254 blocked",
+            ),
         ]);
         let executor = ProductionProfileExecutor::new(grant_table());
         let decisions: Vec<String> = effect_events(&entries)
@@ -2076,13 +2079,15 @@ mod tests {
         let executor = ProductionProfileExecutor::new(grant_table());
         let read = executor.evaluate_event(&events[0], &policy("strict"));
         assert_eq!(read.decision, "allow");
-        assert!(read.rationale.contains("determination=exact"), "{}", read.rationale);
+        assert!(
+            read.rationale.contains("determination=exact"),
+            "{}",
+            read.rationale
+        );
         let egress = executor.evaluate_event(&events[1], &policy("strict"));
         assert_eq!(egress.decision, "deny");
         assert!(
-            egress
-                .rationale
-                .contains("does not grant `network_egress`"),
+            egress.rationale.contains("does not grant `network_egress`"),
             "{}",
             egress.rationale
         );

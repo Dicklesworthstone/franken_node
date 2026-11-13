@@ -527,7 +527,13 @@ mod operation_control {
     fn local_policy(host: &str, port: u16) -> SsrfPolicyTemplate {
         let mut policy = policy();
         policy
-            .add_allowlist(host, Some(port), "local cancellation fixture", "control", "time")
+            .add_allowlist(
+                host,
+                Some(port),
+                "local cancellation fixture",
+                "control",
+                "time",
+            )
             .unwrap();
         policy
     }
@@ -543,14 +549,20 @@ mod operation_control {
         let stream = loop {
             match listener.accept() {
                 Ok((stream, _)) => break stream,
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock && Instant::now() < deadline => {
+                Err(error)
+                    if error.kind() == io::ErrorKind::WouldBlock && Instant::now() < deadline =>
+                {
                     thread::sleep(Duration::from_millis(1));
                 }
                 other => panic!("bounded local accept failed: {other:?}"),
             }
         };
-        stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
-        stream.set_write_timeout(Some(Duration::from_secs(2))).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        stream
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
         stream
     }
 
@@ -572,7 +584,8 @@ mod operation_control {
     ) -> (JoinHandle<()>, mpsc::Receiver<HostIoOutcome>) {
         let (send, receive) = mpsc::channel();
         let worker = thread::spawn(move || {
-            let result = gate.perform_controlled(&request, &[request.required_capability()], control);
+            let result =
+                gate.perform_controlled(&request, &[request.required_capability()], control);
             let _ = send.send(result);
         });
         (worker, receive)
@@ -595,9 +608,15 @@ mod operation_control {
         }
 
         fn resolve_controlled_until(
-            &self, _: &str, _: u16, deadline: Instant, control: Arc<dyn HostIoControl>,
+            &self,
+            _: &str,
+            _: u16,
+            deadline: Instant,
+            control: Arc<dyn HostIoControl>,
         ) -> io::Result<Vec<IpAddr>> {
-            self.0.try_send(()).expect("announce DNS wait without blocking");
+            self.0
+                .try_send(())
+                .expect("announce DNS wait without blocking");
             loop {
                 control.checkpoint().map_err(|_| {
                     io::Error::new(io::ErrorKind::PermissionDenied, "private-dns-diagnostic")
@@ -615,26 +634,44 @@ mod operation_control {
         let root = tempfile::tempdir().unwrap();
         let listener = listener();
         let port = listener.local_addr().unwrap().port();
-        let inner = SandboxedHostIo::with_root(root.path()).unwrap()
-            .with_network_timeout(Duration::from_secs(5)).unwrap();
+        let inner = SandboxedHostIo::with_root(root.path())
+            .unwrap()
+            .with_network_timeout(Duration::from_secs(5))
+            .unwrap();
         let revocation = inner.network_revocation();
         let (entered, waiting) = mpsc::sync_channel(1);
         let gate = Arc::new(SsrfGatedHostIo::with_resolver(
-            inner, local_policy("localhost", port), "cancel-dns", PausingDns(entered),
+            inner,
+            local_policy("localhost", port),
+            "cancel-dns",
+            PausingDns(entered),
         ));
         let signal = Arc::new(Signal::default());
-        let (worker, result) = start(gate.clone(), request("localhost", port, true), signal.clone());
+        let (worker, result) = start(
+            gate.clone(),
+            request("localhost", port, true),
+            signal.clone(),
+        );
         let announced = waiting.recv_timeout(Duration::from_secs(3));
         signal.0.store(true, Ordering::Release);
         let outcome = finish(worker, result);
         announced.expect("DNS phase was entered");
         assert_cancelled(outcome);
-        assert_eq!(listener.accept().unwrap_err().kind(), io::ErrorKind::WouldBlock);
-        assert!(!revocation.is_revoked(), "per-execution cancellation cannot revoke the provider");
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        assert!(
+            !revocation.is_revoked(),
+            "per-execution cancellation cannot revoke the provider"
+        );
         let audit = gate.audit_records();
         assert_eq!(audit.len(), 1);
         assert_eq!(audit[0].action, Action::Deny);
-        assert_eq!(audit[0].cidr_matched.as_deref(), Some("network_execution_cancelled"));
+        assert_eq!(
+            audit[0].cidr_matched.as_deref(),
+            Some("network_execution_cancelled")
+        );
         assert!(!format!("{audit:?}").contains("private-dns-diagnostic"));
     }
 
@@ -643,28 +680,46 @@ mod operation_control {
         let root = tempfile::tempdir().unwrap();
         let listener = listener();
         let address = listener.local_addr().unwrap();
-        let inner = SandboxedHostIo::with_root(root.path()).unwrap()
-            .with_network_timeout(Duration::from_secs(5)).unwrap();
+        let inner = SandboxedHostIo::with_root(root.path())
+            .unwrap()
+            .with_network_timeout(Duration::from_secs(5))
+            .unwrap();
         let revocation = inner.network_revocation();
         let observed = Arc::new(Observed::default());
         let gate = Arc::new(SsrfGatedHostIo::with_resolver(
-            inner, local_policy("localhost", address.port()), "cancel-tls",
-            Resolver { state: observed.clone(), answers: vec![address.ip()] },
+            inner,
+            local_policy("localhost", address.port()),
+            "cancel-tls",
+            Resolver {
+                state: observed.clone(),
+                answers: vec![address.ip()],
+            },
         ));
         let signal = Arc::new(Signal::default());
-        let (worker, result) = start(gate.clone(), request("localhost", address.port(), true), signal.clone());
+        let (worker, result) = start(
+            gate.clone(),
+            request("localhost", address.port(), true),
+            signal.clone(),
+        );
         let mut peer = accept(&listener);
         let mut first = [0_u8];
         peer.read_exact(&mut first).unwrap();
-        assert_eq!(first[0], 22, "TLS ClientHello must precede application bytes");
+        assert_eq!(
+            first[0], 22,
+            "TLS ClientHello must precede application bytes"
+        );
         // Keep the peer open without a ServerHello. EOF must not be what
         // releases the engine's wait, and no certificate exception is granted.
         signal.0.store(true, Ordering::Release);
         assert_cancelled_after_dispatch(finish(worker, result));
         assert!(!revocation.is_revoked());
         assert_eq!(observed.dns.load(Ordering::SeqCst), 1);
-        assert!(gate.audit_records().iter().any(|entry|
-            entry.cidr_matched.as_deref() == Some("network_execution_cancelled_after_dispatch")));
+        assert!(
+            gate.audit_records()
+                .iter()
+                .any(|entry| entry.cidr_matched.as_deref()
+                    == Some("network_execution_cancelled_after_dispatch"))
+        );
         drop(peer);
     }
 
@@ -675,25 +730,37 @@ mod operation_control {
         let second = listener();
         let first_port = first.local_addr().unwrap().port();
         let second_port = second.local_addr().unwrap().port();
-        let inner = SandboxedHostIo::with_root(root.path()).unwrap()
-            .with_network_timeout(Duration::from_secs(5)).unwrap();
+        let inner = SandboxedHostIo::with_root(root.path())
+            .unwrap()
+            .with_network_timeout(Duration::from_secs(5))
+            .unwrap();
         let revocation = inner.network_revocation();
         let mut config = NetworkPolicyConfig::default();
         for port in [first_port, second_port] {
             config.allowlist.push(NetworkAllowlistEntry {
-                host: "127.0.0.1".into(), port: Some(port), reason: "local shared-provider fixture".into(),
+                host: "127.0.0.1".into(),
+                port: Some(port),
+                reason: "local shared-provider fixture".into(),
             });
         }
-        let gate = Arc::new(SsrfGatedHostIo::from_network_policy(inner, &config, "shared-control"));
+        let gate = Arc::new(SsrfGatedHostIo::from_network_policy(
+            inner,
+            &config,
+            "shared-control",
+        ));
         let cancelled = Arc::new(Signal::default());
         let survivor = Arc::new(Signal::default());
         let (first_worker, first_result) = start(
-            gate.clone(), request("127.0.0.1", first_port, false), cancelled.clone(),
+            gate.clone(),
+            request("127.0.0.1", first_port, false),
+            cancelled.clone(),
         );
         let mut first_peer = accept(&first);
         read_request(&mut first_peer);
         let (second_worker, second_result) = start(
-            gate.clone(), request("127.0.0.1", second_port, false), survivor,
+            gate.clone(),
+            request("127.0.0.1", second_port, false),
+            survivor,
         );
         let mut second_peer = accept(&second);
         read_request(&mut second_peer);
@@ -703,40 +770,65 @@ mod operation_control {
         second_peer.write_all(REPLY).unwrap();
         let successful_result = finish(second_worker, second_result);
         assert_cancelled_after_dispatch(cancelled_result);
-        assert_eq!(successful_result, Ok(HostIoResponse::NetworkRequest { response: REPLY.to_vec() }));
+        assert_eq!(
+            successful_result,
+            Ok(HostIoResponse::NetworkRequest {
+                response: REPLY.to_vec()
+            })
+        );
         assert!(!revocation.is_revoked());
-        assert_eq!(gate.audit_records().iter().filter(|entry|
-            entry.cidr_matched.as_deref() == Some("network_execution_cancelled_after_dispatch")).count(), 1);
+        assert_eq!(
+            gate.audit_records()
+                .iter()
+                .filter(|entry| entry.cidr_matched.as_deref()
+                    == Some("network_execution_cancelled_after_dispatch"))
+                .count(),
+            1
+        );
     }
 
     #[derive(Debug)]
     struct NoNetwork;
 
     impl HostIoProvider for NoNetwork {
-        fn name(&self) -> &str { "never-delegated" }
+        fn name(&self) -> &str {
+            "never-delegated"
+        }
         fn perform(&self, _: &HostIoRequest, _: &[HostIoCapability]) -> HostIoOutcome {
             panic!("a refused operation reached plain transport")
         }
     }
 
     impl PinnedNetworkProvider for NoNetwork {
-        fn supports_pinned_tls(&self) -> bool { true }
+        fn supports_pinned_tls(&self) -> bool {
+            true
+        }
         fn perform_pinned_network_candidates_controlled(
-            &self, _: &HostIoRequest, _: &[HostIoCapability], _: &[SocketAddr],
-            _: Instant, _: Arc<dyn HostIoControl>,
+            &self,
+            _: &HostIoRequest,
+            _: &[HostIoCapability],
+            _: &[SocketAddr],
+            _: Instant,
+            _: Arc<dyn HostIoControl>,
         ) -> HostIoOutcome {
             panic!("a refused operation reached pinned transport")
         }
     }
 
     #[derive(Debug)]
-    struct CancellingLegacyDns { signal: Arc<Signal>, fail: bool }
+    struct CancellingLegacyDns {
+        signal: Arc<Signal>,
+        fail: bool,
+    }
 
     impl EndpointResolver for CancellingLegacyDns {
         fn resolve(&self, _: &str, _: u16) -> io::Result<Vec<IpAddr>> {
             self.signal.0.store(true, Ordering::Release);
-            if self.fail { Err(io::Error::other("private-legacy-dns-failure")) }
-            else { Ok(vec![PUBLIC_V4.parse().unwrap()]) }
+            if self.fail {
+                Err(io::Error::other("private-legacy-dns-failure"))
+            } else {
+                Ok(vec![PUBLIC_V4.parse().unwrap()])
+            }
         }
     }
 
@@ -745,40 +837,65 @@ mod operation_control {
         for fail in [false, true] {
             let signal = Arc::new(Signal::default());
             let gate = SsrfGatedHostIo::with_resolver(
-                NoNetwork, policy(), "legacy-control",
-                CancellingLegacyDns { signal: signal.clone(), fail },
+                NoNetwork,
+                policy(),
+                "legacy-control",
+                CancellingLegacyDns {
+                    signal: signal.clone(),
+                    fail,
+                },
             );
             assert_cancelled(gate.perform_controlled(
-                &request("never-connect.invalid", 443, true), &[HostIoCapability::NetworkSend], signal,
+                &request("never-connect.invalid", 443, true),
+                &[HostIoCapability::NetworkSend],
+                signal,
             ));
-            assert_eq!(gate.audit_records()[0].cidr_matched.as_deref(), Some("network_execution_cancelled"));
+            assert_eq!(
+                gate.audit_records()[0].cidr_matched.as_deref(),
+                Some("network_execution_cancelled")
+            );
         }
     }
 
     #[derive(Debug)]
-    struct ResettingTransport { signal: Arc<Signal>, calls: Arc<AtomicUsize> }
+    struct ResettingTransport {
+        signal: Arc<Signal>,
+        calls: Arc<AtomicUsize>,
+    }
 
     impl HostIoProvider for ResettingTransport {
-        fn name(&self) -> &str { "resetting-control-observer" }
+        fn name(&self) -> &str {
+            "resetting-control-observer"
+        }
         fn perform(&self, _: &HostIoRequest, _: &[HostIoCapability]) -> HostIoOutcome {
             panic!("supervised operation used plain transport")
         }
     }
 
     impl PinnedNetworkProvider for ResettingTransport {
-        fn supports_pinned_tls(&self) -> bool { true }
+        fn supports_pinned_tls(&self) -> bool {
+            true
+        }
         fn perform_pinned_network_candidates_controlled(
-            &self, _: &HostIoRequest, _: &[HostIoCapability], _: &[SocketAddr],
-            _: Instant, control: Arc<dyn HostIoControl>,
+            &self,
+            _: &HostIoRequest,
+            _: &[HostIoCapability],
+            _: &[SocketAddr],
+            _: Instant,
+            control: Arc<dyn HostIoControl>,
         ) -> HostIoOutcome {
             if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
                 self.signal.0.store(true, Ordering::Release);
                 assert!(control.checkpoint().is_err());
                 self.signal.0.store(false, Ordering::Release);
-            } else { control.checkpoint()?; }
+            } else {
+                control.checkpoint()?;
+            }
             // Deliberately buggy provider: returning bytes after it observed
             // denial must not turn the whole supervised operation into success.
-            Ok(HostIoResponse::NetworkRequest { response: REPLY.to_vec() })
+            Ok(HostIoResponse::NetworkRequest {
+                response: REPLY.to_vec(),
+            })
         }
     }
 
@@ -788,25 +905,43 @@ mod operation_control {
         let calls = Arc::new(AtomicUsize::new(0));
         let observed = Arc::new(Observed::default());
         let gate = SsrfGatedHostIo::with_resolver(
-            ResettingTransport { signal: signal.clone(), calls: calls.clone() },
-            policy(), "sticky-transport",
-            Resolver { state: observed.clone(), answers: vec![PUBLIC_V4.parse().unwrap()] },
+            ResettingTransport {
+                signal: signal.clone(),
+                calls: calls.clone(),
+            },
+            policy(),
+            "sticky-transport",
+            Resolver {
+                state: observed.clone(),
+                answers: vec![PUBLIC_V4.parse().unwrap()],
+            },
         );
         let original = request("never-connect.invalid", 443, true);
-        assert_cancelled_after_dispatch(gate.perform_controlled(&original, &[HostIoCapability::NetworkSend], signal.clone()));
+        assert_cancelled_after_dispatch(gate.perform_controlled(
+            &original,
+            &[HostIoCapability::NetworkSend],
+            signal.clone(),
+        ));
         assert_eq!(
             gate.perform_controlled(&original, &[HostIoCapability::NetworkSend], signal),
-            Ok(HostIoResponse::NetworkRequest { response: REPLY.to_vec() }),
+            Ok(HostIoResponse::NetworkRequest {
+                response: REPLY.to_vec()
+            }),
         );
         assert_eq!(calls.load(Ordering::SeqCst), 2);
         assert_eq!(observed.dns.load(Ordering::SeqCst), 2);
     }
 
     #[derive(Debug)]
-    struct NonNetwork { expected: Arc<dyn HostIoControl>, calls: Mutex<Vec<HostIoRequest>> }
+    struct NonNetwork {
+        expected: Arc<dyn HostIoControl>,
+        calls: Mutex<Vec<HostIoRequest>>,
+    }
 
     impl HostIoProvider for NonNetwork {
-        fn name(&self) -> &str { "non-network-control-observer" }
+        fn name(&self) -> &str {
+            "non-network-control-observer"
+        }
         fn filesystem_exception_provenance(&self) -> HostIoExceptionProvenance {
             HostIoExceptionProvenance::ProviderInternal
         }
@@ -814,15 +949,22 @@ mod operation_control {
             panic!("supervised operation lost its control")
         }
         fn perform_controlled(
-            &self, request: &HostIoRequest, _: &[HostIoCapability], control: Arc<dyn HostIoControl>,
+            &self,
+            request: &HostIoRequest,
+            _: &[HostIoCapability],
+            control: Arc<dyn HostIoControl>,
         ) -> HostIoOutcome {
             assert!(Arc::ptr_eq(&self.expected, &control));
             control.checkpoint()?;
             self.calls.lock().unwrap().push(request.clone());
             Ok(match request {
                 HostIoRequest::FsRead { .. } => HostIoResponse::FsRead { bytes: vec![1, 2] },
-                HostIoRequest::RandomRead { .. } => HostIoResponse::RandomRead { bytes: vec![3, 4] },
-                HostIoRequest::EnvRead { .. } => HostIoResponse::EnvRead { value: Some("captured".into()) },
+                HostIoRequest::RandomRead { .. } => {
+                    HostIoResponse::RandomRead { bytes: vec![3, 4] }
+                }
+                HostIoRequest::EnvRead { .. } => HostIoResponse::EnvRead {
+                    value: Some("captured".into()),
+                },
                 _ => panic!("unexpected non-network fixture"),
             })
         }
@@ -832,15 +974,44 @@ mod operation_control {
     fn non_network_effects_keep_the_original_control_and_exception_provenance() {
         let control: Arc<dyn HostIoControl> = Arc::new(UnrestrictedHostIoControl);
         let gate = SsrfGatedHostIo::new(
-            NonNetwork { expected: control.clone(), calls: Mutex::new(Vec::new()) }, "non-network",
+            NonNetwork {
+                expected: control.clone(),
+                calls: Mutex::new(Vec::new()),
+            },
+            "non-network",
         );
-        assert_eq!(gate.filesystem_exception_provenance(), HostIoExceptionProvenance::ProviderInternal);
+        assert_eq!(
+            gate.filesystem_exception_provenance(),
+            HostIoExceptionProvenance::ProviderInternal
+        );
         for (request, expected) in [
-            (HostIoRequest::FsRead { path: "input.txt".into() }, HostIoResponse::FsRead { bytes: vec![1, 2] }),
-            (HostIoRequest::RandomRead { byte_len: 2 }, HostIoResponse::RandomRead { bytes: vec![3, 4] }),
-            (HostIoRequest::EnvRead { name: "EXPLICIT_FIXTURE".into() }, HostIoResponse::EnvRead { value: Some("captured".into()) }),
+            (
+                HostIoRequest::FsRead {
+                    path: "input.txt".into(),
+                },
+                HostIoResponse::FsRead { bytes: vec![1, 2] },
+            ),
+            (
+                HostIoRequest::RandomRead { byte_len: 2 },
+                HostIoResponse::RandomRead { bytes: vec![3, 4] },
+            ),
+            (
+                HostIoRequest::EnvRead {
+                    name: "EXPLICIT_FIXTURE".into(),
+                },
+                HostIoResponse::EnvRead {
+                    value: Some("captured".into()),
+                },
+            ),
         ] {
-            assert_eq!(gate.perform_controlled(&request, &[request.required_capability()], control.clone()), Ok(expected));
+            assert_eq!(
+                gate.perform_controlled(
+                    &request,
+                    &[request.required_capability()],
+                    control.clone()
+                ),
+                Ok(expected)
+            );
         }
         assert!(gate.audit_records().is_empty());
     }
@@ -848,22 +1019,46 @@ mod operation_control {
     #[test]
     fn supervised_resolution_still_checks_every_address_and_answer_limit() {
         for (answers, marker) in [
-            (vec![PUBLIC_V6.parse().unwrap(), "fd00::1".parse().unwrap(), PUBLIC_V4.parse().unwrap()], SSRF_EGRESS_POLICY_BLOCK_MARKER),
-            (vec![PUBLIC_V4.parse().unwrap(); 65], "dns_answer_limit_exceeded"),
+            (
+                vec![
+                    PUBLIC_V6.parse().unwrap(),
+                    "fd00::1".parse().unwrap(),
+                    PUBLIC_V4.parse().unwrap(),
+                ],
+                SSRF_EGRESS_POLICY_BLOCK_MARKER,
+            ),
+            (
+                vec![PUBLIC_V4.parse().unwrap(); 65],
+                "dns_answer_limit_exceeded",
+            ),
             (vec![], "dns_resolution_required"),
         ] {
             let observed = Arc::new(Observed::default());
             let gate = SsrfGatedHostIo::with_resolver(
-                NoNetwork, policy(), "controlled-address-set", Resolver { state: observed.clone(), answers },
+                NoNetwork,
+                policy(),
+                "controlled-address-set",
+                Resolver {
+                    state: observed.clone(),
+                    answers,
+                },
             );
             for request in requests("never-connect.invalid:443") {
                 let result = gate.perform_controlled(
-                    &request, &[request.required_capability()], Arc::new(UnrestrictedHostIoControl),
+                    &request,
+                    &[request.required_capability()],
+                    Arc::new(UnrestrictedHostIoControl),
                 );
-                assert!(matches!(result, Err(HostIoError::Denied { reason }) if reason.contains(marker)));
+                assert!(
+                    matches!(result, Err(HostIoError::Denied { reason }) if reason.contains(marker))
+                );
             }
             assert_eq!(observed.dns.load(Ordering::SeqCst), 4);
-            assert!(gate.audit_records().iter().all(|entry| entry.action == Action::Deny));
+            assert!(
+                gate.audit_records()
+                    .iter()
+                    .all(|entry| entry.action == Action::Deny)
+            );
         }
     }
 }

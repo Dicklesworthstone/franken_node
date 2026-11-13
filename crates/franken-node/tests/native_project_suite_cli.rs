@@ -26,7 +26,8 @@ fn project(first_case: &str) -> TempDir {
     std::fs::write(
         project.path().join("package-lock.json"),
         "{\"lockfileVersion\":3,\"packages\":{\"\":{}}}\n",
-    ).expect("lockfile");
+    )
+    .expect("lockfile");
     std::fs::write(
         project.path().join("index.js"),
         "console.log('smoke-only');\n",
@@ -260,16 +261,23 @@ fn validate_and_report_execute_only_the_selected_nested_package_inventory() {
     let manifest = r#"{"name":"nested-suite","version":"1.0.0","engines":{"node":">=20"},"dependencies":{"ordinary":"^1"}}"#;
     let lock = r#"{"lockfileVersion":3,"packages":{"":{"dependencies":{"ordinary":"^1"}},"node_modules/ordinary":{"version":"1.2.3"}}}"#;
     let installed_manifest = r#"{"name":"ordinary","version":"1.2.3"}"#;
-    let inventory = r#"{"schema_version":"franken-node/migration-tests/v1","tests":["inside.test.js"]}"#;
+    let inventory =
+        r#"{"schema_version":"franken-node/migration-tests/v1","tests":["inside.test.js"]}"#;
     let outside = "throw new Error('outside admitted package');\n";
     let ignored = "throw new Error('not selected by package inventory');\n";
     std::fs::write(app.join("package.json"), manifest).expect("manifest");
     std::fs::write(app.join("package-lock.json"), lock).expect("lockfile");
     std::fs::create_dir_all(app.join("node_modules/ordinary")).expect("installed package");
-    std::fs::write(app.join("node_modules/ordinary/package.json"), installed_manifest)
-        .expect("installed manifest");
-    std::fs::write(app.join("node_modules/ordinary/index.js"), "module.exports = 42;\n")
-        .expect("installed source");
+    std::fs::write(
+        app.join("node_modules/ordinary/package.json"),
+        installed_manifest,
+    )
+    .expect("installed manifest");
+    std::fs::write(
+        app.join("node_modules/ordinary/index.js"),
+        "module.exports = 42;\n",
+    )
+    .expect("installed source");
     std::fs::write(app.join(".franken-node/migration-tests.json"), inventory)
         .expect("selected test inventory");
     std::fs::write(app.join("inside.test.js"), "console.log(42);\n").expect("selected case");
@@ -280,7 +288,11 @@ fn validate_and_report_execute_only_the_selected_nested_package_inventory() {
         let output = invoke(container.path(), report_mode, false, false);
         let report = parse_json_stdout(&output, "nested package runtime scope");
         assert!(output.status.success(), "{report}");
-        let validation = if report_mode { &report["validation"] } else { &report };
+        let validation = if report_mode {
+            &report["validation"]
+        } else {
+            &report
+        };
         assert_eq!(validation["status"], "pass", "{report}");
         let suite = &validation["test_suite"];
         assert_eq!(suite["verdict"], "PASS", "{report}");
@@ -295,19 +307,42 @@ fn validate_and_report_execute_only_the_selected_nested_package_inventory() {
         assert_eq!(cases[0]["reference"]["exit_code"], 0);
         assert_eq!(cases[0]["native"]["exit_code"], 0);
         assert_eq!(cases[0]["native"]["stdout"]["bytes"], 3);
-        assert_eq!(cases[0]["reference"]["stdout"], cases[0]["native"]["stdout"]);
-        let inputs = validation["dependency_admission"]["inputs"].as_array()
+        assert_eq!(
+            cases[0]["reference"]["stdout"],
+            cases[0]["native"]["stdout"]
+        );
+        let inputs = validation["dependency_admission"]["inputs"]
+            .as_array()
             .expect("audit evidence");
-        assert!(inputs.iter().all(|input| input["path"].as_str().unwrap().starts_with("app/")));
-        assert_eq!(std::fs::read_to_string(app.join("package.json")).unwrap(), manifest);
-        assert_eq!(std::fs::read_to_string(app.join("package-lock.json")).unwrap(), lock);
+        assert!(
+            inputs
+                .iter()
+                .all(|input| input["path"].as_str().unwrap().starts_with("app/"))
+        );
+        assert_eq!(
+            std::fs::read_to_string(app.join("package.json")).unwrap(),
+            manifest
+        );
+        assert_eq!(
+            std::fs::read_to_string(app.join("package-lock.json")).unwrap(),
+            lock
+        );
         assert_eq!(
             std::fs::read_to_string(app.join("node_modules/ordinary/package.json")).unwrap(),
             installed_manifest,
         );
-        assert_eq!(std::fs::read_to_string(app.join(".franken-node/migration-tests.json")).unwrap(), inventory);
-        assert_eq!(std::fs::read_to_string(app.join("ignored.test.js")).unwrap(), ignored);
-        assert_eq!(std::fs::read_to_string(container.path().join("outside.test.js")).unwrap(), outside);
+        assert_eq!(
+            std::fs::read_to_string(app.join(".franken-node/migration-tests.json")).unwrap(),
+            inventory
+        );
+        assert_eq!(
+            std::fs::read_to_string(app.join("ignored.test.js")).unwrap(),
+            ignored
+        );
+        assert_eq!(
+            std::fs::read_to_string(container.path().join("outside.test.js")).unwrap(),
+            outside
+        );
         assert!(!container.path().join(".franken-node").exists());
         assert!(!container.path().join(".migrate-backup").exists());
     }
@@ -437,8 +472,14 @@ fn static_only_and_failed_prerequisites_never_reserve_failure_storage() {
 fn primary_attestation_flags_cannot_silently_downgrade_or_omit_execution_consent() {
     let project = TempDir::new().unwrap();
     let complete = [
-        "--attest", "--bun-bin", "/missing-bun", "--signing-key", "/missing-key",
-        "--out", "/missing-report", "--execute",
+        "--attest",
+        "--bun-bin",
+        "/missing-bun",
+        "--signing-key",
+        "/missing-key",
+        "--out",
+        "/missing-report",
+        "--execute",
     ];
     let mut cases: Vec<(Vec<&str>, &str)> = vec![
         (vec!["--attest"], "--execute"),
@@ -460,17 +501,30 @@ fn primary_attestation_flags_cannot_silently_downgrade_or_omit_execution_consent
     candidate.extend(["--expected-input-sha256", "a"]);
     cases.push((candidate, "--expected-candidate-input-sha256"));
     for (arguments, expected) in cases {
-        let output = franken_node_command().current_dir(repo_root())
-            .args(["migrate", "validate"]).arg(project.path()).arg("--json")
-            .args(&arguments).output().unwrap();
-        assert!(!output.status.success(), "accepted invalid flags: {arguments:?}");
+        let output = franken_node_command()
+            .current_dir(repo_root())
+            .args(["migrate", "validate"])
+            .arg(project.path())
+            .arg("--json")
+            .args(&arguments)
+            .output()
+            .unwrap();
+        assert!(
+            !output.status.success(),
+            "accepted invalid flags: {arguments:?}"
+        );
         let error = parse_json_stdout(&output, "attested argument contract");
         assert_eq!(error["schema_version"], "franken-node/migrate-error-cli/v1");
-        assert!(error["error"].as_str().unwrap().contains(expected),
-            "{arguments:?}: {error}");
+        assert!(
+            error["error"].as_str().unwrap().contains(expected),
+            "{arguments:?}: {error}"
+        );
     }
-    assert_eq!(std::fs::read_dir(project.path()).unwrap().count(), 0,
-        "invalid flags must not execute or initialize a project");
+    assert_eq!(
+        std::fs::read_dir(project.path()).unwrap().count(),
+        0,
+        "invalid flags must not execute or initialize a project"
+    );
 }
 
 #[cfg(feature = "engine")]
@@ -494,30 +548,49 @@ mod attested_validation_cli {
             let project = root.path().join("project");
             fs::create_dir(&project).unwrap();
             initialize_native_project(&project, false);
-            fs::write(project.join("package.json"),
-                r#"{"name":"attested-validation","version":"1.0.0","engines":{"node":">=20"}}"#).unwrap();
-            fs::write(project.join("package-lock.json"),
-                r#"{"lockfileVersion":3,"packages":{"":{}}}"#).unwrap();
+            fs::write(
+                project.join("package.json"),
+                r#"{"name":"attested-validation","version":"1.0.0","engines":{"node":">=20"}}"#,
+            )
+            .unwrap();
+            fs::write(
+                project.join("package-lock.json"),
+                r#"{"lockfileVersion":3,"packages":{"":{}}}"#,
+            )
+            .unwrap();
             for index in 0..count {
-                fs::write(project.join(format!("case-{index:02}.test.js")),
-                    source.replace("CASE_INDEX", &index.to_string())).unwrap();
+                fs::write(
+                    project.join(format!("case-{index:02}.test.js")),
+                    source.replace("CASE_INDEX", &index.to_string()),
+                )
+                .unwrap();
             }
             fs::create_dir_all(project.join(".franken-node/keys")).unwrap();
             let signing = SigningKey::from_bytes(&[71; 32]);
             let key = root.path().join("validator.seed");
             fs::write(&key, signing.to_bytes()).unwrap();
             fs::set_permissions(&key, fs::Permissions::from_mode(0o600)).unwrap();
-            fs::write(project.join(report_attestation::PUBLIC_KEY_PATH),
-                hex::encode(signing.verifying_key().to_bytes())).unwrap();
+            fs::write(
+                project.join(report_attestation::PUBLIC_KEY_PATH),
+                hex::encode(signing.verifying_key().to_bytes()),
+            )
+            .unwrap();
             Self { root, project, key }
         }
 
         fn command(&self, bun: &Path, key: &Path, out: &Path) -> std::process::Command {
             let mut command = franken_node_command();
-            command.current_dir(repo_root()).env_remove(FAILURE_DIRECTORY)
-                .args(["migrate", "validate"]).arg(&self.project)
+            command
+                .current_dir(repo_root())
+                .env_remove(FAILURE_DIRECTORY)
+                .args(["migrate", "validate"])
+                .arg(&self.project)
                 .args(["--attest", "--execute", "--json", "--bun-bin"])
-                .arg(bun).arg("--signing-key").arg(key).arg("--out").arg(out);
+                .arg(bun)
+                .arg("--signing-key")
+                .arg(key)
+                .arg("--out")
+                .arg(out);
             command
         }
 
@@ -527,17 +600,28 @@ mod attested_validation_cli {
                 command.arg("--attest-regression");
             }
             native_smoke_supervisor::run_command_with_timeout(
-                &mut command, Duration::from_secs(360), Duration::from_secs(1),
-            ).expect("attested CLI must terminate within its total budget")
+                &mut command,
+                Duration::from_secs(360),
+                Duration::from_secs(1),
+            )
+            .expect("attested CLI must terminate within its total budget")
         }
 
         fn rollout(&self, action: &str, report: Option<&Path>) -> Output {
             let mut command = franken_node_command();
-            command.current_dir(repo_root())
+            command
+                .current_dir(repo_root())
                 .env_remove("FRANKEN_NODE_ROLLOUT_SIGNING_KEY")
                 .env_remove("FRANKEN_NODE_ROLLOUT_EXPECTED_HEAD_SHA256")
-                .args(["migrate", "rollout"]).arg(&self.project)
-                .args(["--migration-id", "attested-cli", "--action", action, "--json"]);
+                .args(["migrate", "rollout"])
+                .arg(&self.project)
+                .args([
+                    "--migration-id",
+                    "attested-cli",
+                    "--action",
+                    action,
+                    "--json",
+                ]);
             if let Some(report) = report {
                 command.arg("--lockstep-report").arg(report);
             }
@@ -547,11 +631,13 @@ mod attested_validation_cli {
 
     fn actual_bun() -> PathBuf {
         let path = std::env::var_os("PATH").expect("real reference runtimes must be installed");
-        std::env::split_paths(&path).filter(|directory| directory.is_absolute())
+        std::env::split_paths(&path)
+            .filter(|directory| directory.is_absolute())
             .map(|directory| directory.join("bun"))
             .find(|candidate| candidate.is_file())
             .expect("attested native CLI regressions require real Bun on an absolute PATH entry")
-            .canonicalize().unwrap()
+            .canonicalize()
+            .unwrap()
     }
 
     #[test]
@@ -560,7 +646,11 @@ mod attested_validation_cli {
         // they do not establish independent production samples or a safety KPI.
         let fixture = Fixture::new(35, "console.log(CASE_INDEX + 7);\n");
         let initialized = fixture.rollout("status", None);
-        assert!(initialized.status.success(), "{}", String::from_utf8_lossy(&initialized.stderr));
+        assert!(
+            initialized.status.success(),
+            "{}",
+            String::from_utf8_lossy(&initialized.stderr)
+        );
         let out = fixture.root.path().join("canary.signed.json");
         let bun = actual_bun();
         let output = fixture.validate(&bun, &out, false);
@@ -570,11 +660,17 @@ mod attested_validation_cli {
         assert_eq!(summary["verdict"], "PASS");
         assert_eq!(summary["total_tests"], 35);
         assert_eq!(summary["regression_attested"], false);
-        assert_eq!(fs::metadata(&out).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            fs::metadata(&out).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
 
         let envelope = fs::read(&out).unwrap();
-        let raw = report_attestation::verify(&envelope,
-            &report_attestation::project_key(&fixture.project).unwrap()).unwrap();
+        let raw = report_attestation::verify(
+            &envelope,
+            &report_attestation::project_key(&fixture.project).unwrap(),
+        )
+        .unwrap();
         let measured: serde_json::Value = serde_json::from_slice(&raw).unwrap();
         assert_eq!(measured["filesystem_comparison"], true);
         assert_eq!(measured["skipped"], 0);
@@ -592,14 +688,18 @@ mod attested_validation_cli {
         assert!(promoted.status.success(), "{report}");
         assert_eq!(report["stage"], "canary");
         assert_eq!(report["validation_confidence"]["total_tests"], 35);
-        assert!(!fixture.rollout("promote", Some(&out)).status.success(),
-            "a later promotion must not reuse the old candidate identity");
+        assert!(
+            !fixture.rollout("promote", Some(&out)).status.success(),
+            "a later promotion must not reuse the old candidate identity"
+        );
     }
 
     #[test]
     fn primary_attested_native_regression_retains_nonzero_exit_and_recovery_evidence() {
-        let fixture = Fixture::new(1,
-            "require('fs').writeFileSync('guest-output.txt','written');\n");
+        let fixture = Fixture::new(
+            1,
+            "require('fs').writeFileSync('guest-output.txt','written');\n",
+        );
         assert!(fixture.rollout("status", None).status.success());
         let bun = actual_bun();
         let unapproved = fixture.root.path().join("unsigned-regression.json");
@@ -609,11 +709,17 @@ mod attested_validation_cli {
         let out = fixture.root.path().join("regression.signed.json");
         let output = fixture.validate(&bun, &out, true);
         let summary = parse_json_stdout(&output, "signed native regression");
-        assert!(!output.status.success(), "publishing FAIL must remain a failed validation");
+        assert!(
+            !output.status.success(),
+            "publishing FAIL must remain a failed validation"
+        );
         assert_eq!(summary["verdict"], "FAIL");
         assert_eq!(summary["regression_attested"], true);
-        let raw = report_attestation::verify(&fs::read(&out).unwrap(),
-            &report_attestation::project_key(&fixture.project).unwrap()).unwrap();
+        let raw = report_attestation::verify(
+            &fs::read(&out).unwrap(),
+            &report_attestation::project_key(&fixture.project).unwrap(),
+        )
+        .unwrap();
         let report: serde_json::Value = serde_json::from_slice(&raw).unwrap();
         assert_eq!(report["native_divergences"], 1);
         assert_eq!(report["reference_failures"], 0);
@@ -623,7 +729,10 @@ mod attested_validation_cli {
         let state = parse_json_stdout(&fixture.rollout("status", None), "regression state");
         assert_eq!(state["stage"], "aborted");
         assert_eq!(state["status"], "rolled_back");
-        assert!(state.get("source_rollback").is_none(), "an unbound rollout cannot claim restoration");
+        assert!(
+            state.get("source_rollback").is_none(),
+            "an unbound rollout cannot claim restoration"
+        );
     }
 
     #[test]
@@ -643,12 +752,17 @@ mod attested_validation_cli {
             (linked, "not a symlink"),
             (untrusted, "does not match"),
         ] {
-            let output = fixture.command(Path::new("/missing-bun"), &key, &out)
-                .output().unwrap();
+            let output = fixture
+                .command(Path::new("/missing-bun"), &key, &out)
+                .output()
+                .unwrap();
             let error = parse_json_stdout(&output, "attestation admission refusal");
             assert!(!output.status.success());
             assert_eq!(error["schema_version"], "franken-node/migrate-error-cli/v1");
-            assert!(error["error"].as_str().unwrap().contains(expected), "{error}");
+            assert!(
+                error["error"].as_str().unwrap().contains(expected),
+                "{error}"
+            );
             assert!(!out.exists());
         }
     }

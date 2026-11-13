@@ -10978,7 +10978,7 @@ fn current_binary_sha256() -> Option<String> {
     let executable = std::env::current_exe().ok()?;
     let mut file = std::fs::File::open(executable).ok()?;
     let mut hasher = sha2::Sha256::new();
-    let mut buffer = [0_u8; 8 * 1024];
+    let mut buffer = [0_u8; 64 * 1024];
     loop {
         let read = match file.read(&mut buffer) {
             Ok(read) => read,

@@ -3035,17 +3035,7 @@ mod external_release_live_control {
         );
         assert_eq!(evidence["journal_complete"], true);
         assert_eq!(evidence["replay_certified"], false);
-        assert_eq!(evidence["interrupted_effect_count"], 1);
-        assert!(
-            evidence["entries"].as_array().unwrap().iter().any(|entry| {
-                entry["effect_kind"] == "network_request"
-                    && entry["state"] == "interrupted_indeterminate"
-                    && entry.get("policy_outcome").is_none()
-                    && entry.get("allowed").is_none()
-                    && entry.get("denied").is_none()
-            }),
-            "interrupted network effect must remain indeterminate: {evidence}"
-        );
+        assert_admitted_network_effect_remained_indeterminate(evidence);
         let receipt_path = release.join(
             evidence["receipt_path"]
                 .as_str()
@@ -3298,17 +3288,7 @@ mod external_release_live_control {
             );
             assert_eq!(evidence["journal_complete"], true);
             assert_eq!(evidence["replay_certified"], false);
-            assert_eq!(evidence["interrupted_effect_count"], 1);
-            assert!(
-                evidence["entries"].as_array().unwrap().iter().any(|entry| {
-                    entry["effect_kind"] == "network_request"
-                        && entry["state"] == "interrupted_indeterminate"
-                        && entry.get("policy_outcome").is_none()
-                        && entry.get("allowed").is_none()
-                        && entry.get("denied").is_none()
-                }),
-                "the admitted network effect must remain indeterminate: {evidence}"
-            );
+            assert_admitted_network_effect_remained_indeterminate(evidence);
             let receipt_path = self.release.path().join(
                 evidence["receipt_path"]
                     .as_str()
@@ -3341,6 +3321,48 @@ mod external_release_live_control {
                 "activation retirement is not a native crash"
             );
             report
+        }
+    }
+
+    fn assert_admitted_network_effect_remained_indeterminate(evidence: &Value) {
+        if let Some(ledger) = evidence.get("verified_final_host_effect_ledger") {
+            assert_eq!(evidence["interrupted_effect_count"], 0, "{evidence}");
+            assert!(
+                evidence["entries"].as_array().unwrap().iter().any(|entry| {
+                    entry["effect_kind"] == "network_request"
+                        && entry["state"] == "provider_returned"
+                        && entry.get("policy_outcome").is_none()
+                        && entry.get("allowed").is_none()
+                        && entry.get("denied").is_none()
+                }),
+                "cooperatively stopped WAL entry must remain outcome-neutral: {evidence}"
+            );
+            assert_eq!(ledger["failed_count"], 1, "{evidence}");
+            assert_eq!(ledger["denied_count"], 0, "{evidence}");
+            assert!(
+                ledger["entries"].as_array().unwrap().iter().any(|entry| {
+                    entry["receipt"]["effect_kind"] == "http_request"
+                        && entry["receipt"]["policy_outcome"]["outcome"] == "failed"
+                        && entry["receipt"]["policy_outcome"]["reason"]
+                            .as_str()
+                            .is_some_and(|reason| {
+                                reason.contains("external outcome may be unknown")
+                            })
+                }),
+                "cooperatively stopped final ledger must record cancelled http_request as failed with unknown external outcome: {evidence}"
+            );
+        } else {
+            assert_eq!(evidence["interrupted_effect_count"], 1, "{evidence}");
+            assert!(
+                evidence["entries"].as_array().unwrap().iter().any(|entry| {
+                    entry["effect_kind"] == "network_request"
+                        && entry["state"] == "interrupted_indeterminate"
+                        && entry.get("policy_outcome").is_none()
+                        && entry.get("allowed").is_none()
+                        && entry.get("denied").is_none()
+                }),
+                "interrupted network effect must remain indeterminate: {evidence}"
+            );
         }
     }
 
@@ -3422,17 +3444,7 @@ mod external_release_live_control {
         assert_eq!(evidence["terminal_state"], "control_indeterminate");
         assert_eq!(evidence["journal_complete"], true);
         assert_eq!(evidence["replay_certified"], false);
-        assert_eq!(evidence["interrupted_effect_count"], 1);
-        assert!(
-            evidence["entries"].as_array().unwrap().iter().any(|entry| {
-                entry["effect_kind"] == "network_request"
-                    && entry["state"] == "interrupted_indeterminate"
-                    && entry.get("policy_outcome").is_none()
-                    && entry.get("allowed").is_none()
-                    && entry.get("denied").is_none()
-            }),
-            "the outstanding network request is not certified as rolled back: {evidence}"
-        );
+        assert_admitted_network_effect_remained_indeterminate(evidence);
         let receipt_path = blocked.release.path().join(
             evidence["receipt_path"]
                 .as_str()
@@ -3551,7 +3563,7 @@ mod external_release_live_control {
         let evidence = &stopped["run"];
         assert_eq!(evidence["control_trigger"]["kind"], "fleet_policy_changed");
         assert_eq!(evidence["terminal_state"], "control_indeterminate");
-        assert_eq!(evidence["interrupted_effect_count"], 1);
+        assert_admitted_network_effect_remained_indeterminate(evidence);
         assert_eq!(evidence["replay_certified"], false);
         assert!(!blocked.release.path().join("after.marker").exists());
         let _ = blocked.release_http_response();
@@ -3925,7 +3937,7 @@ fn deploy_supervise_microreboots_across_native_panics_and_certifies_eprocess_pos
         supervised["phase"], "rolled_back_sustained_healthy",
         "{supervised}"
     );
-    assert_eq!(supervised["attempts_executed"], 5, "{supervised}");
+    assert_eq!(supervised["attempts_executed"], 6, "{supervised}");
     assert_eq!(supervised["release_id"], "1.0.0", "{supervised}");
     assert_eq!(
         supervised["crash_loop_detector"]["triggered"], true,
@@ -3952,12 +3964,12 @@ fn deploy_supervise_microreboots_across_native_panics_and_certifies_eprocess_pos
         "{supervised}"
     );
     assert_eq!(
-        supervised["e_process_monitor"]["healthy_runs"], 2,
+        supervised["e_process_monitor"]["healthy_runs"], 3,
         "{supervised}"
     );
 
     let attempts = supervised["attempts"].as_array().expect("attempts array");
-    assert_eq!(attempts.len(), 5);
+    assert_eq!(attempts.len(), 6);
     assert_eq!(attempts[0]["release_id"], "2.0.0");
     assert_eq!(attempts[0]["verdict"], "crashed_microreboot_pending");
     assert_eq!(attempts[1]["release_id"], "2.0.0");
@@ -3970,6 +3982,9 @@ fn deploy_supervise_microreboots_across_native_panics_and_certifies_eprocess_pos
     assert_eq!(attempts[4]["release_id"], "1.0.0");
     assert_eq!(attempts[4]["verdict"], "healthy");
     assert_eq!(guest_stdout(&attempts[4]["run"]), "RELEASE_ONE_HEALTHY\n");
+    assert_eq!(attempts[5]["release_id"], "1.0.0");
+    assert_eq!(attempts[5]["verdict"], "healthy");
+    assert_eq!(guest_stdout(&attempts[5]["run"]), "RELEASE_ONE_HEALTHY\n");
 
     let status = drill.status();
     assert_eq!(status["active"]["release_id"], "1.0.0", "{status}");
