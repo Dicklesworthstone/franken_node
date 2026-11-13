@@ -1418,7 +1418,8 @@ fn assert_signed_health_refuses_new_launches(
     assert_eq!(fs::read(drill.state_path("active.json")).unwrap(), pointer);
     assert_eq!(fs::read(&health_path).unwrap(), health);
     assert_eq!(
-        drill.sessions(failed)["records"], records,
+        drill.sessions(failed)["records"],
+        records,
         "refusal must precede native admission, not merely terminate another guest"
     );
 }
@@ -1437,7 +1438,8 @@ fn signed_crash_containment_survives_cleared_local_safe_mode() {
 
     // An unsigned controller edit must not clear the independently signed
     // deployment history or let an unchanged active pointer launch again.
-    let inactive = frankenengine_node::runtime::safe_mode::SafeModeController::with_default_config();
+    let inactive =
+        frankenengine_node::runtime::safe_mode::SafeModeController::with_default_config();
     assert!(!inactive.is_active());
     fs::write(
         failed.join(".franken-node/safe-mode/state.json"),
@@ -1461,7 +1463,10 @@ fn signed_crash_containment_survives_cleared_local_safe_mode() {
     assert_eq!(code, Some(0), "{recovered}");
     assert_eq!(recovered["phase"], "healthy", "{recovered}");
     assert_eq!(guest_stdout(&recovered["run"]), "RELEASE_ONE_HEALTHY\n");
-    assert_eq!(drill.sessions(&failed)["records"].as_array().unwrap().len(), 3);
+    assert_eq!(
+        drill.sessions(&failed)["records"].as_array().unwrap().len(),
+        3
+    );
 }
 
 #[test]

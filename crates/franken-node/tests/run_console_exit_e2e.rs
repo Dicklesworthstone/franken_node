@@ -2428,18 +2428,30 @@ fn a_failed_run_still_surfaces_the_denied_effect_receipt_bd_muy9u() {
         dir.path(),
         &["ops", "incident-coverage", "--min-coverage", "1", "--json"],
     );
-    assert_eq!(
+    assert_ne!(
         coverage.exit_code,
         Some(0),
-        "{}: {covered}",
-        coverage.stderr
+        "a signed recorded trace cannot satisfy native replay coverage: {covered}"
+    );
+    assert_eq!(
+        covered["schema_version"],
+        "franken-node/ops-incident-coverage-cli/v2"
     );
     assert_eq!(covered["authenticated_receipts"], 1);
     assert_eq!(covered["inventory_runs"], 1);
     assert_eq!(covered["high_severity_events"], 1);
+    assert_eq!(covered["captured"], 1);
     assert_eq!(covered["bundled"], 1);
-    assert_eq!(covered["replay_coverage"], 1.0);
+    assert_eq!(covered["bundle_coverage"], 1.0);
+    assert_eq!(covered["replayable"], 0);
+    assert_eq!(covered["replay_coverage"], 0.0);
+    assert_eq!(
+        covered["unreplayable_incidents"],
+        serde_json::json!([incident_id])
+    );
+    assert_eq!(covered["native_reexecution_performed"], false);
     assert_eq!(covered["source_errors"], serde_json::json!([]));
+    assert!(record["native_replay"].is_null());
 
     // The durable CLI path rejects hand editing even when an already-captured
     // source exists. A failed receipt must never be relabelled as success.
@@ -2468,6 +2480,89 @@ fn a_failed_run_still_surfaces_the_denied_effect_receipt_bd_muy9u() {
         original_source
     );
     assert_eq!(record["receipt_snapshot"], run_receipt);
+}
+
+#[test]
+fn incident_coverage_accepts_only_native_inputs_bound_to_the_authenticated_run() {
+    let (dir, outcome) = run_app(
+        "const http = require('http'); http.get('http://169.254.169.254/latest/meta-data/', (res) => { console.log('unexpected', res.statusCode); });\n",
+        &["--capture-replay", "--json"],
+    );
+    assert_eq!(outcome.exit_code, Some(1), "{}", outcome.stderr);
+    let evidence: Value = serde_json::from_str(&outcome.stdout).expect("captured failed-run JSON");
+    let capture = &evidence["dispatch"]["native_replay"];
+    assert!(
+        capture.is_object(),
+        "native denial inputs must be retained: {evidence}"
+    );
+    let (receipt_path, receipt) = persisted_failed_run_receipt(dir.path(), &outcome, &evidence);
+    assert_eq!(
+        receipt["native_replay_payload_sha256"],
+        capture["payload_sha256"]
+    );
+    let incident_id = receipt["incident_capture"]["incident_id"]
+        .as_str()
+        .expect("captured security incident");
+    let (export, _) = run_workspace_json(
+        dir.path(),
+        &[
+            "incident",
+            "bundle",
+            "--id",
+            incident_id,
+            "--verify",
+            "--json",
+        ],
+    );
+    assert_eq!(export.exit_code, Some(0), "{}", export.stderr);
+
+    let (coverage, report) = run_workspace_json(
+        dir.path(),
+        &["ops", "incident-coverage", "--min-coverage", "1", "--json"],
+    );
+    assert_eq!(coverage.exit_code, Some(0), "{}: {report}", coverage.stderr);
+    assert_eq!(
+        report["schema_version"],
+        "franken-node/ops-incident-coverage-cli/v2"
+    );
+    assert_eq!(report["population_authenticated"], true);
+    assert_eq!(report["high_severity_events"], 1);
+    assert_eq!(report["captured"], 1);
+    assert_eq!(report["bundled"], 1);
+    assert_eq!(report["bundle_coverage"], 1.0);
+    assert_eq!(report["replayable"], 1);
+    assert_eq!(report["replay_coverage"], 1.0);
+    assert_eq!(
+        report["replay_scope"],
+        "authenticated_native_guest_execution_inputs"
+    );
+    assert_eq!(report["native_reexecution_performed"], false);
+    assert_eq!(report["unreplayable_incidents"], serde_json::json!([]));
+    assert_eq!(report["source_errors"], serde_json::json!([]));
+
+    // A still-valid exported bundle cannot replace the original run binding.
+    // Retain the signed record and bundle while altering the receipt selector.
+    let mut altered = receipt.clone();
+    altered["native_replay_payload_sha256"] = Value::from("00".repeat(32));
+    std::fs::write(&receipt_path, serde_json::to_vec_pretty(&altered).unwrap())
+        .expect("alter receipt replay binding");
+    let (rejected, report) = run_workspace_json(
+        dir.path(),
+        &["ops", "incident-coverage", "--min-coverage", "1", "--json"],
+    );
+    assert_ne!(rejected.exit_code, Some(0), "{report}");
+    assert_eq!(report["population_authenticated"], false);
+    assert_eq!(report["high_severity_events"], 1);
+    assert_eq!(report["bundled"], 1);
+    assert_eq!(report["replayable"], 0);
+    assert_eq!(report["replay_coverage"], 0.0);
+    assert!(
+        !report["source_errors"]
+            .as_array()
+            .expect("source errors")
+            .is_empty(),
+        "a retained bundle must not conceal a broken original run binding"
+    );
 }
 
 #[test]

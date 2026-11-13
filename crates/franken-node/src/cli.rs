@@ -2964,11 +2964,12 @@ pub struct OpsSwarmHandoffArgs {
 
 #[derive(Debug, Parser)]
 pub struct OpsIncidentCoverageArgs {
-    /// Fail (exit non-zero) when replay coverage is below this fraction (0.0-1.0).
+    /// Fail when authenticated native replay input coverage is below this fraction (0.0-1.0).
+    /// Signed trace-only bundles do not count as native replay inputs.
     #[arg(long)]
     pub min_coverage: Option<f64>,
 
-    /// Emit `franken-node/ops-incident-coverage-cli/v1` JSON.
+    /// Emit `franken-node/ops-incident-coverage-cli/v2` JSON.
     #[arg(long)]
     pub json: bool,
 }

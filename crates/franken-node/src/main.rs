@@ -13699,7 +13699,7 @@ fn verify_run_ledger_record(
     )
 }
 
-const OPS_INCIDENT_COVERAGE_CLI_SCHEMA_VERSION: &str = "franken-node/ops-incident-coverage-cli/v1";
+const OPS_INCIDENT_COVERAGE_CLI_SCHEMA_VERSION: &str = "franken-node/ops-incident-coverage-cli/v2";
 
 /// Empty or unauthenticated populations cannot establish a coverage target.
 fn incident_coverage_meets_minimum(
@@ -13778,6 +13778,9 @@ fn handle_ops_incident_coverage(args: &cli::OpsIncidentCoverageArgs) -> Result<(
     }
     let receipts = list_all_run_receipts(&project_root)?;
     let mut observed: BTreeMap<String, (String, String, String)> = BTreeMap::new();
+    // Only a replay payload authenticated against its original run receipt
+    // can make a retained bundle eligible for native re-execution.
+    let mut native_replay_payloads = BTreeMap::new();
     let mut receipt_ids = BTreeSet::new();
     let mut unreadable_receipts = 0_usize;
     let mut authenticated_receipts = 0_usize;
@@ -13863,6 +13866,12 @@ fn handle_ops_incident_coverage(args: &cli::OpsIncidentCoverageArgs) -> Result<(
                 let record = authenticated.record;
                 authenticated_receipts = authenticated_receipts.saturating_add(1);
                 let ledger = &record.host_effect_ledger;
+                if let Some(capture) = &record.native_replay {
+                    native_replay_payloads.insert(
+                        run_incident_id(&ledger.chain_head_hash),
+                        capture.payload_sha256.clone(),
+                    );
+                }
                 let tripped_control = ledger.denied_count > 0
                     || !record.ssrf_violations.is_empty()
                     || record.sentinel_enforced;
@@ -13960,9 +13969,11 @@ fn handle_ops_incident_coverage(args: &cli::OpsIncidentCoverageArgs) -> Result<(
     let mut uncaptured = Vec::new();
     let mut bundled = Vec::new();
     let mut unbundled = Vec::new();
+    let mut replayable = Vec::new();
+    let mut unreplayable = Vec::new();
     for (incident_id, (receipt_id, receipt_hash, chain_head)) in &observed {
         let evidence_path = project_root.join(run_incident_evidence_relative_path(incident_id));
-        let expected_integrity_hash = read_captured_incident_evidence(&evidence_path)
+        let expected_bundle = read_captured_incident_evidence(&evidence_path)
             .ok()
             .filter(|package| {
                 &package.incident_id == incident_id
@@ -13971,14 +13982,34 @@ fn handle_ops_incident_coverage(args: &cli::OpsIncidentCoverageArgs) -> Result<(
                     && package.initial_state_snapshot["host_effect_chain_head"]
                         == chain_head.as_str()
             })
-            .and_then(|package| generate_replay_bundle_from_evidence(&package).ok())
-            .map(|bundle| bundle.integrity_hash);
-        let is_captured = expected_integrity_hash.is_some();
-        let is_bundled = expected_integrity_hash.as_ref().is_some_and(|expected| {
+            .and_then(|package| generate_replay_bundle_from_evidence(&package).ok());
+        let is_captured = expected_bundle.is_some();
+        let is_bundled = expected_bundle.as_ref().is_some_and(|expected| {
             verified_bundles.iter().any(|bundle| {
-                &bundle.incident_id == incident_id && &bundle.integrity_hash == expected
+                &bundle.incident_id == incident_id
+                    && bundle.integrity_hash == expected.integrity_hash
             })
         });
+        // A signed recorded trace alone is not executable replay evidence.
+        // Bind the exact native inputs in the exported bundle back to the
+        // already authenticated run record, rather than trusting presence of
+        // an editable field or the exporter's signature by itself.
+        let has_native_inputs = expected_bundle
+            .as_ref()
+            .zip(native_replay_payloads.get(incident_id))
+            .is_some_and(|(bundle, expected_payload)| {
+                serde_json::from_value::<ops::native_replay::NativeReplayCapture>(
+                    bundle.initial_state_snapshot["native_replay"].clone(),
+                )
+                .is_ok_and(|capture| {
+                    &capture.payload_sha256 == expected_payload && capture.validate().is_ok()
+                })
+            });
+        if is_bundled && has_native_inputs {
+            replayable.push(incident_id.clone());
+        } else {
+            unreplayable.push(incident_id.clone());
+        }
         if is_captured {
             captured.push(incident_id.clone());
         } else {
@@ -13999,6 +14030,7 @@ fn handle_ops_incident_coverage(args: &cli::OpsIncidentCoverageArgs) -> Result<(
     };
     let capture_coverage = ratio(captured.len());
     let bundle_coverage = ratio(bundled.len());
+    let replay_coverage = ratio(replayable.len());
     let report = serde_json::json!({
         "schema_version": OPS_INCIDENT_COVERAGE_CLI_SCHEMA_VERSION,
         "command": "ops.incident-coverage",
@@ -14013,10 +14045,15 @@ fn handle_ops_incident_coverage(args: &cli::OpsIncidentCoverageArgs) -> Result<(
         "high_severity_events": observed.len(),
         "captured": captured.len(),
         "bundled": bundled.len(),
+        "replayable": replayable.len(),
         "capture_coverage": capture_coverage,
-        "replay_coverage": bundle_coverage,
+        "bundle_coverage": bundle_coverage,
+        "replay_coverage": replay_coverage,
+        "replay_scope": "authenticated_native_guest_execution_inputs",
+        "native_reexecution_performed": false,
         "uncaptured_incidents": uncaptured,
         "unbundled_incidents": unbundled,
+        "unreplayable_incidents": unreplayable,
         "min_coverage": args.min_coverage,
     });
     if args.json {
@@ -14029,30 +14066,39 @@ fn handle_ops_incident_coverage(args: &cli::OpsIncidentCoverageArgs) -> Result<(
             )
         };
         println!(
-            "incident coverage: high_severity_events={} captured={} ({}) replayable={} ({}) receipts_scanned={} source_errors={}",
+            "incident coverage: high_severity_events={} captured={} ({}) bundled={} ({}) native_replay_inputs={} ({}) receipts_scanned={} source_errors={}",
             observed.len(),
             captured.len(),
             percent(capture_coverage),
             bundled.len(),
             percent(bundle_coverage),
+            replayable.len(),
+            percent(replay_coverage),
             receipts.len(),
             source_errors.len()
         );
         for incident_id in &unbundled {
             println!(
-                "  not replayable yet: {incident_id} (franken-node incident bundle --id {incident_id} --verify)"
+                "  bundle missing: {incident_id} (franken-node incident bundle --id {incident_id} --verify)"
             );
+        }
+        for incident_id in &unreplayable {
+            if !unbundled.contains(incident_id) {
+                println!(
+                    "  native replay inputs unavailable: {incident_id} (a recorded trace cannot reconstruct missing inputs; future runs need --capture-replay)"
+                );
+            }
         }
     }
     if let Some(min) = args.min_coverage
-        && !incident_coverage_meets_minimum(bundle_coverage, min, source_errors.len())
+        && !incident_coverage_meets_minimum(replay_coverage, min, source_errors.len())
     {
         if args.json {
             fail_closed_after_json();
         }
         anyhow::bail!(
-            "cannot establish --min-coverage {min}: replay coverage {} with {} unauthenticated source(s)",
-            bundle_coverage.map_or_else(|| "n/a".to_string(), |value| format!("{value:.3}")),
+            "cannot establish --min-coverage {min}: native replay input coverage {} with {} unauthenticated source(s)",
+            replay_coverage.map_or_else(|| "n/a".to_string(), |value| format!("{value:.3}")),
             source_errors.len()
         );
     }

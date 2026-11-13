@@ -3578,8 +3578,8 @@ mod tests {
                 HealthEvent::CrashLoop {
                     evidence: CrashLoopEvidence {
                         entrypoint: "/releases/v1/app.js".to_string(),
-                        safe_mode_state_path:
-                            "/releases/v1/.franken-node/safe-mode/state.json".to_string(),
+                        safe_mode_state_path: "/releases/v1/.franken-node/safe-mode/state.json"
+                            .to_string(),
                         ..crash("pending-target-crash")
                     },
                 }
