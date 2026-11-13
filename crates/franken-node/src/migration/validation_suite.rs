@@ -805,7 +805,7 @@ fn execute_suite_pair(
 pub fn run_if_present(project: &Path) -> Result<Option<SuiteReport>> {
     run_if_present_with(
         project,
-        || Ok(std::env::current_exe()?),
+        || Ok(crate::resolve_product_cli_executable()?),
         || FailureArchive::from_environment([project, project]),
     )
 }
@@ -822,7 +822,7 @@ pub fn run_if_present_with_dependency_inputs(
     run_if_present_with_bound_inputs(
         project,
         Some(expected),
-        || Ok(std::env::current_exe()?),
+        || Ok(crate::resolve_product_cli_executable()?),
         || FailureArchive::from_environment([project, project]),
     )
 }

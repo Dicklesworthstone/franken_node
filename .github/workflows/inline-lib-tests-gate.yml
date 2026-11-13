@@ -176,30 +176,30 @@ jobs:
             franken_node -> target
           cache-all-crates: "true"
 
-      - name: Install rch
-        run: |
-          curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/remote_compilation_helper/main/install.sh | bash
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-
-      - name: Assert inline library tests are discoverable
+      - name: Build product CLI executable and assert inline library tests are discoverable
         run: |
           set -euo pipefail
-          "$HOME/.local/bin/rch" exec -- env CARGO_INCREMENTAL=0 RUSTFLAGS="--cfg franken_node_inline_tests" cargo test \
+          env CARGO_INCREMENTAL=0 RUSTFLAGS="--cfg franken_node_inline_tests" cargo build \
+            --locked \
+            -p frankenengine-node \
+            --bin franken-node \
+            --features extended-surfaces,test-support
+          env CARGO_INCREMENTAL=0 RUSTFLAGS="--cfg franken_node_inline_tests" cargo test \
             --locked \
             -p frankenengine-node \
             --lib \
             --features extended-surfaces,test-support \
             -- --list \
             | tee inline-lib-tests.list
-          python3 scripts/check_inline_lib_tests.py inline-lib-tests.list --min-tests 1 --json
+          python3 scripts/check_inline_lib_tests.py inline-lib-tests.list --min-tests 20000 --json
 
       - name: Emit inline library test shard plan
         run: |
           python3 scripts/check_inline_lib_tests.py inline-lib-tests.list \
             --emit-shard-plan \
+            --no-rch \
             --max-tests-per-shard 500 \
             --shard-timeout-seconds 1800 \
-            --rch-bin "$HOME/.local/bin/rch" \
             --plan-jsonl-out inline-lib-tests.plan.jsonl \
             --json \
             > inline-lib-tests.plan.json
@@ -210,10 +210,11 @@ jobs:
             --run-shards \
             --resume \
             --fail-fast \
+            --no-rch \
             --max-tests-per-shard 500 \
             --shard-timeout-seconds 1800 \
-            --rch-bin "$HOME/.local/bin/rch" \
             --receipt-jsonl inline-lib-tests.receipts.jsonl \
+            --summary-json inline-lib-tests.summary.json \
             --output-dir inline-lib-test-shards
 
       - name: Upload inline library shard evidence
@@ -227,4 +228,5 @@ jobs:
             franken_node/inline-lib-tests.plan.json
             franken_node/inline-lib-tests.plan.jsonl
             franken_node/inline-lib-tests.receipts.jsonl
+            franken_node/inline-lib-tests.summary.json
             franken_node/inline-lib-test-shards/

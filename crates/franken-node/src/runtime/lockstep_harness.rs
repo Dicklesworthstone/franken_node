@@ -208,7 +208,7 @@ impl LockstepHarness {
             if Path::new(&configured).is_file() {
                 return configured;
             }
-            std::env::current_exe().map_or_else(
+            crate::resolve_product_cli_executable().map_or_else(
                 |_| "franken-node".to_string(),
                 |exe| exe.display().to_string(),
             )
@@ -976,7 +976,7 @@ impl LockstepHarness {
             // gate — the in-process engine is this binary. An operator-
             // configured external engine binary keeps the legacy
             // `run <app>` interface, which is all we can assume about it.
-            let leg_is_self = std::env::current_exe()
+            let leg_is_self = crate::resolve_product_cli_executable()
                 .map(|exe| exe.display().to_string() == bin_path)
                 .unwrap_or(false);
             if leg_is_self {

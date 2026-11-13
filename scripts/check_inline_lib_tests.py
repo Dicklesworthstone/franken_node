@@ -138,12 +138,12 @@ def shard_command(
     target_kind: str = "lib",
     bin_name: str = "franken-node",
     features: str = "extended-surfaces,test-support",
+    use_rch: bool = True,
 ) -> list[str]:
     target_args = ["--lib"] if target_kind == "lib" else ["--bin", bin_name]
+    prefix = [rch_bin, "exec", "--"] if use_rch else []
     command = [
-        rch_bin,
-        "exec",
-        "--",
+        *prefix,
         "env",
         "CARGO_INCREMENTAL=0",
         f"RUSTFLAGS=--cfg {override_cfg}",
@@ -170,6 +170,7 @@ def build_shard_plan(
     target_kind: str = "lib",
     bin_name: str = "franken-node",
     features: str = "extended-surfaces,test-support",
+    use_rch: bool = True,
 ) -> dict[str, object]:
     if timeout_seconds < 1:
         raise ValueError("timeout_seconds must be at least 1")
@@ -194,6 +195,7 @@ def build_shard_plan(
             target_kind=target_kind,
             bin_name=bin_name,
             features=features,
+            use_rch=use_rch,
         )
         shard_id = f"{prefix}-{index:04d}"
         shards.append(
@@ -714,6 +716,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--rch-bin", default=os.environ.get("RCH_BIN", "rch"))
     parser.add_argument(
+        "--no-rch",
+        action="store_true",
+        help="Run cargo directly instead of wrapping shard commands in `rch exec --`.",
+    )
+    parser.add_argument(
         "--cargo-toml",
         type=Path,
         default=Path("crates/franken-node/Cargo.toml"),
@@ -797,6 +804,7 @@ def main(argv: list[str] | None = None) -> int:
             target_kind=args.target,
             bin_name=args.bin_name,
             features=args.features,
+            use_rch=not args.no_rch,
         )
         if args.plan_jsonl_out:
             write_plan_jsonl(plan, args.plan_jsonl_out)

@@ -285,6 +285,21 @@ class InlineLibShardPlanTest(unittest.TestCase):
         self.assertEqual(shard["command"][0], "/bin/rch")
         self.assertEqual(shard["command"][-2:], ["--", "--exact"])
 
+    def test_direct_cargo_mode_omits_rch_wrapper_for_hosted_ci(self) -> None:
+        plan = build_shard_plan(SHARD_LIST_OUTPUT, max_tests_per_shard=2, use_rch=False)
+        shard = plan["shards"][0]
+
+        self.assertEqual(
+            shard["command"][:5],
+            [
+                "env",
+                "CARGO_INCREMENTAL=0",
+                "RUSTFLAGS=--cfg franken_node_inline_tests",
+                "cargo",
+                "test",
+            ],
+        )
+
 
 class InlineLibShardReceiptTest(unittest.TestCase):
     def test_run_shards_writes_receipts_and_output_files(self) -> None:

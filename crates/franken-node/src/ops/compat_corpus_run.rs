@@ -1917,7 +1917,8 @@ pub fn run_corpus(
         bail!("no corpus cases to run");
     }
 
-    let current_exe = std::env::current_exe().context("resolve current executable")?;
+    let current_exe =
+        crate::resolve_product_cli_executable().context("resolve current executable")?;
 
     // Bootstrap ONE fail-closed-valid workspace template exactly as an
     // operator would (`franken-node init`), then clone it into every leg. The

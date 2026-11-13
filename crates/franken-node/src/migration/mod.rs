@@ -1339,7 +1339,7 @@ fn execute_migration_runtime_smoke_guarded(
     // Validate the implementation the operator invoked, including renamed
     // binaries. Never try a different implementation after a native failure:
     // that would turn a policy denial or unsupported feature into a false PASS.
-    let native_executable = std::env::current_exe().map_err(|err| {
+    let native_executable = crate::resolve_product_cli_executable().map_err(|err| {
         anyhow::anyhow!("failed locating native migration smoke executable: {err}")
     })?;
     execute_migration_runtime_smoke_with_target_guarded(
@@ -5145,8 +5145,35 @@ mod tests {
               "name":"demo",
               "version":"1.0.0",
               "engines":{"node":">=20 <23"},
-              "scripts":{"test":"franken-node run --console-only test.js"}
+              "scripts":{"test":"franken-node run --console-only index.js"}
             }"#,
+        );
+    }
+
+    fn init_native_smoke_config(project: &Path) {
+        let home = tempfile::tempdir().expect("private bootstrap home");
+        let exe = crate::resolve_product_cli_executable().expect("resolve franken-node executable");
+        let output = std::process::Command::new(&exe)
+            .current_dir(project)
+            .env_clear()
+            .env("HOME", home.path())
+            .env("USERPROFILE", home.path())
+            .env("XDG_CONFIG_HOME", home.path())
+            .args([
+                "init",
+                "--profile",
+                "balanced",
+                "--out-dir",
+                ".",
+                "--no-state",
+            ])
+            .output()
+            .expect("bootstrap native franken_node.toml for smoke validation");
+        assert!(
+            output.status.success(),
+            "native smoke bootstrap failed via {}: {}",
+            exe.display(),
+            String::from_utf8_lossy(&output.stderr)
         );
     }
 
@@ -6423,7 +6450,7 @@ mod tests {
               "name":"demo",
               "version":"1.0.0",
               "engines":{"node":">=20 <23"},
-              "scripts":{"test":"node test.js"}
+              "scripts":{"test":"franken-node run --console-only index.js"}
             }"#,
         )
         .expect("write package");
@@ -6432,9 +6459,10 @@ mod tests {
             "{\"lockfileVersion\":3,\"packages\":{\"\":{}}}\n",
         )
         .expect("write lockfile");
+        init_native_smoke_config(project);
 
         let report = run_validate(project, false).expect("validate report");
-        assert!(report.is_pass());
+        assert!(report.is_pass(), "{report:#?}");
         assert!(report.blocking_findings.is_empty());
         assert!(report.checks.iter().all(|check| check.passed));
     }
@@ -6447,10 +6475,11 @@ mod tests {
         write_project_file(project, "index.js", "console.log('hello');");
         write_hardened_manifest(project);
         write_lockfile(project);
+        init_native_smoke_config(project);
 
         let report = run_validate(project, false).expect("validate report");
 
-        assert!(report.is_pass());
+        assert!(report.is_pass(), "{report:#?}");
         assert!(report.blocking_findings.is_empty());
         assert!(report.warning_findings.iter().any(|finding| {
             finding.category == MigrationCategory::Runtime
@@ -6473,6 +6502,7 @@ mod tests {
         write_project_file(project, "index.ts", "export const answer: number = 42;");
         write_hardened_manifest(project);
         write_lockfile(project);
+        init_native_smoke_config(project);
 
         let report = run_validate(project, false).expect("validate report");
         let has_lockstep_warning = report.warning_findings.iter().any(|finding| {
@@ -6482,7 +6512,7 @@ mod tests {
                 .is_some_and(|text| text.contains("lockstep validation coverage"))
         });
 
-        assert!(report.is_pass());
+        assert!(report.is_pass(), "{report:#?}");
         assert!(!has_lockstep_warning);
     }
 
