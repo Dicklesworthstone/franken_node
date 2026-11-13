@@ -1079,7 +1079,7 @@ Every fleet command, and `trust quarantine`, talks to one of two stores:
 |---|---|
 | `franken-node fleet serve` | Run the live coordinator: serves this node's durable fleet store over HTTP (fastapi_rust listener on the asupersync runtime). Routes: `GET /v2/fleet/health` (open), `GET/POST /v2/fleet/actions`, `GET/POST /v2/fleet/nodes`, `GET /v2/fleet/state` (bearer token, constant-time compare). V2 preserves coordinator append order; upgrade coordinator and agents together because legacy routes are refused before mutation. Validates every record, caps bodies at 64 KiB, stamps heartbeats with its own clock. Flags: `--bind` (default `127.0.0.1:9440`; port 0 picks a free port, printed first on stdout), `--token-file` (default `.franken-node/keys/fleet-control-plane.token`), `--generate-token` (create a 0600 256-bit token), `--allow-non-loopback` (plaintext listener; only behind TLS termination or an encrypted overlay), `--max-requests`, `--json` (JSONL `FLEET_HTTP_LISTENING` / `FLEET_HTTP_REQUEST` / `FLEET_HTTP_SHUTDOWN` events). |
 | `franken-node fleet status` | Show fleet/quarantine state from the configured store. `activated` is true only when a live coordinator answered. Flags: `--zone`, `--verbose`, `--json`, `--screen` (the operator screen: frankentui summary, node-heartbeat and pending-convergence panels drawn from the same report, width from `COLUMNS`; excludes `--json`). |
-| `franken-node fleet sessions` | Inspect this operator's durable local native-session inventory, pending admissions, observed worker termination and unknown effects. Flags: `--project <directory>`, `--json`. Requires the native engine. |
+| `franken-node fleet sessions` | Inspect this operator's durable local native-session inventory, pending admissions, observed worker termination and unknown effects. JSON includes retained signed panic details and the parent-observed effect journal. Flags: `--project <directory>`, `--json`. Requires the native engine. |
 | `franken-node fleet hold` | Publish a durable native-admission maintenance owner for `--zone <zone\|all>`, with `--reason`. `--id` makes retries refer to the same owner; `--wait` requires fresh terminal drain observations with admission still fenced. Flags: `--json`. |
 | `franken-node fleet resume` | Remove only the maintenance owner selected by `--hold <action-id>`, retaining its original zone. `--wait` checks application; other owners can keep admission fenced. Optional: `--reason`, `--json`. Does not start workloads. |
 | `franken-node fleet describe <node>` | Describe one fleet node with zone context and incident state. Flags: `--zone`, `--json`. |
@@ -1100,6 +1100,17 @@ authenticated observation. `fleet sessions` remains read-only. A crash before
 a complete receipt is retained leaves the admission unresolved; a missing PID
 or elapsed deadline cannot resolve it. Recovery preserves unknown effects and
 unproven worker or descendant termination, which continue to hold the fence.
+
+Validated native panics also retain `panic_evidence` in the signed outcome,
+including cleanup status and the complete reconciled host-effect journal
+observed by the parent. The panic message is limited to a UTF-8 prefix of
+4,096 bytes; its original byte count and SHA-256 digest commit to the full
+message. `fleet sessions --json` exposes these details after restart. Historical
+outcomes without this optional field continue to verify. If optional details
+fail validation or exceed the storage bound, the original panic classification
+is retained and the run reports the forensic error. Provider-return markers
+still carry no finalized allowed/denied outcome or replay certification, and
+retaining them never clears an unknown-effect classification.
 
 ```bash
 franken-node fleet sessions --json

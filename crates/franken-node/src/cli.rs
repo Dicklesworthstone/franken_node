@@ -2721,7 +2721,8 @@ pub struct FleetSessionsArgs {
     #[arg(long)]
     pub project: Option<PathBuf>,
 
-    /// Emit records and counts as JSON, including unresolved observations.
+    /// Emit records and counts as JSON, including unresolved observations
+    /// and retained signed panic details with the parent-observed effect journal.
     #[arg(long)]
     pub json: bool,
 }

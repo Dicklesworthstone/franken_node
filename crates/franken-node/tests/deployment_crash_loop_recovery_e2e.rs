@@ -696,6 +696,41 @@ fn guest_stdout(run: &Value) -> &str {
         .unwrap_or_default()
 }
 
+#[cfg(target_os = "linux")]
+fn assert_retained_panic_forensics(outcome: &Value, panic: &Value, expected_wal_len: usize) {
+    use sha2::{Digest as _, Sha256};
+
+    let evidence = &outcome["panic_evidence"];
+    let message = evidence["panic_message"]
+        .as_str()
+        .expect("a fresh fleet sessions process reads the retained panic diagnostic");
+    assert!(
+        message.contains("test-support fault injection"),
+        "{evidence}"
+    );
+    assert_eq!(evidence["panic_message_truncated"], false, "{evidence}");
+    assert_eq!(evidence["panic_message_bytes"], message.len(), "{evidence}");
+    assert_eq!(
+        evidence["panic_message_sha256"],
+        hex::encode(Sha256::digest(message.as_bytes())),
+        "{evidence}"
+    );
+    assert_eq!(
+        evidence["cleanup_successful"], panic["cleanup_successful"],
+        "{evidence}"
+    );
+    let wal = evidence["host_effect_wal"]
+        .as_array()
+        .expect("retain the complete parent-observed WAL");
+    assert_eq!(wal.len(), expected_wal_len, "{evidence}");
+    for (index, entry) in wal.iter().enumerate() {
+        assert_eq!(entry["sequence"], index, "{entry}");
+        assert_eq!(entry["state"], "provider_returned", "{entry}");
+        let hash = entry["request_hash"].as_str().unwrap();
+        assert!(hash.starts_with("sha256:") && hash.len() == 71, "{entry}");
+    }
+}
+
 fn assert_workspace_run(run: &Value, admitted: &ReleaseRecord, expected: &str) {
     assert_eq!(guest_stdout(run), expected, "{run}");
     let graph = &run["dispatch"]["engine_decision"]["frozen_modules"];
@@ -1234,6 +1269,12 @@ fn effect_free_native_panic_retains_a_terminal_authenticated_observation() {
     assert_eq!(inventory["terminal_sessions"], 1);
     assert_eq!(inventory["unknown_effect_sessions"], 0);
     assert_eq!(inventory["quiescence_certified"], false);
+    assert_retained_panic_forensics(&records[0]["outcome"], &panic, 0);
+    assert_eq!(
+        drill.sessions(&release)["records"],
+        inventory["records"],
+        "another process must recover the same signed forensic observation"
+    );
 }
 
 #[test]
@@ -1515,6 +1556,16 @@ fn authenticated_panic_after_real_host_effect_stays_contained_without_restart() 
     assert!(records.iter().all(|record| {
         record["outcome"]["kind"] == "panicked" && record["outcome"]["effects"]["kind"] == "unknown"
     }));
+    assert_retained_panic_forensics(&records[0]["outcome"], &report["run"], 1);
+    assert_eq!(
+        records[0]["outcome"]["panic_evidence"]["host_effect_wal"][0]["effect_kind"],
+        "fs_write"
+    );
+    assert_eq!(
+        drill.sessions(&failed)["records"],
+        inventory["records"],
+        "a completed provider marker remains an unknown external effect after restart"
+    );
     assert_signed_health_refuses_new_launches(
         &drill,
         &failed,

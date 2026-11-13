@@ -5,7 +5,7 @@ use crate::control_plane::fleet_transport::{
 #[cfg(feature = "engine")]
 use crate::ops::native_session_inventory::{
     NativeSessionAdmission, NativeSessionEffectObservation, NativeSessionInventoryGuard,
-    NativeSessionOutcomeKind,
+    NativeSessionOutcomeKind, NativeSessionPanicEvidence,
 };
 use crate::ops::telemetry_bridge::{
     ShutdownReason, TelemetryBridge, TelemetryRuntimeHandle, TelemetryRuntimeReport,
@@ -5312,6 +5312,7 @@ pub enum NativeEffectWalState {
 /// One bounded, nonce-bound write-ahead record observed by the parent process.
 #[cfg(feature = "engine")]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NativeEffectWalEntry {
     pub sequence: u64,
     pub effect_kind: String,
@@ -5459,6 +5460,7 @@ pub struct NativeRunPanic {
     cleanup_successful: bool,
     crash_loop_observation: Option<crate::runtime::safe_mode::CrashLoopObservation>,
     crash_loop_persistence_error: Option<String>,
+    forensic_persistence_error: Option<String>,
 }
 
 #[cfg(feature = "engine")]
@@ -5478,6 +5480,7 @@ impl NativeRunPanic {
             cleanup_successful,
             crash_loop_observation: None,
             crash_loop_persistence_error: None,
+            forensic_persistence_error: None,
         }
     }
 
@@ -5525,6 +5528,13 @@ impl NativeRunPanic {
         self.crash_loop_persistence_error.as_deref()
     }
 
+    /// A failure to retain the complete signed panic context, without changing
+    /// the original panic or promoting uncertain host effects to final results.
+    #[must_use]
+    pub fn forensic_persistence_error(&self) -> Option<&str> {
+        self.forensic_persistence_error.as_deref()
+    }
+
     fn attach_crash_loop_result(
         &mut self,
         result: Result<crate::runtime::safe_mode::CrashLoopObservation>,
@@ -5562,6 +5572,12 @@ impl std::fmt::Display for NativeRunPanic {
         }
         if let Some(error) = &self.crash_loop_persistence_error {
             write!(formatter, "\ncrash-loop state update failed: {error}")?;
+        }
+        if let Some(error) = &self.forensic_persistence_error {
+            write!(
+                formatter,
+                "\nnative panic forensic persistence failed: {error}"
+            )?;
         }
         Ok(())
     }
@@ -10549,6 +10565,11 @@ impl EngineDispatcher {
                     }
                     .to_actionable()
                 })?;
+                let panic_evidence = NativeSessionPanicEvidence::from_validated_response(
+                    &panic_message,
+                    cleanup_successful,
+                    reconciled.entries,
+                );
                 let dispatch_error = EngineDispatchError::EnginePanic {
                     app_path: app_path_buf,
                     panic_message,
@@ -10557,29 +10578,33 @@ impl EngineDispatcher {
                 // Retain only a panic reported through this authenticated
                 // response. A generic worker exit above is not sufficient.
                 let observed_at_epoch_secs = u64::try_from(Utc::now().timestamp()).unwrap_or(0);
-                session_inventory.finish(
-                    NativeSessionOutcomeKind::Panicked,
-                    if cleanup_successful
-                        && no_host_effects_admitted
-                        && process_spawn_admission.is_none()
-                    {
-                        // The complete, nonce-validated WAL precedes this final
-                        // response and flushes every admission before provider
-                        // I/O. An empty WAL is useful only after successful
-                        // cleanup and with no independent process authority.
-                        NativeSessionEffectObservation::NoAdmittedHostEffects
-                    } else {
-                        NativeSessionEffectObservation::Unknown
-                    },
-                );
-                Err(NativeRunPanic::from_validated_response(
+                let forensic_persistence_error = session_inventory
+                    .finish_panicked(
+                        if cleanup_successful
+                            && no_host_effects_admitted
+                            && process_spawn_admission.is_none()
+                        {
+                            // The complete, nonce-validated WAL precedes this final
+                            // response and flushes every admission before provider
+                            // I/O. An empty WAL is useful only after successful
+                            // cleanup and with no independent process authority.
+                            NativeSessionEffectObservation::NoAdmittedHostEffects
+                        } else {
+                            NativeSessionEffectObservation::Unknown
+                        },
+                        panic_evidence,
+                    )
+                    .err()
+                    .map(|error| format!("{error:#}"));
+                let mut panic = NativeRunPanic::from_validated_response(
                     dispatch_error.to_actionable(),
                     expected_evidence_capture,
                     evidence_capture_path,
                     observed_at_epoch_secs,
                     cleanup_successful,
-                )
-                .into())
+                );
+                panic.forensic_persistence_error = forensic_persistence_error;
+                Err(panic.into())
             }
         }
     }
@@ -16678,6 +16703,7 @@ mod tests {
         assert_eq!(panic.evidence_capture_path(), capture_path.as_path());
         assert!(panic.crash_loop_observation().is_none());
         assert!(panic.crash_loop_persistence_error().is_none());
+        assert!(panic.forensic_persistence_error().is_none());
         let trusted_root = ed25519_dalek::SigningKey::from_bytes(&[0x63; 32]).verifying_key();
         panic
             .evidence_capture()
