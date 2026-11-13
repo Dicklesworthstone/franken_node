@@ -1765,7 +1765,7 @@ impl DeploymentStore {
         recovery_sequence: Option<u64>,
         now_secs: u64,
     ) -> Result<ActivationRecord> {
-        self.release(authority, release_id)?;
+        self.enforce_release_execution_health(authority, release_id)?;
         if let Some(operator_id) = operator_id {
             validate_operator_id(operator_id)?;
         }
@@ -1884,6 +1884,7 @@ impl DeploymentStore {
             "activation intent is dated in the future"
         );
         let release = self.release(authority, &activation.release_id)?;
+        self.enforce_release_execution_health(authority, &release.release_id)?;
         anyhow::ensure!(
             release.installed_at_epoch_secs <= now_secs,
             "release admission is dated in the future"
@@ -1959,6 +1960,7 @@ impl DeploymentStore {
         let state = self.activation_state(authority)?;
         let verify_target = |activation: &ActivationRecord| -> Result<()> {
             let release = self.release(authority, &activation.release_id)?;
+            self.enforce_release_execution_health(authority, &release.release_id)?;
             anyhow::ensure!(
                 release.installed_at_epoch_secs <= now_secs
                     && activation.activated_at_epoch_secs <= now_secs,
@@ -2102,6 +2104,29 @@ impl DeploymentStore {
             self.name
         );
         Ok(record.payload)
+    }
+
+    /// Refuse fresh execution or activation of an immutable release whose
+    /// authenticated history records a crash loop or unresolved native effects.
+    /// The unsigned local safe-mode controller cannot clear these restrictions.
+    /// Recovery selects a separately admitted release; retained failure evidence
+    /// is never erased or converted into readiness by a later healthy report.
+    pub fn enforce_release_execution_health(
+        &self,
+        authority: &DeploymentAuthority,
+        release_id: &str,
+    ) -> Result<()> {
+        self.release(authority, release_id)?;
+        let health = self.health(authority, release_id)?;
+        anyhow::ensure!(
+            !health.crash_looped(),
+            "release `{release_id}` is contained by authenticated crash-loop history; admit and activate a repaired release with a new release ID"
+        );
+        anyhow::ensure!(
+            !health.has_indeterminate_native_effects(),
+            "release `{release_id}` retains authenticated indeterminate native effects; resolve the effects and admit a repaired release with a new release ID"
+        );
+        Ok(())
     }
 
     pub fn record_health(
@@ -3454,6 +3479,168 @@ mod tests {
     }
 
     #[test]
+    fn signed_failure_history_blocks_execution_and_activation_without_erasing_recovery() {
+        let f = fixture();
+        let lock = f.store.lock().unwrap();
+        for id in ["v1", "v2", "v3"] {
+            f.store
+                .install_release(&lock, &f.authority, test_release(&f.store, id))
+                .unwrap();
+        }
+        f.store
+            .enforce_release_execution_health(&f.authority, "v1")
+            .unwrap();
+        f.store
+            .record_health(&lock, &f.authority, "v1", native_panic("v1", 1, 20, true))
+            .unwrap();
+        f.store
+            .enforce_release_execution_health(&f.authority, "v1")
+            .expect("a single effect-free panic still permits a bounded retry");
+        f.store
+            .record_health(&lock, &f.authority, "v1", native_panic("v1", 2, 21, false))
+            .unwrap();
+        f.store
+            .record_health(&lock, &f.authority, "v1", healthy("later-healthy", 22))
+            .unwrap();
+        f.store
+            .record_health(
+                &lock,
+                &f.authority,
+                "v2",
+                HealthEvent::CrashLoop {
+                    evidence: crash("retained-crash"),
+                },
+            )
+            .unwrap();
+        f.store
+            .activate(
+                &lock,
+                &f.authority,
+                "v3",
+                ActivationReason::Operator,
+                Some("ops"),
+                None,
+                101,
+            )
+            .expect("a separately admitted repaired release remains available");
+        let pointer = fs::read(f.store.pointer_path()).unwrap();
+        let journal = journal_bytes(&f.store);
+        for (id, reason) in [
+            ("v1", "authenticated indeterminate native effects"),
+            ("v2", "authenticated crash-loop history"),
+        ] {
+            let health = fs::read(f.store.health_path(id)).unwrap();
+            let error = f
+                .store
+                .enforce_release_execution_health(&f.authority, id)
+                .unwrap_err();
+            assert!(error.to_string().contains(reason), "{error:#}");
+            let error = f
+                .store
+                .activate(
+                    &lock,
+                    &f.authority,
+                    id,
+                    ActivationReason::Operator,
+                    Some("ops"),
+                    None,
+                    102,
+                )
+                .unwrap_err();
+            assert!(error.to_string().contains(reason), "{error:#}");
+            assert_eq!(fs::read(f.store.health_path(id)).unwrap(), health);
+            assert_eq!(fs::read(f.store.pointer_path()).unwrap(), pointer);
+            assert_eq!(journal_bytes(&f.store), journal);
+        }
+        f.store
+            .enforce_release_execution_health(&f.authority, "v3")
+            .unwrap();
+        assert!(
+            f.store
+                .enforce_release_execution_health(&authority(8), "v3")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn pending_operator_activation_and_supersession_recheck_signed_failure_history() {
+        for indeterminate in [false, true] {
+            let f = fixture();
+            let lock = f.store.lock().unwrap();
+            let pending = pending_operator(&f, &lock);
+            retain_intent(&f, &pending);
+            f.store
+                .install_release(&lock, &f.authority, test_release(&f.store, "v2"))
+                .unwrap();
+            let event = if indeterminate {
+                native_panic("v1", 1, 21, false)
+            } else {
+                HealthEvent::CrashLoop {
+                    evidence: CrashLoopEvidence {
+                        entrypoint: "/releases/v1/app.js".to_string(),
+                        safe_mode_state_path:
+                            "/releases/v1/.franken-node/safe-mode/state.json".to_string(),
+                        ..crash("pending-target-crash")
+                    },
+                }
+            };
+            f.store
+                .record_health(&lock, &f.authority, "v1", event)
+                .unwrap();
+            let digest = f
+                .store
+                .activation_status(&f.authority)
+                .unwrap()
+                .pending
+                .unwrap()
+                .transaction_digest;
+            let journal = journal_bytes(&f.store);
+            let verify = |_: &ReleaseRecord| -> Result<()> {
+                panic!("signed containment must refuse before source verification")
+            };
+            let error = f
+                .store
+                .reconcile_pending(&lock, &f.authority, 101, &verify)
+                .unwrap_err();
+            assert!(error.to_string().contains("authenticated"), "{error:#}");
+            let error = f
+                .store
+                .supersede_pending(
+                    &lock,
+                    &f.authority,
+                    &digest,
+                    "v1",
+                    "ops",
+                    "retry failed target",
+                    101,
+                    &verify,
+                )
+                .unwrap_err();
+            assert!(error.to_string().contains("authenticated"), "{error:#}");
+            assert!(!f.store.pointer_path().exists());
+            assert_eq!(journal_bytes(&f.store), journal);
+            let replacement = f
+                .store
+                .supersede_pending(
+                    &lock,
+                    &f.authority,
+                    &digest,
+                    "v2",
+                    "ops",
+                    "select repaired release",
+                    101,
+                    &|_| Ok(()),
+                )
+                .unwrap();
+            assert_eq!(replacement.activation.release_id, "v2");
+            assert_eq!(
+                f.store.active(&f.authority).unwrap().unwrap().release_id,
+                "v2"
+            );
+        }
+    }
+
+    #[test]
     fn authenticated_panic_history_deduplicates_and_ignores_unsigned_counters() {
         let f = fixture();
         let lock = f.store.lock().unwrap();
@@ -4368,39 +4555,51 @@ mod tests {
                 "an idempotent success still rechecks current release trust"
             );
 
-            // Later explicit operator work must not recycle the canceled
-            // recovery's crash nonce or its sequence, or be undone by a retry.
+            // Later explicit operator work selects a fresh release; it cannot
+            // revive crash-looped v2 or recycle the canceled recovery's nonce,
+            // sequence, or be undone by a retry.
+            f.store
+                .install_release(&lock, &f.authority, test_release(&f.store, "v4"))
+                .unwrap();
             f.store
                 .activate(
                     &lock,
                     &f.authority,
-                    "v2",
+                    "v4",
                     ActivationReason::Operator,
                     Some("ops"),
                     None,
                     103,
                 )
                 .unwrap();
+            let error = f
+                .store
+                .recover_from_crash_loop(
+                    &lock,
+                    &f.authority,
+                    "v4",
+                    original.recovery.as_ref().unwrap().crash.clone(),
+                    &policy,
+                    104,
+                    &|_| Ok(()),
+                )
+                .unwrap_err();
             assert!(
-                f.store
-                    .recover_from_crash_loop(
-                        &lock,
-                        &f.authority,
-                        "v2",
-                        original.recovery.as_ref().unwrap().crash.clone(),
-                        &policy,
-                        104,
-                        &|_| Ok(())
-                    )
-                    .is_err()
+                error.to_string().contains("already has a recovery outcome"),
+                "{error:#}"
             );
+            let new_crash = CrashLoopEvidence {
+                entrypoint: "/releases/v4/app.js".to_string(),
+                safe_mode_state_path: "/releases/v4/.franken-node/safe-mode/state.json".to_string(),
+                ..crash("different-session")
+            };
             let new_recovery = f
                 .store
                 .recover_from_crash_loop(
                     &lock,
                     &f.authority,
-                    "v2",
-                    crash("different-session"),
+                    "v4",
+                    new_crash,
                     &policy,
                     104,
                     &|_| Ok(()),
@@ -4424,7 +4623,7 @@ mod tests {
             );
             assert_eq!(
                 f.store.active(&f.authority).unwrap().unwrap().release_id,
-                "v2"
+                "v4"
             );
         }
     }

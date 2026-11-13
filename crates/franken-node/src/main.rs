@@ -7053,10 +7053,15 @@ impl DeployChildRun {
 
 fn spawn_deploy_release_child(
     store: &runtime::deployment::DeploymentStore,
+    authority: &runtime::deployment::DeploymentAuthority,
     release: &runtime::deployment::ReleaseRecord,
     app_args: &[String],
     activation_restriction: Option<&runtime::deployment::ActivationRestriction>,
 ) -> Result<DeployReleaseChild> {
+    // Recheck signed health under the caller's deployment lock at the final
+    // spawn boundary. Clearing local safe mode cannot authorize another launch
+    // after a retained crash loop or an indeterminate native host effect.
+    store.enforce_release_execution_health(authority, &release.release_id)?;
     // Bind the complete approval, including its publisher and authority
     // envelope, rather than accepting a newly signed replacement at the same
     // manifest path. The child checks this after authenticating what it loads.
@@ -7371,8 +7376,13 @@ fn handle_deploy_run(args: &cli::DeployRunArgs) -> Result<(serde_json::Value, i3
             .retire_on_activation
             .then(|| store.capture_activation_restriction(&lock, &authority, &activation))
             .transpose()?;
-        let child =
-            spawn_deploy_release_child(&store, &release, &args.app_args, restriction.as_ref())?;
+        let child = spawn_deploy_release_child(
+            &store,
+            &authority,
+            &release,
+            &args.app_args,
+            restriction.as_ref(),
+        )?;
         (activation, release, child)
     };
     let run = finish_deploy_release_child(child, &release)?;
@@ -7465,11 +7475,7 @@ fn handle_deploy_run(args: &cli::DeployRunArgs) -> Result<(serde_json::Value, i3
                         );
                         enforce_deploy_safe_mode(&store)?;
                         let selected = store.release(&authority, selected)?;
-                        let health = store.health(&authority, &selected.release_id)?;
-                        anyhow::ensure!(
-                            !health.crash_looped() && !health.has_indeterminate_native_effects(),
-                            "recovery release acquired a crash loop or indeterminate effects before restart"
-                        );
+                        store.enforce_release_execution_health(&authority, &selected.release_id)?;
                         verify_deploy_release(&selected)
                             .context("recovery release no longer passes current admission")?;
                         let current = current
@@ -7483,6 +7489,7 @@ fn handle_deploy_run(args: &cli::DeployRunArgs) -> Result<(serde_json::Value, i3
                             .transpose()?;
                         let child = spawn_deploy_release_child(
                             &store,
+                            &authority,
                             &selected,
                             &args.app_args,
                             restriction.as_ref(),
@@ -7623,6 +7630,7 @@ fn supervise_deploy_runs_with(
                 )
             })?;
             let release = store.release(authority, &activation.release_id)?;
+            store.enforce_release_execution_health(authority, &release.release_id)?;
             enforce_deploy_safe_mode(store)?;
             verify_release(&release).with_context(|| {
                 format!(
@@ -7926,7 +7934,13 @@ fn handle_deploy_supervise(args: &cli::DeploySuperviseArgs) -> Result<(serde_jso
                     .retire_on_activation
                     .then(|| store.capture_activation_restriction(&lock, &authority, activation))
                     .transpose()?;
-                spawn_deploy_release_child(&store, release, &args.app_args, restriction.as_ref())?
+                spawn_deploy_release_child(
+                    &store,
+                    &authority,
+                    release,
+                    &args.app_args,
+                    restriction.as_ref(),
+                )?
             };
             let run = finish_deploy_release_child(child, release)?;
             let verdict = classify_and_record_deploy_run(&store, &authority, release, &run)?;

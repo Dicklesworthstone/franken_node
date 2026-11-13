@@ -1366,7 +1366,106 @@ fn forged_unsigned_crash_counter_cannot_authorize_a_deployment_rollback() {
     assert!(failed.join("app.js").is_file());
 }
 
+#[cfg(target_os = "linux")]
+fn assert_signed_health_refuses_new_launches(
+    drill: &Drill,
+    failed: &Path,
+    release_id: &str,
+    expected_reason: &str,
+) {
+    let pointer = fs::read(drill.state_path("active.json")).expect("active pointer");
+    let health_path = drill.state_path(&format!("health/{release_id}.json"));
+    let health = fs::read(&health_path).expect("signed release health");
+    let records = drill.sessions(failed)["records"].clone();
+    for arguments in [
+        vec!["deploy", "run", "app", "--json"],
+        vec![
+            "deploy",
+            "supervise",
+            "app",
+            "--max-runs",
+            "1",
+            "--post-rollback-probes",
+            "1",
+            "--json",
+        ],
+        vec![
+            "deploy",
+            "activate",
+            "app",
+            "--release",
+            release_id,
+            "--operator-id",
+            "ops-1",
+            "--json",
+        ],
+    ] {
+        let output = drill.cli(drill.root.path(), &arguments);
+        assert!(
+            !output.status.success(),
+            "contained release was admitted by {arguments:?}"
+        );
+        let report: Value =
+            serde_json::from_slice(&output.stdout).expect("structured containment refusal");
+        assert_eq!(report["ok"], false, "{report}");
+        assert!(
+            report["error"]
+                .as_str()
+                .is_some_and(|error| error.contains(expected_reason)),
+            "{arguments:?}: {report}"
+        );
+    }
+    assert_eq!(fs::read(drill.state_path("active.json")).unwrap(), pointer);
+    assert_eq!(fs::read(&health_path).unwrap(), health);
+    assert_eq!(
+        drill.sessions(failed)["records"], records,
+        "refusal must precede native admission, not merely terminate another guest"
+    );
+}
+
 #[test]
+#[cfg(target_os = "linux")]
+fn signed_crash_containment_survives_cleared_local_safe_mode() {
+    let drill = Drill::new();
+    drill.install("1.0.0", HEALTHY_V1);
+    let failed = drill.install("2.0.0", &crashing_v2());
+    drill.activate("2.0.0");
+    let (code, report) = drill.crash_until_loop();
+    assert_ne!(code, Some(0));
+    assert_eq!(report["phase"], "contained", "{report}");
+    assert_eq!(report["observation_authentication"]["verified"], true);
+
+    // An unsigned controller edit must not clear the independently signed
+    // deployment history or let an unchanged active pointer launch again.
+    let inactive = frankenengine_node::runtime::safe_mode::SafeModeController::with_default_config();
+    assert!(!inactive.is_active());
+    fs::write(
+        failed.join(".franken-node/safe-mode/state.json"),
+        serde_json::to_vec_pretty(&inactive).unwrap(),
+    )
+    .expect("replace the unsigned local controller");
+    assert_signed_health_refuses_new_launches(
+        &drill,
+        &failed,
+        "2.0.0",
+        "authenticated crash-loop history",
+    );
+    let status = drill.status();
+    assert_eq!(status["active"]["release_id"], "2.0.0");
+    assert_eq!(status["activations"].as_array().unwrap().len(), 1);
+    assert_eq!(status["recoveries"].as_array().unwrap().len(), 1);
+
+    // Explicit recovery still selects and runs a separately admitted release.
+    drill.activate("1.0.0");
+    let (code, recovered) = drill.run();
+    assert_eq!(code, Some(0), "{recovered}");
+    assert_eq!(recovered["phase"], "healthy", "{recovered}");
+    assert_eq!(guest_stdout(&recovered["run"]), "RELEASE_ONE_HEALTHY\n");
+    assert_eq!(drill.sessions(&failed)["records"].as_array().unwrap().len(), 3);
+}
+
+#[test]
+#[cfg(target_os = "linux")]
 fn authenticated_panic_after_real_host_effect_stays_contained_without_restart() {
     let drill = Drill::new();
     drill.install("1.0.0", HEALTHY_V1);
@@ -1386,23 +1485,17 @@ fn authenticated_panic_after_real_host_effect_stays_contained_without_restart() 
     assert_eq!(drill.run().1["phase"], "healthy");
     drill.activate("2.0.0");
 
-    let (code, report) = drill.crash_until_loop();
+    let (code, report) = drill.run();
     assert_ne!(code, Some(0));
-    assert_eq!(
-        report["phase"], "contained_effects_indeterminate",
-        "{report}"
-    );
+    assert_eq!(report["phase"], "crashed", "{report}");
     assert_eq!(report["observation_authentication"]["verified"], true);
     assert_eq!(
         report["observation_authentication"]["observation"]["no_admitted_host_effects"],
         false,
     );
-    assert_eq!(
-        report["recovery"]["outcome"],
-        "contained_effects_indeterminate"
-    );
-    assert!(report["recovery"]["selected_release_id"].is_null());
-    assert!(report["recovery"]["activation_sequence"].is_null());
+    // The first unresolved host effect prevents every later launch; there is
+    // no need to repeat that effect twice just to reach the crash-loop threshold.
+    assert!(report.get("recovery").is_none());
     assert!(report.get("resumed").is_none());
     assert_eq!(
         fs::read_to_string(failed.join("before-panic")).unwrap(),
@@ -1411,16 +1504,22 @@ fn authenticated_panic_after_real_host_effect_stays_contained_without_restart() 
     assert_eq!(fs::read_to_string(failed.join("app.js")).unwrap(), source);
 
     let inventory = drill.sessions(&failed);
-    assert_eq!(inventory["unknown_effect_sessions"], 3, "{inventory}");
+    assert_eq!(inventory["unknown_effect_sessions"], 1, "{inventory}");
     let records = inventory["records"].as_array().unwrap();
-    assert_eq!(records.len(), 3);
+    assert_eq!(records.len(), 1);
     assert!(records.iter().all(|record| {
         record["outcome"]["kind"] == "panicked" && record["outcome"]["effects"]["kind"] == "unknown"
     }));
+    assert_signed_health_refuses_new_launches(
+        &drill,
+        &failed,
+        "2.0.0",
+        "authenticated indeterminate native effects",
+    );
     let status = drill.status();
     assert_eq!(status["active"]["release_id"], "2.0.0");
     assert_eq!(status["activations"].as_array().unwrap().len(), 2);
-    assert_eq!(status["recoveries"].as_array().unwrap().len(), 1);
+    assert!(status["recoveries"].as_array().unwrap().is_empty());
     let good = status["releases"]
         .as_array()
         .unwrap()
