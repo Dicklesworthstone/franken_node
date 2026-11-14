@@ -4508,6 +4508,9 @@ pub struct FleetEpochParticipantQuiescence {
     pub session_set_sha256: String,
     pub checkpoint_sha256: String,
     pub supervisor_key_id: String,
+    /// Owners whose retained maintenance holds keep this observed population
+    /// closed to new admissions until an explicit resume is applied.
+    pub active_hold_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -4540,7 +4543,10 @@ pub struct FleetEpochBarrierParams<'a> {
 ///
 /// Fails closed and aborts the active barrier whenever any enrolled node is missing,
 /// stale, unauthenticated, outside `PolicyApplied`, or retains `pending_sessions > 0`
-/// or `indeterminate_sessions > 0`.
+/// or `indeterminate_sessions > 0`. Every participant must remain fenced by an
+/// active maintenance hold in the exact signed action snapshot. A historical
+/// completed drain with its fence released does not prove current quiescence:
+/// another session may already have been admitted after that observation.
 pub fn certify_fleet_epoch_quiescence(
     coordinator: &mut crate::runtime::epoch_transition::ProductEpochCoordinator,
     state: &FleetSharedState,
@@ -4573,6 +4579,33 @@ pub fn certify_fleet_epoch_quiescence(
     let required_nodes: BTreeSet<(String, String)> =
         enrolled_supervisor_roots.keys().cloned().collect();
     let mut evidence = fleet_native_drain_evidence(state, &required_nodes, now, stale_after)?;
+    let mut holds_by_zone = BTreeMap::<String, Vec<String>>::new();
+    for node in &mut evidence.nodes {
+        let holds = match holds_by_zone.get(&node.zone_id) {
+            Some(holds) => holds.clone(),
+            None => {
+                let holds: Vec<_> = fleet_native_session_holds(&state.actions, &node.zone_id)?
+                    .into_iter()
+                    .collect();
+                holds_by_zone.insert(node.zone_id.clone(), holds.clone());
+                holds
+            }
+        };
+        // The ordinary drain observation deliberately requires a released
+        // fence. Certification instead shares the maintenance publication
+        // gate's held-fence semantics; do not reinterpret a released drain as
+        // evidence that the node has stayed idle since it was signed.
+        node.reason = native_session_hold_readiness(
+            node,
+            !holds.is_empty(),
+            !holds.is_empty(),
+            FleetNativeSessionHoldTarget::Held,
+        );
+        node.ready = node.reason == FleetNativeDrainReadiness::Ready;
+    }
+    evidence.complete = !evidence.nodes.is_empty()
+        && evidence.uncovered_zones.is_empty()
+        && evidence.nodes.iter().all(|node| node.ready);
     for (zone_id, node_id) in &required_nodes {
         coordinator.register_service(&format!("{zone_id}/{node_id}"));
     }
@@ -4586,7 +4619,7 @@ pub fn certify_fleet_epoch_quiescence(
 
     if !evidence.complete {
         abort_detail = Some(
-            "not all required fleet participants have fresh terminal native-session drains"
+            "not all required fleet participants have fresh terminal native-session drains under active maintenance fences"
                 .to_string(),
         );
     }
@@ -4653,6 +4686,7 @@ pub fn certify_fleet_epoch_quiescence(
                 session_set_sha256: drain.session_set_sha256.clone(),
                 checkpoint_sha256: attestation.checkpoint_sha256.clone(),
                 supervisor_key_id: attestation.product_root_key_id.clone(),
+                active_hold_ids: holds_by_zone[&node.zone_id].clone(),
             });
         }
     }
@@ -8095,7 +8129,15 @@ mod tests {
                 reason: "compromised".to_string(),
             },
         };
-        let actions = vec![action];
+        let hold = FleetActionRecord {
+            action_id: "hold-east-epoch".to_string(),
+            emitted_at: now,
+            action: FleetAction::NativeSessionHold {
+                zone_id: "east".to_string(),
+                reason: "keep the drained population closed during the epoch barrier".to_string(),
+            },
+        };
+        let actions = vec![action, hold];
         let expected = fleet_application_checkpoint(&actions, "east").expect("checkpoint");
 
         let make_signed_node = |node_id: &str, seed: u8, indeterminate: u64| {
@@ -8108,7 +8150,7 @@ mod tests {
                 terminal_sessions: if indeterminate == 0 { 2 } else { 1 },
                 pending_sessions: 0,
                 indeterminate_sessions: indeterminate,
-                fence_held: indeterminate > 0,
+                fence_held: true,
                 supervisor_attestation: None,
             };
             let mut attestation = super::NativeSessionDrainAttestation {
@@ -8132,7 +8174,7 @@ mod tests {
                 last_seen: now,
                 quarantine_version: 1,
                 health: if indeterminate == 0 {
-                    NodeHealth::Healthy
+                    NodeHealth::Maintenance
                 } else {
                     NodeHealth::Degraded
                 },
@@ -8182,6 +8224,16 @@ mod tests {
         assert_eq!(cert.committed_epoch, 1);
         assert_eq!(coordinator.current_epoch(), 1);
         assert_eq!(cert.participants.len(), 2);
+        for participant in &cert.participants {
+            assert_eq!(participant.active_hold_ids, ["hold-east-epoch"]);
+        }
+        assert!(evidence.nodes.iter().all(|node| {
+            node.ready
+                && node
+                    .native_session_drain
+                    .as_ref()
+                    .is_some_and(|drain| drain.fence_held && drain.population_is_terminal())
+        }));
 
         // Fault cut: indeterminate session on node-b must abort the barrier and preserve epoch 1.
         let (bad_b, _) = make_signed_node("node-b", 22, 1);
@@ -8206,5 +8258,94 @@ mod tests {
         assert!(err.to_string().contains("aborted before commit"), "{err}");
         assert_eq!(coordinator.current_epoch(), 1);
         assert_eq!(coordinator.abort_manager().abort_events().len(), 1);
+    }
+
+    #[test]
+    fn epoch_barrier_rejects_released_or_resumed_signed_populations() {
+        use crate::control_plane::control_epoch::EpochSigningKey;
+        use crate::control_plane::epoch_transition_barrier::BarrierConfig;
+        use crate::runtime::epoch_transition::ProductEpochCoordinator;
+
+        let root = SigningKey::from_bytes(&[41; 32]);
+        let now = DateTime::from_timestamp(1_800_000_000, 0).unwrap();
+        let (hold, held_node) = signed_supervisor_fixture(&root, now);
+        let roots = std::collections::BTreeMap::from([(
+            ("zone-a".to_string(), "node-a".to_string()),
+            root.verifying_key(),
+        )]);
+
+        for scenario in ["released_fence", "resumed_hold", "replayed_before_resume"] {
+            let mut actions = vec![hold.clone()];
+            let mut node = held_node.clone();
+            if scenario != "released_fence" {
+                actions.push(FleetActionRecord {
+                    action_id: "resume-signed-maintenance".to_string(),
+                    emitted_at: now,
+                    action: FleetAction::NativeSessionResume {
+                        zone_id: "zone-a".to_string(),
+                        hold_action_id: hold.action_id.clone(),
+                        reason: Some("admission has resumed".to_string()),
+                    },
+                });
+            }
+            if scenario != "replayed_before_resume" {
+                let expected = fleet_application_checkpoint(&actions, "zone-a").unwrap();
+                node.applied_actions = Some(expected.clone());
+                node.health = NodeHealth::Healthy;
+                let drain = node.native_session_drain.as_mut().unwrap();
+                drain.applied_actions = expected;
+                drain.fence_held = false;
+                let checkpoint_sha256 = drain.observation_sha256().unwrap();
+                let attestation = drain.supervisor_attestation.as_mut().unwrap();
+                attestation.checkpoint_sha256 = checkpoint_sha256;
+                attestation.signature_hex = hex::encode(
+                    root.sign(&attestation.signing_payload().unwrap())
+                        .to_bytes(),
+                );
+            }
+            let drain = node.native_session_drain.as_ref().unwrap();
+            // Each candidate really is a valid signed supervisor observation;
+            // rejection must come from the live admission/hold contract.
+            drain
+                .supervisor_attestation
+                .as_ref()
+                .unwrap()
+                .verify(drain, "node-a", "zone-a", &root.verifying_key())
+                .unwrap();
+            let state = FleetSharedState {
+                schema_version: FLEET_SHARED_STATE_SCHEMA.to_string(),
+                actions,
+                nodes: vec![node],
+            };
+            let mut coordinator = ProductEpochCoordinator::new(
+                7,
+                2,
+                BarrierConfig::default(),
+                EpochSigningKey::new(b"held-population-test-key").unwrap(),
+            );
+            let error = super::certify_fleet_epoch_quiescence(
+                &mut coordinator,
+                &state,
+                &roots,
+                super::FleetEpochBarrierParams {
+                    initiator: "operator",
+                    reason: "reject a drain with an open admission population",
+                    now,
+                    stale_after: Duration::from_secs(30),
+                    trace_id: scenario,
+                },
+            )
+            .expect_err(scenario);
+            assert!(
+                error.to_string().contains("active maintenance fences"),
+                "{scenario}: {error}"
+            );
+            assert_eq!(coordinator.current_epoch(), 7, "{scenario}");
+            assert_eq!(
+                coordinator.abort_manager().abort_events().len(),
+                1,
+                "{scenario}"
+            );
+        }
     }
 }

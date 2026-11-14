@@ -803,10 +803,16 @@ impl FleetControlPlaneService {
                         .map(|n| n.quarantine_version)
                         .max()
                         .unwrap_or(0);
+                    let active_hold_count = certificate
+                        .participants
+                        .iter()
+                        .flat_map(|participant| participant.active_hold_ids.iter())
+                        .collect::<BTreeSet<_>>()
+                        .len() as u64;
                     seqlock_page.publish(
                         certificate.committed_epoch,
                         max_qv,
-                        0,
+                        active_hold_count,
                         checkpoint.action_count,
                         digest_prefix,
                     );

@@ -8203,20 +8203,29 @@ fn fleet_http_epoch_barrier_certifies_quiescence_across_enrolled_supervisors_and
     operator
         .publish_action(&quarantine)
         .expect("publish quarantine");
+    let hold = FleetActionRecord {
+        action_id: "hold-epoch-drill".to_string(),
+        emitted_at: Utc::now(),
+        action: FleetAction::NativeSessionHold {
+            zone_id: "east".to_string(),
+            reason: "close admissions while certifying the enrolled population".to_string(),
+        },
+    };
+    operator.publish_action(&hold).expect("publish hold");
     let actions = operator.list_actions().expect("actions");
     let expected = fleet_application_checkpoint(&actions, "east").expect("checkpoint");
 
     // Fault cut 1: missing node-b drain must abort the epoch barrier (HTTP 409).
-    let make_heartbeat = |node_id: &str, key: &SigningKey, generation: u64, indeterminate: u64| {
+    let make_heartbeat = |node_id: &str, key: &SigningKey, generation: u64, fence_held: bool| {
         let now = Utc::now();
         let mut drain = NativeSessionDrainCheckpoint {
             applied_actions: expected.clone(),
             session_set_sha256: format!("{generation:02x}").repeat(32),
             admitted_sessions: 3,
-            terminal_sessions: if indeterminate == 0 { 3 } else { 2 },
+            terminal_sessions: 3,
             pending_sessions: 0,
-            indeterminate_sessions: indeterminate,
-            fence_held: false,
+            indeterminate_sessions: 0,
+            fence_held,
             supervisor_attestation: None,
         };
         let mut attestation = NativeSessionDrainAttestation {
@@ -8241,14 +8250,18 @@ fn fleet_http_epoch_barrier_certifies_quiescence_across_enrolled_supervisors_and
             node_id: node_id.to_string(),
             last_seen: now,
             quarantine_version: 5,
-            health: NodeHealth::Healthy,
+            health: if fence_held {
+                NodeHealth::Maintenance
+            } else {
+                NodeHealth::Healthy
+            },
             applied_actions: Some(expected.clone()),
             native_session_drain: Some(drain),
         }
     };
 
     agent_a
-        .upsert_node_status(&make_heartbeat("node-a", &sup_a, 1, 0))
+        .upsert_node_status(&make_heartbeat("node-a", &sup_a, 1, true))
         .expect("node-a heartbeat");
     let missing_err = operator
         .certify_epoch_barrier(&FleetHttpEpochBarrierRequest {
@@ -8261,10 +8274,26 @@ fn fleet_http_epoch_barrier_certifies_quiescence_across_enrolled_supervisors_and
         .to_string();
     assert!(missing_err.contains("HTTP 409"), "{missing_err}");
 
-    // Both enrolled supervisors report signed terminal drains -> epoch barrier commits!
+    // A signed completed observation with admissions reopened cannot certify
+    // the current population even while its action snapshot still contains the hold.
     agent_b
-        .upsert_node_status(&make_heartbeat("node-b", &sup_b, 1, 0))
-        .expect("node-b heartbeat");
+        .upsert_node_status(&make_heartbeat("node-b", &sup_b, 1, false))
+        .expect("node-b released-fence heartbeat");
+    let unfenced_err = operator
+        .certify_epoch_barrier(&FleetHttpEpochBarrierRequest {
+            initiator: "ops-root".to_string(),
+            reason: "quarantine-epoch-advance".to_string(),
+            trace_id: "trace-http-unfenced".to_string(),
+            stale_after: Duration::from_secs(30),
+        })
+        .expect_err("a released admission fence must not certify quiescence")
+        .to_string();
+    assert!(unfenced_err.contains("HTTP 409"), "{unfenced_err}");
+
+    // Both supervisors now attest terminal populations under retained fences.
+    agent_b
+        .upsert_node_status(&make_heartbeat("node-b", &sup_b, 2, true))
+        .expect("node-b held heartbeat");
     let certified = operator
         .certify_epoch_barrier(&FleetHttpEpochBarrierRequest {
             initiator: "ops-root".to_string(),
@@ -8282,12 +8311,46 @@ fn fleet_http_epoch_barrier_certifies_quiescence_across_enrolled_supervisors_and
     assert_eq!(certified.certificate.pre_epoch, 0);
     assert_eq!(certified.certificate.committed_epoch, 1);
     assert_eq!(certified.certificate.participants.len(), 2);
+    for participant in &certified.certificate.participants {
+        assert_eq!(participant.active_hold_ids, [hold.action_id.as_str()]);
+    }
 
     let seqlock = SeqlockControlPage::read_shared_page(&state_dir.join("seqlock.page"))
         .expect("seqlock page persisted on epoch commit");
     assert_eq!(seqlock.control_epoch, 1);
     assert_eq!(seqlock.quarantine_version, 5);
-    assert_eq!(seqlock.action_count, 1);
+    assert_eq!(seqlock.active_hold_count, 1);
+    assert_eq!(seqlock.action_count, 2);
+
+    // Replaying the still-valid held observations after a coordinator-visible
+    // resume must not advance the epoch or silently certify a later admission.
+    operator
+        .publish_action(&FleetActionRecord {
+            action_id: "resume-epoch-drill".to_string(),
+            emitted_at: Utc::now(),
+            action: FleetAction::NativeSessionResume {
+                zone_id: "east".to_string(),
+                hold_action_id: hold.action_id,
+                reason: Some("explicitly reopen admissions".to_string()),
+            },
+        })
+        .expect("publish resume");
+    let resumed_err = operator
+        .certify_epoch_barrier(&FleetHttpEpochBarrierRequest {
+            initiator: "ops-root".to_string(),
+            reason: "reject resumed hold".to_string(),
+            trace_id: "trace-http-resumed".to_string(),
+            stale_after: Duration::from_secs(30),
+        })
+        .expect_err("a resumed hold must invalidate the old held observation")
+        .to_string();
+    assert!(resumed_err.contains("HTTP 409"), "{resumed_err}");
+    assert_eq!(
+        SeqlockControlPage::read_shared_page(&state_dir.join("seqlock.page"))
+            .expect("last committed epoch page")
+            .control_epoch,
+        1
+    );
 
     control.request_shutdown();
     assert!(server.join().expect("server thread").expect("server exit") > 0);
