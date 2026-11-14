@@ -74,6 +74,8 @@ pub mod native_replay;
 pub(crate) mod native_session_control;
 #[cfg(feature = "engine")]
 pub mod native_session_inventory;
+#[cfg(feature = "engine")]
+pub(crate) mod native_session_journal;
 pub mod operator_transcripts;
 pub mod proof_carrying_evidence;
 pub mod proof_pipeline;

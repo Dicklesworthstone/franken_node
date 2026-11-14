@@ -56,7 +56,7 @@ struct RunOutcome {
 #[test]
 fn private_native_session_worker_refuses_direct_cli_invocation() {
     let missing_nonce = Command::new(franken_node_bin())
-        .arg("__franken-native-session-worker-v8")
+        .arg("__franken-native-session-worker-v9")
         .stdin(Stdio::null())
         .output()
         .expect("invoke private worker marker directly");
@@ -75,7 +75,7 @@ fn private_native_session_worker_refuses_direct_cli_invocation() {
     {
         let forged_nonce = Command::new(franken_node_bin())
             .args([
-                "__franken-native-session-worker-v8",
+                "__franken-native-session-worker-v9",
                 "00000000-0000-4000-8000-000000000001",
             ])
             .stdin(Stdio::null())
@@ -528,7 +528,7 @@ fn run_profile_selection_enforces_configured_and_environment_strict_admission() 
 #[cfg(target_os = "linux")]
 #[test]
 fn native_timeout_reaps_a_worker_stuck_in_admitted_http_io() {
-    assert_native_interruption_retains_admitted_http_io(false);
+    assert_native_interruption_retains_admitted_http_io(NativeInterruptionFault::Timeout);
 }
 
 /// A worker killed by the OS cannot finalize its effects. The supervisor must
@@ -537,11 +537,28 @@ fn native_timeout_reaps_a_worker_stuck_in_admitted_http_io() {
 #[cfg(target_os = "linux")]
 #[test]
 fn native_worker_sigkill_preserves_admitted_http_io_and_durable_evidence() {
-    assert_native_interruption_retains_admitted_http_io(true);
+    assert_native_interruption_retains_admitted_http_io(NativeInterruptionFault::WorkerSigkill);
+}
+
+/// The supervisor cannot publish a terminal receipt after SIGKILL. Its
+/// pre-provider journal must already survive, and losing the authenticated
+/// parent channel must stop the worker without a fabricated terminal outcome.
+#[cfg(target_os = "linux")]
+#[test]
+fn native_supervisor_sigkill_preserves_durable_provider_prefix_without_terminal_receipt() {
+    assert_native_interruption_retains_admitted_http_io(NativeInterruptionFault::SupervisorSigkill);
 }
 
 #[cfg(target_os = "linux")]
-fn assert_native_interruption_retains_admitted_http_io(kill_worker: bool) {
+#[derive(Clone, Copy)]
+enum NativeInterruptionFault {
+    Timeout,
+    WorkerSigkill,
+    SupervisorSigkill,
+}
+
+#[cfg(target_os = "linux")]
+fn assert_native_interruption_retains_admitted_http_io(fault: NativeInterruptionFault) {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::os::unix::process::CommandExt;
@@ -550,6 +567,14 @@ fn assert_native_interruption_retains_admitted_http_io(kill_worker: bool) {
     const ENGINE_TIMEOUT: Duration = Duration::from_secs(10);
     const ADMISSION_DEADLINE: Duration = Duration::from_secs(15);
     const OUTER_DEADLINE: Duration = Duration::from_secs(25);
+    let kill_worker = matches!(fault, NativeInterruptionFault::WorkerSigkill);
+    // The supervisor-loss case must stop through channel liveness, well
+    // before its configured execution deadline could explain worker exit.
+    let engine_timeout = if matches!(fault, NativeInterruptionFault::SupervisorSigkill) {
+        Duration::from_secs(60)
+    } else {
+        ENGINE_TIMEOUT
+    };
     let expected_terminal = if kill_worker {
         "worker_exit_indeterminate"
     } else {
@@ -585,6 +610,24 @@ fn assert_native_interruption_retains_admitted_http_io(kill_worker: bool) {
             let pid = pid.parse::<u32>().ok()?;
             process_start_time(pid).map(|start_time| (pid, start_time))
         })
+    }
+
+    fn process_identity_has_exited(pid: u32, expected_start: &str) -> bool {
+        let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Ok(stat) => stat,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return true,
+            Err(_) => return false,
+        };
+        let Some((_, fields)) = stat.rsplit_once(") ") else {
+            return false;
+        };
+        let fields: Vec<_> = fields.split_whitespace().collect();
+        let (Some(state), Some(start)) = (fields.first(), fields.get(19)) else {
+            return false;
+        };
+        // An orphan may remain as a zombie until PID 1 reaps it. That process
+        // can no longer execute; this is no claim about unrelated descendants.
+        *start != expected_start || matches!(*state, "Z" | "X" | "x")
     }
 
     fn kill_test_process_tree(child: &mut std::process::Child) {
@@ -685,6 +728,9 @@ fn assert_native_interruption_retains_admitted_http_io(kill_worker: bool) {
         stream
             .set_read_timeout(Some(ADMISSION_DEADLINE))
             .expect("set timeout sink read deadline");
+        stream
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .expect("bound the late response write");
         let mut request = Vec::new();
         stream
             .read_to_end(&mut request)
@@ -718,7 +764,7 @@ fn assert_native_interruption_retains_admitted_http_io(kill_worker: bool) {
         .current_dir(dir.path())
         .env(
             "FRANKEN_ENGINE_TIMEOUT_SECS",
-            ENGINE_TIMEOUT.as_secs().to_string(),
+            engine_timeout.as_secs().to_string(),
         )
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -755,6 +801,282 @@ fn assert_native_interruption_retains_admitted_http_io(kill_worker: bool) {
             panic!("the admitted effect must belong to the direct native-session worker");
         }
     };
+
+    if matches!(fault, NativeInterruptionFault::SupervisorSigkill) {
+        use frankenengine_node::ops::engine_dispatcher::RuntimeEvidenceIdentityCapture;
+        use frankenengine_node::ops::native_session_inventory::{
+            NativeSessionForensicStatus, read_local_native_session_forensics,
+        };
+        use rustix::process::{Pid, PidfdFlags, Signal, pidfd_open, pidfd_send_signal};
+        use std::os::unix::process::ExitStatusExt as _;
+
+        // Pin the trust anchor while the admitted run is alive, using its
+        // product-authenticated inventory and original identity capture. No
+        // key or identity from the later export is allowed to establish trust.
+        let captured: anyhow::Result<_> = (|| {
+            let project = dir.path().canonicalize()?;
+            let entrypoint = app_path.canonicalize()?;
+            let report = read_local_native_session_forensics(Some(&project))?;
+            let matching: Vec<_> = report
+                .records
+                .iter()
+                .filter(|record| {
+                    record.admission.project_root == project
+                        && record.admission.entrypoint == entrypoint
+                })
+                .collect();
+            let [record] = matching.as_slice() else {
+                anyhow::bail!("the live project must have exactly one authenticated admission");
+            };
+            anyhow::ensure!(
+                record.status == NativeSessionForensicStatus::PendingLivenessUnknown
+                    && record.outcome.is_none(),
+                "the blocked live call must not have a terminal supervisor observation"
+            );
+            anyhow::ensure!(
+                !report
+                    .source_errors
+                    .iter()
+                    .any(|error| error.session_nonce.as_deref()
+                        == Some(record.admission.session_nonce.as_str())),
+                "the selected live admission has invalid retained evidence"
+            );
+            let journal = record.durable_journal.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("the HTTP provider ran without a retained durable journal")
+            })?;
+            anyhow::ensure!(
+                journal.admitted_provider_calls >= 2
+                    && journal.returned_provider_calls >= 1
+                    && journal.indeterminate_provider_calls == 1
+                    && !journal.trailing_partial_record,
+                "the real HTTP sink must already have a complete durable admission prefix"
+            );
+            let capture: RuntimeEvidenceIdentityCapture =
+                serde_json::from_slice(&std::fs::read(&record.admission.identity_capture_path)?)?;
+            anyhow::ensure!(
+                capture.session_nonce == record.admission.session_nonce
+                    && capture.product_root_key_id == record.admission.product_root_key_id
+                    && format!("ed25519:{}", capture.product_root_verification_key_hex)
+                        == record.admission.product_root_key_id,
+                "the original capture must match the independently authenticated admission"
+            );
+            let root_bytes: [u8; 32] = hex::decode(&capture.product_root_verification_key_hex)?
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("captured root key length"))?;
+            let trusted_root = ed25519_dalek::VerifyingKey::from_bytes(&root_bytes)?;
+            capture.verify_with_product_root(&trusted_root)?;
+            let pid = Pid::from_raw(i32::try_from(worker_pid)?)
+                .ok_or_else(|| anyhow::anyhow!("invalid worker PID"))?;
+            let worker_handle = pidfd_open(pid, PidfdFlags::empty())?;
+            anyhow::ensure!(
+                process_start_time(worker_pid).as_deref() == Some(worker_start_time.as_str()),
+                "worker identity changed while pinning the SIGKILL cleanup handle"
+            );
+            anyhow::ensure!(
+                !process_identity_has_exited(worker_pid, &worker_start_time),
+                "the exact worker must still be alive before the supervisor-loss fault"
+            );
+            Ok((
+                record.admission.clone(),
+                trusted_root,
+                journal.head_record_sha256.clone(),
+                worker_handle,
+            ))
+        })();
+        let (admission, trusted_root, original_journal_head, worker_handle) = match captured {
+            Ok(captured) => captured,
+            Err(error) => {
+                kill_test_process_tree(&mut child);
+                let _ = release_tx.send(());
+                let _ = server.join();
+                panic!("cannot authenticate the live admission before supervisor loss: {error:#}");
+            }
+        };
+
+        // Kill only the owned supervisor Child, never its group or the worker.
+        // Its unreaped child identity cannot be recycled before this signal.
+        if let Err(error) = child.kill() {
+            let _ = pidfd_send_signal(&worker_handle, Signal::KILL);
+            kill_test_process_tree(&mut child);
+            let _ = release_tx.send(());
+            let _ = server.join();
+            panic!("failed to SIGKILL the owned native supervisor: {error}");
+        }
+        let parent_status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Some(status),
+                Ok(None) if started.elapsed() < OUTER_DEADLINE => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Ok(None) | Err(_) => break None,
+            }
+        };
+        let worker_wait_started = Instant::now();
+        let worker_stopped_on_parent_loss = loop {
+            if process_identity_has_exited(worker_pid, &worker_start_time) {
+                break true;
+            }
+            if worker_wait_started.elapsed() >= Duration::from_secs(5)
+                || started.elapsed() >= OUTER_DEADLINE
+            {
+                break false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        if !worker_stopped_on_parent_loss {
+            // Failure cleanup targets the pinned original process even if its
+            // numeric PID is later recycled. It cannot make this test pass.
+            let _ = pidfd_send_signal(&worker_handle, Signal::KILL);
+        }
+        let entered_before_release = dir.path().join("entered.marker").is_file();
+        let callback_absent_before_release = !dir.path().join("after.marker").exists();
+        let release_result = release_tx.send(());
+        let server_result = server.join();
+        std::thread::sleep(Duration::from_millis(100));
+        let callback_absent_after_release = !dir.path().join("after.marker").exists();
+        // Perform assertions only after releasing the bounded HTTP fixture,
+        // so an unexpected failure cannot strand its request or a live worker.
+        assert_eq!(
+            parent_status.and_then(|status| status.signal()),
+            Some(9),
+            "the supervisor must end from the injected SIGKILL"
+        );
+        assert!(
+            worker_stopped_on_parent_loss,
+            "the exact worker must stop on parent-channel loss before the 60-second engine deadline"
+        );
+        assert!(started.elapsed() < OUTER_DEADLINE);
+        assert!(
+            entered_before_release
+                && callback_absent_before_release
+                && callback_absent_after_release,
+            "the initial filesystem effect must persist and the withheld HTTP callback must never run"
+        );
+        release_result.expect("release the response after parent and worker exit");
+        let _late_response_result = server_result.expect("join supervisor-loss HTTP sink");
+
+        std::fs::rename(&app_path, dir.path().join("retained-original-app.js"))
+            .expect("move the original source before forensic export");
+        let export_directory = tempfile::tempdir().expect("independent forensic destination");
+        let (exported, report) = run_workspace_json(
+            export_directory.path(),
+            &[
+                "incident",
+                "capture",
+                "--from-session",
+                &admission.session_nonce,
+                "--out",
+                "parent-loss.fnforensics.json",
+                "--json",
+            ],
+        );
+        assert_eq!(exported.exit_code, Some(0), "{}", exported.stderr);
+        assert_eq!(
+            report["verification"]["schema_version"],
+            "franken-node/native-session-forensics/v2"
+        );
+        assert_eq!(report["verification"]["outcome_kind"], "pending");
+        let exported_path = export_directory.path().join("parent-loss.fnforensics.json");
+        let bytes = std::fs::read(&exported_path).expect("read parent-loss forensic artifact");
+        let verified = frankenengine_verifier_sdk::native_session::verify_native_session_forensics(
+            &bytes,
+            &trusted_root,
+        )
+        .expect("independent SDK authenticates the pre-effect evidence against the pre-kill root");
+        assert_eq!(verified.session_nonce, admission.session_nonce);
+        assert_eq!(verified.outcome_kind, "pending");
+        assert!(verified.observed_at.is_none() && verified.process_observation.is_none());
+        assert_eq!(verified.completed_provider_calls, None);
+        assert_eq!(verified.indeterminate_provider_calls, None);
+        assert!(
+            !verified.replay_certified
+                && !verified.quiescence_certified
+                && !verified.historical_completeness
+        );
+        let durable = verified
+            .durable_journal
+            .expect("authenticated durable provider prefix");
+        assert!(durable.admitted_provider_calls >= 2 && durable.returned_provider_calls >= 1);
+        assert_eq!(durable.indeterminate_provider_calls, 1);
+        assert_eq!(durable.head_record_sha256, original_journal_head);
+        assert!(!durable.trailing_partial_record);
+        assert!(
+            !durable.replay_certified
+                && !durable.quiescence_certified
+                && !durable.historical_completeness
+        );
+        let bundle: frankenengine_verifier_sdk::native_session::NativeSessionForensicBundle =
+            serde_json::from_slice(&bytes).expect("portable parent-loss bundle");
+        assert!(
+            bundle.outcome.is_none(),
+            "SIGKILL cannot manufacture a supervisor terminal receipt"
+        );
+        let exported_admission: frankenengine_node::ops::native_session_inventory::NativeSessionAdmission =
+            serde_json::from_str(&bundle.admission_json).expect("original signed admission");
+        assert_eq!(exported_admission, admission);
+        let events: Vec<Value> = bundle
+            .journal_jsonl
+            .expect("retained raw journal")
+            .lines()
+            .map(|line| {
+                let envelope: Value =
+                    serde_json::from_str(line).expect("verified journal envelope");
+                let payload: Value = serde_json::from_str(
+                    envelope["payload_json"]
+                        .as_str()
+                        .expect("signed raw payload"),
+                )
+                .expect("verified journal payload");
+                payload["event"].clone()
+            })
+            .collect();
+        let filesystem_sequence = events
+            .iter()
+            .find(|event| event["kind"] == "admitted" && event["effect_kind"] == "fs_write")
+            .and_then(|event| event["sequence"].as_u64())
+            .expect("initial marker write was durably admitted");
+        let http_sequence = events
+            .iter()
+            .find(|event| event["kind"] == "admitted" && event["effect_kind"] == "network_request")
+            .and_then(|event| event["sequence"].as_u64())
+            .expect("actual HTTP request was durably admitted");
+        assert!(
+            events
+                .iter()
+                .any(|event| event["kind"] == "provider_returned"
+                    && event["sequence"] == filesystem_sequence)
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| event["kind"] == "provider_returned"
+                    && event["sequence"] == http_sequence),
+            "the withheld HTTP effect must remain indeterminate"
+        );
+        let after = read_local_native_session_forensics(Some(&admission.project_root))
+            .expect("rediscover retained evidence without the original source");
+        let retained = after
+            .records
+            .iter()
+            .find(|record| record.admission.session_nonce == admission.session_nonce)
+            .expect("the same pending launch remains discoverable");
+        assert_eq!(
+            retained.status,
+            NativeSessionForensicStatus::PendingLivenessUnknown
+        );
+        assert!(retained.outcome.is_none());
+        assert_eq!(
+            retained
+                .durable_journal
+                .as_ref()
+                .unwrap()
+                .head_record_sha256,
+            original_journal_head
+        );
+        assert!(!after.quiescence_certified && !after.replay_certified);
+        assert!(!app_path.exists() && !dir.path().join("after.marker").exists());
+        return;
+    }
 
     if kill_worker {
         if process_start_time(worker_pid).as_deref() != Some(worker_start_time.as_str()) {
@@ -1102,9 +1424,7 @@ fn assert_native_interruption_retains_admitted_http_io(kill_worker: bool) {
     let native_incident_id = format!("native-session:{}", typed_wal.session_nonce);
     let native = incidents
         .iter()
-        .find(|row| {
-            row["source"] == "native_session" && row["incident_id"] == native_incident_id
-        })
+        .find(|row| row["source"] == "native_session" && row["incident_id"] == native_incident_id)
         .expect("the actual interrupted native session remains discoverable");
     assert_eq!(native["severity"], "unknown");
     assert_eq!(native["event_count"], 0);
@@ -3187,7 +3507,8 @@ fn incident_list_shows_run_captured_incidents_and_tolerates_bad_bundles() {
         "{incidents:?}"
     );
     let source = frankenengine_node::tools::replay_bundle::read_verified_incident_evidence_package(
-        &dir.path().join(captured["path"].as_str().expect("captured source path")),
+        &dir.path()
+            .join(captured["path"].as_str().expect("captured source path")),
         captured["incident_id"].as_str(),
         &receipt_verifying_key(dir.path()),
     )
@@ -3198,9 +3519,7 @@ fn incident_list_shows_run_captured_incidents_and_tolerates_bad_bundles() {
     let native_incident_id = format!("native-session:{nonce}");
     let native = incidents
         .iter()
-        .find(|row| {
-            row["source"] == "native_session" && row["incident_id"] == native_incident_id
-        })
+        .find(|row| row["source"] == "native_session" && row["incident_id"] == native_incident_id)
         .expect("the captured denial also retains its authenticated supervisor observation");
     assert_eq!(native["severity"], "unknown");
     assert_eq!(

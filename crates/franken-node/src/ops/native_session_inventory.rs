@@ -647,6 +647,52 @@ pub struct NativeSessionForensicRecord {
     /// The signed observation was absent from the database projection. This
     /// field describes an in-memory read; inspection never repairs the store.
     pub outcome_recovered_from_receipt: bool,
+    /// Independently authenticated provider observations never promote a
+    /// pending launch to a terminal session or establish worker liveness.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub durable_journal: Option<NativeSessionForensicJournal>,
+}
+
+/// Owned report fields preserve the existing deserializable inventory API.
+/// Only the SDK verifier constructs this observation during discovery.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeSessionForensicJournal {
+    pub schema_version: String,
+    pub scope: String,
+    pub record_count: usize,
+    pub event_count: usize,
+    pub admitted_provider_calls: usize,
+    pub returned_provider_calls: usize,
+    pub indeterminate_provider_calls: usize,
+    pub head_record_sha256: String,
+    pub trailing_partial_record: bool,
+    pub replay_certified: bool,
+    pub quiescence_certified: bool,
+    pub historical_completeness: bool,
+}
+
+impl From<frankenengine_verifier_sdk::native_session::VerifiedNativeSessionEffectJournal>
+    for NativeSessionForensicJournal
+{
+    fn from(
+        journal: frankenengine_verifier_sdk::native_session::VerifiedNativeSessionEffectJournal,
+    ) -> Self {
+        Self {
+            schema_version: journal.schema_version.to_owned(),
+            scope: journal.scope.to_owned(),
+            record_count: journal.record_count,
+            event_count: journal.event_count,
+            admitted_provider_calls: journal.admitted_provider_calls,
+            returned_provider_calls: journal.returned_provider_calls,
+            indeterminate_provider_calls: journal.indeterminate_provider_calls,
+            head_record_sha256: journal.head_record_sha256,
+            trailing_partial_record: journal.trailing_partial_record,
+            replay_certified: journal.replay_certified,
+            quiescence_certified: journal.quiescence_certified,
+            historical_completeness: journal.historical_completeness,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -660,6 +706,7 @@ pub enum NativeSessionForensicErrorKind {
     OutcomeReceiptMissing,
     OutcomeReceiptInvalid,
     OutcomeProjectionConflict,
+    JournalInvalid,
     IdentityInventoryInvalid,
 }
 
@@ -1549,6 +1596,34 @@ impl NativeSessionInventoryGuard {
             containment_empty_observed: false,
             finished: false,
         })
+    }
+
+    /// Establish a durable provider journal before the worker can start. This
+    /// uses the already retained admission and existing product root; neither
+    /// a worker request nor a journal file can provision signing authority.
+    pub(crate) fn prepare_effect_journal(
+        &self,
+    ) -> Result<super::native_session_journal::NativeSessionEffectJournalWriter> {
+        if self.finished || self.process != NativeSessionProcessObservation::NotSpawned {
+            bail!("native-session effect journal must be prepared before worker spawn");
+        }
+        validate_admission(&self.admission)?;
+        let root = load_runtime_evidence_product_root(
+            &self
+                .protected_root
+                .join(RUNTIME_EVIDENCE_ROOT_KEY_RELATIVE_PATH),
+        )?;
+        let key = root.verifying_key();
+        verify_admission_capture_with_root(&self.protected_root, &self.admission, &key)?;
+        let receipt = read_admission_receipt(&self.protected_root, &self.admission, &key)?
+            .context("native-session effect journal requires an authenticated admission")?;
+        super::native_session_journal::NativeSessionEffectJournalWriter::create(
+            &self.protected_root,
+            &self.admission.session_nonce,
+            &self.admission.product_root_key_id,
+            &receipt.admission_sha256,
+            root,
+        )
     }
 
     pub(crate) fn worker_started(&mut self) {
@@ -2589,11 +2664,13 @@ fn read_forensic_identity_captures(
         })();
         match observed {
             Ok(capture) if !admissions.contains_key(&capture.session_nonce) => {
-                report.untracked_identity_captures.push(UntrackedNativeIdentityCapture {
-                    session_nonce: capture.session_nonce,
-                    product_root_key_id: capture.product_root_key_id,
-                    identity_capture_path: path,
-                });
+                report
+                    .untracked_identity_captures
+                    .push(UntrackedNativeIdentityCapture {
+                        session_nonce: capture.session_nonce,
+                        product_root_key_id: capture.product_root_key_id,
+                        identity_capture_path: path,
+                    });
             }
             Ok(_) => {}
             Err(error) => report.source_errors.push(forensic_source_error(
@@ -2724,18 +2801,19 @@ fn read_native_session_forensics_at(
                         continue;
                     }
                     let projection = read_forensic_projection(&connection, nonce);
-                    let (admission_value, projected_outcome, outcome_within_bound) = match projection {
-                        Ok(values) => values,
-                        Err(error) => {
-                            report.source_errors.push(forensic_source_error(
-                                Some(nonce),
-                                report.database_path.clone(),
-                                NativeSessionForensicErrorKind::AdmissionInvalid,
-                                format!("{error:#}"),
-                            ));
-                            continue;
-                        }
-                    };
+                    let (admission_value, projected_outcome, outcome_within_bound) =
+                        match projection {
+                            Ok(values) => values,
+                            Err(error) => {
+                                report.source_errors.push(forensic_source_error(
+                                    Some(nonce),
+                                    report.database_path.clone(),
+                                    NativeSessionForensicErrorKind::AdmissionInvalid,
+                                    format!("{error:#}"),
+                                ));
+                                continue;
+                            }
+                        };
                     let json_bytes = |value: &SqliteValue| match value {
                         SqliteValue::Text(text) => text.len(),
                         _ => 0,
@@ -2752,13 +2830,13 @@ fn read_native_session_forensics_at(
                         ));
                         break;
                     }
-                    let admission = match authenticate_forensic_admission(
+                    let (admission, admission_receipt) = match authenticate_forensic_admission(
                         protected_root,
                         nonce,
                         &admission_value,
                         &key,
                     ) {
-                        Ok((admission, _receipt)) => admission,
+                        Ok(authenticated) => authenticated,
                         Err(error) => {
                             report.source_errors.push(error);
                             continue;
@@ -2781,6 +2859,7 @@ fn read_native_session_forensics_at(
                         status: NativeSessionForensicStatus::PendingLivenessUnknown,
                         outcome_receipt_path: None,
                         outcome_recovered_from_receipt: false,
+                        durable_journal: None,
                     };
                     let outcome = authenticate_forensic_outcome(
                         protected_root,
@@ -2789,9 +2868,11 @@ fn read_native_session_forensics_at(
                         outcome_within_bound,
                         &key,
                     );
+                    let mut signed_outcome = None;
                     match outcome {
                         Ok(Some(receipt)) => {
-                            let signed_bytes = bounded_json(&receipt.outcome, MAX_OUTCOME_BYTES)?.len();
+                            let signed_bytes =
+                                bounded_json(&receipt.outcome, MAX_OUTCOME_BYTES)?.len();
                             retained_bytes = retained_bytes.saturating_add(
                                 signed_bytes.saturating_sub(json_bytes(&projected_outcome)),
                             );
@@ -2819,6 +2900,12 @@ fn read_native_session_forensics_at(
                                 matches!(projected_outcome, SqliteValue::Null);
                             record.outcome_receipt_path =
                                 Some(outcome_receipt_path(protected_root, nonce));
+                            signed_outcome = Some(
+                                frankenengine_verifier_sdk::native_session::NativeSessionForensicOutcome {
+                                    payload_json: receipt.payload_json()?,
+                                    signature_hex: receipt.signature_hex,
+                                },
+                            );
                             record.outcome = Some(receipt.outcome);
                         }
                         Ok(None) if matches!(projected_outcome, SqliteValue::Null) => {}
@@ -2836,20 +2923,57 @@ fn read_native_session_forensics_at(
                             report.source_errors.push(error);
                         }
                     }
+                    let journal = read_retained_native_session_effect_journal(protected_root, nonce)
+                        .and_then(|journal| {
+                            journal
+                                .map(|jsonl| {
+                                    retained_bytes = retained_bytes.saturating_add(jsonl.len());
+                                    if retained_bytes > MAX_RESERVED_BYTES {
+                                        bail!("native-session forensic journals exceed the aggregate byte bound");
+                                    }
+                                    let (bundle, byte_cap) = make_native_session_forensic_bundle(
+                                        &record.admission,
+                                        &admission_receipt,
+                                        signed_outcome,
+                                        Some(jsonl),
+                                    )?;
+                                    let bytes = bounded_json(&bundle, byte_cap)?;
+                                    let verified = frankenengine_verifier_sdk::native_session::verify_native_session_forensics(
+                                        bytes.as_bytes(), &key,
+                                    )?;
+                                    verified.durable_journal.map(NativeSessionForensicJournal::from)
+                                        .context("verified v2 forensic bundle has no durable journal")
+                                })
+                                .transpose()
+                        });
+                    match journal {
+                        Ok(journal) => record.durable_journal = journal,
+                        Err(error) => report.source_errors.push(forensic_source_error(
+                            Some(nonce),
+                            super::native_session_journal::native_session_effect_journal_path(
+                                protected_root,
+                                nonce,
+                            ),
+                            NativeSessionForensicErrorKind::JournalInvalid,
+                            format!("{error:#}"),
+                        )),
+                    }
                     report.records.push(record);
+                    if retained_bytes > MAX_RESERVED_BYTES {
+                        break;
+                    }
                 }
             }
         }
     }
     report.records.sort_by(|left, right| {
-        left.admission.session_nonce.cmp(&right.admission.session_nonce)
+        left.admission
+            .session_nonce
+            .cmp(&right.admission.session_nonce)
     });
-    if let Err(error) = read_forensic_identity_captures(
-        protected_root,
-        &key,
-        &admissions,
-        &mut report,
-    ) {
+    if let Err(error) =
+        read_forensic_identity_captures(protected_root, &key, &admissions, &mut report)
+    {
         report.source_errors.push(forensic_source_error(
             None,
             protected_root.join(RUNTIME_EVIDENCE_CAPTURE_DIR_RELATIVE_PATH),
@@ -3145,13 +3269,80 @@ fn authenticate_forensic_outcome(
     Ok(receipt)
 }
 
+/// Read only an existing bounded journal. Absence never provisions a journal
+/// or turns a pending launch into a zero-effect claim. Complete authentication
+/// is performed by the independent SDK against the signed admission.
+fn read_retained_native_session_effect_journal(
+    protected_root: &Path,
+    nonce: &str,
+) -> Result<Option<String>> {
+    use super::native_session_journal::{
+        NATIVE_SESSION_EFFECT_JOURNAL_BYTE_CAP, NATIVE_SESSION_EFFECT_JOURNAL_DIRECTORY,
+        native_session_effect_journal_path,
+    };
+    let directory = protected_root.join(NATIVE_SESSION_EFFECT_JOURNAL_DIRECTORY);
+    match std::fs::symlink_metadata(&directory) {
+        Ok(_) => validate_existing_forensic_directory(&directory)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error).context("inspect retained native-session journal directory");
+        }
+    }
+    let path = native_session_effect_journal_path(protected_root, nonce);
+    if !validate_private_path_if_present(&path)? {
+        return Ok(None);
+    }
+    let bytes = read_runtime_evidence_private_file(&path, NATIVE_SESSION_EFFECT_JOURNAL_BYTE_CAP)?;
+    let jsonl = String::from_utf8(bytes).context("retained native-session journal is not UTF-8")?;
+    Ok(Some(jsonl))
+}
+
+fn make_native_session_forensic_bundle(
+    admission: &NativeSessionAdmission,
+    receipt: &NativeSessionAdmissionReceipt,
+    outcome: Option<frankenengine_verifier_sdk::native_session::NativeSessionForensicOutcome>,
+    journal_jsonl: Option<String>,
+) -> Result<(
+    frankenengine_verifier_sdk::native_session::NativeSessionForensicBundle,
+    usize,
+)> {
+    use frankenengine_verifier_sdk::native_session::{
+        MAX_NATIVE_SESSION_FORENSICS_BYTES, MAX_NATIVE_SESSION_FORENSICS_V2_BYTES,
+        NATIVE_SESSION_FORENSICS_SCHEMA, NATIVE_SESSION_FORENSICS_V2_SCHEMA,
+        NativeSessionForensicAdmissionReceipt, NativeSessionForensicBundle,
+    };
+    let (schema, byte_cap) = if journal_jsonl.is_some() {
+        (
+            NATIVE_SESSION_FORENSICS_V2_SCHEMA,
+            MAX_NATIVE_SESSION_FORENSICS_V2_BYTES,
+        )
+    } else {
+        (
+            NATIVE_SESSION_FORENSICS_SCHEMA,
+            MAX_NATIVE_SESSION_FORENSICS_BYTES,
+        )
+    };
+    let bundle = NativeSessionForensicBundle {
+        schema_version: schema.to_owned(),
+        admission_json: bounded_json(admission, MAX_ADMISSION_BYTES)?,
+        journal_jsonl,
+        admission_receipt: NativeSessionForensicAdmissionReceipt {
+            schema_version: receipt.schema_version.clone(),
+            session_nonce: receipt.session_nonce.clone(),
+            product_root_key_id: receipt.product_root_key_id.clone(),
+            admission_sha256: receipt.admission_sha256.clone(),
+            signature_hex: receipt.signature_hex.clone(),
+        },
+        outcome,
+    };
+    Ok((bundle, byte_cap))
+}
+
 fn export_native_session_forensics_at(
     protected_root: &Path,
     nonce: &str,
 ) -> Result<NativeSessionForensicExport> {
     use frankenengine_verifier_sdk::native_session::{
-        MAX_NATIVE_SESSION_FORENSICS_BYTES, NATIVE_SESSION_FORENSICS_SCHEMA,
-        NativeSessionForensicAdmissionReceipt, NativeSessionForensicBundle,
         NativeSessionForensicOutcome, verify_native_session_forensics,
     };
 
@@ -3196,18 +3387,11 @@ fn export_native_session_forensics_at(
         outcome_within_bound,
         &key,
     )?;
-    let bundle = NativeSessionForensicBundle {
-        schema_version: NATIVE_SESSION_FORENSICS_SCHEMA.to_owned(),
-        journal_jsonl: None,
-        admission_json: bounded_json(&admission, MAX_ADMISSION_BYTES)?,
-        admission_receipt: NativeSessionForensicAdmissionReceipt {
-            schema_version: receipt.schema_version,
-            session_nonce: receipt.session_nonce,
-            product_root_key_id: receipt.product_root_key_id,
-            admission_sha256: receipt.admission_sha256,
-            signature_hex: receipt.signature_hex,
-        },
-        outcome: outcome
+    let journal_jsonl = read_retained_native_session_effect_journal(protected_root, nonce)?;
+    let (bundle, byte_cap) = make_native_session_forensic_bundle(
+        &admission,
+        &receipt,
+        outcome
             .map(|receipt| -> Result<_> {
                 Ok(NativeSessionForensicOutcome {
                     payload_json: receipt.payload_json()?,
@@ -3215,8 +3399,9 @@ fn export_native_session_forensics_at(
                 })
             })
             .transpose()?,
-    };
-    let bytes = bounded_json(&bundle, MAX_NATIVE_SESSION_FORENSICS_BYTES)?;
+        journal_jsonl,
+    )?;
+    let bytes = bounded_json(&bundle, byte_cap)?;
     let verification = verify_native_session_forensics(bytes.as_bytes(), &key)
         .map_err(|error| anyhow::anyhow!("native-session forensic export verification: {error}"))?;
     Ok(NativeSessionForensicExport {
@@ -3497,6 +3682,9 @@ mod tests {
     };
 
     fn fixture(root: &Path, marker: u8) -> NativeSessionAdmission {
+        // The fixture's parent represents the private product directory, not
+        // a user's general state-home directory. Model its provisioned mode.
+        ensure_runtime_evidence_directory(root.parent().unwrap(), true).unwrap();
         ensure_runtime_evidence_directory(root, true).unwrap();
         let keys = root.join("keys");
         let captures = root.join(RUNTIME_EVIDENCE_CAPTURE_DIR_RELATIVE_PATH);
@@ -3567,6 +3755,44 @@ mod tests {
         admission
     }
 
+    #[test]
+    fn effect_journal_preparation_requires_retained_authority_before_worker_start() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("evidence");
+        let admission = fixture(&root, 142);
+        let mut guard = NativeSessionInventoryGuard::admit(&root, admission.clone(), 0).unwrap();
+        let receipt = admission_receipt_path(&root, &admission.session_nonce);
+        let retained_receipt = receipt.with_extension("retained");
+        std::fs::rename(&receipt, &retained_receipt).unwrap();
+        assert!(guard.prepare_effect_journal().is_err());
+        assert!(
+            !root
+                .join(super::super::native_session_journal::NATIVE_SESSION_EFFECT_JOURNAL_DIRECTORY)
+                .exists()
+        );
+        std::fs::rename(&retained_receipt, &receipt).unwrap();
+        let journal = guard.prepare_effect_journal().unwrap();
+        let journal_path = super::super::native_session_journal::native_session_effect_journal_path(
+            &root,
+            &admission.session_nonce,
+        );
+        let header = std::fs::read(&journal_path).unwrap();
+        assert!(!header.is_empty());
+        assert!(guard.prepare_effect_journal().is_err());
+        guard.worker_started();
+        assert!(
+            guard
+                .prepare_effect_journal()
+                .unwrap_err()
+                .to_string()
+                .contains("before worker spawn")
+        );
+        drop(journal);
+        assert_eq!(std::fs::read(journal_path).unwrap(), header);
+        // The test observes no worker exit or terminal effect outcome.
+        guard.finished = true;
+    }
+
     fn forensic_interruption(
         admission: &NativeSessionAdmission,
     ) -> NativeEffectInterruptionEvidence {
@@ -3616,6 +3842,210 @@ mod tests {
         let mut files = BTreeMap::new();
         visit(root, root, &mut files);
         files
+    }
+
+    #[test]
+    fn forensic_export_durable_journal_survives_parent_loss_without_terminal_claims() {
+        use super::super::native_session_journal::native_session_effect_journal_path;
+        use std::io::Write as _;
+
+        for torn_tail in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("evidence");
+            let admission = fixture(&root, 143);
+            std::fs::create_dir(&admission.project_root).unwrap();
+            std::fs::write(&admission.entrypoint, "original source").unwrap();
+            let mut guard =
+                NativeSessionInventoryGuard::admit(&root, admission.clone(), 0).unwrap();
+            let mut journal = guard.prepare_effect_journal().unwrap();
+            let request_hash = format!("sha256:{}", "bc".repeat(32));
+            journal.admit(0, "fs_write", &request_hash).unwrap();
+            journal.complete(0).unwrap();
+            journal.admit(1, "network_request", &request_hash).unwrap();
+            // Model abrupt supervisor loss: no Drop-derived or signed terminal
+            // observation is invented from the retained provider prefix.
+            guard.finished = true;
+            drop(guard);
+            drop(journal);
+            let journal_path = native_session_effect_journal_path(&root, &admission.session_nonce);
+            if torn_tail {
+                let mut file = std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(&journal_path)
+                    .unwrap();
+                file.write_all(b"{\"payload_json\":\"unfinished").unwrap();
+                file.sync_all().unwrap();
+            }
+            std::fs::rename(&admission.project_root, temp.path().join("retired-source")).unwrap();
+            let before = forensic_state_snapshot(&root);
+            let export =
+                export_native_session_forensics_at(&root, &admission.session_nonce).unwrap();
+            assert_eq!(
+                export.bundle.schema_version,
+                "franken-node/native-session-forensics/v2"
+            );
+            assert_eq!(
+                export.bundle.journal_jsonl.as_ref().unwrap().as_bytes(),
+                std::fs::read(&journal_path).unwrap()
+            );
+            assert!(export.bundle.outcome.is_none());
+            assert_eq!(export.verification.outcome_kind, "pending");
+            assert_eq!(export.verification.completed_provider_calls, None);
+            assert_eq!(export.verification.indeterminate_provider_calls, None);
+            let journal = export.verification.durable_journal.unwrap();
+            assert_eq!(journal.admitted_provider_calls, 2);
+            assert_eq!(journal.returned_provider_calls, 1);
+            assert_eq!(journal.indeterminate_provider_calls, 1);
+            assert_eq!(journal.trailing_partial_record, torn_tail);
+            assert!(
+                !journal.replay_certified
+                    && !journal.quiescence_certified
+                    && !journal.historical_completeness
+            );
+            let discovery = read_native_session_forensics_at(&root, None).unwrap();
+            assert!(
+                discovery.source_errors.is_empty(),
+                "{:?}",
+                discovery.source_errors
+            );
+            assert_eq!(discovery.records.len(), 1);
+            let record = &discovery.records[0];
+            assert_eq!(
+                record.status,
+                NativeSessionForensicStatus::PendingLivenessUnknown
+            );
+            assert!(record.outcome.is_none());
+            assert_eq!(
+                record
+                    .durable_journal
+                    .as_ref()
+                    .unwrap()
+                    .admitted_provider_calls,
+                2
+            );
+            assert_eq!(
+                record
+                    .durable_journal
+                    .as_ref()
+                    .unwrap()
+                    .trailing_partial_record,
+                torn_tail
+            );
+            assert_eq!(forensic_state_snapshot(&root), before);
+            assert!(!root.join(OUTCOME_RECEIPT_DIRECTORY).exists());
+        }
+    }
+
+    #[test]
+    fn forensic_export_refuses_corrupt_and_cross_session_journals_without_repair() {
+        use super::super::native_session_journal::{
+            NATIVE_SESSION_EFFECT_JOURNAL_BYTE_CAP, NativeSessionEffectJournalWriter,
+            native_session_effect_journal_path,
+        };
+        use std::io::Write as _;
+
+        for mutation in 0..5 {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("evidence");
+            let admission = fixture(&root, 144);
+            let mut guard =
+                NativeSessionInventoryGuard::admit(&root, admission.clone(), 0).unwrap();
+            let mut journal = guard.prepare_effect_journal().unwrap();
+            journal
+                .admit(0, "fs_read", &format!("sha256:{}", "bc".repeat(32)))
+                .unwrap();
+            journal.complete(0).unwrap();
+            guard.finished = true;
+            drop(guard);
+            drop(journal);
+            let path = native_session_effect_journal_path(&root, &admission.session_nonce);
+            let original = std::fs::read_to_string(&path).unwrap();
+            match mutation {
+                0 => {
+                    let (first, remaining) = original.split_once('\n').unwrap();
+                    let mut envelope: serde_json::Value = serde_json::from_str(first).unwrap();
+                    envelope["signature_hex"] = serde_json::Value::String("00".repeat(64));
+                    std::fs::write(
+                        &path,
+                        format!("{}\n{remaining}", serde_json::to_string(&envelope).unwrap()),
+                    )
+                    .unwrap();
+                }
+                1 | 2 => {
+                    let foreign_root = temp.path().join("foreign-evidence");
+                    ensure_runtime_evidence_directory(&foreign_root, true).unwrap();
+                    let nonce = if mutation == 1 {
+                        uuid::Uuid::now_v7().to_string()
+                    } else {
+                        admission.session_nonce.clone()
+                    };
+                    let digest = if mutation == 1 {
+                        admission_digest(&admission).unwrap()
+                    } else {
+                        "ef".repeat(32)
+                    };
+                    let mut foreign = NativeSessionEffectJournalWriter::create(
+                        &foreign_root,
+                        &nonce,
+                        &admission.product_root_key_id,
+                        &digest,
+                        ed25519_dalek::SigningKey::from_bytes(&[17; 32]),
+                    )
+                    .unwrap();
+                    foreign
+                        .admit(0, "network_request", &format!("sha256:{}", "bc".repeat(32)))
+                        .unwrap();
+                    drop(foreign);
+                    let foreign_bytes = std::fs::read_to_string(
+                        native_session_effect_journal_path(&foreign_root, &nonce),
+                    )
+                    .unwrap();
+                    let replaced = if mutation == 1 {
+                        format!(
+                            "{}\n{}\n",
+                            original.lines().next().unwrap(),
+                            foreign_bytes.lines().nth(1).unwrap()
+                        )
+                    } else {
+                        foreign_bytes
+                    };
+                    std::fs::write(&path, replaced).unwrap();
+                }
+                3 => {
+                    std::fs::OpenOptions::new()
+                        .append(true)
+                        .open(&path)
+                        .unwrap()
+                        .write_all(b"{}\n")
+                        .unwrap();
+                }
+                4 => std::fs::write(
+                    &path,
+                    vec![b'x'; NATIVE_SESSION_EFFECT_JOURNAL_BYTE_CAP + 1],
+                )
+                .unwrap(),
+                _ => unreachable!(),
+            }
+            let before = forensic_state_snapshot(&root);
+            assert!(
+                export_native_session_forensics_at(&root, &admission.session_nonce).is_err(),
+                "mutation {mutation}"
+            );
+            let report = read_native_session_forensics_at(&root, None).unwrap();
+            assert_eq!(report.records.len(), 1);
+            assert_eq!(
+                report.records[0].status,
+                NativeSessionForensicStatus::PendingLivenessUnknown
+            );
+            assert!(report.records[0].durable_journal.is_none());
+            assert!(
+                report
+                    .source_errors
+                    .iter()
+                    .any(|error| error.kind == NativeSessionForensicErrorKind::JournalInvalid)
+            );
+            assert_eq!(forensic_state_snapshot(&root), before);
+        }
     }
 
     #[test]
@@ -4164,7 +4594,10 @@ mod tests {
                     panic!("expected the authenticated admission despite invalid outcome");
                 };
                 assert_eq!(record.admission, admission);
-                assert_eq!(record.status, NativeSessionForensicStatus::OutcomeUnverified);
+                assert_eq!(
+                    record.status,
+                    NativeSessionForensicStatus::OutcomeUnverified
+                );
                 assert!(record.outcome.is_none());
                 assert!(record.outcome_receipt_path.is_none());
                 assert!(!record.outcome_recovered_from_receipt);
@@ -4268,7 +4701,10 @@ mod tests {
             panic!("expected one authenticated capture with unknown project scope");
         };
         assert_eq!(capture.session_nonce, admission.session_nonce);
-        assert_eq!(capture.identity_capture_path, admission.identity_capture_path);
+        assert_eq!(
+            capture.identity_capture_path,
+            admission.identity_capture_path
+        );
         assert!(!report.replay_certified);
         assert!(!report.quiescence_certified);
         assert!(!root.join(INVENTORY_FILE).exists());
@@ -4303,10 +4739,17 @@ mod tests {
             NativeSessionForensicStatus::OutcomeUnverified
         );
         assert!(report.records[0].outcome.is_none());
-        assert!(report.source_errors.iter().any(|error| {
-            error.kind == NativeSessionForensicErrorKind::OutcomeReceiptInvalid
-        }));
-        assert!(std::fs::symlink_metadata(&path).unwrap().file_type().is_symlink());
+        assert!(
+            report.source_errors.iter().any(|error| {
+                error.kind == NativeSessionForensicErrorKind::OutcomeReceiptInvalid
+            })
+        );
+        assert!(
+            std::fs::symlink_metadata(&path)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
     }
 
     #[test]

@@ -3,6 +3,8 @@ use crate::control_plane::fleet_transport::{
     validate_fleet_policy_project_root_with_operator,
 };
 #[cfg(feature = "engine")]
+use crate::ops::native_session_control::{NativeEffectAdmissionAcks, NativeSessionControlFrame};
+#[cfg(feature = "engine")]
 use crate::ops::native_session_inventory::{
     NativeSessionAdmission, NativeSessionEffectObservation, NativeSessionInventoryGuard,
     NativeSessionOutcomeKind, NativeSessionPanicEvidence,
@@ -118,17 +120,17 @@ const NATIVE_ENGINE_WORKER_NAME: &str = "franken-node-native-engine";
 /// before Clap so the worker can never recursively enter the public `run`
 /// command.
 ///
-/// Version 8 requires complete failed-attempt journal accounting. Advance the
+/// Version 9 requires durable supervisor acknowledgment before provider I/O. Advance the
 /// marker, frame and schema together: a configured older worker must reject the
 /// request before executing under the stronger contract.
 #[cfg(feature = "engine")]
-const NATIVE_SESSION_WORKER_ARG: &str = "__franken-native-session-worker-v8";
+const NATIVE_SESSION_WORKER_ARG: &str = "__franken-native-session-worker-v9";
 #[cfg(feature = "engine")]
-const NATIVE_SESSION_SCHEMA: &str = "franken-node/native-session/v8";
+const NATIVE_SESSION_SCHEMA: &str = "franken-node/native-session/v9";
 #[cfg(feature = "engine")]
-const NATIVE_SESSION_FRAME_MAGIC: &[u8; 12] = b"FNNS-IPC-V8\0";
+const NATIVE_SESSION_FRAME_MAGIC: &[u8; 12] = b"FNNS-IPC-V9\0";
 #[cfg(feature = "engine")]
-const NATIVE_SESSION_PROTOCOL_VERSION: u32 = 8;
+const NATIVE_SESSION_PROTOCOL_VERSION: u32 = 9;
 #[cfg(feature = "engine")]
 const NATIVE_SESSION_FRAME_HEADER_BYTES: usize = 12 + 4 + 8 + 32;
 #[cfg(feature = "engine")]
@@ -1440,6 +1442,178 @@ struct ParsedNativeSessionOutput {
     protocol_error: Option<String>,
 }
 
+/// The live reader needs only provider-boundary metadata. A potentially large
+/// final engine response is decoded by the existing terminal verifier once.
+#[cfg(feature = "engine")]
+#[derive(Deserialize)]
+#[serde(tag = "message_type", rename_all = "snake_case", deny_unknown_fields)]
+enum NativeSessionJournalFrame {
+    HostEffectAdmitted {
+        schema_version: String,
+        nonce: String,
+        sequence: u64,
+        effect_kind: String,
+        request_hash: String,
+    },
+    HostEffectCompleted {
+        schema_version: String,
+        nonce: String,
+        sequence: u64,
+    },
+    Final {
+        #[serde(rename = "response")]
+        _response: serde::de::IgnoredAny,
+    },
+}
+
+#[cfg(feature = "engine")]
+fn native_effect_ack_hash(request_hash: &str) -> std::result::Result<[u8; 32], String> {
+    let hash = request_hash
+        .strip_prefix("sha256:")
+        .filter(|value| {
+            value.len() == 64
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+        .ok_or_else(|| "native effect admission has an invalid request commitment".to_string())?;
+    hex::decode(hash)
+        .map_err(|_| "native effect admission has an invalid request commitment".to_string())?
+        .try_into()
+        .map_err(|_| "native effect admission has an invalid request commitment length".to_string())
+}
+
+/// Owned by the response reader, never the supervisor's deadline loop. Each
+/// complete admission is signed and synchronized before its ACK is queued.
+#[cfg(feature = "engine")]
+struct NativeSessionDurableOutput {
+    nonce: String,
+    journal: crate::ops::native_session_journal::NativeSessionEffectJournalWriter,
+    commands: std::sync::mpsc::SyncSender<NativeSessionControlCommand>,
+    offset: usize,
+    started: bool,
+    final_seen: bool,
+    allow_test_harness_noise: bool,
+}
+
+#[cfg(feature = "engine")]
+impl NativeSessionDurableOutput {
+    fn observe(&mut self, output: &[u8]) -> std::result::Result<(), String> {
+        if !self.started {
+            if self.allow_test_harness_noise {
+                let Some(offset) = output
+                    .windows(NATIVE_SESSION_FRAME_MAGIC.len())
+                    .position(|window| window == NATIVE_SESSION_FRAME_MAGIC)
+                else {
+                    return Ok(());
+                };
+                self.offset = offset;
+            }
+            self.started = true;
+        }
+        while self.offset < output.len() {
+            if self.final_seen {
+                return if self.allow_test_harness_noise {
+                    Ok(())
+                } else {
+                    Err("native-session output followed its terminal response".to_string())
+                };
+            }
+            let remaining = &output[self.offset..];
+            if remaining.len() < NATIVE_SESSION_FRAME_HEADER_BYTES {
+                return Ok(());
+            }
+            if !remaining.starts_with(NATIVE_SESSION_FRAME_MAGIC) {
+                return Err("native-session live frame magic mismatch".to_string());
+            }
+            let version = u32::from_be_bytes(
+                remaining[12..16]
+                    .try_into()
+                    .map_err(|_| "invalid live frame version")?,
+            );
+            let payload_len = u64::from_be_bytes(
+                remaining[16..24]
+                    .try_into()
+                    .map_err(|_| "invalid live frame length")?,
+            );
+            if version != NATIVE_SESSION_PROTOCOL_VERSION
+                || payload_len > NATIVE_SESSION_MAX_RESPONSE_BYTES as u64
+            {
+                return Err(
+                    "native-session live frame version or byte bound is invalid".to_string()
+                );
+            }
+            let payload_bytes = usize::try_from(payload_len)
+                .map_err(|_| "native-session live frame length does not fit usize")?;
+            let frame_len = NATIVE_SESSION_FRAME_HEADER_BYTES
+                .checked_add(payload_bytes)
+                .ok_or_else(|| "native-session live frame length overflowed".to_string())?;
+            if remaining.len() < frame_len {
+                return Ok(());
+            }
+            let frame: NativeSessionJournalFrame = decode_native_session_frame(
+                &remaining[..frame_len],
+                NATIVE_SESSION_MAX_RESPONSE_BYTES,
+                false,
+            )?;
+            match frame {
+                NativeSessionJournalFrame::HostEffectAdmitted {
+                    schema_version,
+                    nonce,
+                    sequence,
+                    effect_kind,
+                    request_hash,
+                } => {
+                    self.validate_event(&schema_version, &nonce, payload_len)?;
+                    let hash = native_effect_ack_hash(&request_hash)?;
+                    self.journal
+                        .admit(sequence, &effect_kind, &request_hash)
+                        .map_err(|error| {
+                            format!("cannot durably admit native host effect: {error}")
+                        })?;
+                    self.commands
+                        .try_send(NativeSessionControlCommand::DurableEffectAdmitted {
+                            sequence,
+                            request_hash: hash,
+                        })
+                        .map_err(|_| {
+                            "durable effect admission ACK could not be queued".to_string()
+                        })?;
+                }
+                NativeSessionJournalFrame::HostEffectCompleted {
+                    schema_version,
+                    nonce,
+                    sequence,
+                } => {
+                    self.validate_event(&schema_version, &nonce, payload_len)?;
+                    self.journal.complete(sequence).map_err(|error| {
+                        format!("cannot retain native provider return: {error}")
+                    })?;
+                }
+                NativeSessionJournalFrame::Final { .. } => self.final_seen = true,
+            }
+            self.offset += frame_len;
+        }
+        Ok(())
+    }
+
+    fn validate_event(
+        &self,
+        schema: &str,
+        nonce: &str,
+        bytes: u64,
+    ) -> std::result::Result<(), String> {
+        if schema != NATIVE_EFFECT_WAL_SCHEMA
+            || nonce != self.nonce
+            || bytes > NATIVE_SESSION_MAX_EFFECT_WAL_EVENT_BYTES as u64
+        {
+            Err("native-session live effect frame has invalid authority or size".to_string())
+        } else {
+            Ok(())
+        }
+    }
+}
+
 #[cfg(feature = "engine")]
 fn parse_native_session_output(
     output: &[u8],
@@ -2413,6 +2587,27 @@ fn native_engine_spawn_error_with_telemetry_cleanup(
     }
 }
 
+/// Only provider-boundary events can be emitted by the write-ahead writer.
+/// These tags and fields match the corresponding NativeSessionOutputFrame
+/// variants; terminal responses retain their separate verifier and byte cap.
+#[cfg(feature = "engine")]
+#[derive(Serialize)]
+#[serde(tag = "message_type", rename_all = "snake_case")]
+enum NativeEffectWalFrame {
+    HostEffectAdmitted {
+        schema_version: String,
+        nonce: String,
+        sequence: u64,
+        effect_kind: String,
+        request_hash: String,
+    },
+    HostEffectCompleted {
+        schema_version: String,
+        nonce: String,
+        sequence: u64,
+    },
+}
+
 /// Worker-side writer for the parent-observed host-effect write-ahead stream.
 /// The cap reserves room for the completion marker before admitting an effect,
 /// so capacity exhaustion always refuses the provider call before execution.
@@ -2424,6 +2619,9 @@ struct NativeEffectWalWriter {
     emitted_events: usize,
     emitted_bytes: usize,
     failed: Option<String>,
+    admission_acks: NativeEffectAdmissionAcks,
+    #[cfg(test)]
+    unpersisted_fixture: bool,
 }
 
 #[cfg(feature = "engine")]
@@ -2442,7 +2640,11 @@ impl std::fmt::Debug for NativeEffectWalWriter {
 
 #[cfg(feature = "engine")]
 impl NativeEffectWalWriter {
-    fn new(nonce: String, sink: Box<dyn Write + Send>) -> Self {
+    fn new(
+        nonce: String,
+        sink: Box<dyn Write + Send>,
+        admission_acks: NativeEffectAdmissionAcks,
+    ) -> Self {
         Self {
             sink,
             nonce,
@@ -2450,10 +2652,14 @@ impl NativeEffectWalWriter {
             emitted_events: 0,
             emitted_bytes: 0,
             failed: None,
+            admission_acks,
+            #[cfg(test)]
+            unpersisted_fixture: false,
         }
     }
 
     fn fail(&mut self, message: String) -> String {
+        self.admission_acks.fail();
         if self.failed.is_none() {
             self.failed = Some(message);
         }
@@ -2462,7 +2668,7 @@ impl NativeEffectWalWriter {
             .unwrap_or_else(|| "native effect WAL failed".to_string())
     }
 
-    fn write_frame(&mut self, frame: &NativeSessionOutputFrame) -> std::result::Result<(), String> {
+    fn write_frame(&mut self, frame: &NativeEffectWalFrame) -> std::result::Result<(), String> {
         if let Some(error) = self.failed.as_ref() {
             return Err(error.clone());
         }
@@ -2480,7 +2686,7 @@ impl NativeEffectWalWriter {
         let new_total = self
             .emitted_bytes
             .checked_add(encoded.len())
-            .ok_or_else(|| "native effect WAL byte count overflowed".to_string())?;
+            .ok_or_else(|| self.fail("native effect WAL byte count overflowed".to_string()))?;
         if new_total > NATIVE_SESSION_MAX_EFFECT_WAL_STREAM_BYTES {
             return Err(self.fail(format!(
                 "native effect WAL reached the {}-byte cap",
@@ -2521,14 +2727,34 @@ impl NativeEffectWalWriter {
             )));
         }
         let sequence = self.next_sequence;
-        let frame = NativeSessionOutputFrame::HostEffectAdmitted {
+        let request_hash = native_effect_wal_request_hash(request)?;
+        let hash_bytes = native_effect_ack_hash(&request_hash)?;
+        self.admission_acks
+            .begin(sequence, hash_bytes)
+            .map_err(|error| {
+                self.fail(format!("cannot await durable effect admission: {error}"))
+            })?;
+        let frame = NativeEffectWalFrame::HostEffectAdmitted {
             schema_version: NATIVE_EFFECT_WAL_SCHEMA.to_string(),
             nonce: self.nonce.clone(),
             sequence,
             effect_kind: request.kind().to_string(),
-            request_hash: native_effect_wal_request_hash(request)?,
+            request_hash,
         };
         self.write_frame(&frame)?;
+        #[cfg(test)]
+        if self.unpersisted_fixture {
+            self.admission_acks
+                .acknowledge(sequence, hash_bytes)
+                .map_err(|error| self.fail(format!("fixture acknowledgment failed: {error}")))?;
+        }
+        self.admission_acks
+            .wait(sequence, hash_bytes)
+            .map_err(|error| {
+                self.fail(format!(
+                    "durable effect admission was not acknowledged: {error}"
+                ))
+            })?;
         self.next_sequence = self
             .next_sequence
             .checked_add(1)
@@ -2543,7 +2769,7 @@ impl NativeEffectWalWriter {
                 "native effect WAL completion sequence {sequence} did not match pending sequence {expected}"
             )));
         }
-        let frame = NativeSessionOutputFrame::HostEffectCompleted {
+        let frame = NativeEffectWalFrame::HostEffectCompleted {
             schema_version: NATIVE_EFFECT_WAL_SCHEMA.to_string(),
             nonce: self.nonce.clone(),
             sequence,
@@ -2562,12 +2788,29 @@ struct NativeEffectWalEmitter {
 
 #[cfg(feature = "engine")]
 impl NativeEffectWalEmitter {
-    fn new(nonce: String, sink: Box<dyn Write + Send>) -> Self {
+    fn new(
+        nonce: String,
+        sink: Box<dyn Write + Send>,
+        admission_acks: NativeEffectAdmissionAcks,
+    ) -> Self {
         Self {
-            writer: Arc::new(Mutex::new(NativeEffectWalWriter::new(nonce, sink))),
+            writer: Arc::new(Mutex::new(NativeEffectWalWriter::new(
+                nonce,
+                sink,
+                admission_acks,
+            ))),
             #[cfg(feature = "test-support")]
             panic_after_host_effect: false,
         }
+    }
+
+    /// Isolated codec/provider fixtures do not represent a supervised launch.
+    /// Production construction always requires the authenticated ACK gate.
+    #[cfg(test)]
+    fn unpersisted_fixture(nonce: String, sink: Box<dyn Write + Send>) -> Self {
+        let emitter = Self::new(nonce, sink, NativeEffectAdmissionAcks::new());
+        emitter.writer.lock().unwrap().unpersisted_fixture = true;
+        emitter
     }
 
     #[cfg(feature = "test-support")]
@@ -2595,7 +2838,7 @@ impl NativeEffectWalEmitter {
 
 /// Provider decorator placed inside the product policy gates and immediately
 /// outside the real filesystem/network mechanism. Only effects that have
-/// passed policy reach this boundary. Admission is flushed before I/O; a
+/// passed policy reach this boundary. Admission is durably acknowledged before I/O; a
 /// completion marker is attempted after the provider returns.
 #[cfg(feature = "engine")]
 #[derive(Debug)]
@@ -2816,10 +3059,29 @@ fn observe_native_session_cancellation(
     reader: &mut impl Read,
     expected_nonce: &str,
     cancellation: &NativeEngineCancellation,
+    admission_acks: &NativeEffectAdmissionAcks,
 ) -> io::Result<()> {
     loop {
-        crate::ops::native_session_control::read_cancel_request(reader, expected_nonce)?;
-        cancellation.request_cancel();
+        let frame =
+            match crate::ops::native_session_control::read_control_frame(reader, expected_nonce) {
+                Ok(frame) => frame,
+                Err(error) => {
+                    admission_acks.fail();
+                    return Err(error);
+                }
+            };
+        match frame {
+            NativeSessionControlFrame::Cancel => {
+                admission_acks.cancel();
+                cancellation.request_cancel();
+            }
+            NativeSessionControlFrame::DurableEffectAdmitted {
+                sequence,
+                request_hash,
+            } => {
+                admission_acks.acknowledge(sequence, request_hash)?;
+            }
+        }
     }
 }
 
@@ -2842,6 +3104,10 @@ fn native_session_control_drain_deadline(
 #[derive(Debug, Clone, Copy)]
 enum NativeSessionControlCommand {
     Cancel,
+    DurableEffectAdmitted {
+        sequence: u64,
+        request_hash: [u8; 32],
+    },
     Release,
 }
 
@@ -2850,6 +3116,7 @@ struct NativeSessionRequestWriter {
     commands: std::sync::mpsc::SyncSender<NativeSessionControlCommand>,
     worker: thread::JoinHandle<()>,
     outcome: std::sync::mpsc::Receiver<std::result::Result<(), String>>,
+    release_requested: Arc<AtomicBool>,
 }
 
 /// All potentially blocking control writes belong to this owned thread. The
@@ -2860,9 +3127,12 @@ fn spawn_native_session_request_writer(
     mut stream: impl Write + Send + 'static,
     mut request_frame: Zeroizing<Vec<u8>>,
     nonce: String,
+    commands: std::sync::mpsc::SyncSender<NativeSessionControlCommand>,
+    receiver: std::sync::mpsc::Receiver<NativeSessionControlCommand>,
 ) -> io::Result<NativeSessionRequestWriter> {
     let (sender, outcome) = std::sync::mpsc::channel();
-    let (commands, receiver) = std::sync::mpsc::sync_channel(1);
+    let release_requested = Arc::new(AtomicBool::new(false));
+    let release_for_worker = Arc::clone(&release_requested);
     let worker = thread::Builder::new()
         .name("franken-node-native-request-writer".to_string())
         .spawn(move || {
@@ -2873,7 +3143,12 @@ fn spawn_native_session_request_writer(
             // serialized per-session signing seed does not need that lifetime.
             request_frame.zeroize();
             if result.is_ok() {
-                while let Ok(command) = receiver.recv() {
+                while !release_for_worker.load(Ordering::Acquire) {
+                    let command = match receiver.recv_timeout(NATIVE_RUN_CONTROL_POLL_INTERVAL) {
+                        Ok(command) => command,
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                    };
                     match command {
                         NativeSessionControlCommand::Cancel => {
                             if let Err(error) =
@@ -2884,6 +3159,24 @@ fn spawn_native_session_request_writer(
                             {
                                 result = Err(format!(
                                     "failed requesting native-session cancellation: {error}"
+                                ));
+                                break;
+                            }
+                        }
+                        NativeSessionControlCommand::DurableEffectAdmitted {
+                            sequence,
+                            request_hash,
+                        } => {
+                            if let Err(error) =
+                                crate::ops::native_session_control::write_effect_admission_ack(
+                                    &mut stream,
+                                    &nonce,
+                                    sequence,
+                                    request_hash,
+                                )
+                            {
+                                result = Err(format!(
+                                    "failed acknowledging durable effect admission: {error}"
                                 ));
                                 break;
                             }
@@ -2899,6 +3192,7 @@ fn spawn_native_session_request_writer(
         commands,
         worker,
         outcome,
+        release_requested,
     })
 }
 
@@ -2911,10 +3205,14 @@ fn receive_native_session_request_writer(
         commands,
         worker,
         outcome,
+        release_requested,
     } = writer;
+    // A journal reader may still own a sender while fsync is blocked. Release
+    // must not depend on every sender being dropped or an empty command slot.
+    release_requested.store(true, Ordering::Release);
     let _ = commands.try_send(NativeSessionControlCommand::Release);
-    // If a Cancel already fills the single slot, disconnection ends the loop
-    // after that command. Cleanup must never block while enqueueing Release.
+    // A full slot may contain an ACK or cancellation. The release flag also
+    // ends the loop; cleanup never blocks while enqueueing Release.
     drop(commands);
     match outcome.recv_timeout(crate::config::timeouts::ENGINE_DISPATCH_PIPE_READER_TIMEOUT) {
         Ok(write_result) => {
@@ -8604,7 +8902,7 @@ impl EngineDispatcher {
 
         // Read exactly one bounded frame without waiting for EOF. The parent
         // deliberately keeps stdin open for the rest of the session; a
-        // watchdog below accepts only nonce-bound cancellation requests. EOF or
+        // watchdog accepts nonce-bound cancellation and durable admission ACKs. EOF or
         // a protocol fault still aborts this worker before it can outlive the
         // supervising process (including after SIGKILL).
         let mut locked_stdin = stdin.lock();
@@ -8615,6 +8913,8 @@ impl EngineDispatcher {
         drop(locked_stdin);
         let cancellation = NativeEngineCancellation::new();
         let cancellation_for_control = cancellation.clone();
+        let admission_acks = NativeEffectAdmissionAcks::new();
+        let acknowledgements_for_control = admission_acks.clone();
         let control_nonce = expected_nonce.to_string();
         let _parent_liveness_watchdog = thread::Builder::new()
             .name("franken-node-native-parent-watchdog".to_string())
@@ -8625,6 +8925,7 @@ impl EngineDispatcher {
                     &mut control,
                     &control_nonce,
                     &cancellation_for_control,
+                    &acknowledgements_for_control,
                 );
                 // Cancellation never releases parent liveness: continue
                 // reading until EOF/failure, then abort even while draining.
@@ -8818,7 +9119,8 @@ impl EngineDispatcher {
         let app_args = request.app_args;
         let capture_replay = request.capture_replay;
         let nonce = request.nonce;
-        let effect_wal = NativeEffectWalEmitter::new(nonce.clone(), Box::new(io::stdout()));
+        let effect_wal =
+            NativeEffectWalEmitter::new(nonce.clone(), Box::new(io::stdout()), admission_acks);
         #[cfg(feature = "test-support")]
         let effect_wal = effect_wal.with_post_effect_panic_marker(project_paths.entrypoint());
         let spawned = spawn_caught_native_engine_worker(cleanup_for_worker, move || {
@@ -9082,6 +9384,8 @@ impl EngineDispatcher {
             mut stream: impl Read + Send + 'static,
             cap: usize,
             label: &'static str,
+            mut durable: Option<NativeSessionDurableOutput>,
+            durable_failure: Option<mpsc::SyncSender<String>>,
         ) -> io::Result<(
             thread::JoinHandle<()>,
             mpsc::Receiver<std::result::Result<BoundedPipeRead, String>>,
@@ -9102,9 +9406,26 @@ impl EngineDispatcher {
                                     output.extend_from_slice(&chunk[..count.min(available)]);
                                 }
                                 exceeded |= count > available;
+                                if let Some(observer) = durable.as_mut() {
+                                    let result = if exceeded {
+                                        Err("native-session output exceeded its durable reader bound".to_string())
+                                    } else {
+                                        observer.observe(&output)
+                                    };
+                                    if let Err(error) = result {
+                                        if let Some(failure) = &durable_failure {
+                                            let _ = failure.try_send(error.clone());
+                                        }
+                                        let _ = sender.send(Err(error));
+                                        return;
+                                    }
+                                }
                             }
                             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                             Err(error) => {
+                                if let Some(failure) = &durable_failure {
+                                    let _ = failure.try_send(format!("native-session live reader failed: {error}"));
+                                }
                                 let _ = sender.send(Err(format!(
                                     "failed reading native-session {label}: {error}"
                                 )));
@@ -9568,6 +9889,8 @@ impl EngineDispatcher {
             admission_generation,
         )
         .context("native-session inventory admission failed; worker was not started")?;
+        let effect_journal = session_inventory.prepare_effect_journal()
+            .context("native-session durable effect journal could not be established; worker was not started")?;
         let request = NativeSessionRequest {
             schema_version: NATIVE_SESSION_SCHEMA.to_string(),
             nonce: nonce.clone(),
@@ -9881,10 +10204,23 @@ impl EngineDispatcher {
                 }
             }
         }
+        let (control_commands, control_receiver) = mpsc::sync_channel(1);
+        let (durable_failure_sender, durable_failures) = mpsc::sync_channel(1);
+        let durable_output = NativeSessionDurableOutput {
+            nonce: nonce.clone(),
+            journal: effect_journal,
+            commands: control_commands.clone(),
+            offset: 0,
+            started: false,
+            final_seen: false,
+            allow_test_harness_noise: cfg!(test),
+        };
         let stdout_reader = match spawn_bounded_reader(
             stdout,
             NATIVE_SESSION_MAX_OUTPUT_STREAM_BYTES,
             "response",
+            Some(durable_output),
+            Some(durable_failure_sender),
         ) {
             Ok(reader) => reader,
             Err(error) => {
@@ -9915,6 +10251,8 @@ impl EngineDispatcher {
             stderr,
             NATIVE_SESSION_MAX_DIAGNOSTIC_BYTES,
             "diagnostics",
+            None,
+            None,
         ) {
             Ok(reader) => reader,
             Err(error) => {
@@ -9971,6 +10309,8 @@ impl EngineDispatcher {
             stdin,
             request_frame,
             nonce.clone(),
+            control_commands,
+            control_receiver,
         ) {
             Ok(writer) => writer,
             Err(error) => {
@@ -9998,6 +10338,24 @@ impl EngineDispatcher {
         };
 
         let status = loop {
+            if let Ok(error) = durable_failures.try_recv() {
+                let cleanup = native_session_cleanup_failure(
+                    kill_and_reap_native_session(&mut child, &containment, &mut session_inventory),
+                    Some(receive_native_session_request_writer(request_writer, true)),
+                    Some(receive_reader(stdout_reader, "response")),
+                    Some(receive_reader(stderr_reader, "diagnostics")),
+                );
+                return Err(EngineDispatchError::EngineExecutionError {
+                    app_path: app_path_buf,
+                    error_message: cleanup.map_or_else(
+                        || error.clone(),
+                        |cleanup| format!("{error}; cleanup: {cleanup}"),
+                    ),
+                    phase: "durable host-effect admission".to_string(),
+                }
+                .to_actionable()
+                .into());
+            }
             // This only polls the child and bounded observer channel. Policy
             // store reads cannot block either the deadline or completion.
             match control_monitor.poll_session(&mut child, started, timeout) {
@@ -14001,6 +14359,7 @@ mod tests {
                 &mut io::Cursor::new(requests),
                 nonce,
                 &observer_cancellation,
+                &NativeEffectAdmissionAcks::new(),
             )
             .expect_err("EOF remains a parent-liveness failure after cancellation");
             observed.send(error.kind()).unwrap();
@@ -14029,6 +14388,7 @@ mod tests {
                     &mut io::Cursor::new(bytes),
                     nonce,
                     &cancellation,
+                    &NativeEffectAdmissionAcks::new(),
                 )
                 .is_err()
             );
@@ -14050,10 +14410,13 @@ mod tests {
         worker
             .set_read_timeout(Some(Duration::from_millis(30)))
             .unwrap();
+        let (commands, receiver) = std::sync::mpsc::sync_channel(1);
         let writer = spawn_native_session_request_writer(
             parent,
             Zeroizing::new(b"initial-request".to_vec()),
             nonce.to_string(),
+            commands,
+            receiver,
         )
         .unwrap();
         let mut request = [0_u8; 15];
@@ -14102,10 +14465,13 @@ mod tests {
         }
         let (entered, writing) = std::sync::mpsc::sync_channel(1);
         let (terminate, release) = std::sync::mpsc::sync_channel(1);
+        let (commands, receiver) = std::sync::mpsc::sync_channel(1);
         let writer = spawn_native_session_request_writer(
             BlockedWriter { entered, release },
             Zeroizing::new(vec![1]),
             "00000000-0000-4000-8000-000000000184".to_string(),
+            commands,
+            receiver,
         )
         .unwrap();
         writing
@@ -14123,6 +14489,71 @@ mod tests {
         ));
         terminate.send(()).unwrap();
         receive_native_session_request_writer(writer, true).unwrap();
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn native_control_writer_release_survives_a_full_queue_and_retained_sender() {
+        use std::time::Duration;
+
+        struct PausedInitialWrite {
+            entered: std::sync::mpsc::SyncSender<()>,
+            resume: std::sync::mpsc::Receiver<()>,
+        }
+        impl Write for PausedInitialWrite {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.entered.send(()).map_err(io::Error::other)?;
+                self.resume
+                    .recv_timeout(Duration::from_secs(5))
+                    .map_err(io::Error::other)?;
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let (entered, writing) = std::sync::mpsc::sync_channel(1);
+        let (resume, paused) = std::sync::mpsc::sync_channel(1);
+        let (commands, receiver) = std::sync::mpsc::sync_channel(1);
+        let writer = spawn_native_session_request_writer(
+            PausedInitialWrite {
+                entered,
+                resume: paused,
+            },
+            Zeroizing::new(vec![1]),
+            "00000000-0000-4000-8000-000000000185".to_string(),
+            commands,
+            receiver,
+        )
+        .unwrap();
+        writing.recv_timeout(Duration::from_secs(5)).unwrap();
+        // Model the journal reader retaining its sender during a blocked fsync.
+        let retained_sender = writer.commands.clone();
+        retained_sender
+            .try_send(NativeSessionControlCommand::Cancel)
+            .unwrap();
+        assert!(matches!(
+            retained_sender.try_send(NativeSessionControlCommand::Release),
+            Err(std::sync::mpsc::TrySendError::Full(_)),
+        ));
+        let release_requested = Arc::clone(&writer.release_requested);
+        let (finished, result) = std::sync::mpsc::sync_channel(1);
+        let cleanup = thread::spawn(move || {
+            let _ = finished.send(receive_native_session_request_writer(writer, false));
+        });
+        let started = Instant::now();
+        while !release_requested.load(Ordering::Acquire) {
+            assert!(started.elapsed() < Duration::from_secs(5));
+            thread::yield_now();
+        }
+        resume.send(()).unwrap();
+        result
+            .recv_timeout(Duration::from_secs(5))
+            .expect("release cannot depend on the reader dropping its sender")
+            .unwrap();
+        cleanup.join().unwrap();
+        drop(retained_sender);
     }
 
     #[cfg(feature = "engine")]
@@ -14148,7 +14579,7 @@ mod tests {
         let gate = CancellationGatedHostIo::new(
             Arc::new(WriteAheadHostIo::new(
                 CancelledProvider(Arc::clone(&calls)),
-                Some(NativeEffectWalEmitter::new(
+                Some(NativeEffectWalEmitter::unpersisted_fixture(
                     "00000000-0000-4000-8000-000000000185".to_string(),
                     Box::new(io::sink()),
                 )),
@@ -24713,7 +25144,7 @@ exec "$2" pinned-worker-image"#,
         let bytes = Arc::new(Mutex::new(Vec::new()));
         let flushed = Arc::new(AtomicBool::new(false));
         let calls = Arc::new(AtomicUsize::new(0));
-        let emitter = NativeEffectWalEmitter::new(
+        let emitter = NativeEffectWalEmitter::unpersisted_fixture(
             nonce.to_string(),
             Box::new(SharedFlushSink {
                 bytes: Arc::clone(&bytes),
@@ -24746,7 +25177,7 @@ exec "$2" pinned-worker-image"#,
         let refused_calls = Arc::new(AtomicUsize::new(0));
         let failing_provider = WriteAheadHostIo::new(
             CountingHostIo(Arc::clone(&refused_calls)),
-            Some(NativeEffectWalEmitter::new(
+            Some(NativeEffectWalEmitter::unpersisted_fixture(
                 nonce.to_string(),
                 Box::new(FailingSink),
             )),
@@ -24760,7 +25191,8 @@ exec "$2" pinned-worker-image"#,
         ));
         assert_eq!(refused_calls.load(Ordering::Acquire), 0);
 
-        let capped_emitter = NativeEffectWalEmitter::new(nonce.to_string(), Box::new(io::sink()));
+        let capped_emitter =
+            NativeEffectWalEmitter::unpersisted_fixture(nonce.to_string(), Box::new(io::sink()));
         capped_emitter
             .writer
             .lock()
@@ -24784,6 +25216,392 @@ exec "$2" pinned-worker-image"#,
                 + NATIVE_SESSION_FRAME_HEADER_BYTES
                 + NATIVE_SESSION_MAX_RESPONSE_BYTES
         );
+    }
+
+    #[cfg(feature = "engine")]
+    #[allow(clippy::type_complexity)]
+    fn durable_observer_fixture() -> (
+        tempfile::TempDir,
+        NativeSessionDurableOutput,
+        std::sync::mpsc::Receiver<NativeSessionControlCommand>,
+        ed25519_dalek::VerifyingKey,
+        PathBuf,
+    ) {
+        let directory = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))
+                .unwrap();
+        }
+        let nonce = "019a7f53-c180-7001-8001-000000000073";
+        let key = ed25519_dalek::SigningKey::from_bytes(&[73; 32]);
+        let public_key = key.verifying_key();
+        let journal = crate::ops::native_session_journal::NativeSessionEffectJournalWriter::create(
+            directory.path(),
+            nonce,
+            &format!("ed25519:{}", hex::encode(public_key.as_bytes())),
+            &"ab".repeat(32),
+            key,
+        )
+        .unwrap();
+        let path = crate::ops::native_session_journal::native_session_effect_journal_path(
+            directory.path(),
+            nonce,
+        );
+        let (commands, receiver) = std::sync::mpsc::sync_channel(1);
+        let observer = NativeSessionDurableOutput {
+            nonce: nonce.to_string(),
+            journal,
+            commands,
+            offset: 0,
+            started: false,
+            final_seen: false,
+            allow_test_harness_noise: false,
+        };
+        (directory, observer, receiver, public_key, path)
+    }
+
+    #[cfg(feature = "engine")]
+    fn durable_observer_admission(nonce: &str, sequence: u64) -> Vec<u8> {
+        encode_native_session_frame(
+            &serde_json::json!({
+                "message_type": "host_effect_admitted", "schema_version": NATIVE_EFFECT_WAL_SCHEMA,
+                "nonce": nonce, "sequence": sequence, "effect_kind": "fs_write",
+                "request_hash": format!("sha256:{}", "ab".repeat(32)),
+            }),
+            NATIVE_SESSION_MAX_EFFECT_WAL_EVENT_BYTES,
+        )
+        .unwrap()
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn durable_wal_frames_decode_in_the_terminal_protocol() {
+        let nonce = "019a7f53-c180-7001-8001-000000000073";
+        let frames = [
+            NativeEffectWalFrame::HostEffectAdmitted {
+                schema_version: NATIVE_EFFECT_WAL_SCHEMA.to_string(),
+                nonce: nonce.to_string(),
+                sequence: 0,
+                effect_kind: "fs_write".to_string(),
+                request_hash: format!("sha256:{}", "ab".repeat(32)),
+            },
+            NativeEffectWalFrame::HostEffectCompleted {
+                schema_version: NATIVE_EFFECT_WAL_SCHEMA.to_string(),
+                nonce: nonce.to_string(),
+                sequence: 0,
+            },
+        ];
+        for frame in frames {
+            let encoded =
+                encode_native_session_frame(&frame, NATIVE_SESSION_MAX_EFFECT_WAL_EVENT_BYTES)
+                    .unwrap();
+            let decoded: NativeSessionOutputFrame = decode_native_session_frame(
+                &encoded,
+                NATIVE_SESSION_MAX_EFFECT_WAL_EVENT_BYTES,
+                false,
+            )
+            .unwrap();
+            assert_eq!(
+                encoded,
+                encode_native_session_frame(&decoded, NATIVE_SESSION_MAX_EFFECT_WAL_EVENT_BYTES)
+                    .unwrap()
+            );
+        }
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn durable_provider_entry_waits_for_the_retained_admission_ack() {
+        use frankenengine_extension_host::host_io::SandboxedHostIo;
+        use std::sync::mpsc::{RecvTimeoutError, channel};
+        use std::time::Duration;
+
+        struct FlushedFrames {
+            bytes: Vec<u8>,
+            sender: std::sync::mpsc::Sender<Vec<u8>>,
+        }
+
+        impl Write for FlushedFrames {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.bytes.extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                self.sender
+                    .send(std::mem::take(&mut self.bytes))
+                    .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "test observer closed"))
+            }
+        }
+
+        struct WakeOnDrop(NativeEffectAdmissionAcks);
+
+        impl Drop for WakeOnDrop {
+            fn drop(&mut self) {
+                self.0.fail();
+            }
+        }
+
+        let (directory, mut observer, commands, key, journal_path) = durable_observer_fixture();
+        let gate = NativeEffectAdmissionAcks::new();
+        let _wake_on_panic = WakeOnDrop(gate.clone());
+        let (frames, observed_frames) = channel();
+        let emitter = NativeEffectWalEmitter::new(
+            observer.nonce.clone(),
+            Box::new(FlushedFrames {
+                bytes: Vec::new(),
+                sender: frames,
+            }),
+            gate.clone(),
+        );
+        let provider = WriteAheadHostIo::new(
+            SandboxedHostIo::with_root(directory.path()).unwrap(),
+            Some(emitter),
+        );
+        let marker = directory.path().join("durable-marker");
+        let (outcome, completed) = channel();
+        let worker = thread::spawn(move || {
+            let result = provider.perform(
+                &HostIoRequest::FsWrite {
+                    path: "durable-marker".to_string(),
+                    data: b"entered".to_vec(),
+                },
+                &[HostIoCapability::FsWrite],
+            );
+            let _ = outcome.send(result);
+        });
+        let mut output = observed_frames
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+        assert!(
+            matches!(
+                completed.recv_timeout(Duration::from_millis(100)),
+                Err(RecvTimeoutError::Timeout)
+            ),
+            "flushing the admission must not authorize provider entry"
+        );
+        assert!(!marker.exists());
+        observer.observe(&output).unwrap();
+        let NativeSessionControlCommand::DurableEffectAdmitted {
+            sequence,
+            request_hash,
+        } = commands.recv_timeout(Duration::from_secs(5)).unwrap()
+        else {
+            panic!("expected exact durable admission acknowledgment");
+        };
+        let retained =
+            frankenengine_verifier_sdk::native_session::verify_native_session_effect_journal(
+                &std::fs::read(&journal_path).unwrap(),
+                &key,
+                &observer.nonce,
+                &"ab".repeat(32),
+            )
+            .unwrap();
+        assert_eq!(retained.admitted_provider_calls, 1);
+        assert_eq!(retained.returned_provider_calls, 0);
+        assert_eq!(retained.indeterminate_provider_calls, 1);
+        assert!(
+            !marker.exists(),
+            "retention alone must not release the worker gate"
+        );
+        gate.acknowledge(sequence, request_hash).unwrap();
+        completed
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .expect("ACK permits the real provider");
+        worker.join().unwrap();
+        assert_eq!(std::fs::read(&marker).unwrap().as_slice(), b"entered");
+        output.extend(
+            observed_frames
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap(),
+        );
+        observer.observe(&output).unwrap();
+        let returned =
+            frankenengine_verifier_sdk::native_session::verify_native_session_effect_journal(
+                &std::fs::read(&journal_path).unwrap(),
+                &key,
+                &observer.nonce,
+                &"ab".repeat(32),
+            )
+            .unwrap();
+        assert_eq!(returned.admitted_provider_calls, 1);
+        assert_eq!(returned.returned_provider_calls, 1);
+        assert_eq!(returned.indeterminate_provider_calls, 0);
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn durable_admission_flush_failure_revokes_a_queued_matching_ack() {
+        use frankenengine_extension_host::host_io::SandboxedHostIo;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct AckThenFailFlush {
+            gate: NativeEffectAdmissionAcks,
+            hash: [u8; 32],
+            flushes: Arc<AtomicUsize>,
+        }
+
+        impl Write for AckThenFailFlush {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                self.flushes.fetch_add(1, Ordering::AcqRel);
+                self.gate.acknowledge(0, self.hash)?;
+                Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "failed after a matching ACK was queued",
+                ))
+            }
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let request = HostIoRequest::FsWrite {
+            path: "must-not-exist".to_string(),
+            data: b"entered".to_vec(),
+        };
+        let gate = NativeEffectAdmissionAcks::new();
+        let flushes = Arc::new(AtomicUsize::new(0));
+        let hash =
+            native_effect_ack_hash(&native_effect_wal_request_hash(&request).unwrap()).unwrap();
+        let emitter = NativeEffectWalEmitter::new(
+            "019a7f53-c180-7001-8001-000000000073".to_string(),
+            Box::new(AckThenFailFlush {
+                gate: gate.clone(),
+                hash,
+                flushes: Arc::clone(&flushes),
+            }),
+            gate.clone(),
+        );
+        let provider = WriteAheadHostIo::new(
+            SandboxedHostIo::with_root(directory.path()).unwrap(),
+            Some(emitter),
+        );
+        for _ in 0..2 {
+            let error = provider
+                .perform(&request, &[HostIoCapability::FsWrite])
+                .expect_err("a failed admission flush must refuse provider entry and every retry");
+            assert!(matches!(error, HostIoError::Denied { .. }));
+            assert!(!directory.path().join("must-not-exist").exists());
+        }
+        assert_eq!(flushes.load(Ordering::Acquire), 1);
+        assert!(gate.acknowledge(0, hash).is_err());
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn durable_observer_ack_requires_a_complete_authenticated_and_persisted_frame() {
+        let (_directory, mut observer, receiver, key, path) = durable_observer_fixture();
+        let frame = durable_observer_admission(&observer.nonce, 0);
+        let header = std::fs::read(&path).unwrap();
+        for end in 0..frame.len() {
+            observer.observe(&frame[..end]).unwrap();
+            assert!(matches!(
+                receiver.try_recv(),
+                Err(std::sync::mpsc::TryRecvError::Empty)
+            ));
+        }
+        assert_eq!(std::fs::read(&path).unwrap(), header);
+        observer.observe(&frame).unwrap();
+        assert!(
+            matches!(receiver.try_recv().unwrap(), NativeSessionControlCommand::DurableEffectAdmitted {
+            sequence: 0, request_hash,
+        } if request_hash == [0xab; 32])
+        );
+        let retained =
+            frankenengine_verifier_sdk::native_session::verify_native_session_effect_journal(
+                &std::fs::read(&path).unwrap(),
+                &key,
+                &observer.nonce,
+                &"ab".repeat(32),
+            )
+            .unwrap();
+        assert_eq!(retained.admitted_provider_calls, 1);
+        assert_eq!(retained.returned_provider_calls, 0);
+        assert_eq!(retained.indeterminate_provider_calls, 1);
+        assert!(!retained.historical_completeness);
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn durable_observer_rejects_corrupt_foreign_and_failed_admission_without_ack() {
+        for mutation in 0..3 {
+            let (_directory, mut observer, receiver, _key, path) = durable_observer_fixture();
+            let before = std::fs::read(&path).unwrap();
+            let mut frame = match mutation {
+                0 => durable_observer_admission("019a7f53-c180-7001-8001-000000000074", 0),
+                1 => durable_observer_admission(&observer.nonce, 5),
+                _ => durable_observer_admission(&observer.nonce, 0),
+            };
+            if mutation == 2 {
+                *frame.last_mut().unwrap() ^= 1;
+            }
+            assert!(observer.observe(&frame).is_err());
+            assert!(matches!(
+                receiver.try_recv(),
+                Err(std::sync::mpsc::TryRecvError::Empty)
+            ));
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+            if mutation == 1 {
+                let valid = durable_observer_admission(&observer.nonce, 0);
+                assert!(
+                    observer.observe(&valid).is_err(),
+                    "a failed store must never resume admission"
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn durable_observer_retains_return_before_next_ack_and_rejects_post_final_effects() {
+        let (_directory, mut observer, receiver, key, path) = durable_observer_fixture();
+        let mut stream = durable_observer_admission(&observer.nonce, 0);
+        observer.observe(&stream).unwrap();
+        receiver.try_recv().unwrap();
+        stream.extend(encode_native_session_frame(&serde_json::json!({
+            "message_type": "host_effect_completed", "schema_version": NATIVE_EFFECT_WAL_SCHEMA,
+            "nonce": observer.nonce, "sequence": 0,
+        }), NATIVE_SESSION_MAX_EFFECT_WAL_EVENT_BYTES).unwrap());
+        stream.extend(durable_observer_admission(&observer.nonce, 1));
+        observer.observe(&stream).unwrap();
+        assert!(matches!(
+            receiver.try_recv().unwrap(),
+            NativeSessionControlCommand::DurableEffectAdmitted { sequence: 1, .. }
+        ));
+        let retained =
+            frankenengine_verifier_sdk::native_session::verify_native_session_effect_journal(
+                &std::fs::read(&path).unwrap(),
+                &key,
+                &observer.nonce,
+                &"ab".repeat(32),
+            )
+            .unwrap();
+        assert_eq!(retained.admitted_provider_calls, 2);
+        assert_eq!(retained.returned_provider_calls, 1);
+        assert_eq!(retained.indeterminate_provider_calls, 1);
+        stream.extend(
+            encode_native_session_frame(
+                &serde_json::json!({
+                    "message_type": "final", "response": {},
+                }),
+                NATIVE_SESSION_MAX_RESPONSE_BYTES,
+            )
+            .unwrap(),
+        );
+        observer.observe(&stream).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        stream.extend(durable_observer_admission(&observer.nonce, 2));
+        assert!(observer.observe(&stream).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
     }
 
     #[cfg(feature = "engine")]

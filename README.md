@@ -1192,10 +1192,12 @@ franken-node fleet sessions --project /srv/application --json
 
 The records live in the existing protected runtime-evidence directory outside
 guest source, using durable SQLite transactions. Admissions are bounded to
-16,384 retained records and 256 MiB of reserved record bytes; each pending
+16,384 retained records and 256 MiB of reserved database record bytes; each pending
 admission reserves 5 MiB for its maximum outcome, covering the existing effect
-journal and diagnostic bounds. The byte limit can therefore be reached before
-the record limit. Capacity exhaustion refuses new workers while retaining
+journal and diagnostic bounds. Separate signed provider-journal files each have
+a 4 MiB limit; that storage is additional to the database record budget. The
+database byte limit can be reached before the record limit. Capacity exhaustion
+refuses new workers while retaining
 earlier obligations. The inventory never evicts a session to make room for another.
 
 This command reports local supervisor observations, with
@@ -2336,9 +2338,28 @@ remain nonzero failures, produce no fabricated finalized host-effect ledger or
 automatic replay capture, and remain visible as source errors in incident
 coverage. `incident capture --from-run` explicitly refuses to certify them.
 
+Native host-I/O admissions now survive supervisor loss. Before starting a
+worker, the supervisor creates a private signed journal bound to the original
+signed session admission. For each filesystem or network provider call that
+passes the existing policy gates, the worker sends its sequence and request
+commitment, then waits. The supervisor signs, appends and synchronizes that
+admission before acknowledging the exact request over the authenticated
+control channel. Only that acknowledgment releases the provider. A storage,
+transport or acknowledgment failure refuses the call; cancellation and lost
+parent liveness wake a waiting worker without granting it permission.
+
+Provider-return markers are retained separately after the call returns. A
+crash between admission and a retained return leaves an indeterminate call,
+even if the external operation actually completed. The journal is bounded to
+2,048 effect events and 4 MiB, and reserves room for a return before admitting
+another call. Storage synchronization runs outside the supervisor's deadline
+loop. The private worker protocol is v9; older configured workers cannot
+accept this acknowledgment contract.
+
 The retained supervisor evidence can be exported separately, including after
 the original application or project has been moved. Select a session UUID from
-`fleet sessions --json`, then choose an operator-controlled destination:
+`incident sessions --json`, which also reports verified durable-journal counts,
+then choose an operator-controlled destination:
 
 ```bash
 franken-node incident capture --from-session SESSION_UUID \
@@ -2358,6 +2379,14 @@ cross-session outcomes and inconsistent journal states are rejected. Its bounded
 summary includes the session, project, observation state and effect counts; the
 private panic text and request commitments remain in the artifact.
 
+Exports containing a retained journal use
+`franken-node/native-session-forensics/v2` with a 32 MiB artifact limit;
+historical v1 exports remain supported with their original 16 MiB limit. The
+verifier authenticates each journal record, its hash-chain predecessor and its
+binding to the admission, and checks agreement with any signed terminal
+observation. A final incomplete line can leave a verified prefix with
+`trailing_partial_record: true`; a malformed complete record is rejected.
+
 Session export opens existing protected evidence read-only. It does not create
 replacement authority, repair the inventory or retry an effect. Publication uses
 an owner-only staged file, a durable sync and an atomic no-clobber operation;
@@ -2366,15 +2395,19 @@ existing output is preserved. Without `--out`, the destination is
 and `--from-run` are mutually exclusive, and `--severity` applies only to run
 capture because session export preserves the original signed observations.
 
-A missing signed outcome yields an admission-only `pending` export, even if an
-unsigned database projection claims completion. Missing admission authority,
+A missing signed outcome yields a `pending` export, including any independently
+verified durable journal, even if an unsigned database projection claims
+completion. Missing admission authority,
 corrupt retained evidence or disagreement with a signed outcome refuses export.
 These artifacts establish authenticated supervisor observations. They carry
 `replay_certified: false`, `quiescence_certified: false` and
 `historical_completeness: false`, and do not increase incident replay coverage.
-In particular, if the parent dies before retaining its terminal outcome, this
-export cannot recover the in-memory effect stream or certify that a worker or
-external effect has stopped. Durable pre-effect journaling remains separate work.
+If the parent dies before retaining its terminal outcome, the durable provider
+prefix remains exportable and the session stays pending. It cannot certify that
+a worker or external effect has stopped. Journal scope is
+`host_io_provider_calls`; process spawning and the captured environment snapshot
+use separate paths. Original replay sources are not recovered from this journal,
+and a signed prefix alone cannot establish that later records were never lost.
 
 Live controls can also stop a worker cooperatively. When that worker returns a
 valid final response within the bounded drain period, the interruption envelope
