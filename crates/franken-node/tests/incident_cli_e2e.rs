@@ -2087,7 +2087,10 @@ fn incident_coverage_preserves_distinct_zero_effect_security_decisions_without_r
                 .expect("retain unreadable failed-run receipt");
         }
         let result = coverage();
-        assert!(!result.status.success(), "missing evidence cannot establish coverage");
+        assert!(
+            !result.status.success(),
+            "missing evidence cannot establish coverage"
+        );
         let report: serde_json::Value =
             serde_json::from_slice(&result.stdout).expect("coverage JSON");
         assert_eq!(report["inventory_runs"], 3, "{report}");
@@ -2455,14 +2458,15 @@ fn native_replay_private_worker_rejects_unbound_or_incomplete_requests() {
     let (_workspace, run) = native_replay_workspace("console.log('framed-replay');\n");
     let request_id = uuid::Uuid::now_v7().to_string();
     let request = serde_json::json!({
-        "schema_version": "franken-node/native-replay-worker-request/v1",
+        "schema_version": "franken-node/native-replay-worker-request/v2",
         "request_id": request_id,
         "capture": run["dispatch"]["native_replay"],
+        "operation": {"kind": "replay"},
     });
     // Construct the wire format independently of the private worker codec.
     let frame = |value: &serde_json::Value| {
         let body = serde_json::to_vec(value).unwrap();
-        let mut bytes = b"FNRPLY1\0".to_vec();
+        let mut bytes = b"FNRPLY2\0".to_vec();
         bytes.extend_from_slice(&(body.len() as u64).to_le_bytes());
         bytes.extend_from_slice(&Sha256::digest(&body));
         bytes.extend_from_slice(&body);
@@ -2479,6 +2483,8 @@ fn native_replay_private_worker_rejects_unbound_or_incomplete_requests() {
     wrong_schema["schema_version"] = serde_json::json!("unrecognized-replay-worker");
     let mut unknown_field = request.clone();
     unknown_field["skip_verification"] = serde_json::json!(true);
+    let mut unknown_operation = request.clone();
+    unknown_operation["operation"] = serde_json::json!({"kind": "skip_baseline"});
     let parent_pid = std::process::id().to_string();
     for (bytes, expected) in [
         (valid[..20].to_vec(), "protocol header"),
@@ -2487,13 +2493,17 @@ fn native_replay_private_worker_rejects_unbound_or_incomplete_requests() {
         (frame(&wrong_request), "does not match its launch"),
         (frame(&wrong_schema), "does not match its launch"),
         (frame(&unknown_field), "invalid native replay protocol JSON"),
+        (
+            frame(&unknown_operation),
+            "invalid native replay protocol JSON",
+        ),
     ] {
         let mut input = tempfile::tempfile().expect("create private malformed request");
         input.write_all(&bytes).unwrap();
         input.rewind().unwrap();
         let output = Command::new(resolve_binary_path())
             .args([
-                "__franken-native-replay-worker-v1",
+                "__franken-native-replay-worker-v2",
                 &request_id,
                 &parent_pid,
             ])
@@ -3571,7 +3581,9 @@ fn native_incident_replay_captures_pure_programs_without_inventing_host_effects(
     assert!(failed["receipt"]["incident_capture"].is_null());
     let (failed_bundle_name, failed_bundle) = capture_native_run_bundle(
         workspace.path(),
-        failed["receipt"]["receipt_id"].as_str().expect("failed receipt id"),
+        failed["receipt"]["receipt_id"]
+            .as_str()
+            .expect("failed receipt id"),
     );
     assert_ne!(failed_bundle_name, first_bundle_name);
     assert_ne!(failed_bundle_name, second_bundle_name);
@@ -3581,10 +3593,7 @@ fn native_incident_replay_captures_pure_programs_without_inventing_host_effects(
         failed["receipt"]["receipt_id"]
     );
 
-    let coverage = run_cli_in_workspace(
-        workspace.path(),
-        &["ops", "incident-coverage", "--json"],
-    );
+    let coverage = run_cli_in_workspace(workspace.path(), &["ops", "incident-coverage", "--json"]);
     assert!(coverage.status.success());
     let coverage: serde_json::Value =
         serde_json::from_slice(&coverage.stdout).expect("pure-run coverage JSON");
@@ -3597,12 +3606,17 @@ fn native_incident_replay_captures_pure_programs_without_inventing_host_effects(
     // An authenticated manual capture does not let a later edited selector
     // masquerade as the original pure failed run or disappear from coverage.
     let receipt_path = workspace.path().join(
-        failed["receipt_path"].as_str().expect("failed receipt path"),
+        failed["receipt_path"]
+            .as_str()
+            .expect("failed receipt path"),
     );
     let mut altered_receipt = failed["receipt"].clone();
     altered_receipt["native_replay_payload_sha256"] = json!("00".repeat(32));
-    fs::write(&receipt_path, serde_json::to_vec_pretty(&altered_receipt).unwrap())
-        .expect("alter failed-run replay selector");
+    fs::write(
+        &receipt_path,
+        serde_json::to_vec_pretty(&altered_receipt).unwrap(),
+    )
+    .expect("alter failed-run replay selector");
     let rejected = run_cli_in_workspace(
         workspace.path(),
         &[

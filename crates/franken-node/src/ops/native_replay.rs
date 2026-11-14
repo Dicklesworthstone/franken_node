@@ -28,6 +28,170 @@ use sha2::{Digest, Sha256};
 pub const NATIVE_REPLAY_CAPTURE_SCHEMA: &str = "franken-node/native-replay-capture/v3";
 pub const NATIVE_REPLAY_OUTCOME_SCHEMA: &str = "franken-node/native-replay-outcome/v2";
 pub const MAX_NATIVE_REPLAY_PAYLOAD_BYTES: usize = 4 * 1024 * 1024;
+pub const NATIVE_COUNTERFACTUAL_OUTCOME_SCHEMA: &str =
+    "franken-node/native-counterfactual-outcome/v1";
+pub const NATIVE_COUNTERFACTUAL_SCOPE: &str = "captured_inputs_capability_attenuation";
+pub const MAX_NATIVE_COUNTERFACTUAL_DENIALS: usize = 32;
+
+/// Restrictions applied to an independently authenticated capture. A branch
+/// can remove existing capabilities; it cannot add authority or replace the
+/// original source, settings, scheduler inputs or recorded host outcomes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeCounterfactualRequest {
+    pub denied_capabilities: Vec<String>,
+}
+
+impl NativeCounterfactualRequest {
+    /// Check the bounded request before starting a child. The engine additionally
+    /// requires each tag to name a capability granted by the captured package.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.denied_capabilities.is_empty()
+            || self.denied_capabilities.len() > MAX_NATIVE_COUNTERFACTUAL_DENIALS
+        {
+            return Err(format!(
+                "native counterfactual requires 1..={MAX_NATIVE_COUNTERFACTUAL_DENIALS} denied capabilities"
+            ));
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for capability in &self.denied_capabilities {
+            if capability.is_empty()
+                || capability.len() > 64
+                || !capability
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+                || !seen.insert(capability)
+            {
+                return Err(
+                    "native counterfactual requires unique, bounded canonical capability tags"
+                        .to_string(),
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Actual console observation from the restricted native branch. Messages may
+/// contain private captured data; they are omitted from diagnostic Debug output.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeCounterfactualConsoleEntry {
+    pub level: String,
+    pub message: String,
+    pub instruction_index: u64,
+}
+
+impl std::fmt::Debug for NativeCounterfactualConsoleEntry {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("NativeCounterfactualConsoleEntry")
+            .field("message", &"[redacted]")
+            .field("instruction_index", &self.instruction_index)
+            .finish_non_exhaustive()
+    }
+}
+
+/// A fresh native branch after successful verification of the original run.
+/// Its result describes capability attenuation over captured inputs, not parity
+/// with the original program or an independently certified alternative policy.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeCounterfactualOutcome {
+    pub schema_version: String,
+    pub execution_kind: String,
+    pub verification_scope: String,
+    pub capture_payload_sha256: String,
+    pub baseline: NativeReplayOutcome,
+    pub denied_capabilities: Vec<String>,
+    /// Declared package grants retained after attenuation. This is not an
+    /// enumeration of engine-intrinsic or ambient authority.
+    pub retained_declared_capabilities: Vec<String>,
+    pub terminal_state: NativeReplayTerminalState,
+    pub execution_value: Option<String>,
+    pub exception_value: Option<String>,
+    pub engine_failure: Option<String>,
+    pub exit_code: Option<i32>,
+    pub instructions_executed: Option<u64>,
+    pub console_output: Vec<NativeCounterfactualConsoleEntry>,
+    pub captured_host_effects: usize,
+    pub consumed_host_effects: usize,
+    pub unused_original_host_effects: usize,
+    pub console_matches_original: bool,
+    pub execution_value_matches_original: Option<bool>,
+    pub terminal_state_matches_original: bool,
+    pub replay_certified: bool,
+    pub policy_equivalence_certified: bool,
+}
+
+impl std::fmt::Debug for NativeCounterfactualOutcome {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("NativeCounterfactualOutcome")
+            .field("terminal_state", &self.terminal_state)
+            .field("console_entries", &self.console_output.len())
+            .field("consumed_host_effects", &self.consumed_host_effects)
+            .field(
+                "unused_original_host_effects",
+                &self.unused_original_host_effects,
+            )
+            .field("observed_values", &"[redacted]")
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(all(feature = "engine", target_os = "linux"))]
+impl NativeCounterfactualOutcome {
+    fn validate_for_request(
+        &self,
+        capture_payload_sha256: &str,
+        request: &NativeCounterfactualRequest,
+    ) -> Result<(), String> {
+        request.validate()?;
+        if self.schema_version != NATIVE_COUNTERFACTUAL_OUTCOME_SCHEMA
+            || self.execution_kind != "native_counterfactual"
+            || self.verification_scope != NATIVE_COUNTERFACTUAL_SCOPE
+            || self.capture_payload_sha256 != capture_payload_sha256
+            || self.denied_capabilities != request.denied_capabilities
+            || self.baseline.verification_scope != POLICY_EQUIVALENCE_SCOPE
+            || !self.baseline.satisfies_policy_equivalence()
+            || self.replay_certified
+            || self.policy_equivalence_certified
+            || self
+                .consumed_host_effects
+                .checked_add(self.unused_original_host_effects)
+                != Some(self.captured_host_effects)
+            || self.captured_host_effects > MAX_NATIVE_REPLAY_PAYLOAD_BYTES
+            || self
+                .retained_declared_capabilities
+                .iter()
+                .any(|capability| self.denied_capabilities.contains(capability))
+            || self
+                .console_output
+                .iter()
+                .any(|entry| !matches!(entry.level.as_str(), "log" | "error" | "warn" | "info"))
+        {
+            return Err("native counterfactual worker returned an invalid observation".to_string());
+        }
+        let completed = self.terminal_state == NativeReplayTerminalState::Completed;
+        if self.execution_value.is_some() != completed
+            || self.instructions_executed.is_some() != completed
+            || self.execution_value_matches_original.is_some() != completed
+            || self.terminal_state_matches_original != completed
+            || (!completed && self.exit_code.is_some())
+            || self.exception_value.is_some()
+                != (self.terminal_state == NativeReplayTerminalState::UncaughtException)
+            || self.engine_failure.is_some()
+                != (self.terminal_state == NativeReplayTerminalState::EngineFailure)
+        {
+            return Err(
+                "native counterfactual worker returned contradictory terminal observations"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+}
 
 /// The engine terminal state the authenticated capture describes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -266,6 +430,29 @@ pub fn reexecute(capture: &NativeReplayCapture) -> Result<NativeReplayOutcome, S
     engine::reexecute(capture)
 }
 
+/// Execute a restricted branch in the calling process after verifying the
+/// original run. The caller must authenticate the capture independently. Use
+/// [`counterfactual_supervised`] for untrusted workloads so startup, native
+/// execution and cleanup share a process-enforced deadline.
+#[cfg(feature = "engine")]
+pub fn counterfactual(
+    capture: &NativeReplayCapture,
+    denied_capabilities: &[String],
+) -> Result<NativeCounterfactualOutcome, String> {
+    if denied_capabilities.len() > MAX_NATIVE_COUNTERFACTUAL_DENIALS
+        || denied_capabilities
+            .iter()
+            .any(|capability| capability.len() > 64)
+    {
+        return Err("native counterfactual denial request exceeds its bounds".to_string());
+    }
+    NativeCounterfactualRequest {
+        denied_capabilities: denied_capabilities.to_vec(),
+    }
+    .validate()?;
+    engine::counterfactual(capture, denied_capabilities)
+}
+
 /// Re-execute under [`POLICY_EQUIVALENCE_SCOPE`], failing closed when policy
 /// decisions diverge or when original capability/module context is unavailable.
 #[cfg(feature = "engine")]
@@ -309,9 +496,43 @@ pub fn reexecute_supervised_with_policy_equivalence(
     reexecute_supervised(capture, timeout).map(NativeReplayOutcome::into_policy_equivalence_outcome)
 }
 
+/// Verify the original completed run, then execute a capability-restricted
+/// branch in the same owned child and under one startup/execution/drain deadline.
+/// The caller must authenticate the incident, source capture and runtime authority
+/// independently before calling. No branch can repeat live host effects.
+#[cfg(feature = "engine")]
+pub fn counterfactual_supervised(
+    capture: &NativeReplayCapture,
+    denied_capabilities: &[String],
+    timeout: std::time::Duration,
+) -> Result<NativeCounterfactualOutcome, String> {
+    // Bound allocations before cloning caller-owned strings into the protocol.
+    if denied_capabilities.len() > MAX_NATIVE_COUNTERFACTUAL_DENIALS
+        || denied_capabilities
+            .iter()
+            .any(|capability| capability.len() > 64)
+    {
+        return Err("native counterfactual denial request exceeds its bounds".to_string());
+    }
+    let request = NativeCounterfactualRequest {
+        denied_capabilities: denied_capabilities.to_vec(),
+    };
+    request.validate()?;
+    #[cfg(target_os = "linux")]
+    {
+        supervised::counterfactual(capture, &request, timeout)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (capture, request, timeout);
+        Err("supervised native counterfactual execution currently requires Linux".to_string())
+    }
+}
+
 /// Select the private replay child before parsing public CLI commands. This
 /// worker never verifies or signs an incident: the parent authenticates the
-/// bundle, and the child only executes the existing captured-input replay.
+/// bundle, and the child verifies the captured execution before any requested
+/// restricted branch. Both operations install only captured-input providers.
 #[doc(hidden)]
 pub fn maybe_run_internal_native_replay_worker() -> Result<bool, String> {
     #[cfg(all(feature = "engine", target_os = "linux"))]
@@ -328,7 +549,8 @@ pub fn maybe_run_internal_native_replay_worker() -> Result<bool, String> {
 mod supervised {
     use super::{
         MAX_NATIVE_REPLAY_PAYLOAD_BYTES, MAX_NATIVE_REPLAY_TIMEOUT_MS,
-        NATIVE_REPLAY_OUTCOME_SCHEMA, NativeReplayCapture, NativeReplayOutcome,
+        NATIVE_REPLAY_OUTCOME_SCHEMA, NativeCounterfactualOutcome, NativeCounterfactualRequest,
+        NativeReplayCapture, NativeReplayOutcome,
     };
     use crate::migration::smoke_supervisor::{StopReason, Stream, supervise_with_redirected_input};
     use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -337,15 +559,39 @@ mod supervised {
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
 
-    const WORKER_ARG: &str = "__franken-native-replay-worker-v1";
-    const REQUEST_SCHEMA: &str = "franken-node/native-replay-worker-request/v1";
-    const RESPONSE_SCHEMA: &str = "franken-node/native-replay-worker-response/v1";
-    const FRAME_MAGIC: &[u8; 8] = b"FNRPLY1\0";
+    const WORKER_ARG: &str = "__franken-native-replay-worker-v2";
+    const REQUEST_SCHEMA: &str = "franken-node/native-replay-worker-request/v2";
+    const RESPONSE_SCHEMA: &str = "franken-node/native-replay-worker-response/v2";
+    const FRAME_MAGIC: &[u8; 8] = b"FNRPLY2\0";
     const HEADER_BYTES: usize = 8 + 8 + 32;
     // The outer JSON escapes the already serialized capture once more.
     const BODY_LIMIT: usize = 2 * MAX_NATIVE_REPLAY_PAYLOAD_BYTES + 4096;
     const DIAGNOSTIC_LIMIT: usize = 64 * 1024;
     const DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(
+        tag = "kind",
+        content = "request",
+        rename_all = "snake_case",
+        deny_unknown_fields
+    )]
+    enum Operation {
+        Replay,
+        Counterfactual(NativeCounterfactualRequest),
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(
+        tag = "kind",
+        content = "outcome",
+        rename_all = "snake_case",
+        deny_unknown_fields
+    )]
+    enum WorkerOutcome {
+        Replay(Box<NativeReplayOutcome>),
+        Counterfactual(Box<NativeCounterfactualOutcome>),
+    }
 
     #[derive(Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -353,6 +599,7 @@ mod supervised {
         schema_version: String,
         request_id: String,
         capture: NativeReplayCapture,
+        operation: Operation,
     }
 
     #[derive(Serialize, Deserialize)]
@@ -361,7 +608,7 @@ mod supervised {
         schema_version: String,
         request_id: String,
         request_sha256: String,
-        outcome: Result<NativeReplayOutcome, String>,
+        outcome: Result<WorkerOutcome, String>,
     }
 
     struct FrameWriter {
@@ -472,6 +719,33 @@ mod supervised {
         capture: &NativeReplayCapture,
         timeout: Duration,
     ) -> Result<NativeReplayOutcome, String> {
+        match launch(capture, Operation::Replay, timeout)? {
+            WorkerOutcome::Replay(outcome) => Ok(*outcome),
+            WorkerOutcome::Counterfactual(_) => {
+                Err("native replay worker returned another operation's result".to_string())
+            }
+        }
+    }
+
+    pub(super) fn counterfactual(
+        capture: &NativeReplayCapture,
+        request: &NativeCounterfactualRequest,
+        timeout: Duration,
+    ) -> Result<NativeCounterfactualOutcome, String> {
+        request.validate()?;
+        match launch(capture, Operation::Counterfactual(request.clone()), timeout)? {
+            WorkerOutcome::Counterfactual(outcome) => Ok(*outcome),
+            WorkerOutcome::Replay(_) => {
+                Err("native counterfactual worker returned another operation's result".to_string())
+            }
+        }
+    }
+
+    fn launch(
+        capture: &NativeReplayCapture,
+        operation: Operation,
+        timeout: Duration,
+    ) -> Result<WorkerOutcome, String> {
         if timeout < Duration::from_millis(1)
             || timeout > Duration::from_millis(MAX_NATIVE_REPLAY_TIMEOUT_MS)
         {
@@ -488,6 +762,7 @@ mod supervised {
             schema_version: REQUEST_SCHEMA.to_string(),
             request_id: request_id.clone(),
             capture: capture.clone(),
+            operation: operation.clone(),
         };
         let frame = encode_frame(&request)?;
         let request_sha256 = hex::encode(Sha256::digest(&frame));
@@ -509,6 +784,8 @@ mod supervised {
             Stdio::from(input),
             &request_id,
             &request_sha256,
+            &operation,
+            &capture.payload_sha256,
             deadline,
         )
     }
@@ -518,8 +795,10 @@ mod supervised {
         input: Stdio,
         request_id: &str,
         request_sha256: &str,
+        operation: &Operation,
+        capture_payload_sha256: &str,
         deadline: Instant,
-    ) -> Result<NativeReplayOutcome, String> {
+    ) -> Result<WorkerOutcome, String> {
         let mut stdout = Vec::new();
         let mut diagnostics = 0_usize;
         let completion = supervise_with_redirected_input(
@@ -581,12 +860,22 @@ mod supervised {
         }
         remaining(deadline)?;
         let outcome = response.outcome?;
-        if outcome.schema_version != NATIVE_REPLAY_OUTCOME_SCHEMA
-            || outcome.matched != outcome.divergences.is_empty()
-        {
-            return Err(
-                "native replay worker returned an invalid verification outcome".to_string(),
-            );
+        match (operation, &outcome) {
+            (Operation::Replay, WorkerOutcome::Replay(replayed)) => {
+                if replayed.schema_version != NATIVE_REPLAY_OUTCOME_SCHEMA
+                    || replayed.matched != replayed.divergences.is_empty()
+                {
+                    return Err(
+                        "native replay worker returned an invalid verification outcome".to_string(),
+                    );
+                }
+            }
+            (Operation::Counterfactual(request), WorkerOutcome::Counterfactual(branched)) => {
+                branched.validate_for_request(capture_payload_sha256, request)?;
+            }
+            _ => {
+                return Err("native replay worker returned another operation's result".to_string());
+            }
         }
         Ok(outcome)
     }
@@ -628,13 +917,23 @@ mod supervised {
             return Err("native replay worker request does not match its launch".to_string());
         }
         request.capture.validate()?;
+        let outcome = match request.operation {
+            Operation::Replay => super::reexecute(&request.capture)
+                .map(|outcome| WorkerOutcome::Replay(Box::new(outcome))),
+            Operation::Counterfactual(restrictions) => {
+                restrictions.validate()?;
+                super::counterfactual(&request.capture, &restrictions.denied_capabilities)
+                    .map(|outcome| WorkerOutcome::Counterfactual(Box::new(outcome)))
+            }
+        };
         let response = Response {
             schema_version: RESPONSE_SCHEMA.to_string(),
             request_id,
             request_sha256,
-            // This is the existing in-process engine path. It validates the
-            // complete canonical capture and installs only replay providers.
-            outcome: super::reexecute(&request.capture),
+            // Each in-process path validates the complete canonical capture.
+            // A counterfactual also verifies the original run before branching;
+            // both executions are covered by the parent's single deadline.
+            outcome,
         };
         let response = encode_frame(&response)?;
         let stdout = io::stdout();
@@ -668,6 +967,25 @@ mod supervised {
             frame: &[u8],
             timeout: Duration,
         ) -> (Result<NativeReplayOutcome, String>, u32) {
+            let (outcome, pid) =
+                shell_fixture_operation(script, frame, timeout, &Operation::Replay);
+            (
+                outcome.and_then(|outcome| match outcome {
+                    WorkerOutcome::Replay(outcome) => Ok(*outcome),
+                    WorkerOutcome::Counterfactual(_) => {
+                        Err("replay fixture received a counterfactual result".to_string())
+                    }
+                }),
+                pid,
+            )
+        }
+
+        fn shell_fixture_operation(
+            script: &str,
+            frame: &[u8],
+            timeout: Duration,
+            operation: &Operation,
+        ) -> (Result<WorkerOutcome, String>, u32) {
             let work = tempfile::tempdir().expect("create replay process fixture");
             let response = work.path().join("response.bin");
             let pid_path = work.path().join("worker.pid");
@@ -682,6 +1000,8 @@ mod supervised {
                 Stdio::null(),
                 REQUEST_ID,
                 REQUEST_DIGEST,
+                operation,
+                REQUEST_DIGEST,
                 Instant::now() + timeout,
             );
             let pid = std::fs::read_to_string(pid_path)
@@ -689,6 +1009,76 @@ mod supervised {
                 .parse()
                 .expect("fixture wrote its process ID");
             (outcome, pid)
+        }
+
+        fn completed_replay_outcome() -> NativeReplayOutcome {
+            NativeReplayOutcome {
+                schema_version: NATIVE_REPLAY_OUTCOME_SCHEMA.to_string(),
+                replay_kind: "native_reexecution".to_string(),
+                verification_scope: "guest_execution".to_string(),
+                module_load_disabled: true,
+                matched: true,
+                divergences: Vec::new(),
+                captured_trace_id: "captured-protocol-fixture".to_string(),
+                replay_trace_id: "captured-protocol-fixture".to_string(),
+                captured_terminal_state: super::super::NativeReplayTerminalState::Completed,
+                replay_terminal_state: super::super::NativeReplayTerminalState::Completed,
+                terminal_state_match: true,
+                ir3_hash_match: Some(true),
+                ir4_witness_match: Some(true),
+                execution_value_match: Some(true),
+                instruction_count_match: Some(true),
+                console_match: true,
+                host_effects_match: true,
+                nondeterminism_trace_match: Some(true),
+                lane_match: Some(true),
+                exit_code_match: Some(true),
+                exception_value_match: None,
+                decisions_match: None,
+                policy_comparison_note: "protocol acceptance fixture".to_string(),
+            }
+        }
+
+        fn counterfactual_protocol_outcome() -> NativeCounterfactualOutcome {
+            use super::super::{
+                NATIVE_COUNTERFACTUAL_OUTCOME_SCHEMA, NATIVE_COUNTERFACTUAL_SCOPE,
+                NativeCounterfactualConsoleEntry, NativeReplayTerminalState,
+            };
+
+            let mut baseline = completed_replay_outcome();
+            baseline.module_load_disabled = false;
+            baseline.decisions_match = Some(true);
+            NativeCounterfactualOutcome {
+                schema_version: NATIVE_COUNTERFACTUAL_OUTCOME_SCHEMA.to_string(),
+                execution_kind: "native_counterfactual".to_string(),
+                verification_scope: NATIVE_COUNTERFACTUAL_SCOPE.to_string(),
+                capture_payload_sha256: REQUEST_DIGEST.to_string(),
+                baseline: baseline.into_policy_equivalence_outcome(),
+                denied_capabilities: vec!["fs_write".to_string()],
+                retained_declared_capabilities: vec![
+                    "fs_read".to_string(),
+                    "module_load".to_string(),
+                ],
+                terminal_state: NativeReplayTerminalState::Completed,
+                execution_value: Some("private-protocol-result".to_string()),
+                exception_value: None,
+                engine_failure: None,
+                exit_code: None,
+                instructions_executed: Some(10),
+                console_output: vec![NativeCounterfactualConsoleEntry {
+                    level: "log".to_string(),
+                    message: "private-protocol-console".to_string(),
+                    instruction_index: 3,
+                }],
+                captured_host_effects: 2,
+                consumed_host_effects: 1,
+                unused_original_host_effects: 1,
+                console_matches_original: false,
+                execution_value_matches_original: Some(false),
+                terminal_state_matches_original: true,
+                replay_certified: false,
+                policy_equivalence_certified: false,
+            }
         }
 
         #[test]
@@ -757,34 +1147,10 @@ mod supervised {
         fn replay_supervisor_accepts_only_consistent_completed_outcomes() {
             // This exercises the process protocol, not engine equivalence.
             // Actual replay matches are covered by incident CLI integration.
-            let expected = NativeReplayOutcome {
-                schema_version: NATIVE_REPLAY_OUTCOME_SCHEMA.to_string(),
-                replay_kind: "native_reexecution".to_string(),
-                verification_scope: "guest_execution".to_string(),
-                module_load_disabled: true,
-                matched: true,
-                divergences: Vec::new(),
-                captured_trace_id: "captured-protocol-fixture".to_string(),
-                replay_trace_id: "replayed-protocol-fixture".to_string(),
-                captured_terminal_state: super::super::NativeReplayTerminalState::Completed,
-                replay_terminal_state: super::super::NativeReplayTerminalState::Completed,
-                terminal_state_match: true,
-                ir3_hash_match: Some(true),
-                ir4_witness_match: Some(true),
-                execution_value_match: Some(true),
-                instruction_count_match: Some(true),
-                console_match: true,
-                host_effects_match: true,
-                nondeterminism_trace_match: Some(true),
-                lane_match: Some(true),
-                exit_code_match: Some(true),
-                exception_value_match: None,
-                decisions_match: None,
-                policy_comparison_note: "protocol acceptance fixture".to_string(),
-            };
+            let expected = completed_replay_outcome();
             let script = "printf '%s' \"$$\" > \"$2\"; /bin/cat \"$1\"";
             let mut response = refusal_response();
-            response.outcome = Ok(expected.clone());
+            response.outcome = Ok(WorkerOutcome::Replay(Box::new(expected.clone())));
             let frame = encode_frame(&response).unwrap();
             let (outcome, pid) = shell_fixture(script, &frame, Duration::from_secs(2));
             assert_eq!(outcome.unwrap(), expected);
@@ -798,7 +1164,7 @@ mod supervised {
                     "divergences" => outcome.divergences.push("console".to_string()),
                     _ => unreachable!(),
                 }
-                response.outcome = Ok(outcome);
+                response.outcome = Ok(WorkerOutcome::Replay(Box::new(outcome)));
                 let frame = encode_frame(&response).unwrap();
                 let (outcome, pid) = shell_fixture(script, &frame, Duration::from_secs(2));
                 assert!(
@@ -808,6 +1174,118 @@ mod supervised {
                 );
                 assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists());
             }
+        }
+
+        #[test]
+        fn counterfactual_request_bounds_and_diagnostics_preserve_private_outputs() {
+            for denied_capabilities in [
+                Vec::new(),
+                vec!["fs_write".to_string(), "fs_write".to_string()],
+                vec!["fs:write".to_string()],
+                vec![" fs_write".to_string()],
+                vec!["fs_write\0".to_string()],
+                vec!["a".repeat(65)],
+                (0..=super::super::MAX_NATIVE_COUNTERFACTUAL_DENIALS)
+                    .map(|index| format!("capability_{index}"))
+                    .collect(),
+            ] {
+                assert!(
+                    NativeCounterfactualRequest {
+                        denied_capabilities
+                    }
+                    .validate()
+                    .is_err()
+                );
+            }
+            NativeCounterfactualRequest {
+                denied_capabilities: vec!["fs_write".to_string(), "network_egress".to_string()],
+            }
+            .validate()
+            .unwrap();
+
+            let observation = counterfactual_protocol_outcome();
+            let diagnostic = format!("{observation:?} {:?}", observation.console_output[0]);
+            assert!(!diagnostic.contains("private-protocol-result"));
+            assert!(!diagnostic.contains("private-protocol-console"));
+            let exported = serde_json::to_string(&observation).unwrap();
+            assert!(exported.contains("private-protocol-result"));
+            assert!(exported.contains("private-protocol-console"));
+        }
+
+        #[test]
+        fn counterfactual_supervisor_binds_restrictions_baseline_and_observations() {
+            // These are process-protocol fixtures. Native branch execution is
+            // independently exercised by engine and incident CLI tests.
+            let expected = counterfactual_protocol_outcome();
+            let operation = Operation::Counterfactual(NativeCounterfactualRequest {
+                denied_capabilities: expected.denied_capabilities.clone(),
+            });
+            let script = "printf '%s' \"$$\" > \"$2\"; /bin/cat \"$1\"";
+            for mutation in 0..14 {
+                let mut observation = expected.clone();
+                match mutation {
+                    0 => {}
+                    1 => observation.schema_version.push_str("-other"),
+                    2 => observation.capture_payload_sha256 = "0".repeat(64),
+                    3 => observation.denied_capabilities = vec!["network_egress".to_string()],
+                    4 => observation.baseline.decisions_match = Some(false),
+                    5 => observation.baseline.module_load_disabled = true,
+                    6 => observation.replay_certified = true,
+                    7 => observation.policy_equivalence_certified = true,
+                    8 => observation.unused_original_host_effects += 1,
+                    9 => observation.execution_value = None,
+                    10 => observation.exception_value = Some("not an exception".to_string()),
+                    11 => observation.console_output[0].level = "unknown".to_string(),
+                    12 => observation
+                        .retained_declared_capabilities
+                        .push("fs_write".to_string()),
+                    13 => observation.terminal_state_matches_original = false,
+                    _ => unreachable!(),
+                }
+                let mut response = refusal_response();
+                response.outcome = Ok(WorkerOutcome::Counterfactual(Box::new(observation)));
+                let frame = encode_frame(&response).unwrap();
+                let (result, pid) =
+                    shell_fixture_operation(script, &frame, Duration::from_secs(2), &operation);
+                if mutation == 0 {
+                    let WorkerOutcome::Counterfactual(observation) = result.unwrap() else {
+                        panic!("expected the requested counterfactual operation");
+                    };
+                    assert_eq!(*observation, expected);
+                } else {
+                    assert!(result.is_err(), "mutation {mutation}");
+                }
+                assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists());
+            }
+        }
+
+        #[test]
+        fn counterfactual_supervisor_rejects_operation_confusion_and_unfinished_workers() {
+            let observation = counterfactual_protocol_outcome();
+            let operation = Operation::Counterfactual(NativeCounterfactualRequest {
+                denied_capabilities: observation.denied_capabilities.clone(),
+            });
+            let mut response = refusal_response();
+            response.outcome = Ok(WorkerOutcome::Counterfactual(Box::new(observation)));
+            let frame = encode_frame(&response).unwrap();
+            let script = "printf '%s' \"$$\" > \"$2\"; /bin/cat \"$1\"";
+            let (result, pid) = shell_fixture(script, &frame, Duration::from_secs(2));
+            assert!(result.unwrap_err().contains("another operation's result"));
+            assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists());
+
+            let script = "printf '%s' \"$$\" > \"$2\"; /bin/cat \"$1\"; while :; do :; done";
+            let (result, pid) =
+                shell_fixture_operation(script, &frame, Duration::from_millis(100), &operation);
+            assert!(result.unwrap_err().contains("timed out"));
+            assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists());
+
+            response.outcome = Ok(WorkerOutcome::Replay(Box::new(completed_replay_outcome())));
+            let frame = encode_frame(&response).unwrap();
+            let script = "printf '%s' \"$$\" > \"$2\"; /bin/cat \"$1\"";
+            let (result, pid) =
+                shell_fixture_operation(script, &frame, Duration::from_secs(2), &operation);
+            assert!(result.unwrap_err().contains("another operation's result"));
+            assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists());
         }
 
         #[test]
@@ -884,7 +1362,7 @@ mod engine {
     };
     use frankenengine_engine::ast::ParseGoal;
     use frankenengine_engine::baseline_interpreter::{
-        ConsoleEntry, InterpreterConfig, InterpreterError, LaneChoice,
+        ConsoleEntry, ConsoleLevel, InterpreterConfig, InterpreterError, LaneChoice,
     };
     use frankenengine_engine::capability::RuntimeCapability;
     use frankenengine_engine::deterministic_replay::NondeterminismTrace;
@@ -1912,6 +2390,123 @@ mod engine {
         }
     }
 
+    /// Supplies only the exact next authenticated input to a speculative branch.
+    /// This is deliberately a provider with no live mechanisms, paired with a
+    /// normal recording recorder. The engine's exact-replay recorder contract
+    /// still requires exhaustion; only this separate counterfactual input source
+    /// may leave an original suffix unused.
+    struct CounterfactualHostIo {
+        entries: Vec<(HostIoRequest, HostIoOutcome)>,
+        state: Mutex<CounterfactualHostIoState>,
+    }
+
+    #[derive(Default)]
+    struct CounterfactualHostIoState {
+        consumed: usize,
+        refusal: Option<&'static str>,
+    }
+
+    impl std::fmt::Debug for CounterfactualHostIo {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter
+                .debug_struct("CounterfactualHostIo")
+                .field("captured_entries", &self.entries.len())
+                .finish_non_exhaustive()
+        }
+    }
+
+    impl CounterfactualHostIo {
+        fn new(entries: Vec<(HostIoRequest, HostIoOutcome)>) -> Self {
+            Self {
+                entries,
+                state: Mutex::new(CounterfactualHostIoState::default()),
+            }
+        }
+
+        fn refuse(&self, reason: &'static str) -> HostIoError {
+            let mut state = self.state.lock().expect("counterfactual input state mutex");
+            let reason = *state.refusal.get_or_insert(reason);
+            HostIoError::Denied {
+                reason: reason.to_string(),
+            }
+        }
+
+        fn verify(&self, observed: &[(HostIoRequest, HostIoOutcome)]) -> Result<usize, String> {
+            let state = self.state.lock().expect("counterfactual input state mutex");
+            if let Some(reason) = state.refusal {
+                return Err(reason.to_string());
+            }
+            if observed != &self.entries[..state.consumed] {
+                return Err(
+                    "native counterfactual effect evidence differs from its consumed captured-input prefix"
+                        .to_string(),
+                );
+            }
+            Ok(state.consumed)
+        }
+    }
+
+    impl HostIoProvider for CounterfactualHostIo {
+        fn name(&self) -> &str {
+            "native-counterfactual-captured-inputs-only"
+        }
+
+        fn filesystem_exception_provenance(&self) -> HostIoExceptionProvenance {
+            HostIoExceptionProvenance::ProviderInternal
+        }
+
+        fn perform(&self, request: &HostIoRequest, granted: &[HostIoCapability]) -> HostIoOutcome {
+            let mut state = self.state.lock().expect("counterfactual input state mutex");
+            if let Some(reason) = state.refusal {
+                return Err(HostIoError::Denied {
+                    reason: reason.to_string(),
+                });
+            }
+            if !granted.contains(&request.required_capability()) {
+                state.refusal =
+                    Some("native counterfactual input request exceeds the attenuated capabilities");
+                return Err(HostIoError::CapabilityMissing {
+                    capability: request.required_capability(),
+                });
+            }
+            let Some((expected_request, outcome)) = self.entries.get(state.consumed) else {
+                let reason = "native counterfactual requires an uncaptured host input";
+                state.refusal = Some(reason);
+                return Err(HostIoError::Denied {
+                    reason: reason.to_string(),
+                });
+            };
+            if expected_request != request {
+                let reason =
+                    "native counterfactual host request differs from the next captured input";
+                state.refusal = Some(reason);
+                return Err(HostIoError::Denied {
+                    reason: reason.to_string(),
+                });
+            }
+            state.consumed += 1;
+            outcome.clone()
+        }
+
+        fn perform_controlled(
+            &self,
+            request: &HostIoRequest,
+            granted: &[HostIoCapability],
+            control: Arc<dyn HostIoControl>,
+        ) -> HostIoOutcome {
+            if control.checkpoint().is_err() {
+                return Err(self.refuse("native counterfactual host input was cancelled"));
+            }
+            // No DNS, filesystem, network, environment, random, or process API
+            // is reachable here, including when an input is absent or changed.
+            let outcome = self.perform(request, granted);
+            if control.checkpoint().is_err() {
+                return Err(self.refuse("native counterfactual host input was cancelled"));
+            }
+            outcome
+        }
+    }
+
     struct BoundedCaptureWriter(Vec<u8>);
 
     impl Write for BoundedCaptureWriter {
@@ -2609,6 +3204,258 @@ mod engine {
             })?
     }
 
+    fn attenuated_package(
+        original: &ExtensionPackage,
+        denied_capabilities: &[String],
+    ) -> Result<ExtensionPackage, String> {
+        NativeCounterfactualRequest {
+            denied_capabilities: denied_capabilities.to_vec(),
+        }
+        .validate()?;
+        let granted: BTreeSet<_> = original
+            .capabilities
+            .iter()
+            .filter_map(|tag| RuntimeCapability::from_tag_str(tag))
+            .collect();
+        let mut denied = BTreeSet::new();
+        for tag in denied_capabilities {
+            let capability = RuntimeCapability::from_tag_str(tag).ok_or_else(|| {
+                format!("native counterfactual cannot deny unknown capability {tag}")
+            })?;
+            if capability.to_string() != *tag {
+                return Err(format!(
+                    "native counterfactual requires canonical capability name {capability}"
+                ));
+            }
+            if matches!(
+                capability,
+                RuntimeCapability::VmDispatch
+                    | RuntimeCapability::HeapAllocate
+                    | RuntimeCapability::Console
+            ) {
+                return Err(format!(
+                    "native counterfactual cannot deny engine-intrinsic capability {tag}"
+                ));
+            }
+            if !granted.contains(&capability) {
+                return Err(format!(
+                    "native counterfactual capability {tag} was not granted by the captured run"
+                ));
+            }
+            if capability == RuntimeCapability::ModuleLoad {
+                return Err(
+                    "native counterfactual cannot deny module_load before frozen entrypoint admission"
+                        .to_string(),
+                );
+            }
+            denied.insert(capability);
+        }
+        let mut package = original.clone();
+        // Remove every spelling of the denied authority. String-only removal
+        // would leave aliases such as fs:write authorized in older captures.
+        package.capabilities.retain(|tag| {
+            RuntimeCapability::from_tag_str(tag)
+                .is_none_or(|capability| !denied.contains(&capability))
+        });
+        Ok(package)
+    }
+
+    struct CounterfactualObservation {
+        terminal_state: NativeReplayTerminalState,
+        execution_value: Option<String>,
+        exception_value: Option<String>,
+        engine_failure: Option<String>,
+        exit_code: Option<i32>,
+        instructions_executed: Option<u64>,
+        console_output: Vec<ConsoleEntry>,
+        host_effect_transcript: Vec<(HostIoRequest, HostIoOutcome)>,
+    }
+
+    impl CounterfactualObservation {
+        fn completed(result: OrchestratorResult) -> Result<Self, String> {
+            if result.ir4_witness.outcome != ExecutionOutcome::Completed
+                || result.ir4_witness.instructions_executed != result.instructions_executed
+            {
+                return Err(
+                    "native counterfactual has no consistent completed guest witness".to_string(),
+                );
+            }
+            Ok(Self {
+                terminal_state: NativeReplayTerminalState::Completed,
+                execution_value: Some(result.execution_value),
+                exception_value: None,
+                engine_failure: None,
+                exit_code: result.exit_code,
+                instructions_executed: Some(result.instructions_executed),
+                console_output: result.console_output,
+                host_effect_transcript: result.host_effect_transcript,
+            })
+        }
+
+        fn failed(observed: ObservedFailure) -> Result<Self, String> {
+            let observed = TerminalObservation::failed(observed)?;
+            Ok(Self {
+                terminal_state: observed.terminal_state,
+                execution_value: None,
+                exception_value: observed.exception_value,
+                engine_failure: observed.engine_failure.map(|(_, diagnostic)| diagnostic),
+                exit_code: None,
+                instructions_executed: None,
+                console_output: observed.console_output,
+                host_effect_transcript: observed.host_effect_transcript,
+            })
+        }
+    }
+
+    pub(super) fn counterfactual(
+        capture: &NativeReplayCapture,
+        denied_capabilities: &[String],
+    ) -> Result<NativeCounterfactualOutcome, String> {
+        capture.validate()?;
+        let payload: NativeReplayPayload = serde_json::from_str(&capture.payload_json)
+            .map_err(|error| format!("invalid native counterfactual payload: {error}"))?;
+        if encode_capture(&payload)?.payload_json != capture.payload_json {
+            return Err(
+                "native counterfactual requires the complete canonical capture".to_string(),
+            );
+        }
+        if payload.module_sources.is_none()
+            || !matches!(&payload.expected, CapturedAttempt::Completed(_))
+        {
+            return Err(
+                "native counterfactual requires a completed original run with frozen module sources"
+                    .to_string(),
+            );
+        }
+        if payload.process.is_some()
+            || payload.package.capabilities.iter().any(|tag| {
+                RuntimeCapability::from_tag_str(tag) == Some(RuntimeCapability::ProcessSpawn)
+            })
+        {
+            return Err(
+                "native counterfactual does not support process-authorized captures".to_string(),
+            );
+        }
+        let package = attenuated_package(&payload.package, denied_capabilities)?;
+        // A changed expected result, missing input, divergent policy decision,
+        // or incomplete original run cannot become evidence for an alternative.
+        // The public supervisor owns one timeout for both this baseline and the
+        // branch; neither phase can outlive its owned worker process.
+        let baseline = reexecute(capture)?.into_policy_equivalence_outcome();
+        if !baseline.satisfies_policy_equivalence() {
+            return Err(
+                "native counterfactual requires successful original execution and policy verification"
+                    .to_string(),
+            );
+        }
+        let capture_payload_sha256 = capture.payload_sha256.clone();
+        let denied_capabilities = denied_capabilities.to_vec();
+        std::thread::Builder::new()
+            .name("native-incident-counterfactual".to_string())
+            .stack_size(REPLAY_STACK_BYTES)
+            .spawn(move || {
+                let sources = payload.module_sources.as_ref().ok_or_else(|| {
+                    "native counterfactual requires frozen module sources".to_string()
+                })?;
+                // The original resolver and parser are retained, but every
+                // resolution is authorized under the smaller capability set.
+                let (entry, resolver) = sources.restore(&package, &payload.orchestrator)?;
+                let authority = RuntimeEvidenceAuthority::generate_runtime_owned(
+                    "franken-node.incident-counterfactual",
+                    payload.orchestrator.epoch,
+                    1,
+                    None,
+                )
+                .map_err(|error| format!("initialize native counterfactual authority: {error}"))?;
+                let mut orchestrator =
+                    ExecutionOrchestrator::try_new_with_runtime_config_and_authority(
+                        payload.orchestrator.restore(),
+                        payload.runtime.clone(),
+                        payload.ambient_authority,
+                        authority,
+                    )
+                    .map_err(|error| format!("initialize native counterfactual engine: {error}"))?;
+                orchestrator.set_process_argv(payload.process_argv.clone());
+                let inputs = Arc::new(CounterfactualHostIo::new(
+                    payload.host_effect_transcript.clone(),
+                ));
+                orchestrator.set_host_io(
+                    inputs.clone(),
+                    Some(Arc::new(InMemoryHostIoTranscript::recording())),
+                );
+                let observed = match orchestrator
+                    .execute_resolved_entry_with_resolver(&package, &entry, resolver)
+                {
+                    Ok(result) => CounterfactualObservation::completed(result)?,
+                    Err(error) => CounterfactualObservation::failed(
+                        observe_failure(&orchestrator, &error).map_err(|reason| {
+                            format!(
+                                "native counterfactual has no certified terminal observation: {reason}"
+                            )
+                        })?,
+                    )?,
+                };
+                // Check the sticky input refusal after engine finalization.
+                // Catching an exception, returning successfully, or requesting
+                // the original next input later cannot erase a prior mismatch.
+                let consumed_host_effects = inputs.verify(&observed.host_effect_transcript)?;
+                let CapturedAttempt::Completed(expected) = &payload.expected else {
+                    return Err("native counterfactual original run was not completed".to_string());
+                };
+                let console_matches_original = observed.console_output == expected.console_output;
+                let execution_value_matches_original = observed
+                    .execution_value
+                    .as_ref()
+                    .map(|value| value == &expected.execution_value);
+                let captured_host_effects = payload.host_effect_transcript.len();
+                Ok(NativeCounterfactualOutcome {
+                    schema_version: NATIVE_COUNTERFACTUAL_OUTCOME_SCHEMA.to_string(),
+                    execution_kind: "native_counterfactual".to_string(),
+                    verification_scope: NATIVE_COUNTERFACTUAL_SCOPE.to_string(),
+                    capture_payload_sha256,
+                    baseline,
+                    denied_capabilities,
+                    retained_declared_capabilities: package.capabilities,
+                    terminal_state: observed.terminal_state,
+                    execution_value: observed.execution_value,
+                    exception_value: observed.exception_value,
+                    engine_failure: observed.engine_failure,
+                    exit_code: observed.exit_code,
+                    instructions_executed: observed.instructions_executed,
+                    console_output: observed
+                        .console_output
+                        .into_iter()
+                        .map(|entry| NativeCounterfactualConsoleEntry {
+                            level: match entry.level {
+                                ConsoleLevel::Log => "log",
+                                ConsoleLevel::Error => "error",
+                                ConsoleLevel::Warn => "warn",
+                                ConsoleLevel::Info => "info",
+                            }
+                            .to_string(),
+                            message: entry.message,
+                            instruction_index: entry.instruction_index,
+                        })
+                        .collect(),
+                    captured_host_effects,
+                    consumed_host_effects,
+                    unused_original_host_effects: captured_host_effects - consumed_host_effects,
+                    console_matches_original,
+                    execution_value_matches_original,
+                    terminal_state_matches_original: observed.terminal_state
+                        == NativeReplayTerminalState::Completed,
+                    replay_certified: false,
+                    policy_equivalence_certified: false,
+                })
+            })
+            .map_err(|error| format!("start native counterfactual engine worker: {error}"))?
+            .join()
+            .map_err(|_| {
+                "native counterfactual engine worker panicked before finalizing its observation"
+                    .to_string()
+            })?
+    }
+
     #[cfg(test)]
     mod tests {
         use std::collections::BTreeMap;
@@ -2627,6 +3474,334 @@ mod engine {
                 .expect("start native test")
                 .join()
                 .expect("native test completed");
+        }
+
+        #[test]
+        fn native_counterfactual_inputs_allow_only_an_exact_prefix_and_poison_divergence() {
+            let first = HostIoRequest::FsRead {
+                path: "first-private-path".into(),
+            };
+            let second = HostIoRequest::FsRead {
+                path: "second-private-path".into(),
+            };
+            let first_outcome = Ok(HostIoResponse::FsRead {
+                bytes: b"private-captured-input".to_vec(),
+            });
+            let second_outcome = Ok(HostIoResponse::FsRead {
+                bytes: b"unused-input".to_vec(),
+            });
+            let entries = vec![
+                (first.clone(), first_outcome.clone()),
+                (second.clone(), second_outcome.clone()),
+            ];
+            let prefix = CounterfactualHostIo::new(entries.clone());
+            assert_eq!(prefix.verify(&[]).unwrap(), 0);
+            assert_eq!(
+                prefix.perform(&first, &[HostIoCapability::FsRead]),
+                first_outcome
+            );
+            assert_eq!(prefix.verify(&entries[..1]).unwrap(), 1);
+            assert!(
+                prefix.verify(&entries).is_err(),
+                "unused input is not an observed effect"
+            );
+            let diagnostic = format!("{prefix:?}");
+            assert!(!diagnostic.contains("private"));
+
+            // A skipped/reordered input never searches ahead, and ignoring its
+            // error cannot allow a later matching request to repair the branch.
+            let reordered = CounterfactualHostIo::new(entries.clone());
+            assert!(
+                reordered
+                    .perform(&second, &[HostIoCapability::FsRead])
+                    .is_err()
+            );
+            assert!(
+                reordered
+                    .perform(&first, &[HostIoCapability::FsRead])
+                    .is_err()
+            );
+            assert!(reordered.verify(&[]).is_err());
+
+            let exhausted = CounterfactualHostIo::new(entries[..1].to_vec());
+            assert_eq!(
+                exhausted.perform(&first, &[HostIoCapability::FsRead]),
+                first_outcome
+            );
+            assert!(
+                exhausted
+                    .perform(&second, &[HostIoCapability::FsRead])
+                    .is_err()
+            );
+            assert!(exhausted.verify(&entries[..1]).is_err());
+
+            let denied = CounterfactualHostIo::new(entries);
+            assert!(matches!(
+                denied.perform(&first, &[]),
+                Err(HostIoError::CapabilityMissing { .. })
+            ));
+            assert!(denied.perform(&first, &[HostIoCapability::FsRead]).is_err());
+            assert!(denied.verify(&[]).is_err());
+        }
+
+        #[test]
+        fn native_counterfactual_attenuation_removes_semantic_aliases_and_never_adds_authority() {
+            let package = ExtensionPackage {
+                extension_id: "counterfactual-capabilities".into(),
+                source: "1;".into(),
+                source_file: None,
+                module_root: None,
+                capabilities: vec![
+                    "module_load".into(),
+                    "fs_write".into(),
+                    "fs:write".into(),
+                    "fs_read".into(),
+                ],
+                version: "test".into(),
+                metadata: BTreeMap::new(),
+            };
+            let restricted = attenuated_package(&package, &["fs_write".into()]).unwrap();
+            assert_eq!(restricted.capabilities, ["module_load", "fs_read"]);
+            assert_eq!(
+                package.capabilities.len(),
+                4,
+                "the original capture is immutable"
+            );
+            for denied in [
+                vec![],
+                vec!["fs_write".into(), "fs_write".into()],
+                vec!["fs:write".into()],
+                vec!["fs".into()],
+                vec!["network_egress".into()],
+                vec!["not_a_capability".into()],
+                vec!["module_load".into()],
+            ] {
+                assert!(attenuated_package(&package, &denied).is_err(), "{denied:?}");
+            }
+            for intrinsic in ["vm_dispatch", "heap_allocate", "console"] {
+                let mut explicitly_declared = package.clone();
+                explicitly_declared.capabilities.push(intrinsic.into());
+                let error = attenuated_package(&explicitly_declared, &[intrinsic.into()])
+                    .expect_err("removing a declaration cannot revoke an engine-intrinsic grant");
+                assert!(error.contains("engine-intrinsic"), "{error}");
+            }
+        }
+
+        #[cfg(unix)]
+        fn record_frozen_counterfactual(root: &Path, source: &str) -> NativeReplayCapture {
+            use crate::supply_chain::module_resolution_graph::file_resolution::source_graph::{
+                GraphOptions, capture,
+            };
+
+            let config = OrchestratorConfig {
+                commonjs_entry: true,
+                ..OrchestratorConfig::default()
+            };
+            let runtime = RuntimeConfig::default();
+            let path = root.join("app.cjs");
+            std::fs::write(&path, source).expect("write original frozen source");
+            let graph = capture(root, "app.cjs", GraphOptions::default())
+                .expect("capture original module closure");
+            let sources = CapturedModuleSources::capture(&graph).unwrap();
+            let graph_hash = graph.report().input_hash.clone();
+            let resolver = Arc::new(
+                CapturedEngineResolver::new_with_parser_options(
+                    graph,
+                    &graph_hash,
+                    config.parser_options.clone(),
+                )
+                .expect("admit frozen module graph"),
+            );
+            let capabilities: Vec<String> =
+                ["module_load", "fs_read", "fs_write", "builtin", "timer"]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect();
+            let policy = Arc::new(CapabilityPolicyHook::new(
+                capabilities
+                    .iter()
+                    .filter_map(|tag| RuntimeCapability::from_tag_str(tag))
+                    .collect(),
+            ));
+            let entry = resolver
+                .resolve(
+                    &resolver.entry_request(),
+                    &ResolutionContext::new(
+                        "native-module-admission",
+                        "native-module-admission",
+                        &config.policy_id,
+                    ),
+                    policy.as_ref(),
+                )
+                .expect("admit frozen entry source");
+            let package = ExtensionPackage {
+                extension_id: "native-counterfactual-regression".into(),
+                source: entry.module.record.source.clone(),
+                source_file: Some(path.display().to_string()),
+                module_root: Some(root.display().to_string()),
+                capabilities,
+                version: "test".into(),
+                metadata: BTreeMap::new(),
+            };
+            let authority = RuntimeEvidenceAuthority::generate_runtime_owned(
+                "franken-node.native-counterfactual-test",
+                config.epoch,
+                1,
+                None,
+            )
+            .unwrap();
+            let mut orchestrator =
+                ExecutionOrchestrator::try_new_with_runtime_config_and_authority(
+                    config.clone(),
+                    runtime.clone(),
+                    AmbientAuthorityGrant::DenyAll,
+                    authority,
+                )
+                .unwrap();
+            orchestrator.set_host_io(
+                Arc::new(SandboxedHostIo::with_root(root).unwrap()),
+                Some(Arc::new(InMemoryHostIoTranscript::recording())),
+            );
+            let result = orchestrator
+                .execute_resolved_entry_with_resolver(
+                    &package,
+                    &entry,
+                    resolver.execution_resolver(root, policy).unwrap(),
+                )
+                .expect("complete the real original frozen run");
+            NativeReplayCapture::from_execution(
+                &package,
+                &config,
+                &runtime,
+                AmbientAuthorityGrant::DenyAll,
+                &[],
+                None,
+                Some(&sources),
+                &result,
+            )
+            .expect("capture the completed frozen original")
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn native_counterfactual_executes_restrictions_offline_without_repeating_original_effects()
+        {
+            on_native_stack(|| {
+                let workspace = tempfile::tempdir().unwrap();
+                let original = workspace.path().join("original");
+                std::fs::create_dir(&original).unwrap();
+                std::fs::write(original.join("input.txt"), "captured-before-write").unwrap();
+                let capture = record_frozen_counterfactual(
+                    &original,
+                    "const fs = require('fs'); const value = fs.readFileSync('input.txt', 'utf8'); console.log(value); fs.writeFileSync('output.txt', value); console.log('after-write');",
+                );
+                let archived = workspace.path().join("archived");
+                std::fs::rename(&original, &archived).unwrap();
+
+                let outcome = counterfactual(&capture, &["fs_write".into()])
+                    .expect("execute the real restricted branch over captured inputs");
+                assert!(outcome.baseline.satisfies_policy_equivalence());
+                assert_eq!(
+                    outcome.baseline.verification_scope,
+                    POLICY_EQUIVALENCE_SCOPE
+                );
+                assert_eq!(
+                    outcome.terminal_state,
+                    NativeReplayTerminalState::EngineFailure
+                );
+                assert!(
+                    outcome
+                        .engine_failure
+                        .as_deref()
+                        .unwrap()
+                        .contains("fs_write")
+                );
+                assert!(outcome.execution_value.is_none());
+                assert!(outcome.instructions_executed.is_none());
+                assert_eq!(outcome.captured_host_effects, 2);
+                assert_eq!(outcome.consumed_host_effects, 1);
+                assert_eq!(outcome.unused_original_host_effects, 1);
+                assert_eq!(outcome.console_output.len(), 1);
+                assert_eq!(outcome.console_output[0].message, "captured-before-write");
+                assert!(!outcome.console_matches_original);
+                assert!(!outcome.terminal_state_matches_original);
+                assert!(!outcome.replay_certified && !outcome.policy_equivalence_certified);
+
+                let before_input = counterfactual(&capture, &["fs_read".into()]).unwrap();
+                assert_eq!(
+                    before_input.terminal_state,
+                    NativeReplayTerminalState::EngineFailure
+                );
+                assert_eq!(before_input.consumed_host_effects, 0);
+                assert_eq!(before_input.unused_original_host_effects, 2);
+                assert!(before_input.console_output.is_empty());
+
+                let completed = counterfactual(&capture, &["timer".into()]).unwrap();
+                assert_eq!(
+                    completed.terminal_state,
+                    NativeReplayTerminalState::Completed
+                );
+                assert!(completed.execution_value.is_some());
+                assert!(completed.instructions_executed.is_some());
+                assert!(completed.console_matches_original);
+                assert_eq!(completed.execution_value_matches_original, Some(true));
+                assert_eq!(completed.consumed_host_effects, 2);
+                assert_eq!(completed.unused_original_host_effects, 0);
+                assert!(!completed.replay_certified && !completed.policy_equivalence_certified);
+
+                assert!(
+                    !original.exists(),
+                    "neither replay may recreate the original tree"
+                );
+                assert_eq!(
+                    std::fs::read_to_string(archived.join("output.txt")).unwrap(),
+                    "captured-before-write"
+                );
+                assert!(reexecute(&capture).unwrap().satisfies_policy_equivalence());
+            });
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn native_counterfactual_refuses_unverified_baselines_and_incomplete_source_authority() {
+            on_native_stack(|| {
+                let root = tempfile::tempdir().unwrap();
+                let capture = record_frozen_counterfactual(root.path(), "console.log('original');");
+                let original: NativeReplayPayload =
+                    serde_json::from_str(&capture.payload_json).unwrap();
+                let mut divergent = original.clone();
+                let CapturedAttempt::Completed(expected) = &mut divergent.expected else {
+                    panic!("fixture completed");
+                };
+                expected.execution_value = "forged-baseline-value".into();
+                let error = counterfactual(&encode_capture(&divergent).unwrap(), &["timer".into()])
+                    .expect_err("an alternative cannot launder a divergent original");
+                assert!(
+                    error.contains("original execution and policy verification"),
+                    "{error}"
+                );
+
+                let mut missing = original.clone();
+                missing.module_sources = None;
+                assert!(
+                    counterfactual(&encode_capture(&missing).unwrap(), &["timer".into()])
+                        .unwrap_err()
+                        .contains("frozen module sources")
+                );
+                let mut process_authorized = original;
+                process_authorized
+                    .package
+                    .capabilities
+                    .push("process_spawn".into());
+                assert!(
+                    counterfactual(
+                        &encode_capture(&process_authorized).unwrap(),
+                        &["timer".into()]
+                    )
+                    .unwrap_err()
+                    .contains("process-authorized")
+                );
+            });
         }
 
         #[test]

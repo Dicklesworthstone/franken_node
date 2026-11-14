@@ -90,6 +90,63 @@ gate continue to require their existing authenticated execution inputs. See
 for verification of session exports with an independently supplied product
 public key.
 
+## Executing a native counterfactual
+
+The native counterfactual mode executes the captured program with explicitly
+removed capabilities. It can reveal the actual console output and terminal
+state of that restricted execution, including changed guest control flow:
+
+```bash
+franken-node incident counterfactual \
+  --bundle incident.fnbundle \
+  --model native \
+  --deny-capability fs_write,network_egress \
+  --trusted-public-key exporter.pub \
+  --trusted-run-public-key original-run.pub \
+  --trusted-runtime-public-key product-root.pub \
+  --timeout-ms 30000 \
+  --json
+```
+
+The three public-key inputs independently authenticate the export, original
+run, and runtime identity/effect ledger. The containing bundle is read once
+and authenticated before captured input is executed. The worker first
+reproduces the completed original run, including its policy decisions and
+frozen module sources. A failed or incomplete baseline refuses the entire
+counterfactual.
+
+The second execution preserves the captured source, arguments, ambient
+authority, runtime settings and nondeterminism inputs while subtracting the
+requested capability tags. It never adds authority or changes an entire
+runtime profile. Use repeated `--deny-capability` flags or a comma-separated
+list; `--policy` remains the input for the synthetic and production decision
+models.
+
+The restricted execution's provider only serves the next exact request from
+the authenticated original host-input transcript. An unused suffix is
+reported explicitly. A different, reordered or additional request poisons
+the attempt, even if the guest catches the error. No live filesystem,
+network, environment, entropy or process operation supplies missing data.
+Changed branches that require unrecorded results are therefore refused.
+
+Both executions share one supervised Linux worker and one total deadline,
+including startup and protocol draining. The worker must terminate and its
+response must match the exact request before the parent accepts observations.
+Process-authorized captures and removing `module_load` are currently refused;
+the latter would remove the authority needed to enter the frozen program.
+The engine's intrinsic `vm_dispatch`, `heap_allocate`, and `console`
+capabilities cannot be removed through package declarations and are also
+refused as restrictions. Captured ambient process-shape authority is preserved.
+
+The `franken-node/incident-native-counterfactual/v1` report binds the original
+incident, verified origins, restriction and observed outcome into its digest.
+It includes the verified baseline, remaining declared capabilities, actual terminal
+state and console, and consumed/unused original input counts. The digest is
+an integrity commitment, not a signature. The branch has
+`replay_certified = false` and `policy_equivalence_certified = false`; an
+observed capability restriction is not a certificate for a different policy
+or a rollout approval. Native mode does not support `--promote`.
+
 ## Required finalization
 
 All supported failures share the existing post-cell certification boundary:

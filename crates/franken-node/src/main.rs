@@ -6040,9 +6040,9 @@ fn handle_incident_sessions(args: &cli::IncidentSessionsArgs) -> Result<()> {
             report
                 .records
                 .retain(|record| record.admission.session_nonce == nonce);
-            report.source_errors.retain(|error| {
-                error.session_nonce.as_deref().is_none_or(|id| id == nonce)
-            });
+            report
+                .source_errors
+                .retain(|error| error.session_nonce.as_deref().is_none_or(|id| id == nonce));
             report
                 .untracked_identity_captures
                 .retain(|capture| capture.session_nonce == nonce);
@@ -13579,8 +13579,7 @@ fn planned_run_incident_capture(
     if !tripped_control || (ledger.entries.is_empty() && dispatch.native_replay.is_none()) {
         return None;
     }
-    let incident_id =
-        run_execution_incident_id(&ledger.chain_head_hash, &receipt.core.receipt_id);
+    let incident_id = run_execution_incident_id(&ledger.chain_head_hash, &receipt.core.receipt_id);
     Some(RunIncidentCaptureRef {
         evidence_path: run_incident_evidence_relative_path(&incident_id),
         incident_id,
@@ -14513,10 +14512,8 @@ fn handle_ops_incident_coverage(args: &cli::OpsIncidentCoverageArgs) -> Result<(
                 let incident_id =
                     run_execution_incident_id(&ledger.chain_head_hash, &record.receipt_id);
                 if let Some(capture) = &record.native_replay {
-                    native_replay_payloads.insert(
-                        incident_id.clone(),
-                        capture.payload_sha256.clone(),
-                    );
+                    native_replay_payloads
+                        .insert(incident_id.clone(), capture.payload_sha256.clone());
                 }
                 let tripped_control = ledger.denied_count > 0
                     || !record.ssrf_violations.is_empty()
@@ -26154,22 +26151,21 @@ impl IncidentReplayCliSummary {
     }
 }
 
-fn incident_replay_cli_summary(
+struct AuthenticatedIncidentBundle {
+    bundle: tools::replay_bundle::ReplayBundle,
+    run_origin: Option<frankenengine_verifier_sdk::incident_bundle::VerifiedRunOrigin>,
+    runtime_origin: Option<frankenengine_verifier_sdk::incident_bundle::VerifiedRuntimeOrigin>,
+}
+
+/// Authenticate the export and original execution against independently chosen
+/// authorities using one bounded immutable byte buffer. Native consumers must
+/// never reopen a bundle between origin verification and input extraction.
+fn read_authenticated_incident_bundle(
     bundle_path: &Path,
     trusted_key_ids: &[String],
-    execute: bool,
-    require_policy_equivalence: bool,
     trusted_run_key: Option<&ed25519_dalek::VerifyingKey>,
     trusted_runtime_key: Option<&ed25519_dalek::VerifyingKey>,
-    timeout: std::time::Duration,
-) -> Result<IncidentReplayCliSummary> {
-    #[cfg(not(feature = "engine"))]
-    let _ = timeout;
-    anyhow::ensure!(
-        !require_policy_equivalence
-            || (execute && trusted_run_key.is_some() && trusted_runtime_key.is_some()),
-        "--require-policy-equivalence requires --execute, --trusted-run-public-key and --trusted-runtime-public-key"
-    );
+) -> Result<AuthenticatedIncidentBundle> {
     anyhow::ensure!(
         trusted_runtime_key.is_none() || trusted_run_key.is_some(),
         "--trusted-runtime-public-key requires --trusted-run-public-key"
@@ -26221,6 +26217,39 @@ fn incident_replay_cli_summary(
     } else {
         (None, None)
     };
+    Ok(AuthenticatedIncidentBundle {
+        bundle,
+        run_origin,
+        runtime_origin,
+    })
+}
+
+fn incident_replay_cli_summary(
+    bundle_path: &Path,
+    trusted_key_ids: &[String],
+    execute: bool,
+    require_policy_equivalence: bool,
+    trusted_run_key: Option<&ed25519_dalek::VerifyingKey>,
+    trusted_runtime_key: Option<&ed25519_dalek::VerifyingKey>,
+    timeout: std::time::Duration,
+) -> Result<IncidentReplayCliSummary> {
+    #[cfg(not(feature = "engine"))]
+    let _ = timeout;
+    anyhow::ensure!(
+        !require_policy_equivalence
+            || (execute && trusted_run_key.is_some() && trusted_runtime_key.is_some()),
+        "--require-policy-equivalence requires --execute, --trusted-run-public-key and --trusted-runtime-public-key"
+    );
+    let AuthenticatedIncidentBundle {
+        bundle,
+        run_origin,
+        runtime_origin,
+    } = read_authenticated_incident_bundle(
+        bundle_path,
+        trusted_key_ids,
+        trusted_run_key,
+        trusted_runtime_key,
+    )?;
     let outcome = replay_bundle_with_trusted_keys(&bundle, trusted_key_ids).map_err(|err| {
         anyhow::anyhow!("failed replaying bundle {}: {err:#}", bundle_path.display())
     })?;
@@ -26957,10 +26986,152 @@ fn incident_counterfactual_sha256(bytes: &[u8]) -> String {
     format!("sha256:{}", hex::encode(sha2::Sha256::digest(bytes)))
 }
 
+fn handle_native_incident_counterfactual(args: &cli::IncidentCounterfactualArgs) -> Result<()> {
+    anyhow::ensure!(
+        args.policy.trim().is_empty(),
+        "--model native uses --deny-capability to restrict the captured grants; --policy applies to the synthetic and production models"
+    );
+    anyhow::ensure!(
+        !args.promote && args.promotion_signing_key.is_none() && args.operator_id.is_none(),
+        "native counterfactual execution does not certify a policy rollout or support promotion"
+    );
+    let request = ops::native_replay::NativeCounterfactualRequest {
+        denied_capabilities: args.denied_capabilities.clone(),
+    };
+    request.validate().map_err(anyhow::Error::msg)?;
+    anyhow::ensure!(
+        (1..=ops::native_replay::MAX_NATIVE_REPLAY_TIMEOUT_MS).contains(&args.timeout_ms),
+        "native counterfactual timeout must be 1..={} milliseconds",
+        ops::native_replay::MAX_NATIVE_REPLAY_TIMEOUT_MS
+    );
+    let run_key_path = args
+        .trusted_run_public_key
+        .as_deref()
+        .context("--model native requires --trusted-run-public-key")?;
+    let runtime_key_path = args
+        .trusted_runtime_public_key
+        .as_deref()
+        .context("--model native requires --trusted-runtime-public-key")?;
+    #[cfg(not(feature = "engine"))]
+    {
+        let _ = (request, run_key_path, runtime_key_path);
+        anyhow::bail!("native counterfactual execution requires a build with the `engine` feature");
+    }
+    #[cfg(feature = "engine")]
+    {
+        let trusted_key_ids = replay_trusted_key_ids(
+            args.trusted_public_key.as_deref(),
+            args.trusted_key_dir.as_deref(),
+        )?;
+        let run_key = load_replay_trust_anchor(run_key_path)
+            .context("failed loading --trusted-run-public-key")?;
+        let runtime_key = load_replay_trust_anchor(runtime_key_path)
+            .context("failed loading --trusted-runtime-public-key")?;
+        let AuthenticatedIncidentBundle {
+            bundle,
+            run_origin,
+            runtime_origin,
+        } = read_authenticated_incident_bundle(
+            &args.bundle,
+            &trusted_key_ids,
+            Some(&run_key),
+            Some(&runtime_key),
+        )?;
+        let trace = replay_bundle_with_trusted_keys(&bundle, &trusted_key_ids)
+            .context("recorded trace verification failed before native counterfactual execution")?;
+        anyhow::ensure!(
+            trace.matched,
+            "recorded trace integrity failed before native counterfactual execution"
+        );
+        let capture: ops::native_replay::NativeReplayCapture = serde_json::from_value(
+            bundle
+                .initial_state_snapshot
+                .get("native_replay")
+                .context(
+                    "native counterfactual execution requires a bundle from run --capture-replay",
+                )?
+                .clone(),
+        )
+        .context("invalid authenticated native replay capsule")?;
+        let outcome = ops::native_replay::counterfactual_supervised(
+            &capture,
+            &request.denied_capabilities,
+            std::time::Duration::from_millis(args.timeout_ms),
+        )
+        .map_err(|error| anyhow::anyhow!("native counterfactual execution refused: {error}"))?;
+        let mut report = serde_json::json!({
+            "schema_version": "franken-node/incident-native-counterfactual/v1",
+            "command": "incident.counterfactual",
+            "executor": "native",
+            "bundle_id": bundle.bundle_id,
+            "incident_id": bundle.incident_id,
+            "bundle_integrity_hash": bundle.integrity_hash,
+            "authentication_scope": "authenticated_runtime_incident",
+            "run_origin_verified": run_origin.is_some(),
+            "run_origin": run_origin,
+            "runtime_origin_verified": runtime_origin.is_some(),
+            "runtime_origin": runtime_origin,
+            "policy_change": {
+                "kind": "capability_attenuation",
+                "denied_capabilities": &outcome.denied_capabilities,
+                "runtime_settings": "captured_unchanged",
+            },
+            "execution": &outcome,
+            "promotion_available": false,
+        });
+        // Bind the exact independently authenticated source, restrictions and
+        // observed branch. This digest is not a signature or rollout approval.
+        let canonical = counterfactual_to_json(&report)?;
+        report["counterfactual_digest"] = serde_json::json!(incident_counterfactual_sha256(
+            format!("incident-native-counterfactual/v1\n{canonical}").as_bytes()
+        ));
+        if args.json {
+            println!("{}", counterfactual_to_json(&report)?);
+        } else {
+            println!(
+                "native counterfactual: incident={} denied={} terminal={:?} captured_inputs_consumed={}/{}",
+                bundle.incident_id,
+                outcome.denied_capabilities.join(","),
+                outcome.terminal_state,
+                outcome.consumed_host_effects,
+                outcome.captured_host_effects,
+            );
+            println!("  baseline guest execution and original policy decisions verified");
+            println!(
+                "  capability restriction observed; policy rollout and replay certification unavailable"
+            );
+            for entry in &outcome.console_output {
+                println!(
+                    "  {}: {}",
+                    entry.level,
+                    serde_json::to_string(&entry.message)?
+                );
+            }
+            if let Some(error) = &outcome.engine_failure {
+                println!("  engine_failure={}", serde_json::to_string(error)?);
+            }
+            if let Some(value) = &outcome.exception_value {
+                println!("  exception={}", serde_json::to_string(value)?);
+            }
+        }
+        Ok(())
+    }
+}
+
 fn handle_incident_counterfactual_command(args: &cli::IncidentCounterfactualArgs) -> Result<()> {
     if args.bundle.as_os_str().is_empty() {
         anyhow::bail!("`incident counterfactual` requires --bundle");
     }
+    if args.model == "native" {
+        return handle_native_incident_counterfactual(args);
+    }
+    anyhow::ensure!(
+        args.denied_capabilities.is_empty()
+            && args.trusted_run_public_key.is_none()
+            && args.trusted_runtime_public_key.is_none()
+            && args.timeout_ms == ops::native_replay::DEFAULT_NATIVE_REPLAY_TIMEOUT_MS,
+        "--deny-capability, original-run/runtime trust anchors and --timeout-ms require --model native"
+    );
     if args.policy.trim().is_empty() {
         anyhow::bail!("`incident counterfactual` requires --policy");
     }
@@ -26973,7 +27144,7 @@ fn handle_incident_counterfactual_command(args: &cli::IncidentCounterfactualArgs
         tools::counterfactual_replay::EXECUTOR_KIND_PRODUCTION => true,
         other => {
             anyhow::bail!(
-                "invalid counterfactual --model `{other}`; expected `synthetic` or `production`"
+                "invalid counterfactual --model `{other}`; expected `synthetic`, `production` or `native`"
             );
         }
     };
@@ -43516,23 +43687,19 @@ fn main() -> Result<()> {
                 // Keep that lookup at the command boundary, separate from the
                 // project-file collector and its hermetic fixture tests.
                 let native = collect_native_session_incident_listing(&cwd);
-                entries.extend(
-                    native
-                        .entries
-                        .into_iter()
-                        .filter(|entry| {
-                            severity_filter
-                                .as_ref()
-                                .is_none_or(|severity| &entry.severity == severity)
-                        }),
-                );
+                entries.extend(native.entries.into_iter().filter(|entry| {
+                    severity_filter
+                        .as_ref()
+                        .is_none_or(|severity| &entry.severity == severity)
+                }));
                 entries.sort_by(|left, right| {
                     left.incident_id
                         .cmp(&right.incident_id)
                         .then_with(|| left.path.cmp(&right.path))
                 });
                 if args.json {
-                    let mut payload = incident_list_json_payload(&entries, severity_filter.as_deref());
+                    let mut payload =
+                        incident_list_json_payload(&entries, severity_filter.as_deref());
                     if let Some(inspection) = native.inspection {
                         payload["native_session_inspection"] = inspection;
                     }
@@ -45123,7 +45290,10 @@ mod run_trust_gate_tests {
         let failed = run_execution_incident_id(&genesis, "zero-effect-failed");
         assert_eq!(completed, "INC-RUN-9b784df9d916ac565d008f461ad138a6");
         assert_eq!(failed, "INC-RUN-fd7ec7dcb80fde64b48e34a1884babe2");
-        assert_ne!(completed, failed, "the shared genesis does not identify a run");
+        assert_ne!(
+            completed, failed,
+            "the shared genesis does not identify a run"
+        );
         assert_ne!(completed, run_incident_id(&genesis));
         assert_eq!(
             run_execution_incident_id(

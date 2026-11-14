@@ -3590,7 +3590,17 @@ pub struct IncidentCounterfactualArgs {
     #[arg(long = "key-dir", alias = "trusted-key-dir")]
     pub trusted_key_dir: Option<PathBuf>,
 
-    /// Policy to simulate.
+    /// Independently trusted original run-receipt key. Required by native
+    /// counterfactual execution before captured guest code may execute.
+    #[arg(long)]
+    pub trusted_run_public_key: Option<PathBuf>,
+
+    /// Independently trusted product-root key for the original runtime identity
+    /// and effect ledger. Required by --model native.
+    #[arg(long)]
+    pub trusted_runtime_public_key: Option<PathBuf>,
+
+    /// Policy to simulate with the synthetic or production model.
     /// Required by the handler (not clap) so `--json` failures emit
     /// `franken-node/incident-error-cli/v1` instead of a human clap error.
     #[arg(long, default_value = "")]
@@ -3601,9 +3611,22 @@ pub struct IncidentCounterfactualArgs {
     /// re-decides every host effect a run-captured incident recorded under the
     /// runtime profile named by `--policy`, using the run path's own capability
     /// table. The chosen model is labeled in the report and bound into the
-    /// counterfactual digest.
+    /// counterfactual digest. `native` executes the captured program with
+    /// --deny-capability restrictions, preserving the original runtime settings
+    /// and using only authenticated captured inputs and host results.
     #[arg(long, default_value = "synthetic")]
     pub model: String,
+
+    /// Remove an originally granted capability during native execution.
+    /// Repeat the flag or separate tags with commas. This cannot add authority
+    /// or select a different runtime profile; requires --model native.
+    #[arg(long = "deny-capability", value_delimiter = ',')]
+    pub denied_capabilities: Vec<String>,
+
+    /// Total native baseline and restricted-execution budget in milliseconds,
+    /// including worker startup and protocol draining (1..=300000).
+    #[arg(long, default_value_t = 30_000)]
+    pub timeout_ms: u64,
 
     /// Emit the structured counterfactual report as canonical JSON on stdout.
     /// Suppresses the human `counterfactual summary:` / `counterfactual output:`
@@ -5261,6 +5284,52 @@ mod parser_contract_extra_tests {
     }
 
     #[test]
+    fn native_counterfactual_parses_restrictions_and_independent_authorities() -> Result<(), String>
+    {
+        let cli = parse(&[
+            "franken-node",
+            "incident",
+            "counterfactual",
+            "--bundle",
+            "incident.fnbundle",
+            "--model",
+            "native",
+            "--deny-capability",
+            "fs_write,network_egress",
+            "--deny-capability",
+            "env_read",
+            "--trusted-public-key",
+            "export.pub",
+            "--trusted-run-public-key",
+            "run.pub",
+            "--trusted-runtime-public-key",
+            "runtime.pub",
+            "--timeout-ms",
+            "2000",
+            "--json",
+        ])
+        .map_err(|error| error.to_string())?;
+        let Command::Incident(IncidentCommand::Counterfactual(args)) = cli.command else {
+            return Err("expected native counterfactual command".into());
+        };
+        assert_eq!(args.model, "native");
+        assert!(args.policy.is_empty());
+        assert_eq!(
+            args.denied_capabilities,
+            ["fs_write", "network_egress", "env_read"]
+        );
+        assert_eq!(args.trusted_public_key, Some(PathBuf::from("export.pub")));
+        assert_eq!(args.trusted_run_public_key, Some(PathBuf::from("run.pub")));
+        assert_eq!(
+            args.trusted_runtime_public_key,
+            Some(PathBuf::from("runtime.pub"))
+        );
+        assert_eq!(args.timeout_ms, 2000);
+        assert!(args.json);
+        Ok(())
+    }
+
+    #[test]
     fn fleet_agent_parses_without_zone_so_json_can_fail_closed() -> Result<(), String> {
         let cli = parse(&[
             "franken-node",
@@ -5324,12 +5393,15 @@ mod parser_contract_extra_tests {
         let Command::Incident(IncidentCommand::Sessions(args)) = cli.command else {
             return Err("expected authenticated incident-session inspection".into());
         };
-        assert_eq!(args.project, Some(PathBuf::from("/srv/retired-application")));
+        assert_eq!(
+            args.project,
+            Some(PathBuf::from("/srv/retired-application"))
+        );
         assert_eq!(args.session.as_deref(), Some(nonce));
         assert!(args.json);
 
-        let cli = parse(&["franken-node", "incident", "sessions"])
-            .map_err(|error| error.to_string())?;
+        let cli =
+            parse(&["franken-node", "incident", "sessions"]).map_err(|error| error.to_string())?;
         let Command::Incident(IncidentCommand::Sessions(args)) = cli.command else {
             return Err("expected current-project session inspection".into());
         };

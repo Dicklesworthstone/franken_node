@@ -78,6 +78,49 @@ fn runtime_origin_replay_requires_an_explicit_run_anchor_before_reading_inputs()
     assert!(report.get("execution_result").is_none());
 }
 
+#[test]
+fn native_counterfactual_requires_explicit_restrictions_and_origins_before_reading_inputs() {
+    let workspace = config_only_workspace();
+    for extra in [
+        &[][..],
+        &["--deny-capability", "fs_write"][..],
+        &[
+            "--deny-capability",
+            "fs_write",
+            "--trusted-run-public-key",
+            "absent-run.pub",
+        ][..],
+        &["--deny-capability", "fs_write", "--policy", "strict"][..],
+        &["--deny-capability", "fs_write", "--promote"][..],
+        &["--deny-capability", "fs_write", "--timeout-ms", "0"][..],
+    ] {
+        let mut args = vec![
+            "incident",
+            "counterfactual",
+            "--bundle",
+            "absent.fnbundle",
+            "--model",
+            "native",
+            "--json",
+        ];
+        args.extend_from_slice(extra);
+        let output = run_cli_in_workspace(workspace.path(), &args);
+        assert!(!output.status.success(), "{output:?}");
+        let report: Value = serde_json::from_slice(&output.stdout)
+            .expect("one structured native counterfactual dependency refusal");
+        assert_eq!(report["ok"], false);
+        assert_eq!(report["command"], "incident.counterfactual");
+        assert!(report.get("execution").is_none());
+        assert!(
+            !report["error"]
+                .as_str()
+                .unwrap()
+                .contains("failed reading replay bundle"),
+            "invalid execution requests must be rejected before opening captured input: {report}",
+        );
+    }
+}
+
 #[cfg(all(feature = "engine", target_os = "linux"))]
 mod native {
     use super::super::{capture_native_run_bundle_with, run_cli_in_workspace_with_state_home};
@@ -469,6 +512,164 @@ mod native {
                     .unwrap(),
                 "ORIGINAL",
             );
+        }
+
+        fn counterfactual(&self, denied: &str, timeout_ms: &str) -> Output {
+            run_cli_in_workspace_with_state_home(
+                self.operator.path(),
+                &[
+                    "incident",
+                    "counterfactual",
+                    "--bundle",
+                    &self.bundle_name,
+                    "--model",
+                    "native",
+                    "--deny-capability",
+                    denied,
+                    "--trusted-public-key",
+                    "exporter.pub",
+                    "--trusted-run-public-key",
+                    "run.pub",
+                    "--trusted-runtime-public-key",
+                    "runtime.pub",
+                    "--timeout-ms",
+                    timeout_ms,
+                    "--json",
+                ],
+                Some(self.operator_state.path()),
+            )
+        }
+    }
+
+    #[test]
+    fn native_counterfactual_executes_a_restricted_frozen_program_without_repeating_effects() {
+        let fixture = Fixture::new_with_sources(false, SourceMode::AutomaticCommonJs);
+        fixture.archive_original_authority_and_inputs();
+        let output = fixture.counterfactual("fs_write", "30000");
+        assert!(output.status.success(), "{output:?}");
+        let report: Value = serde_json::from_slice(&output.stdout).expect("native branch report");
+        assert_eq!(
+            report["schema_version"],
+            "franken-node/incident-native-counterfactual/v1"
+        );
+        assert_eq!(report["executor"], "native");
+        assert_eq!(report["run_origin_verified"], true);
+        assert_eq!(report["runtime_origin_verified"], true);
+        assert_eq!(report["run_origin"]["receipt_id"], fixture.receipt_id);
+        assert_eq!(report["promotion_available"], false);
+        let execution = &report["execution"];
+        assert_eq!(execution["baseline"]["matched"], true);
+        assert_eq!(execution["baseline"]["decisions_match"], true);
+        assert_eq!(execution["baseline"]["module_load_disabled"], false);
+        assert_eq!(execution["denied_capabilities"], json!(["fs_write"]));
+        assert!(
+            execution["retained_declared_capabilities"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|tag| tag != "fs_write")
+        );
+        assert_eq!(execution["terminal_state"], "engine_failure");
+        assert_eq!(execution["terminal_state_matches_original"], false);
+        assert!(
+            execution["engine_failure"]
+                .as_str()
+                .unwrap()
+                .contains("fs_write")
+        );
+        assert_eq!(execution["captured_host_effects"], 2);
+        assert_eq!(execution["consumed_host_effects"], 1);
+        assert_eq!(execution["unused_original_host_effects"], 1);
+        assert_eq!(execution["replay_certified"], false);
+        assert_eq!(execution["policy_equivalence_certified"], false);
+        assert!(
+            execution["console_output"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| { entry["message"] == "captured-dependency" })
+        );
+        assert!(
+            !execution["console_output"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| { entry["message"] == "ORIGINAL" })
+        );
+
+        // The digest commits to source authority, restriction and actual branch
+        // observations; it is not the synthetic model's expected-loss score.
+        let mut unsigned = report.clone();
+        let digest = unsigned
+            .as_object_mut()
+            .unwrap()
+            .remove("counterfactual_digest")
+            .unwrap();
+        let canonical =
+            frankenengine_node::tools::counterfactual_replay::to_canonical_json(&unsigned).unwrap();
+        use sha2::{Digest as _, Sha256};
+        assert_eq!(
+            digest,
+            format!(
+                "sha256:{}",
+                hex::encode(Sha256::digest(
+                    format!("incident-native-counterfactual/v1\n{canonical}").as_bytes()
+                ))
+            )
+        );
+        fixture.assert_no_repeated_effects();
+    }
+
+    #[test]
+    fn native_counterfactual_refuses_foreign_origins_unreplayable_baselines_and_deadlines() {
+        let fixture = Fixture::new_with_sources(false, SourceMode::AutomaticCommonJs);
+        fixture.archive_original_authority_and_inputs();
+        for (name, trusted_key) in [
+            ("exporter.pub", fixture.exporter.verifying_key()),
+            ("run.pub", fixture.run_signer.verifying_key()),
+            ("runtime.pub", fixture.runtime_root),
+        ] {
+            let path = fixture.operator.path().join(name);
+            fs::write(
+                &path,
+                hex::encode(
+                    SigningKey::from_bytes(&[0x75; 32])
+                        .verifying_key()
+                        .as_bytes(),
+                ),
+            )
+            .unwrap();
+            let output = fixture.counterfactual("fs_write", "30000");
+            assert!(!output.status.success(), "foreign {name}: {output:?}");
+            let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(report["ok"], false);
+            assert!(report.get("execution").is_none());
+            fixture.assert_no_repeated_effects();
+            fs::write(path, hex::encode(trusted_key.as_bytes())).unwrap();
+        }
+        let timed_out = fixture.counterfactual("fs_write", "1");
+        assert!(!timed_out.status.success(), "{timed_out:?}");
+        let refusal: Value = serde_json::from_slice(&timed_out.stdout).unwrap();
+        assert_eq!(refusal["ok"], false);
+        assert!(
+            refusal["error"].as_str().unwrap().contains("timed out"),
+            "{refusal}"
+        );
+        assert!(refusal.get("execution").is_none());
+        fixture.assert_no_repeated_effects();
+
+        for (guest_exception, mode) in [
+            (true, SourceMode::AutomaticCommonJs),
+            (false, SourceMode::EntryOnly),
+        ] {
+            let fixture = Fixture::new_with_sources(guest_exception, mode);
+            fixture.archive_original_authority_and_inputs();
+            let refused = fixture.counterfactual("fs_write", "30000");
+            assert!(!refused.status.success(), "{refused:?}");
+            let report: Value = serde_json::from_slice(&refused.stdout).unwrap();
+            assert_eq!(report["ok"], false);
+            assert!(report.get("execution").is_none());
+            fixture.assert_no_repeated_effects();
         }
     }
 
