@@ -152,63 +152,55 @@ class TestRustImplementation(unittest.TestCase):
         check = check_named("bench_run_e2e_real_and_failure_coverage")
         self.assertTrue(check["pass"], check["detail"])
 
-    def test_default_cli_measured_provider_check_rejects_fixture_default(self):
-        with tempfile.TemporaryDirectory(prefix="bench-check-") as temp_dir:
-            impl = Path(temp_dir) / "benchmark_suite.rs"
-            impl.write_text(
-                """
-pub fn run_default_suite_for_cli(
-    scenario_filter: Option<&str>,
-    fixture_mode: bool,
-) -> Result<BenchmarkReport, BenchRunError> {
-    let evidence_mode = if fixture_mode {
-        BenchmarkEvidenceMode::FixtureOnly
-    } else {
-        BenchmarkEvidenceMode::FixtureOnly
-    };
-    run_default_suite_with_config_and_mode(SuiteConfig::for_cli(), scenario_filter, evidence_mode)
-}
+    def test_default_cli_check_rejects_invalid_main_routes(self):
+        # Leave the library's measured-provider markers intact: they must not
+        # conceal a broken default route in the actual product command.
+        original = checker.RUST_MAIN_PATH.read_text(encoding="utf-8")
+        mutations = [
+            (
+                "let (rendered, summary) = if args.fixture_mode {",
+                "let (rendered, summary) = if !args.fixture_mode {",
+                "explicit_fixture_opt_in_branch",
+            ),
+            (
+                "execute_triad_benchmark_with_limits(&spec, &commands, &limits)",
+                "benchmark_suite_run_default_suite_with_config_and_mode("
+                "config, None, BenchmarkEvidenceMode::Measured)",
+                "default_live_no_synthetic_fallback",
+            ),
+            (
+                "TriadRuntimeLeg::FrankenNode",
+                "TriadRuntimeLeg::Node",
+                "default_live_complete_runtime_triad",
+            ),
+        ]
+        for old, new, expected_missing in mutations:
+            with self.subTest(expected_missing=expected_missing):
+                self.assertEqual(original.count(old), 1, old)
+                with tempfile.TemporaryDirectory(prefix="bench-main-check-") as temp_dir:
+                    main = Path(temp_dir) / "main.rs"
+                    main.write_text(original.replace(old, new, 1), encoding="utf-8")
+                    checker.RESULTS.clear()
+                    with patch.object(checker, "RUST_MAIN_PATH", main):
+                        check = checker.check_rust_default_cli_uses_measured_provider()
+                self.assertFalse(check["pass"])
+                self.assertIn(expected_missing, check["detail"])
 
-fn measured_sample_map() {
-    BenchmarkSecurityControls::from_env(false);
-    let _ = "measured_product_workload";
-    let _ = "fixture_only_deterministic";
-    let _ = "FRANKEN_NODE_BENCH_FAIL_SCENARIO";
-}
-""",
-                encoding="utf-8",
-            )
-            checker.RESULTS.clear()
-
-            with patch.object(checker, "RUST_IMPL_PATH", impl):
-                check = checker.check_rust_default_cli_uses_measured_provider()
-
-        self.assertFalse(check["pass"])
-        self.assertIn("default_cli_measured_else_branch", check["detail"])
-
-    def test_bench_run_e2e_coverage_check_rejects_missing_forced_failure(self):
+    def test_bench_run_e2e_coverage_check_rejects_missing_runtime_alias_refusal(self):
+        original = checker.BENCH_E2E_PATH.read_text(encoding="utf-8")
+        required_test = "bench_run_rejects_runtime_aliases_without_publishing_measurements"
+        self.assertEqual(original.count(required_test), 1)
         with tempfile.TemporaryDirectory(prefix="bench-e2e-check-") as temp_dir:
             e2e = Path(temp_dir) / "bench_run_e2e.rs"
             e2e.write_text(
-                """
-fn bench_run_default_path_emits_measured_evidence() {
-    let _ = "--fixture-mode";
-    let _ = "fixture_only_deterministic";
-    let _ = "raw_samples";
-    let _ = "security_controls";
-}
-
-fn bench_run_invalid_scenario_returns_structured_error() {}
-""",
+                original.replace(required_test, "removed_runtime_alias_refusal_test", 1),
                 encoding="utf-8",
             )
             checker.RESULTS.clear()
-
             with patch.object(checker, "BENCH_E2E_PATH", e2e):
                 check = checker.check_bench_run_e2e_real_and_failure_coverage()
-
         self.assertFalse(check["pass"])
-        self.assertIn("forced_runner_failure_test", check["detail"])
+        self.assertIn("runtime_alias_refusal_test", check["detail"])
 
 
 class TestPolicyDocument(unittest.TestCase):

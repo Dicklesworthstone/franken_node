@@ -696,3 +696,55 @@ fn bench_run_rejects_runtime_aliases_without_publishing_measurements() {
     assert!(report.get("provenance_hash").is_none());
     assert!(!workspace.path().join("triad.json").exists());
 }
+
+#[cfg(unix)]
+#[test]
+fn bench_run_fixture_mode_never_executes_runtime_discovery_programs() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let workspace = TempDir::new().expect("create isolated fixture workspace");
+    for runtime in ["node", "bun"] {
+        let path = workspace.path().join(runtime);
+        std::fs::write(
+            &path,
+            "#!/bin/sh\nprintf 'unexpected runtime probe\\n' > \"$0.invoked\"\nexit 1\n",
+        )
+        .expect("write runtime discovery sentinel");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
+            .expect("make discovery sentinel executable");
+    }
+
+    let mut command = Command::cargo_bin("franken-node").expect("franken-node binary");
+    let output = command
+        .current_dir(workspace.path())
+        .env("PATH", workspace.path())
+        .env_remove("FRANKEN_NODE_BENCH_NODE_VERSION")
+        .env_remove("FRANKEN_NODE_BENCH_BUN_VERSION")
+        .timeout(std::time::Duration::from_secs(30))
+        .args([
+            "bench",
+            "run",
+            "--scenario",
+            "secure-extension-heavy",
+            "--fixture-mode",
+            "--json",
+        ])
+        .output()
+        .expect("run fixture benchmark with instrumented PATH");
+    assert!(
+        output.status.success(),
+        "fixture reports must not depend on executable discovery: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).expect("fixture report JSON");
+    assert_eq!(report["evidence_mode"], "fixture_only");
+    assert_eq!(report["scenarios"][0]["data_source"], "fixture-inputs");
+    assert!(report["runtime_versions"]["node"].is_null());
+    assert!(report["runtime_versions"]["bun"].is_null());
+    for runtime in ["node", "bun"] {
+        assert!(
+            !workspace.path().join(format!("{runtime}.invoked")).exists(),
+            "explicit fixture mode must never execute {runtime} from PATH"
+        );
+    }
+}

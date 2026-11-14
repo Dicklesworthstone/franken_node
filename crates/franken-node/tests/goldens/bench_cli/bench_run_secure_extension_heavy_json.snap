@@ -201,9 +201,9 @@ source: crates/franken-node/tests/cli_subcommand_goldens.rs
       "score": 81,
       "iterations": 5,
       "variance_pct": 1.6924920531402692,
-      "data_source": "measured-pipeline"
+      "data_source": "fixture-inputs"
     }
   ],
   "aggregate_score": 81,
-  "provenance_hash": "sha256:bdf6ff1219e10630092d025b3a2b2ff3533069c0f2916c5ce7fd5866f3f704f7"
+  "provenance_hash": "sha256:0bd3f5a78225e87b7ca670c36495e631cfe37c916aa15e6c2547ef552110f8af"
 }

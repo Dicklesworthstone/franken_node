@@ -23,6 +23,7 @@ from typing import Any
 SPEC_PATH = ROOT / "docs" / "specs" / "section_10_6" / "bd-k4s_contract.md"
 POLICY_PATH = ROOT / "docs" / "policy" / "benchmark_suite.md"
 RUST_IMPL_PATH = ROOT / "crates" / "franken-node" / "src" / "tools" / "benchmark_suite.rs"
+RUST_MAIN_PATH = ROOT / "crates" / "franken-node" / "src" / "main.rs"
 TOOLS_MOD_PATH = ROOT / "crates" / "franken-node" / "src" / "tools" / "mod.rs"
 BENCH_E2E_PATH = ROOT / "crates" / "franken-node" / "tests" / "bench_run_e2e.rs"
 FRANKEN_NODE_CARGO_TOML = ROOT / "crates" / "franken-node" / "Cargo.toml"
@@ -297,29 +298,82 @@ def check_rust_measured_evidence_boundary() -> dict[str, Any]:
 
 
 def check_rust_default_cli_uses_measured_provider() -> dict[str, Any]:
-    if not RUST_IMPL_PATH.is_file():
-        return _check("rust_default_cli_uses_measured_provider", False, "impl file missing")
-    text = RUST_IMPL_PATH.read_text()
-    default_cli_pattern = re.compile(
-        r"pub fn run_default_suite_for_cli\([\s\S]*?"
-        r"let evidence_mode = if fixture_mode \{[\s\S]*?"
-        r"BenchmarkEvidenceMode::FixtureOnly[\s\S]*?"
-        r"\} else \{[\s\S]*?"
-        r"BenchmarkEvidenceMode::Measured[\s\S]*?"
-        r"run_default_suite_with_config_and_mode\(SuiteConfig::for_cli\(\), scenario_filter, evidence_mode\)",
+    if not RUST_IMPL_PATH.is_file() or not RUST_MAIN_PATH.is_file():
+        return _check(
+            "rust_default_cli_uses_measured_provider", False, "benchmark impl or main.rs missing"
+        )
+    text = RUST_IMPL_PATH.read_text(encoding="utf-8")
+    main_text = RUST_MAIN_PATH.read_text(encoding="utf-8")
+    # Inspect the product command, not a legacy library helper that the CLI
+    # might never call. This is a wiring check, not evidence of a measured run.
+    handler_match = re.search(
+        r"^fn handle_bench_run\b[\s\S]*?^\}", main_text, re.MULTILINE
+    )
+    handler = handler_match.group(0) if handler_match else ""
+    branches = re.search(
+        r"let \(rendered, summary\) = if args\.fixture_mode \{\n"
+        r"(?P<fixture>[\s\S]*?)^    \} else \{\n"
+        r"(?P<live>[\s\S]*?)^    \};",
+        handler,
         re.MULTILINE,
     )
+    fixture = branches.group("fixture") if branches else ""
+    live = branches.group("live") if branches else ""
+    live_call = re.search(
+        r"execute_triad_benchmark_with_limits\(&spec,\s*&commands,\s*&limits\)"
+        r"\s*\.map_err\([\s\S]*?\)\?;",
+        live,
+    )
+    synthetic_call = re.search(
+        r"\b(?:benchmark_suite_run_default_suite_with_config_and_mode|"
+        r"run_default_suite(?:_for_cli|_with_config_and_mode)?|"
+        r"run_scenario_samples|measured_sample_map)\s*\(",
+        live,
+    )
     required = {
-        "default_cli_measured_else_branch": bool(default_cli_pattern.search(text)),
+        "actual_cli_handler": bool(handler_match),
+        "explicit_fixture_opt_in_branch": bool(branches),
+        "explicit_fixture_provider": (
+            "benchmark_suite_run_default_suite_with_config_and_mode(" in fixture
+            and "BenchmarkEvidenceMode::FixtureOnly" in fixture
+        ),
+        "default_live_bounded_triad_call": bool(live_call),
+        "default_live_native_current_exe": "std::env::current_exe()" in live,
+        "default_live_complete_runtime_triad": all(
+            f"TriadRuntimeLeg::{leg}" in live for leg in ("FrankenNode", "Node", "Bun")
+        ),
+        "default_live_time_budgets": (
+            "per_invocation_timeout_ms: args.timeout_ms" in live
+            and "total_timeout_ms: args.budget_ms" in live
+        ),
+        "default_live_no_synthetic_fallback": (
+            bool(live) and not synthetic_call and "BenchmarkEvidenceMode::" not in live
+        ),
+        "legacy_scenario_requires_fixture_mode": (
+            "Legacy synthetic suite scenarios require --fixture-mode" in live
+            and "other => anyhow::bail!" in live
+        ),
+        "triad_v2_report": '"franken-node/triad-benchmark/v2"' in text,
+        "triad_supervised_children": "supervise_with_observer(" in text,
+        "triad_complete_population": (
+            "triad benchmark requires exactly one franken-node, node, and bun leg" in text
+        ),
+        "triad_distinct_executables": (
+            "triad benchmark requires three distinct executable paths" in text
+            and "triad benchmark requires three distinct executable byte identities" in text
+        ),
+        "triad_stdout_parity": "stdout parity mismatch on" in text,
         "measured_security_from_env": "BenchmarkSecurityControls::from_env(false)" in text,
-        "measured_source_marker": '"measured_product_workload"' in text,
+        "synthetic_source_marker": '"measured_synthetic_microbenchmark"' in text,
+        "fixture_input_source_marker": '"measured_fixture_inputs"' in text,
         "fixture_source_marker": '"fixture_only_deterministic"' in text,
         "forced_failure_hook": "FRANKEN_NODE_BENCH_FAIL_SCENARIO" in text,
     }
     missing = [name for name, present in required.items() if not present]
     passed = not missing
     detail = (
-        "default CLI path uses measured provider; fixture provider requires --fixture-mode"
+        "static CLI wiring: default bounded native/Node/Bun triad, explicit fixture opt-in, "
+        "honest synthetic provenance; runtime execution is not verified by this check"
         if passed
         else f"missing: {', '.join(missing)}"
     )
@@ -329,15 +383,31 @@ def check_rust_default_cli_uses_measured_provider() -> dict[str, Any]:
 def check_bench_run_e2e_real_and_failure_coverage() -> dict[str, Any]:
     if not BENCH_E2E_PATH.is_file():
         return _check("bench_run_e2e_real_and_failure_coverage", False, "bench_run_e2e.rs missing")
-    text = BENCH_E2E_PATH.read_text()
+    text = BENCH_E2E_PATH.read_text(encoding="utf-8")
     manifest_text = FRANKEN_NODE_CARGO_TOML.read_text() if FRANKEN_NODE_CARGO_TOML.is_file() else ""
     required = {
         "registered_cargo_test_target": 'name = "bench_run_e2e"' in manifest_text
         and 'path = "tests/bench_run_e2e.rs"' in manifest_text,
-        "measured_default_test": "bench_run_default_path_emits_measured_evidence" in text,
+        "default_live_missing_runtime_refusal_test": (
+            "bench_run_default_path_requires_complete_live_runtime_triad" in text
+        ),
+        "live_runtime_triad_test": (
+            "bench_run_live_triad_records_real_runtimes_or_refuses_missing_references" in text
+        ),
+        "runtime_alias_refusal_test": (
+            "bench_run_rejects_runtime_aliases_without_publishing_measurements" in text
+        ),
+        "live_budget_and_fixture_conflict_test": (
+            "bench_run_live_options_reject_fixture_mode_and_invalid_budgets" in text
+        ),
+        "legacy_scenario_fixture_opt_in_test": (
+            "bench_run_legacy_scenario_requires_explicit_fixture_opt_in" in text
+        ),
         "fixture_mode_test": "--fixture-mode" in text and "fixture_only_deterministic" in text,
         "invalid_scenario_test": "bench_run_invalid_scenario_returns_structured_error" in text,
-        "forced_runner_failure_test": "FRANKEN_NODE_BENCH_FAIL_SCENARIO" in text,
+        "live_raw_samples_assertion": "samples_ms" in text,
+        "live_native_identity_assertion": "CARGO_BIN_EXE_franken-node" in text,
+        "live_v2_report_assertion": "franken-node/triad-benchmark/v2" in text,
         "raw_samples_assertion": "raw_samples" in text,
         "security_metadata_assertion": "security_controls" in text,
         "trace_metadata_assertion": "trace_id" in text,
@@ -347,7 +417,9 @@ def check_bench_run_e2e_real_and_failure_coverage() -> dict[str, Any]:
     missing = [name for name, present in required.items() if not present]
     passed = not missing
     detail = (
-        "bench_run_e2e covers measured default, fixture quarantine, invalid scenario, forced runner failure, raw samples, security metadata, sample policy, and event logs"
+        "source coverage includes live triad, missing/aliased runtime refusal, budgets, "
+        "fixture opt-in, raw samples and fixture metadata; run the registered Cargo target "
+        "to execute these assertions"
         if passed
         else f"missing: {', '.join(missing)}"
     )

@@ -1,9 +1,10 @@
-//! bd-k4s: Product-level benchmark suite with secure-extension scenarios.
+//! Benchmark report scoring, explicitly labeled fixture/microbenchmark inputs,
+//! and a bounded live native/Node/Bun subprocess harness.
 //!
-//! Validates franken_node performance under realistic security-hardened
-//! conditions, covering all major workflow categories with sandbox enforcement
-//! active. Produces machine-readable results with confidence intervals for
-//! CI/release gating and public reporting.
+//! The legacy suite's built-in providers time synthetic SHA/JSON work or score
+//! fixed fixture inputs. Their scenario names and configured security metadata
+//! do not prove execution of the corresponding product workflow. Live runtime
+//! comparisons use the separate triad harness and its source-bound v2 report.
 //!
 //! # Invariants
 //!
@@ -301,22 +302,19 @@ pub struct ConfidenceInterval {
     pub upper: f64,
 }
 
-/// Where a scenario's metric actually comes from.
-///
-/// bd-5r99w.8: even in `Measured` evidence mode, a few sub-scenarios score
-/// pass-rates over a handful of hardcoded input payloads rather than driving the
-/// live security/migration pipelines. That is honest-by-construction, but a
-/// reader of a signed `Measured` report could mistake those metrics for
-/// full-pipeline measurements. This discriminator is carried in the signed
-/// report so the distinction is explicit and verifier-visible.
+/// Where a scenario's metric actually comes from. Timing a synthetic digest
+/// loop does not turn it into a measurement of the named product workflow.
+/// The discriminator is committed by the report's provenance hash.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ScenarioDataSource {
-    /// Metric measured by driving the real pipeline / workload.
+    /// Measurements supplied for a product workload, outside the legacy built-ins.
     #[default]
     MeasuredPipeline,
-    /// Metric scored against a fixed set of hardcoded fixture inputs.
+    /// Metric scored against fixed fixture inputs or deterministic fixture samples.
     FixtureInputs,
+    /// Time spent in local SHA/JSON stand-ins, not the named product pipeline.
+    SyntheticMicrobenchmark,
 }
 
 impl ScenarioDataSource {
@@ -324,19 +322,26 @@ impl ScenarioDataSource {
         match self {
             ScenarioDataSource::MeasuredPipeline => "measured-pipeline",
             ScenarioDataSource::FixtureInputs => "fixture-inputs",
+            ScenarioDataSource::SyntheticMicrobenchmark => "synthetic-microbenchmark",
         }
     }
 }
 
-/// Classify a scenario by how its metric is produced. The named scenarios score
-/// over hardcoded fixture payloads (see `measured_adversarial_pass_rate`,
-/// `measured_migration_success_rate`, `measured_fixture_identity_replay_rate`)
-/// rather than driving the live pipelines, so they are flagged `fixture-inputs`.
+/// Classify the built-in provider, independently of a scenario's aspirational
+/// name. Live subprocess measurements use the separate triad report schema.
 pub fn scenario_data_source(scenario_name: &str) -> ScenarioDataSource {
     match scenario_name {
         "adversarial_pass_rate" | "migration_success_rate" | "replay_bit_identity_rate" => {
             ScenarioDataSource::FixtureInputs
         }
+        "secure-extension-heavy"
+        | "cold_start_latency"
+        | "p99_request_latency"
+        | "extension_overhead_ratio"
+        | "migration_scanner_throughput"
+        | "lockstep_harness_throughput"
+        | "quarantine_propagation_latency"
+        | "trust_card_materialization" => ScenarioDataSource::SyntheticMicrobenchmark,
         _ => ScenarioDataSource::MeasuredPipeline,
     }
 }
@@ -353,9 +358,9 @@ pub struct ScenarioResult {
     pub score: u32,
     pub iterations: u32,
     pub variance_pct: f64,
-    /// Whether this metric was measured from the live pipeline or scored over
-    /// fixture inputs (bd-5r99w.8). Defaults to `measured-pipeline` for
-    /// backward-compatible deserialization of older reports.
+    /// Actual provider: product measurements, fixed fixtures, or timed synthetic
+    /// microbenchmarks. Historical reports without the field retain their
+    /// original default; that default is not verification of their provenance.
     #[serde(default)]
     pub data_source: ScenarioDataSource,
 }
@@ -1045,7 +1050,9 @@ impl SuiteConfig {
         }
     }
 
-    /// Create a host-aware config for CLI benchmark execution.
+    /// Create metadata for the legacy fixture/microbenchmark suite without
+    /// executing any programs from PATH. Live triad version probes are supervised
+    /// under their own campaign deadline and never use these metadata overrides.
     pub fn for_cli() -> Self {
         let memory_mb = std::env::var("FRANKEN_NODE_BENCH_MEMORY_MB")
             .ok()
@@ -1071,12 +1078,10 @@ impl SuiteConfig {
 
         let node_version = std::env::var("FRANKEN_NODE_BENCH_NODE_VERSION")
             .ok()
-            .filter(|v| !v.trim().is_empty())
-            .or_else(|| detect_runtime_version("node", &["--version"]));
+            .filter(|v| !v.trim().is_empty());
         let bun_version = std::env::var("FRANKEN_NODE_BENCH_BUN_VERSION")
             .ok()
-            .filter(|v| !v.trim().is_empty())
-            .or_else(|| detect_runtime_version("bun", &["--version"]));
+            .filter(|v| !v.trim().is_empty());
 
         SuiteConfig {
             hardware_profile: HardwareProfile {
@@ -1097,24 +1102,6 @@ impl SuiteConfig {
             evidence_path,
         }
     }
-}
-
-/// Probe an external JS runtime binary for its version string (`--version`),
-/// stripping trailing whitespace/newlines. Returns `None` if absent or failing.
-pub fn detect_runtime_version(program: &str, args: &[&str]) -> Option<String> {
-    let output = std::process::Command::new(program)
-        .args(args)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let version = String::from_utf8(output.stdout).ok()?;
-    let trimmed = version.lines().next()?.trim();
-    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
 fn benchmark_trace_id(timestamp_utc: &str, profile: &str, cpu: &str) -> String {
@@ -1368,7 +1355,14 @@ impl BenchmarkSuite {
             score,
             iterations: u32::try_from(raw_measurements.len()).unwrap_or(u32::MAX),
             variance_pct: cv,
-            data_source: scenario_data_source(&scenario.name),
+            data_source: if raw_samples
+                .iter()
+                .any(|sample| sample.source == "fixture_only_deterministic")
+            {
+                ScenarioDataSource::FixtureInputs
+            } else {
+                scenario_data_source(&scenario.name)
+            },
         })
     }
 
@@ -1429,7 +1423,10 @@ impl BenchmarkSuite {
 
         for scenario in &self.scenarios.clone() {
             if let Some(raw) = sample_sets.get(&scenario.name) {
-                let result = self.execute_scenario_samples(scenario, raw)?;
+                let mut result = self.execute_scenario_samples(scenario, raw)?;
+                if evidence_mode == BenchmarkEvidenceMode::FixtureOnly {
+                    result.data_source = ScenarioDataSource::FixtureInputs;
+                }
                 results.push(result);
             }
         }
@@ -1711,7 +1708,14 @@ fn measured_samples_for_scenario(
                 value,
                 started_at_utc,
                 finished_at_utc,
-                source: "measured_product_workload".to_string(),
+                source: match scenario_data_source(&scenario.name) {
+                    ScenarioDataSource::SyntheticMicrobenchmark => {
+                        "measured_synthetic_microbenchmark"
+                    }
+                    ScenarioDataSource::FixtureInputs => "measured_fixture_inputs",
+                    ScenarioDataSource::MeasuredPipeline => "provided_measurement",
+                }
+                .to_string(),
             });
         }
     }
@@ -2871,11 +2875,20 @@ mod tests {
                 "{fixture_scored} must be flagged fixture-inputs"
             );
         }
-        // Real pipeline scenarios stay measured-pipeline.
-        for measured in ["secure-extension-heavy", "migration_scanner_throughput"] {
+        for synthetic in [
+            "secure-extension-heavy",
+            "cold_start_latency",
+            "p99_request_latency",
+            "extension_overhead_ratio",
+            "migration_scanner_throughput",
+            "lockstep_harness_throughput",
+            "quarantine_propagation_latency",
+            "trust_card_materialization",
+        ] {
             assert_eq!(
-                scenario_data_source(measured),
-                ScenarioDataSource::MeasuredPipeline
+                scenario_data_source(synthetic),
+                ScenarioDataSource::SyntheticMicrobenchmark,
+                "{synthetic} is a SHA/JSON stand-in, not the named product workflow"
             );
         }
     }
@@ -2893,6 +2906,15 @@ mod tests {
         assert_eq!(json, "\"fixture-inputs\"");
         let back: ScenarioDataSource = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back, ScenarioDataSource::FixtureInputs);
+        assert_eq!(
+            ScenarioDataSource::SyntheticMicrobenchmark.as_str(),
+            "synthetic-microbenchmark"
+        );
+        let synthetic_json = serde_json::to_string(&ScenarioDataSource::SyntheticMicrobenchmark)
+            .expect("serialize synthetic provider");
+        let synthetic: ScenarioDataSource =
+            serde_json::from_str(&synthetic_json).expect("deserialize synthetic provider");
+        assert_eq!(synthetic, ScenarioDataSource::SyntheticMicrobenchmark);
         // Older reports without the field default to measured-pipeline. Build a
         // real result, drop the discriminator from its JSON, and confirm it
         // still deserializes (backward compatibility).
@@ -4134,11 +4156,22 @@ mod tests {
         assert!(report.security_controls.trust_verification_enabled);
         assert_eq!(report.scenarios.len(), 1);
         assert_eq!(report.scenarios[0].raw_samples.len(), 5);
+        assert_eq!(
+            report.scenarios[0].data_source,
+            ScenarioDataSource::SyntheticMicrobenchmark
+        );
         assert!(
             report.scenarios[0]
                 .raw_samples
                 .iter()
-                .all(|sample| sample.source == "measured_product_workload")
+                .all(|sample| sample.source == "measured_synthetic_microbenchmark")
+        );
+        let mut falsely_relabeled = report.clone();
+        falsely_relabeled.scenarios[0].data_source = ScenarioDataSource::MeasuredPipeline;
+        assert_ne!(
+            report.provenance_hash,
+            falsely_relabeled.compute_provenance_hash(),
+            "the content hash must bind the synthetic provider classification"
         );
     }
 
@@ -4154,6 +4187,7 @@ mod tests {
 
         assert_eq!(report.evidence_mode, BenchmarkEvidenceMode::FixtureOnly);
         assert!(report.security_controls.fixture_mode);
+        assert_eq!(report.scenarios[0].data_source, ScenarioDataSource::FixtureInputs);
         assert!(
             report.scenarios[0]
                 .raw_samples
