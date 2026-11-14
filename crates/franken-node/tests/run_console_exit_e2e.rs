@@ -1092,7 +1092,27 @@ fn assert_native_interruption_retains_admitted_http_io(kill_worker: bool) {
     );
     let (listing, list) = run_workspace_json(dir.path(), &["incident", "list", "--json"]);
     assert_eq!(listing.exit_code, Some(0), "{}", listing.stderr);
-    assert_eq!(list["incidents"], serde_json::json!([]));
+    let incidents = list["incidents"].as_array().expect("incident listing");
+    assert!(
+        incidents
+            .iter()
+            .all(|row| !matches!(row["source"].as_str(), Some("captured" | "bundle"))),
+        "interrupted execution has supervisor evidence, not finalized replay evidence: {list}"
+    );
+    let native_incident_id = format!("native-session:{}", typed_wal.session_nonce);
+    let native = incidents
+        .iter()
+        .find(|row| {
+            row["source"] == "native_session" && row["incident_id"] == native_incident_id
+        })
+        .expect("the actual interrupted native session remains discoverable");
+    assert_eq!(native["severity"], "unknown");
+    assert_eq!(native["event_count"], 0);
+    assert_eq!(
+        native["status"],
+        "terminal_observation; outcome=interrupted; process=worker_reaped; effects=interrupted_external_outcomes_unknown",
+        "a signed worker reap must retain the admitted request's unknown external outcome"
+    );
     let (coverage, report) = run_workspace_json(
         dir.path(),
         &["ops", "incident-coverage", "--min-coverage", "1", "--json"],
@@ -3151,21 +3171,62 @@ fn incident_list_shows_run_captured_incidents_and_tolerates_bad_bundles() {
     };
 
     let incidents = list(dir.path());
-    assert_eq!(incidents.len(), 1, "{incidents:?}");
-    assert_eq!(incidents[0]["source"], "captured");
-    assert_eq!(incidents[0]["status"], "valid");
-    assert_eq!(incidents[0]["severity"], "high");
+    let finalized = incidents
+        .iter()
+        .filter(|row| matches!(row["source"].as_str(), Some("captured" | "bundle")))
+        .collect::<Vec<_>>();
+    assert_eq!(finalized.len(), 1, "{incidents:?}");
+    let captured = finalized[0];
+    assert_eq!(captured["source"], "captured");
+    assert_eq!(captured["status"], "valid");
+    assert_eq!(captured["severity"], "high");
     assert!(
-        incidents[0]["incident_id"]
+        captured["incident_id"]
             .as_str()
             .is_some_and(|id| id.starts_with("INC-RUN-")),
         "{incidents:?}"
+    );
+    let source = frankenengine_node::tools::replay_bundle::read_verified_incident_evidence_package(
+        &dir.path().join(captured["path"].as_str().expect("captured source path")),
+        captured["incident_id"].as_str(),
+        &receipt_verifying_key(dir.path()),
+    )
+    .expect("the signed capture binds the exact native-session identity");
+    let nonce = source.initial_state_snapshot["runtime_evidence_identity_capture"]["session_nonce"]
+        .as_str()
+        .expect("captured runtime session nonce");
+    let native_incident_id = format!("native-session:{nonce}");
+    let native = incidents
+        .iter()
+        .find(|row| {
+            row["source"] == "native_session" && row["incident_id"] == native_incident_id
+        })
+        .expect("the captured denial also retains its authenticated supervisor observation");
+    assert_eq!(native["severity"], "unknown");
+    assert_eq!(
+        native["status"],
+        "terminal_observation; outcome=completed; process=worker_reaped; effects=final_ledger_observed(count=1,denied=1,failed=0)"
     );
 
     std::fs::write(dir.path().join("bogus.fnbundle"), b"not a replay bundle")
         .expect("write corrupt bundle");
     let incidents = list(dir.path());
-    assert_eq!(incidents.len(), 2, "{incidents:?}");
+    assert_eq!(
+        incidents
+            .iter()
+            .filter(|row| matches!(row["source"].as_str(), Some("captured" | "bundle")))
+            .count(),
+        2,
+        "{incidents:?}"
+    );
+    assert!(
+        incidents.iter().any(|row| {
+            row["source"] == "native_session"
+                && row["incident_id"] == native_incident_id
+                && row["status"] == native["status"]
+        }),
+        "an invalid bundle must not hide the authenticated supervisor observation"
+    );
     let bogus = incidents
         .iter()
         .find(|entry| entry["source"] == "bundle")

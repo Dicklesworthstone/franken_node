@@ -3432,8 +3432,12 @@ pub enum IncidentCommand {
     /// Simulate alternative policy actions.
     Counterfactual(IncidentCounterfactualArgs),
 
-    /// List recorded incidents.
+    /// List recorded incidents and retained native-session failures.
     List(IncidentListArgs),
+
+    /// Inspect authenticated native-session evidence, including attempts that
+    /// stopped before a run receipt or replay bundle could be finalized.
+    Sessions(IncidentSessionsArgs),
 
     /// Capture a signed run, or export authenticated native-session forensics.
     Capture(IncidentCaptureArgs),
@@ -3628,6 +3632,22 @@ pub struct IncidentListArgs {
 
     /// Emit one JSON envelope on stdout (`incident-list-v1` with an `incidents` array).
     /// This is not NDJSON; `--json` does not print one object per incident.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Parser)]
+pub struct IncidentSessionsArgs {
+    /// Project whose retained sessions to inspect (defaults to the current directory).
+    /// An old absolute project path may still select evidence after its source is moved.
+    #[arg(long)]
+    pub project: Option<PathBuf>,
+
+    /// Select one canonical native-session UUID from an incident or run error report.
+    #[arg(long)]
+    pub session: Option<String>,
+
+    /// Emit authenticated observations and unresolved evidence errors as JSON.
     #[arg(long)]
     pub json: bool,
 }
@@ -5283,6 +5303,38 @@ mod parser_contract_extra_tests {
             return Err("expected unfiltered native-session inventory command".into());
         };
         assert!(args.project.is_none());
+        assert!(!args.json);
+        Ok(())
+    }
+
+    #[test]
+    fn incident_sessions_parses_project_and_launch_identity() -> Result<(), String> {
+        let nonce = "00000000-0000-4000-8000-000000000001";
+        let cli = parse(&[
+            "franken-node",
+            "incident",
+            "sessions",
+            "--project",
+            "/srv/retired-application",
+            "--session",
+            nonce,
+            "--json",
+        ])
+        .map_err(|error| error.to_string())?;
+        let Command::Incident(IncidentCommand::Sessions(args)) = cli.command else {
+            return Err("expected authenticated incident-session inspection".into());
+        };
+        assert_eq!(args.project, Some(PathBuf::from("/srv/retired-application")));
+        assert_eq!(args.session.as_deref(), Some(nonce));
+        assert!(args.json);
+
+        let cli = parse(&["franken-node", "incident", "sessions"])
+            .map_err(|error| error.to_string())?;
+        let Command::Incident(IncidentCommand::Sessions(args)) = cli.command else {
+            return Err("expected current-project session inspection".into());
+        };
+        assert!(args.project.is_none());
+        assert!(args.session.is_none());
         assert!(!args.json);
         Ok(())
     }

@@ -27,6 +27,69 @@ This does not broaden the accepted failure boundary: supervisor deadlines,
 external cancellation, panics, interrupted effects, and incomplete cleanup
 remain non-replayable.
 
+## Inspecting attempts that never finalized
+
+An engine panic, interrupted supervisor, or failed evidence write can prevent
+an attempt from producing a run receipt or replay bundle. Native execution
+retains its admission before starting the worker and retains a signed
+supervisor outcome before updating the inventory. The incident commands expose
+those observations independently of finalized replay captures:
+
+```bash
+# Discover retained failures and unresolved sessions in the current project.
+franken-node incident list --json
+
+# Authenticate admissions and available supervisor outcomes for this project.
+franken-node incident sessions --json
+
+# Inspect one launch from the session_nonce in a run error or incident listing.
+franken-node incident sessions --session <UUID> --json
+
+# Retained evidence can be selected after the original source tree is moved.
+franken-node incident sessions --project /old/absolute/project --session <UUID> --json
+
+# Export the selected original signatures using the existing forensic format.
+franken-node incident capture --from-session <UUID> --out session.fnforensics.json --json
+```
+
+`incident sessions` verifies the immutable admission and outcome receipts
+against the existing protected local product authority. It checks their
+session, project, identity-capture, and admission commitments before returning
+authenticated metadata. A signed outcome that survived a failed inventory
+update can be recovered for inspection; this query does not repair or rewrite
+the database. Missing authority is never created by inspection.
+
+The report separates authenticated records from `source_errors` and identity
+captures without authenticated lifecycle evidence. An unverified database
+outcome is withheld. Pending admissions retain unknown liveness and effects;
+a missing process, elapsed deadline, or absent outcome cannot prove that a
+worker stopped. A terminal supervisor observation preserves its specific
+outcome, including `panicked`, `interrupted`, and `execution_failed`, along with
+the recorded process and host-effect observations. Panic diagnostics and the
+bounded parent-observed effect journal remain available when they were signed.
+
+`incident list` includes failures and unresolved observations with
+`source = "native_session"` and IDs of the form `native-session:<UUID>`.
+Their severity is `unknown`: a failed execution alone does not establish a
+security incident. Ordinary fully observed successful sessions remain available
+in `incident sessions`. The existing severity filter applies to these entries
+too, so `--severity high` does not include entries of unknown severity.
+Only authenticated project admissions become native-session incident entries.
+The additive `native_session_inspection` JSON field retains source errors and
+identity-only captures separately: these can come from shared operator state
+without authenticated project attribution. Human output reports their counts
+or an inspection error; an unavailable inventory never becomes a project
+incident.
+
+These observations are retained local forensic evidence. They do not certify
+native replay, external-effect completion, fleet quiescence, or historical
+completeness after evidence deletion. Both `replay_certified` and
+`quiescence_certified` remain false. Exported replay bundles and the coverage
+gate continue to require their existing authenticated execution inputs. See
+[the portable forensic protocol](../sdk/verifier/NATIVE_SESSION_FORENSICS.md)
+for verification of session exports with an independently supplied product
+public key.
+
 ## Required finalization
 
 All supported failures share the existing post-cell certification boundary:

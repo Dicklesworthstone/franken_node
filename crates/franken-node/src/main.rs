@@ -5672,8 +5672,8 @@ struct IncidentListEntry {
     event_count: usize,
     created_at: String,
     path: String,
-    /// `bundle` (a signed `.fnbundle`) or `captured` (evidence a run wrote to
-    /// the incident store, listed before anyone bundles it).
+    /// `bundle` (a signed `.fnbundle`), `captured` (finalized run evidence),
+    /// or `native_session` (retained supervisor evidence, not a replay bundle).
     source: String,
     /// `verified` / `valid`, or why the entry could not be read or verified.
     /// One unreadable entry is reported here instead of failing the listing.
@@ -5841,6 +5841,268 @@ fn write_captured_incident_evidence(
     write_bytes_atomically(path, &serde_json::to_vec_pretty(&signed)?)
 }
 
+#[cfg(feature = "engine")]
+fn native_session_forensic_status(
+    record: &ops::native_session_inventory::NativeSessionForensicRecord,
+) -> String {
+    use ops::native_session_inventory::{
+        NativeSessionEffectObservation as Effects, NativeSessionOutcomeKind as Kind,
+        NativeSessionProcessObservation as Process,
+    };
+    let Some(outcome) = &record.outcome else {
+        return format!(
+            "{}; outcome=unavailable; process=unproven; effects=unknown",
+            record.status.as_str()
+        );
+    };
+    let kind = match outcome.kind {
+        Kind::Completed => "completed",
+        Kind::ExecutionFailed => "execution_failed",
+        Kind::ControlStopped => "control_stopped",
+        Kind::Interrupted => "interrupted",
+        Kind::TelemetryFailed => "telemetry_failed",
+        Kind::Panicked => "panicked",
+        Kind::SupervisionIncomplete => "supervision_incomplete",
+    };
+    let process = match outcome.process {
+        Process::NotSpawned => "not_spawned",
+        Process::WorkerReaped => "worker_reaped",
+        Process::Unproven => "unproven",
+    };
+    let effects = match &outcome.effects {
+        Effects::NotStarted => "not_started".to_string(),
+        Effects::NoAdmittedHostEffects => "no_admitted_host_effects".to_string(),
+        Effects::FinalLedgerObserved {
+            effect_count,
+            denied_count,
+            failed_count,
+            ..
+        } => format!(
+            "final_ledger_observed(count={effect_count},denied={denied_count},failed={failed_count})"
+        ),
+        Effects::Interrupted { .. } => "interrupted_external_outcomes_unknown".to_string(),
+        Effects::Unknown => "unknown".to_string(),
+    };
+    format!(
+        "{}; outcome={kind}; process={process}; effects={effects}",
+        record.status.as_str()
+    )
+}
+
+/// An authenticated session observation remains useful even when execution
+/// never produced a run receipt. It is listed independently of replay inputs:
+/// no outcome, elapsed time, or missing process establishes a completed run.
+struct NativeSessionIncidentListing {
+    entries: Vec<IncidentListEntry>,
+    inspection: Option<serde_json::Value>,
+    diagnostic: Option<String>,
+}
+
+fn collect_native_session_incident_listing(root: &Path) -> NativeSessionIncidentListing {
+    #[cfg(not(feature = "engine"))]
+    {
+        let _ = root;
+        NativeSessionIncidentListing {
+            entries: Vec::new(),
+            inspection: None,
+            diagnostic: None,
+        }
+    }
+    #[cfg(feature = "engine")]
+    {
+        use ops::native_session_inventory::{
+            NativeSessionEffectObservation as Effects, NativeSessionOutcomeKind as Kind,
+            NativeSessionProcessObservation as Process, read_local_native_session_forensics,
+        };
+        let report = match read_local_native_session_forensics(Some(root)) {
+            Ok(report) => report,
+            Err(error) => {
+                let detail = format!("{error:#}");
+                return NativeSessionIncidentListing {
+                    entries: Vec::new(),
+                    inspection: Some(serde_json::json!({
+                        "schema_version": "native-session-inspection-v1",
+                        "scope": "operator_protected_state",
+                        "project_root": root,
+                        "status": "unavailable",
+                        "error": &detail,
+                        "replay_certified": false,
+                        "quiescence_certified": false,
+                    })),
+                    diagnostic: Some(format!("native-session inspection unavailable: {detail}")),
+                };
+            }
+        };
+        let mut entries = Vec::new();
+        for record in &report.records {
+            // Completed, fully observed executions are available through
+            // incident sessions; they need not crowd the incident listing.
+            let clean_completion = record.outcome.as_ref().is_some_and(|outcome| {
+                outcome.kind == Kind::Completed
+                    && outcome.process == Process::WorkerReaped
+                    && matches!(
+                        &outcome.effects,
+                        Effects::FinalLedgerObserved {
+                            denied_count: 0,
+                            failed_count: 0,
+                            ..
+                        } | Effects::NoAdmittedHostEffects
+                    )
+            });
+            if clean_completion {
+                continue;
+            }
+            entries.push(IncidentListEntry {
+                incident_id: format!("native-session:{}", record.admission.session_nonce),
+                // A signed failure is not a security-severity classification.
+                severity: "unknown".to_string(),
+                event_count: 0,
+                created_at: record.admission.admitted_at.to_rfc3339(),
+                path: record
+                    .outcome_receipt_path
+                    .as_ref()
+                    .unwrap_or(&record.admission_receipt_path)
+                    .display()
+                    .to_string(),
+                source: "native_session".to_string(),
+                status: native_session_forensic_status(record),
+            });
+        }
+        // Unverified admissions and identity-only captures may belong to any
+        // project. Preserve those diagnostics without manufacturing incidents
+        // attributed to the current working directory.
+        let diagnostic =
+            (!report.source_errors.is_empty() || !report.untracked_identity_captures.is_empty())
+                .then(|| {
+                    format!(
+                        "native-session inspection: source_errors={} identity_only={}; evidence without authenticated project attribution is separate from incidents; inspect with `franken-node incident sessions`",
+                        report.source_errors.len(),
+                        report.untracked_identity_captures.len(),
+                    )
+                });
+        NativeSessionIncidentListing {
+            entries,
+            inspection: Some(serde_json::json!({
+                "schema_version": "native-session-inspection-v1",
+                "scope": "operator_protected_state",
+                "project_root": &report.project_root,
+                "status": "inspected",
+                "store_present": report.store_present,
+                "coverage": &report.coverage,
+                "authenticated_project_admissions": report.records.len(),
+                "source_errors_scope": "operator_protected_state",
+                "source_errors": &report.source_errors,
+                "untracked_identity_captures_scope": "unknown_project",
+                "untracked_identity_captures": &report.untracked_identity_captures,
+                "replay_certified": false,
+                "quiescence_certified": false,
+            })),
+            diagnostic,
+        }
+    }
+}
+
+fn handle_incident_sessions(args: &cli::IncidentSessionsArgs) -> Result<()> {
+    #[cfg(not(feature = "engine"))]
+    {
+        let _ = args;
+        anyhow::bail!("incident sessions requires a native-engine build");
+    }
+    #[cfg(feature = "engine")]
+    {
+        if let Some(nonce) = args.session.as_deref() {
+            let parsed = uuid::Uuid::parse_str(nonce).context("invalid native-session UUID")?;
+            anyhow::ensure!(
+                !parsed.is_nil() && parsed.to_string() == nonce,
+                "--session must be a canonical non-nil native-session UUID"
+            );
+        }
+        let project = args
+            .project
+            .clone()
+            .map_or_else(std::env::current_dir, Ok)
+            .context("resolve project for incident-session inspection")?;
+        let mut report =
+            ops::native_session_inventory::read_local_native_session_forensics(Some(&project))?;
+        if let Some(nonce) = args.session.as_deref() {
+            let selected_evidence_present = report
+                .records
+                .iter()
+                .any(|record| record.admission.session_nonce == nonce)
+                || report
+                    .source_errors
+                    .iter()
+                    .any(|error| error.session_nonce.as_deref() == Some(nonce))
+                || report
+                    .untracked_identity_captures
+                    .iter()
+                    .any(|capture| capture.session_nonce == nonce);
+            report
+                .records
+                .retain(|record| record.admission.session_nonce == nonce);
+            report.source_errors.retain(|error| {
+                error.session_nonce.as_deref().is_none_or(|id| id == nonce)
+            });
+            report
+                .untracked_identity_captures
+                .retain(|capture| capture.session_nonce == nonce);
+            anyhow::ensure!(
+                selected_evidence_present,
+                "no attributable retained evidence for native session {nonce} in project {}; inspect unfiltered incident sessions for inventory diagnostics",
+                project.display()
+            );
+        }
+        if args.json {
+            let mut payload = serde_json::to_value(&report)?;
+            payload["command"] = serde_json::json!("incident.sessions");
+            payload["session_filter"] = serde_json::json!(&args.session);
+            println!("{}", serde_json::to_string_pretty(&payload)?);
+        } else {
+            println!(
+                "incident sessions: authenticated_admissions={} source_errors={} identity_only={}",
+                report.records.len(),
+                report.source_errors.len(),
+                report.untracked_identity_captures.len()
+            );
+            println!("  coverage={}", report.coverage);
+            println!("  replay_certified=false quiescence_certified=false");
+            for record in &report.records {
+                println!(
+                    "  {} entrypoint={} {}",
+                    record.admission.session_nonce,
+                    record.admission.entrypoint.display(),
+                    native_session_forensic_status(record),
+                );
+                if record.outcome_recovered_from_receipt {
+                    println!("    signed outcome recovered for inspection; database unchanged");
+                }
+                if let Some(panic) = record
+                    .outcome
+                    .as_ref()
+                    .and_then(|outcome| outcome.panic_evidence.as_ref())
+                {
+                    println!("    panic={}", serde_json::to_string(&panic.panic_message)?);
+                }
+            }
+            for error in &report.source_errors {
+                println!(
+                    "  unverified {}: {:?}: {}",
+                    error.path.display(),
+                    error.kind,
+                    error.detail
+                );
+            }
+            for capture in &report.untracked_identity_captures {
+                println!(
+                    "  {} identity_capture_only; project, admission and liveness unknown",
+                    capture.session_nonce
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
 fn collect_incident_list_entries(
     root: &Path,
     severity_filter: Option<&str>,
@@ -5966,6 +6228,12 @@ fn render_incident_list(entries: &[IncidentListEntry], severity_filter: Option<&
             entry.status,
             entry.path
         ));
+    }
+    if entries.iter().any(|entry| entry.source == "native_session") {
+        lines.push(
+            "Inspect retained supervisor evidence with `franken-node incident sessions --session <UUID>`; native-session entries are not replay bundles."
+                .to_string(),
+        );
     }
     lines.join("\n")
 }
@@ -43216,6 +43484,11 @@ fn main() -> Result<()> {
                     return incident_fail("incident.capture", args.json, err);
                 }
             }
+            IncidentCommand::Sessions(args) => {
+                if let Err(error) = handle_incident_sessions(&args) {
+                    return incident_fail("incident.sessions", args.json, error);
+                }
+            }
             IncidentCommand::List(args) => {
                 let severity_filter = match parse_incident_severity_filter(args.severity.as_deref())
                 {
@@ -43234,13 +43507,35 @@ fn main() -> Result<()> {
                         );
                     }
                 };
-                let entries = match collect_incident_list_entries(&cwd, severity_filter.as_deref())
-                {
-                    Ok(entries) => entries,
-                    Err(err) => return incident_fail("incident.list", args.json, err),
-                };
+                let mut entries =
+                    match collect_incident_list_entries(&cwd, severity_filter.as_deref()) {
+                        Ok(entries) => entries,
+                        Err(err) => return incident_fail("incident.list", args.json, err),
+                    };
+                // Native authority belongs to the operator's protected state.
+                // Keep that lookup at the command boundary, separate from the
+                // project-file collector and its hermetic fixture tests.
+                let native = collect_native_session_incident_listing(&cwd);
+                entries.extend(
+                    native
+                        .entries
+                        .into_iter()
+                        .filter(|entry| {
+                            severity_filter
+                                .as_ref()
+                                .is_none_or(|severity| &entry.severity == severity)
+                        }),
+                );
+                entries.sort_by(|left, right| {
+                    left.incident_id
+                        .cmp(&right.incident_id)
+                        .then_with(|| left.path.cmp(&right.path))
+                });
                 if args.json {
-                    let payload = incident_list_json_payload(&entries, severity_filter.as_deref());
+                    let mut payload = incident_list_json_payload(&entries, severity_filter.as_deref());
+                    if let Some(inspection) = native.inspection {
+                        payload["native_session_inspection"] = inspection;
+                    }
                     let rendered = match serde_json::to_string_pretty(&payload) {
                         Ok(rendered) => rendered,
                         Err(err) => return incident_fail("incident.list", true, err),
@@ -43251,6 +43546,9 @@ fn main() -> Result<()> {
                         "{}",
                         render_incident_list(&entries, severity_filter.as_deref())
                     );
+                    if let Some(diagnostic) = native.diagnostic {
+                        println!("{diagnostic}");
+                    }
                 }
             }
         },
