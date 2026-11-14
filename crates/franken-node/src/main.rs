@@ -8886,9 +8886,97 @@ fn migrate_fail(command: &str, json: bool, error: impl std::fmt::Display) -> Res
 struct MigrateAutopilotReport {
     schema_version: &'static str,
     mode: &'static str,
+    phase: &'static str,
     ok: bool,
     release_certification: bool,
     checked_rewrite: migration::verified_rewrite::CheckedRewriteReport,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attestation: Option<migration::report_attestation::execution::PublishedAttestation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rollout: Option<migration::rollout::RolloutReport>,
+    errors: Vec<String>,
+}
+
+#[cfg(target_os = "linux")]
+struct AutopilotRolloutOptions<'a> {
+    validation_key: &'a Path,
+    rollout_key: &'a Path,
+    output: &'a Path,
+}
+
+#[cfg(target_os = "linux")]
+fn advance_autopilot_rollout(
+    report: &mut MigrateAutopilotReport,
+    project: &Path,
+    native: &Path,
+    bun: &Path,
+    options: &AutopilotRolloutOptions<'_>,
+) -> Result<()> {
+    use migration::report_attestation::execution;
+    use migration::rollout::{RolloutConfig, RolloutManager, RolloutStage};
+
+    report.phase = "rollout-initialization";
+    anyhow::ensure!(
+        Path::new(&report.checked_rewrite.project_path) == project,
+        "selected project identity changed during checked installation"
+    );
+    let transaction = report.checked_rewrite.transaction.as_ref().context(
+        "no new rewrite transaction was installed; use migrate rollout explicitly for an existing migration",
+    )?;
+    let manager = RolloutManager::new(project, Some(&transaction.transaction_id))
+        .with_signing_key(Some(options.rollout_key.to_path_buf()));
+    report.rollout = Some(manager.initialize_applied_rewrite(transaction)?);
+
+    // Installation and signed rollout initialization are captured inputs too.
+    // Only a NEW measurement of this exact tree may authorize promotion.
+    report.phase = "rollout-validation";
+    let published = execution::run(
+        &execution::Selection {
+            project: project.to_path_buf(),
+            migrated_project: None,
+            expected_input_sha256: None,
+            expected_candidate_input_sha256: None,
+            attest_regression: true,
+        },
+        native,
+        bun,
+        options.validation_key,
+        options.output,
+        true,
+    )?;
+    let evidence = published.report.clone();
+    let regression = published.regression_attested;
+    report.attestation = Some(published);
+
+    report.phase = "rollout-promotion";
+    let config = RolloutConfig {
+        lockstep_report: Some(evidence),
+        ..Default::default()
+    };
+    match manager.promote(&config, Some(RolloutStage::Canary), None) {
+        Ok(rollout) => {
+            let admitted = rollout.ok;
+            report.rollout = Some(rollout);
+            anyhow::ensure!(
+                admitted && !regression,
+                "rollout did not admit a passing candidate"
+            );
+        }
+        Err(error) => {
+            // An authenticated native regression can trigger the controller's
+            // pinned source restoration. Report its actual durable state,
+            // while retaining the original installation receipt and failure.
+            match manager.status() {
+                Ok(state) => report.rollout = Some(state),
+                Err(status_error) => report.errors.push(format!(
+                    "could not inspect rollout state after refusal: {status_error}"
+                )),
+            }
+            anyhow::bail!("Canary promotion refused: {error}");
+        }
+    }
+    report.phase = "complete";
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -8896,35 +8984,85 @@ fn handle_migrate_autopilot(args: &cli::MigrateAutopilotArgs) -> Result<u8> {
     use migration::verified_rewrite::{CheckedRewriteMode, CheckedRewriteStatus};
 
     args.validate_intent()?;
+    // Keep the selected directory identity stable across both key preflights,
+    // candidate installation and post-install rollout measurement.
+    let project = args
+        .project_path
+        .canonicalize()
+        .context("resolve the selected migration project")?;
     let native = std::env::current_exe().context("resolve the native product executable")?;
     let bun = args.bun_bin.as_deref().context("missing Bun executable")?;
+    let rollout_options = if args.rollout {
+        let options = AutopilotRolloutOptions {
+            validation_key: args
+                .signing_key
+                .as_deref()
+                .context("missing validation signing key")?,
+            rollout_key: args
+                .rollout_signing_key
+                .as_deref()
+                .context("missing rollout signing key")?,
+            output: args
+                .out
+                .as_deref()
+                .context("missing signed report destination")?,
+        };
+        // Reject missing authority, wrong keys and existing/unsafe destinations
+        // before running project code or opening the source transaction writer.
+        migration::report_attestation::execution::preflight_current_project(
+            &project,
+            options.validation_key,
+            options.output,
+        )?;
+        migration::rollout::RolloutManager::new(&project, None)
+            .with_signing_key(Some(options.rollout_key.to_path_buf()))
+            .preflight_signed_authority()?;
+        Some(options)
+    } else {
+        None
+    };
     let mode = if args.apply {
         CheckedRewriteMode::Apply
     } else {
         CheckedRewriteMode::Preview
     };
-    let checked_rewrite =
-        migration::verified_rewrite::run_autopilot(&args.project_path, &native, bun, mode);
-    let code = if checked_rewrite.is_success() {
+    let checked_rewrite = migration::verified_rewrite::run_autopilot(&project, &native, bun, mode);
+    let mut code = if checked_rewrite.is_success() {
         0
     } else if checked_rewrite.status == CheckedRewriteStatus::Error {
         2
     } else {
         1
     };
-    let report = MigrateAutopilotReport {
+    let mut report = MigrateAutopilotReport {
         schema_version: "franken-node/migration-autopilot/v1",
         mode: if args.apply { "apply" } else { "preview" },
+        phase: if code == 0 {
+            "complete"
+        } else {
+            "checked-rewrite"
+        },
         ok: code == 0,
         release_certification: false,
         checked_rewrite,
+        attestation: None,
+        rollout: None,
+        errors: Vec::new(),
     };
+    if report.ok
+        && let Some(options) = rollout_options
+        && let Err(error) = advance_autopilot_rollout(&mut report, &project, &native, bun, &options)
+    {
+        report.ok = false;
+        report.errors.push(format!("{error:#}"));
+        code = 1;
+    }
     emit_json_or_human(&report, args.json, || {
         use std::fmt::Write as _;
         let checked = &report.checked_rewrite;
         let mut text = format!(
-            "franken-node migrate autopilot\ntarget: {}\nmode: {}\nstatus: {:?}\n",
-            checked.project_path, report.mode, checked.status
+            "franken-node migrate autopilot\ntarget: {}\nmode: {}\nrewrite status: {:?}\nphase: {}\ncompleted: {}\n",
+            checked.project_path, report.mode, checked.status, report.phase, report.ok
         );
         if let Some(plan) = &checked.rewrite {
             let _ = writeln!(
@@ -8951,7 +9089,18 @@ fn handle_migrate_autopilot(args: &cli::MigrateAutopilotArgs) -> Result<u8> {
                 transaction.journal_sha256
             );
         }
-        for error in &checked.errors {
+        if let Some(attestation) = &report.attestation {
+            let _ = writeln!(
+                text,
+                "signed installed-project validation: {}",
+                attestation.report.display()
+            );
+            let _ = writeln!(text, "installed-project verdict: {}", attestation.verdict);
+        }
+        if let Some(rollout) = &report.rollout {
+            let _ = writeln!(text, "{}", rollout.render_human());
+        }
+        for error in checked.errors.iter().chain(&report.errors) {
             let _ = writeln!(text, "error: {error}");
         }
         let _ = writeln!(text, "release certification: false");

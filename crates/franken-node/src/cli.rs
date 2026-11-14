@@ -1066,6 +1066,24 @@ pub struct MigrateAutopilotArgs {
     #[arg(long, requires = "execute")]
     pub apply: bool,
 
+    /// After installation, sign fresh installed-project validation and attempt Canary promotion.
+    /// Uses the existing confidence gate and signed recovery path; never bypasses them.
+    #[arg(long, requires_all = ["apply", "signing_key", "rollout_signing_key", "out"])]
+    pub rollout: bool,
+
+    /// Owner-only 32-byte Ed25519 seed matching the project's migration-validation.pub.
+    /// The absolute key path must remain outside the captured project.
+    #[arg(long, requires = "rollout")]
+    pub signing_key: Option<PathBuf>,
+
+    /// Separate operator seed matching the independently installed migration-rollout.pub.
+    #[arg(long, requires = "rollout")]
+    pub rollout_signing_key: Option<PathBuf>,
+
+    /// New absolute signed validation report outside the project; never overwritten.
+    #[arg(long, requires = "rollout")]
+    pub out: Option<PathBuf>,
+
     /// Emit one structured result, including comparison evidence and any installed transaction.
     #[arg(long)]
     pub json: bool,
@@ -1086,6 +1104,29 @@ impl MigrateAutopilotArgs {
             self.bun_bin.as_deref().is_some_and(Path::is_absolute),
             "migrate autopilot requires --bun-bin with an absolute Bun executable path"
         );
+        if self.rollout {
+            anyhow::ensure!(
+                self.apply,
+                "autopilot rollout requires --apply; preview cannot create rollout state"
+            );
+            for (flag, path) in [
+                ("--signing-key", self.signing_key.as_deref()),
+                ("--rollout-signing-key", self.rollout_signing_key.as_deref()),
+                ("--out", self.out.as_deref()),
+            ] {
+                anyhow::ensure!(
+                    path.is_some_and(Path::is_absolute),
+                    "autopilot rollout requires {flag} with an absolute path"
+                );
+            }
+        } else {
+            anyhow::ensure!(
+                self.signing_key.is_none()
+                    && self.rollout_signing_key.is_none()
+                    && self.out.is_none(),
+                "signing keys and --out require --rollout"
+            );
+        }
         Ok(())
     }
 }
@@ -1143,6 +1184,40 @@ mod autopilot_cli_tests {
                 Cli::try_parse_from(["franken-node", "migrate", "autopilot", "project", flag,])
                     .is_err()
             );
+        }
+    }
+
+    #[test]
+    fn autopilot_rollout_requires_explicit_installation_and_both_signing_authorities() {
+        let flags = [
+            "--execute",
+            "--bun-bin",
+            "/opt/bun",
+            "--apply",
+            "--rollout",
+            "--signing-key",
+            "/keys/validation.seed",
+            "--rollout-signing-key",
+            "/keys/rollout.seed",
+            "--out",
+            "/evidence/fresh.json",
+        ];
+        let args = parse(&flags);
+        args.validate_intent().unwrap();
+        assert!(args.rollout && args.apply);
+        for required in ["--apply", "--signing-key", "--rollout-signing-key", "--out"] {
+            let mut argv = vec!["franken-node", "migrate", "autopilot", "project"];
+            let mut skip_value = false;
+            for argument in flags {
+                if skip_value {
+                    skip_value = false;
+                } else if argument == required {
+                    skip_value = required != "--apply";
+                } else {
+                    argv.push(argument);
+                }
+            }
+            assert!(Cli::try_parse_from(argv).is_err(), "{required}");
         }
     }
 

@@ -62,6 +62,129 @@ fn chain(project: &Path, id: &str) -> receipt::ChainVerification {
 }
 
 #[test]
+fn signed_authority_preflight_is_read_only_and_never_learns_a_trust_key() {
+    let (root, project, secret) = fixture();
+    let manager = RolloutManager::new(&project, None).with_signing_key(Some(secret.clone()));
+    assert_eq!(
+        manager.preflight_signed_authority().unwrap(),
+        hex::encode(key().verifying_key().to_bytes())
+    );
+    assert!(!project.join(".franken-node/state").exists());
+    assert!(
+        RolloutManager::new(&project, None)
+            .preflight_signed_authority()
+            .is_err()
+    );
+    fs::write(&secret, [18; 32]).unwrap();
+    assert!(manager.preflight_signed_authority().is_err());
+    fs::write(&secret, [17; 32]).unwrap();
+    fs::rename(project.join(ANCHOR), root.path().join("retained.pub")).unwrap();
+    assert!(manager.preflight_signed_authority().is_err());
+    assert!(!project.join(ANCHOR).exists());
+    assert!(!project.join(".franken-node/state").exists());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn composed_rollout_binds_the_completed_group_commit_before_publishing_state() {
+    use super::super::super::rewrite_transaction::{Edit, RewriteTransaction};
+
+    let (_root, project, secret) = fixture();
+    fs::write(project.join("app.js"), b"original").unwrap();
+    let applied = RewriteTransaction::open(&project)
+        .unwrap()
+        .apply_group_commit_with_receipt(&[Edit {
+            path: "app.js",
+            before: b"original",
+            after: b"candidate",
+        }])
+        .unwrap()
+        .unwrap();
+    let manager =
+        RolloutManager::new(&project, Some(&applied.transaction_id)).with_signing_key(Some(secret));
+    let report = manager.initialize_applied_rewrite(&applied).unwrap();
+    assert_eq!(report.stage, RolloutStage::Shadow);
+    assert_eq!(report.status, RolloutStatus::Pending);
+    assert!(!report.lockstep_verified);
+    assert!(report.history.is_empty());
+    let recovery = report.source_rollback.unwrap();
+    assert_eq!(recovery.transaction_id, applied.transaction_id);
+    assert_eq!(recovery.journal_sha256, applied.journal_sha256);
+    assert!(!recovery.restoration_recorded);
+    assert_eq!(chain(&project, &applied.transaction_id).revision, 1);
+
+    let state_path = location(&project, &format!("{}.json", applied.transaction_id));
+    let before = fs::read(&state_path).unwrap();
+    manager.initialize_applied_rewrite(&applied).unwrap();
+    assert_eq!(fs::read(&state_path).unwrap(), before);
+    assert_eq!(fs::read(project.join("app.js")).unwrap(), b"candidate");
+    // An explicit existing-controller transition is not permission for the
+    // composed initializer to reopen it or execute a new admission campaign.
+    manager
+        .promote(
+            &RolloutConfig {
+                force: true,
+                ..RolloutConfig::default()
+            },
+            Some(RolloutStage::Canary),
+            None,
+        )
+        .unwrap();
+    let promoted = fs::read(&state_path).unwrap();
+    assert!(manager.initialize_applied_rewrite(&applied).is_err());
+    assert_eq!(fs::read(&state_path).unwrap(), promoted);
+    assert_eq!(fs::read(project.join("app.js")).unwrap(), b"candidate");
+    manager
+        .rollback("restore the automatically bound migration")
+        .unwrap();
+    assert_eq!(fs::read(project.join("app.js")).unwrap(), b"original");
+    let restored = fs::read(&state_path).unwrap();
+    assert!(manager.initialize_applied_rewrite(&applied).is_err());
+    assert_eq!(fs::read(&state_path).unwrap(), restored);
+    assert_eq!(fs::read(project.join("app.js")).unwrap(), b"original");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn composed_rollout_refuses_wrong_receipt_and_changed_source_without_publication() {
+    use super::super::super::rewrite_transaction::{Edit, RewriteTransaction};
+
+    let (_root, project, secret) = fixture();
+    fs::write(project.join("app.js"), b"original").unwrap();
+    let applied = RewriteTransaction::open(&project)
+        .unwrap()
+        .apply_group_commit_with_receipt(&[Edit {
+            path: "app.js",
+            before: b"original",
+            after: b"candidate",
+        }])
+        .unwrap()
+        .unwrap();
+    let manager =
+        RolloutManager::new(&project, Some(&applied.transaction_id)).with_signing_key(Some(secret));
+    let state_path = location(&project, &format!("{}.json", applied.transaction_id));
+    for mutation in 0..3 {
+        let mut wrong = applied.clone();
+        match mutation {
+            0 => wrong.transaction_id.push_str("-other"),
+            1 => wrong.journal_sha256 = "0".repeat(64),
+            2 => wrong.files = 0,
+            _ => unreachable!(),
+        }
+        assert!(manager.initialize_applied_rewrite(&wrong).is_err());
+        assert!(!state_path.exists());
+        assert_eq!(fs::read(project.join("app.js")).unwrap(), b"candidate");
+    }
+    fs::write(project.join("app.js"), b"later user work").unwrap();
+    assert!(manager.initialize_applied_rewrite(&applied).is_err());
+    assert!(!state_path.exists());
+    assert_eq!(
+        fs::read(project.join("app.js")).unwrap(),
+        b"later user work"
+    );
+}
+
+#[test]
 fn signed_store_extends_full_state_and_preserves_exact_predecessors() {
     let (_root, project, secret) = fixture();
     let store = Store::open_with_key(&project, Some(&secret), None).unwrap();

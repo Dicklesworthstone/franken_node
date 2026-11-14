@@ -179,7 +179,7 @@ pub mod execution {
     };
     use super::{SCHEMA, project_key, seal, verify};
     use anyhow::{Context, Result, ensure};
-    use ed25519_dalek::SigningKey;
+    use ed25519_dalek::{SigningKey, VerifyingKey};
     use serde::Serialize;
     use std::fs::{self, File};
     use std::io::{Read, Write};
@@ -346,6 +346,41 @@ pub mod execution {
         Ok(tests)
     }
 
+    fn prepare_publication(
+        original: &Path,
+        candidate: &Path,
+        key: &Path,
+        out: &Path,
+    ) -> Result<(PathBuf, SigningKey, VerifyingKey)> {
+        let destination = destination(out)?;
+        let destination = native_replay::output_destination(&destination, &[original, candidate])?;
+        let signing = load_secret(key, &[original, candidate])?;
+        let trusted = project_key(candidate)?;
+        ensure!(
+            signing.verifying_key() == trusted,
+            "signing key does not match the independently installed candidate validation key"
+        );
+        Ok((destination, signing, trusted))
+    }
+
+    /// Check the same publication authority and destination as live attested
+    /// validation before a composed workflow changes its project. This creates
+    /// no files and executes no guest code. The selected private key is dropped
+    /// before returning; the eventual validation repeats all checks and cannot
+    /// treat this preflight as retained authority or measured evidence.
+    pub fn preflight_current_project(project: &Path, key: &Path, out: &Path) -> Result<()> {
+        let inputs = Selection {
+            project: project.to_path_buf(),
+            migrated_project: None,
+            expected_input_sha256: None,
+            expected_candidate_input_sha256: None,
+            attest_regression: false,
+        };
+        let (original, candidate) = resolve_inputs(&inputs)?;
+        prepare_publication(&original, &candidate, key, out)?;
+        Ok(())
+    }
+
     /// Measure every captured test under all three runtimes with filesystem
     /// comparison and publish an exclusively created, independently anchored
     /// signature. The private key and output must remain outside BOTH projects.
@@ -363,15 +398,7 @@ pub mod execution {
             "--execute is required before running project code"
         );
         let (original, candidate) = resolve_inputs(inputs)?;
-        let destination = destination(out)?;
-        let destination =
-            native_replay::output_destination(&destination, &[&original, &candidate])?;
-        let signing = load_secret(key, &[&original, &candidate])?;
-        let trusted = project_key(&candidate)?;
-        ensure!(
-            signing.verifying_key() == trusted,
-            "signing key does not match the independently installed candidate validation key"
-        );
+        let (destination, signing, trusted) = prepare_publication(&original, &candidate, key, out)?;
 
         let deadline = Instant::now() + Duration::from_secs(300);
         let (original_pin, candidate_pin) = match (
@@ -468,6 +495,68 @@ pub mod execution {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    fn publication_fixture() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        std::fs::create_dir_all(project.join(".franken-node/keys")).unwrap();
+        std::fs::write(
+            project.join(PUBLIC_KEY_PATH),
+            hex::encode(SigningKey::from_bytes(&[7; 32]).verifying_key().to_bytes()),
+        )
+        .unwrap();
+        let key = root.path().join("validator.seed");
+        std::fs::write(&key, [7; 32]).unwrap();
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
+        (root, project, key)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn publication_preflight_requires_existing_independent_authority_without_writes() {
+        let (root, project, key) = publication_fixture();
+        let out = root.path().join("validation.json");
+        execution::preflight_current_project(&project, &key, &out).unwrap();
+        assert!(!out.exists());
+        assert!(!project.join(".franken-node/state").exists());
+        std::fs::write(&key, [8; 32]).unwrap();
+        assert!(execution::preflight_current_project(&project, &key, &out).is_err());
+        std::fs::write(&key, [7; 32]).unwrap();
+        std::fs::rename(
+            project.join(PUBLIC_KEY_PATH),
+            root.path().join("retained.pub"),
+        )
+        .unwrap();
+        assert!(execution::preflight_current_project(&project, &key, &out).is_err());
+        assert!(!project.join(PUBLIC_KEY_PATH).exists());
+        assert!(!out.exists());
+        assert!(!project.join(".franken-node/state").exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn publication_preflight_preserves_existing_outputs_and_rejects_project_destinations() {
+        let (root, project, key) = publication_fixture();
+        let out = root.path().join("validation.json");
+        std::fs::write(&out, b"retained operator report").unwrap();
+        assert!(execution::preflight_current_project(&project, &key, &out).is_err());
+        assert_eq!(std::fs::read(&out).unwrap(), b"retained operator report");
+        let inside = project.join("validation.json");
+        assert!(execution::preflight_current_project(&project, &key, &inside).is_err());
+        assert!(!inside.exists());
+        assert!(
+            execution::preflight_current_project(
+                &project,
+                &key,
+                std::path::Path::new("relative-validation.json")
+            )
+            .is_err()
+        );
+        assert!(!project.join(".franken-node/state").exists());
+    }
 
     #[test]
     fn independent_ed25519_vector_pins_domain_length_and_exact_bytes() {

@@ -968,7 +968,7 @@ every leaf command available in the current build.
 | Command | Purpose |
 |---|---|
 | `franken-node migrate audit <path>` | Inventory migration risk. The project path is handler-required so `--json` failures emit `franken-node/migrate-error-cli/v1` instead of a human clap error. Flags: `--format` (json\|text\|sarif), `--json` (alias for `--format json`), `--out`. |
-| `franken-node migrate autopilot <path>` | Capture and audit the project, prepare rewrites, and compare every captured test and its filesystem effects under Node, Bun, and this native product. Requires `--execute --bun-bin <absolute-path>`. Defaults to a validated preview that does not install source edits or recover transactions; `--apply` installs only the measured candidate using the packed durable transaction journal and returns its exact rollback identity. Linux only. Flags: `--execute`, `--bun-bin`, `--apply`, `--json`. |
+| `franken-node migrate autopilot <path>` | Capture and audit the project, prepare rewrites, and compare every captured test and its filesystem effects under Node, Bun, and this native product. Requires `--execute --bun-bin <absolute-path>`. Defaults to a validated preview that does not install source edits or recover transactions; `--apply` installs only the measured candidate using the packed durable transaction journal and returns its exact rollback identity. Optional `--rollout` signs fresh installed-project validation and attempts Canary admission using the existing confidence and recovery gates. Linux only. Flags: `--execute`, `--bun-bin`, `--apply`, `--rollout`, `--signing-key`, `--rollout-signing-key`, `--out`, `--json`. |
 | `franken-node migrate rewrite <path>` | Apply migration transforms. `--emit-rollback` writes an unsigned JSON `MigrationRollbackPlan` (not Ed25519-signed) plus `.migrate-backup/` snapshots. The project path is handler-required so `--json` failures emit `franken-node/migrate-error-cli/v1` instead of a human clap error. Flags: `--apply`, `--emit-rollback`, `--json`. |
 | `franken-node migrate rollback <path>` | Inspect retained native rewrite transactions or restore one by its explicit identity. `--transaction <ID>` selects the transaction; without `--apply` the command is preview-only, and there is no latest-ID inference. The project path is handler-required so `--json` failures emit `franken-node/migrate-error-cli/v1` instead of a human clap error. Flags: `--transaction`, `--apply`, `--json`. |
 | `franken-node migrate validate <path>` | Rerun static migration audit checks and, unless `--static-only`, a transformed-runtime smoke test. Does **not** run `verify lockstep`. The project path is handler-required so `--json` failures emit `franken-node/migrate-error-cli/v1` instead of a human clap error. Flags: `--format` (json\|text), `--json`, `--static-only`. |
@@ -997,6 +997,44 @@ validation runner, and Bun and the native executable must have distinct bytes
 from both other runtimes. `--execute` approves trusted project code running in
 disposable workspaces; those workspaces are not an OS sandbox. Passing the
 captured suite is not release certification or proof of untested behavior.
+
+To include signed Canary admission in the same invocation:
+
+```bash
+franken-node migrate autopilot ./app --execute --bun-bin /opt/bun/bin/bun --apply \
+  --rollout --signing-key /secure/validation.seed \
+  --rollout-signing-key /secure/rollout.seed \
+  --out /reports/app-installed-validation.json --json
+```
+
+Provision the independent public trust anchors at
+`app/.franken-node/keys/migration-validation.pub` and
+`app/.franken-node/keys/migration-rollout.pub` beforehand. Each contains the
+corresponding Ed25519 public key in lowercase hexadecimal. The selected private
+keys must be owner-only, single-link regular files containing a 32-byte raw seed,
+outside the project. The external report's parent directory must exist, and the
+report path must be new. Autopilot checks both authorities and the output before
+running tests or installing rewrites; it never creates its own trust anchor.
+
+After checked installation, the returned transaction ID becomes the migration
+ID. Autopilot initializes signed Shadow state bound to that exact journal, then
+runs a fresh Node/Bun/native comparison of the installed project and publishes
+its signed report. This second measurement is necessary because the durable
+rewrite journal and rollout state are part of the captured input identity.
+The controller then attempts Canary with its existing confidence policy: the
+conditional Wilson 95% lower bound must reach 0.90. A small suite can pass every
+test while still lacking sufficient confidence; test independence is not
+established by this bound. No confidence override is available in autopilot.
+
+The JSON result keeps `checked_rewrite.transaction`, the signed `attestation`,
+the actual `rollout` state, `phase`, and `errors` as each becomes available.
+A later rollout refusal exits nonzero even if rewrites were installed. Complete
+signed native-regression evidence can invoke the controller's pinned automatic
+source restoration; insufficient confidence or an infrastructure error does
+not itself authorize restoration. The original installation receipt remains
+available for an explicit `migrate rollback`. An unchanged candidate has no new
+transaction to bind, so `--rollout` refuses instead of selecting an older one.
+Canary records the admitted rollout stage; it does not route live traffic.
 
 `migrate rewrite <path> --apply --verify` checks captured dependency metadata
 and installed package identities before differential execution. Its npm 11

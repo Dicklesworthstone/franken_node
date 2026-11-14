@@ -73,6 +73,41 @@ fn child_directory(parent: &File, name: &str) -> io::Result<File> {
 }
 
 impl Store {
+    /// Check the independently installed operator authority without creating
+    /// rollout directories, acquiring a writer, or publishing any state. The
+    /// actual writer loads and checks the same authority again under its lock.
+    pub(super) fn preflight_signed_authority(
+        project: &Path,
+        selected: &Path,
+    ) -> io::Result<String> {
+        #[cfg(unix)]
+        {
+            let root = File::from(open(
+                project,
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )?);
+            let authority = signing::Policy::open(&root, project, Some(selected), None)?;
+            let key = authority
+                .trusted_verifying_key()
+                .ok_or_else(|| invalid("signed rollout requires an independent operator key"))?;
+            if authority.signing_key().is_none() {
+                return Err(invalid(
+                    "signed rollout requires an explicit operator signing key",
+                ));
+            }
+            authority.recheck()?;
+            Ok(hex::encode(key.to_bytes()))
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (project, selected);
+            Err(invalid(
+                "operator-signed rollout storage is supported on Unix only",
+            ))
+        }
+    }
+
     #[allow(dead_code)]
     pub(super) fn open(project: &Path) -> io::Result<Self> {
         Self::open_with_selected_key(project, None)

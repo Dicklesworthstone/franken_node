@@ -721,6 +721,329 @@ fn primary_attestation_flags_cannot_silently_downgrade_or_omit_execution_consent
     );
 }
 
+mod autopilot_rollout_cli {
+    use super::*;
+    use ed25519_dalek::SigningKey;
+    use frankenengine_node::migration::report_attestation;
+    use frankenengine_node::migration::validation_suite::rewrite_candidate::RewriteCandidate;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
+    use std::time::Instant;
+
+    const ROLLOUT_ANCHOR: &str = ".franken-node/keys/migration-rollout.pub";
+
+    struct Fixture {
+        root: TempDir,
+        project: PathBuf,
+        validation_key: PathBuf,
+        rollout_key: PathBuf,
+        out: PathBuf,
+    }
+
+    impl Fixture {
+        fn new(count: usize) -> Self {
+            let root = TempDir::new().unwrap();
+            let project = root.path().join("project");
+            fs::create_dir(&project).unwrap();
+            initialize_native_project(&project, false);
+            fs::write(
+                project.join("package.json"),
+                r#"{"name":"autopilot-rollout","version":"1.0.0","engines":{"node":">=20"}}"#,
+            )
+            .unwrap();
+            fs::write(
+                project.join("package-lock.json"),
+                r#"{"lockfileVersion":3,"packages":{"":{}}}"#,
+            )
+            .unwrap();
+            for index in 0..count {
+                // Distinct curated tests exercise the real admission path;
+                // they do not establish independent production samples.
+                fs::write(
+                    project.join(format!("case-{index:02}.test.js")),
+                    format!("console.log(require('path').basename('/tmp/{index}'));\n"),
+                )
+                .unwrap();
+            }
+            fs::create_dir_all(project.join(".franken-node/keys")).unwrap();
+            let validation_key = root.path().join("validator.seed");
+            let rollout_key = root.path().join("operator.seed");
+            for (path, seed) in [(&validation_key, 81_u8), (&rollout_key, 82_u8)] {
+                fs::write(path, [seed; 32]).unwrap();
+                fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+            }
+            fs::write(
+                project.join(report_attestation::PUBLIC_KEY_PATH),
+                hex::encode(SigningKey::from_bytes(&[81; 32]).verifying_key().to_bytes()),
+            )
+            .unwrap();
+            fs::write(
+                project.join(ROLLOUT_ANCHOR),
+                hex::encode(SigningKey::from_bytes(&[82; 32]).verifying_key().to_bytes()),
+            )
+            .unwrap();
+            let out = root.path().join("installed-validation.signed.json");
+            Self {
+                root,
+                project,
+                validation_key,
+                rollout_key,
+                out,
+            }
+        }
+
+        fn execute(&self, bun: &Path) -> Output {
+            let mut command = franken_node_command();
+            command
+                .current_dir(repo_root())
+                .env_remove(FAILURE_DIRECTORY)
+                .env_remove("FRANKEN_NODE_CHECKED_REWRITE_BUN_BIN")
+                .env_remove("FRANKEN_NODE_ROLLOUT_SIGNING_KEY")
+                .env_remove("FRANKEN_NODE_ROLLOUT_EXPECTED_HEAD_SHA256")
+                .args(["migrate", "autopilot"])
+                .arg(&self.project)
+                .args(["--execute", "--apply", "--rollout", "--json", "--bun-bin"])
+                .arg(bun)
+                .arg("--signing-key")
+                .arg(&self.validation_key)
+                .arg("--rollout-signing-key")
+                .arg(&self.rollout_key)
+                .arg("--out")
+                .arg(&self.out);
+            native_smoke_supervisor::run_command_with_timeout(
+                &mut command,
+                Duration::from_secs(660),
+                Duration::from_secs(1),
+            )
+            .expect("the two bounded live validation phases must terminate")
+        }
+
+        #[cfg(feature = "engine")]
+        fn measured_report(&self) -> serde_json::Value {
+            let raw = fs::read(&self.out).unwrap();
+            let verified = report_attestation::verify(
+                &raw,
+                &SigningKey::from_bytes(&[81; 32]).verifying_key(),
+            )
+            .unwrap();
+            serde_json::from_slice(&verified).unwrap()
+        }
+
+        #[cfg(feature = "engine")]
+        fn signed_state(
+            &self,
+            transaction: &str,
+        ) -> (u64, frankenengine_node::migration::rollout::RolloutState) {
+            let filename = format!("{transaction}.json");
+            let raw = fs::read(
+                self.project
+                    .join(".franken-node/state/rollout")
+                    .join(&filename),
+            )
+            .unwrap();
+            let verified = report_attestation::rollout_receipt::verify(
+                &raw,
+                &SigningKey::from_bytes(&[82; 32]).verifying_key(),
+                self.project.canonicalize().unwrap().to_str().unwrap(),
+                &filename,
+            )
+            .unwrap();
+            (
+                verified.revision(),
+                serde_json::from_slice(verified.state_bytes()).unwrap(),
+            )
+        }
+    }
+
+    #[cfg(feature = "engine")]
+    fn real_bun() -> PathBuf {
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+            .filter(|directory| directory.is_absolute())
+            .map(|directory| directory.join("bun"))
+            .find(|path| path.is_file())
+            .expect("the native autopilot rollout acceptance tests require real installed Bun")
+            .canonicalize()
+            .unwrap()
+    }
+
+    #[test]
+    fn autopilot_rollout_rejects_bad_authority_and_existing_report_before_installation() {
+        for fault in 0..3 {
+            let fixture = Fixture::new(2);
+            let captured = RewriteCandidate::capture(
+                &fixture.project,
+                Instant::now() + Duration::from_secs(60),
+            )
+            .unwrap();
+            let expected = match fault {
+                0 => {
+                    fs::write(&fixture.validation_key, [91; 32]).unwrap();
+                    "does not match"
+                }
+                1 => {
+                    fs::write(&fixture.rollout_key, [92; 32]).unwrap();
+                    "does not match"
+                }
+                2 => {
+                    fs::write(&fixture.out, b"retained independent report").unwrap();
+                    "already exists"
+                }
+                _ => unreachable!(),
+            };
+            let output = fixture.execute(&fixture.root.path().join("absent-bun"));
+            assert!(!output.status.success());
+            let report = parse_json_stdout(&output, "autopilot rollout authority preflight");
+            assert_eq!(
+                report["schema_version"],
+                "franken-node/migrate-error-cli/v1"
+            );
+            assert_eq!(report["command"], "migrate.autopilot");
+            assert!(
+                report["error"].as_str().unwrap().contains(expected),
+                "{report}"
+            );
+            assert!(!fixture.project.join(".migrate-backup").exists());
+            assert!(!fixture.project.join(".franken-node/state").exists());
+            captured.ensure_source_unchanged().unwrap();
+            if fault == 2 {
+                assert_eq!(
+                    fs::read(&fixture.out).unwrap(),
+                    b"retained independent report"
+                );
+            } else {
+                assert!(!fixture.out.exists());
+            }
+        }
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn autopilot_rollout_signs_fresh_installed_inputs_but_keeps_low_sample_shadow() {
+        let fixture = Fixture::new(2);
+        let output = fixture.execute(&real_bun());
+        let report = parse_json_stdout(&output, "autopilot low-sample rollout refusal");
+        assert!(!output.status.success(), "{report}");
+        assert_eq!(report["ok"], false);
+        assert_eq!(report["phase"], "rollout-promotion");
+        assert_eq!(report["checked_rewrite"]["status"], "APPLIED");
+        assert_eq!(report["checked_rewrite"]["rewrite"]["rewrites_applied"], 2);
+        assert_eq!(report["attestation"]["verdict"], "PASS");
+        assert_eq!(report["attestation"]["total_tests"], 2);
+        assert_eq!(report["rollout"]["stage"], "shadow");
+        assert_eq!(report["rollout"]["status"], "pending");
+        assert_eq!(report["rollout"]["rollback_triggered"], false);
+        assert!(
+            report["errors"].as_array().unwrap().iter().any(|error| {
+                error
+                    .as_str()
+                    .unwrap()
+                    .contains("insufficient cohort evidence")
+            }),
+            "{report}"
+        );
+        let measured = fixture.measured_report();
+        assert_eq!(measured["verdict"], "PASS");
+        assert_eq!(measured["input_sha256"], measured["candidate_input_sha256"]);
+        assert_ne!(
+            measured["candidate_input_sha256"],
+            report["checked_rewrite"]["product_validation"]["candidate_input_sha256"]
+        );
+        let current =
+            RewriteCandidate::capture(&fixture.project, Instant::now() + Duration::from_secs(30))
+                .unwrap();
+        assert_eq!(measured["candidate_input_sha256"], current.input_sha256());
+        let transaction = &report["checked_rewrite"]["transaction"];
+        let id = transaction["transaction_id"].as_str().unwrap();
+        assert_eq!(report["rollout"]["source_rollback"]["transaction_id"], id);
+        assert_eq!(
+            report["rollout"]["source_rollback"]["journal_sha256"],
+            transaction["journal_sha256"]
+        );
+        let (revision, state) = fixture.signed_state(id);
+        assert_eq!(revision, 1);
+        assert!(state.history.is_empty());
+        assert!(!state.lockstep_verified);
+        assert!(state.validation_confidence.is_none());
+        assert!(
+            fs::read_to_string(fixture.project.join("case-00.test.js"))
+                .unwrap()
+                .contains("node:path")
+        );
+        assert_eq!(report["release_certification"], false);
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn autopilot_rollout_reaches_canary_only_with_fresh_real_triad_and_signed_transition() {
+        use frankenengine_node::migration::rollout::{RolloutStage, RolloutStatus};
+
+        let fixture = Fixture::new(35);
+        let output = fixture.execute(&real_bun());
+        let report = parse_json_stdout(&output, "native autopilot signed canary");
+        assert!(output.status.success(), "{report}");
+        assert_eq!(report["ok"], true);
+        assert_eq!(report["phase"], "complete");
+        assert_eq!(report["checked_rewrite"]["status"], "APPLIED");
+        assert_eq!(report["checked_rewrite"]["rewrite"]["rewrites_applied"], 35);
+        assert_eq!(report["attestation"]["verdict"], "PASS");
+        assert_eq!(report["attestation"]["total_tests"], 35);
+        assert_eq!(report["rollout"]["stage"], "canary");
+        assert_eq!(report["rollout"]["status"], "active");
+        assert_eq!(report["rollout"]["ramp_pct"], 5);
+        assert_eq!(report["rollout"]["lockstep_verified"], true);
+        assert_eq!(report["rollout"]["rollback_triggered"], false);
+        assert!(report["errors"].as_array().unwrap().is_empty());
+        let measured = fixture.measured_report();
+        assert_eq!(measured["verdict"], "PASS");
+        assert_eq!(measured["total_tests"], 35);
+        assert_eq!(measured["passed"], 35);
+        assert_eq!(measured["errored"], 0);
+        assert_eq!(measured["skipped"], 0);
+        assert_eq!(measured["filesystem_comparison"], true);
+        assert_eq!(measured["distinct_reference_binaries"], true);
+        assert_eq!(measured["input_sha256"], measured["candidate_input_sha256"]);
+        assert_ne!(
+            measured["candidate_input_sha256"],
+            report["checked_rewrite"]["product_validation"]["candidate_input_sha256"]
+        );
+        assert_ne!(
+            measured["native_runtime"]["sha256"],
+            measured["node_runtime"]["sha256"]
+        );
+        assert_ne!(
+            measured["native_runtime"]["sha256"],
+            measured["bun_runtime"]["sha256"]
+        );
+        let transaction = &report["checked_rewrite"]["transaction"];
+        let id = transaction["transaction_id"].as_str().unwrap();
+        let (revision, state) = fixture.signed_state(id);
+        assert_eq!(revision, 2);
+        assert_eq!(state.current_stage, RolloutStage::Canary);
+        assert_eq!(state.status, RolloutStatus::Active);
+        assert_eq!(state.rollback_plan_id.as_deref(), Some(id));
+        assert_eq!(
+            state.rollback_journal_sha256.as_deref(),
+            transaction["journal_sha256"].as_str()
+        );
+        assert_eq!(state.history.len(), 1);
+        state.history[0]
+            .verify_transition_signature(id, &SigningKey::from_bytes(&[82; 32]).verifying_key())
+            .unwrap();
+        let confidence = state.validation_confidence.as_ref().unwrap();
+        confidence.validate().unwrap();
+        assert_eq!(confidence.total_tests, 35);
+        assert_eq!(confidence.matched_tests, 35);
+        assert!(confidence.wilson_lower_95 >= 0.90);
+        assert!(!confidence.independent_sampling_verified);
+        assert_eq!(
+            confidence.candidate_input_sha256,
+            measured["candidate_input_sha256"]
+        );
+        assert_eq!(report["release_certification"], false);
+    }
+}
+
 #[cfg(feature = "engine")]
 mod attested_validation_cli {
     use super::*;

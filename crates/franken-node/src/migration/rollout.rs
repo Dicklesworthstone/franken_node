@@ -694,6 +694,69 @@ impl RolloutManager {
         self
     }
 
+    /// Validate an explicitly selected operator key before a composed migration
+    /// changes source files. This reads existing authority only; it never learns
+    /// a trust anchor from a report or initializes rollout storage. The writer
+    /// repeats these checks, so preflight is not a reusable authorization token.
+    pub fn preflight_signed_authority(&self) -> io::Result<String> {
+        let selected = self.signing_key_path.as_deref().ok_or_else(|| {
+            invalid("signed migration rollout requires an explicit operator signing key")
+        })?;
+        Store::preflight_signed_authority(&self.project_path.canonicalize()?, selected)
+    }
+
+    /// Initialize signed rollout recovery from the receipt returned by the
+    /// writer that just installed this migration. Both the transaction ID and
+    /// journal digest must match before publishing the first state. This is a
+    /// pending Shadow state, not evidence of runtime validation or promotion.
+    /// Measure the initialized installed tree before requesting promotion: its
+    /// journals and rollout state are part of the captured input identity.
+    #[cfg(target_os = "linux")]
+    pub fn initialize_applied_rewrite(
+        &self,
+        applied: &super::rewrite_transaction::AppliedRewrite,
+    ) -> io::Result<RolloutReport> {
+        if applied.files == 0 || applied.transaction_id != self.migration_id {
+            return Err(invalid(
+                "signed rollout must name the exact nonempty applied rewrite transaction",
+            ));
+        }
+        self.preflight_signed_authority()?;
+        let store = self.open_store()?;
+        let existing = self.load_existing(&store)?;
+        let initialize = existing.is_none();
+        let state = match existing {
+            Some(state) => state,
+            None => self.prepare_initial_state()?,
+        };
+        if state.current_stage != RolloutStage::Shadow || state.status != RolloutStatus::Pending {
+            return Err(invalid(
+                "composed rollout initialization requires a pending Shadow state; use explicit rollout controls for an existing transition or recovery",
+            ));
+        }
+        if state.rollback_plan_id.as_deref() != Some(applied.transaction_id.as_str())
+            || state.rollback_journal_sha256.as_deref() != Some(applied.journal_sha256.as_str())
+        {
+            return Err(invalid(
+                "rollout recovery binding differs from the completed rewrite receipt",
+            ));
+        }
+        self.verify_bound_source(&state).map_err(invalid)?;
+        if initialize {
+            self.persist_locked(&store, &state)?;
+        }
+        Ok(Self::report(
+            state,
+            true,
+            if initialize {
+                "Signed transaction-bound rollout initialized; installed-tree validation and promotion remain pending"
+            } else {
+                "Existing signed transaction-bound rollout verified; no transition performed"
+            }
+            .into(),
+        ))
+    }
+
     fn discover_or_generate_id(project_path: &Path) -> String {
         let canonical = project_path
             .canonicalize()
