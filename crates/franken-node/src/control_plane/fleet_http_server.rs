@@ -29,15 +29,12 @@ use subtle::ConstantTimeEq;
 
 use crate::capacity_defaults::aliases::MAX_NODES_CAP;
 use crate::control_plane::control_epoch::EpochSigningKey;
-use crate::control_plane::epoch_transition_barrier::BarrierConfig;
-use crate::runtime::epoch_transition::ProductEpochCoordinator;
 
 use super::fleet_transport::{
     FleetAction, FleetActionRecord, FleetGuardedPolicyObservationScope, FleetTransport,
     FleetTransportError, GuardedFleetPolicyPublication, MAX_GUARDED_POLICY_REQUEST_BYTES,
     MAX_GUARDED_POLICY_STALE_AFTER, NodeHealth, NodeStatus, SeqlockControlPage,
-    certify_fleet_epoch_quiescence, fleet_action_log_checkpoint, validate_action_record,
-    validate_node_id, validate_node_status, validate_zone_id,
+    validate_action_record, validate_node_id, validate_node_status, validate_zone_id,
 };
 use super::fleet_transport_durable::DurableFleetTransport;
 use super::fleet_transport_http::{
@@ -427,7 +424,7 @@ pub struct FleetControlPlaneService {
     state_dir: PathBuf,
     token: String,
     node_credentials: Option<Arc<FleetNodeCredentials>>,
-    epoch_coordinator: Arc<Mutex<ProductEpochCoordinator>>,
+    epoch_signing_key: Arc<EpochSigningKey>,
     seqlock_page: Arc<SeqlockControlPage>,
     clock: fn() -> DateTime<Utc>,
 }
@@ -455,12 +452,8 @@ impl FleetControlPlaneService {
         let epoch_key_material = Sha256::digest(format!("fleet-epoch-signing:{token}").as_bytes());
         let epoch_signing_key = EpochSigningKey::new(epoch_key_material.as_slice())
             .map_err(|err| FleetTransportError::not_initialized(err.to_string()))?;
-        let epoch_coordinator = Arc::new(Mutex::new(ProductEpochCoordinator::new(
-            0,
-            2,
-            BarrierConfig::default(),
-            epoch_signing_key,
-        )));
+        let epoch_signing_key = Arc::new(epoch_signing_key);
+        let store_epoch_key = Arc::clone(&epoch_signing_key);
         let seqlock_page = Arc::new(SeqlockControlPage::new());
         let store_dir = state_dir.clone();
         let (jobs, inbox) = mpsc::channel::<StoreJob>();
@@ -468,18 +461,21 @@ impl FleetControlPlaneService {
         std::thread::Builder::new()
             .name("fleet-control-plane-store".to_string())
             .spawn(move || {
-                let mut transport = match DurableFleetTransport::new(store_dir)
-                    .and_then(|mut transport| transport.initialize().map(|()| transport))
-                {
-                    Ok(transport) => {
-                        let _ = ready.send(Ok(()));
-                        transport
-                    }
-                    Err(err) => {
-                        let _ = ready.send(Err(err));
-                        return;
-                    }
-                };
+                let mut transport =
+                    match DurableFleetTransport::new(store_dir).and_then(|mut transport| {
+                        transport.initialize()?;
+                        transport.current_fleet_epoch(&store_epoch_key)?;
+                        Ok(transport)
+                    }) {
+                        Ok(transport) => {
+                            let _ = ready.send(Ok(()));
+                            transport
+                        }
+                        Err(err) => {
+                            let _ = ready.send(Err(err));
+                            return;
+                        }
+                    };
                 let mut authenticated_nodes = AuthenticatedNodes::new();
                 // Ends when the service (the only sender) is dropped.
                 while let Ok(job) = inbox.recv() {
@@ -495,7 +491,7 @@ impl FleetControlPlaneService {
             state_dir,
             token: token.to_string(),
             node_credentials: None,
-            epoch_coordinator,
+            epoch_signing_key,
             seqlock_page,
             clock: Utc::now,
         })
@@ -765,44 +761,32 @@ impl FleetControlPlaneService {
                     Err(response) => return response,
                 };
                 let clock = self.clock;
-                let epoch_coordinator = Arc::clone(&self.epoch_coordinator);
+                let epoch_signing_key = Arc::clone(&self.epoch_signing_key);
                 let seqlock_page = Arc::clone(&self.seqlock_page);
                 let seqlock_path = self.state_dir.join("seqlock.page");
                 self.with_transport(move |transport, authenticated| {
-                    let now = clock();
-                    let mut state = transport.read_shared_state()?;
-                    enrolled_node_view(&mut state.nodes, &enrollment, authenticated, now)?;
-                    let mut coordinator = match epoch_coordinator.lock() {
-                        Ok(guard) => guard,
-                        Err(poisoned) => poisoned.into_inner(),
-                    };
-                    let (evidence, certificate) = certify_fleet_epoch_quiescence(
-                        &mut coordinator,
-                        &state,
+                    let (evidence, certificate, max_qv) = transport.certify_epoch_quiescence_projected(
+                        &epoch_signing_key,
                         &roots,
                         super::fleet_transport::FleetEpochBarrierParams {
                             initiator: &barrier_req.initiator,
                             reason: &barrier_req.reason,
-                            now,
+                            now: clock(),
                             stale_after: barrier_req
                                 .stale_after
                                 .min(MAX_GUARDED_POLICY_STALE_AFTER),
                             trace_id: &barrier_req.trace_id,
                         },
+                        clock,
+                        |nodes| enrolled_node_view(nodes, &enrollment, authenticated, clock()),
                     )?;
-                    let checkpoint = fleet_action_log_checkpoint(&state.actions)?;
+                    let checkpoint = &certificate.action_log_checkpoint;
                     let mut digest_prefix = [0_u8; 32];
                     if let Ok(decoded) = hex::decode(&checkpoint.actions_sha256)
                         && decoded.len() == 32
                     {
                         digest_prefix.copy_from_slice(&decoded);
                     }
-                    let max_qv = state
-                        .nodes
-                        .iter()
-                        .map(|n| n.quarantine_version)
-                        .max()
-                        .unwrap_or(0);
                     let active_hold_count = certificate
                         .participants
                         .iter()
@@ -816,7 +800,12 @@ impl FleetControlPlaneService {
                         checkpoint.action_count,
                         digest_prefix,
                     );
-                    seqlock_page.write_shared_page(&seqlock_path)?;
+                    seqlock_page.write_shared_page(&seqlock_path).map_err(|error| {
+                        FleetTransportError::io(format!(
+                            "fleet epoch {} committed durably, but control cache publication failed: {error}",
+                            certificate.committed_epoch
+                        ))
+                    })?;
                     Ok(FleetHttpResponse::json(
                         200,
                         "ok",
@@ -1420,6 +1409,231 @@ mod tests {
         attestation.signature_hex = hex::encode(
             root.sign(&attestation.signing_payload().unwrap())
                 .to_bytes(),
+        );
+    }
+
+    fn epoch_barrier_response(
+        service: &FleetControlPlaneService,
+        trace: &str,
+    ) -> FleetHttpResponse {
+        service.handle(request(
+            "POST",
+            FLEET_HTTP_EPOCH_BARRIER_PATH,
+            Some(&bearer()),
+            &serde_json::to_vec(&FleetHttpEpochBarrierRequest {
+                initiator: "operator".to_string(),
+                reason: "held-population epoch transition".to_string(),
+                trace_id: trace.to_string(),
+                stale_after: std::time::Duration::from_secs(30),
+            })
+            .unwrap(),
+        ))
+    }
+
+    fn service_with_committed_epoch(
+        root: &ed25519_dalek::SigningKey,
+    ) -> (tempfile::TempDir, FleetControlPlaneService) {
+        let (dir, service) = service();
+        let service = service
+            .with_node_credentials(supervisor_enrollment(root))
+            .unwrap();
+        let hold = FleetActionRecord {
+            action_id: "supervisor-maintenance".into(),
+            emitted_at: fixed_clock(),
+            action: FleetAction::NativeSessionHold {
+                zone_id: "zone-a".into(),
+                reason: "verified supervisor maintenance".into(),
+            },
+        };
+        assert_eq!(
+            service
+                .handle(request(
+                    "POST",
+                    FLEET_HTTP_ACTIONS_PATH,
+                    Some(&bearer()),
+                    &serde_json::to_vec(&hold).unwrap(),
+                ))
+                .status,
+            201
+        );
+        let auth = format!("Bearer {NODE_TOKEN}");
+        assert_eq!(
+            service
+                .handle(request(
+                    "POST",
+                    FLEET_HTTP_NODES_PATH,
+                    Some(&auth),
+                    &serde_json::to_vec(&signed_maintenance(root, fixed_clock())).unwrap(),
+                ))
+                .status,
+            200
+        );
+        let response = epoch_barrier_response(&service, "trace-first-epoch");
+        assert_eq!(
+            response.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&response.body)
+        );
+        let response: FleetHttpEpochBarrierResponse =
+            serde_json::from_slice(&response.body).unwrap();
+        assert_eq!(response.certificate.pre_epoch, 0);
+        assert_eq!(response.certificate.committed_epoch, 1);
+        (dir, service)
+    }
+
+    #[test]
+    fn fleet_epoch_recovery_is_monotonic_and_requires_fresh_enrolled_nodes() {
+        let root = ed25519_dalek::SigningKey::from_bytes(&[51; 32]);
+        let (dir, service) = service_with_committed_epoch(&root);
+        drop(service);
+        let service = FleetControlPlaneService::open(dir.path().join("fleet"), TOKEN)
+            .unwrap()
+            .with_clock(fixed_clock)
+            .with_node_credentials(supervisor_enrollment(&root))
+            .unwrap();
+        assert_eq!(
+            epoch_barrier_response(&service, "trace-missing-after-restart").status,
+            409,
+            "recovered signed history cannot replace a fresh enrolled heartbeat"
+        );
+        let auth = format!("Bearer {NODE_TOKEN}");
+        assert_eq!(
+            service
+                .handle(request(
+                    "POST",
+                    FLEET_HTTP_NODES_PATH,
+                    Some(&auth),
+                    &serde_json::to_vec(&signed_maintenance(&root, fixed_clock())).unwrap(),
+                ))
+                .status,
+            200
+        );
+        let response = epoch_barrier_response(&service, "trace-second-epoch");
+        assert_eq!(
+            response.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&response.body)
+        );
+        let response: FleetHttpEpochBarrierResponse =
+            serde_json::from_slice(&response.body).unwrap();
+        assert_eq!(response.certificate.pre_epoch, 1);
+        assert_eq!(response.certificate.committed_epoch, 2);
+        assert_eq!(
+            SeqlockControlPage::read_shared_page(&dir.path().join("fleet/seqlock.page"))
+                .unwrap()
+                .control_epoch,
+            2
+        );
+
+        let resume = FleetActionRecord {
+            action_id: "resume-after-epoch-recovery".into(),
+            emitted_at: fixed_clock(),
+            action: FleetAction::NativeSessionResume {
+                zone_id: "zone-a".into(),
+                hold_action_id: "supervisor-maintenance".into(),
+                reason: Some("resume the certified population".into()),
+            },
+        };
+        assert_eq!(
+            service
+                .handle(request(
+                    "POST",
+                    FLEET_HTTP_ACTIONS_PATH,
+                    Some(&bearer()),
+                    &serde_json::to_vec(&resume).unwrap(),
+                ))
+                .status,
+            201
+        );
+        assert_eq!(
+            epoch_barrier_response(&service, "trace-resumed-after-restart").status,
+            409,
+            "a committed epoch cannot authorize reusing a released hold"
+        );
+        let recovered = DurableFleetTransport::new(dir.path().join("fleet")).unwrap();
+        assert_eq!(
+            recovered
+                .current_fleet_epoch(&service.epoch_signing_key)
+                .unwrap(),
+            2,
+            "a rejected resumed population must not advance durable epoch authority"
+        );
+    }
+
+    #[test]
+    fn fleet_epoch_recovery_rejects_changed_key_tampering_and_missing_history() {
+        for scenario in [
+            "changed_key",
+            "altered_certificate",
+            "missing_head",
+            "missing_commit",
+        ] {
+            let root = ed25519_dalek::SigningKey::from_bytes(&[52; 32]);
+            let (dir, service) = service_with_committed_epoch(&root);
+            drop(service);
+            let state_dir = dir.path().join("fleet");
+            let connection = fsqlite::Connection::open(
+                state_dir.join("fleet-state.db").to_string_lossy().as_ref(),
+            )
+            .unwrap();
+            match scenario {
+                "changed_key" => {}
+                "altered_certificate" => {
+                    let rows = connection
+                        .query("SELECT commit_json FROM fleet_epoch_commits WHERE epoch = '1';")
+                        .unwrap();
+                    let fsqlite::SqliteValue::Text(raw) = &rows[0].values()[0] else {
+                        panic!("stored epoch commit must be JSON text");
+                    };
+                    let mut commit: serde_json::Value = serde_json::from_str(raw.as_ref()).unwrap();
+                    commit["certificate"]["participants"][0]["session_set_sha256"] =
+                        serde_json::Value::String("a".repeat(64));
+                    connection
+                        .execute_with_params(
+                            "UPDATE fleet_epoch_commits SET commit_json = ?1 WHERE epoch = '1';",
+                            &[fsqlite::SqliteValue::Text(
+                                serde_json::to_string(&commit).unwrap().into(),
+                            )],
+                        )
+                        .unwrap();
+                }
+                "missing_head" => {
+                    connection.execute(
+                        "UPDATE fleet_meta SET key = 'lost_epoch_head' WHERE key = 'authenticated_epoch_head';",
+                    ).unwrap();
+                }
+                _ => {
+                    connection
+                        .execute("UPDATE fleet_epoch_commits SET epoch = '99' WHERE epoch = '1';")
+                        .unwrap();
+                }
+            }
+            drop(connection);
+            let token = if scenario == "changed_key" {
+                "changed-operator-token-0123456789abcdef0123456789abcdef"
+            } else {
+                TOKEN
+            };
+            assert!(
+                FleetControlPlaneService::open(state_dir, token).is_err(),
+                "{scenario}: invalid recovery state must not reset the fleet epoch"
+            );
+        }
+    }
+
+    #[test]
+    fn unsigned_epoch_cache_cannot_bootstrap_authoritative_history() {
+        let (dir, service) = service();
+        drop(service);
+        let page = SeqlockControlPage::new();
+        page.publish(9, 1, 0, 0, [0; 32]);
+        page.write_shared_page(&dir.path().join("fleet/seqlock.page"))
+            .unwrap();
+        assert!(
+            FleetControlPlaneService::open(dir.path().join("fleet"), TOKEN).is_err(),
+            "an unsigned cache cannot authorize epoch recovery or silent genesis"
         );
     }
 

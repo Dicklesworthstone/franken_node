@@ -4529,6 +4529,21 @@ pub struct FleetEpochQuiescenceCertificate {
     pub participants: Vec<FleetEpochParticipantQuiescence>,
 }
 
+/// Bind the full evidence and certificate to the canonical signed epoch event.
+/// This digest is used by the durable fleet owner; it is not an independent
+/// public attestation or a substitute for the enrolled supervisors' signatures.
+pub(crate) fn fleet_epoch_quiescence_manifest_hash(
+    evidence: &FleetNativeDrainEvidence,
+    certificate: &FleetEpochQuiescenceCertificate,
+) -> Result<String, FleetTransportError> {
+    let bytes = canonical_fleet_convergence_receipt_payload(&(evidence, certificate))?;
+    let mut digest = Sha256::new();
+    digest.update(b"franken-node/fleet-epoch-quiescence-manifest/v1\0");
+    digest.update((bytes.len() as u64).to_be_bytes());
+    digest.update(bytes);
+    Ok(hex::encode(digest.finalize()))
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct FleetEpochBarrierParams<'a> {
     pub initiator: &'a str,
@@ -4699,17 +4714,13 @@ pub fn certify_fleet_epoch_quiescence(
         )));
     }
 
-    let committed_epoch = coordinator
-        .commit_transition(timestamp_ms, trace_id)
-        .map_err(|err| FleetTransportError::stale_state(err.to_string()))?;
-
     evidence.scope = FLEET_EPOCH_BARRIER_CERTIFIED_DRAIN_SCOPE.to_string();
     evidence.fleet_quiescence_certified = true;
     let certificate = FleetEpochQuiescenceCertificate {
         schema_version: FLEET_EPOCH_QUIESCENCE_CERTIFICATE_SCHEMA.to_string(),
         transition_id: proposal.transition_id,
         pre_epoch: proposal.pre_epoch,
-        committed_epoch,
+        committed_epoch: proposal.target_epoch,
         initiator: initiator.to_string(),
         reason: reason.to_string(),
         trace_id: trace_id.to_string(),
@@ -4718,6 +4729,10 @@ pub fn certify_fleet_epoch_quiescence(
         fleet_quiescence_certified: true,
         participants,
     };
+    let manifest_hash = fleet_epoch_quiescence_manifest_hash(&evidence, &certificate)?;
+    coordinator
+        .commit_transition_with_manifest_hash(&manifest_hash, timestamp_ms, trace_id)
+        .map_err(|err| FleetTransportError::stale_state(err.to_string()))?;
     Ok((evidence, certificate))
 }
 

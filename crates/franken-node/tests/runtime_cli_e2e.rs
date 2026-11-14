@@ -426,7 +426,8 @@ fn runtime_lane_assign_json_fails_closed_when_task_class_missing() {
 
 #[test]
 fn runtime_epoch_json_fails_closed_when_local_epoch_flag_missing() {
-    let output = franken_node()
+    let dir = TempDir::new().expect("isolated runtime epoch workspace");
+    let output = runtime_epoch_command(dir.path())
         .args(["runtime", "epoch", "--json"])
         .output()
         .expect("run runtime epoch missing --local-epoch");
@@ -650,8 +651,18 @@ fn runtime_lane_assign_persists_across_invocations_in_initialized_workspace() {
     assert_eq!(cc["active_count"], 1);
 }
 
+fn runtime_epoch_command(project: &Path) -> Command {
+    let mut command = franken_node();
+    command
+        .current_dir(project)
+        .env_remove("FRANKEN_NODE_FLEET_STATE_DIR")
+        .env_remove("FRANKEN_NODE_FLEET_CONTROL_PLANE_TOKEN_PATH")
+        .env_remove("FRANKEN_NODE_FLEET_CONTROL_PLANE_URL");
+    command
+}
+
 #[test]
-fn runtime_epoch_reads_live_seqlock_control_page_when_present() {
+fn runtime_epoch_rejects_unsigned_page_and_preserves_integer_simulation() {
     use frankenengine_node::control_plane::fleet_transport::SeqlockControlPage;
 
     let dir = tempfile::TempDir::new().expect("tempdir");
@@ -661,19 +672,224 @@ fn runtime_epoch_reads_live_seqlock_control_page_when_present() {
     page.write_shared_page(&seqlock_path)
         .expect("write shared seqlock page");
 
-    let mut cmd = franken_node();
-    cmd.current_dir(dir.path())
-        .args(["runtime", "epoch", "--peer-epoch", "14", "--json"]);
-    let payload = stdout_json(cmd);
-    assert_eq!(payload["live_node"], true);
-    assert_eq!(payload["compares_live_control_epoch"], true);
-    assert_eq!(payload["local_epoch"], 14);
-    assert_eq!(payload["peer_epoch"], 14);
-    assert_eq!(payload["verdict"], "matched");
-    assert_eq!(payload["epoch_delta"], 0);
-    assert_eq!(payload["live_seqlock_sequence"], 2);
-    assert_eq!(payload["live_quarantine_version"], 3);
-    assert_eq!(payload["epoch_guard_accepted"], true);
-    assert_eq!(payload["checkpoint_guard_ok"], true);
-    assert_eq!(payload["evidence_replay_verified"], true);
+    let output = runtime_epoch_command(dir.path())
+        .args(["runtime", "epoch", "--peer-epoch", "14", "--json"])
+        .output()
+        .expect("inspect an unsigned cache");
+    assert!(!output.status.success());
+    let refused: Value = serde_json::from_slice(&output.stdout).expect("structured refusal");
+    assert_eq!(refused["ok"], false);
+    assert!(refused["error"].as_str().unwrap().contains("--local-epoch"));
+    assert!(
+        !dir.path()
+            .join(".franken-node/state/fleet/fleet-state.db")
+            .exists()
+    );
+
+    let mut simulated = runtime_epoch_command(dir.path());
+    simulated
+        .env(
+            "FRANKEN_NODE_FLEET_CONTROL_PLANE_TOKEN_PATH",
+            "missing-token",
+        )
+        .args([
+            "runtime",
+            "epoch",
+            "--local-epoch",
+            "7",
+            "--peer-epoch",
+            "9",
+            "--json",
+        ]);
+    let report = stdout_json(simulated);
+    assert_eq!(report["local_epoch"], 7);
+    assert_eq!(report["peer_epoch"], 9);
+    assert_eq!(report["epoch_delta"], 2);
+    assert_eq!(report["live_node"], false);
+    assert_eq!(report["compares_live_control_epoch"], false);
+    for absent in [
+        "live_seqlock_sequence",
+        "live_quarantine_version",
+        "epoch_guard_accepted",
+        "checkpoint_guard_ok",
+        "evidence_replay_verified",
+    ] {
+        assert!(report.get(absent).is_none(), "invented {absent}: {report}");
+    }
+}
+
+#[cfg(feature = "http-client")]
+fn authenticated_runtime_epoch_store(project: &Path, commit_epoch: bool) -> std::path::PathBuf {
+    use ed25519_dalek::Signer;
+    use frankenengine_node::control_plane::control_epoch::EpochSigningKey;
+    use frankenengine_node::control_plane::fleet_transport::{
+        FleetAction, FleetActionRecord, FleetEpochBarrierParams, FleetTransport,
+        NATIVE_SESSION_DRAIN_ATTESTATION_SCHEMA, NativeSessionDrainAttestation,
+        NativeSessionDrainCheckpoint, NodeHealth, NodeStatus, fleet_application_checkpoint,
+    };
+    use frankenengine_node::control_plane::fleet_transport_durable::DurableFleetTransport;
+    use sha2::{Digest, Sha256};
+    use std::collections::BTreeMap;
+
+    let token = "runtime-epoch-operator-token-0123456789abcdef";
+    let token_path = project.join(".franken-node/keys/fleet-control-plane.token");
+    fs::create_dir_all(token_path.parent().unwrap()).unwrap();
+    fs::write(token_path, token).unwrap();
+    let state_dir = project.join(".franken-node/state/fleet");
+    let mut transport = DurableFleetTransport::new(&state_dir).unwrap();
+    transport.initialize().unwrap();
+    if !commit_epoch {
+        return state_dir;
+    }
+
+    let now = Utc::now();
+    let root = ed25519_dalek::SigningKey::from_bytes(&[81; 32]);
+    let action = FleetActionRecord {
+        action_id: "runtime-epoch-maintenance".into(),
+        emitted_at: now,
+        action: FleetAction::NativeSessionHold {
+            zone_id: "runtime-zone".into(),
+            reason: "signed epoch inspection fixture".into(),
+        },
+    };
+    let checkpoint =
+        fleet_application_checkpoint(std::slice::from_ref(&action), "runtime-zone").unwrap();
+    let mut drain = NativeSessionDrainCheckpoint {
+        applied_actions: checkpoint.clone(),
+        session_set_sha256: hex::encode(Sha256::digest(b"empty-held-fixture-population")),
+        admitted_sessions: 0,
+        terminal_sessions: 0,
+        pending_sessions: 0,
+        indeterminate_sessions: 0,
+        fence_held: true,
+        supervisor_attestation: None,
+    };
+    let mut attestation = NativeSessionDrainAttestation {
+        schema_version: NATIVE_SESSION_DRAIN_ATTESTATION_SCHEMA.into(),
+        node_id: "runtime-node".into(),
+        zone_id: "runtime-zone".into(),
+        drain_id: "01900000-0000-7000-8000-000000000081".into(),
+        generation: 1,
+        project_root_sha256: hex::encode(Sha256::digest(b"runtime-epoch-project")),
+        observed_at: now,
+        product_root_key_id: format!("ed25519:{}", hex::encode(root.verifying_key().as_bytes())),
+        checkpoint_sha256: drain.observation_sha256().unwrap(),
+        signature_hex: String::new(),
+    };
+    attestation.signature_hex = hex::encode(
+        root.sign(&attestation.signing_payload().unwrap())
+            .to_bytes(),
+    );
+    drain.supervisor_attestation = Some(attestation);
+    transport.publish_action(&action).unwrap();
+    transport
+        .upsert_node_status(&NodeStatus {
+            node_id: "runtime-node".into(),
+            zone_id: "runtime-zone".into(),
+            last_seen: now,
+            quarantine_version: 0,
+            health: NodeHealth::Maintenance,
+            applied_actions: Some(checkpoint),
+            native_session_drain: Some(drain),
+        })
+        .unwrap();
+    let roots = BTreeMap::from([(
+        ("runtime-zone".to_string(), "runtime-node".to_string()),
+        root.verifying_key(),
+    )]);
+    let key = EpochSigningKey::new(
+        Sha256::digest(format!("fleet-epoch-signing:{token}").as_bytes()).as_slice(),
+    )
+    .unwrap();
+    let (_, certificate, _) = transport
+        .certify_epoch_quiescence_projected(
+            &key,
+            &roots,
+            FleetEpochBarrierParams {
+                initiator: "runtime-epoch-test",
+                reason: "durable epoch authority regression",
+                now,
+                stale_after: std::time::Duration::from_secs(30),
+                trace_id: "runtime-epoch-test",
+            },
+            || now,
+            |_| Ok(()),
+        )
+        .unwrap();
+    assert_eq!(certificate.committed_epoch, 1);
+    state_dir
+}
+
+#[cfg(feature = "http-client")]
+#[test]
+fn runtime_epoch_authenticates_durable_head_and_ignores_stale_or_corrupt_cache() {
+    use frankenengine_node::control_plane::fleet_transport::SeqlockControlPage;
+
+    let dir = TempDir::new().unwrap();
+    let state_dir = authenticated_runtime_epoch_store(dir.path(), true);
+    let cache = state_dir.join("seqlock.page");
+    for cached_epoch in [0, 9000] {
+        let page = SeqlockControlPage::new();
+        page.publish(cached_epoch, 999, 0, 5, [0xAB; 32]);
+        page.write_shared_page(&cache).unwrap();
+        let mut command = runtime_epoch_command(dir.path());
+        command.args(["runtime", "epoch", "--peer-epoch", "1", "--json"]);
+        let report = stdout_json(command);
+        assert_eq!(report["local_epoch"], 1);
+        assert_eq!(report["verdict"], "matched");
+        assert_eq!(report["live_node"], true);
+        assert_eq!(report["compares_live_control_epoch"], true);
+        assert_eq!(report["epoch_guard_accepted"], true);
+        for absent in [
+            "live_seqlock_sequence",
+            "live_quarantine_version",
+            "checkpoint_guard_ok",
+            "evidence_replay_verified",
+        ] {
+            assert!(report.get(absent).is_none(), "invented {absent}: {report}");
+        }
+    }
+    fs::write(&cache, b"incomplete cache publication").unwrap();
+    let mut mismatch = runtime_epoch_command(dir.path());
+    mismatch.args(["runtime", "epoch", "--peer-epoch", "0", "--json"]);
+    let report = stdout_json(mismatch);
+    assert_eq!(report["local_epoch"], 1);
+    assert_eq!(report["epoch_guard_accepted"], false);
+
+    let wrong_token = dir.path().join("different-operator.token");
+    fs::write(&wrong_token, "another-operator-token-0123456789abcdef").unwrap();
+    let output = runtime_epoch_command(dir.path())
+        .env("FRANKEN_NODE_FLEET_CONTROL_PLANE_TOKEN_PATH", wrong_token)
+        .args(["runtime", "epoch", "--peer-epoch", "1", "--json"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let refused: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(refused["ok"], false);
+    assert!(
+        refused["error"]
+            .as_str()
+            .unwrap()
+            .contains("authenticating durable fleet epoch")
+    );
+}
+
+#[cfg(feature = "http-client")]
+#[test]
+fn runtime_epoch_unsigned_genesis_cannot_authenticate_a_live_epoch() {
+    let dir = TempDir::new().unwrap();
+    authenticated_runtime_epoch_store(dir.path(), false);
+    let output = runtime_epoch_command(dir.path())
+        .args(["runtime", "epoch", "--json"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let refused: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(refused["ok"], false);
+    assert!(
+        refused["error"]
+            .as_str()
+            .unwrap()
+            .contains("no committed authenticated fleet epoch")
+    );
 }

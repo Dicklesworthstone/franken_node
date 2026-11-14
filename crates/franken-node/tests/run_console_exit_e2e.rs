@@ -941,7 +941,10 @@ fn assert_native_interruption_retains_admitted_http_io(kill_worker: bool) {
             "the CLI envelope must preserve the exact typed WAL field {field}"
         );
     }
-    let project_root = dir.path().canonicalize().expect("canonical interrupted project");
+    let project_root = dir
+        .path()
+        .canonicalize()
+        .expect("canonical interrupted project");
     let inventory =
         frankenengine_node::ops::native_session_inventory::read_local_native_session_inventory(
             Some(&project_root),

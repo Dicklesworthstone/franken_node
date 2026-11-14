@@ -25,6 +25,7 @@
 //! * cross-process contention is handled by SQLite busy-timeout instead of
 //!   ad-hoc flock files.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -34,15 +35,19 @@ use fsqlite::compat::{Transaction, TransactionExt};
 use fsqlite::{Connection, SqliteValue};
 
 use crate::capacity_defaults::aliases::{MAX_ACTION_LOG_ENTRIES, MAX_NODES_CAP};
+use crate::control_plane::control_epoch::{EpochSigningKey, EpochTransition};
+use crate::control_plane::epoch_transition_barrier::BarrierConfig;
+use crate::runtime::epoch_transition::ProductEpochCoordinator;
 
 use super::fleet_transport::{
     FLEET_ACTION_LOG_FILE, FLEET_GUARDED_POLICY_RECEIPT_SCHEMA, FleetAction, FleetActionRecord,
-    FleetGuardedPolicyObservationScope, FleetGuardedPolicyReceipt, FleetSharedState,
-    FleetTransport, FleetTransportError, GuardedFleetPolicyPublication, MAX_ACTION_RECORD_BYTES,
+    FleetEpochBarrierParams, FleetEpochQuiescenceCertificate, FleetGuardedPolicyObservationScope,
+    FleetGuardedPolicyReceipt, FleetNativeDrainEvidence, FleetSharedState, FleetTransport,
+    FleetTransportError, GuardedFleetPolicyPublication, MAX_ACTION_RECORD_BYTES,
     MAX_GUARDED_POLICY_RECEIPT_BYTES, MAX_GUARDED_POLICY_STALE_AFTER, NodeStatus,
-    validate_action_record, validate_fleet_native_session_publication,
-    validate_fleet_policy_publication, validate_guarded_fleet_policy_publication,
-    validate_node_status,
+    certify_fleet_epoch_quiescence, fleet_epoch_quiescence_manifest_hash, validate_action_record,
+    validate_fleet_native_session_publication, validate_fleet_policy_publication,
+    validate_guarded_fleet_policy_publication, validate_node_status,
 };
 
 const FLEET_DB_FILE: &str = "fleet-state.db";
@@ -50,6 +55,42 @@ const FLEET_DB_SCHEMA_VERSION: &str = "franken-node/fleet-durable-store/v1";
 const META_INITIALIZED_KEY: &str = "initialized";
 const META_JSONL_IMPORT_KEY: &str = "legacy_jsonl_imported";
 const META_MUTATION_CONFLICT_KEY: &str = "action_node_mutation_conflict";
+const META_EPOCH_HEAD_KEY: &str = "authenticated_epoch_head";
+const EPOCH_COMMIT_SCHEMA: &str = "franken-node/fleet-durable-epoch-commit/v1";
+
+/// Coordinator-authenticated recovery state. The canonical epoch event MAC
+/// binds the entire evidence/certificate pair, including every held population.
+/// The operator-owned HMAC key does not make this an independent public proof.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SignedFleetEpochCommit {
+    schema_version: String,
+    evidence: FleetNativeDrainEvidence,
+    certificate: FleetEpochQuiescenceCertificate,
+    transition: EpochTransition,
+}
+
+impl SignedFleetEpochCommit {
+    fn verify(&self, key: &EpochSigningKey) -> Result<(), FleetTransportError> {
+        let certificate = &self.certificate;
+        if self.schema_version != EPOCH_COMMIT_SCHEMA
+            || certificate.pre_epoch.checked_add(1) != Some(certificate.committed_epoch)
+            || self.transition.old_epoch.value() != certificate.pre_epoch
+            || self.transition.new_epoch.value() != certificate.committed_epoch
+            || self.transition.trace_id != certificate.trace_id
+            || self.transition.timestamp
+                != u64::try_from(certificate.certified_at.timestamp_millis().max(0)).unwrap_or(0)
+            || self.transition.manifest_hash
+                != fleet_epoch_quiescence_manifest_hash(&self.evidence, certificate)?
+            || !self.transition.verify(key)
+        {
+            return Err(FleetTransportError::stale_state(
+                "durable fleet epoch evidence failed coordinator authentication or binding",
+            ));
+        }
+        Ok(())
+    }
+}
 /// bd-ymbjw: fsqlite surfaces WAL write-write races as immediate
 /// "database is busy (snapshot conflict …)" errors. Unlike a plain lock wait,
 /// a snapshot conflict is not resolved by `busy_timeout` — the failing
@@ -784,6 +825,204 @@ impl DurableFleetTransport {
         })
     }
 
+    fn query_epoch_head(
+        &self,
+        connection: &Connection,
+        key: &EpochSigningKey,
+    ) -> Result<u64, FleetTransportError> {
+        let head = connection
+            .query_with_params(
+                "SELECT value FROM fleet_meta WHERE key = ?1;",
+                &[SqliteValue::Text(META_EPOCH_HEAD_KEY.into())],
+            )
+            .map_err(|error| FleetTransportError::io(error.to_string()))?;
+        let rows = connection
+            .query("SELECT COUNT(*) FROM fleet_epoch_commits;")
+            .map_err(|error| FleetTransportError::io(error.to_string()))?;
+        let count = match rows.first().and_then(|row| row.values().first()) {
+            Some(SqliteValue::Integer(count)) => u64::try_from(*count).map_err(|_| {
+                FleetTransportError::serialization("invalid durable epoch history count")
+            })?,
+            _ => {
+                return Err(FleetTransportError::serialization(
+                    "missing durable epoch history count",
+                ));
+            }
+        };
+        if head.is_empty() {
+            let has_cache = self
+                .state_dir
+                .join("seqlock.page")
+                .try_exists()
+                .map_err(|error| FleetTransportError::io(error.to_string()))?;
+            if count != 0 || has_cache {
+                return Err(FleetTransportError::stale_state(
+                    "fleet epoch history or cache exists without an authenticated head; refusing genesis reset",
+                ));
+            }
+            return Ok(0);
+        }
+        let [row] = head.as_slice() else {
+            return Err(FleetTransportError::serialization(
+                "ambiguous durable epoch head",
+            ));
+        };
+        let [value] = row.values() else {
+            return Err(FleetTransportError::serialization(
+                "invalid durable epoch head row",
+            ));
+        };
+        let encoded = text(value, "epoch_head")?;
+        let epoch = encoded
+            .parse::<u64>()
+            .map_err(|_| FleetTransportError::serialization("invalid durable epoch head value"))?;
+        if epoch == 0 || epoch.to_string() != encoded || count != epoch {
+            return Err(FleetTransportError::stale_state(
+                "durable fleet epoch head and retained history disagree",
+            ));
+        }
+        let retained = connection
+            .query_with_params(
+                "SELECT commit_json FROM fleet_epoch_commits WHERE epoch = ?1;",
+                &[SqliteValue::Text(encoded.into())],
+            )
+            .map_err(|error| FleetTransportError::io(error.to_string()))?;
+        let [row] = retained.as_slice() else {
+            return Err(FleetTransportError::stale_state(
+                "durable fleet epoch head is missing",
+            ));
+        };
+        let [value] = row.values() else {
+            return Err(FleetTransportError::serialization(
+                "invalid durable epoch commit row",
+            ));
+        };
+        let raw = text(value, "commit_json")?;
+        if raw.len() > MAX_GUARDED_POLICY_RECEIPT_BYTES {
+            return Err(FleetTransportError::serialization(
+                "durable epoch commit exceeds its byte bound",
+            ));
+        }
+        let commit: SignedFleetEpochCommit = serde_json::from_str(&raw)
+            .map_err(|error| FleetTransportError::serialization(error.to_string()))?;
+        commit.verify(key)?;
+        if commit.certificate.committed_epoch != epoch {
+            return Err(FleetTransportError::stale_state(
+                "durable epoch head identifies another commit",
+            ));
+        }
+        Ok(epoch)
+    }
+
+    /// Recover only a coordinator-authenticated epoch from one SQL snapshot.
+    /// A seqlock page is a derived cache and can never establish authority.
+    pub fn current_fleet_epoch(&self, key: &EpochSigningKey) -> Result<u64, FleetTransportError> {
+        self.ensure_initialized()?;
+        self.with_connection(|connection| {
+            let mut tx = connection
+                .transaction()
+                .map_err(|error| FleetTransportError::io(error.to_string()))?;
+            let epoch = self.query_epoch_head(connection, key)?;
+            tx.commit()
+                .map_err(|error| FleetTransportError::io(error.to_string()))?;
+            Ok(epoch)
+        })
+    }
+
+    /// Authenticate, certify and durably commit against one serialized action,
+    /// node and epoch snapshot. A failed/conflicted transaction discards its
+    /// provisional coordinator; retry rechecks the live hold and fresh nodes.
+    /// The clock refreshes params.now after node projection on every attempt.
+    pub fn certify_epoch_quiescence_projected(
+        &mut self,
+        key: &EpochSigningKey,
+        roots: &BTreeMap<(String, String), ed25519_dalek::VerifyingKey>,
+        params: FleetEpochBarrierParams<'_>,
+        now: impl Fn() -> DateTime<Utc>,
+        project_nodes: impl Fn(&mut Vec<NodeStatus>) -> Result<(), FleetTransportError>,
+    ) -> Result<
+        (
+            FleetNativeDrainEvidence,
+            FleetEpochQuiescenceCertificate,
+            u64,
+        ),
+        FleetTransportError,
+    > {
+        self.ensure_initialized()?;
+        self.with_connection(|connection| {
+            let mut tx = connection
+                .transaction()
+                .map_err(|error| FleetTransportError::io(error.to_string()))?;
+            serialize_fleet_mutation(&tx)?;
+            let epoch = self.query_epoch_head(connection, key)?;
+            let mut state = FleetSharedState {
+                schema_version: super::fleet_transport::FLEET_SHARED_STATE_SCHEMA.to_owned(),
+                actions: Self::query_actions(connection)?,
+                nodes: Self::query_nodes(connection)?,
+            };
+            project_nodes(&mut state.nodes)?;
+            let quarantine_version = state
+                .nodes
+                .iter()
+                .map(|node| node.quarantine_version)
+                .max()
+                .unwrap_or(0);
+            let mut coordinator =
+                ProductEpochCoordinator::new(epoch, 2, BarrierConfig::default(), key.clone());
+            let (evidence, certificate) = certify_fleet_epoch_quiescence(
+                &mut coordinator,
+                &state,
+                roots,
+                FleetEpochBarrierParams {
+                    now: now(),
+                    ..params
+                },
+            )?;
+            let transition = coordinator
+                .last_signed_transition()
+                .cloned()
+                .ok_or_else(|| {
+                    FleetTransportError::stale_state("epoch barrier produced no signed transition")
+                })?;
+            let commit = SignedFleetEpochCommit {
+                schema_version: EPOCH_COMMIT_SCHEMA.to_string(),
+                evidence: evidence.clone(),
+                certificate: certificate.clone(),
+                transition,
+            };
+            commit.verify(key)?;
+            let raw = serde_json::to_string(&commit)
+                .map_err(|error| FleetTransportError::serialization(error.to_string()))?;
+            if raw.len() > MAX_GUARDED_POLICY_RECEIPT_BYTES {
+                return Err(FleetTransportError::serialization(
+                    "durable epoch commit exceeds its byte bound",
+                ));
+            }
+            let encoded = certificate.committed_epoch.to_string();
+            tx.execute_with_params(
+                "INSERT INTO fleet_epoch_commits(epoch, commit_json) VALUES (?1, ?2);",
+                &[
+                    SqliteValue::Text(encoded.clone().into()),
+                    SqliteValue::Text(raw.into()),
+                ],
+            )
+            .map_err(|error| FleetTransportError::io(error.to_string()))?;
+            enforce_table_capacity(&tx, "fleet_epoch_commits", MAX_ACTION_LOG_ENTRIES)?;
+            tx.execute_with_params(
+                "INSERT INTO fleet_meta(key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value;",
+                &[
+                    SqliteValue::Text(META_EPOCH_HEAD_KEY.into()),
+                    SqliteValue::Text(encoded.into()),
+                ],
+            )
+            .map_err(|error| FleetTransportError::io(error.to_string()))?;
+            tx.commit()
+                .map_err(|error| FleetTransportError::io(error.to_string()))?;
+            Ok((evidence, certificate, quarantine_version))
+        })
+    }
+
     /// Same staleness helper as [`FileFleetTransport::list_stale_nodes`].
     ///
     /// # Errors
@@ -871,6 +1110,14 @@ impl FleetTransport for DurableFleetTransport {
                         node_id TEXT NOT NULL,
                         status_json TEXT NOT NULL,
                         PRIMARY KEY (zone_id, node_id)
+                    );",
+                )
+                .map_err(|err| FleetTransportError::io(err.to_string()))?;
+            connection
+                .execute(
+                    "CREATE TABLE IF NOT EXISTS fleet_epoch_commits (
+                        epoch TEXT PRIMARY KEY,
+                        commit_json TEXT NOT NULL
                     );",
                 )
                 .map_err(|err| FleetTransportError::io(err.to_string()))?;

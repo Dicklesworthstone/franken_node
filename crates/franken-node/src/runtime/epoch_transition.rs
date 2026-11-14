@@ -10,7 +10,9 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::control_plane::control_epoch::{EpochError, EpochSigningKey, EpochStore};
+use crate::control_plane::control_epoch::{
+    EpochError, EpochSigningKey, EpochStore, EpochTransition,
+};
 use crate::control_plane::epoch_transition_barrier::{
     AbortReason, BarrierCommitOutcome, BarrierConfig, BarrierError, BarrierInstance, DrainAck,
     EpochTransitionBarrier,
@@ -216,6 +218,13 @@ impl ProductEpochCoordinator {
         self.epoch_store.epoch_read().value()
     }
 
+    /// The canonical signed event for the last committed transition. Durable
+    /// owners must persist it in the same transaction as the bound manifest.
+    #[must_use]
+    pub fn last_signed_transition(&self) -> Option<&EpochTransition> {
+        self.epoch_store.transitions().last()
+    }
+
     #[must_use]
     pub fn max_epoch_lag(&self) -> u64 {
         self.max_epoch_lag
@@ -400,6 +409,37 @@ impl ProductEpochCoordinator {
     ) -> Result<u64, EpochTransitionError> {
         let pending = self
             .pending
+            .as_ref()
+            .ok_or(EpochTransitionError::NoActiveTransition)?;
+        let manifest_hash = manifest_hash_for_transition(
+            &pending.transition_id,
+            &pending.initiator,
+            &pending.reason,
+            pending.target_epoch,
+        );
+        self.commit_transition_with_manifest_hash(&manifest_hash, timestamp_ms, trace_id)
+    }
+
+    /// Commit the canonical barrier while authenticating its durable owner's
+    /// complete evidence manifest. Invalid digests leave the barrier pending.
+    pub fn commit_transition_with_manifest_hash(
+        &mut self,
+        manifest_hash: &str,
+        timestamp_ms: u64,
+        trace_id: &str,
+    ) -> Result<u64, EpochTransitionError> {
+        if manifest_hash.len() != 64
+            || !manifest_hash
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(EpochError::InvalidManifestHash {
+                reason: "bound epoch manifest must be a lowercase SHA-256 digest".to_string(),
+            }
+            .into());
+        }
+        let pending = self
+            .pending
             .clone()
             .ok_or(EpochTransitionError::NoActiveTransition)?;
         let target_epoch = match self.barrier.try_commit(timestamp_ms, trace_id)? {
@@ -424,15 +464,9 @@ impl ProductEpochCoordinator {
                 });
             }
         };
-        let manifest_hash = manifest_hash_for_transition(
-            &pending.transition_id,
-            &pending.initiator,
-            &pending.reason,
-            pending.target_epoch,
-        );
         let advanced = self
             .epoch_store
-            .epoch_advance(&manifest_hash, timestamp_ms, trace_id)?;
+            .epoch_advance(manifest_hash, timestamp_ms, trace_id)?;
         let actual_epoch = advanced.new_epoch.value();
         if actual_epoch != target_epoch {
             return Err(EpochTransitionError::EpochAdvanceMismatch {
@@ -661,6 +695,41 @@ mod tests {
     /// every transition it issues cross-verifiable here.
     fn epoch_test_key() -> EpochSigningKey {
         EpochSigningKey::new(b"control-epoch-test-signing-key").expect("non-empty test key")
+    }
+
+    #[test]
+    fn bound_epoch_manifest_is_signed_without_committing_invalid_digests() {
+        let key = epoch_test_key();
+        let mut coordinator =
+            ProductEpochCoordinator::new(4, 1, BarrierConfig::default(), key.clone());
+        coordinator.register_service("node-a");
+        coordinator
+            .propose_transition("operator", "held fleet", 1_000, "trace-bound")
+            .unwrap();
+        coordinator
+            .ack_drain("node-a", 2, 0, "trace-bound")
+            .unwrap();
+        assert!(
+            coordinator
+                .commit_transition_with_manifest_hash("not-a-digest", 1_001, "trace-bound")
+                .is_err()
+        );
+        assert_eq!(coordinator.current_epoch(), 4);
+        assert!(coordinator.last_signed_transition().is_none());
+
+        let manifest_hash = "ab".repeat(32);
+        assert_eq!(
+            coordinator
+                .commit_transition_with_manifest_hash(&manifest_hash, 1_002, "trace-bound")
+                .unwrap(),
+            5
+        );
+        let signed = coordinator.last_signed_transition().unwrap();
+        assert_eq!(signed.manifest_hash, manifest_hash);
+        assert!(signed.verify(&key));
+        let mut altered = signed.clone();
+        altered.manifest_hash = "cd".repeat(32);
+        assert!(!altered.verify(&key));
     }
 
     #[test]

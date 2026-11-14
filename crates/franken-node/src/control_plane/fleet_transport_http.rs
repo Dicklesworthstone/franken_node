@@ -871,9 +871,8 @@ mod tests {
             checkpoint_sha256: drain.observation_sha256().unwrap(),
             signature_hex: String::new(),
         };
-        attestation.signature_hex = hex::encode(
-            key.sign(&attestation.signing_payload().unwrap()).to_bytes(),
-        );
+        attestation.signature_hex =
+            hex::encode(key.sign(&attestation.signing_payload().unwrap()).to_bytes());
         drain.supervisor_attestation = Some(attestation);
         let state = FleetSharedState {
             schema_version: FLEET_SHARED_STATE_SCHEMA.to_string(),
@@ -940,7 +939,9 @@ mod tests {
         type Mutation = fn(&mut FleetHttpEpochBarrierResponse);
         let cases: &[(&str, Mutation)] = &[
             ("other trace", |r| r.certificate.trace_id.push_str("-other")),
-            ("other initiator", |r| r.certificate.initiator.push_str("-other")),
+            ("other initiator", |r| {
+                r.certificate.initiator.push_str("-other")
+            }),
             ("other reason", |r| r.certificate.reason.push_str("-other")),
             ("epoch skip", |r| r.certificate.committed_epoch += 1),
             ("epoch overflow", |r| {
@@ -952,28 +953,44 @@ mod tests {
                 r.evidence.nodes.clear();
                 r.certificate.participants.clear();
             }),
-            ("missing participant", |r| r.certificate.participants.clear()),
+            ("missing participant", |r| {
+                r.certificate.participants.clear()
+            }),
             ("duplicate population", |r| {
                 r.evidence.nodes.push(r.evidence.nodes[0].clone());
-                r.certificate.participants.push(r.certificate.participants[0].clone());
+                r.certificate
+                    .participants
+                    .push(r.certificate.participants[0].clone());
             }),
             ("incomplete evidence", |r| r.evidence.complete = false),
-            ("uncovered zone", |r| r.evidence.uncovered_zones.push("west".to_string())),
+            ("uncovered zone", |r| {
+                r.evidence.uncovered_zones.push("west".to_string())
+            }),
             ("different observation time", |r| {
                 r.evidence.observed_at += chrono::TimeDelta::seconds(1);
             }),
-            ("weaker freshness", |r| r.evidence.stale_after = Duration::from_secs(31)),
-            ("action population differs", |r| r.evidence.action_count += 1),
+            ("weaker freshness", |r| {
+                r.evidence.stale_after = Duration::from_secs(31)
+            }),
+            ("action population differs", |r| {
+                r.evidence.action_count += 1
+            }),
             ("invalid action digest", |r| {
                 r.certificate.action_log_checkpoint.actions_sha256 = "invalid".to_string();
             }),
-            ("other node", |r| r.certificate.participants[0].node_id = "node-b".to_string()),
+            ("other node", |r| {
+                r.certificate.participants[0].node_id = "node-b".to_string()
+            }),
             ("wrong acknowledgement stage", |r| {
                 r.certificate.participants[0].stage = FleetAcknowledgementStage::PolicyApplied;
             }),
-            ("missing hold", |r| r.certificate.participants[0].active_hold_ids.clear()),
+            ("missing hold", |r| {
+                r.certificate.participants[0].active_hold_ids.clear()
+            }),
             ("duplicate hold", |r| {
-                r.certificate.participants[0].active_hold_ids.push("hold-client-contract".to_string());
+                r.certificate.participants[0]
+                    .active_hold_ids
+                    .push("hold-client-contract".to_string());
             }),
             ("unsafe hold identity", |r| {
                 r.certificate.participants[0].active_hold_ids[0] = "../hold".to_string();
@@ -982,8 +999,12 @@ mod tests {
             ("contradictory readiness", |r| {
                 r.evidence.nodes[0].reason = FleetNativeDrainReadiness::HoldNotActive;
             }),
-            ("admission reopened", |r| r.evidence.nodes[0].health = Some(NodeHealth::Healthy)),
-            ("missing heartbeat", |r| r.evidence.nodes[0].last_seen = None),
+            ("admission reopened", |r| {
+                r.evidence.nodes[0].health = Some(NodeHealth::Healthy)
+            }),
+            ("missing heartbeat", |r| {
+                r.evidence.nodes[0].last_seen = None
+            }),
             ("stale heartbeat", |r| {
                 r.evidence.nodes[0].last_seen =
                     Some(r.evidence.observed_at - chrono::TimeDelta::seconds(30));
@@ -995,7 +1016,9 @@ mod tests {
             ("different action snapshot", |r| {
                 r.evidence.nodes[0].expected_actions.actions_sha256 = "ef".repeat(32);
             }),
-            ("missing drain", |r| r.evidence.nodes[0].native_session_drain = None),
+            ("missing drain", |r| {
+                r.evidence.nodes[0].native_session_drain = None
+            }),
             ("missing signature", |r| {
                 r.evidence.nodes[0]
                     .native_session_drain
@@ -1003,9 +1026,15 @@ mod tests {
                     .unwrap()
                     .supervisor_attestation = None;
             }),
-            ("other drain generation", |r| r.certificate.participants[0].generation += 1),
-            ("other session population", |r| r.certificate.participants[0].admitted_sessions += 1),
-            ("other checkpoint", |r| r.certificate.participants[0].checkpoint_sha256 = "ef".repeat(32)),
+            ("other drain generation", |r| {
+                r.certificate.participants[0].generation += 1
+            }),
+            ("other session population", |r| {
+                r.certificate.participants[0].admitted_sessions += 1
+            }),
+            ("other checkpoint", |r| {
+                r.certificate.participants[0].checkpoint_sha256 = "ef".repeat(32)
+            }),
             ("invalid signature", |r| {
                 r.evidence.nodes[0]
                     .native_session_drain
@@ -1038,9 +1067,8 @@ mod tests {
         let attestation = drain.supervisor_attestation.as_mut().unwrap();
         attestation.observed_at -= chrono::TimeDelta::seconds(301);
         let key = SigningKey::from_bytes(&[73; 32]);
-        attestation.signature_hex = hex::encode(
-            key.sign(&attestation.signing_payload().unwrap()).to_bytes(),
-        );
+        attestation.signature_hex =
+            hex::encode(key.sign(&attestation.signing_payload().unwrap()).to_bytes());
         drain
             .supervisor_attestation
             .as_ref()

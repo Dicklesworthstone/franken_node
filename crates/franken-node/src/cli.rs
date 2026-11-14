@@ -533,7 +533,7 @@ pub enum RuntimeCommand {
     #[command(subcommand)]
     Lane(RuntimeLaneCommand),
 
-    /// Compare two caller-supplied epoch integers (does not inspect a live ControlEpoch).
+    /// Inspect the operator-authenticated durable epoch, or compare explicit epoch integers.
     Epoch(RuntimeEpochArgs),
 }
 
@@ -580,13 +580,12 @@ pub struct RuntimeLaneAssignArgs {
 
 #[derive(Debug, Parser)]
 pub struct RuntimeEpochArgs {
-    /// Local control epoch.
-    /// Required by the handler (not clap) so `--json` failures emit
-    /// `franken-node/runtime-error-cli/v1` instead of a human clap error.
+    /// Select integer simulation with this local epoch, without reading coordinator state.
+    /// When omitted, authenticate the committed durable epoch using the operator token.
     #[arg(long)]
     pub local_epoch: Option<u64>,
 
-    /// Peer control epoch to compare against.
+    /// Peer epoch to compare with the authenticated durable epoch or explicit local integer.
     #[arg(long)]
     pub peer_epoch: Option<u64>,
 

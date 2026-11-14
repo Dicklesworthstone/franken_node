@@ -24416,8 +24416,7 @@ exec "$2" pinned-worker-image"#,
     fn worker_exit_wal_preserves_returned_and_indeterminate_effects() {
         let nonce = "00000000-0000-4000-8000-000000000130";
         let output = native_session_test_wal_prefix(3, nonce);
-        let evidence =
-            native_worker_exit_effect_evidence(Ok((&output, false)), None, nonce, false);
+        let evidence = native_worker_exit_effect_evidence(Ok((&output, false)), None, nonce, false);
 
         assert_eq!(evidence.terminal_state, "worker_exit_indeterminate");
         assert!(evidence.journal_complete);
@@ -24435,10 +24434,8 @@ exec "$2" pinned-worker-image"#,
             NativeEffectWalState::InterruptedIndeterminate
         );
         assert!(
-            serde_json::from_value::<HostEffectLedger>(
-                serde_json::to_value(&evidence).unwrap()
-            )
-            .is_err(),
+            serde_json::from_value::<HostEffectLedger>(serde_json::to_value(&evidence).unwrap())
+                .is_err(),
             "worker death cannot manufacture a finalized effect ledger"
         );
     }

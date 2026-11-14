@@ -6023,7 +6023,7 @@ struct RuntimeLaneAssignmentReport {
 struct RuntimeEpochReport {
     schema_version: &'static str,
     command: &'static str,
-    /// True when backed by a live `.franken-node/state/fleet/seqlock.page` snapshot.
+    /// True only for an authenticated committed coordinator epoch.
     live_node: bool,
     compares_live_control_epoch: bool,
     local_epoch: u64,
@@ -6040,6 +6040,58 @@ struct RuntimeEpochReport {
     checkpoint_guard_ok: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     evidence_replay_verified: Option<bool>,
+}
+
+/// Authenticate an existing committed coordinator epoch without creating or
+/// initializing a fleet store. A cache page and unsigned genesis cannot supply
+/// the coordinator authority that a live epoch comparison requires.
+#[cfg(feature = "http-client")]
+fn authenticated_runtime_control_epoch(project_root: &Path) -> Result<u64> {
+    let resolved = config::Config::resolve_for_fleet(None, CliOverrides::default())
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let state_dir = resolved
+        .config
+        .fleet
+        .state_dir
+        .as_deref()
+        .map(|path| resolve_fleet_config_path(project_root, &resolved, path))
+        .unwrap_or_else(|| project_root.join(".franken-node/state/fleet"));
+    anyhow::ensure!(
+        state_dir.join("fleet-state.db").is_file(),
+        "--local-epoch is required for simulation when no durable fleet epoch database exists"
+    );
+    let token_path = resolved
+        .config
+        .fleet
+        .control_plane_token_path
+        .as_deref()
+        .map(|path| resolve_fleet_config_path(project_root, &resolved, path))
+        .unwrap_or_else(|| project_root.join(FLEET_CONTROL_PLANE_TOKEN_DEFAULT));
+    let token = read_fleet_control_plane_token(&token_path).context(
+        "runtime epoch requires the coordinator operator token to authenticate its durable head; \
+         use --local-epoch for integer simulation",
+    )?;
+    let key_material = sha2::Sha256::digest(format!("fleet-epoch-signing:{token}").as_bytes());
+    let signing_key = control_plane::control_epoch::EpochSigningKey::new(key_material.as_slice())
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let transport = fleet_transport_durable::DurableFleetTransport::new(state_dir)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let epoch = transport
+        .current_fleet_epoch(&signing_key)
+        .map_err(|error| anyhow::anyhow!("failed authenticating durable fleet epoch: {error}"))?;
+    anyhow::ensure!(
+        epoch > 0,
+        "no committed authenticated fleet epoch exists yet; use --local-epoch for integer simulation"
+    );
+    Ok(epoch)
+}
+
+#[cfg(not(feature = "http-client"))]
+fn authenticated_runtime_control_epoch(_project_root: &Path) -> Result<u64> {
+    anyhow::bail!(
+        "authenticated runtime epoch inspection requires the http-client feature; \
+         use --local-epoch for integer simulation"
+    )
 }
 
 const RUNTIME_LANE_STATE_SCHEMA_VERSION: &str = "franken-node/runtime-lane-state/v1";
@@ -8344,107 +8396,51 @@ fn handle_runtime_command(command: RuntimeCommand) -> Result<()> {
             }
         },
         RuntimeCommand::Epoch(args) => {
-            let fleet_state_dir = resolve_ops_metrics_fleet_state_dir(project_root)?;
-            let seqlock_path = fleet_state_dir.join("seqlock.page");
-            let live_snapshot = if seqlock_path.is_file() {
-                Some(
-                    control_plane::fleet_transport::SeqlockControlPage::read_shared_page(
-                        &seqlock_path,
-                    )
-                    .map_err(|err| anyhow::anyhow!(err.to_string()))?,
-                )
-            } else {
-                None
+            // Supplying a local integer explicitly selects simulation, even
+            // when a coordinator database or an unsigned cache is present.
+            let (local_epoch, live_node) = match args.local_epoch {
+                Some(epoch) => (epoch, false),
+                None => (authenticated_runtime_control_epoch(project_root)?, true),
             };
-
-            let (local_epoch, peer_epoch, live_node, compares_live_control_epoch) =
-                match (live_snapshot.as_ref(), args.local_epoch, args.peer_epoch) {
-                    (Some(snap), None, peer) => (snap.control_epoch, peer, true, true),
-                    (Some(snap), Some(caller_epoch), None) => {
-                        (snap.control_epoch, Some(caller_epoch), true, true)
-                    }
-                    (Some(_), Some(local), Some(peer)) => (local, Some(peer), true, true),
-                    (None, Some(local), peer) => (local, peer, false, false),
-                    (None, None, _) => {
-                        return Err(anyhow::anyhow!(
-                            "--local-epoch is required when no live seqlock.page is present"
-                        ));
-                    }
-                };
-
+            let peer_epoch = args.peer_epoch;
             let (verdict, epoch_delta) = match peer_epoch {
                 Some(peer) if peer == local_epoch => ("matched", Some(0)),
                 Some(peer) => ("mismatch", Some(local_epoch.abs_diff(peer))),
                 None => ("local_only", None),
             };
-            let (epoch_guard_accepted, checkpoint_guard_ok, evidence_replay_verified) = if live_node
-            {
+            let epoch_guard_accepted = live_node.then(|| {
                 let source = runtime::epoch_guard::StaticEpochSource::available(
                     control_plane::control_epoch::ControlEpoch::new(local_epoch),
                 );
                 let presented = control_plane::control_epoch::ControlEpoch::new(
                     peer_epoch.unwrap_or(local_epoch),
                 );
-                let guard_ok = runtime::epoch_guard::EpochGuard::default()
+                runtime::epoch_guard::EpochGuard::default()
                     .validate_operation_epoch(presented, &source, "trace-runtime-epoch")
-                    .is_ok();
-
-                let mut ck_guard = runtime::checkpoint_guard::CheckpointGuard::new(
-                    "runtime-epoch",
-                    "trace-runtime-epoch",
-                    runtime::checkpoint_guard::CheckpointGuardConfig::default(),
-                );
-                ck_guard.checkpoint(1);
-                let ck_ok = ck_guard.on_iteration(1).is_ok();
-
-                let mut replay_gate =
-                    control_plane::evidence_replay_gate::EvidenceReplayGate::new();
-                let mut input_ctx = BTreeMap::new();
-                input_ctx.insert("local_epoch".to_string(), local_epoch.to_string());
-                if let Some(peer) = peer_epoch {
-                    input_ctx.insert("peer_epoch".to_string(), peer.to_string());
-                }
-                let mut captured = control_plane::evidence_replay_gate::CapturedEvidence {
-                    decision_id: format!("epoch-check-{local_epoch}"),
-                    decision_type: control_plane::evidence_replay_gate::DecisionType::Fencing,
-                    epoch_id: local_epoch,
-                    timestamp: Utc::now().to_rfc3339(),
-                    chosen_action: verdict.to_string(),
-                    input_entries: vec![format!("seqlock_epoch={local_epoch}")],
-                    input_context: input_ctx,
-                    input_hash: String::new(),
-                    trace_id: "trace-runtime-epoch".to_string(),
-                };
-                captured.input_hash = captured.compute_input_hash();
-                let ts = captured.timestamp.clone();
-                replay_gate.capture_evidence(captured.clone());
-                let replay_res = replay_gate.replay_decision(&captured, verdict, &ts);
-                let replay_ok = matches!(
-                    replay_res.verdict,
-                    control_plane::evidence_replay_gate::ReplayVerdict::Reproduced
-                );
-                (Some(guard_ok), Some(ck_ok), Some(replay_ok))
-            } else {
-                (None, None, None)
-            };
+                    .is_ok()
+            });
             let report = RuntimeEpochReport {
                 schema_version: "runtime-epoch-v1",
                 command: "runtime.epoch",
                 live_node,
-                compares_live_control_epoch,
+                compares_live_control_epoch: live_node,
                 local_epoch,
                 peer_epoch,
                 verdict,
                 epoch_delta,
-                live_seqlock_sequence: live_snapshot.as_ref().map(|s| s.sequence),
-                live_quarantine_version: live_snapshot.as_ref().map(|s| s.quarantine_version),
+                // The unsigned page is a derived cache, not an authenticated
+                // observation of either the committed epoch or quarantine.
+                live_seqlock_sequence: None,
+                live_quarantine_version: None,
                 epoch_guard_accepted,
-                checkpoint_guard_ok,
-                evidence_replay_verified,
+                // This command reads an epoch; it neither observes a running
+                // checkpoint loop nor independently replays captured evidence.
+                checkpoint_guard_ok: None,
+                evidence_replay_verified: None,
             };
             emit_json_or_human(&report, args.json, || {
                 let scope = if report.compares_live_control_epoch {
-                    "live seqlock ControlEpoch"
+                    "authenticated durable ControlEpoch"
                 } else {
                     "caller-supplied integers (not a live ControlEpoch)"
                 };
@@ -31573,7 +31569,7 @@ fn apply_fleet_release_action(
 }
 
 /// Default coordinator token location, relative to the project root.
-#[cfg(feature = "fleet-control-plane-server")]
+#[cfg(feature = "http-client")]
 const FLEET_CONTROL_PLANE_TOKEN_DEFAULT: &str = ".franken-node/keys/fleet-control-plane.token";
 
 /// Serve this node's durable fleet store as the live HTTP control plane.
