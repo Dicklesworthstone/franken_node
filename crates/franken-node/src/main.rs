@@ -8948,40 +8948,122 @@ struct BenchRunErrorCliReport<'a> {
 }
 
 fn handle_bench_run(args: &cli::BenchRunArgs) -> Result<()> {
-    let mut config = BenchmarkSuiteConfig::for_cli();
-    if let Some(output) = &args.output {
-        config.evidence_path = Some(output.display().to_string());
-    }
-    let evidence_mode = if args.fixture_mode {
-        BenchmarkEvidenceMode::FixtureOnly
-    } else {
-        BenchmarkEvidenceMode::Measured
-    };
-    let report = match benchmark_suite_run_default_suite_with_config_and_mode(
-        config,
-        args.scenario.as_deref(),
-        evidence_mode,
-    ) {
-        Ok(report) => report,
-        Err(err) => {
-            let message = format!("benchmark suite run failed: {err}");
-            if args.json {
-                let error_report = BenchRunErrorCliReport {
-                    schema_version: BENCH_RUN_ERROR_CLI_SCHEMA_VERSION,
-                    command: "bench.run",
-                    ok: false,
-                    error: message.as_str(),
-                    scenario: args.scenario.as_deref(),
-                    fixture_mode: args.fixture_mode,
-                };
-                println!("{}", serde_json::to_string_pretty(&error_report)?);
-                fail_closed_after_json();
-            }
-            anyhow::bail!("{message}");
+    let (rendered, summary) = if args.fixture_mode {
+        let mut config = BenchmarkSuiteConfig::for_cli();
+        if let Some(output) = &args.output {
+            config.evidence_path = Some(output.display().to_string());
         }
+        let report = benchmark_suite_run_default_suite_with_config_and_mode(
+            config,
+            args.scenario.as_deref(),
+            BenchmarkEvidenceMode::FixtureOnly,
+        )
+        .map_err(|err| anyhow::anyhow!("benchmark suite run failed: {err}"))?;
+        (
+            benchmark_suite_to_json(&report)
+                .context("failed serializing benchmark fixture report")?,
+            benchmark_suite_render_human_summary(&report),
+        )
+    } else {
+        use tools::benchmark_suite::{
+            TriadExecutionLimits, TriadRuntimeLeg, TriadWorkloadSpec,
+            execute_triad_benchmark_with_limits,
+        };
+
+        let scenario = args.scenario.as_deref().unwrap_or("runtime-startup");
+        let (script_source, expected_stdout) = match scenario {
+            "runtime-startup" => (
+                "console.log('franken-node benchmark');\n",
+                "franken-node benchmark\n",
+            ),
+            "json-array-reduce" => (
+                "const xs = Array.from({ length: 256 }, (_, i) => i * 3);\nconsole.log(xs.reduce((a, b) => a + b, 0));\n",
+                "97920\n",
+            ),
+            other => anyhow::bail!(
+                "benchmark suite run failed: unknown live scenario '{other}'; \
+                 choose runtime-startup or json-array-reduce. \
+                 Legacy synthetic suite scenarios require --fixture-mode"
+            ),
+        };
+        let spec = TriadWorkloadSpec {
+            name: scenario.to_string(),
+            script_source: script_source.to_string(),
+            expected_stdout: expected_stdout.to_string(),
+            warmup_rounds: args.warmups,
+            measured_rounds: args.samples,
+            seed: args.seed,
+        };
+        // The native leg is the running product, never an independently supplied
+        // executable or a fallback to one of the reference runtimes.
+        let native_binary =
+            std::env::current_exe().context("failed locating the native benchmark executable")?;
+        let commands = vec![
+            (
+                TriadRuntimeLeg::FrankenNode,
+                native_binary,
+                vec![
+                    "run".to_string(),
+                    "--runtime".to_string(),
+                    "franken-engine".to_string(),
+                    "--policy".to_string(),
+                    "balanced".to_string(),
+                    "--console-only".to_string(),
+                ],
+            ),
+            (
+                TriadRuntimeLeg::Node,
+                args.node_bin
+                    .clone()
+                    .unwrap_or_else(|| PathBuf::from("node")),
+                Vec::new(),
+            ),
+            (
+                TriadRuntimeLeg::Bun,
+                args.bun_bin
+                    .clone()
+                    .unwrap_or_else(|| PathBuf::from("bun")),
+                vec!["run".to_string()],
+            ),
+        ];
+        let limits = TriadExecutionLimits {
+            per_invocation_timeout_ms: args.timeout_ms,
+            total_timeout_ms: args.budget_ms,
+            ..TriadExecutionLimits::default()
+        };
+        let report = execute_triad_benchmark_with_limits(&spec, &commands, &limits)
+            .map_err(|err| anyhow::anyhow!("benchmark suite run failed: {err}"))?;
+        let rendered = serde_json::to_string_pretty(&report)
+            .context("failed serializing live runtime benchmark report")?;
+        let mut summary = format!(
+            "live runtime benchmark: workload={} samples_per_runtime={} warmups={} \
+             stdout_parity_verified={}\n",
+            report.workload_name,
+            args.samples,
+            args.warmups,
+            report.stdout_parity_verified
+        );
+        for leg in &report.legs {
+            use std::fmt::Write as _;
+            writeln!(
+                summary,
+                "  {}: p50={:.3}ms p95={:.3}ms p99={:.3}ms",
+                leg.runtime, leg.p50.point_ms, leg.p95.point_ms, leg.p99.point_ms
+            )?;
+        }
+        summary.push_str(
+            "Timings include process startup and the selected workload. \
+             Null confidence bounds are unbounded; small samples cannot establish tail latency.\n",
+        );
+        summary.push_str(&format!(
+            "provenance_hash={} (sha256 content hash; not ed25519-signed)",
+            report.provenance_hash
+        ));
+        (rendered, summary)
     };
-    let rendered =
-        benchmark_suite_to_json(&report).context("failed serializing benchmark suite report")?;
+
+    // Only complete, parity-checked live runs or explicitly requested fixtures
+    // reach the artifact writer. Preserve an existing artifact on every error.
     if let Some(output) = &args.output {
         write_bytes_atomically(output, rendered.as_bytes()).with_context(|| {
             format!(
@@ -8992,7 +9074,7 @@ fn handle_bench_run(args: &cli::BenchRunArgs) -> Result<()> {
     }
     println!("{rendered}");
     if !args.json {
-        eprintln!("{}", benchmark_suite_render_human_summary(&report));
+        eprintln!("{summary}");
     }
     Ok(())
 }

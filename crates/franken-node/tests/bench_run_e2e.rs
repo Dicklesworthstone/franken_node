@@ -176,47 +176,34 @@ fn bench_run_secure_extension_heavy_is_byte_stable() {
 }
 
 #[test]
-fn bench_run_default_path_emits_measured_evidence() {
+fn bench_run_default_path_requires_complete_live_runtime_triad() {
+    let workspace = TempDir::new().expect("create benchmark workspace");
     let mut command = Command::cargo_bin("franken-node").expect("franken-node binary");
     let output = command
-        .current_dir(repo_root())
-        .env("FRANKEN_NODE_BENCH_CPU", "deterministic-test-cpu")
-        .env("FRANKEN_NODE_BENCH_MEMORY_MB", "32768")
-        .env("FRANKEN_NODE_BENCH_TIMESTAMP_UTC", "2026-02-21T00:00:00Z")
-        .args(["bench", "run", "--scenario", "secure-extension-heavy"])
+        .current_dir(workspace.path())
+        .args(["bench", "run", "--json", "--node-bin"])
+        .arg(workspace.path().join("missing-node"))
+        .arg("--bun-bin")
+        .arg(workspace.path().join("missing-bun"))
+        .args(["--output", "bench.json"])
         .output()
-        .expect("failed to run franken-node measured bench run");
+        .expect("invoke default live benchmark without reference runtimes");
 
     assert!(
-        output.status.success(),
-        "measured bench command failed: stdout={} stderr={}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+        !output.status.success(),
+        "an incomplete runtime population must never become measured evidence"
     );
-
-    let report: Value = serde_json::from_slice(&output.stdout).expect("bench stdout must be JSON");
-    assert_eq!(report["evidence_mode"], "measured");
-    assert_eq!(report["security_controls"]["fixture_mode"], false);
-    assert_eq!(
-        report["scenarios"][0]["raw_samples"][0]["source"],
-        "measured_product_workload"
-    );
+    let report: Value = serde_json::from_slice(&output.stdout)
+        .expect("live benchmark refusal must be machine-readable");
+    assert_eq!(report["schema_version"], "franken-node/bench-run-error/v1");
+    assert_eq!(report["command"], "bench.run");
+    assert_eq!(report["ok"], false);
+    assert_eq!(report["fixture_mode"], false);
+    assert!(report.get("aggregate_score").is_none());
+    assert!(report.get("provenance_hash").is_none());
     assert!(
-        report["scenarios"][0]["raw_samples"]
-            .as_array()
-            .is_some_and(|samples| samples.len() >= 3),
-        "measured report must carry raw samples: {report}"
-    );
-    assert_eq!(report["sample_policy"]["min_measured_samples"], 3);
-    assert_eq!(
-        report["sample_policy"]["max_raw_samples_per_scenario"],
-        4096
-    );
-    assert!(
-        report["events"]
-            .as_array()
-            .is_some_and(|events| events.iter().any(|event| event["code"] == "BS-008")),
-        "measured report must include scenario completion event: {report}"
+        !workspace.path().join("bench.json").exists(),
+        "a failed live campaign must not publish a success artifact"
     );
 }
 
@@ -232,17 +219,13 @@ fn run_bench_with_invalid_scenario() -> std::process::Output {
         .expect("failed to run franken-node bench run with invalid scenario")
 }
 
-fn run_bench_with_forced_scenario_failure() -> std::process::Output {
+fn run_bench_with_legacy_scenario_without_fixture_opt_in() -> std::process::Output {
     let mut command = Command::cargo_bin("franken-node").expect("franken-node binary");
     command
         .current_dir(repo_root())
-        .env("FRANKEN_NODE_BENCH_CPU", "deterministic-test-cpu")
-        .env("FRANKEN_NODE_BENCH_MEMORY_MB", "32768")
-        .env("FRANKEN_NODE_BENCH_TIMESTAMP_UTC", "2026-02-21T00:00:00Z")
-        .env("FRANKEN_NODE_BENCH_FAIL_SCENARIO", "secure-extension-heavy")
         .args(["bench", "run", "--scenario", "secure-extension-heavy"])
         .output()
-        .expect("failed to run franken-node bench run with forced scenario failure")
+        .expect("invoke legacy benchmark scenario without fixture opt-in")
 }
 
 fn run_bench_with_traversal_output() -> std::process::Output {
@@ -378,32 +361,24 @@ fn bench_run_invalid_scenario_returns_structured_error() {
 }
 
 #[test]
-fn bench_run_forced_scenario_failure_returns_structured_error() {
-    let output = run_bench_with_forced_scenario_failure();
+fn bench_run_legacy_scenario_requires_explicit_fixture_opt_in() {
+    let output = run_bench_with_legacy_scenario_without_fixture_opt_in();
 
     assert!(
         !output.status.success(),
-        "forced measured scenario failure must exit nonzero"
+        "a legacy synthetic scenario cannot become live runtime evidence"
     );
     assert!(
         output.stdout.is_empty(),
-        "forced failure must not emit a benchmark report to stdout: {}",
+        "refusal must not emit a benchmark report: {}",
         String::from_utf8_lossy(&output.stdout)
     );
-
-    let error_info = assert_structured_error_response(&output.stderr);
-    let stderr_content = error_info["stderr_content"].as_str().unwrap_or("");
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr_content.contains("benchmark suite run failed"),
-        "stderr must preserve the CLI failure boundary: {stderr_content}"
-    );
-    assert!(
-        stderr_content.contains("secure-extension-heavy"),
-        "stderr must identify the failing scenario: {stderr_content}"
-    );
-    assert!(
-        stderr_content.contains("forced failure via FRANKEN_NODE_BENCH_FAIL_SCENARIO"),
-        "stderr must expose the runner failure reason: {stderr_content}"
+        stderr.contains("benchmark suite run failed")
+            && stderr.contains("secure-extension-heavy")
+            && stderr.contains("--fixture-mode"),
+        "the error must name the scenario and its explicit fixture-only mode: {stderr}"
     );
 }
 
@@ -517,60 +492,207 @@ fn bench_run_successful_execution_logs_expected_events() {
 }
 
 #[test]
-fn triad_interleaved_benchmark_executes_real_subprocesses_and_enforces_stdout_parity() {
-    use frankenengine_node::tools::benchmark_suite::{
-        BenchRunError, SuiteConfig, TRIAD_BENCHMARK_SCHEMA_VERSION, TriadWorkloadSpec,
-        discover_triad_commands, execute_triad_benchmark, order_statistic_quantile_ci,
-    };
-
-    let cli_cfg = SuiteConfig::for_cli();
-    assert!(
-        cli_cfg.runtime_versions.node.is_some() || cli_cfg.runtime_versions.bun.is_some(),
-        "SuiteConfig::for_cli() must populate live reference runtime versions on host"
-    );
-
-    let samples: Vec<f64> = (1..=31).map(|v| v as f64 * 1.5).collect();
-    let p50 = order_statistic_quantile_ci(&samples, 0.50).expect("p50 CI");
-    let p95 = order_statistic_quantile_ci(&samples, 0.95).expect("p95 CI");
-    let p99 = order_statistic_quantile_ci(&samples, 0.99).expect("p99 CI");
-    assert!(p50.lower_95_ms <= p50.point_ms && p50.point_ms <= p50.upper_95_ms);
-    assert!(p50.point_ms < p95.point_ms && p95.point_ms <= p99.point_ms);
-
-    let commands = discover_triad_commands(None);
-    assert!(
-        !commands.is_empty(),
-        "at least one live JS runtime (node/bun) must be discovered"
-    );
-
-    let spec = TriadWorkloadSpec {
-        name: "json-array-reduce-triad".to_string(),
-        script_source: "const xs = Array.from({ length: 256 }, (_, i) => i * 3);\nconsole.log(xs.reduce((a, b) => a + b, 0));\n".to_string(),
-        expected_stdout: "97920\n".to_string(),
-        warmup_rounds: 1,
-        measured_rounds: 5,
-        seed: 0x2026_1111,
-    };
-    let report = execute_triad_benchmark(&spec, &commands).expect("live triad benchmark succeeds");
-    assert_eq!(report.schema_version, TRIAD_BENCHMARK_SCHEMA_VERSION);
-    assert!(report.stdout_parity_verified);
-    assert_eq!(report.interleaved_schedule_len, commands.len() * 5);
-    assert!(report.provenance_hash.starts_with("sha256:"));
-    assert_eq!(report.legs.len(), commands.len());
-    for leg in &report.legs {
-        assert_eq!(leg.samples_ms.len(), 5);
-        assert!(leg.p50.point_ms > 0.0 && leg.p95.point_ms >= leg.p50.point_ms);
+fn bench_run_live_options_reject_fixture_mode_and_invalid_budgets() {
+    let cases: &[&[&str]] = &[
+        &["--samples", "2"],
+        &["--samples", "4097"],
+        &["--warmups", "129"],
+        &["--timeout-ms", "0"],
+        &["--timeout-ms", "300001"],
+        &["--budget-ms", "0"],
+        &["--budget-ms", "3600001"],
+        &["--fixture-mode", "--samples", "3"],
+        &["--fixture-mode", "--warmups", "0"],
+        &["--fixture-mode", "--timeout-ms", "1000"],
+        &["--fixture-mode", "--budget-ms", "1000"],
+        &["--fixture-mode", "--seed", "42"],
+        &["--fixture-mode", "--node-bin", "/not-executed-node"],
+        &["--fixture-mode", "--bun-bin", "/not-executed-bun"],
+    ];
+    for flags in cases {
+        let mut command = Command::cargo_bin("franken-node").expect("franken-node binary");
+        let output = command
+            .args(["bench", "run", "--json"])
+            .args(*flags)
+            .output()
+            .expect("invoke invalid benchmark options");
+        assert!(
+            !output.status.success(),
+            "invalid or conflicting options must fail before runtime discovery: {flags:?}"
+        );
+        let error: Value = serde_json::from_slice(&output.stdout)
+            .expect("benchmark option errors must retain the JSON CLI contract");
+        assert_eq!(error["schema_version"], "franken-node/bench-run-error/v1");
+        assert_eq!(error["command"], "bench.run");
+        assert_eq!(error["ok"], false);
+        assert!(error["error"].as_str().is_some_and(|text| !text.is_empty()));
+        assert!(error.get("legs").is_none());
+        assert!(error.get("provenance_hash").is_none());
     }
-    if commands.len() >= 2 {
-        assert_eq!(report.comparisons.len(), 1);
-        assert!((report.comparisons[0].holm_bonferroni_alpha - 0.05).abs() < 1e-12);
+}
+
+#[cfg(all(feature = "engine", target_os = "linux"))]
+fn reference_runtime_on_path(name: &str) -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let search_path = std::env::var_os("PATH")?;
+    for directory in std::env::split_paths(&search_path) {
+        let candidate = directory.join(name);
+        if let Ok(metadata) = candidate.metadata()
+            && metadata.is_file()
+            && metadata.permissions().mode() & 0o111 != 0
+        {
+            return candidate.canonicalize().ok();
+        }
+    }
+    None
+}
+
+#[cfg(all(feature = "engine", target_os = "linux"))]
+#[test]
+fn bench_run_live_triad_records_real_runtimes_or_refuses_missing_references() {
+    let workspace = TempDir::new().expect("create live benchmark workspace");
+    let node = reference_runtime_on_path("node");
+    let bun = reference_runtime_on_path("bun");
+    let mut command = Command::cargo_bin("franken-node").expect("franken-node binary");
+    command
+        .current_dir(workspace.path())
+        .timeout(std::time::Duration::from_secs(150))
+        .args([
+            "bench",
+            "run",
+            "--scenario",
+            "json-array-reduce",
+            "--samples",
+            "3",
+            "--warmups",
+            "1",
+            "--timeout-ms",
+            "30000",
+            "--budget-ms",
+            "120000",
+            "--seed",
+            "17",
+            "--output",
+            "triad.json",
+            "--json",
+        ]);
+    if let Some(path) = &node {
+        command.arg("--node-bin").arg(path);
+    }
+    if let Some(path) = &bun {
+        command.arg("--bun-bin").arg(path);
+    }
+    let output = command.output().expect("run actual native and reference benchmarks");
+    let report: Value =
+        serde_json::from_slice(&output.stdout).expect("live benchmark output must be JSON");
+
+    if node.is_none() || bun.is_none() {
+        // Missing references are a tested refusal, never a smaller population
+        // labeled as a successful triad or fabricated benchmark measurements.
+        assert!(!output.status.success(), "{report}");
+        assert_eq!(report["schema_version"], "franken-node/bench-run-error/v1");
+        assert_eq!(report["ok"], false);
+        assert!(report.get("legs").is_none());
+        assert!(!workspace.path().join("triad.json").exists());
+        return;
     }
 
-    let mut bad_spec = spec;
-    bad_spec.expected_stdout = "999999\n".to_string();
-    let err = execute_triad_benchmark(&bad_spec, &commands)
-        .expect_err("stdout mismatch must fail closed");
     assert!(
-        matches!(err, BenchRunError::ScenarioExecutionFailed { ref detail, .. } if detail.contains("stdout parity mismatch")),
-        "unexpected error: {err:?}"
+        output.status.success(),
+        "complete live runtime triad failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
+    assert_eq!(report["schema_version"], "franken-node/triad-benchmark/v2");
+    assert_eq!(report["workload_name"], "json-array-reduce");
+    assert_eq!(report["seed"], 17);
+    assert_eq!(report["stdout_parity_verified"], true);
+    assert_eq!(report["interleaved_schedule_len"], 9);
+    assert!(report.get("aggregate_score").is_none());
+    let legs = report["legs"].as_array().expect("three measured runtime legs");
+    assert_eq!(legs.len(), 3);
+    let names: std::collections::BTreeSet<_> = legs
+        .iter()
+        .map(|leg| leg["runtime"].as_str().expect("runtime label"))
+        .collect();
+    assert_eq!(
+        names,
+        ["franken_node", "node", "bun"].into_iter().collect()
+    );
+    for leg in legs {
+        let samples = leg["samples_ms"].as_array().expect("raw invocation timings");
+        assert_eq!(samples.len(), 3);
+        assert!(
+            samples
+                .iter()
+                .all(|sample| sample.as_f64().is_some_and(|ms| ms.is_finite() && ms > 0.0)),
+            "every measurement must come from a completed live invocation: {leg}"
+        );
+        assert!(leg["version"].as_str().is_some_and(|text| !text.is_empty()));
+        assert!(
+            leg["p99"]["upper_95_ms"].is_null(),
+            "three observations cannot give a bounded distribution-free p99 upper limit"
+        );
+    }
+    let native = legs
+        .iter()
+        .find(|leg| leg["runtime"] == "franken_node")
+        .expect("native leg");
+    assert_eq!(
+        PathBuf::from(native["program"].as_str().expect("native program"))
+            .canonicalize()
+            .expect("canonical native executable"),
+        PathBuf::from(env!("CARGO_BIN_EXE_franken-node"))
+            .canonicalize()
+            .expect("current product executable"),
+        "the measured native leg must be the product under test"
+    );
+    assert_eq!(
+        report["comparisons"].as_array().expect("paired comparisons").len(),
+        3
+    );
+    assert!(
+        report["provenance_hash"]
+            .as_str()
+            .is_some_and(|hash| hash.starts_with("sha256:") && hash.len() == 71)
+    );
+    let persisted: Value = serde_json::from_slice(
+        &std::fs::read(workspace.path().join("triad.json")).expect("persisted triad report"),
+    )
+    .expect("persisted triad report JSON");
+    assert_eq!(persisted, report);
+    assert!(
+        output.stderr.is_empty(),
+        "--json must keep the human benchmark summary out of stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(all(feature = "engine", target_os = "linux"))]
+#[test]
+fn bench_run_rejects_runtime_aliases_without_publishing_measurements() {
+    let workspace = TempDir::new().expect("create alias-refusal workspace");
+    let mut command = Command::cargo_bin("franken-node").expect("franken-node binary");
+    let output = command
+        .current_dir(workspace.path())
+        .args(["bench", "run", "--json", "--node-bin"])
+        .arg(env!("CARGO_BIN_EXE_franken-node"))
+        .arg("--bun-bin")
+        .arg(env!("CARGO_BIN_EXE_franken-node"))
+        .args(["--output", "triad.json"])
+        .output()
+        .expect("invoke benchmark with aliased runtime binaries");
+    assert!(!output.status.success());
+    let report: Value =
+        serde_json::from_slice(&output.stdout).expect("alias refusal must be JSON");
+    assert_eq!(report["ok"], false);
+    assert!(
+        report["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("three distinct executable paths")),
+        "identical programs cannot qualify as independent runtime legs: {report}"
+    );
+    assert!(report.get("provenance_hash").is_none());
+    assert!(!workspace.path().join("triad.json").exists());
 }

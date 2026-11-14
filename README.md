@@ -711,7 +711,7 @@ shows the per-node application of the release.
 ```bash
 # Independent third party, with their own trust anchors
 franken-node verify release ./release-dir --key-dir ./auditor-trust-roots
-franken-node bench run --scenario secure-extension-heavy --output bench.json
+franken-node bench run --scenario runtime-startup --output bench.json
 ```
 
 Auditors use `frankenengine-verifier-sdk` to recompute receipts and verify
@@ -1392,7 +1392,7 @@ receipt signing key, and emit `franken-node/deploy-cli/v1` with `--json`
 | `franken-node registry search <query>` | Query locally stored registry artifacts with trust filters (not a live npm/control-plane service). The query is handler-required so `--json` failures emit `franken-node/registry-error-cli/v1` instead of a human clap error. Filter: `--min-assurance`. `--json` emits `franken-node/registry-search-cli/v1`. |
 | `franken-node registry verify <id>` | Verify a locally stored registry artifact. The extension id is handler-required so `--json` failures emit `franken-node/registry-error-cli/v1` instead of a human clap error. `--json` emits `franken-node/registry-verify-cli/v1`. |
 | `franken-node registry gc` | Archive older registry artifacts. Optional: `--keep`. `--json` emits `franken-node/registry-gc-cli/v1`. |
-| `franken-node bench run` | Run benchmark suite and emit a SHA256 `provenance_hash` report (not Ed25519-signed). Flags: `--scenario`, `--fixture-mode`, `--output`, `--json`. The report is always JSON on stdout; `--json` suppresses the human summary on stderr. |
+| `franken-node bench run` | Run the current native binary, Node.js and Bun on the same built-in workload; all three runtimes are required. Live scenarios: `runtime-startup` (default), `json-array-reduce`. Flags: `--samples`, `--warmups`, `--timeout-ms`, `--budget-ms`, `--seed`, `--node-bin`, `--bun-bin`, `--output`, `--json`. `--fixture-mode` explicitly selects the separate deterministic fixture suite and conflicts with live execution options. JSON is always on stdout; `--json` suppresses the human summary. Reports carry a SHA256 `provenance_hash`, not an Ed25519 signature. |
 | `franken-node debug explain` | Walk a signed decision-receipt through verification steps. `--receipt` is handler-required so `--json` failures emit `franken-node/debug-error-cli/v1` instead of a human clap error. `--json` emits machine-readable per-step results (`franken-node/debug-explain-cli/v1`). |
 | `franken-node debug evidence` | Inspect verifier evidence artifacts. `--artifact` is handler-required so `--json` failures emit `franken-node/debug-error-cli/v1` instead of a human clap error. `--kind` accepts `auto`, `node-replay-capsule`, `provenance-attestation`, `vef-evidence-capsule`. `--json` emits machine-readable diagnostics. |
 | `franken-node debug trace` | Trace a policy-activation fixture through `doctor_policy_activation` (not live guest execution). `--policy` and `--input` are handler-required so `--json` failures emit `franken-node/debug-error-cli/v1` instead of a human clap error. `--json` emits machine-readable trace (`franken-node/debug-trace-cli/v1`). |
@@ -3926,10 +3926,54 @@ Hot-path discipline is enforced by `tests/hot_path_perf_budget_contract.rs`
 (feature `policy-engine`): performance budgets for the most-traveled
 paths are encoded as conformance assertions, and a regression fails CI.
 
-The `bench run` CLI surface produces a SHA256 `provenance_hash` report
-(not Ed25519-signed). A verifier can recompute the hash over the report
-body; that is tamper-evident content hashing, not an independently
-signed attestation.
+### Live runtime benchmarks
+
+On Linux, `bench run` executes the current `franken-node` binary, Node.js
+and Bun against the same built-in JavaScript workload. Every measured
+round contains all three runtimes in a seeded shuffled order. The native
+workspace is initialized once before timing, and native runs explicitly
+select `franken-engine` with the balanced policy. Each sample measures the
+complete process invocation, including startup and the product's normal
+policy and receipt work.
+
+```bash
+# Require all three real runtimes; Node.js and Bun are discovered on PATH.
+franken-node bench run --scenario runtime-startup \
+    --samples 20 --warmups 2 --output bench.json --json
+
+# Compare an identical array/reduce workload with explicit reference binaries.
+franken-node bench run --scenario json-array-reduce \
+    --node-bin /usr/bin/node --bun-bin /opt/bun/bin/bun \
+    --samples 30 --seed 42 --timeout-ms 10000 --budget-ms 300000 --json
+
+# The old deterministic suite remains explicitly fixture-only.
+franken-node bench run --scenario secure-extension-heavy --fixture-mode --json
+```
+
+Live runs require three distinct executable identities and successful
+invocations with exact expected stdout. Missing runtimes, aliased binaries,
+output mismatch, nonzero exit, output overflow or timeout fail the campaign;
+they never produce a synthetic replacement score. Runtime initialization,
+version checks and measured runs share a total time budget. The default
+per-invocation timeout is 10 seconds and the campaign budget is 5 minutes.
+`--samples` accepts 3–4096, `--warmups` accepts 0–128,
+`--timeout-ms` accepts 1–300000, and `--budget-ms` accepts 1–3600000.
+The built-in workloads exercise startup and a small pure JavaScript program;
+they do not measure the full compatibility corpus, migration throughput or
+compromise resistance.
+
+The `franken-node/triad-benchmark/v2` report retains raw timings, runtime
+identity and invocation evidence, p50/p95/p99 estimates, and paired
+comparisons. An unavailable finite quantile confidence bound is `null`;
+small sample sets cannot establish a bounded p99 tail interval. Stderr
+evidence is retained separately and is not a claim of cross-runtime stderr
+parity.
+
+Reports carry a SHA256 `provenance_hash`, not an Ed25519 signature.
+A verifier can recompute the hash over the report body; independently
+authenticating the producer or asserting a headline performance advantage
+requires additional evidence. Fixture reports remain explicitly labeled
+`fixture_only` and are not live runtime measurements.
 
 ---
 
@@ -3946,8 +3990,8 @@ franken-node verify lockstep ./my-app \
 # When node is real Node.js, Node is the spec:
 # franken-node verify lockstep ./my-app --runtimes node,bun,franken-node --emit-fixtures
 
-# Reproduce a benchmark report
-franken-node bench run --scenario secure-extension-heavy --output bench.json
+# Reproduce a live three-runtime benchmark report (requires Node.js and Bun)
+franken-node bench run --scenario json-array-reduce --output bench.json
 # Recompute the SHA256 provenance_hash over the report body (tamper-evident
 # content hash, not an Ed25519-signed SDK attestation).
 

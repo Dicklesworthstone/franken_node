@@ -3649,32 +3649,79 @@ pub struct RegistryGcArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum BenchCommand {
-    /// Run benchmark suite and emit a SHA256 `provenance_hash` report (not Ed25519-signed).
+    /// Benchmark live native, Node, and Bun processes, or emit explicit fixture evidence.
     Run(BenchRunArgs),
 }
 
 #[derive(Debug, Parser)]
 pub struct BenchRunArgs {
-    /// Benchmark scenario to run.
+    /// Live workload: runtime-startup (default) or json-array-reduce.
+    /// Legacy suite scenarios require --fixture-mode.
     #[arg(long)]
     pub scenario: Option<String>,
-    /// Use deterministic fixture-only measurements. Fixture reports are not
-    /// authoritative release/headline benchmark evidence.
+
+    /// Use deterministic fixture-only measurements instead of executing runtimes.
+    /// Fixture reports are not release or headline benchmark evidence.
     #[arg(long)]
     pub fixture_mode: bool,
+
+    /// Measured invocations per runtime, interleaved in seeded rounds.
+    #[arg(
+        long,
+        default_value_t = 20,
+        value_parser = clap::value_parser!(u32).range(3..=4096),
+        conflicts_with = "fixture_mode"
+    )]
+    pub samples: u32,
+
+    /// Untimed warmup invocations per runtime, also checked for output parity.
+    #[arg(
+        long,
+        default_value_t = 2,
+        value_parser = clap::value_parser!(u32).range(0..=128),
+        conflicts_with = "fixture_mode"
+    )]
+    pub warmups: u32,
+
+    /// Deadline in milliseconds for each runtime invocation.
+    #[arg(
+        long,
+        default_value_t = 10_000,
+        value_parser = clap::value_parser!(u64).range(1..=300_000),
+        conflicts_with = "fixture_mode"
+    )]
+    pub timeout_ms: u64,
+
+    /// Total deadline in milliseconds, including setup, probes, warmups, and samples.
+    #[arg(
+        long,
+        default_value_t = 300_000,
+        value_parser = clap::value_parser!(u64).range(1..=3_600_000),
+        conflicts_with = "fixture_mode"
+    )]
+    pub budget_ms: u64,
+
+    /// Seed for the balanced runtime execution order.
+    #[arg(long, default_value_t = 42, conflicts_with = "fixture_mode")]
+    pub seed: u64,
+
+    /// Node executable; defaults to node on PATH. The native leg is franken-node itself.
+    #[arg(long, value_parser = parse_safe_binary_pathbuf, conflicts_with = "fixture_mode")]
+    pub node_bin: Option<PathBuf>,
+
+    /// Bun executable; defaults to bun on PATH. Both reference runtimes are required.
+    #[arg(long, value_parser = parse_safe_binary_pathbuf, conflicts_with = "fixture_mode")]
+    pub bun_bin: Option<PathBuf>,
+
     /// Write the benchmark JSON report to a file in addition to stdout.
     ///
-    /// Must be a cwd-relative path under the workspace; absolute paths are
-    /// rejected (`parse_safe_content_pathbuf` enforces this so a benchmark
-    /// run cannot be tricked into writing into arbitrary system locations
-    /// such as `/etc` or `/tmp`). To export to a sibling directory, run the
-    /// bench from there or pass a relative path that resolves to it.
+    /// Must be a cwd-relative path under the workspace; absolute paths and
+    /// traversal are rejected. A failed benchmark never writes a success report.
     #[arg(long, value_parser = parse_safe_content_pathbuf)]
     pub output: Option<PathBuf>,
 
-    /// Emit the JSON report on stdout. The report is always JSON and carries
-    /// `provenance_hash` (SHA256 of canonical content), not an Ed25519
-    /// signature. `--json` suppresses the human summary on stderr.
+    /// Emit JSON without the human summary on stderr. The provenance_hash is
+    /// a SHA256 content hash, not an Ed25519 signature or independent attestation.
     #[arg(long)]
     pub json: bool,
 }
@@ -4072,6 +4119,97 @@ mod parser_contract_extra_tests {
         assert!(args.fixture_mode);
         assert_eq!(args.scenario.as_deref(), Some("secure-extension-heavy"));
         Ok(())
+    }
+
+    #[test]
+    fn bench_run_live_defaults_and_explicit_limits() {
+        let cli = parse(&["franken-node", "bench", "run"]).expect("live defaults");
+        let Command::Bench(BenchCommand::Run(args)) = cli.command else {
+            panic!("expected bench run");
+        };
+        assert!(!args.fixture_mode);
+        assert_eq!(args.samples, 20);
+        assert_eq!(args.warmups, 2);
+        assert_eq!(args.timeout_ms, 10_000);
+        assert_eq!(args.budget_ms, 300_000);
+        assert_eq!(args.seed, 42);
+        assert!(args.node_bin.is_none());
+        assert!(args.bun_bin.is_none());
+
+        let cli = parse(&[
+            "franken-node",
+            "bench",
+            "run",
+            "--scenario",
+            "json-array-reduce",
+            "--samples",
+            "3",
+            "--warmups",
+            "0",
+            "--timeout-ms",
+            "100",
+            "--budget-ms",
+            "1000",
+            "--seed",
+            "7",
+            "--node-bin",
+            "/opt/node",
+            "--bun-bin",
+            "/opt/bun",
+            "--json",
+        ])
+        .expect("explicit live limits");
+        let Command::Bench(BenchCommand::Run(args)) = cli.command else {
+            panic!("expected bench run");
+        };
+        assert_eq!(args.samples, 3);
+        assert_eq!(args.warmups, 0);
+        assert_eq!(args.timeout_ms, 100);
+        assert_eq!(args.budget_ms, 1000);
+        assert_eq!(args.seed, 7);
+        assert_eq!(args.node_bin, Some(PathBuf::from("/opt/node")));
+        assert_eq!(args.bun_bin, Some(PathBuf::from("/opt/bun")));
+    }
+
+    #[test]
+    fn bench_run_rejects_unbounded_or_ambiguous_live_options() {
+        for (flag, value) in [
+            ("--samples", "2"),
+            ("--samples", "4097"),
+            ("--warmups", "129"),
+            ("--timeout-ms", "0"),
+            ("--timeout-ms", "300001"),
+            ("--budget-ms", "0"),
+            ("--budget-ms", "3600001"),
+        ] {
+            let err = parse(&["franken-node", "bench", "run", flag, value])
+                .expect_err("live limits must be enforced by the parser");
+            assert_eq!(err.kind(), ErrorKind::ValueValidation, "{flag} {value}");
+        }
+        for (flag, value) in [
+            ("--samples", "3"),
+            ("--warmups", "0"),
+            ("--timeout-ms", "100"),
+            ("--budget-ms", "1000"),
+            ("--seed", "42"),
+            ("--node-bin", "node"),
+            ("--bun-bin", "bun"),
+        ] {
+            let err = parse(&[
+                "franken-node",
+                "bench",
+                "run",
+                "--fixture-mode",
+                flag,
+                value,
+            ])
+            .expect_err("fixture mode must not silently ignore a live option");
+            assert_eq!(err.kind(), ErrorKind::ArgumentConflict, "{flag}");
+        }
+        assert!(
+            parse(&["franken-node", "bench", "run", "--fixture-mode"]).is_ok(),
+            "default live values must not conflict with explicit fixtures"
+        );
     }
 
     #[test]
