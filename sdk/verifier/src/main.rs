@@ -18,6 +18,9 @@ use frankenengine_verifier_sdk::incident_bundle::{
     decode_evidence_json, verify_incident_bundle, verify_incident_bundle_with_run_key,
     verify_incident_bundle_with_runtime_keys,
 };
+use frankenengine_verifier_sdk::native_session::{
+    MAX_NATIVE_SESSION_FORENSICS_BYTES, NativeSessionForensicError, verify_native_session_forensics,
+};
 use frankenengine_verifier_sdk::publisher_source::{
     MAX_PUBLISHER_SOURCE_INPUT_BYTES, MAX_PUBLISHER_SOURCE_TRUST_INPUT_BYTES, PublisherSourceError,
     PublisherTrustAnchors, verify_publisher_source_input, verify_publisher_source_trust_input,
@@ -39,7 +42,7 @@ const COUNTERFACTUAL_INPUT_SCHEMA: &str = "franken-verifier/counterfactual-recei
 const LTV_INPUT_SCHEMA: &str = "franken-verifier/ltv-evidence-input/v1";
 const LTV_WITNESS_ANCHOR_DOMAIN: &[u8] = b"franken-verifier/ltv-witness-anchor/v1:";
 const MAX_LTV_WITNESS_ANCHOR_BYTES: usize = 64 * 1024;
-const USAGE: &str = "franken-verifier verify --format incident-bundle|capsule|signed-bundle|resolution-receipt|publisher-source|publisher-source-trust|counterfactual-receipt|ltv-evidence --trusted-key-hex HEX [--trusted-run-key-hex HEX [--trusted-runtime-key-hex HEX]] [--signature-hex HEX] [--trusted-revocation-key-hex HEX --evaluation-time RFC3339 --max-revocation-age-secs SECONDS [--trusted-provenance-key-hex HEX]] < artifact";
+const USAGE: &str = "franken-verifier verify --format incident-bundle|native-session-forensics|capsule|signed-bundle|resolution-receipt|publisher-source|publisher-source-trust|counterfactual-receipt|ltv-evidence --trusted-key-hex HEX [--trusted-run-key-hex HEX [--trusted-runtime-key-hex HEX]] [--signature-hex HEX] [--trusted-revocation-key-hex HEX --evaluation-time RFC3339 --max-revocation-age-secs SECONDS [--trusted-provenance-key-hex HEX]] < artifact";
 
 #[derive(Debug)]
 struct PublisherTrustRequest {
@@ -148,6 +151,7 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
     if !matches!(
         format.as_str(),
         "incident-bundle"
+            | "native-session-forensics"
             | "capsule"
             | "signed-bundle"
             | "resolution-receipt"
@@ -351,6 +355,25 @@ fn publisher_source_failure(error: &PublisherSourceError) -> Failure {
     failure(code, "publisher-signed source verification failed")
 }
 
+fn native_session_failure(error: NativeSessionForensicError) -> Failure {
+    let code = match error {
+        NativeSessionForensicError::InputTooLarge => "INPUT_TOO_LARGE",
+        NativeSessionForensicError::JsonInvalid => "JSON_INVALID",
+        NativeSessionForensicError::SchemaUnsupported => "SCHEMA_UNSUPPORTED",
+        NativeSessionForensicError::IdentityInvalid => "IDENTITY_INVALID",
+        NativeSessionForensicError::SignerUntrusted => "SIGNER_UNTRUSTED",
+        NativeSessionForensicError::AdmissionHashMismatch => "INTEGRITY_MISMATCH",
+        NativeSessionForensicError::SignatureMalformed => "SIGNATURE_MALFORMED",
+        NativeSessionForensicError::AdmissionSignatureInvalid
+        | NativeSessionForensicError::OutcomeSignatureInvalid => "SIGNATURE_INVALID",
+        NativeSessionForensicError::ObservationInvalid => "OBSERVATION_INVALID",
+    };
+    failure(
+        code,
+        "native-session supervisor evidence verification failed",
+    )
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CounterfactualInputEnvelope {
@@ -393,6 +416,13 @@ fn counterfactual_failure(error: &CounterfactualReceiptError) -> Failure {
 
 fn verify(request: &Request, bytes: &[u8]) -> Result<Value, Failure> {
     match request.format.as_str() {
+        "native-session-forensics" => {
+            let verified = verify_native_session_forensics(bytes, &request.anchor)
+                .map_err(native_session_failure)?;
+            // The result authenticates original supervisor statements only.
+            // It contains no private panic text or host-effect request data.
+            Ok(json!({"scope": "authenticated_supervisor_observations", "facts": verified}))
+        }
         "publisher-source-trust" => {
             let signature = request
                 .signature
@@ -731,6 +761,7 @@ fn verify(request: &Request, bytes: &[u8]) -> Result<Value, Failure> {
 fn run(args: &[String], input: &mut impl Read) -> Result<Value, Failure> {
     let request = arguments(args)?;
     let input_limit = match request.format.as_str() {
+        "native-session-forensics" => MAX_NATIVE_SESSION_FORENSICS_BYTES,
         "publisher-source" => MAX_PUBLISHER_SOURCE_INPUT_BYTES,
         "publisher-source-trust" => MAX_PUBLISHER_SOURCE_TRUST_INPUT_BYTES,
         _ => MAX_INCIDENT_BUNDLE_BYTES,
@@ -747,7 +778,9 @@ fn run(args: &[String], input: &mut impl Read) -> Result<Value, Failure> {
     if bytes.len() > input_limit {
         return Err(failure(
             "INPUT_TOO_LARGE",
-            if matches!(
+            if request.format == "native-session-forensics" {
+                "native-session forensic evidence exceeds the 16 MiB input limit"
+            } else if matches!(
                 request.format.as_str(),
                 "publisher-source" | "publisher-source-trust"
             ) {
@@ -808,6 +841,131 @@ mod tests {
         ["verify", "--format", format, "--trusted-key-hex", anchor]
             .map(str::to_owned)
             .to_vec()
+    }
+
+    fn native_session_fixture(outcome: bool) -> (Vec<u8>, String) {
+        use ed25519_dalek::{Signer as _, SigningKey};
+        use frankenengine_verifier_sdk::native_session::{
+            NATIVE_SESSION_FORENSICS_SCHEMA, NativeSessionForensicAdmissionReceipt,
+            NativeSessionForensicBundle, NativeSessionForensicOutcome,
+        };
+        let key = SigningKey::from_bytes(&[71; 32]);
+        let public_key = hex::encode(key.verifying_key().as_bytes());
+        let key_id = format!("ed25519:{public_key}");
+        let nonce = "019a7f53-c180-7001-8001-000000000071";
+        let admission_json = json!({
+            "session_nonce": nonce, "product_root_key_id": key_id,
+            "identity_capture_path": "/removed/evidence/capture.json", "security_epoch": 9,
+            "admitted_at": "2026-11-14T12:00:00Z", "project_root": "/removed/project",
+            "entrypoint": "/removed/project/main.js", "dependency_ids": ["private dependency"],
+            "configured_node_id": null, "fleet_zone_id": null, "fleet_policy_sha256": null,
+            "process_spawn_authority_granted": false, "control_scopes": [],
+        })
+        .to_string();
+        let signing_bytes = |domain: &[u8], raw: &str| {
+            [domain, &(raw.len() as u64).to_be_bytes(), raw.as_bytes()].concat()
+        };
+        let digest = hex::encode(Sha256::digest(signing_bytes(
+            b"franken-node/native-session-admission/v1\0",
+            &admission_json,
+        )));
+        let admission_payload = format!(
+            "{{\"schema_version\":\"franken-node/native-session-admission-receipt/v1\",\"session_nonce\":\"{nonce}\",\"product_root_key_id\":\"{key_id}\",\"admission_sha256\":\"{digest}\"}}"
+        );
+        let admission_receipt = NativeSessionForensicAdmissionReceipt {
+            schema_version: "franken-node/native-session-admission-receipt/v1".into(),
+            session_nonce: nonce.into(),
+            product_root_key_id: key_id.clone(),
+            admission_sha256: digest.clone(),
+            signature_hex: hex::encode(
+                key.sign(&signing_bytes(
+                    b"franken-node/native-session-admission-signature/v1\0",
+                    &admission_payload,
+                ))
+                .to_bytes(),
+            ),
+        };
+        let outcome = outcome.then(|| {
+            let observation = json!({
+                "observed_at": "2026-11-14T12:00:01Z", "kind": "panicked", "process": "worker_reaped",
+                "containment_empty_observed": false, "effects": {"kind":"no_admitted_host_effects"},
+                "panic_evidence": {"panic_message":"private panic", "panic_message_bytes":13,
+                    "panic_message_sha256":hex::encode(Sha256::digest(b"private panic")), "panic_message_truncated":false,
+                    "cleanup_successful":true,"host_effect_wal":[]},
+            });
+            let payload_json = format!(
+                "{{\"schema_version\":\"franken-node/native-session-outcome-receipt/v1\",\"session_nonce\":\"{nonce}\",\"product_root_key_id\":\"{key_id}\",\"admission_sha256\":\"{digest}\",\"outcome\":{observation}}}"
+            );
+            NativeSessionForensicOutcome {
+                signature_hex: hex::encode(key.sign(&signing_bytes(b"franken-node/native-session-outcome-signature/v1\0", &payload_json)).to_bytes()),
+                payload_json,
+            }
+        });
+        let bundle = NativeSessionForensicBundle {
+            schema_version: NATIVE_SESSION_FORENSICS_SCHEMA.into(),
+            admission_json,
+            admission_receipt,
+            outcome,
+        };
+        (serde_json::to_vec(&bundle).unwrap(), public_key)
+    }
+
+    #[test]
+    fn cli_native_session_forensics_authenticates_pending_and_panic_without_private_details() {
+        for outcome in [false, true] {
+            let (bytes, key) = native_session_fixture(outcome);
+            let verified = run(
+                &args("native-session-forensics", &key),
+                &mut bytes.as_slice(),
+            )
+            .unwrap();
+            assert_eq!(verified["verdict"], "verified");
+            assert_eq!(verified["scope"], "authenticated_supervisor_observations");
+            assert_eq!(
+                verified["facts"]["outcome_kind"],
+                if outcome { "panicked" } else { "pending" }
+            );
+            assert_eq!(verified["facts"]["replay_certified"], false);
+            assert_eq!(verified["facts"]["quiescence_certified"], false);
+            assert_eq!(verified["facts"]["historical_completeness"], false);
+            assert_eq!(
+                verified["artifact_sha256"],
+                hex::encode(Sha256::digest(&bytes))
+            );
+            let summary = verified.to_string();
+            assert!(!summary.contains("private panic") && !summary.contains("private dependency"));
+        }
+    }
+
+    #[test]
+    fn cli_native_session_forensics_rejects_wrong_authority_options_and_oversized_input() {
+        let (bytes, key) = native_session_fixture(true);
+        assert_eq!(
+            run(
+                &args("native-session-forensics", ANCHOR),
+                &mut bytes.as_slice()
+            )
+            .unwrap_err()
+            .code,
+            "SIGNER_UNTRUSTED"
+        );
+        for option in [
+            "--signature-hex",
+            "--trusted-run-key-hex",
+            "--trusted-runtime-key-hex",
+        ] {
+            let mut request = args("native-session-forensics", &key);
+            request.extend([option.to_owned(), key.clone()]);
+            assert_eq!(arguments(&request).unwrap_err().code, "USAGE");
+        }
+        let oversized = vec![b' '; MAX_NATIVE_SESSION_FORENSICS_BYTES + 1];
+        let error = run(
+            &args("native-session-forensics", &key),
+            &mut oversized.as_slice(),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "INPUT_TOO_LARGE");
+        assert!(error.message.contains("16 MiB"));
     }
 
     #[test]
