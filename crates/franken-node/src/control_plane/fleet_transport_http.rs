@@ -33,10 +33,12 @@ use crate::capacity_defaults::aliases::{MAX_ACTION_LOG_ENTRIES, MAX_NODES_CAP};
 
 use super::fleet_transport::{
     FLEET_EPOCH_BARRIER_CERTIFIED_DRAIN_SCOPE, FLEET_EPOCH_QUIESCENCE_CERTIFICATE_SCHEMA,
-    FLEET_SHARED_STATE_SCHEMA, FleetActionRecord, FleetEpochQuiescenceCertificate,
-    FleetGuardedPolicyObservationScope, FleetGuardedPolicyReceipt, FleetNativeDrainEvidence,
-    FleetSharedState, FleetTransport, FleetTransportError, GuardedFleetPolicyPublication,
-    MAX_GUARDED_POLICY_RECEIPT_BYTES, MAX_GUARDED_POLICY_REQUEST_BYTES, NodeStatus,
+    FLEET_SHARED_STATE_SCHEMA, FleetAcknowledgementStage, FleetActionRecord,
+    FleetEpochQuiescenceCertificate, FleetGuardedPolicyObservationScope, FleetGuardedPolicyReceipt,
+    FleetNativeDrainEvidence, FleetNativeDrainReadiness, FleetSharedState, FleetTransport,
+    FleetTransportError, GuardedFleetPolicyPublication, MAX_GUARDED_POLICY_RECEIPT_BYTES,
+    MAX_GUARDED_POLICY_REQUEST_BYTES, MAX_GUARDED_POLICY_STALE_AFTER,
+    MAX_NATIVE_SESSION_MAINTENANCE_HOLDS, NodeHealth, NodeStatus, validate_action_id,
     validate_action_record, validate_node_status,
 };
 
@@ -113,6 +115,135 @@ pub struct FleetHttpEpochBarrierResponse {
     pub schema_version: String,
     pub evidence: FleetNativeDrainEvidence,
     pub certificate: FleetEpochQuiescenceCertificate,
+}
+
+impl FleetHttpEpochBarrierResponse {
+    /// Validate one complete, request-bound claim instead of trusting summary
+    /// booleans. Supervisor signatures establish internal integrity here;
+    /// enrollment authority still comes from the configured coordinator, never
+    /// from keys supplied by this response.
+    fn validate_for_request(
+        &self,
+        request: &FleetHttpEpochBarrierRequest,
+    ) -> Result<(), FleetTransportError> {
+        let evidence = &self.evidence;
+        let certificate = &self.certificate;
+        if self.schema_version != FLEET_HTTP_API_SCHEMA
+            || evidence.schema_version != "franken-node/fleet-native-drain-evidence/v1"
+            || evidence.scope != FLEET_EPOCH_BARRIER_CERTIFIED_DRAIN_SCOPE
+            || !evidence.complete
+            || !evidence.fleet_quiescence_certified
+            || !evidence.uncovered_zones.is_empty()
+            || evidence.nodes.is_empty()
+            || evidence.nodes.len() > MAX_NODES_CAP
+            || evidence.nodes.len() != certificate.participants.len()
+            || !certificate.fleet_quiescence_certified
+            || certificate.schema_version != FLEET_EPOCH_QUIESCENCE_CERTIFICATE_SCHEMA
+            || certificate.pre_epoch.checked_add(1) != Some(certificate.committed_epoch)
+            || certificate.transition_id.trim().is_empty()
+            || certificate.initiator != request.initiator
+            || certificate.reason != request.reason
+            || certificate.trace_id != request.trace_id
+            || certificate.certified_at != evidence.observed_at
+            || evidence.stale_after.is_zero()
+            || evidence.stale_after != request.stale_after.min(MAX_GUARDED_POLICY_STALE_AFTER)
+            || evidence.action_count == 0
+            || evidence.action_count != certificate.action_log_checkpoint.action_count
+        {
+            return Err(FleetTransportError::serialization(
+                "coordinator returned an incomplete or request-mismatched epoch-barrier response",
+            ));
+        }
+        certificate.action_log_checkpoint.validate()?;
+        let threshold = chrono::TimeDelta::from_std(evidence.stale_after)
+            .map_err(|error| FleetTransportError::serialization(error.to_string()))?;
+        let mut previous_identity = None;
+        for (node, participant) in evidence.nodes.iter().zip(&certificate.participants) {
+            let identity = (node.zone_id.as_str(), node.node_id.as_str());
+            if previous_identity.is_some_and(|previous| previous >= identity)
+                || node.zone_id == "all"
+                || participant.zone_id != node.zone_id
+                || participant.node_id != node.node_id
+                || participant.stage != FleetAcknowledgementStage::EpochBarrierCertified
+                || !node.ready
+                || node.reason != FleetNativeDrainReadiness::Ready
+                || node.health != Some(NodeHealth::Maintenance)
+                || node.expected_actions.action_count == 0
+                || node.expected_actions.action_count > evidence.action_count
+                || node.applied_actions.as_ref() != Some(&node.expected_actions)
+                || participant.active_hold_ids.is_empty()
+                || participant.active_hold_ids.len() > MAX_NATIVE_SESSION_MAINTENANCE_HOLDS
+                || participant
+                    .active_hold_ids
+                    .windows(2)
+                    .any(|pair| pair[0] >= pair[1])
+            {
+                return Err(FleetTransportError::serialization(
+                    "epoch-barrier response has an invalid or mismatched held participant",
+                ));
+            }
+            previous_identity = Some(identity);
+            for hold in &participant.active_hold_ids {
+                validate_action_id(hold)?;
+            }
+            let last_seen = node.last_seen.ok_or_else(|| {
+                FleetTransportError::serialization("epoch-barrier participant lacks a heartbeat")
+            })?;
+            if last_seen > evidence.observed_at
+                || evidence.observed_at.signed_duration_since(last_seen) >= threshold
+            {
+                return Err(FleetTransportError::stale_state(
+                    "epoch-barrier response contains a stale or future heartbeat",
+                ));
+            }
+            validate_node_status(&NodeStatus {
+                zone_id: node.zone_id.clone(),
+                node_id: node.node_id.clone(),
+                last_seen,
+                quarantine_version: 0,
+                health: NodeHealth::Maintenance,
+                applied_actions: node.applied_actions.clone(),
+                native_session_drain: node.native_session_drain.clone(),
+            })?;
+            let drain = node.native_session_drain.as_ref().ok_or_else(|| {
+                FleetTransportError::serialization("epoch-barrier participant lacks a native drain")
+            })?;
+            let attestation = drain.supervisor_attestation.as_ref().ok_or_else(|| {
+                FleetTransportError::serialization(
+                    "epoch-barrier participant lacks a supervisor signature",
+                )
+            })?;
+            if !drain.fence_held
+                || !drain.population_is_terminal()
+                || drain.applied_actions != node.expected_actions
+                || participant.drain_id != attestation.drain_id
+                || participant.generation != attestation.generation
+                || participant.admitted_sessions != drain.admitted_sessions
+                || participant.terminal_sessions != drain.terminal_sessions
+                || participant.session_set_sha256 != drain.session_set_sha256
+                || participant.checkpoint_sha256 != attestation.checkpoint_sha256
+                || participant.supervisor_key_id != attestation.product_root_key_id
+            {
+                return Err(FleetTransportError::serialization(
+                    "epoch-barrier certificate differs from its signed native population",
+                ));
+            }
+            let root: [u8; 32] = participant
+                .supervisor_key_id
+                .strip_prefix("ed25519:")
+                .and_then(|encoded| hex::decode(encoded).ok())
+                .and_then(|bytes| bytes.try_into().ok())
+                .ok_or_else(|| {
+                    FleetTransportError::serialization("invalid epoch-barrier supervisor key")
+                })?;
+            let root = ed25519_dalek::VerifyingKey::from_bytes(&root).map_err(|_| {
+                FleetTransportError::serialization("invalid epoch-barrier supervisor key")
+            })?;
+            attestation.verify(drain, &node.node_id, &node.zone_id, &root)?;
+            attestation.validate_freshness(evidence.observed_at)?;
+        }
+        Ok(())
+    }
 }
 
 /// Acknowledgement for a successful `POST`.
@@ -668,23 +799,22 @@ impl HttpFleetTransport {
         &self,
         request: &FleetHttpEpochBarrierRequest,
     ) -> Result<FleetHttpEpochBarrierResponse, FleetTransportError> {
+        if request.initiator.trim().is_empty()
+            || request.reason.trim().is_empty()
+            || request.trace_id.trim().is_empty()
+            || request.stale_after.is_zero()
+        {
+            return Err(FleetTransportError::serialization(
+                "epoch-barrier requests require an initiator, reason, trace and positive freshness window",
+            ));
+        }
         let response: FleetHttpEpochBarrierResponse = self.post_json_with_limits(
             FLEET_HTTP_EPOCH_BARRIER_PATH,
             request,
             FLEET_HTTP_MAX_REQUEST_BYTES,
             MAX_GUARDED_POLICY_RECEIPT_BYTES as u64,
         )?;
-        self.check_schema(&response.schema_version)?;
-        if !response.evidence.fleet_quiescence_certified
-            || response.evidence.scope != FLEET_EPOCH_BARRIER_CERTIFIED_DRAIN_SCOPE
-            || !response.certificate.fleet_quiescence_certified
-            || response.certificate.schema_version != FLEET_EPOCH_QUIESCENCE_CERTIFICATE_SCHEMA
-            || response.certificate.committed_epoch <= response.certificate.pre_epoch
-        {
-            return Err(FleetTransportError::serialization(
-                "coordinator returned an uncertified or inconsistent epoch-barrier response",
-            ));
-        }
+        response.validate_for_request(request)?;
         Ok(response)
     }
 }
@@ -692,6 +822,259 @@ impl HttpFleetTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn certified_epoch_response() -> (FleetHttpEpochBarrierRequest, FleetHttpEpochBarrierResponse) {
+        use std::collections::BTreeMap;
+
+        use chrono::{DateTime, Utc};
+        use ed25519_dalek::{Signer, SigningKey};
+
+        use super::super::fleet_transport::{
+            FleetAction, FleetEpochBarrierParams, NATIVE_SESSION_DRAIN_ATTESTATION_SCHEMA,
+            NativeSessionDrainAttestation, NativeSessionDrainCheckpoint,
+            certify_fleet_epoch_quiescence, fleet_application_checkpoint,
+        };
+        use crate::control_plane::control_epoch::EpochSigningKey;
+        use crate::control_plane::epoch_transition_barrier::BarrierConfig;
+        use crate::runtime::epoch_transition::ProductEpochCoordinator;
+
+        let now = DateTime::<Utc>::from_timestamp(1_800_000_000, 0).unwrap();
+        let key = SigningKey::from_bytes(&[73; 32]);
+        let actions = vec![FleetActionRecord {
+            action_id: "hold-client-contract".to_string(),
+            emitted_at: now,
+            action: FleetAction::NativeSessionHold {
+                zone_id: "east".to_string(),
+                reason: "certify a closed admission population".to_string(),
+            },
+        }];
+        let applied = fleet_application_checkpoint(&actions, "east").unwrap();
+        let mut drain = NativeSessionDrainCheckpoint {
+            applied_actions: applied.clone(),
+            session_set_sha256: "ab".repeat(32),
+            admitted_sessions: 2,
+            terminal_sessions: 2,
+            pending_sessions: 0,
+            indeterminate_sessions: 0,
+            fence_held: true,
+            supervisor_attestation: None,
+        };
+        let mut attestation = NativeSessionDrainAttestation {
+            schema_version: NATIVE_SESSION_DRAIN_ATTESTATION_SCHEMA.to_string(),
+            node_id: "node-a".to_string(),
+            zone_id: "east".to_string(),
+            drain_id: uuid::Uuid::from_u128(1).to_string(),
+            generation: 1,
+            project_root_sha256: "cd".repeat(32),
+            observed_at: now,
+            product_root_key_id: format!("ed25519:{}", hex::encode(key.verifying_key().as_bytes())),
+            checkpoint_sha256: drain.observation_sha256().unwrap(),
+            signature_hex: String::new(),
+        };
+        attestation.signature_hex = hex::encode(
+            key.sign(&attestation.signing_payload().unwrap()).to_bytes(),
+        );
+        drain.supervisor_attestation = Some(attestation);
+        let state = FleetSharedState {
+            schema_version: FLEET_SHARED_STATE_SCHEMA.to_string(),
+            actions,
+            nodes: vec![NodeStatus {
+                zone_id: "east".to_string(),
+                node_id: "node-a".to_string(),
+                last_seen: now,
+                quarantine_version: 1,
+                health: NodeHealth::Maintenance,
+                applied_actions: Some(applied),
+                native_session_drain: Some(drain),
+            }],
+        };
+        let roots = BTreeMap::from([(
+            ("east".to_string(), "node-a".to_string()),
+            key.verifying_key(),
+        )]);
+        let request = FleetHttpEpochBarrierRequest {
+            initiator: "operator".to_string(),
+            reason: "advance while admissions are closed".to_string(),
+            trace_id: "trace-epoch-client".to_string(),
+            stale_after: Duration::from_secs(30),
+        };
+        let mut coordinator = ProductEpochCoordinator::new(
+            7,
+            2,
+            BarrierConfig::default(),
+            EpochSigningKey::new(b"epoch-client-contract-signing-key").unwrap(),
+        );
+        let (evidence, certificate) = certify_fleet_epoch_quiescence(
+            &mut coordinator,
+            &state,
+            &roots,
+            FleetEpochBarrierParams {
+                initiator: &request.initiator,
+                reason: &request.reason,
+                now,
+                stale_after: request.stale_after,
+                trace_id: &request.trace_id,
+            },
+        )
+        .unwrap();
+        (
+            request,
+            FleetHttpEpochBarrierResponse {
+                schema_version: FLEET_HTTP_API_SCHEMA.to_string(),
+                evidence,
+                certificate,
+            },
+        )
+    }
+
+    #[test]
+    fn epoch_response_accepts_actual_signed_barrier_certificate() {
+        let (request, response) = certified_epoch_response();
+        response.validate_for_request(&request).unwrap();
+        assert_eq!(response.certificate.pre_epoch, 7);
+        assert_eq!(response.certificate.committed_epoch, 8);
+    }
+
+    #[test]
+    fn epoch_response_rejects_request_population_and_attestation_substitution() {
+        type Mutation = fn(&mut FleetHttpEpochBarrierResponse);
+        let cases: &[(&str, Mutation)] = &[
+            ("other trace", |r| r.certificate.trace_id.push_str("-other")),
+            ("other initiator", |r| r.certificate.initiator.push_str("-other")),
+            ("other reason", |r| r.certificate.reason.push_str("-other")),
+            ("epoch skip", |r| r.certificate.committed_epoch += 1),
+            ("epoch overflow", |r| {
+                r.certificate.pre_epoch = u64::MAX;
+                r.certificate.committed_epoch = 0;
+            }),
+            ("no transition", |r| r.certificate.transition_id.clear()),
+            ("empty population", |r| {
+                r.evidence.nodes.clear();
+                r.certificate.participants.clear();
+            }),
+            ("missing participant", |r| r.certificate.participants.clear()),
+            ("duplicate population", |r| {
+                r.evidence.nodes.push(r.evidence.nodes[0].clone());
+                r.certificate.participants.push(r.certificate.participants[0].clone());
+            }),
+            ("incomplete evidence", |r| r.evidence.complete = false),
+            ("uncovered zone", |r| r.evidence.uncovered_zones.push("west".to_string())),
+            ("different observation time", |r| {
+                r.evidence.observed_at += chrono::TimeDelta::seconds(1);
+            }),
+            ("weaker freshness", |r| r.evidence.stale_after = Duration::from_secs(31)),
+            ("action population differs", |r| r.evidence.action_count += 1),
+            ("invalid action digest", |r| {
+                r.certificate.action_log_checkpoint.actions_sha256 = "invalid".to_string();
+            }),
+            ("other node", |r| r.certificate.participants[0].node_id = "node-b".to_string()),
+            ("wrong acknowledgement stage", |r| {
+                r.certificate.participants[0].stage = FleetAcknowledgementStage::PolicyApplied;
+            }),
+            ("missing hold", |r| r.certificate.participants[0].active_hold_ids.clear()),
+            ("duplicate hold", |r| {
+                r.certificate.participants[0].active_hold_ids.push("hold-client-contract".to_string());
+            }),
+            ("unsafe hold identity", |r| {
+                r.certificate.participants[0].active_hold_ids[0] = "../hold".to_string();
+            }),
+            ("unready node", |r| r.evidence.nodes[0].ready = false),
+            ("contradictory readiness", |r| {
+                r.evidence.nodes[0].reason = FleetNativeDrainReadiness::HoldNotActive;
+            }),
+            ("admission reopened", |r| r.evidence.nodes[0].health = Some(NodeHealth::Healthy)),
+            ("missing heartbeat", |r| r.evidence.nodes[0].last_seen = None),
+            ("stale heartbeat", |r| {
+                r.evidence.nodes[0].last_seen =
+                    Some(r.evidence.observed_at - chrono::TimeDelta::seconds(30));
+            }),
+            ("future heartbeat", |r| {
+                r.evidence.nodes[0].last_seen =
+                    Some(r.evidence.observed_at + chrono::TimeDelta::seconds(1));
+            }),
+            ("different action snapshot", |r| {
+                r.evidence.nodes[0].expected_actions.actions_sha256 = "ef".repeat(32);
+            }),
+            ("missing drain", |r| r.evidence.nodes[0].native_session_drain = None),
+            ("missing signature", |r| {
+                r.evidence.nodes[0]
+                    .native_session_drain
+                    .as_mut()
+                    .unwrap()
+                    .supervisor_attestation = None;
+            }),
+            ("other drain generation", |r| r.certificate.participants[0].generation += 1),
+            ("other session population", |r| r.certificate.participants[0].admitted_sessions += 1),
+            ("other checkpoint", |r| r.certificate.participants[0].checkpoint_sha256 = "ef".repeat(32)),
+            ("invalid signature", |r| {
+                r.evidence.nodes[0]
+                    .native_session_drain
+                    .as_mut()
+                    .unwrap()
+                    .supervisor_attestation
+                    .as_mut()
+                    .unwrap()
+                    .signature_hex = "00".repeat(64);
+            }),
+        ];
+        let (request, response) = certified_epoch_response();
+        response.validate_for_request(&request).unwrap();
+        for (label, mutate) in cases {
+            let mut changed = response.clone();
+            mutate(&mut changed);
+            assert!(changed.validate_for_request(&request).is_err(), "{label}");
+        }
+    }
+
+    #[test]
+    fn epoch_response_rejects_expired_but_cryptographically_valid_supervisor_evidence() {
+        use ed25519_dalek::{Signer, SigningKey};
+
+        let (request, mut response) = certified_epoch_response();
+        let drain = response.evidence.nodes[0]
+            .native_session_drain
+            .as_mut()
+            .unwrap();
+        let attestation = drain.supervisor_attestation.as_mut().unwrap();
+        attestation.observed_at -= chrono::TimeDelta::seconds(301);
+        let key = SigningKey::from_bytes(&[73; 32]);
+        attestation.signature_hex = hex::encode(
+            key.sign(&attestation.signing_payload().unwrap()).to_bytes(),
+        );
+        drain
+            .supervisor_attestation
+            .as_ref()
+            .unwrap()
+            .verify(drain, "node-a", "east", &key.verifying_key())
+            .unwrap();
+        let error = response.validate_for_request(&request).unwrap_err();
+        assert!(error.to_string().contains("expired"), "{error}");
+    }
+
+    #[test]
+    fn invalid_epoch_requests_are_rejected_before_network_access() {
+        let client = HttpFleetTransport::new(
+            "http://127.0.0.1:1",
+            "0123456789abcdef0123456789abcdef",
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        let (request, _) = certified_epoch_response();
+        for field in ["initiator", "reason", "trace", "freshness"] {
+            let mut invalid = request.clone();
+            match field {
+                "initiator" => invalid.initiator.clear(),
+                "reason" => invalid.reason.clear(),
+                "trace" => invalid.trace_id.clear(),
+                _ => invalid.stale_after = Duration::ZERO,
+            }
+            let error = client.certify_epoch_barrier(&invalid).unwrap_err();
+            assert!(
+                error.to_string().contains("positive freshness window"),
+                "{field}: {error}"
+            );
+        }
+    }
 
     #[test]
     fn loopback_http_urls_are_accepted() {
