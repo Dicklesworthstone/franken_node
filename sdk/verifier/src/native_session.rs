@@ -15,7 +15,13 @@ use sha2::{Digest, Sha256};
 use crate::incident_bundle::decode_evidence_json;
 
 pub const NATIVE_SESSION_FORENSICS_SCHEMA: &str = "franken-node/native-session-forensics/v1";
+pub const NATIVE_SESSION_FORENSICS_V2_SCHEMA: &str = "franken-node/native-session-forensics/v2";
 pub const MAX_NATIVE_SESSION_FORENSICS_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_NATIVE_SESSION_FORENSICS_V2_BYTES: usize = 32 * 1024 * 1024;
+pub const NATIVE_SESSION_EFFECT_JOURNAL_SCHEMA: &str =
+    "franken-node/native-effect-journal-record/v1";
+pub const MAX_NATIVE_SESSION_EFFECT_JOURNAL_BYTES: usize = 4 * 1024 * 1024;
+pub const MAX_NATIVE_SESSION_EFFECT_JOURNAL_RECORD_BYTES: usize = 4096;
 const MAX_ADMISSION_BYTES: usize = 4 * 1024 * 1024;
 const MAX_WAL_BYTES: usize = 4 * 1024 * 1024;
 const MAX_OUTCOME_BYTES: usize = MAX_WAL_BYTES + 1024 * 1024;
@@ -28,6 +34,8 @@ const INTERRUPTION_SCHEMA: &str = "franken-node/native-effect-interruption-evide
 const ADMISSION_HASH_DOMAIN: &[u8] = b"franken-node/native-session-admission/v1\0";
 const ADMISSION_SIGNATURE_DOMAIN: &[u8] = b"franken-node/native-session-admission-signature/v1\0";
 const OUTCOME_SIGNATURE_DOMAIN: &[u8] = b"franken-node/native-session-outcome-signature/v1\0";
+const JOURNAL_SIGNATURE_DOMAIN: &[u8] = b"franken-node/native-effect-journal-signature/v1\0";
+const JOURNAL_RECORD_DOMAIN: &[u8] = b"franken-node/native-effect-journal-record/v1\0";
 
 /// Portable envelope, with an explicit `outcome: null` for an observation that
 /// has no retained signed outcome. Absence is never inferred to mean success.
@@ -39,6 +47,13 @@ pub struct NativeSessionForensicBundle {
     pub admission_receipt: NativeSessionForensicAdmissionReceipt,
     #[serde(deserialize_with = "required_option")]
     pub outcome: Option<NativeSessionForensicOutcome>,
+    /// Present only in v2; original newline-delimited signed record bytes.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "nonnull_option"
+    )]
+    pub journal_jsonl: Option<String>,
 }
 
 impl fmt::Debug for NativeSessionForensicBundle {
@@ -49,6 +64,10 @@ impl fmt::Debug for NativeSessionForensicBundle {
             .field("admission_json", &"[redacted]")
             .field("admission_receipt", &self.admission_receipt)
             .field("outcome", &self.outcome)
+            .field(
+                "journal_jsonl",
+                &self.journal_jsonl.as_ref().map(|_| "[redacted]"),
+            )
             .finish()
     }
 }
@@ -105,6 +124,7 @@ pub struct VerifiedNativeSessionForensics {
     pub final_ledger_effect_count: Option<usize>,
     pub failed_effect_count: Option<usize>,
     pub journal_complete: Option<bool>,
+    pub durable_journal: Option<VerifiedNativeSessionEffectJournal>,
     pub replay_certified: bool,
     pub quiescence_certified: bool,
     pub historical_completeness: bool,
@@ -122,6 +142,8 @@ pub enum NativeSessionForensicError {
     SignatureMalformed,
     AdmissionSignatureInvalid,
     OutcomeSignatureInvalid,
+    JournalSignatureInvalid,
+    JournalInvalid,
     ObservationInvalid,
 }
 
@@ -139,12 +161,238 @@ impl fmt::Display for NativeSessionForensicError {
             Self::SignatureMalformed => "native-session forensic signature encoding is invalid",
             Self::AdmissionSignatureInvalid => "native-session admission signature is invalid",
             Self::OutcomeSignatureInvalid => "native-session outcome signature is invalid",
+            Self::JournalSignatureInvalid => "native-session effect journal signature is invalid",
+            Self::JournalInvalid => "native-session effect journal prefix is inconsistent",
             Self::ObservationInvalid => "native-session supervisor observation is inconsistent",
         })
     }
 }
 
 impl std::error::Error for NativeSessionForensicError {}
+
+/// Authenticated retained prefix of supported host-I/O provider crossings.
+/// An admitted call may not have entered its provider; a return marker does
+/// not certify its external effect. A prefix never establishes the newest
+/// state, process cleanup, all process-spawn effects, or complete guest history.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct VerifiedNativeSessionEffectJournal {
+    pub schema_version: &'static str,
+    pub scope: &'static str,
+    pub session_nonce: String,
+    pub product_root_key_id: String,
+    pub admission_sha256: String,
+    pub record_count: usize,
+    pub event_count: usize,
+    pub admitted_provider_calls: usize,
+    pub returned_provider_calls: usize,
+    pub indeterminate_provider_calls: usize,
+    pub head_record_sha256: String,
+    pub trailing_partial_record: bool,
+    pub replay_certified: bool,
+    pub quiescence_certified: bool,
+    pub historical_completeness: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EffectJournalRecord {
+    payload_json: String,
+    signature_hex: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EffectJournalPayload {
+    schema_version: String,
+    session_nonce: String,
+    product_root_key_id: String,
+    admission_sha256: String,
+    event_index: u64,
+    previous_record_sha256: String,
+    event: EffectJournalEvent,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum EffectJournalEvent {
+    Header {
+        scope: String,
+        event_cap: usize,
+        byte_cap: usize,
+    },
+    Admitted {
+        sequence: u64,
+        effect_kind: String,
+        request_hash: String,
+    },
+    ProviderReturned {
+        sequence: u64,
+    },
+}
+
+/// Verify a bounded, root-signed JSONL prefix against an independently selected
+/// session and admission commitment. The containing forensic verifier obtains
+/// those bindings from the authenticated original admission receipt.
+///
+/// # Errors
+/// Every newline-terminated record must verify. A final non-newline suffix is
+/// reported as torn and ignored only after a valid signed header and all prior
+/// records verify. An old valid prefix remains a prefix, never complete history.
+pub fn verify_native_session_effect_journal(
+    bytes: &[u8],
+    trusted_root: &VerifyingKey,
+    expected_nonce: &str,
+    admission_sha256: &str,
+) -> Result<VerifiedNativeSessionEffectJournal, NativeSessionForensicError> {
+    verify_effect_journal_prefix(bytes, trusted_root, expected_nonce, admission_sha256)
+        .map(|prefix| prefix.summary)
+}
+
+struct VerifiedEffectJournalPrefix {
+    summary: VerifiedNativeSessionEffectJournal,
+    entries: Vec<WalEntry>,
+}
+
+fn verify_effect_journal_prefix(
+    bytes: &[u8],
+    trusted_root: &VerifyingKey,
+    expected_nonce: &str,
+    admission_sha256: &str,
+) -> Result<VerifiedEffectJournalPrefix, NativeSessionForensicError> {
+    if bytes.len() > MAX_NATIVE_SESSION_EFFECT_JOURNAL_BYTES {
+        return Err(NativeSessionForensicError::InputTooLarge);
+    }
+    if !nonce_valid(expected_nonce) || !digest_valid(admission_sha256) {
+        return Err(NativeSessionForensicError::IdentityInvalid);
+    }
+    if trusted_root.is_weak() {
+        return Err(NativeSessionForensicError::SignerUntrusted);
+    }
+    let root_id = format!("ed25519:{}", hex::encode(trusted_root.as_bytes()));
+    let mut verified = VerifiedNativeSessionEffectJournal {
+        schema_version: NATIVE_SESSION_EFFECT_JOURNAL_SCHEMA,
+        scope: "host_io_provider_calls",
+        session_nonce: expected_nonce.to_owned(),
+        product_root_key_id: root_id,
+        admission_sha256: admission_sha256.to_owned(),
+        record_count: 0,
+        event_count: 0,
+        admitted_provider_calls: 0,
+        returned_provider_calls: 0,
+        indeterminate_provider_calls: 0,
+        head_record_sha256: "0".repeat(64),
+        trailing_partial_record: false,
+        replay_certified: false,
+        quiescence_certified: false,
+        historical_completeness: false,
+    };
+    let mut pending = None;
+    let mut entries = Vec::new();
+    for fragment in bytes.split_inclusive(|byte| *byte == b'\n') {
+        let terminated = fragment.last() == Some(&b'\n');
+        let raw = if terminated {
+            &fragment[..fragment.len() - 1]
+        } else {
+            fragment
+        };
+        if raw.len() > MAX_NATIVE_SESSION_EFFECT_JOURNAL_RECORD_BYTES {
+            return Err(NativeSessionForensicError::InputTooLarge);
+        }
+        if !terminated {
+            verified.trailing_partial_record = true;
+            break;
+        }
+        if verified.record_count > MAX_WAL_EVENTS {
+            return Err(NativeSessionForensicError::JournalInvalid);
+        }
+        let record: EffectJournalRecord =
+            decode(raw, MAX_NATIVE_SESSION_EFFECT_JOURNAL_RECORD_BYTES)?;
+        let payload: EffectJournalPayload = decode(
+            record.payload_json.as_bytes(),
+            MAX_NATIVE_SESSION_EFFECT_JOURNAL_RECORD_BYTES,
+        )?;
+        if payload.schema_version != NATIVE_SESSION_EFFECT_JOURNAL_SCHEMA {
+            return Err(NativeSessionForensicError::SchemaUnsupported);
+        }
+        if payload.product_root_key_id != verified.product_root_key_id {
+            return Err(NativeSessionForensicError::SignerUntrusted);
+        }
+        if payload.session_nonce != expected_nonce || payload.admission_sha256 != admission_sha256 {
+            return Err(NativeSessionForensicError::IdentityInvalid);
+        }
+        trusted_root
+            .verify_strict(
+                &signing_bytes(JOURNAL_SIGNATURE_DOMAIN, record.payload_json.as_bytes()),
+                &signature(&record.signature_hex)?,
+            )
+            .map_err(|_| NativeSessionForensicError::JournalSignatureInvalid)?;
+        if payload.event_index != verified.record_count as u64
+            || payload.previous_record_sha256 != verified.head_record_sha256
+        {
+            return Err(NativeSessionForensicError::JournalInvalid);
+        }
+        match payload.event {
+            EffectJournalEvent::Header {
+                scope,
+                event_cap,
+                byte_cap,
+            } => {
+                if verified.record_count != 0
+                    || scope != "host_io_provider_calls"
+                    || event_cap != MAX_WAL_EVENTS
+                    || byte_cap != MAX_NATIVE_SESSION_EFFECT_JOURNAL_BYTES
+                {
+                    return Err(NativeSessionForensicError::JournalInvalid);
+                }
+            }
+            EffectJournalEvent::Admitted {
+                sequence,
+                effect_kind,
+                request_hash,
+            } => {
+                if verified.record_count == 0
+                    || pending.is_some()
+                    || sequence != verified.admitted_provider_calls as u64
+                    || verified.admitted_provider_calls >= MAX_WAL_EVENTS / 2
+                    || effect_kind.trim().is_empty()
+                    || !prefixed_digest_valid(&request_hash)
+                {
+                    return Err(NativeSessionForensicError::JournalInvalid);
+                }
+                pending = Some(sequence);
+                verified.admitted_provider_calls += 1;
+                entries.push(WalEntry {
+                    sequence,
+                    effect_kind,
+                    request_hash,
+                    state: WalState::InterruptedIndeterminate,
+                });
+            }
+            EffectJournalEvent::ProviderReturned { sequence } => {
+                if verified.record_count == 0 || pending != Some(sequence) {
+                    return Err(NativeSessionForensicError::JournalInvalid);
+                }
+                pending = None;
+                verified.returned_provider_calls += 1;
+                if let Some(entry) = entries.last_mut() {
+                    entry.state = WalState::ProviderReturned;
+                }
+            }
+        }
+        verified.head_record_sha256 =
+            hex::encode(Sha256::digest(signing_bytes(JOURNAL_RECORD_DOMAIN, raw)));
+        verified.record_count += 1;
+    }
+    if verified.record_count == 0 {
+        return Err(NativeSessionForensicError::JournalInvalid);
+    }
+    verified.event_count = verified.record_count - 1;
+    verified.indeterminate_provider_calls = usize::from(pending.is_some());
+    Ok(VerifiedEffectJournalPrefix {
+        summary: verified,
+        entries,
+    })
+}
 
 fn required_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
 where
@@ -647,6 +895,46 @@ fn validate_outcome(
     Ok(())
 }
 
+fn validate_journal_outcome(
+    journal: &[WalEntry],
+    outcome: &Outcome,
+) -> Result<(), NativeSessionForensicError> {
+    let invalid = NativeSessionForensicError::JournalInvalid;
+    if !journal.is_empty()
+        && matches!(
+            outcome.effects,
+            EffectObservation::NotStarted | EffectObservation::NoAdmittedHostEffects
+        )
+    {
+        return Err(invalid);
+    }
+    let (observed, complete) = match (&outcome.effects, &outcome.panic_evidence) {
+        (_, Some(panic)) => (panic.host_effect_wal.as_slice(), true),
+        (EffectObservation::Interrupted { evidence }, _) => {
+            (evidence.entries.as_slice(), evidence.journal_complete)
+        }
+        _ => return Ok(()),
+    };
+    if complete && journal.len() > observed.len() {
+        return Err(invalid);
+    }
+    for (durable, observed) in journal.iter().zip(observed) {
+        if durable.sequence != observed.sequence
+            || durable.effect_kind != observed.effect_kind
+            || durable.request_hash != observed.request_hash
+            || (complete
+                && durable.state == WalState::ProviderReturned
+                && observed.state != WalState::ProviderReturned)
+        {
+            return Err(invalid);
+        }
+    }
+    // A failed response drain can seal an incomplete outcome while a journal
+    // append finishes. Later authenticated entries/returns do not repair that
+    // outcome or justify rejecting the independently valid retained prefix.
+    Ok(())
+}
+
 /// Verify original admission/outcome signatures without consulting a product
 /// workspace, executing a guest, or trusting an embedded key.
 ///
@@ -658,10 +946,22 @@ pub fn verify_native_session_forensics(
     input: &[u8],
     trusted_root: &VerifyingKey,
 ) -> Result<VerifiedNativeSessionForensics, NativeSessionForensicError> {
-    let bundle: NativeSessionForensicBundle = decode(input, MAX_NATIVE_SESSION_FORENSICS_BYTES)?;
-    if bundle.schema_version != NATIVE_SESSION_FORENSICS_SCHEMA {
-        return Err(NativeSessionForensicError::SchemaUnsupported);
-    }
+    let bundle: NativeSessionForensicBundle = decode(input, MAX_NATIVE_SESSION_FORENSICS_V2_BYTES)?;
+    let schema_version = match bundle.schema_version.as_str() {
+        NATIVE_SESSION_FORENSICS_SCHEMA => {
+            if input.len() > MAX_NATIVE_SESSION_FORENSICS_BYTES {
+                return Err(NativeSessionForensicError::InputTooLarge);
+            }
+            if bundle.journal_jsonl.is_some() {
+                return Err(NativeSessionForensicError::SchemaUnsupported);
+            }
+            NATIVE_SESSION_FORENSICS_SCHEMA
+        }
+        NATIVE_SESSION_FORENSICS_V2_SCHEMA if bundle.journal_jsonl.is_some() => {
+            NATIVE_SESSION_FORENSICS_V2_SCHEMA
+        }
+        _ => return Err(NativeSessionForensicError::SchemaUnsupported),
+    };
     let admission: Admission = decode(bundle.admission_json.as_bytes(), MAX_ADMISSION_BYTES)?;
     validate_admission(&admission)?;
     let receipt = &bundle.admission_receipt;
@@ -706,8 +1006,21 @@ pub fn verify_native_session_forensics(
         )
         .map_err(|_| NativeSessionForensicError::AdmissionSignatureInvalid)?;
 
+    let durable_journal = bundle
+        .journal_jsonl
+        .as_deref()
+        .map(|journal| {
+            verify_effect_journal_prefix(
+                journal.as_bytes(),
+                trusted_root,
+                &admission.session_nonce,
+                &receipt.admission_sha256,
+            )
+        })
+        .transpose()?;
+
     let mut verified = VerifiedNativeSessionForensics {
-        schema_version: NATIVE_SESSION_FORENSICS_SCHEMA,
+        schema_version,
         scope: "authenticated_supervisor_observations",
         session_nonce: admission.session_nonce.clone(),
         product_root_key_id: admission.product_root_key_id.clone(),
@@ -726,6 +1039,9 @@ pub fn verify_native_session_forensics(
         final_ledger_effect_count: None,
         failed_effect_count: None,
         journal_complete: None,
+        durable_journal: durable_journal
+            .as_ref()
+            .map(|prefix| prefix.summary.clone()),
         replay_certified: false,
         quiescence_certified: false,
         historical_completeness: false,
@@ -752,6 +1068,9 @@ pub fn verify_native_session_forensics(
             )
             .map_err(|_| NativeSessionForensicError::OutcomeSignatureInvalid)?;
         validate_outcome(&admission, &payload.outcome)?;
+        if let Some(prefix) = &durable_journal {
+            validate_journal_outcome(&prefix.entries, &payload.outcome)?;
+        }
         let outcome = &payload.outcome;
         verified.observed_at = Some(outcome.observed_at.clone());
         verified.outcome_kind = outcome.kind.label();
@@ -878,6 +1197,7 @@ mod tests {
                 signature_hex: String::new(),
             },
             outcome: None,
+            journal_jsonl: None,
         };
         issue_admission(&mut bundle, &key);
         (key, bundle)
@@ -1288,7 +1608,7 @@ mod tests {
         }
         assert_eq!(
             verify_native_session_forensics(
-                &vec![b' '; MAX_NATIVE_SESSION_FORENSICS_BYTES + 1],
+                &vec![b' '; MAX_NATIVE_SESSION_FORENSICS_V2_BYTES + 1],
                 &root
             )
             .unwrap_err(),
@@ -1353,5 +1673,589 @@ mod tests {
             issue_admission(&mut changed, &key);
             assert_eq!(verify_bundle(&changed, &key).is_ok(), accepted);
         }
+    }
+
+    fn journal_line(key: &SigningKey, payload: &str) -> String {
+        let signature = sign(
+            key,
+            b"franken-node/native-effect-journal-signature/v1\0",
+            payload,
+        );
+        format!(
+            "{{\"payload_json\":{},\"signature_hex\":\"{signature}\"}}",
+            serde_json::to_string(payload).unwrap()
+        )
+    }
+
+    fn journal_hash(line: &str) -> String {
+        hex::encode(Sha256::digest(
+            [
+                b"franken-node/native-effect-journal-record/v1\0".as_slice(),
+                &(line.len() as u64).to_be_bytes(),
+                line.as_bytes(),
+            ]
+            .concat(),
+        ))
+    }
+
+    fn append_journal_event(journal: &mut String, key: &SigningKey, binding: &str, event: Value) {
+        let index = journal.lines().count();
+        let previous = journal
+            .lines()
+            .last()
+            .map(journal_hash)
+            .unwrap_or_else(|| "0".repeat(64));
+        let payload = json!({
+            "schema_version":"franken-node/native-effect-journal-record/v1",
+            "session_nonce":NONCE,
+            "product_root_key_id":format!("ed25519:{}", hex::encode(key.verifying_key().as_bytes())),
+            "admission_sha256":binding,
+            "event_index":index,
+            "previous_record_sha256":previous,
+            "event":event,
+        });
+        journal.push_str(&journal_line(key, &payload.to_string()));
+        journal.push('\n');
+    }
+
+    fn journal_header(key: &SigningKey, binding: &str) -> String {
+        let mut journal = String::new();
+        append_journal_event(
+            &mut journal,
+            key,
+            binding,
+            json!({
+                "kind":"header", "scope":"host_io_provider_calls", "event_cap":2048, "byte_cap":4194304,
+            }),
+        );
+        journal
+    }
+
+    fn journal_admission(sequence: usize) -> Value {
+        json!({"kind":"admitted","sequence":sequence,"effect_kind":"http",
+            "request_hash":format!("sha256:{}", "a".repeat(64))})
+    }
+
+    #[test]
+    fn durable_journal_preserves_admission_without_claiming_provider_execution_or_completion() {
+        let (key, mut bundle) = pending_fixture();
+        let binding = bundle.admission_receipt.admission_sha256.clone();
+        let mut journal = journal_header(&key, &binding);
+        append_journal_event(&mut journal, &key, &binding, journal_admission(0));
+        bundle.schema_version = NATIVE_SESSION_FORENSICS_V2_SCHEMA.into();
+        bundle.journal_jsonl = Some(journal.clone());
+        let verified = verify_bundle(&bundle, &key).unwrap();
+        assert_eq!(verified.schema_version, NATIVE_SESSION_FORENSICS_V2_SCHEMA);
+        assert_eq!(verified.outcome_kind, "pending");
+        assert_eq!(verified.process_observation, None);
+        assert_eq!(verified.completed_provider_calls, None);
+        assert_eq!(verified.indeterminate_provider_calls, None);
+        let prefix = verified.durable_journal.unwrap();
+        assert_eq!(prefix.record_count, 2);
+        assert_eq!(prefix.admitted_provider_calls, 1);
+        assert_eq!(prefix.returned_provider_calls, 0);
+        assert_eq!(prefix.indeterminate_provider_calls, 1);
+        assert!(!prefix.trailing_partial_record);
+        assert!(
+            !prefix.replay_certified
+                && !prefix.quiescence_certified
+                && !prefix.historical_completeness
+        );
+        assert_eq!(
+            prefix.head_record_sha256,
+            journal_hash(journal.lines().last().unwrap())
+        );
+        // Cancellation after durable admission but before the provider starts
+        // has precisely this prefix: no return or zero-effects claim is added.
+        assert_eq!(prefix.scope, "host_io_provider_calls");
+        append_journal_event(
+            &mut journal,
+            &key,
+            &binding,
+            json!({"kind":"provider_returned","sequence":0}),
+        );
+        append_journal_event(&mut journal, &key, &binding, journal_admission(1));
+        let prefix = verify_native_session_effect_journal(
+            journal.as_bytes(),
+            &key.verifying_key(),
+            NONCE,
+            &binding,
+        )
+        .unwrap();
+        assert_eq!(prefix.event_count, 3);
+        assert_eq!(prefix.returned_provider_calls, 1);
+        assert_eq!(prefix.indeterminate_provider_calls, 1);
+    }
+
+    #[test]
+    fn durable_journal_torn_tail_needs_verified_header_and_never_hides_complete_corruption() {
+        let (key, bundle) = pending_fixture();
+        let binding = &bundle.admission_receipt.admission_sha256;
+        let header = journal_header(&key, binding);
+        let mut complete = header.clone();
+        append_journal_event(&mut complete, &key, binding, journal_admission(0));
+        let suffix = &complete[header.len()..];
+        // Exercise every byte boundary in a genuine signed admission record.
+        for length in 1..suffix.len() {
+            let mut torn = header.as_bytes().to_vec();
+            torn.extend_from_slice(&suffix.as_bytes()[..length]);
+            let verified =
+                verify_native_session_effect_journal(&torn, &key.verifying_key(), NONCE, binding)
+                    .unwrap();
+            assert!(verified.trailing_partial_record, "tail length {length}");
+            assert_eq!(verified.event_count, 0);
+            assert_eq!(verified.admitted_provider_calls, 0);
+        }
+        for invalid in [
+            b"".as_slice(),
+            b"{partial".as_slice(),
+            header.trim_end().as_bytes(),
+        ] {
+            assert!(
+                verify_native_session_effect_journal(invalid, &key.verifying_key(), NONCE, binding)
+                    .is_err()
+            );
+        }
+        for suffix in [b"{partial\n".as_slice(), b"{}\n", b"\n", b"\xff\n"] {
+            let mut invalid = header.as_bytes().to_vec();
+            invalid.extend_from_slice(suffix);
+            assert!(
+                verify_native_session_effect_journal(
+                    &invalid,
+                    &key.verifying_key(),
+                    NONCE,
+                    binding
+                )
+                .is_err()
+            );
+        }
+        let mut invalid_header: Value = serde_json::from_str(header.trim_end()).unwrap();
+        invalid_header["signature_hex"] = json!("00".repeat(64));
+        let invalid = format!("{invalid_header}\n{{partial");
+        assert_eq!(
+            verify_native_session_effect_journal(
+                invalid.as_bytes(),
+                &key.verifying_key(),
+                NONCE,
+                binding
+            )
+            .unwrap_err(),
+            NativeSessionForensicError::JournalSignatureInvalid
+        );
+    }
+
+    #[test]
+    fn durable_journal_authenticates_every_record_binding_and_original_bytes() {
+        let (key, bundle) = pending_fixture();
+        let binding = &bundle.admission_receipt.admission_sha256;
+        let mut journal = journal_header(&key, binding);
+        append_journal_event(&mut journal, &key, binding, journal_admission(0));
+        let root = key.verifying_key();
+        assert!(
+            verify_native_session_effect_journal(
+                journal.as_bytes(),
+                &SigningKey::from_bytes(&[43; 32]).verifying_key(),
+                NONCE,
+                binding
+            )
+            .is_err()
+        );
+        assert!(
+            verify_native_session_effect_journal(
+                journal.as_bytes(),
+                &root,
+                "019a7f53-c180-7001-8001-000000000002",
+                binding
+            )
+            .is_err()
+        );
+        assert!(
+            verify_native_session_effect_journal(journal.as_bytes(), &root, NONCE, &"b".repeat(64))
+                .is_err()
+        );
+        let lines = journal.lines().collect::<Vec<_>>();
+        let reordered = format!("{}\n{}\n", lines[1], lines[0]);
+        let omitted = format!("{}\n", lines[1]);
+        let duplicated = format!("{}\n{}\n{}\n", lines[0], lines[1], lines[1]);
+        // Altering only the outer envelope spelling changes the chained hash.
+        let respelled = format!(" {}\n{}\n", lines[0], lines[1]);
+        for invalid in [reordered, omitted, duplicated, respelled] {
+            assert_eq!(
+                verify_native_session_effect_journal(invalid.as_bytes(), &root, NONCE, binding)
+                    .unwrap_err(),
+                NativeSessionForensicError::JournalInvalid
+            );
+        }
+        for (field, value) in [
+            (
+                "session_nonce",
+                json!("019a7f53-c180-7001-8001-000000000002"),
+            ),
+            ("admission_sha256", json!("b".repeat(64))),
+            ("event_index", json!(9)),
+            ("previous_record_sha256", json!("f".repeat(64))),
+        ] {
+            let envelope: Value = serde_json::from_str(lines[1]).unwrap();
+            let mut payload: Value =
+                serde_json::from_str(envelope["payload_json"].as_str().unwrap()).unwrap();
+            payload[field] = value;
+            let invalid = format!(
+                "{}\n{}\n",
+                lines[0],
+                journal_line(&key, &payload.to_string())
+            );
+            assert!(
+                verify_native_session_effect_journal(invalid.as_bytes(), &root, NONCE, binding)
+                    .is_err(),
+                "signed {field}"
+            );
+        }
+        let mut envelope: Value = serde_json::from_str(lines[1]).unwrap();
+        envelope["payload_json"] =
+            json!(format!("{} ", envelope["payload_json"].as_str().unwrap()));
+        let tampered = format!("{}\n{envelope}\n", lines[0]);
+        assert_eq!(
+            verify_native_session_effect_journal(tampered.as_bytes(), &root, NONCE, binding)
+                .unwrap_err(),
+            NativeSessionForensicError::JournalSignatureInvalid
+        );
+    }
+
+    #[test]
+    fn durable_journal_rejects_signed_impossible_protocol_states() {
+        let (key, bundle) = pending_fixture();
+        let binding = &bundle.admission_receipt.admission_sha256;
+        for case in 0..10 {
+            let mut journal = journal_header(&key, binding);
+            match case {
+                0 => append_journal_event(
+                    &mut journal,
+                    &key,
+                    binding,
+                    json!({"kind":"provider_returned","sequence":0}),
+                ),
+                1 => append_journal_event(&mut journal, &key, binding, journal_admission(1)),
+                2 => {
+                    append_journal_event(&mut journal, &key, binding, journal_admission(0));
+                    append_journal_event(&mut journal, &key, binding, journal_admission(1));
+                }
+                3 => {
+                    append_journal_event(&mut journal, &key, binding, journal_admission(0));
+                    append_journal_event(
+                        &mut journal,
+                        &key,
+                        binding,
+                        json!({"kind":"provider_returned","sequence":1}),
+                    );
+                }
+                4 | 5 => {
+                    let mut event = journal_admission(0);
+                    event[if case == 4 {
+                        "effect_kind"
+                    } else {
+                        "request_hash"
+                    }] = json!("");
+                    append_journal_event(&mut journal, &key, binding, event);
+                }
+                6 => append_journal_event(
+                    &mut journal,
+                    &key,
+                    binding,
+                    json!({"kind":"header","scope":"host_io_provider_calls","event_cap":2048,"byte_cap":4194304}),
+                ),
+                7..=9 => {
+                    journal.clear();
+                    let mut header = json!({"kind":"header","scope":"host_io_provider_calls","event_cap":2048,"byte_cap":4194304});
+                    header[match case {
+                        7 => "scope",
+                        8 => "event_cap",
+                        _ => "byte_cap",
+                    }] = if case == 7 {
+                        json!("all_guest_effects")
+                    } else {
+                        json!(4096)
+                    };
+                    append_journal_event(&mut journal, &key, binding, header);
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                verify_native_session_effect_journal(
+                    journal.as_bytes(),
+                    &key.verifying_key(),
+                    NONCE,
+                    binding
+                )
+                .unwrap_err(),
+                NativeSessionForensicError::JournalInvalid,
+                "case {case}"
+            );
+        }
+    }
+
+    #[test]
+    fn durable_journal_rejects_duplicate_keys_unknown_fields_and_byte_caps() {
+        let (key, bundle) = pending_fixture();
+        let binding = &bundle.admission_receipt.admission_sha256;
+        let header = journal_header(&key, binding);
+        let envelope: Value = serde_json::from_str(header.trim_end()).unwrap();
+        let payload = envelope["payload_json"].as_str().unwrap();
+        for bad_payload in [
+            payload.replacen('{', "{\"session_nonce\":\"ignored\",", 1),
+            payload.replacen(
+                "\"event_cap\":2048",
+                "\"event_cap\":2048,\"event_\\u0063ap\":2048",
+                1,
+            ),
+            payload.replacen('{', "{\"unknown\":true,", 1),
+            payload.replacen("\"scope\":", "\"unknown\":true,\"scope\":", 1),
+        ] {
+            let bad = format!("{}\n", journal_line(&key, &bad_payload));
+            assert_eq!(
+                verify_native_session_effect_journal(
+                    bad.as_bytes(),
+                    &key.verifying_key(),
+                    NONCE,
+                    binding
+                )
+                .unwrap_err(),
+                NativeSessionForensicError::JsonInvalid
+            );
+        }
+        let duplicate_outer = header.replacen('{', "{\"signature_hex\":\"ignored\",", 1);
+        assert_eq!(
+            verify_native_session_effect_journal(
+                duplicate_outer.as_bytes(),
+                &key.verifying_key(),
+                NONCE,
+                binding
+            )
+            .unwrap_err(),
+            NativeSessionForensicError::JsonInvalid
+        );
+        for bad in [
+            vec![b' '; MAX_NATIVE_SESSION_EFFECT_JOURNAL_BYTES + 1],
+            format!(
+                "{header}{}",
+                "x".repeat(MAX_NATIVE_SESSION_EFFECT_JOURNAL_RECORD_BYTES + 1)
+            )
+            .into_bytes(),
+        ] {
+            assert_eq!(
+                verify_native_session_effect_journal(&bad, &key.verifying_key(), NONCE, binding)
+                    .unwrap_err(),
+                NativeSessionForensicError::InputTooLarge
+            );
+        }
+    }
+
+    #[test]
+    fn forensic_versions_require_journal_attachment_and_keep_distinct_byte_limits() {
+        let (key, mut bundle) = pending_fixture();
+        let mut explicit_null = serde_json::to_value(&bundle).unwrap();
+        explicit_null["journal_jsonl"] = Value::Null;
+        assert_eq!(
+            verify_native_session_forensics(
+                &serde_json::to_vec(&explicit_null).unwrap(),
+                &key.verifying_key()
+            )
+            .unwrap_err(),
+            NativeSessionForensicError::JsonInvalid
+        );
+        let journal = journal_header(&key, &bundle.admission_receipt.admission_sha256);
+        bundle.journal_jsonl = Some(journal);
+        assert_eq!(
+            verify_bundle(&bundle, &key).unwrap_err(),
+            NativeSessionForensicError::SchemaUnsupported
+        );
+        bundle.schema_version = NATIVE_SESSION_FORENSICS_V2_SCHEMA.into();
+        assert!(verify_bundle(&bundle, &key).is_ok());
+        let mut v2 = serde_json::to_vec(&bundle).unwrap();
+        v2.resize(MAX_NATIVE_SESSION_FORENSICS_BYTES + 1, b' ');
+        assert!(verify_native_session_forensics(&v2, &key.verifying_key()).is_ok());
+        bundle.journal_jsonl = None;
+        assert_eq!(
+            verify_bundle(&bundle, &key).unwrap_err(),
+            NativeSessionForensicError::SchemaUnsupported
+        );
+        bundle.schema_version = NATIVE_SESSION_FORENSICS_SCHEMA.into();
+        let mut v1 = serde_json::to_vec(&bundle).unwrap();
+        v1.resize(MAX_NATIVE_SESSION_FORENSICS_BYTES + 1, b' ');
+        assert_eq!(
+            verify_native_session_forensics(&v1, &key.verifying_key()).unwrap_err(),
+            NativeSessionForensicError::InputTooLarge
+        );
+    }
+
+    #[test]
+    fn durable_journal_accepts_record_and_event_boundaries_and_rejects_overflow() {
+        let (key, bundle) = pending_fixture();
+        let binding = &bundle.admission_receipt.admission_sha256;
+        let header = journal_header(&key, binding);
+        let line = header.trim_end_matches('\n');
+        for (extra, accepted) in [(0, true), (1, false)] {
+            let bounded = format!(
+                "{}{line}\n",
+                " ".repeat(MAX_NATIVE_SESSION_EFFECT_JOURNAL_RECORD_BYTES - line.len() + extra)
+            );
+            assert_eq!(
+                verify_native_session_effect_journal(
+                    bounded.as_bytes(),
+                    &key.verifying_key(),
+                    NONCE,
+                    binding
+                )
+                .is_ok(),
+                accepted
+            );
+        }
+        let mut journal = header;
+        for sequence in 0..1024 {
+            append_journal_event(&mut journal, &key, binding, journal_admission(sequence));
+            append_journal_event(
+                &mut journal,
+                &key,
+                binding,
+                json!({"kind":"provider_returned","sequence":sequence}),
+            );
+        }
+        let verified = verify_native_session_effect_journal(
+            journal.as_bytes(),
+            &key.verifying_key(),
+            NONCE,
+            binding,
+        )
+        .unwrap();
+        assert_eq!(verified.record_count, 2049);
+        assert_eq!(verified.event_count, 2048);
+        assert_eq!(verified.returned_provider_calls, 1024);
+        append_journal_event(&mut journal, &key, binding, journal_admission(1024));
+        assert_eq!(
+            verify_native_session_effect_journal(
+                journal.as_bytes(),
+                &key.verifying_key(),
+                NONCE,
+                binding
+            )
+            .unwrap_err(),
+            NativeSessionForensicError::JournalInvalid
+        );
+    }
+
+    #[test]
+    fn forensic_journal_rejects_contradictions_with_complete_signed_outcome_wal() {
+        let (key, mut bundle) = pending_fixture();
+        let binding = bundle.admission_receipt.admission_sha256.clone();
+        let mut journal = journal_header(&key, &binding);
+        append_journal_event(&mut journal, &key, &binding, journal_admission(0));
+        append_journal_event(
+            &mut journal,
+            &key,
+            &binding,
+            json!({"kind":"provider_returned","sequence":0}),
+        );
+        bundle.schema_version = NATIVE_SESSION_FORENSICS_V2_SCHEMA.into();
+        bundle.journal_jsonl = Some(journal.clone());
+        issue_outcome(&mut bundle, &key, panic_outcome("private panic"));
+        assert!(verify_bundle(&bundle, &key).is_ok());
+        for case in 0..4 {
+            let mut outcome = panic_outcome("private panic");
+            match case {
+                0 => {
+                    outcome["panic_evidence"]["host_effect_wal"][0]["request_hash"] =
+                        json!(format!("sha256:{}", "b".repeat(64)))
+                }
+                1 => outcome["panic_evidence"]["host_effect_wal"] = json!([]),
+                2 => {
+                    outcome["effects"] = json!({"kind":"no_admitted_host_effects"});
+                    outcome["panic_evidence"]["host_effect_wal"] = json!([]);
+                }
+                3 => {
+                    outcome = json!({"observed_at":"2026-11-14T12:00:01Z","kind":"supervision_incomplete","process":"not_spawned","containment_empty_observed":false,"effects":{"kind":"not_started"}})
+                }
+                _ => unreachable!(),
+            }
+            issue_outcome(&mut bundle, &key, outcome);
+            assert_eq!(
+                verify_bundle(&bundle, &key).unwrap_err(),
+                NativeSessionForensicError::JournalInvalid,
+                "case {case}"
+            );
+        }
+        append_journal_event(&mut journal, &key, &binding, journal_admission(1));
+        bundle.journal_jsonl = Some(journal.clone());
+        issue_outcome(&mut bundle, &key, interrupted());
+        assert!(verify_bundle(&bundle, &key).is_ok());
+        let mut shorter = interrupted();
+        shorter["effects"]["evidence"]["entries"]
+            .as_array_mut()
+            .unwrap()
+            .truncate(1);
+        shorter["effects"]["evidence"]["interrupted_effect_count"] = json!(0);
+        issue_outcome(&mut bundle, &key, shorter);
+        assert_eq!(
+            verify_bundle(&bundle, &key).unwrap_err(),
+            NativeSessionForensicError::JournalInvalid
+        );
+        append_journal_event(
+            &mut journal,
+            &key,
+            &binding,
+            json!({"kind":"provider_returned","sequence":1}),
+        );
+        bundle.journal_jsonl = Some(journal);
+        issue_outcome(&mut bundle, &key, interrupted());
+        assert_eq!(
+            verify_bundle(&bundle, &key).unwrap_err(),
+            NativeSessionForensicError::JournalInvalid
+        );
+    }
+
+    #[test]
+    fn forensic_journal_allows_later_prefix_after_incomplete_or_unknown_outcome() {
+        let (key, mut bundle) = pending_fixture();
+        let binding = bundle.admission_receipt.admission_sha256.clone();
+        let mut journal = journal_header(&key, &binding);
+        for sequence in 0..2 {
+            append_journal_event(&mut journal, &key, &binding, journal_admission(sequence));
+            append_journal_event(
+                &mut journal,
+                &key,
+                &binding,
+                json!({"kind":"provider_returned","sequence":sequence}),
+            );
+        }
+        bundle.schema_version = NATIVE_SESSION_FORENSICS_V2_SCHEMA.into();
+        bundle.journal_jsonl = Some(journal);
+        let mut incomplete = interrupted();
+        incomplete["effects"]["evidence"]["journal_complete"] = json!(false);
+        incomplete["effects"]["evidence"]["protocol_error"] =
+            json!("response drain ended before the journal append finished");
+        issue_outcome(&mut bundle, &key, incomplete.clone());
+        let verified = verify_bundle(&bundle, &key).unwrap();
+        assert_eq!(verified.indeterminate_provider_calls, Some(1));
+        assert_eq!(verified.durable_journal.unwrap().returned_provider_calls, 2);
+        let mut conflict = incomplete.clone();
+        conflict["effects"]["evidence"]["entries"][0]["request_hash"] =
+            json!(format!("sha256:{}", "b".repeat(64)));
+        issue_outcome(&mut bundle, &key, conflict);
+        assert_eq!(
+            verify_bundle(&bundle, &key).unwrap_err(),
+            NativeSessionForensicError::JournalInvalid
+        );
+        incomplete["effects"]["evidence"]["entries"] = json!([]);
+        incomplete["effects"]["evidence"]["completed_effect_count"] = json!(0);
+        incomplete["effects"]["evidence"]["interrupted_effect_count"] = json!(0);
+        issue_outcome(&mut bundle, &key, incomplete);
+        assert!(verify_bundle(&bundle, &key).is_ok());
+        issue_outcome(
+            &mut bundle,
+            &key,
+            json!({"observed_at":"2026-11-14T12:00:01Z","kind":"supervision_incomplete","process":"unproven","containment_empty_observed":false,"effects":{"kind":"unknown"}}),
+        );
+        let verified = verify_bundle(&bundle, &key).unwrap();
+        assert_eq!(verified.completed_provider_calls, None);
+        assert_eq!(verified.durable_journal.unwrap().returned_provider_calls, 2);
+        assert!(!verified.replay_certified && !verified.quiescence_certified);
     }
 }

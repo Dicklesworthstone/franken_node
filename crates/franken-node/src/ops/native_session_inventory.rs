@@ -3198,6 +3198,7 @@ fn export_native_session_forensics_at(
     )?;
     let bundle = NativeSessionForensicBundle {
         schema_version: NATIVE_SESSION_FORENSICS_SCHEMA.to_owned(),
+        journal_jsonl: None,
         admission_json: bounded_json(&admission, MAX_ADMISSION_BYTES)?,
         admission_receipt: NativeSessionForensicAdmissionReceipt {
             schema_version: receipt.schema_version,

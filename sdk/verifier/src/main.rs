@@ -19,7 +19,8 @@ use frankenengine_verifier_sdk::incident_bundle::{
     verify_incident_bundle_with_runtime_keys,
 };
 use frankenengine_verifier_sdk::native_session::{
-    MAX_NATIVE_SESSION_FORENSICS_BYTES, NativeSessionForensicError, verify_native_session_forensics,
+    MAX_NATIVE_SESSION_FORENSICS_V2_BYTES, NativeSessionForensicError,
+    verify_native_session_forensics,
 };
 use frankenengine_verifier_sdk::publisher_source::{
     MAX_PUBLISHER_SOURCE_INPUT_BYTES, MAX_PUBLISHER_SOURCE_TRUST_INPUT_BYTES, PublisherSourceError,
@@ -365,7 +366,9 @@ fn native_session_failure(error: NativeSessionForensicError) -> Failure {
         NativeSessionForensicError::AdmissionHashMismatch => "INTEGRITY_MISMATCH",
         NativeSessionForensicError::SignatureMalformed => "SIGNATURE_MALFORMED",
         NativeSessionForensicError::AdmissionSignatureInvalid
-        | NativeSessionForensicError::OutcomeSignatureInvalid => "SIGNATURE_INVALID",
+        | NativeSessionForensicError::OutcomeSignatureInvalid
+        | NativeSessionForensicError::JournalSignatureInvalid => "SIGNATURE_INVALID",
+        NativeSessionForensicError::JournalInvalid => "JOURNAL_INVALID",
         NativeSessionForensicError::ObservationInvalid => "OBSERVATION_INVALID",
     };
     failure(
@@ -761,7 +764,7 @@ fn verify(request: &Request, bytes: &[u8]) -> Result<Value, Failure> {
 fn run(args: &[String], input: &mut impl Read) -> Result<Value, Failure> {
     let request = arguments(args)?;
     let input_limit = match request.format.as_str() {
-        "native-session-forensics" => MAX_NATIVE_SESSION_FORENSICS_BYTES,
+        "native-session-forensics" => MAX_NATIVE_SESSION_FORENSICS_V2_BYTES,
         "publisher-source" => MAX_PUBLISHER_SOURCE_INPUT_BYTES,
         "publisher-source-trust" => MAX_PUBLISHER_SOURCE_TRUST_INPUT_BYTES,
         _ => MAX_INCIDENT_BUNDLE_BYTES,
@@ -779,7 +782,7 @@ fn run(args: &[String], input: &mut impl Read) -> Result<Value, Failure> {
         return Err(failure(
             "INPUT_TOO_LARGE",
             if request.format == "native-session-forensics" {
-                "native-session forensic evidence exceeds the 16 MiB input limit"
+                "native-session forensic evidence exceeds the 32 MiB input limit"
             } else if matches!(
                 request.format.as_str(),
                 "publisher-source" | "publisher-source-trust"
@@ -906,6 +909,7 @@ mod tests {
             admission_json,
             admission_receipt,
             outcome,
+            journal_jsonl: None,
         };
         (serde_json::to_vec(&bundle).unwrap(), public_key)
     }
@@ -958,14 +962,76 @@ mod tests {
             request.extend([option.to_owned(), key.clone()]);
             assert_eq!(arguments(&request).unwrap_err().code, "USAGE");
         }
-        let oversized = vec![b' '; MAX_NATIVE_SESSION_FORENSICS_BYTES + 1];
+        let oversized = vec![b' '; MAX_NATIVE_SESSION_FORENSICS_V2_BYTES + 1];
         let error = run(
             &args("native-session-forensics", &key),
             &mut oversized.as_slice(),
         )
         .unwrap_err();
         assert_eq!(error.code, "INPUT_TOO_LARGE");
-        assert!(error.message.contains("16 MiB"));
+        assert!(error.message.contains("32 MiB"));
+    }
+
+    #[test]
+    fn cli_native_session_v2_authenticates_retained_journal_without_promoting_pending() {
+        use ed25519_dalek::{Signer as _, SigningKey};
+        use frankenengine_verifier_sdk::native_session::{
+            NATIVE_SESSION_FORENSICS_V2_SCHEMA, NativeSessionForensicBundle,
+        };
+        let (bytes, anchor) = native_session_fixture(false);
+        let mut bundle: NativeSessionForensicBundle = serde_json::from_slice(&bytes).unwrap();
+        let receipt = &bundle.admission_receipt;
+        let payload = json!({
+            "schema_version":"franken-node/native-effect-journal-record/v1",
+            "session_nonce":receipt.session_nonce,
+            "product_root_key_id":receipt.product_root_key_id,
+            "admission_sha256":receipt.admission_sha256,
+            "event_index":0,"previous_record_sha256":"0".repeat(64),
+            "event":{"kind":"header","scope":"host_io_provider_calls","event_cap":2048,"byte_cap":4194304},
+        }).to_string();
+        let signed = [
+            b"franken-node/native-effect-journal-signature/v1\0".as_slice(),
+            &(payload.len() as u64).to_be_bytes(),
+            payload.as_bytes(),
+        ]
+        .concat();
+        let signature = SigningKey::from_bytes(&[71; 32]).sign(&signed);
+        let journal = format!(
+            "{}\nprivate torn diagnostic",
+            json!({"payload_json":payload,"signature_hex":hex::encode(signature.to_bytes())})
+        );
+        bundle.schema_version = NATIVE_SESSION_FORENSICS_V2_SCHEMA.into();
+        bundle.journal_jsonl = Some(journal);
+        let encoded = serde_json::to_vec(&bundle).unwrap();
+        let verified = run(
+            &args("native-session-forensics", &anchor),
+            &mut encoded.as_slice(),
+        )
+        .unwrap();
+        assert_eq!(verified["verdict"], "verified");
+        assert_eq!(verified["facts"]["outcome_kind"], "pending");
+        assert!(verified["facts"]["completed_provider_calls"].is_null());
+        assert_eq!(verified["facts"]["durable_journal"]["record_count"], 1);
+        assert_eq!(
+            verified["facts"]["durable_journal"]["trailing_partial_record"],
+            true
+        );
+        assert_eq!(
+            verified["facts"]["durable_journal"]["historical_completeness"],
+            false
+        );
+        assert!(!verified.to_string().contains("private torn diagnostic"));
+        bundle.journal_jsonl.as_mut().unwrap().push('\n');
+        let encoded = serde_json::to_vec(&bundle).unwrap();
+        assert_eq!(
+            run(
+                &args("native-session-forensics", &anchor),
+                &mut encoded.as_slice()
+            )
+            .unwrap_err()
+            .code,
+            "JSON_INVALID"
+        );
     }
 
     #[test]
