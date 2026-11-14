@@ -2165,7 +2165,9 @@ pub fn order_statistic_quantile_ci(samples_ms: &[f64], quantile: f64) -> Option<
         || samples_ms.len() > MAX_RAW_BENCHMARK_SAMPLES
         || !quantile.is_finite()
         || !(0.0..=1.0).contains(&quantile)
-        || samples_ms.iter().any(|value| !value.is_finite() || *value < 0.0)
+        || samples_ms
+            .iter()
+            .any(|value| !value.is_finite() || *value < 0.0)
     {
         return None;
     }
@@ -2181,8 +2183,14 @@ pub fn order_statistic_quantile_ci(samples_ms: &[f64], quantile: f64) -> Option<
     Some(QuantileEstimate {
         quantile,
         point_ms,
-        lower_95_ms: lower.checked_sub(1).and_then(|rank| sorted.get(rank)).copied(),
-        upper_95_ms: upper.checked_sub(1).and_then(|rank| sorted.get(rank)).copied(),
+        lower_95_ms: lower
+            .checked_sub(1)
+            .and_then(|rank| sorted.get(rank))
+            .copied(),
+        upper_95_ms: upper
+            .checked_sub(1)
+            .and_then(|rank| sorted.get(rank))
+            .copied(),
     })
 }
 
@@ -2339,9 +2347,15 @@ fn triad_pairwise_comparisons(legs: &[TriadLegResult]) -> Vec<TriadPairwiseCompa
             let baseline = &legs[j];
             let (candidate_wins, baseline_wins, ties, p_value) =
                 paired_sign_test(&candidate.samples_ms, &baseline.samples_ms);
-            let separated = candidate.p50.upper_95_ms.zip(baseline.p50.lower_95_ms)
+            let separated = candidate
+                .p50
+                .upper_95_ms
+                .zip(baseline.p50.lower_95_ms)
                 .is_some_and(|(upper, lower)| upper < lower)
-                || baseline.p50.upper_95_ms.zip(candidate.p50.lower_95_ms)
+                || baseline
+                    .p50
+                    .upper_95_ms
+                    .zip(candidate.p50.lower_95_ms)
                     .is_some_and(|(upper, lower)| upper < lower);
             comparisons.push(TriadPairwiseComparison {
                 candidate: candidate.runtime,
@@ -2362,15 +2376,16 @@ fn triad_pairwise_comparisons(legs: &[TriadLegResult]) -> Vec<TriadPairwiseCompa
     }
     let mut order: Vec<usize> = (0..comparisons.len()).collect();
     order.sort_by(|left, right| {
-        comparisons[*left].paired_sign_test_p_value
+        comparisons[*left]
+            .paired_sign_test_p_value
             .total_cmp(&comparisons[*right].paired_sign_test_p_value)
     });
     let mut previous_adjusted = 0.0_f64;
     for (rank, index) in order.into_iter().enumerate() {
         let remaining = (comparisons.len() - rank) as f64;
         let comparison = &mut comparisons[index];
-        let adjusted = (comparison.paired_sign_test_p_value * remaining)
-            .clamp(previous_adjusted, 1.0);
+        let adjusted =
+            (comparison.paired_sign_test_p_value * remaining).clamp(previous_adjusted, 1.0);
         comparison.holm_adjusted_p_value = adjusted;
         comparison.holm_bonferroni_alpha = 0.05 / remaining;
         comparison.reject_equal_paired_performance_at_05 = adjusted <= 0.05;
@@ -2380,8 +2395,17 @@ fn triad_pairwise_comparisons(legs: &[TriadLegResult]) -> Vec<TriadPairwiseCompa
 }
 
 fn native_triad_prefix() -> Vec<String> {
-    ["run", "--runtime", "franken-engine", "--policy", "balanced", "--console-only"]
-        .into_iter().map(str::to_string).collect()
+    [
+        "run",
+        "--runtime",
+        "franken-engine",
+        "--policy",
+        "balanced",
+        "--console-only",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
 }
 
 /// Construct default invocations without spawning discovery probes. Execution
@@ -2391,10 +2415,22 @@ pub fn discover_triad_commands(
 ) -> Vec<(TriadRuntimeLeg, std::path::PathBuf, Vec<String>)> {
     let mut commands = Vec::new();
     if let Some(bin) = franken_node_bin {
-        commands.push((TriadRuntimeLeg::FrankenNode, bin.to_path_buf(), native_triad_prefix()));
+        commands.push((
+            TriadRuntimeLeg::FrankenNode,
+            bin.to_path_buf(),
+            native_triad_prefix(),
+        ));
     }
-    commands.push((TriadRuntimeLeg::Node, std::path::PathBuf::from("node"), Vec::new()));
-    commands.push((TriadRuntimeLeg::Bun, std::path::PathBuf::from("bun"), vec!["run".into()]));
+    commands.push((
+        TriadRuntimeLeg::Node,
+        std::path::PathBuf::from("node"),
+        Vec::new(),
+    ));
+    commands.push((
+        TriadRuntimeLeg::Bun,
+        std::path::PathBuf::from("bun"),
+        vec!["run".into()],
+    ));
     commands
 }
 
@@ -2428,14 +2464,23 @@ fn resolve_triad_program(
         std::env::split_paths(environment.get("PATH").map_or("", String::as_str))
             .map(|directory| directory.join(program))
             .find_map(|candidate| {
-                candidate.is_file().then(|| std::fs::canonicalize(candidate).ok()).flatten()
+                candidate
+                    .is_file()
+                    .then(|| std::fs::canonicalize(candidate).ok())
+                    .flatten()
             })
     };
     let resolved = resolved.ok_or_else(|| {
-        triad_error(scenario, format!("could not resolve {leg} executable {}", program.display()))
+        triad_error(
+            scenario,
+            format!("could not resolve {leg} executable {}", program.display()),
+        )
     })?;
     if !resolved.is_file() || resolved.to_str().is_none() {
-        return Err(triad_error(scenario, format!("{leg} executable must be a regular UTF-8 path")));
+        return Err(triad_error(
+            scenario,
+            format!("{leg} executable must be a regular UTF-8 path"),
+        ));
     }
     Ok(resolved)
 }
@@ -2447,9 +2492,14 @@ fn triad_remaining(
 ) -> Result<std::time::Duration, BenchRunError> {
     let remaining = deadline.saturating_duration_since(Instant::now());
     if remaining.is_zero() {
-        return Err(triad_error(scenario, "triad campaign exceeded its total time budget"));
+        return Err(triad_error(
+            scenario,
+            "triad campaign exceeded its total time budget",
+        ));
     }
-    Ok(remaining.min(std::time::Duration::from_millis(limits.per_invocation_timeout_ms)))
+    Ok(remaining.min(std::time::Duration::from_millis(
+        limits.per_invocation_timeout_ms,
+    )))
 }
 
 fn triad_executable_digest(
@@ -2459,31 +2509,46 @@ fn triad_executable_digest(
     limits: &TriadExecutionLimits,
 ) -> Result<String, BenchRunError> {
     use std::io::Read as _;
-    let mut file = std::fs::File::open(program)
-        .map_err(|error| triad_error(scenario, format!("cannot open runtime executable: {error}")))?;
-    let metadata = file.metadata()
-        .map_err(|error| triad_error(scenario, format!("cannot inspect runtime executable: {error}")))?;
+    let mut file = std::fs::File::open(program).map_err(|error| {
+        triad_error(scenario, format!("cannot open runtime executable: {error}"))
+    })?;
+    let metadata = file.metadata().map_err(|error| {
+        triad_error(
+            scenario,
+            format!("cannot inspect runtime executable: {error}"),
+        )
+    })?;
     if !metadata.is_file() || metadata.len() > MAX_TRIAD_EXECUTABLE_BYTES {
-        return Err(triad_error(scenario, "runtime executable is not a regular file within the 1 GiB bound"));
+        return Err(triad_error(
+            scenario,
+            "runtime executable is not a regular file within the 1 GiB bound",
+        ));
     }
     let mut hash = sha2::Sha256::new();
     let mut bytes = 0_u64;
     let mut buffer = [0_u8; 64 * 1024];
     loop {
         triad_remaining(scenario, deadline, limits)?;
-        let count = file.read(&mut buffer)
-            .map_err(|error| triad_error(scenario, format!("cannot hash runtime executable: {error}")))?;
+        let count = file.read(&mut buffer).map_err(|error| {
+            triad_error(scenario, format!("cannot hash runtime executable: {error}"))
+        })?;
         if count == 0 {
             break;
         }
         bytes += count as u64;
         if bytes > MAX_TRIAD_EXECUTABLE_BYTES {
-            return Err(triad_error(scenario, "runtime executable grew beyond the 1 GiB bound"));
+            return Err(triad_error(
+                scenario,
+                "runtime executable grew beyond the 1 GiB bound",
+            ));
         }
         hash.update(&buffer[..count]);
     }
     if bytes != metadata.len() {
-        return Err(triad_error(scenario, "runtime executable changed length while being hashed"));
+        return Err(triad_error(
+            scenario,
+            "runtime executable changed length while being hashed",
+        ));
     }
     Ok(format!("sha256:{}", hex::encode(hash.finalize())))
 }
@@ -2494,15 +2559,18 @@ fn valid_triad_version(leg: TriadRuntimeLeg, version: &str) -> bool {
         TriadRuntimeLeg::Node => version.strip_prefix('v'),
         TriadRuntimeLeg::Bun => Some(version),
     };
-    let Some(numeric) = numeric else { return false; };
+    let Some(numeric) = numeric else {
+        return false;
+    };
     if numeric.is_empty() || numeric.chars().any(char::is_whitespace) {
         return false;
     }
     let core = numeric.split(['-', '+']).next().unwrap_or_default();
     let parts: Vec<_> = core.split('.').collect();
-    parts.len() == 3 && parts.iter().all(|part| {
-        !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit())
-    })
+    parts.len() == 3
+        && parts
+            .iter()
+            .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
 }
 
 fn triad_command(
@@ -2539,20 +2607,39 @@ fn run_triad_process(
                 Stream::Stderr => &mut stderr,
             };
             if bytes.len() > limits.max_output_bytes.saturating_sub(target.len()) {
-                return Err(std::io::Error::other("triad child output exceeded its byte budget"));
+                return Err(std::io::Error::other(
+                    "triad child output exceeded its byte budget",
+                ));
             }
             target.extend_from_slice(bytes);
             Ok(())
         },
-    ).map_err(|error| triad_error(scenario, format!("{leg} supervised invocation failed: {error:#}")))?;
+    )
+    .map_err(|error| {
+        triad_error(
+            scenario,
+            format!("{leg} supervised invocation failed: {error:#}"),
+        )
+    })?;
     match completion.reason {
         StopReason::Exited => {}
-        StopReason::RuntimeTimeout => return Err(triad_error(scenario, format!("{leg} invocation timed out"))),
-        StopReason::PipeTimeout => return Err(triad_error(scenario, format!("{leg} output pipes did not close within the drain budget"))),
+        StopReason::RuntimeTimeout => {
+            return Err(triad_error(scenario, format!("{leg} invocation timed out")));
+        }
+        StopReason::PipeTimeout => {
+            return Err(triad_error(
+                scenario,
+                format!("{leg} output pipes did not close within the drain budget"),
+            ));
+        }
     }
     triad_remaining(scenario, deadline, limits)?;
     Ok((
-        std::process::Output { status: completion.status, stdout, stderr },
+        std::process::Output {
+            status: completion.status,
+            stdout,
+            stderr,
+        },
         (started.elapsed().as_secs_f64() * 1_000.0).max(f64::MIN_POSITIVE),
     ))
 }
@@ -2565,7 +2652,10 @@ fn run_triad_process(
     _deadline: Instant,
     _limits: &TriadExecutionLimits,
 ) -> Result<(std::process::Output, f64), BenchRunError> {
-    Err(triad_error(scenario, "live triad benchmarks require the Linux owned-process supervisor"))
+    Err(triad_error(
+        scenario,
+        "live triad benchmarks require the Linux owned-process supervisor",
+    ))
 }
 
 fn verify_triad_script(
@@ -2574,16 +2664,24 @@ fn verify_triad_script(
 ) -> Result<(), BenchRunError> {
     use std::io::Read as _;
     let path = workdir.join(TRIAD_SCRIPT_NAME);
-    let metadata = std::fs::symlink_metadata(&path)
-        .map_err(|error| triad_error(&spec.name, format!("cannot inspect staged workload: {error}")))?;
+    let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
+        triad_error(
+            &spec.name,
+            format!("cannot inspect staged workload: {error}"),
+        )
+    })?;
     if !metadata.is_file() || metadata.len() != spec.script_source.len() as u64 {
         return Err(triad_error(&spec.name, "staged benchmark workload changed"));
     }
-    let file = std::fs::File::open(path)
-        .map_err(|error| triad_error(&spec.name, format!("cannot read staged workload: {error}")))?;
+    let file = std::fs::File::open(path).map_err(|error| {
+        triad_error(&spec.name, format!("cannot read staged workload: {error}"))
+    })?;
     let mut bytes = Vec::new();
-    file.take((MAX_TRIAD_SOURCE_BYTES + 1) as u64).read_to_end(&mut bytes)
-        .map_err(|error| triad_error(&spec.name, format!("cannot read staged workload: {error}")))?;
+    file.take((MAX_TRIAD_SOURCE_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|error| {
+            triad_error(&spec.name, format!("cannot read staged workload: {error}"))
+        })?;
     if bytes != spec.script_source.as_bytes() {
         return Err(triad_error(&spec.name, "staged benchmark workload changed"));
     }
@@ -2624,17 +2722,22 @@ pub fn execute_triad_benchmark_with_limits(
     ]);
     let supplied: BTreeSet<_> = commands.iter().map(|(leg, _, _)| *leg).collect();
     if commands.len() != 3 || supplied != required {
-        return Err(triad_error(&spec.name,
-            "triad benchmark requires exactly one franken-node, node, and bun leg"));
+        return Err(triad_error(
+            &spec.name,
+            "triad benchmark requires exactly one franken-node, node, and bun leg",
+        ));
     }
-    if spec.name.is_empty() || spec.name.len() > 128
+    if spec.name.is_empty()
+        || spec.name.len() > 128
         || spec.name.chars().any(char::is_control)
         || spec.script_source.is_empty()
         || spec.script_source.len() > MAX_TRIAD_SOURCE_BYTES
         || spec.expected_stdout.len() > limits.max_output_bytes
     {
-        return Err(triad_error(&spec.name,
-            "triad name, source, or expected output is empty, invalid, or over its byte bound"));
+        return Err(triad_error(
+            &spec.name,
+            "triad name, source, or expected output is empty, invalid, or over its byte bound",
+        ));
     }
     if limits.per_invocation_timeout_ms == 0
         || limits.per_invocation_timeout_ms > MAX_TRIAD_INVOCATION_TIMEOUT_MS
@@ -2644,7 +2747,10 @@ pub fn execute_triad_benchmark_with_limits(
         || limits.max_output_bytes > MAX_TRIAD_OUTPUT_BYTES
         || spec.warmup_rounds > MAX_TRIAD_WARMUP_ROUNDS
     {
-        return Err(triad_error(&spec.name, "invalid triad time, output, or warmup budget"));
+        return Err(triad_error(
+            &spec.name,
+            "invalid triad time, output, or warmup budget",
+        ));
     }
     let measured_rounds = spec.measured_rounds as usize;
     if measured_rounds < MIN_MEASURED_SAMPLES {
@@ -2662,13 +2768,17 @@ pub fn execute_triad_benchmark_with_limits(
             TriadRuntimeLeg::Bun => vec!["run".to_string()],
         };
         if *prefix != expected {
-            return Err(triad_error(&spec.name,
-                format!("{leg} requires its canonical triad invocation arguments")));
+            return Err(triad_error(
+                &spec.name,
+                format!("{leg} requires its canonical triad invocation arguments"),
+            ));
         }
     }
     if !cfg!(target_os = "linux") {
-        return Err(triad_error(&spec.name,
-            "live triad benchmarks require the Linux owned-process supervisor"));
+        return Err(triad_error(
+            &spec.name,
+            "live triad benchmarks require the Linux owned-process supervisor",
+        ));
     }
 
     let started = Instant::now();
@@ -2682,12 +2792,16 @@ pub fn execute_triad_benchmark_with_limits(
     let mut digests = BTreeSet::new();
     // Resolve the entire population before probing versions or running init.
     for leg in required {
-        let (_, program, prefix) = commands.iter().find(|(candidate, _, _)| *candidate == leg)
+        let (_, program, prefix) = commands
+            .iter()
+            .find(|(candidate, _, _)| *candidate == leg)
             .ok_or_else(|| triad_error(&spec.name, "missing required triad leg"))?;
         let program = resolve_triad_program(&spec.name, leg, program, &environment)?;
         if !paths.insert(program.clone()) {
-            return Err(triad_error(&spec.name,
-                "triad benchmark requires three distinct executable paths"));
+            return Err(triad_error(
+                &spec.name,
+                "triad benchmark requires three distinct executable paths",
+            ));
         }
         prepared.push(PreparedTriadLeg {
             runtime: leg,
@@ -2699,10 +2813,13 @@ pub fn execute_triad_benchmark_with_limits(
         });
     }
     for leg in &mut prepared {
-        leg.executable_sha256 = triad_executable_digest(&spec.name, &leg.program, deadline, limits)?;
+        leg.executable_sha256 =
+            triad_executable_digest(&spec.name, &leg.program, deadline, limits)?;
         if !digests.insert(leg.executable_sha256.clone()) {
-            return Err(triad_error(&spec.name,
-                "triad benchmark requires three distinct executable byte identities"));
+            return Err(triad_error(
+                &spec.name,
+                "triad benchmark requires three distinct executable byte identities",
+            ));
         }
     }
 
@@ -2710,19 +2827,28 @@ pub fn execute_triad_benchmark_with_limits(
         .map_err(|error| triad_error(&spec.name, format!("create triad workspace: {error}")))?;
     for leg in &mut prepared {
         leg.workspace = workspace.path().join(leg.runtime.to_string());
-        std::fs::create_dir(&leg.workspace)
-            .map_err(|error| triad_error(&spec.name, format!("create runtime workspace: {error}")))?;
+        std::fs::create_dir(&leg.workspace).map_err(|error| {
+            triad_error(&spec.name, format!("create runtime workspace: {error}"))
+        })?;
         std::fs::write(leg.workspace.join(TRIAD_SCRIPT_NAME), &spec.script_source)
             .map_err(|error| triad_error(&spec.name, format!("stage triad source: {error}")))?;
         let mut command = triad_command(&leg.program, &leg.workspace, &environment);
         command.arg("--version");
-        let (output, _) = run_triad_process(&spec.name, leg.runtime, &mut command, deadline, limits)?;
+        let (output, _) =
+            run_triad_process(&spec.name, leg.runtime, &mut command, deadline, limits)?;
         let version = std::str::from_utf8(&output.stdout)
-            .ok().map(str::trim).filter(|version| version.len() <= 128)
+            .ok()
+            .map(str::trim)
+            .filter(|version| version.len() <= 128)
             .filter(|version| valid_triad_version(leg.runtime, version));
         if !output.status.success() || version.is_none() {
-            return Err(triad_error(&spec.name, format!(
-                "{} version probe did not identify the requested runtime", leg.runtime)));
+            return Err(triad_error(
+                &spec.name,
+                format!(
+                    "{} version probe did not identify the requested runtime",
+                    leg.runtime
+                ),
+            ));
         }
         leg.version = version.unwrap_or_default().to_string();
     }
@@ -2730,11 +2856,22 @@ pub fn execute_triad_benchmark_with_limits(
     let mut initialize = triad_command(&native.program, &native.workspace, &environment);
     initialize.args(["init", "--profile", "balanced", "--out-dir", "."]);
     let (initialized, native_init_elapsed_ms) = run_triad_process(
-        &spec.name, native.runtime, &mut initialize, deadline, limits)?;
+        &spec.name,
+        native.runtime,
+        &mut initialize,
+        deadline,
+        limits,
+    )?;
     if !initialized.status.success() {
-        return Err(triad_error(&spec.name, format!(
-            "native benchmark initialization failed ({}; stderr {} bytes, {})",
-            initialized.status, initialized.stderr.len(), triad_digest(&initialized.stderr))));
+        return Err(triad_error(
+            &spec.name,
+            format!(
+                "native benchmark initialization failed ({}; stderr {} bytes, {})",
+                initialized.status,
+                initialized.stderr.len(),
+                triad_digest(&initialized.stderr)
+            ),
+        ));
     }
 
     let total_rounds = spec.warmup_rounds + spec.measured_rounds;
@@ -2744,7 +2881,11 @@ pub fn execute_triad_benchmark_with_limits(
     let mut rng_state = spec.seed ^ 0xD1B5_4A32_D192_ED03;
     for round in 0..total_rounds {
         let warmup = round < spec.warmup_rounds;
-        let phase_round = if warmup { round } else { round - spec.warmup_rounds };
+        let phase_round = if warmup {
+            round
+        } else {
+            round - spec.warmup_rounds
+        };
         for index in triad_round_order(&mut rng_state) {
             let leg = &prepared[index];
             triad_remaining(&spec.name, deadline, limits)?;
@@ -2754,15 +2895,27 @@ pub fn execute_triad_benchmark_with_limits(
             let (output, elapsed_ms) =
                 run_triad_process(&spec.name, leg.runtime, &mut command, deadline, limits)?;
             if !output.status.success() {
-                return Err(triad_error(&spec.name, format!(
-                    "{} exited with {} (stderr {} bytes, {})",
-                    leg.runtime, output.status, output.stderr.len(), triad_digest(&output.stderr))));
+                return Err(triad_error(
+                    &spec.name,
+                    format!(
+                        "{} exited with {} (stderr {} bytes, {})",
+                        leg.runtime,
+                        output.status,
+                        output.stderr.len(),
+                        triad_digest(&output.stderr)
+                    ),
+                ));
             }
             if output.stdout != spec.expected_stdout.as_bytes() {
-                return Err(triad_error(&spec.name, format!(
-                    "stdout parity mismatch on {}: expected {}, got {}",
-                    leg.runtime, triad_digest(spec.expected_stdout.as_bytes()),
-                    triad_digest(&output.stdout))));
+                return Err(triad_error(
+                    &spec.name,
+                    format!(
+                        "stdout parity mismatch on {}: expected {}, got {}",
+                        leg.runtime,
+                        triad_digest(spec.expected_stdout.as_bytes()),
+                        triad_digest(&output.stdout)
+                    ),
+                ));
             }
             verify_triad_script(spec, &leg.workspace)?;
             if !warmup {
@@ -2786,11 +2939,18 @@ pub fn execute_triad_benchmark_with_limits(
     for (leg, samples) in prepared.iter().zip(per_leg_samples) {
         let final_digest = triad_executable_digest(&spec.name, &leg.program, deadline, limits)?;
         if final_digest != leg.executable_sha256 {
-            return Err(triad_error(&spec.name, format!(
-                "{} executable changed during the benchmark", leg.runtime)));
+            return Err(triad_error(
+                &spec.name,
+                format!("{} executable changed during the benchmark", leg.runtime),
+            ));
         }
-        let quantile = |p| order_statistic_quantile_ci(&samples, p)
-            .ok_or_else(|| BenchRunError::NonFiniteMeasurement { scenario: spec.name.clone() });
+        let quantile = |p| {
+            order_statistic_quantile_ci(&samples, p).ok_or_else(|| {
+                BenchRunError::NonFiniteMeasurement {
+                    scenario: spec.name.clone(),
+                }
+            })
+        };
         let p50 = quantile(0.50)?;
         let p95 = quantile(0.95)?;
         let p99 = quantile(0.99)?;
@@ -2835,8 +2995,9 @@ pub fn execute_triad_benchmark_with_limits(
         statistical_assumptions: "Exact binomial order-statistic 95% intervals assume independent identically distributed observations per leg; null endpoints are unbounded, not zero or the observed maximum. Complete randomized triples pair runtime timings within rounds. Two-sided sign tests assume independent round signs, discard exact ties and test equally likely timing wins; Holm controls the family of three pairwise sign tests. Quantile ratios and CI separation are descriptive, not corrected quantile tests. Independence and stationary machine load are not established by this campaign.".into(),
         provenance_hash: String::new(),
     };
-    let json = serde_json::to_vec(&report)
-        .map_err(|error| BenchRunError::SerializeReport { detail: error.to_string() })?;
+    let json = serde_json::to_vec(&report).map_err(|error| BenchRunError::SerializeReport {
+        detail: error.to_string(),
+    })?;
     let mut hash = sha2::Sha256::new();
     hash.update(b"franken-node/triad-benchmark/v2\0");
     hash.update((json.len() as u64).to_le_bytes());
@@ -4187,7 +4348,10 @@ mod tests {
 
         assert_eq!(report.evidence_mode, BenchmarkEvidenceMode::FixtureOnly);
         assert!(report.security_controls.fixture_mode);
-        assert_eq!(report.scenarios[0].data_source, ScenarioDataSource::FixtureInputs);
+        assert_eq!(
+            report.scenarios[0].data_source,
+            ScenarioDataSource::FixtureInputs
+        );
         assert!(
             report.scenarios[0]
                 .raw_samples
@@ -4738,8 +4902,9 @@ mod tests {
         assert!(order_statistic_quantile_ci(&[1.0, f64::INFINITY], 0.5).is_none());
         assert!(order_statistic_quantile_ci(&[-1.0, 2.0], 0.5).is_none());
         assert!(order_statistic_quantile_ci(&[1.0, 2.0], 1.5).is_none());
-        assert!(order_statistic_quantile_ci(
-            &vec![1.0; MAX_RAW_BENCHMARK_SAMPLES + 1], 0.5).is_none());
+        assert!(
+            order_statistic_quantile_ci(&vec![1.0; MAX_RAW_BENCHMARK_SAMPLES + 1], 0.5).is_none()
+        );
     }
 
     #[test]
@@ -4798,8 +4963,14 @@ mod tests {
         }
         let ranked = triad_pairwise_comparisons(&[
             make_leg(TriadRuntimeLeg::FrankenNode, vec![1.0; 8]),
-            make_leg(TriadRuntimeLeg::Node, vec![2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 0.5, 0.5]),
-            make_leg(TriadRuntimeLeg::Bun, vec![3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 0.25]),
+            make_leg(
+                TriadRuntimeLeg::Node,
+                vec![2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 0.5, 0.5],
+            ),
+            make_leg(
+                TriadRuntimeLeg::Bun,
+                vec![3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 0.25],
+            ),
         ]);
         assert!((ranked[0].paired_sign_test_p_value - 0.2890625).abs() < 1e-12);
         assert!((ranked[0].holm_adjusted_p_value - 0.2890625).abs() < 1e-12);
@@ -4823,43 +4994,78 @@ mod tests {
     fn triad_refuses_missing_duplicate_or_unbounded_populations_before_execution() {
         let spec = triad_protocol_spec();
         let commands = discover_triad_commands(Some(std::path::Path::new("absent-native")));
-        assert!(execute_triad_benchmark(&spec, &commands[..2]).unwrap_err().to_string()
-            .contains("exactly one"));
+        assert!(
+            execute_triad_benchmark(&spec, &commands[..2])
+                .unwrap_err()
+                .to_string()
+                .contains("exactly one")
+        );
         let mut duplicate = commands.clone();
         duplicate[2].0 = TriadRuntimeLeg::Node;
-        assert!(execute_triad_benchmark(&spec, &duplicate).unwrap_err().to_string()
-            .contains("exactly one"));
+        assert!(
+            execute_triad_benchmark(&spec, &duplicate)
+                .unwrap_err()
+                .to_string()
+                .contains("exactly one")
+        );
         let mut too_many_warmups = spec.clone();
         too_many_warmups.warmup_rounds = MAX_TRIAD_WARMUP_ROUNDS + 1;
-        assert!(execute_triad_benchmark(&too_many_warmups, &commands).unwrap_err().to_string()
-            .contains("budget"));
+        assert!(
+            execute_triad_benchmark(&too_many_warmups, &commands)
+                .unwrap_err()
+                .to_string()
+                .contains("budget")
+        );
         let mut too_many_samples = spec.clone();
         too_many_samples.measured_rounds = MAX_RAW_BENCHMARK_SAMPLES as u32 + 1;
         assert!(execute_triad_benchmark(&too_many_samples, &commands).is_err());
         let invalid_limits = [
-            TriadExecutionLimits { per_invocation_timeout_ms: 0, ..Default::default() },
-            TriadExecutionLimits { total_timeout_ms: 0, ..Default::default() },
-            TriadExecutionLimits { max_output_bytes: 0, ..Default::default() },
+            TriadExecutionLimits {
+                per_invocation_timeout_ms: 0,
+                ..Default::default()
+            },
+            TriadExecutionLimits {
+                total_timeout_ms: 0,
+                ..Default::default()
+            },
+            TriadExecutionLimits {
+                max_output_bytes: 0,
+                ..Default::default()
+            },
         ];
         for limits in invalid_limits {
             let error = execute_triad_benchmark_with_limits(&spec, &commands, &limits)
-                .unwrap_err().to_string();
-            assert!(error.contains("budget") || error.contains("byte bound"), "{error}");
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("budget") || error.contains("byte bound"),
+                "{error}"
+            );
         }
         let mut wrong_native = commands;
         wrong_native[0].2 = vec!["run".into(), "--runtime".into(), "node".into()];
-        assert!(execute_triad_benchmark(&spec, &wrong_native).unwrap_err().to_string()
-            .contains("canonical triad"));
+        assert!(
+            execute_triad_benchmark(&spec, &wrong_native)
+                .unwrap_err()
+                .to_string()
+                .contains("canonical triad")
+        );
     }
 
     #[test]
     fn triad_version_identifiers_cannot_substitute_node_for_bun() {
-        assert!(valid_triad_version(TriadRuntimeLeg::FrankenNode, "franken-node 0.2.0"));
+        assert!(valid_triad_version(
+            TriadRuntimeLeg::FrankenNode,
+            "franken-node 0.2.0"
+        ));
         assert!(valid_triad_version(TriadRuntimeLeg::Node, "v24.14.0"));
         assert!(valid_triad_version(TriadRuntimeLeg::Bun, "1.3.10"));
         assert!(!valid_triad_version(TriadRuntimeLeg::Bun, "v24.14.0"));
         assert!(!valid_triad_version(TriadRuntimeLeg::Node, "1.3.10"));
-        assert!(!valid_triad_version(TriadRuntimeLeg::FrankenNode, "v24.14.0"));
+        assert!(!valid_triad_version(
+            TriadRuntimeLeg::FrankenNode,
+            "v24.14.0"
+        ));
         assert!(!valid_triad_version(TriadRuntimeLeg::Bun, "1.3.10\nextra"));
     }
 
@@ -4901,14 +5107,26 @@ mod tests {
         node_body: &str,
     ) -> Vec<(TriadRuntimeLeg, std::path::PathBuf, Vec<String>)> {
         vec![
-            (TriadRuntimeLeg::FrankenNode,
-                make_triad_protocol_fixture(root, "native-protocol", "franken-node 0.0.1",
-                    "printf 'TRIAD_OK\\n'"), native_triad_prefix()),
-            (TriadRuntimeLeg::Node,
-                make_triad_protocol_fixture(root, "node-protocol", "v0.0.1", node_body), Vec::new()),
-            (TriadRuntimeLeg::Bun,
-                make_triad_protocol_fixture(root, "bun-protocol", "0.0.1",
-                    "printf 'TRIAD_OK\\n'"), vec!["run".into()]),
+            (
+                TriadRuntimeLeg::FrankenNode,
+                make_triad_protocol_fixture(
+                    root,
+                    "native-protocol",
+                    "franken-node 0.0.1",
+                    "printf 'TRIAD_OK\\n'",
+                ),
+                native_triad_prefix(),
+            ),
+            (
+                TriadRuntimeLeg::Node,
+                make_triad_protocol_fixture(root, "node-protocol", "v0.0.1", node_body),
+                Vec::new(),
+            ),
+            (
+                TriadRuntimeLeg::Bun,
+                make_triad_protocol_fixture(root, "bun-protocol", "0.0.1", "printf 'TRIAD_OK\\n'"),
+                vec!["run".into()],
+            ),
         ]
     }
 
@@ -4926,7 +5144,10 @@ mod tests {
         assert_eq!(report.invocations.len(), 12);
         assert_eq!(report.legs.len(), 3);
         assert_eq!(report.comparisons.len(), 3);
-        assert_eq!(report.workload_sha256, triad_digest(spec.script_source.as_bytes()));
+        assert_eq!(
+            report.workload_sha256,
+            triad_digest(spec.script_source.as_bytes())
+        );
         assert!(report.stdout_parity_verified);
         assert!(report.provenance_hash.starts_with("sha256:"));
         for round in report.measured_schedule.chunks_exact(3) {
@@ -4938,8 +5159,12 @@ mod tests {
             assert!(leg.executable_sha256.starts_with("sha256:"));
         }
         let bad_commands = triad_protocol_commands(root.path(), "printf 'WRONG\\n'");
-        assert!(execute_triad_benchmark(&spec, &bad_commands).unwrap_err().to_string()
-            .contains("stdout parity mismatch"));
+        assert!(
+            execute_triad_benchmark(&spec, &bad_commands)
+                .unwrap_err()
+                .to_string()
+                .contains("stdout parity mismatch")
+        );
     }
 
     #[cfg(target_os = "linux")]
@@ -4949,8 +5174,12 @@ mod tests {
         let spec = triad_protocol_spec();
         let mut aliases = triad_protocol_commands(root.path(), "printf 'TRIAD_OK\\n'");
         aliases[2].1 = aliases[1].1.clone();
-        assert!(execute_triad_benchmark(&spec, &aliases).unwrap_err().to_string()
-            .contains("distinct executable paths"));
+        assert!(
+            execute_triad_benchmark(&spec, &aliases)
+                .unwrap_err()
+                .to_string()
+                .contains("distinct executable paths")
+        );
         let short = TriadExecutionLimits {
             per_invocation_timeout_ms: 100,
             total_timeout_ms: 3_000,
@@ -4958,18 +5187,36 @@ mod tests {
         };
         let hanging = triad_protocol_commands(root.path(), "exec /bin/sleep 5");
         let started = Instant::now();
-        assert!(execute_triad_benchmark_with_limits(&spec, &hanging, &short)
-            .unwrap_err().to_string().contains("timed out"));
+        assert!(
+            execute_triad_benchmark_with_limits(&spec, &hanging, &short)
+                .unwrap_err()
+                .to_string()
+                .contains("timed out")
+        );
         assert!(started.elapsed() < std::time::Duration::from_secs(3));
 
-        let flood = triad_protocol_commands(root.path(),
-            "while :; do printf '0123456789012345678901234567890123456789'; done");
-        let limits = TriadExecutionLimits { per_invocation_timeout_ms: 1_000, ..short.clone() };
-        assert!(execute_triad_benchmark_with_limits(&spec, &flood, &limits)
-            .unwrap_err().to_string().contains("byte budget"));
+        let flood = triad_protocol_commands(
+            root.path(),
+            "while :; do printf '0123456789012345678901234567890123456789'; done",
+        );
+        let limits = TriadExecutionLimits {
+            per_invocation_timeout_ms: 1_000,
+            ..short.clone()
+        };
+        assert!(
+            execute_triad_benchmark_with_limits(&spec, &flood, &limits)
+                .unwrap_err()
+                .to_string()
+                .contains("byte budget")
+        );
 
-        let inherited = triad_protocol_commands(root.path(), "/bin/sleep 5 &\nprintf 'TRIAD_OK\\n'");
-        assert!(execute_triad_benchmark_with_limits(&spec, &inherited, &limits)
-            .unwrap_err().to_string().contains("pipes"));
+        let inherited =
+            triad_protocol_commands(root.path(), "/bin/sleep 5 &\nprintf 'TRIAD_OK\\n'");
+        assert!(
+            execute_triad_benchmark_with_limits(&spec, &inherited, &limits)
+                .unwrap_err()
+                .to_string()
+                .contains("pipes")
+        );
     }
 }

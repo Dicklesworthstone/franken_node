@@ -8,7 +8,7 @@
 //! native admission before either comparison runtime executes. Findings remain
 //! explicit review barriers, not scores that a passing test suite can outweigh.
 
-use super::rewrite_transaction::{Edit, RewriteTransaction};
+use super::rewrite_transaction::{AppliedRewrite, Edit, RewriteTransaction};
 use super::validation_suite::rewrite_candidate::{Replacement, RewriteCandidate};
 use super::validation_suite::{SuiteReport, product_oracle::ProductReport};
 use super::{
@@ -34,10 +34,27 @@ pub const BUN_ENV: &str = "FRANKEN_NODE_CHECKED_REWRITE_BUN_BIN";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum CheckedRewriteStatus {
+    /// Every captured test passed, but the selected project was not modified.
+    Validated,
     Applied,
     Unchanged,
     Rejected,
     Error,
+}
+
+/// Whether an autopilot run may install the candidate it measures. Both modes
+/// execute captured project tests; Preview is not a static-only operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckedRewriteMode {
+    Preview,
+    Apply,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InstallationMode {
+    Preview,
+    OriginalBackup,
+    GroupCommit,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -57,6 +74,10 @@ pub struct CheckedRewriteReport {
     pub validation: Option<SuiteReport>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub product_validation: Option<ProductReport>,
+    /// Exact journal returned while this operation still owns the writer.
+    /// This is local recovery identity, not a signature or a rollout grant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transaction: Option<AppliedRewrite>,
     pub errors: Vec<String>,
 }
 
@@ -64,7 +85,9 @@ impl CheckedRewriteReport {
     pub fn is_success(&self) -> bool {
         matches!(
             self.status,
-            CheckedRewriteStatus::Applied | CheckedRewriteStatus::Unchanged
+            CheckedRewriteStatus::Validated
+                | CheckedRewriteStatus::Applied
+                | CheckedRewriteStatus::Unchanged
         )
     }
 }
@@ -97,6 +120,39 @@ pub fn run_product(
     bun_executable: &Path,
 ) -> CheckedRewriteReport {
     run_selected(project, native_executable, Some(bun_executable), false)
+}
+
+/// Audit, plan and compare a candidate under Node, Bun and the native product.
+/// Preview never opens the writer or recovers a pending installation. Apply
+/// uses the existing packed group-commit journal and returns its exact recovery
+/// identity. No stage is promoted and no evidence is signed by this operation.
+///
+/// Callers must explicitly authorize project execution in either mode and
+/// source modification in Apply mode. Disposable workspaces do not sandbox
+/// external effects of the project tests.
+pub fn run_autopilot(
+    project: &Path,
+    native_executable: &Path,
+    bun_executable: &Path,
+    mode: CheckedRewriteMode,
+) -> CheckedRewriteReport {
+    let installation = match mode {
+        CheckedRewriteMode::Preview => InstallationMode::Preview,
+        CheckedRewriteMode::Apply => InstallationMode::GroupCommit,
+    };
+    execute_with_evidence(project, installation, |candidate| {
+        ensure!(
+            bun_executable.is_absolute(),
+            "autopilot requires an absolute trusted Bun executable path"
+        );
+        let report = candidate.validate_product(native_executable, bun_executable)?;
+        ensure!(
+            report.native_runtime.sha256 != report.node_runtime.sha256
+                && report.native_runtime.sha256 != report.bun_runtime.sha256,
+            "autopilot requires three distinct runtime executable hashes"
+        );
+        Ok(ValidationEvidence::Product(Box::new(report)))
+    })
 }
 
 fn run_selected(
@@ -144,6 +200,24 @@ fn run_with_evidence(
     project: &Path,
     validate: impl FnOnce(&RewriteCandidate) -> Result<ValidationEvidence>,
 ) -> CheckedRewriteReport {
+    execute_with_evidence(project, InstallationMode::OriginalBackup, validate)
+}
+
+fn ensure_no_pending_rewrite(project: &Path) -> Result<()> {
+    match std::fs::symlink_metadata(project.join(".migrate-backup/.franken-rewrite/pending.json")) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+        Ok(_) => anyhow::bail!(
+            "an unfinished rewrite requires explicit recovery; preview cannot certify the candidate or recover the installation"
+        ),
+    }
+}
+
+fn execute_with_evidence(
+    project: &Path,
+    installation: InstallationMode,
+    validate: impl FnOnce(&RewriteCandidate) -> Result<ValidationEvidence>,
+) -> CheckedRewriteReport {
     let mut report = CheckedRewriteReport {
         schema_version: "franken-node/checked-rewrite/v1".into(),
         project_path: project.to_string_lossy().into_owned(),
@@ -154,6 +228,7 @@ fn run_with_evidence(
         rewrite: None,
         validation: None,
         product_validation: None,
+        transaction: None,
         errors: Vec::new(),
     };
     let operation = (|| -> Result<()> {
@@ -171,10 +246,20 @@ fn run_with_evidence(
         // The lock is not inherited by the runtime processes (CLOEXEC).
         let control = crate::runtime::safe_mode::AdmittedSafeModeProject::capture(&project)?;
         let deadline = Instant::now() + Duration::from_secs(300);
+        if installation == InstallationMode::Preview {
+            ensure_no_pending_rewrite(&project)?;
+        }
         RewriteCandidate::capture(&project, deadline)?.ensure_source_execution_allowed()?;
-        let transaction = RewriteTransaction::open(&project)?;
+        let transaction = match installation {
+            InstallationMode::Preview => None,
+            InstallationMode::OriginalBackup => Some(RewriteTransaction::open(&project)?),
+            InstallationMode::GroupCommit => {
+                Some(RewriteTransaction::open_without_recovery(&project)?)
+            }
+        };
         // Recovery can change source inputs; capture again under the writer
-        // lock rather than reusing the read-only containment preflight.
+        // lock rather than reusing the read-only containment preflight. Preview
+        // instead retains a read-only snapshot and rechecks the complete tree.
         let mut candidate = RewriteCandidate::capture(&project, deadline)?;
         // This contains the complete captured source tree, even before any
         // runtime runs. Privacy cannot depend on a permissive caller umask.
@@ -288,6 +373,13 @@ fn run_with_evidence(
         // Include unchanged dependencies/configuration in this check, not only
         // the edit preimages rechecked by the transaction writer itself.
         candidate.ensure_source_unchanged()?;
+        control.enforce()?;
+        candidate.ensure_execution_allowed()?;
+        if installation == InstallationMode::Preview {
+            ensure_no_pending_rewrite(&project)?;
+            report.status = CheckedRewriteStatus::Validated;
+            return Ok(());
+        }
         let plan = report
             .rewrite
             .as_mut()
@@ -301,9 +393,14 @@ fn run_with_evidence(
                 after: entry.rewritten_content.as_bytes(),
             })
             .collect();
-        control.enforce()?;
-        candidate.ensure_execution_allowed()?;
-        transaction.apply(&edits)?;
+        let Some(transaction) = transaction else {
+            anyhow::bail!("source installation requires the retained rewrite writer");
+        };
+        report.transaction = match installation {
+            InstallationMode::OriginalBackup => transaction.apply_with_receipt(&edits)?,
+            InstallationMode::GroupCommit => transaction.apply_group_commit_with_receipt(&edits)?,
+            InstallationMode::Preview => anyhow::bail!("preview cannot install source changes"),
+        };
         plan.apply_mode = true;
         plan.rewrites_applied = plan.rewrites_planned;
         for entry in &mut plan.entries {
@@ -365,6 +462,13 @@ pub fn render(report: &CheckedRewriteReport) -> String {
             text,
             "rewrites_planned={} rewrites_applied={} manual_review_items={}",
             plan.rewrites_planned, plan.rewrites_applied, plan.manual_review_items
+        );
+    }
+    if let Some(transaction) = &report.transaction {
+        let _ = writeln!(
+            text,
+            "source_transaction={} journal_sha256={} files={}",
+            transaction.transaction_id, transaction.journal_sha256, transaction.files
         );
     }
     if let Some(validation) = &report.validation {
@@ -444,6 +548,178 @@ mod tests {
     }
     fn source(root: &Path) -> String {
         fs::read_to_string(root.join("helper.mjs")).unwrap()
+    }
+
+    // These tests use actual Node/Node execution to isolate orchestration and
+    // source recovery. They do not qualify the production native triad.
+    fn pair_evidence(candidate: &RewriteCandidate) -> Result<ValidationEvidence> {
+        candidate
+            .validate_node_pair()
+            .map(|report| ValidationEvidence::Pair(Box::new(report)))
+    }
+
+    #[test]
+    fn autopilot_preview_measures_candidate_without_creating_source_or_recovery_state() {
+        let root = project();
+        let before =
+            RewriteCandidate::capture(root.path(), Instant::now() + Duration::from_secs(30))
+                .unwrap();
+        let original = source(root.path());
+        let report = execute_with_evidence(root.path(), InstallationMode::Preview, pair_evidence);
+        assert_eq!(
+            report.status,
+            CheckedRewriteStatus::Validated,
+            "{report:#?}"
+        );
+        assert!(report.is_success());
+        assert!(report.transaction.is_none());
+        let plan = report.rewrite.as_ref().unwrap();
+        assert_eq!(plan.rewrites_planned, 1);
+        assert_eq!(plan.rewrites_applied, 0);
+        assert!(!plan.apply_mode);
+        let measured = report.validation.as_ref().unwrap();
+        assert_eq!(measured.verdict, "PASS");
+        assert_eq!(measured.passed, 1);
+        assert_ne!(measured.input_sha256, measured.candidate_input_sha256);
+        assert_eq!(source(root.path()), original);
+        assert!(!root.path().join(".migrate-backup").exists());
+        assert!(!root.path().join(".franken-node").exists());
+        before.ensure_source_unchanged().unwrap();
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["status"], "VALIDATED");
+        assert!(json.get("transaction").is_none());
+        assert!(!report.release_certification);
+    }
+
+    #[test]
+    fn autopilot_preview_refuses_pending_recovery_before_running_any_test() {
+        let root = project();
+        let pending = root
+            .path()
+            .join(".migrate-backup/.franken-rewrite/pending.json");
+        fs::create_dir_all(pending.parent().unwrap()).unwrap();
+        let journal = b"retained unfinished journal; preview must not parse or recover it";
+        fs::write(&pending, journal).unwrap();
+        let original = source(root.path());
+        let report = execute_with_evidence(root.path(), InstallationMode::Preview, |_| {
+            panic!("an unfinished rewrite must precede runtime execution")
+        });
+        assert_eq!(report.status, CheckedRewriteStatus::Error, "{report:#?}");
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("unfinished rewrite"))
+        );
+        assert!(report.transaction.is_none() && report.validation.is_none());
+        assert_eq!(fs::read(&pending).unwrap(), journal);
+        assert_eq!(source(root.path()), original);
+        assert!(!pending.parent().unwrap().join("lock").exists());
+    }
+
+    #[test]
+    fn autopilot_preview_refuses_changes_to_the_measured_source() {
+        let root = project();
+        let changed = "export const value = 99;\n";
+        let report = execute_with_evidence(root.path(), InstallationMode::Preview, |candidate| {
+            let measured = pair_evidence(candidate)?;
+            fs::write(root.path().join("helper.mjs"), changed)?;
+            Ok(measured)
+        });
+        assert_eq!(report.status, CheckedRewriteStatus::Error, "{report:#?}");
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("project changed"))
+        );
+        assert_eq!(report.validation.as_ref().unwrap().verdict, "PASS");
+        assert_eq!(source(root.path()), changed);
+        assert!(report.transaction.is_none());
+        assert!(!root.path().join(".migrate-backup").exists());
+    }
+
+    #[test]
+    fn autopilot_apply_returns_the_packed_transaction_that_restores_its_exact_preimage() {
+        use super::super::rollback::{RollbackStatus, run_pinned};
+        let root = project();
+        let original = source(root.path());
+        let report =
+            execute_with_evidence(root.path(), InstallationMode::GroupCommit, pair_evidence);
+        assert_eq!(report.status, CheckedRewriteStatus::Applied, "{report:#?}");
+        assert_eq!(report.validation.as_ref().unwrap().verdict, "PASS");
+        assert!(source(root.path()).contains("node:path"));
+        let transaction = report.transaction.as_ref().unwrap();
+        assert_eq!(transaction.files, 1);
+        assert_eq!(transaction.journal_sha256.len(), 64);
+        let session = root
+            .path()
+            .join(".migrate-backup/.franken-rewrite")
+            .join(&transaction.transaction_id);
+        let journal: serde_json::Value =
+            serde_json::from_slice(&fs::read(session.join("applied.json")).unwrap()).unwrap();
+        assert_eq!(
+            journal["schema_version"],
+            super::super::rewrite_transaction::PACKED_JOURNAL_VERSION
+        );
+        assert!(session.join("session.pack").is_file());
+        let restored = run_pinned(
+            root.path(),
+            &transaction.transaction_id,
+            &transaction.journal_sha256,
+            true,
+        );
+        assert_eq!(restored.status, RollbackStatus::RolledBack, "{restored:#?}");
+        assert_eq!(source(root.path()), original);
+        assert!(render(&report).contains(&transaction.transaction_id));
+        assert_eq!(
+            serde_json::from_value::<CheckedRewriteReport>(serde_json::to_value(&report).unwrap())
+                .unwrap()
+                .transaction,
+            report.transaction
+        );
+    }
+
+    #[test]
+    fn autopilot_apply_refuses_incomplete_measurement_without_a_transaction() {
+        let root = project();
+        let original = source(root.path());
+        let report =
+            execute_with_evidence(root.path(), InstallationMode::GroupCommit, |candidate| {
+                let mut measured = candidate.validate_node_pair()?;
+                measured.cases.clear();
+                Ok(ValidationEvidence::Pair(Box::new(measured)))
+            });
+        assert_eq!(report.status, CheckedRewriteStatus::Rejected, "{report:#?}");
+        assert!(report.transaction.is_none());
+        assert_eq!(source(root.path()), original);
+        assert_eq!(report.rewrite.as_ref().unwrap().rewrites_applied, 0);
+        let history = super::super::rollback::run(root.path(), None, false);
+        assert_eq!(
+            history.status,
+            super::super::rollback::RollbackStatus::History
+        );
+        assert!(history.history.is_empty());
+    }
+
+    #[test]
+    fn autopilot_unchanged_candidate_does_not_invent_a_recovery_identity() {
+        let root = project();
+        fs::write(
+            root.path().join("helper.mjs"),
+            "import { basename } from \"node:path\";\nexport const value = basename('/tmp/42');\n",
+        )
+        .unwrap();
+        let report =
+            execute_with_evidence(root.path(), InstallationMode::GroupCommit, pair_evidence);
+        assert_eq!(
+            report.status,
+            CheckedRewriteStatus::Unchanged,
+            "{report:#?}"
+        );
+        assert!(report.transaction.is_none());
+        assert_eq!(report.rewrite.as_ref().unwrap().rewrites_applied, 0);
+        assert_eq!(report.validation.as_ref().unwrap().verdict, "PASS");
     }
 
     fn assert_dependency_rejection(root: &Path, code: &str) {

@@ -968,11 +968,35 @@ every leaf command available in the current build.
 | Command | Purpose |
 |---|---|
 | `franken-node migrate audit <path>` | Inventory migration risk. The project path is handler-required so `--json` failures emit `franken-node/migrate-error-cli/v1` instead of a human clap error. Flags: `--format` (json\|text\|sarif), `--json` (alias for `--format json`), `--out`. |
+| `franken-node migrate autopilot <path>` | Capture and audit the project, prepare rewrites, and compare every captured test and its filesystem effects under Node, Bun, and this native product. Requires `--execute --bun-bin <absolute-path>`. Defaults to a validated preview that does not install source edits or recover transactions; `--apply` installs only the measured candidate using the packed durable transaction journal and returns its exact rollback identity. Linux only. Flags: `--execute`, `--bun-bin`, `--apply`, `--json`. |
 | `franken-node migrate rewrite <path>` | Apply migration transforms. `--emit-rollback` writes an unsigned JSON `MigrationRollbackPlan` (not Ed25519-signed) plus `.migrate-backup/` snapshots. The project path is handler-required so `--json` failures emit `franken-node/migrate-error-cli/v1` instead of a human clap error. Flags: `--apply`, `--emit-rollback`, `--json`. |
 | `franken-node migrate rollback <path>` | Inspect retained native rewrite transactions or restore one by its explicit identity. `--transaction <ID>` selects the transaction; without `--apply` the command is preview-only, and there is no latest-ID inference. The project path is handler-required so `--json` failures emit `franken-node/migrate-error-cli/v1` instead of a human clap error. Flags: `--transaction`, `--apply`, `--json`. |
 | `franken-node migrate validate <path>` | Rerun static migration audit checks and, unless `--static-only`, a transformed-runtime smoke test. Does **not** run `verify lockstep`. The project path is handler-required so `--json` failures emit `franken-node/migrate-error-cli/v1` instead of a human clap error. Flags: `--format` (json\|text), `--json`, `--static-only`. |
 | `franken-node migrate rollout <path>` | Drive the progressive rollout state machine (shadow → canary → ramp → default) with fail-closed gates. `--action` is `promote` (default), `rollback`, or `status`; `--stage` overrides the target stage; `--ramp-pct` applies in ramp stage. The state machine records stages and evidence; it does not start or route traffic to instances. Leaving Shadow requires `--lockstep-report <path>`, the JSON printed by `franken-node verify lockstep <project> --json`. The report must have verdict Pass, include a franken leg and a reference leg, and match the project's current input. Without it the promotion fails closed. `--force` bypasses the confidence and evidence checks but never records `lockstep_verified`. `--no-auto-rollback` disables automatic rollback on verification failure. The project path is handler-required so `--json` failures emit `franken-node/migrate-error-cli/v1` instead of a human clap error. Flags: `--migration-id`, `--action`, `--stage`, `--ramp-pct`, `--lockstep-report`, `--force`, `--no-auto-rollback`, `--json`. |
 | `franken-node migrate-report <path>` | Export one-command migration assessment. The project path is handler-required so `--json` failures emit `franken-node/migrate-error-cli/v1` instead of a human clap error. Flags: `--format` (json\|html), `--json` (alias for `--format json`), `--output`. |
+
+For a complete checked migration in one process:
+
+```bash
+# Run the comparison and inspect the candidate without changing the project.
+franken-node migrate autopilot ./app --execute --bun-bin /opt/bun/bin/bun --json
+
+# Re-capture, re-validate, then install that exact candidate.
+franken-node migrate autopilot ./app --execute --bun-bin /opt/bun/bin/bun --apply --json
+
+# Use checked_rewrite.transaction.transaction_id from the applied result.
+franken-node migrate rollback ./app --transaction <transaction-id> --apply --json
+```
+
+Autopilot uses the existing captured test inventory and native dependency
+admission. Missing tests, unresolved dependency review findings, reference
+disagreement, changed source inputs, or any incomplete runtime/filesystem
+comparison prevent installation. A preview refuses unfinished rewrite recovery
+and never opens the transaction writer. Node must be discoverable by the
+validation runner, and Bun and the native executable must have distinct bytes
+from both other runtimes. `--execute` approves trusted project code running in
+disposable workspaces; those workspaces are not an OS sandbox. Passing the
+captured suite is not release certification or proof of untested behavior.
 
 `migrate rewrite <path> --apply --verify` checks captured dependency metadata
 and installed package identities before differential execution. Its npm 11

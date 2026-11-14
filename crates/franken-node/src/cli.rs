@@ -1030,6 +1030,9 @@ pub enum MigrateCommand {
     /// Inventory migration risk and emit findings.
     Audit(MigrateAuditArgs),
 
+    /// Audit and test a captured rewrite on Node, Bun and native Franken; optionally install it.
+    Autopilot(MigrateAutopilotArgs),
+
     /// Apply migration transforms and optionally emit an unsigned JSON rollback plan.
     Rewrite(MigrateRewriteArgs),
 
@@ -1041,6 +1044,125 @@ pub enum MigrateCommand {
 
     /// Progressive rollout state machine (shadow -> canary -> ramp -> default) with fail-closed gates.
     Rollout(MigrateRolloutArgs),
+}
+
+#[derive(Debug, Parser)]
+pub struct MigrateAutopilotArgs {
+    /// Project to capture, audit, rewrite and compare. Missing paths are JSON handler errors.
+    #[arg(default_value = "", value_parser = parse_handler_required_pathbuf)]
+    pub project_path: PathBuf,
+
+    /// Absolute Bun executable; Node is discovered through the existing validation runner.
+    #[arg(long, value_parser = parse_safe_binary_pathbuf)]
+    pub bun_bin: Option<PathBuf>,
+
+    /// Approve running trusted project tests in disposable workspaces with ambient authority.
+    /// Preview does not install source edits or recover transactions; tests are not sandboxed.
+    #[arg(long)]
+    pub execute: bool,
+
+    /// Install only the exact candidate that passes all three runtimes and filesystem checks.
+    /// Without this flag, return a validated preview without installing source edits.
+    #[arg(long, requires = "execute")]
+    pub apply: bool,
+
+    /// Emit one structured result, including comparison evidence and any installed transaction.
+    #[arg(long)]
+    pub json: bool,
+}
+
+impl MigrateAutopilotArgs {
+    #[cfg(target_os = "linux")]
+    pub fn validate_intent(&self) -> Result<()> {
+        anyhow::ensure!(
+            !self.project_path.as_os_str().is_empty(),
+            "`migrate autopilot` requires a project path"
+        );
+        anyhow::ensure!(
+            self.execute,
+            "--execute is required before running project tests; omit --apply for a validated preview"
+        );
+        anyhow::ensure!(
+            self.bun_bin.as_deref().is_some_and(Path::is_absolute),
+            "migrate autopilot requires --bun-bin with an absolute Bun executable path"
+        );
+        Ok(())
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod autopilot_cli_tests {
+    use super::*;
+
+    fn parse(flags: &[&str]) -> MigrateAutopilotArgs {
+        let mut args = vec!["franken-node", "migrate", "autopilot", "project"];
+        args.extend_from_slice(flags);
+        let Command::Migrate(MigrateCommand::Autopilot(args)) =
+            Cli::try_parse_from(args).unwrap().command
+        else {
+            panic!("wrong command");
+        };
+        args
+    }
+
+    #[test]
+    fn autopilot_execution_defaults_to_a_nonmutating_validated_preview() {
+        let args = parse(&["--execute", "--bun-bin", "/opt/bun", "--json"]);
+        args.validate_intent().unwrap();
+        assert!(!args.apply);
+        assert!(args.json);
+    }
+
+    #[test]
+    fn autopilot_apply_requires_explicit_execution_approval() {
+        assert!(
+            Cli::try_parse_from(["franken-node", "migrate", "autopilot", "project", "--apply",])
+                .is_err()
+        );
+        let args = parse(&["--execute", "--bun-bin", "/opt/bun", "--apply"]);
+        args.validate_intent().unwrap();
+        assert!(args.apply);
+    }
+
+    #[test]
+    fn autopilot_refuses_missing_approval_or_reference_before_execution() {
+        for flags in [
+            vec![],
+            vec!["--bun-bin", "/opt/bun"],
+            vec!["--execute"],
+            vec!["--execute", "--bun-bin", "bun"],
+        ] {
+            assert!(parse(&flags).validate_intent().is_err());
+        }
+    }
+
+    #[test]
+    fn autopilot_has_no_force_or_static_success_path() {
+        for flag in ["--force", "--static-only", "--native-bin", "--skip-tests"] {
+            assert!(
+                Cli::try_parse_from(["franken-node", "migrate", "autopilot", "project", flag,])
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn autopilot_missing_project_is_owned_by_the_json_handler() {
+        let Command::Migrate(MigrateCommand::Autopilot(args)) =
+            Cli::try_parse_from(["franken-node", "migrate", "autopilot", "--json"])
+                .unwrap()
+                .command
+        else {
+            panic!("wrong command");
+        };
+        assert!(args.json);
+        assert!(
+            args.validate_intent()
+                .unwrap_err()
+                .to_string()
+                .contains("project path")
+        );
+    }
 }
 
 #[derive(Debug)]

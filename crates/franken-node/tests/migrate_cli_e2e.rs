@@ -977,6 +977,60 @@ fn migrate_rewrite_json_fails_closed_when_project_path_missing() {
     );
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn migrate_autopilot_missing_project_emits_one_json_error() {
+    let output = run_cli(&["migrate", "autopilot", "--json"]);
+    assert!(!output.status.success());
+    let report = parse_json_stdout(&output, "autopilot missing project");
+    assert_eq!(
+        report["schema_version"],
+        "franken-node/migrate-error-cli/v1"
+    );
+    assert_eq!(report["command"], "migrate.autopilot");
+    assert_eq!(report["ok"], false);
+    assert!(report["error"].as_str().unwrap().contains("project path"));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("Error:"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn migrate_autopilot_requires_execution_and_reference_before_touching_project() {
+    let project = TempDir::new().unwrap();
+    let manifest = br#"{"name":"unapproved-autopilot","version":"1.0.0"}"#;
+    std::fs::write(project.path().join("package.json"), manifest).unwrap();
+    for flags in [
+        vec![],
+        vec!["--apply"],
+        vec!["--execute"],
+        vec!["--execute", "--bun-bin", "relative-bun"],
+    ] {
+        let mut command = franken_node_command();
+        let output = command
+            .args(["migrate", "autopilot"])
+            .arg(project.path())
+            .args(flags)
+            .arg("--json")
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        let report = parse_json_stdout(&output, "autopilot execution preflight");
+        assert_eq!(
+            report["schema_version"],
+            "franken-node/migrate-error-cli/v1"
+        );
+        assert_eq!(report["command"], "migrate.autopilot");
+        assert_eq!(report["ok"], false);
+        assert_eq!(
+            std::fs::read(project.path().join("package.json")).unwrap(),
+            manifest
+        );
+        assert!(!project.path().join(".migrate-backup").exists());
+        assert!(!project.path().join(".franken-node").exists());
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("Error:"));
+    }
+}
+
 #[test]
 fn migrate_validate_json_fails_closed_when_project_path_missing() {
     let output = run_cli(&["migrate", "validate", "--json"]);

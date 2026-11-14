@@ -8881,6 +8881,85 @@ fn migrate_fail(command: &str, json: bool, error: impl std::fmt::Display) -> Res
     anyhow::bail!("{message}")
 }
 
+#[cfg(target_os = "linux")]
+#[derive(Serialize)]
+struct MigrateAutopilotReport {
+    schema_version: &'static str,
+    mode: &'static str,
+    ok: bool,
+    release_certification: bool,
+    checked_rewrite: migration::verified_rewrite::CheckedRewriteReport,
+}
+
+#[cfg(target_os = "linux")]
+fn handle_migrate_autopilot(args: &cli::MigrateAutopilotArgs) -> Result<u8> {
+    use migration::verified_rewrite::{CheckedRewriteMode, CheckedRewriteStatus};
+
+    args.validate_intent()?;
+    let native = std::env::current_exe().context("resolve the native product executable")?;
+    let bun = args.bun_bin.as_deref().context("missing Bun executable")?;
+    let mode = if args.apply {
+        CheckedRewriteMode::Apply
+    } else {
+        CheckedRewriteMode::Preview
+    };
+    let checked_rewrite =
+        migration::verified_rewrite::run_autopilot(&args.project_path, &native, bun, mode);
+    let code = if checked_rewrite.is_success() {
+        0
+    } else if checked_rewrite.status == CheckedRewriteStatus::Error {
+        2
+    } else {
+        1
+    };
+    let report = MigrateAutopilotReport {
+        schema_version: "franken-node/migration-autopilot/v1",
+        mode: if args.apply { "apply" } else { "preview" },
+        ok: code == 0,
+        release_certification: false,
+        checked_rewrite,
+    };
+    emit_json_or_human(&report, args.json, || {
+        use std::fmt::Write as _;
+        let checked = &report.checked_rewrite;
+        let mut text = format!(
+            "franken-node migrate autopilot\ntarget: {}\nmode: {}\nstatus: {:?}\n",
+            checked.project_path, report.mode, checked.status
+        );
+        if let Some(plan) = &checked.rewrite {
+            let _ = writeln!(
+                text,
+                "rewrites planned: {}; installed: {}; manual review items: {}",
+                plan.rewrites_planned, plan.rewrites_applied, plan.manual_review_items
+            );
+        }
+        if let Some(validation) = &checked.product_validation {
+            let _ = writeln!(
+                text,
+                "Node/Bun/native comparison: {}; {}/{} tests matched; filesystem effects compared: {}",
+                validation.verdict,
+                validation.passed,
+                validation.total_tests,
+                validation.filesystem_comparison
+            );
+        }
+        if let Some(transaction) = &checked.transaction {
+            let _ = writeln!(text, "rollback transaction: {}", transaction.transaction_id);
+            let _ = writeln!(
+                text,
+                "rollback journal sha256: {}",
+                transaction.journal_sha256
+            );
+        }
+        for error in &checked.errors {
+            let _ = writeln!(text, "error: {error}");
+        }
+        let _ = writeln!(text, "release certification: false");
+        text
+    })?;
+    Ok(code)
+}
+
 fn handle_migrate_report(args: &MigrateReportArgs) -> Result<()> {
     if args.project_path.as_os_str().is_empty() {
         return migrate_fail(
@@ -9020,9 +9099,7 @@ fn handle_bench_run(args: &cli::BenchRunArgs) -> Result<()> {
             ),
             (
                 TriadRuntimeLeg::Bun,
-                args.bun_bin
-                    .clone()
-                    .unwrap_or_else(|| PathBuf::from("bun")),
+                args.bun_bin.clone().unwrap_or_else(|| PathBuf::from("bun")),
                 vec!["run".to_string()],
             ),
         ];
@@ -9038,10 +9115,7 @@ fn handle_bench_run(args: &cli::BenchRunArgs) -> Result<()> {
         let mut summary = format!(
             "live runtime benchmark: workload={} samples_per_runtime={} warmups={} \
              stdout_parity_verified={}\n",
-            report.workload_name,
-            args.samples,
-            args.warmups,
-            report.stdout_parity_verified
+            report.workload_name, args.samples, args.warmups, report.stdout_parity_verified
         );
         for leg in &report.legs {
             use std::fmt::Write as _;
@@ -40500,6 +40574,7 @@ fn clap_json_error_surface() -> (&'static str, &'static str) {
             "doctor.process-spawn-readiness",
         ),
         ("migrate", Some("audit")) => (MIGRATE_ERROR_CLI_SCHEMA_VERSION, "migrate.audit"),
+        ("migrate", Some("autopilot")) => (MIGRATE_ERROR_CLI_SCHEMA_VERSION, "migrate.autopilot"),
         ("migrate", Some("rewrite")) => (MIGRATE_ERROR_CLI_SCHEMA_VERSION, "migrate.rewrite"),
         ("migrate", Some("validate")) => (MIGRATE_ERROR_CLI_SCHEMA_VERSION, "migrate.validate"),
         ("migrate", Some("rollout")) => (MIGRATE_ERROR_CLI_SCHEMA_VERSION, "migrate.rollout"),
@@ -41629,6 +41704,24 @@ fn main() -> Result<()> {
                     Ok(None) => {}
                     Err(err) => return migrate_fail("migrate.audit", json, err),
                 }
+            }
+            MigrateCommand::Autopilot(args) => {
+                #[cfg(target_os = "linux")]
+                {
+                    let code = match handle_migrate_autopilot(&args) {
+                        Ok(code) => code,
+                        Err(error) => return migrate_fail("migrate.autopilot", args.json, error),
+                    };
+                    if code != 0 {
+                        fail_closed_after_json_with_code(i32::from(code));
+                    }
+                }
+                #[cfg(not(target_os = "linux"))]
+                return migrate_fail(
+                    "migrate.autopilot",
+                    args.json,
+                    "checked migration autopilot currently requires Linux",
+                );
             }
             MigrateCommand::Rewrite(args) => {
                 if args.project_path.as_os_str().is_empty() {

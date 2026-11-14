@@ -583,7 +583,9 @@ fn bench_run_live_triad_records_real_runtimes_or_refuses_missing_references() {
     if let Some(path) = &bun {
         command.arg("--bun-bin").arg(path);
     }
-    let output = command.output().expect("run actual native and reference benchmarks");
+    let output = command
+        .output()
+        .expect("run actual native and reference benchmarks");
     let report: Value =
         serde_json::from_slice(&output.stdout).expect("live benchmark output must be JSON");
 
@@ -610,18 +612,19 @@ fn bench_run_live_triad_records_real_runtimes_or_refuses_missing_references() {
     assert_eq!(report["stdout_parity_verified"], true);
     assert_eq!(report["interleaved_schedule_len"], 9);
     assert!(report.get("aggregate_score").is_none());
-    let legs = report["legs"].as_array().expect("three measured runtime legs");
+    let legs = report["legs"]
+        .as_array()
+        .expect("three measured runtime legs");
     assert_eq!(legs.len(), 3);
     let names: std::collections::BTreeSet<_> = legs
         .iter()
         .map(|leg| leg["runtime"].as_str().expect("runtime label"))
         .collect();
-    assert_eq!(
-        names,
-        ["franken_node", "node", "bun"].into_iter().collect()
-    );
+    assert_eq!(names, ["franken_node", "node", "bun"].into_iter().collect());
     for leg in legs {
-        let samples = leg["samples_ms"].as_array().expect("raw invocation timings");
+        let samples = leg["samples_ms"]
+            .as_array()
+            .expect("raw invocation timings");
         assert_eq!(samples.len(), 3);
         assert!(
             samples
@@ -649,7 +652,10 @@ fn bench_run_live_triad_records_real_runtimes_or_refuses_missing_references() {
         "the measured native leg must be the product under test"
     );
     assert_eq!(
-        report["comparisons"].as_array().expect("paired comparisons").len(),
+        report["comparisons"]
+            .as_array()
+            .expect("paired comparisons")
+            .len(),
         3
     );
     assert!(
@@ -684,8 +690,7 @@ fn bench_run_rejects_runtime_aliases_without_publishing_measurements() {
         .output()
         .expect("invoke benchmark with aliased runtime binaries");
     assert!(!output.status.success());
-    let report: Value =
-        serde_json::from_slice(&output.stdout).expect("alias refusal must be JSON");
+    let report: Value = serde_json::from_slice(&output.stdout).expect("alias refusal must be JSON");
     assert_eq!(report["ok"], false);
     assert!(
         report["error"]

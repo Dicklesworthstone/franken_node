@@ -215,6 +215,200 @@ fn static_prerequisites_block_all_runtime_dispatch() {
     assert_no_guest_state(&project);
 }
 
+fn invoke_autopilot(path: &Path, bun: &Path, apply: bool) -> Output {
+    let mut command = franken_node_command();
+    command
+        .current_dir(repo_root())
+        .env_remove(FAILURE_DIRECTORY)
+        .env_remove("FRANKEN_NODE_CHECKED_REWRITE_BUN_BIN")
+        .args(["migrate", "autopilot"])
+        .arg(path)
+        .args(["--execute", "--json", "--bun-bin"])
+        .arg(bun);
+    if apply {
+        command.arg("--apply");
+    }
+    native_smoke_supervisor::run_command_with_timeout(
+        &mut command,
+        Duration::from_secs(360),
+        Duration::from_secs(1),
+    )
+    .expect("migration autopilot must terminate within the bounded test")
+}
+
+#[test]
+fn autopilot_missing_bun_cannot_downgrade_to_a_two_runtime_success() {
+    let project = project("console.log(require('path').basename('/tmp/42'));\n");
+    let absent = TempDir::new().expect("absent runtime directory");
+    let bun = absent.path().join("reference-bun-unavailable");
+    let original = std::fs::read(project.path().join("a.test.js")).unwrap();
+    let output = invoke_autopilot(project.path(), &bun, false);
+    assert!(!output.status.success());
+    let report = parse_json_stdout(&output, "missing autopilot Bun reference");
+    assert_eq!(
+        report["schema_version"],
+        "franken-node/migration-autopilot/v1"
+    );
+    assert_eq!(report["ok"], false);
+    assert_eq!(report["mode"], "preview");
+    let checked = &report["checked_rewrite"];
+    assert_eq!(checked["status"], "ERROR");
+    assert!(checked["validation"].is_null());
+    assert!(checked.get("product_validation").is_none());
+    assert!(checked.get("transaction").is_none());
+    assert!(
+        checked["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| error.as_str().unwrap().contains("resolve Bun executable")),
+        "{report}"
+    );
+    assert_eq!(
+        std::fs::read(project.path().join("a.test.js")).unwrap(),
+        original
+    );
+    assert!(!project.path().join(".migrate-backup").exists());
+    assert_no_guest_state(&project);
+}
+
+#[test]
+fn autopilot_pending_rewrite_stops_preview_without_recovering_or_resolving_runtimes() {
+    let project = project("console.log(42);\n");
+    let pending = project
+        .path()
+        .join(".migrate-backup/.franken-rewrite/pending.json");
+    std::fs::create_dir_all(pending.parent().unwrap()).unwrap();
+    let retained = b"pending operation must remain untouched";
+    std::fs::write(&pending, retained).unwrap();
+    let output = invoke_autopilot(project.path(), Path::new("/absent-bun"), false);
+    assert!(!output.status.success());
+    let report = parse_json_stdout(&output, "autopilot pending recovery refusal");
+    assert_eq!(report["checked_rewrite"]["status"], "ERROR");
+    assert!(report["checked_rewrite"]["static_validation"].is_null());
+    assert!(
+        report["checked_rewrite"]["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| error.as_str().unwrap().contains("unfinished rewrite")),
+        "{report}"
+    );
+    assert_eq!(std::fs::read(&pending).unwrap(), retained);
+    assert!(!pending.parent().unwrap().join("lock").exists());
+    assert_no_guest_state(&project);
+}
+
+#[cfg(feature = "engine")]
+#[test]
+fn autopilot_real_triad_preview_apply_and_exact_transaction_rollback() {
+    use frankenengine_node::migration::validation_suite::rewrite_candidate::RewriteCandidate;
+    use std::time::Instant;
+
+    let bun = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .filter(|directory| directory.is_absolute())
+        .map(|directory| directory.join("bun"))
+        .find(|path| path.is_file())
+        .expect("the native autopilot acceptance test requires installed Bun")
+        .canonicalize()
+        .unwrap();
+    let source = "console.log(require('path').basename('/tmp/42'));\n";
+    let project = project(source);
+    initialize_native_project(project.path(), false);
+    let captured =
+        RewriteCandidate::capture(project.path(), Instant::now() + Duration::from_secs(30))
+            .unwrap();
+    let expected_native = std::fs::canonicalize(franken_node_command().get_program()).unwrap();
+
+    let output = invoke_autopilot(project.path(), &bun, false);
+    let preview = parse_json_stdout(&output, "actual native autopilot preview");
+    assert!(output.status.success(), "{preview}");
+    assert_eq!(preview["mode"], "preview");
+    assert_eq!(preview["checked_rewrite"]["status"], "VALIDATED");
+    assert_eq!(preview["checked_rewrite"]["rewrite"]["rewrites_planned"], 1);
+    assert_eq!(preview["checked_rewrite"]["rewrite"]["rewrites_applied"], 0);
+    assert!(preview["checked_rewrite"].get("transaction").is_none());
+    assert!(!project.path().join(".migrate-backup").exists());
+    captured.ensure_source_unchanged().unwrap();
+    assert_no_guest_state(&project);
+
+    let output = invoke_autopilot(project.path(), &bun, true);
+    let applied = parse_json_stdout(&output, "actual native autopilot apply");
+    assert!(output.status.success(), "{applied}");
+    assert_eq!(applied["mode"], "apply");
+    assert_eq!(applied["checked_rewrite"]["status"], "APPLIED");
+    assert_eq!(applied["checked_rewrite"]["rewrite"]["rewrites_applied"], 1);
+    assert!(
+        std::fs::read_to_string(project.path().join("a.test.js"))
+            .unwrap()
+            .contains("node:path")
+    );
+    for report in [&preview, &applied] {
+        assert_eq!(report["ok"], true);
+        assert_eq!(report["release_certification"], false);
+        let measured = &report["checked_rewrite"]["product_validation"];
+        assert_eq!(measured["verdict"], "PASS");
+        assert_eq!(measured["total_tests"], 2);
+        assert_eq!(measured["passed"], 2);
+        assert_eq!(measured["errored"], 0);
+        assert_eq!(measured["skipped"], 0);
+        assert_eq!(measured["filesystem_comparison"], true);
+        assert_eq!(measured["distinct_reference_binaries"], true);
+        assert_eq!(
+            measured["native_runtime"]["executable"],
+            expected_native.to_str().unwrap()
+        );
+        assert_ne!(
+            measured["native_runtime"]["sha256"],
+            measured["node_runtime"]["sha256"]
+        );
+        assert_ne!(
+            measured["native_runtime"]["sha256"],
+            measured["bun_runtime"]["sha256"]
+        );
+        assert_ne!(measured["input_sha256"], measured["candidate_input_sha256"]);
+        for case in measured["cases"].as_array().unwrap() {
+            assert_eq!(case["outcome"], "MATCH");
+            for runtime in ["node", "bun", "native"] {
+                assert_eq!(case[runtime]["exit_code"], 0);
+                assert_eq!(case[runtime]["stdout"]["bytes"], 3);
+                assert_eq!(case[runtime]["stdout"], case["node"]["stdout"]);
+                assert_eq!(case[runtime]["stderr"], case["node"]["stderr"]);
+                assert_eq!(
+                    case[runtime]["workspace_delta"],
+                    case["node"]["workspace_delta"]
+                );
+            }
+        }
+    }
+    let transaction = &applied["checked_rewrite"]["transaction"];
+    let id = transaction["transaction_id"].as_str().unwrap();
+    let mut command = franken_node_command();
+    command
+        .current_dir(repo_root())
+        .args(["migrate", "rollback"])
+        .arg(project.path())
+        .args(["--transaction", id, "--apply", "--json"]);
+    let output = native_smoke_supervisor::run_command_with_timeout(
+        &mut command,
+        Duration::from_secs(60),
+        Duration::from_secs(1),
+    )
+    .unwrap();
+    let restored = parse_json_stdout(&output, "rollback exact autopilot installation");
+    assert!(output.status.success(), "{restored}");
+    assert_eq!(restored["status"], "ROLLED_BACK");
+    assert_eq!(restored["transaction"]["transaction_id"], id);
+    assert_eq!(
+        restored["transaction"]["journal_sha256"],
+        transaction["journal_sha256"]
+    );
+    assert_eq!(
+        std::fs::read_to_string(project.path().join("a.test.js")).unwrap(),
+        source
+    );
+}
+
 #[cfg(feature = "engine")]
 #[test]
 fn successful_native_suite_requires_two_complete_measured_cases() {
