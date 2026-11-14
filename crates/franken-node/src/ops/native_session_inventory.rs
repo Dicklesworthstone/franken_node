@@ -795,9 +795,13 @@ fn validate_outcome(
                     evidence.terminal_state.as_str(),
                     "timeout_indeterminate"
                         | "control_indeterminate"
+                        | "worker_exit_indeterminate"
                         | "timeout_cleanup_unproven"
                         | "control_cleanup_unproven"
+                        | "worker_exit_cleanup_unproven"
                 )
+                || (evidence.terminal_state.starts_with("worker_exit_")
+                    && outcome.process != Process::WorkerReaped)
                 || evidence.control_trigger.is_some()
                     != evidence.terminal_state.starts_with("control_")
             {
@@ -3591,6 +3595,94 @@ mod tests {
         assert!(encoded.len() <= NATIVE_SESSION_MAX_REQUEST_BYTES);
         let decoded: NativeSessionAdmission = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded, admission);
+    }
+
+    #[test]
+    fn signed_worker_exit_evidence_survives_restart_and_rejects_forged_completion() {
+        for cleanup_unproven in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("runtime-evidence");
+            let admission = fixture(&root, 133);
+            let evidence = NativeEffectInterruptionEvidence {
+                schema_version: NATIVE_EFFECT_INTERRUPTION_EVIDENCE_SCHEMA.to_string(),
+                session_nonce: admission.session_nonce.clone(),
+                terminal_state: if cleanup_unproven {
+                    "worker_exit_cleanup_unproven"
+                } else {
+                    "worker_exit_indeterminate"
+                }
+                .to_string(),
+                replay_certified: false,
+                journal_complete: !cleanup_unproven,
+                journal_event_cap: NATIVE_SESSION_MAX_EFFECT_WAL_EVENTS,
+                completed_effect_count: 1,
+                interrupted_effect_count: 1,
+                entries: vec![
+                    NativeEffectWalEntry {
+                        sequence: 0,
+                        effect_kind: "fs_write".to_string(),
+                        request_hash: format!("sha256:{}", "ab".repeat(32)),
+                        state: NativeEffectWalState::ProviderReturned,
+                    },
+                    NativeEffectWalEntry {
+                        sequence: 1,
+                        effect_kind: "network_request".to_string(),
+                        request_hash: format!("sha256:{}", "cd".repeat(32)),
+                        state: NativeEffectWalState::InterruptedIndeterminate,
+                    },
+                ],
+                protocol_error: cleanup_unproven.then(|| "response pipe stayed open".to_string()),
+                control_trigger: None,
+            };
+            let mut guard =
+                NativeSessionInventoryGuard::admit(&root, admission.clone(), 0).unwrap();
+            guard.worker_started();
+            guard.worker_reaped();
+            guard.finish(
+                NativeSessionOutcomeKind::Interrupted,
+                NativeSessionEffectObservation::Interrupted {
+                    evidence: Box::new(evidence.clone()),
+                },
+            );
+            drop(guard);
+
+            let report = read_inventory_at(&root, None).unwrap();
+            assert_eq!(report.pending_sessions, 0);
+            assert_eq!(report.unknown_effect_sessions, 1);
+            assert!(!report.quiescence_certified);
+            let outcome = report.records[0].outcome.as_ref().unwrap();
+            assert_eq!(outcome.kind, NativeSessionOutcomeKind::Interrupted);
+            assert!(outcome.panic_evidence.is_none());
+            assert_eq!(
+                outcome.effects,
+                NativeSessionEffectObservation::Interrupted {
+                    evidence: Box::new(evidence.clone())
+                }
+            );
+            assert!(!terminal_outcome_observed(&admission, outcome));
+
+            let key = ed25519_dalek::SigningKey::from_bytes(&[17; 32]).verifying_key();
+            let receipt = read_outcome_receipt(&root, &admission, &key)
+                .unwrap()
+                .unwrap();
+            let mut changed = receipt.clone();
+            let NativeSessionEffectObservation::Interrupted { evidence } =
+                &mut changed.outcome.effects
+            else {
+                panic!("worker death must retain interruption evidence");
+            };
+            evidence.entries[1].state = NativeEffectWalState::ProviderReturned;
+            evidence.completed_effect_count = 2;
+            evidence.interrupted_effect_count = 0;
+            assert!(changed.verify(&admission, &key).is_err());
+
+            let mut unreaped = outcome.clone();
+            unreaped.process = NativeSessionProcessObservation::Unproven;
+            assert!(validate_outcome(&admission, &unreaped).is_err());
+            let mut panicked = outcome.clone();
+            panicked.kind = NativeSessionOutcomeKind::Panicked;
+            assert!(validate_outcome(&admission, &panicked).is_err());
+        }
     }
 
     #[test]

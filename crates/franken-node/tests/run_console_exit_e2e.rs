@@ -528,6 +528,20 @@ fn run_profile_selection_enforces_configured_and_environment_strict_admission() 
 #[cfg(target_os = "linux")]
 #[test]
 fn native_timeout_reaps_a_worker_stuck_in_admitted_http_io() {
+    assert_native_interruption_retains_admitted_http_io(false);
+}
+
+/// A worker killed by the OS cannot finalize its effects. The supervisor must
+/// still persist its authenticated admission and observed WAL, without counting
+/// that process death as an engine-reported panic or certifying replay.
+#[cfg(target_os = "linux")]
+#[test]
+fn native_worker_sigkill_preserves_admitted_http_io_and_durable_evidence() {
+    assert_native_interruption_retains_admitted_http_io(true);
+}
+
+#[cfg(target_os = "linux")]
+fn assert_native_interruption_retains_admitted_http_io(kill_worker: bool) {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::os::unix::process::CommandExt;
@@ -536,6 +550,16 @@ fn native_timeout_reaps_a_worker_stuck_in_admitted_http_io() {
     const ENGINE_TIMEOUT: Duration = Duration::from_secs(10);
     const ADMISSION_DEADLINE: Duration = Duration::from_secs(15);
     const OUTER_DEADLINE: Duration = Duration::from_secs(25);
+    let expected_terminal = if kill_worker {
+        "worker_exit_indeterminate"
+    } else {
+        "timeout_indeterminate"
+    };
+    let expected_error = if kill_worker {
+        "worker exited unexpectedly"
+    } else {
+        "timed out"
+    };
 
     fn fixed_binary(candidates: &[&'static str]) -> &'static str {
         candidates
@@ -732,6 +756,27 @@ fn native_timeout_reaps_a_worker_stuck_in_admitted_http_io() {
         }
     };
 
+    if kill_worker {
+        if process_start_time(worker_pid).as_deref() != Some(worker_start_time.as_str()) {
+            kill_test_process_tree(&mut child);
+            let _ = release_tx.send(());
+            let _ = server.join();
+            panic!("the admitted worker identity changed before the SIGKILL fault");
+        }
+        let killed = Command::new(fixed_binary(&["/bin/kill", "/usr/bin/kill"]))
+            .args(["-KILL", "--", &worker_pid.to_string()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        if !killed.is_ok_and(|status| status.success()) {
+            kill_test_process_tree(&mut child);
+            let _ = release_tx.send(());
+            let _ = server.join();
+            panic!("failed to deliver SIGKILL to the admitted native worker");
+        }
+    }
+
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
@@ -778,10 +823,10 @@ fn native_timeout_reaps_a_worker_stuck_in_admitted_http_io() {
     std::thread::sleep(Duration::from_millis(100));
     let callback_absent_after_release = !dir.path().join("after.marker").exists();
 
-    assert!(!status.success(), "the stuck session must time out");
+    assert!(!status.success(), "the interrupted session must fail");
     assert!(
-        stderr.to_ascii_lowercase().contains("timed out"),
-        "timeout must be typed and actionable: {stderr}"
+        stderr.to_ascii_lowercase().contains(expected_error),
+        "the original interruption must remain typed and actionable: {stderr}"
     );
     let evidence: Value = serde_json::from_str(&stdout).unwrap_or_else(|error| {
         panic!(
@@ -794,7 +839,7 @@ fn native_timeout_reaps_a_worker_stuck_in_admitted_http_io() {
     );
     assert_eq!(
         evidence.get("terminal_state").and_then(Value::as_str),
-        Some("timeout_indeterminate")
+        Some(expected_terminal)
     );
     assert_eq!(
         evidence.get("replay_certified").and_then(Value::as_bool),
@@ -846,8 +891,8 @@ fn native_timeout_reaps_a_worker_stuck_in_admitted_http_io() {
         "interrupted WAL evidence must not masquerade as finalized ledger semantics"
     );
     assert!(
-        elapsed >= ENGINE_TIMEOUT && elapsed < OUTER_DEADLINE,
-        "whole-session deadline must be bounded: {elapsed:?}"
+        (kill_worker || elapsed >= ENGINE_TIMEOUT) && elapsed < OUTER_DEADLINE,
+        "interruption handling must be bounded: {elapsed:?}"
     );
     assert!(
         entered_before_timeout,
@@ -875,8 +920,8 @@ fn native_timeout_reaps_a_worker_stuck_in_admitted_http_io() {
     assert!(
         evidence["error"]
             .as_str()
-            .is_some_and(|error| error.to_ascii_lowercase().contains("timed out")),
-        "the original timeout remains the run's error: {evidence}"
+            .is_some_and(|error| error.to_ascii_lowercase().contains(expected_error)),
+        "the original interruption remains the run's error: {evidence}"
     );
     assert_eq!(evidence["dispatch"]["runtime"], "franken_engine");
     assert!(evidence["dispatch"]["host_effect_ledger"].is_null());
@@ -886,8 +931,49 @@ fn native_timeout_reaps_a_worker_stuck_in_admitted_http_io() {
     assert!(evidence.get("denied_count").is_none());
 
     let typed_wal: frankenengine_node::ops::engine_dispatcher::NativeEffectInterruptionEvidence =
-        serde_json::from_value(evidence.clone()).expect("the original typed parent WAL");
+        serde_json::from_value(evidence["receipt"]["interruption_evidence"].clone())
+            .expect("the original typed parent WAL");
     let wal = serde_json::to_value(&typed_wal).expect("serialize every typed WAL field");
+    for (field, value) in wal.as_object().expect("typed WAL object") {
+        assert_eq!(
+            evidence.get(field),
+            Some(value),
+            "the CLI envelope must preserve the exact typed WAL field {field}"
+        );
+    }
+    let project_root = dir.path().canonicalize().expect("canonical interrupted project");
+    let inventory =
+        frankenengine_node::ops::native_session_inventory::read_local_native_session_inventory(
+            Some(&project_root),
+        )
+        .expect("reopen the signed native-session observation");
+    let inventory_record = inventory
+        .records
+        .iter()
+        .find(|record| record.admission.session_nonce == typed_wal.session_nonce)
+        .expect("the interrupted worker remains in the durable session inventory");
+    let outcome = inventory_record
+        .outcome
+        .as_ref()
+        .expect("worker termination has a signed outcome");
+    assert_eq!(
+        outcome.kind,
+        frankenengine_node::ops::native_session_inventory::NativeSessionOutcomeKind::Interrupted
+    );
+    assert_eq!(
+        outcome.process,
+        frankenengine_node::ops::native_session_inventory::NativeSessionProcessObservation::WorkerReaped
+    );
+    assert!(outcome.panic_evidence.is_none());
+    let frankenengine_node::ops::native_session_inventory::NativeSessionEffectObservation::Interrupted {
+        evidence: retained,
+    } = &outcome.effects
+    else {
+        panic!("the signed outcome must retain the interrupted WAL");
+    };
+    assert_eq!(retained.as_ref(), &typed_wal);
+    assert!(!inventory.quiescence_certified);
+
     let receipt = &evidence["receipt"];
     assert_eq!(receipt["runtime_used"], "franken_engine");
     assert_eq!(receipt["exit_code"], 1);

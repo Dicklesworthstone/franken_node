@@ -1836,6 +1836,42 @@ fn native_interruption_effect_evidence_with_terminal(
     evidence
 }
 
+/// Preserve the observed WAL when a worker dies before returning a validated
+/// terminal response. A reaped process and a complete WAL prefix do not settle
+/// an admitted external effect, nor do they establish an engine panic.
+#[cfg(feature = "engine")]
+fn native_worker_exit_effect_evidence(
+    response_output: std::result::Result<(&[u8], bool), &str>,
+    cleanup_failure: Option<&str>,
+    expected_nonce: &str,
+    allow_test_harness_noise: bool,
+) -> NativeEffectInterruptionEvidence {
+    let (output, output_cap_exceeded, response_failure) = match response_output {
+        Ok((output, output_cap_exceeded)) => (output, output_cap_exceeded, None),
+        Err(error) => (&[][..], false, Some(error)),
+    };
+    let mut evidence = native_effect_interruption_evidence_with_terminal(
+        output,
+        output_cap_exceeded,
+        expected_nonce,
+        allow_test_harness_noise,
+        false,
+    );
+    evidence.terminal_state = "worker_exit_indeterminate".to_string();
+    if let Some(error) = cleanup_failure.or(response_failure) {
+        let prefix = evidence
+            .protocol_error
+            .take()
+            .map_or_else(String::new, |error| format!("{error}; "));
+        evidence.protocol_error = Some(format!(
+            "{prefix}native-session worker exit cleanup could not prove quiescence: {error}"
+        ));
+        evidence.terminal_state = "worker_exit_cleanup_unproven".to_string();
+        evidence.journal_complete = false;
+    }
+    evidence
+}
+
 #[cfg(feature = "engine")]
 fn native_effect_wal_request_hash(request: &HostIoRequest) -> std::result::Result<String, String> {
     use sha2::{Digest, Sha256};
@@ -10186,6 +10222,81 @@ impl EngineDispatcher {
         let request_write_result = receive_native_session_request_writer(request_writer, false);
         let response_result = receive_reader(stdout_reader, "response");
         let diagnostic_result = receive_reader(stderr_reader, "diagnostics");
+        if !status.success() {
+            // The parent has reaped this worker. Never signal its numeric PID
+            // again: it could now identify an unrelated process. Process-spawn
+            // authority retains the existing pinned namespace-empty proof.
+            let process_cleanup = match &containment {
+                #[cfg(target_os = "linux")]
+                NativeSessionContainment::Bubblewrap(unit) => {
+                    let result = wait_for_containment_unit_empty(unit);
+                    if result.is_ok() {
+                        session_inventory.containment_empty();
+                    }
+                    result
+                }
+                NativeSessionContainment::ProcessGroup => Ok(()),
+            };
+            let cleanup_failure = native_session_cleanup_failure(
+                process_cleanup,
+                Some(request_write_result),
+                Some(response_result.clone()),
+                Some(diagnostic_result.clone()),
+            );
+            let mut evidence = native_worker_exit_effect_evidence(
+                response_result
+                    .as_ref()
+                    .map(|response| (response.bytes.as_slice(), response.cap_exceeded))
+                    .map_err(String::as_str),
+                cleanup_failure.as_deref(),
+                &nonce,
+                cfg!(test),
+            );
+            if diagnostic_result
+                .as_ref()
+                .is_ok_and(|diagnostics| diagnostics.cap_exceeded)
+            {
+                let prefix = evidence
+                    .protocol_error
+                    .take()
+                    .map_or_else(String::new, |error| format!("{error}; "));
+                evidence.protocol_error = Some(format!(
+                    "{prefix}native-session diagnostics exceeded {NATIVE_SESSION_MAX_DIAGNOSTIC_BYTES} bytes"
+                ));
+                evidence.journal_complete = false;
+            }
+            session_inventory.finish(
+                NativeSessionOutcomeKind::Interrupted,
+                NativeSessionEffectObservation::Interrupted {
+                    evidence: Box::new(evidence.clone()),
+                },
+            );
+            let diagnostics = diagnostic_result
+                .as_ref()
+                .ok()
+                .map(|read| String::from_utf8_lossy(&read.bytes).trim().to_string())
+                .filter(|diagnostics| !diagnostics.is_empty())
+                .map_or_else(String::new, |diagnostics| format!(": {diagnostics}"));
+            let cleanup_detail = cleanup_failure.map_or_else(String::new, |error| {
+                format!("; worker cleanup could not prove quiescence: {error}")
+            });
+            let actionable = EngineDispatchError::EngineExecutionError {
+                app_path: app_path_buf,
+                error_message: format!(
+                    "native-session worker exited unexpectedly: {status}{diagnostics}{cleanup_detail}"
+                ),
+                phase: "worker termination".to_string(),
+            }
+            .to_actionable();
+            return Err(anyhow::Error::new(NativeRunInterruption {
+                actionable,
+                effect_evidence: Box::new(evidence),
+                verified_final_host_effect_ledger: None,
+                runtime_evidence_identity_capture: Some(expected_evidence_capture),
+                runtime_evidence_identity_capture_path: Some(evidence_capture_path),
+                dispatch_report: None,
+            }));
+        }
         request_write_result.map_err(|message| {
             EngineDispatchError::EngineExecutionError {
                 app_path: app_path_buf.clone(),
@@ -10251,19 +10362,6 @@ impl EngineDispatcher {
         let diagnostics = String::from_utf8_lossy(&diagnostic_bytes)
             .trim()
             .to_string();
-        if !status.success() {
-            let dispatch_error = EngineDispatchError::EnginePanic {
-                app_path: app_path_buf,
-                panic_message: if diagnostics.is_empty() {
-                    format!("native-session worker exited unexpectedly: {status}")
-                } else {
-                    format!("native-session worker exited unexpectedly: {status}: {diagnostics}")
-                },
-                cleanup_successful: true,
-            };
-            return Err(dispatch_error.to_actionable().into());
-        }
-
         let parsed = parse_native_session_output(&response_bytes, cfg!(test));
         let mut reconciled = reconcile_native_session_output(parsed, &nonce);
         if reconciled
@@ -24311,6 +24409,136 @@ exec "$2" pinned-worker-image"#,
             assert_eq!(parsed.frames.len(), NATIVE_SESSION_MAX_EFFECT_WAL_EVENTS);
             assert_eq!(parsed.protocol_error.as_deref(), Some(expected));
         }
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn worker_exit_wal_preserves_returned_and_indeterminate_effects() {
+        let nonce = "00000000-0000-4000-8000-000000000130";
+        let output = native_session_test_wal_prefix(3, nonce);
+        let evidence =
+            native_worker_exit_effect_evidence(Ok((&output, false)), None, nonce, false);
+
+        assert_eq!(evidence.terminal_state, "worker_exit_indeterminate");
+        assert!(evidence.journal_complete);
+        assert!(!evidence.replay_certified);
+        assert!(evidence.control_trigger.is_none());
+        assert_eq!(evidence.completed_effect_count, 1);
+        assert_eq!(evidence.interrupted_effect_count, 1);
+        assert_eq!(evidence.entries.len(), 2);
+        assert_eq!(
+            evidence.entries[0].state,
+            NativeEffectWalState::ProviderReturned
+        );
+        assert_eq!(
+            evidence.entries[1].state,
+            NativeEffectWalState::InterruptedIndeterminate
+        );
+        assert!(
+            serde_json::from_value::<HostEffectLedger>(
+                serde_json::to_value(&evidence).unwrap()
+            )
+            .is_err(),
+            "worker death cannot manufacture a finalized effect ledger"
+        );
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn worker_exit_wal_marks_corruption_caps_and_unproven_cleanup_incomplete() {
+        let nonce = "00000000-0000-4000-8000-000000000131";
+        let output = native_session_test_wal_prefix(3, nonce);
+        let mut wrong_nonce = native_session_test_wal_prefix(2, nonce);
+        wrong_nonce.extend_from_slice(
+            &encode_native_session_frame(
+                &NativeSessionOutputFrame::HostEffectAdmitted {
+                    schema_version: NATIVE_EFFECT_WAL_SCHEMA.to_string(),
+                    nonce: "00000000-0000-4000-8000-000000000132".to_string(),
+                    sequence: 1,
+                    effect_kind: "fs_write".to_string(),
+                    request_hash: format!("sha256:{}", "a".repeat(64)),
+                },
+                NATIVE_SESSION_MAX_EFFECT_WAL_EVENT_BYTES,
+            )
+            .unwrap(),
+        );
+        for (bytes, cap_exceeded, cleanup_failure, state, retained, reason) in [
+            (
+                output.as_slice(),
+                true,
+                None,
+                "worker_exit_indeterminate",
+                2,
+                "output exceeded",
+            ),
+            (
+                output.as_slice(),
+                false,
+                Some("response pipe remained open"),
+                "worker_exit_cleanup_unproven",
+                2,
+                "response pipe remained open",
+            ),
+            (
+                wrong_nonce.as_slice(),
+                false,
+                None,
+                "worker_exit_indeterminate",
+                1,
+                "nonce mismatch",
+            ),
+        ] {
+            let evidence = native_worker_exit_effect_evidence(
+                Ok((bytes, cap_exceeded)),
+                cleanup_failure,
+                nonce,
+                false,
+            );
+            assert_eq!(evidence.terminal_state, state);
+            assert_eq!(evidence.entries.len(), retained);
+            assert!(!evidence.journal_complete);
+            assert!(!evidence.replay_certified);
+            assert!(evidence.control_trigger.is_none());
+            assert!(
+                evidence
+                    .protocol_error
+                    .as_deref()
+                    .is_some_and(|error| error.contains(reason)),
+                "{evidence:?}"
+            );
+        }
+
+        let unavailable =
+            native_worker_exit_effect_evidence(Err("reader failed"), None, nonce, false);
+        assert_eq!(unavailable.terminal_state, "worker_exit_cleanup_unproven");
+        assert!(!unavailable.journal_complete);
+        assert!(!unavailable.replay_certified);
+        assert!(unavailable.entries.is_empty());
+
+        let mut with_final = native_session_test_wal_prefix(2, nonce);
+        with_final.extend_from_slice(
+            &encode_native_session_frame(
+                &NativeSessionOutputFrame::Final {
+                    response: Box::new(NativeSessionResponse::TelemetryFailed {
+                        schema_version: NATIVE_SESSION_SCHEMA.to_string(),
+                        nonce: nonce.to_string(),
+                        message: "unvalidated final response before worker death".to_string(),
+                    }),
+                },
+                NATIVE_SESSION_MAX_RESPONSE_BYTES,
+            )
+            .unwrap(),
+        );
+        let unverified =
+            native_worker_exit_effect_evidence(Ok((&with_final, false)), None, nonce, false);
+        assert!(!unverified.journal_complete);
+        assert!(!unverified.replay_certified);
+        assert!(
+            unverified
+                .protocol_error
+                .as_deref()
+                .is_some_and(|error| error.contains("final response"))
+        );
     }
 
     #[cfg(feature = "engine")]

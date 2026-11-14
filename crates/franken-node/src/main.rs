@@ -15374,6 +15374,7 @@ fn emit_interrupted_run_effect_evidence(
         println!("{}", render_host_effect_ledger_human(ledger));
     } else if evidence.terminal_state == "timeout_cleanup_unproven"
         || evidence.terminal_state == "control_cleanup_unproven"
+        || evidence.terminal_state == "worker_exit_cleanup_unproven"
     {
         println!(
             "run interrupted, but worker termination and quiescence were not proven; replay certification refused (terminal-state={}, provider-returned={}, interrupted={}, journal-complete={})",
