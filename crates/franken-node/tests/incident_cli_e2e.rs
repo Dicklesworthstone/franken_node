@@ -2000,6 +2000,114 @@ fn incident_coverage_refuses_empty_or_unreadable_populations() {
 }
 
 #[test]
+fn incident_coverage_preserves_distinct_zero_effect_security_decisions_without_run_files() {
+    use frankenengine_node::observability::evidence_ledger::{DecisionKind, EvidenceEntry};
+    use frankenengine_node::observability::evidence_ledger_durable::DurableEvidenceLedger;
+    use frankenengine_node::runtime::effect_receipt::EffectReceiptChain;
+
+    let workspace = config_only_workspace();
+    configure_replay_bundle_signing_key(workspace.path());
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&[0x42_u8; 32]);
+    let store = DurableEvidenceLedger::open_default(workspace.path()).expect("open inventory");
+    let genesis = EffectReceiptChain::new().head_hash();
+    let nonempty_head = format!("sha256:{}", "ab".repeat(32));
+
+    // Signed inventory contract fixtures, not native-execution proof. The
+    // complete run files are deliberately unavailable: each authenticated
+    // security decision must survive independently in the coverage population.
+    // No new payload fields are required to interpret historical v1 decisions.
+    for (receipt_id, chain_head, exit_code, denied, failure) in [
+        ("zero-effect-completed", genesis.as_str(), 92, 0, None),
+        (
+            "zero-effect-failed",
+            genesis.as_str(),
+            1,
+            0,
+            Some("native capability denial before any host effect"),
+        ),
+        ("nonempty-effects", nonempty_head.as_str(), 1, 1, None),
+    ] {
+        let mut payload = json!({
+            "runtime": "franken_engine",
+            "exit_code": exit_code,
+            "violation_count": 1,
+            "host_effect_chain_head": chain_head,
+            "host_effects_allowed": 0,
+            "host_effects_denied": denied,
+            "containment_verdict": if exit_code == 92 { Some("Sandbox") } else { None },
+            "receipt_hash": format!("sha256:{receipt_id}"),
+        });
+        if let Some(failure) = failure {
+            payload["execution_failure"] = json!(failure);
+        }
+        store
+            .append_signed_chained(
+                EvidenceEntry {
+                    schema_version: "franken-node/run-decision-evidence/v1".to_string(),
+                    entry_id: Some(receipt_id.to_string()),
+                    decision_id: receipt_id.to_string(),
+                    decision_kind: if exit_code == 92 {
+                        DecisionKind::Escalate
+                    } else {
+                        DecisionKind::Deny
+                    },
+                    decision_time: "2026-10-07T00:00:00Z".to_string(),
+                    timestamp_ms: 1_791_331_200_000,
+                    trace_id: format!("trace-{receipt_id}"),
+                    epoch_id: 0,
+                    payload,
+                    size_bytes: 0,
+                    signature: String::new(),
+                    prev_entry_hash: String::new(),
+                },
+                &signing_key,
+            )
+            .expect("retain signed security decision");
+    }
+    drop(store);
+
+    let coverage = || {
+        run_cli_in_workspace(
+            workspace.path(),
+            &["ops", "incident-coverage", "--min-coverage", "1", "--json"],
+        )
+    };
+    let expected_incidents = json!([
+        "INC-RUN-9b784df9d916ac565d008f461ad138a6",
+        "INC-RUN-abababababababab",
+        "INC-RUN-fd7ec7dcb80fde64b48e34a1884babe2",
+    ]);
+    for corrupt_receipt_present in [false, true] {
+        if corrupt_receipt_present {
+            let receipt_dir = workspace
+                .path()
+                .join(".franken-node/state/execution-receipts/2026-10-07");
+            fs::create_dir_all(&receipt_dir).expect("create receipt directory");
+            fs::write(receipt_dir.join("zero-effect-failed.json"), b"{ truncated")
+                .expect("retain unreadable failed-run receipt");
+        }
+        let result = coverage();
+        assert!(!result.status.success(), "missing evidence cannot establish coverage");
+        let report: serde_json::Value =
+            serde_json::from_slice(&result.stdout).expect("coverage JSON");
+        assert_eq!(report["inventory_runs"], 3, "{report}");
+        assert_eq!(report["high_severity_events"], 3, "{report}");
+        assert_eq!(report["captured"], 0);
+        assert_eq!(report["bundled"], 0);
+        assert_eq!(report["replayable"], 0);
+        assert_eq!(report["replay_coverage"], 0.0);
+        assert_eq!(report["population_authenticated"], false);
+        assert_eq!(report["uncaptured_incidents"], expected_incidents);
+        assert_eq!(report["unreplayable_incidents"], expected_incidents);
+        assert_eq!(
+            report["unreadable_receipts"],
+            usize::from(corrupt_receipt_present)
+        );
+        assert!(report["source_errors"].as_array().unwrap().len() >= 3);
+    }
+}
+
+#[test]
 fn incident_coverage_excludes_only_independently_authenticated_clean_external_runs() {
     use frankenengine_node::observability::evidence_ledger::{DecisionKind, EvidenceEntry};
     use frankenengine_node::observability::evidence_ledger_durable::DurableEvidenceLedger;
@@ -3445,7 +3553,78 @@ fn native_incident_replay_captures_pure_programs_without_inventing_host_effects(
         first_bundle_name, second_bundle_name,
         "empty host ledgers must not collapse distinct executions into one incident"
     );
-    assert!(workspace.path().join(first_bundle_name).is_file());
+    assert!(workspace.path().join(&first_bundle_name).is_file());
+
+    fs::write(
+        workspace.path().join("failure.js"),
+        "throw new Error('pure failure');\n",
+    )
+    .expect("write zero-effect failed program");
+    let failed = run_cli_in_workspace(
+        workspace.path(),
+        &["run", "failure.js", "--capture-replay", "--json"],
+    );
+    assert_eq!(failed.status.code(), Some(1));
+    let failed: serde_json::Value =
+        serde_json::from_slice(&failed.stdout).expect("failed run JSON");
+    assert_eq!(failed["dispatch"]["host_effect_ledger"]["effect_count"], 0);
+    assert!(failed["receipt"]["incident_capture"].is_null());
+    let (failed_bundle_name, failed_bundle) = capture_native_run_bundle(
+        workspace.path(),
+        failed["receipt"]["receipt_id"].as_str().expect("failed receipt id"),
+    );
+    assert_ne!(failed_bundle_name, first_bundle_name);
+    assert_ne!(failed_bundle_name, second_bundle_name);
+    assert_eq!(failed_bundle["initial_state_snapshot"]["effect_count"], 0);
+    assert_eq!(
+        failed_bundle["timeline"][0]["payload"]["native_execution_failed"]["run_receipt_id"],
+        failed["receipt"]["receipt_id"]
+    );
+
+    let coverage = run_cli_in_workspace(
+        workspace.path(),
+        &["ops", "incident-coverage", "--json"],
+    );
+    assert!(coverage.status.success());
+    let coverage: serde_json::Value =
+        serde_json::from_slice(&coverage.stdout).expect("pure-run coverage JSON");
+    assert_eq!(coverage["population_authenticated"], true, "{coverage}");
+    assert_eq!(coverage["authenticated_receipts"], 3);
+    assert_eq!(coverage["inventory_runs"], 3);
+    assert_eq!(coverage["high_severity_events"], 0);
+    assert!(coverage["replay_coverage"].is_null());
+
+    // An authenticated manual capture does not let a later edited selector
+    // masquerade as the original pure failed run or disappear from coverage.
+    let receipt_path = workspace.path().join(
+        failed["receipt_path"].as_str().expect("failed receipt path"),
+    );
+    let mut altered_receipt = failed["receipt"].clone();
+    altered_receipt["native_replay_payload_sha256"] = json!("00".repeat(32));
+    fs::write(&receipt_path, serde_json::to_vec_pretty(&altered_receipt).unwrap())
+        .expect("alter failed-run replay selector");
+    let rejected = run_cli_in_workspace(
+        workspace.path(),
+        &[
+            "incident",
+            "capture",
+            "--from-run",
+            failed["receipt"]["receipt_id"].as_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert!(!rejected.status.success());
+    let corrupted = run_cli_in_workspace(
+        workspace.path(),
+        &["ops", "incident-coverage", "--min-coverage", "1", "--json"],
+    );
+    assert!(!corrupted.status.success());
+    let corrupted: serde_json::Value =
+        serde_json::from_slice(&corrupted.stdout).expect("corrupted pure-run coverage JSON");
+    assert_eq!(corrupted["population_authenticated"], false, "{corrupted}");
+    assert_eq!(corrupted["authenticated_receipts"], 2);
+    assert_eq!(corrupted["high_severity_events"], 0);
+    assert!(!corrupted["source_errors"].as_array().unwrap().is_empty());
 }
 
 #[cfg(feature = "engine")]

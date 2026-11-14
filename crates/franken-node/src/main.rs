@@ -13264,13 +13264,12 @@ fn run_incident_id(chain_head_hash: &str) -> String {
 }
 
 /// Runs without host effects share the ledger genesis. Their execution
-/// evidence is identified by the authenticated run receipt instead.
-fn run_execution_incident_id(
-    ledger: &ops::engine_dispatcher::HostEffectLedger,
-    receipt_id: &str,
-) -> String {
-    if !ledger.entries.is_empty() {
-        return run_incident_id(&ledger.chain_head_hash);
+/// evidence is identified by the authenticated run receipt instead. Derive
+/// this from the authenticated chain head so retained decision inventory can
+/// recover the same identity even when the full run ledger is missing.
+fn run_execution_incident_id(chain_head_hash: &str, receipt_id: &str) -> String {
+    if chain_head_hash != runtime::effect_receipt::EffectReceiptChain::new().head_hash() {
+        return run_incident_id(chain_head_hash);
     }
     let digest = sha2::Sha256::digest(
         [
@@ -13312,7 +13311,8 @@ fn planned_run_incident_capture(
     if !tripped_control || (ledger.entries.is_empty() && dispatch.native_replay.is_none()) {
         return None;
     }
-    let incident_id = run_execution_incident_id(ledger, &receipt.core.receipt_id);
+    let incident_id =
+        run_execution_incident_id(&ledger.chain_head_hash, &receipt.core.receipt_id);
     Some(RunIncidentCaptureRef {
         evidence_path: run_incident_evidence_relative_path(&incident_id),
         incident_id,
@@ -13921,7 +13921,7 @@ fn handle_incident_capture_command(args: &cli::IncidentCaptureArgs) -> Result<()
             ),
         },
     };
-    let incident_id = run_execution_incident_id(ledger, &receipt_id);
+    let incident_id = run_execution_incident_id(&ledger.chain_head_hash, &receipt_id);
     let evidence_relative = run_incident_evidence_relative_path(&incident_id);
     let evidence_path = project_root.join(&evidence_relative);
     let status = if evidence_path.is_file() {
@@ -14143,7 +14143,8 @@ fn authenticated_run_decision_inventory(
 
 /// Measure replay availability from authenticated retained run decisions and
 /// discoverable run records. Derive incident identities from the authenticated
-/// effect chain instead of trusting an editable receipt's capture pointer.
+/// effect chain and receipt identity instead of trusting an editable receipt's
+/// capture pointer. An empty chain still identifies a distinct native run.
 fn handle_ops_incident_coverage(args: &cli::OpsIncidentCoverageArgs) -> Result<()> {
     let project_root = std::env::current_dir().context("failed resolving the project directory")?;
     if let Some(min) = args.min_coverage
@@ -14241,18 +14242,20 @@ fn handle_ops_incident_coverage(args: &cli::OpsIncidentCoverageArgs) -> Result<(
                 let record = authenticated.record;
                 authenticated_receipts = authenticated_receipts.saturating_add(1);
                 let ledger = &record.host_effect_ledger;
+                let incident_id =
+                    run_execution_incident_id(&ledger.chain_head_hash, &record.receipt_id);
                 if let Some(capture) = &record.native_replay {
                     native_replay_payloads.insert(
-                        run_incident_id(&ledger.chain_head_hash),
+                        incident_id.clone(),
                         capture.payload_sha256.clone(),
                     );
                 }
                 let tripped_control = ledger.denied_count > 0
                     || !record.ssrf_violations.is_empty()
                     || record.sentinel_enforced;
-                if tripped_control && !ledger.entries.is_empty() {
+                if tripped_control {
                     observed.insert(
-                        run_incident_id(&ledger.chain_head_hash),
+                        incident_id,
                         (
                             record.receipt_id,
                             record.receipt_hash,
@@ -14302,7 +14305,7 @@ fn handle_ops_incident_coverage(args: &cli::OpsIncidentCoverageArgs) -> Result<(
                     ) {
                         (Some(chain_head), Some(receipt_hash)) => {
                             observed
-                                .entry(run_incident_id(chain_head))
+                                .entry(run_execution_incident_id(chain_head, &run.decision_id))
                                 .or_insert_with(|| {
                                     (
                                         run.decision_id.clone(),
@@ -44812,6 +44815,25 @@ mod run_trust_gate_tests {
                 .get("native_module_graph")
                 .is_none(),
             "runs without a frozen graph retain their existing receipt representation"
+        );
+    }
+
+    #[test]
+    fn incident_identity_keeps_zero_effect_runs_distinct_and_nonempty_chains_stable() {
+        let genesis = runtime::effect_receipt::EffectReceiptChain::new().head_hash();
+        let completed = run_execution_incident_id(&genesis, "zero-effect-completed");
+        let failed = run_execution_incident_id(&genesis, "zero-effect-failed");
+        assert_eq!(completed, "INC-RUN-9b784df9d916ac565d008f461ad138a6");
+        assert_eq!(failed, "INC-RUN-fd7ec7dcb80fde64b48e34a1884babe2");
+        assert_ne!(completed, failed, "the shared genesis does not identify a run");
+        assert_ne!(completed, run_incident_id(&genesis));
+        assert_eq!(
+            run_execution_incident_id(
+                "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+                "zero-effect-completed",
+            ),
+            "INC-RUN-1234567890abcdef",
+            "nonempty effect-chain incident identities retain their existing format"
         );
     }
 
