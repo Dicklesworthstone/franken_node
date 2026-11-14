@@ -3435,8 +3435,7 @@ pub enum IncidentCommand {
     /// List recorded incidents.
     List(IncidentListArgs),
 
-    /// Capture a recorded run as incident evidence from its persisted, signed
-    /// host-effect ledger (re-verified before anything is written).
+    /// Capture a signed run, or export authenticated native-session forensics.
     Capture(IncidentCaptureArgs),
 }
 
@@ -3448,11 +3447,22 @@ pub struct IncidentCaptureArgs {
     #[arg(long, default_value = "")]
     pub from_run: String,
 
-    /// Severity recorded on the evidence: low, medium, high (default), critical.
+    /// Native-session UUID from `fleet sessions`. Exports retained signed
+    /// supervisor observations, including interruptions, panics and pending
+    /// admissions. Does not certify replay or cleanup. Select this OR --from-run.
+    #[arg(long)]
+    pub from_session: Option<String>,
+
+    /// New forensic export path for --from-session. Defaults to
+    /// INC-SESSION-<UUID>.fnforensics.json; existing files are never replaced.
+    #[arg(long, value_parser = parse_handler_required_pathbuf)]
+    pub out: Option<PathBuf>,
+
+    /// Severity for --from-run: low, medium, high (default), critical.
     #[arg(long)]
     pub severity: Option<String>,
 
-    /// Emit `franken-node/incident-capture-cli/v1` JSON.
+    /// Emit capture JSON, or `franken-node/incident-forensics-cli/v1` for a session.
     #[arg(long)]
     pub json: bool,
 }
@@ -4771,6 +4781,50 @@ mod parser_contract_extra_tests {
                 assert!(args.artifact.is_empty());
             }
             other => panic!("expected trust quarantine, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn incident_capture_accepts_external_forensic_destination_and_defers_selector_errors() {
+        let nonce = "018f2c91-5eba-7a91-8150-f756af5ae782";
+        let cli = parse(&[
+            "franken-node",
+            "incident",
+            "capture",
+            "--from-session",
+            nonce,
+            "--out",
+            "/operator/evidence/session.fnforensics.json",
+            "--json",
+        ])
+        .expect("a forensic export is an operator artifact, not a guest source path");
+        let Command::Incident(IncidentCommand::Capture(args)) = cli.command else {
+            panic!("expected incident capture");
+        };
+        assert_eq!(args.from_session.as_deref(), Some(nonce));
+        assert!(args.from_run.is_empty());
+        assert_eq!(
+            args.out,
+            Some(PathBuf::from("/operator/evidence/session.fnforensics.json"))
+        );
+        assert!(args.json);
+
+        for tail in [
+            vec![],
+            vec!["--from-session", ""],
+            vec!["--from-session", nonce, "--from-run", "run-id"],
+            vec!["--from-session", nonce, "--severity", "critical"],
+        ] {
+            let cli = <Cli as clap::Parser>::try_parse_from(
+                ["franken-node", "incident", "capture", "--json"]
+                    .into_iter()
+                    .chain(tail),
+            )
+            .expect("the handler owns selector errors so automation receives JSON");
+            assert!(matches!(
+                cli.command,
+                Command::Incident(IncidentCommand::Capture(_))
+            ));
         }
     }
 

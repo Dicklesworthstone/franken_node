@@ -10371,36 +10371,31 @@ fn build_backup_path(path: &Path, timestamp_suffix: &str) -> PathBuf {
     }
 }
 
-/// Stage credential-bearing configuration and backups privately before publication.
-fn write_private_init_file(
-    path: &Path,
-    mut source: impl std::io::Read,
-    overwrite: bool,
-) -> Result<()> {
+/// Stage sensitive contents privately and sync them before atomic publication.
+fn write_private_file(path: &Path, mut source: impl std::io::Read, overwrite: bool) -> Result<()> {
     let parent = normalized_directory(path.parent().unwrap_or_else(|| Path::new(".")));
     let mut temporary = tempfile::NamedTempFile::new_in(parent)
-        .with_context(|| format!("failed staging private init file in {}", parent.display()))?;
+        .with_context(|| format!("failed staging private file in {}", parent.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
         temporary
             .as_file()
             .set_permissions(std::fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("failed protecting init file for {}", path.display()))?;
+            .with_context(|| format!("failed protecting private file for {}", path.display()))?;
     }
     std::io::copy(&mut source, temporary.as_file_mut())
-        .with_context(|| format!("failed staging init contents for {}", path.display()))?;
+        .with_context(|| format!("failed staging private contents for {}", path.display()))?;
     temporary
         .as_file()
         .sync_all()
-        .with_context(|| format!("failed syncing init contents for {}", path.display()))?;
+        .with_context(|| format!("failed syncing private contents for {}", path.display()))?;
     let publication = if overwrite {
         temporary.persist(path)
     } else {
         temporary.persist_noclobber(path)
     };
-    publication
-        .with_context(|| format!("failed publishing private init file {}", path.display()))?;
+    publication.with_context(|| format!("failed publishing private file {}", path.display()))?;
     #[cfg(unix)]
     sync_directory(parent)?;
     Ok(())
@@ -10418,14 +10413,14 @@ fn apply_init_write_policy(
             let backup_path = build_backup_path(path, timestamp_suffix);
             let original = std::fs::File::open(path)
                 .with_context(|| format!("failed opening init backup source {}", path.display()))?;
-            write_private_init_file(&backup_path, original, false).with_context(|| {
+            write_private_file(&backup_path, original, false).with_context(|| {
                 format!(
                     "failed creating backup {} from {}",
                     backup_path.display(),
                     path.display()
                 )
             })?;
-            write_private_init_file(path, content.as_bytes(), true)
+            write_private_file(path, content.as_bytes(), true)
                 .with_context(|| format!("failed writing {}", path.display()))?;
             return Ok(InitFileAction {
                 path: path.display().to_string(),
@@ -10434,7 +10429,7 @@ fn apply_init_write_policy(
             });
         }
         if overwrite {
-            write_private_init_file(path, content.as_bytes(), true)
+            write_private_file(path, content.as_bytes(), true)
                 .with_context(|| format!("failed writing {}", path.display()))?;
             return Ok(InitFileAction {
                 path: path.display().to_string(),
@@ -10448,7 +10443,7 @@ fn apply_init_write_policy(
         );
     }
 
-    write_private_init_file(path, content.as_bytes(), false)
+    write_private_file(path, content.as_bytes(), false)
         .with_context(|| format!("failed writing {}", path.display()))?;
     Ok(InitFileAction {
         path: path.display().to_string(),
@@ -13773,6 +13768,64 @@ fn load_authenticated_run_ledger_record(
 
 const INCIDENT_CAPTURE_CLI_SCHEMA_VERSION: &str = "franken-node/incident-capture-cli/v1";
 
+/// Export the original supervisor signatures without granting an interrupted
+/// session the stronger native replay or fleet-quiescence proof scopes.
+fn handle_incident_session_forensics(
+    args: &cli::IncidentCaptureArgs,
+    session_nonce: &str,
+) -> Result<()> {
+    #[cfg(not(feature = "engine"))]
+    {
+        let _ = (args, session_nonce);
+        anyhow::bail!("`incident capture --from-session` requires a native-engine build");
+    }
+    #[cfg(feature = "engine")]
+    {
+        let export =
+            ops::native_session_inventory::export_local_native_session_forensics(session_nonce)?;
+        let bytes = serde_json::to_vec(&export.bundle)
+            .context("failed serializing authenticated native-session forensics")?;
+        if bytes.len()
+            > frankenengine_verifier_sdk::native_session::MAX_NATIVE_SESSION_FORENSICS_BYTES
+        {
+            anyhow::bail!("native-session forensic export exceeds its byte bound");
+        }
+        let bundle_path = args.out.clone().unwrap_or_else(|| {
+            PathBuf::from(format!("INC-SESSION-{session_nonce}.fnforensics.json"))
+        });
+        if bundle_path.as_os_str().is_empty() {
+            anyhow::bail!("native-session forensic export requires a nonempty --out path");
+        }
+        // The shared publisher stages owner-only bytes, syncs them, and uses a
+        // no-clobber atomic publication. Failed authentication never opens the
+        // destination, and repeated export cannot overwrite existing evidence.
+        write_private_file(&bundle_path, bytes.as_slice(), false)
+            .context("failed publishing native-session forensic export")?;
+        let bundle_sha256 = hex::encode(sha2::Sha256::digest(&bytes));
+        let report = serde_json::json!({
+            "schema_version": "franken-node/incident-forensics-cli/v1",
+            "command": "incident.capture",
+            "status": "exported",
+            "session_nonce": session_nonce,
+            "bundle_path": bundle_path.display().to_string(),
+            "bundle_sha256": bundle_sha256,
+            "verification": export.verification,
+        });
+        if args.json {
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        } else {
+            println!("Exported authenticated native-session forensics for {session_nonce}");
+            println!("  bundle: {}", bundle_path.display());
+            println!("  sha256: {bundle_sha256}");
+            println!("  scope: signed supervisor observations; replay and quiescence uncertified");
+            println!(
+                "  offline verification: franken-verifier verify --format native-session-forensics --trusted-key-hex TRUSTED_PRODUCT_ROOT_HEX < BUNDLE_PATH"
+            );
+        }
+        Ok(())
+    }
+}
+
 /// `incident capture --from-run`: capture a recorded run as incident evidence
 /// after the fact. The run's persisted host-effect ledger is re-verified
 /// (hash chain, outcome counts, and the detached signature against the
@@ -13781,8 +13834,29 @@ const INCIDENT_CAPTURE_CLI_SCHEMA_VERSION: &str = "franken-node/incident-capture
 /// operator but the choice of run and the severity.
 fn handle_incident_capture_command(args: &cli::IncidentCaptureArgs) -> Result<()> {
     let selector = args.from_run.trim();
+    if let Some(session_nonce) = args.from_session.as_deref() {
+        if !selector.is_empty() {
+            anyhow::bail!(
+                "`incident capture` requires exactly one of --from-run or --from-session"
+            );
+        }
+        if args.severity.is_some() {
+            anyhow::bail!(
+                "--severity applies to --from-run; session forensics preserve the original signed observations"
+            );
+        }
+        if session_nonce.is_empty() {
+            anyhow::bail!("`incident capture --from-session` requires a native-session UUID");
+        }
+        return handle_incident_session_forensics(args, session_nonce);
+    }
+    if args.out.is_some() {
+        anyhow::bail!("`incident capture --out` requires --from-session");
+    }
     if selector.is_empty() {
-        anyhow::bail!("`incident capture` requires --from-run <receipt-id|receipt-path>");
+        anyhow::bail!(
+            "`incident capture` requires --from-run <receipt-id|receipt-path> or --from-session <UUID>"
+        );
     }
     let project_root = std::env::current_dir().context("failed resolving the project directory")?;
     let receipt_path = {

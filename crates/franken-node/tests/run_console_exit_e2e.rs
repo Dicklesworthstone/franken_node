@@ -1162,6 +1162,93 @@ fn assert_native_interruption_retains_admitted_http_io(kill_worker: bool) {
             .any(|error| error.to_string().contains(receipt_id)),
         "a healthy later run must not erase the unresolved timeout: {after_healthy}"
     );
+
+    // The interruption has no replay-certified incident, but its original
+    // supervisor observation must remain portable for independent analysis.
+    // Export from a separate directory, with the entry source moved away, so
+    // this cannot accidentally recapture or execute the original application.
+    std::fs::rename(&app_path, dir.path().join("retained-original-app.js"))
+        .expect("preserve the source away from its admitted entrypoint");
+    let export_directory = tempfile::tempdir().expect("operator forensic destination");
+    let invoke_export = || {
+        Command::new(franken_node_bin())
+            .args([
+                "incident",
+                "capture",
+                "--from-session",
+                &typed_wal.session_nonce,
+                "--out",
+                "session.fnforensics.json",
+                "--json",
+            ])
+            .current_dir(export_directory.path())
+            .output()
+            .expect("export the retained supervisor observation")
+    };
+    let exported = invoke_export();
+    assert!(
+        exported.status.success(),
+        "forensic export failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&exported.stdout),
+        String::from_utf8_lossy(&exported.stderr)
+    );
+    let export_report: Value = serde_json::from_slice(&exported.stdout).expect("forensic CLI JSON");
+    assert_eq!(
+        export_report["schema_version"],
+        "franken-node/incident-forensics-cli/v1"
+    );
+    assert_eq!(export_report["verification"]["outcome_kind"], "interrupted");
+    assert_eq!(export_report["verification"]["replay_certified"], false);
+    assert_eq!(export_report["verification"]["quiescence_certified"], false);
+    assert_eq!(
+        export_report["verification"]["historical_completeness"],
+        false
+    );
+    let exported_path = export_directory.path().join("session.fnforensics.json");
+    let exported_bytes = std::fs::read(&exported_path).expect("read forensic export");
+    let captured_root = evidence["dispatch"]["runtime_evidence_identity_capture"]
+        ["product_root_verification_key_hex"]
+        .as_str()
+        .expect("root selected from the original live run, not the export");
+    let root_bytes: [u8; 32] = hex::decode(captured_root)
+        .expect("root hex")
+        .try_into()
+        .expect("root length");
+    let trusted_root = ed25519_dalek::VerifyingKey::from_bytes(&root_bytes).expect("root key");
+    let verified = frankenengine_verifier_sdk::native_session::verify_native_session_forensics(
+        &exported_bytes,
+        &trusted_root,
+    )
+    .expect("the independent SDK authenticates the original supervisor signatures");
+    assert_eq!(verified.session_nonce, typed_wal.session_nonce);
+    assert_eq!(verified.indeterminate_provider_calls, Some(1));
+    assert!(!verified.replay_certified && !verified.quiescence_certified);
+    let portable: frankenengine_verifier_sdk::native_session::NativeSessionForensicBundle =
+        serde_json::from_slice(&exported_bytes).expect("portable forensic envelope");
+    let original_outcome: Value = serde_json::from_str(
+        &portable
+            .outcome
+            .expect("signed interrupted outcome")
+            .payload_json,
+    )
+    .expect("original signed payload");
+    assert_eq!(original_outcome["outcome"]["effects"]["evidence"], wal);
+    use std::os::unix::fs::PermissionsExt as _;
+    assert_eq!(
+        std::fs::metadata(&exported_path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o077,
+        0,
+        "forensic details must be private at publication"
+    );
+    let duplicate = invoke_export();
+    assert!(
+        !duplicate.status.success(),
+        "existing evidence must never be overwritten"
+    );
+    assert_eq!(std::fs::read(&exported_path).unwrap(), exported_bytes);
 }
 
 #[cfg(target_os = "linux")]

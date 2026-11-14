@@ -563,6 +563,102 @@ fn incident_bundle_round_trips_evidence_refs_and_trust_artifacts() {
 }
 
 #[test]
+fn incident_forensics_rejects_ambiguous_or_missing_authority_without_creating_evidence() {
+    let workspace = config_only_workspace();
+    let state = tempfile::tempdir().expect("empty private state");
+    let nonce = "018f2c91-5eba-7a91-8150-f756af5ae782";
+    let wrapped_nonce = format!(" {nonce} ");
+    let cases = [
+        vec!["incident", "capture", "--json"],
+        vec!["incident", "capture", "--from-session", "", "--json"],
+        vec![
+            "incident",
+            "capture",
+            "--from-session",
+            wrapped_nonce.as_str(),
+            "--json",
+        ],
+        vec![
+            "incident",
+            "capture",
+            "--from-session",
+            nonce,
+            "--from-run",
+            "run-id",
+            "--json",
+        ],
+        vec![
+            "incident",
+            "capture",
+            "--from-session",
+            nonce,
+            "--severity",
+            "critical",
+            "--json",
+        ],
+        vec![
+            "incident",
+            "capture",
+            "--from-run",
+            "run-id",
+            "--out",
+            "forensics.json",
+            "--json",
+        ],
+        vec![
+            "incident",
+            "capture",
+            "--from-session",
+            "../forged",
+            "--out",
+            "forensics.json",
+            "--json",
+        ],
+        vec![
+            "incident",
+            "capture",
+            "--from-session",
+            nonce,
+            "--out",
+            "forensics.json",
+            "--json",
+        ],
+    ];
+    for arguments in cases {
+        let output =
+            run_cli_in_workspace_with_state_home(workspace.path(), &arguments, Some(state.path()));
+        assert!(
+            !output.status.success(),
+            "{arguments:?} unexpectedly succeeded"
+        );
+        let error: serde_json::Value =
+            serde_json::from_slice(&output.stdout).unwrap_or_else(|failure| {
+                panic!(
+                    "{arguments:?}: {failure}; stderr={}",
+                    String::from_utf8_lossy(&output.stderr)
+                )
+            });
+        assert_eq!(
+            error["schema_version"],
+            "franken-node/incident-error-cli/v1"
+        );
+        assert_eq!(error["command"], "incident.capture");
+        assert_eq!(error["ok"], false);
+        assert!(!workspace.path().join("forensics.json").exists());
+        assert!(
+            !workspace
+                .path()
+                .join(format!("INC-SESSION-{nonce}.fnforensics.json"))
+                .exists()
+        );
+        assert!(
+            !state.path().join("franken-node/runtime-evidence").exists(),
+            "forensic inspection must not provision replacement authority"
+        );
+    }
+}
+
+#[test]
 fn incident_bundle_json_fails_closed_when_id_missing() {
     let workspace = config_only_workspace();
     let output = run_cli_in_workspace(workspace.path(), &["incident", "bundle", "--json"]);

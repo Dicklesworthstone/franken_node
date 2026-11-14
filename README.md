@@ -1388,7 +1388,7 @@ franken-node fleet status --json   # transport=http, live_control_plane=true
 | `franken-node incident replay` | Verifies recorded bundle integrity by default; `--execute` also re-executes captured native guest inputs. `--bundle` is handler-required so `--json` failures emit `franken-node/incident-error-cli/v1` instead of a human clap error. **Also fails closed without `--trusted-public-key` or `--key-dir`.** Flags: `--execute`, `--json`. |
 | `franken-node incident counterfactual` | Simulate alternative policy actions. Same trust-anchor requirement as `replay`. `--bundle` and `--policy` are handler-required so `--json` failures emit `franken-node/incident-error-cli/v1` instead of a human clap error. Optional: `--promote`, `--promotion-signing-key`, `--operator-id`. `--model synthetic` (default) is the sandboxed risk-score stand-in. `--model production` re-decides every host effect a run-captured incident recorded (its signed effect-receipt chain entry) under the runtime profile named by `--policy` (`strict`, `balanced`, `legacy-risky`), using the run path's own capability table: an effect whose capability the profile does not grant is refused at the capability gate; one it grants gets the recorded outcome of the profile-independent SSRF / flow / sandbox gates; spawns keep their admission-bound outcome. Decisions after the first divergence are labelled `determination=path_assumed`. Bundles without recorded effects, and non-profile policies, are refused. The model is bound into the counterfactual digest. Flags: `--json`. |
 | `franken-node incident list` | List recorded incidents. Filter: `--severity`. Flags: `--json` (failures `franken-node/incident-error-cli/v1`). |
-| `franken-node incident capture` | Capture a recorded native run as incident evidence. `--from-run <receipt-id\|receipt-path>` verifies the product-signed run record and complete receipt snapshot, then the engine ledger's counts, hash chain, detached signature, and product-root-signed session identity before sealing the captured source. An existing source is returned as `already_captured` only after its signature and run bindings authenticate. Legacy unsigned records require a new run. Flags: `--severity`, `--json` (`franken-node/incident-capture-cli/v1`). |
+| `franken-node incident capture` | `--from-run <receipt-id\|receipt-path>` verifies the product-signed run record, receipt snapshot, engine ledger and session identity before sealing incident evidence. An existing source is returned as `already_captured` only after its signature and run bindings authenticate. Alternatively, `--from-session <UUID>` exports original signed supervisor observations, including interrupted, panicked and pending sessions, to a private `.fnforensics.json` artifact for independent offline verification. Session exports accept `--out`; run captures accept `--severity`. Both accept `--json`; session exports use `franken-node/incident-forensics-cli/v1`, run captures use `franken-node/incident-capture-cli/v1`. |
 
 ### Long-term verifiability (LTV)
 
@@ -2335,6 +2335,46 @@ and original timeout error with a separate `persistence_error`. Interrupted runs
 remain nonzero failures, produce no fabricated finalized host-effect ledger or
 automatic replay capture, and remain visible as source errors in incident
 coverage. `incident capture --from-run` explicitly refuses to certify them.
+
+The retained supervisor evidence can be exported separately, including after
+the original application or project has been moved. Select a session UUID from
+`fleet sessions --json`, then choose an operator-controlled destination:
+
+```bash
+franken-node incident capture --from-session SESSION_UUID \
+  --out /srv/operator-evidence/session.fnforensics.json --json
+
+franken-verifier verify --format native-session-forensics \
+  --trusted-key-hex "$TRUSTED_PRODUCT_ROOT_HEX" \
+  < /srv/operator-evidence/session.fnforensics.json
+```
+
+`TRUSTED_PRODUCT_ROOT_HEX` is the independently trusted 32-byte product-root
+public key in hexadecimal. The verifier does not select a trust anchor from the
+artifact. It authenticates the original admission commitment and, when present,
+the original supervisor outcome signature without consulting the runtime,
+workspace, database or network. Nested duplicate JSON keys, altered commitments,
+cross-session outcomes and inconsistent journal states are rejected. Its bounded
+summary includes the session, project, observation state and effect counts; the
+private panic text and request commitments remain in the artifact.
+
+Session export opens existing protected evidence read-only. It does not create
+replacement authority, repair the inventory or retry an effect. Publication uses
+an owner-only staged file, a durable sync and an atomic no-clobber operation;
+existing output is preserved. Without `--out`, the destination is
+`INC-SESSION-<UUID>.fnforensics.json` in the current directory. `--from-session`
+and `--from-run` are mutually exclusive, and `--severity` applies only to run
+capture because session export preserves the original signed observations.
+
+A missing signed outcome yields an admission-only `pending` export, even if an
+unsigned database projection claims completion. Missing admission authority,
+corrupt retained evidence or disagreement with a signed outcome refuses export.
+These artifacts establish authenticated supervisor observations. They carry
+`replay_certified: false`, `quiescence_certified: false` and
+`historical_completeness: false`, and do not increase incident replay coverage.
+In particular, if the parent dies before retaining its terminal outcome, this
+export cannot recover the in-memory effect stream or certify that a worker or
+external effect has stopped. Durable pre-effect journaling remains separate work.
 
 Live controls can also stop a worker cooperatively. When that worker returns a
 valid final response within the bounded drain period, the interruption envelope
