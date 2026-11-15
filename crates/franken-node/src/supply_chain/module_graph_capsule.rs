@@ -800,6 +800,61 @@ mod tests {
     }
 
     #[test]
+    fn operator_state_capsule_inputs_and_links_are_rejected_before_replay() {
+        let root = tempfile::tempdir().unwrap();
+        let capsule = encode(&simple(root.path())).unwrap();
+        let (header, payload) = parse_frame(capsule.bytes()).unwrap();
+        assert!(recorded_resolver(&header, payload).is_ok());
+
+        // An independently pinned old or malicious capsule does not grant
+        // access to operator state. Refuse its recorded namespace before any
+        // graph replay or source preparation, even for unused observations.
+        for entrypoint in [
+            ".franken-node/key.json",
+            "nested/.franken-node/key.json",
+            ".FRANKEN-NODE/key.json",
+            "franken_node.toml",
+            "nested/FRANKEN_NODE.TOML",
+        ] {
+            let forbidden = modify(&capsule, |header| {
+                header.entrypoint = entrypoint.to_owned();
+            });
+            assert_eq!(failure(&forbidden), "ERR_INVALID_MODULE_SPECIFIER");
+        }
+        let forbidden_input = modify(&capsule, |header| {
+            header.inputs.push(Input {
+                path: ".franken-node".into(),
+                content: Content::Directory,
+            });
+            header
+                .inputs
+                .sort_by(|left, right| left.path.cmp(&right.path));
+        });
+        let (header, payload) = parse_frame(&forbidden_input).unwrap();
+        assert_eq!(
+            recorded_resolver(&header, payload)
+                .err()
+                .expect("protected input")
+                .code,
+            "ERR_INVALID_MODULE_SPECIFIER"
+        );
+        assert_eq!(failure(&forbidden_input), "ERR_INVALID_MODULE_SPECIFIER");
+
+        let forbidden_link = modify(&capsule, |header| {
+            let target = ".franken-node/remotecap/trust-scan-token.json";
+            header.options.symlink_policy = super::super::SymlinkPolicy::Contained;
+            header.inputs.push(Input {
+                path: "zz-alias.json".into(),
+                content: Content::Symlink {
+                    target: target.into(),
+                    sha256: hex::encode(Sha256::digest(target.as_bytes())),
+                },
+            });
+        });
+        assert_eq!(failure(&forbidden_link), "ERR_INVALID_MODULE_SYMLINK");
+    }
+
+    #[test]
     fn truncation_trailing_bytes_and_unknown_schema_fail_closed() {
         let root = tempfile::tempdir().unwrap();
         let capsule = encode(&simple(root.path())).unwrap();

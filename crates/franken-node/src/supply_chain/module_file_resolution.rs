@@ -428,6 +428,25 @@ impl Resolver {
     }
     fn new(project: &Path, conditions: &[String], symlink_policy: SymlinkPolicy) -> Result<Self> {
         let conditions = Self::canonical_conditions(conditions)?;
+        // A narrower root must not turn operator files into ordinary relative
+        // modules. Check both spellings so an ancestor symlink cannot hide the
+        // reserved namespace. Preserve the no-follow open below: canonicalizing
+        // for this check must not implicitly admit a symlink as the root itself.
+        let canonical = project
+            .canonicalize()
+            .map_err(|e| io_error("<project>", e))?;
+        if [project, canonical.as_path()].iter().any(|root| {
+            root.components().any(|part| {
+                part.as_os_str()
+                    .to_str()
+                    .is_some_and(operator_control_component)
+            })
+        }) {
+            return Err(error(
+                "ERR_INVALID_MODULE_SPECIFIER",
+                "operator control state cannot be a module capture root",
+            ));
+        }
         let root = File::from(
             open(
                 project,
@@ -1262,6 +1281,19 @@ impl Resolver {
     }
 }
 
+// Operator state and configuration contain signing keys, bearer credentials and
+// containment controls. Neither source capture nor metadata resolution grants
+// access to them. Fold ASCII case for filesystems that alias those spellings;
+// ordinary names with a prefix or suffix remain valid module inputs.
+fn operator_control_component(component: &str) -> bool {
+    component.eq_ignore_ascii_case(".franken-node")
+        || component.eq_ignore_ascii_case("franken_node.toml")
+}
+
+fn reserved_module_component(component: &str) -> bool {
+    matches!(component, ".git" | ".beads") || operator_control_component(component)
+}
+
 fn validate_link_target(target: &str) -> Result<()> {
     if target.is_empty()
         || target.len() > MAX_PATH
@@ -1269,11 +1301,11 @@ fn validate_link_target(target: &str) -> Result<()> {
         || target.starts_with('/')
         || target.contains(['\\', ':'])
         || target.chars().any(char::is_control)
-        || target.split('/').any(|p| matches!(p, ".git" | ".beads"))
+        || target.split('/').any(reserved_module_component)
     {
         return Err(error(
             "ERR_INVALID_MODULE_SYMLINK",
-            "symlink target must be bounded, relative and outside reserved repository state",
+            "symlink target must be bounded, relative and outside reserved operator or repository state",
         ));
     }
     Ok(())
@@ -1347,11 +1379,11 @@ fn validate_path(path: &str) -> Result<()> {
         || path.chars().any(char::is_control)
         || path
             .split('/')
-            .any(|p| p.is_empty() || matches!(p, "." | ".." | ".git" | ".beads"))
+            .any(|p| p.is_empty() || matches!(p, "." | "..") || reserved_module_component(p))
     {
         return Err(error(
             "ERR_INVALID_MODULE_SPECIFIER",
-            "module path must remain canonical and project-relative",
+            "module path must remain canonical, project-relative and outside reserved operator or repository state",
         ));
     }
     Ok(())
@@ -1378,10 +1410,10 @@ fn normalize(directory: &str, request: &str) -> Result<String> {
                     ));
                 }
             }
-            ".git" | ".beads" => {
+            part if reserved_module_component(part) => {
                 return Err(error(
                     "ERR_INVALID_MODULE_SPECIFIER",
-                    "reserved repository state is not a module input",
+                    "reserved operator or repository state is not a module input",
                 ));
             }
             _ => parts.push(part),
@@ -4054,6 +4086,217 @@ mod tests {
             "ERR_MODULE_RESOLUTION_LIMIT"
         );
         assert!(package_parts("pkg/../other", false).is_err());
+    }
+
+    #[test]
+    fn operator_state_is_not_a_source_or_metadata_resolution_target() {
+        let root = fixture();
+        for path in [
+            ".franken-node/remotecap/trust-scan-token.json",
+            "nested/.franken-node/keys/receipt.json",
+            ".FRANKEN-NODE/remotecap/trust-scan-token.json",
+            "franken_node.toml",
+            "nested/FRANKEN_NODE.TOML",
+        ] {
+            put(
+                root.path(),
+                path,
+                br#"{"bearer":"OPERATOR_STATE_MUST_STAY_PRIVATE"}"#,
+            );
+            for mode in [ResolutionMode::Require, ResolutionMode::Import] {
+                assert_eq!(
+                    rejected(root.path(), "app.js", &format!("./{path}"), mode),
+                    "ERR_INVALID_MODULE_SPECIFIER"
+                );
+            }
+            assert_eq!(
+                rejected(root.path(), path, "./app.js", ResolutionMode::Require),
+                "ERR_INVALID_MODULE_SPECIFIER"
+            );
+        }
+        for request in [
+            "./%2efranken-node/remotecap/trust-scan-token.json",
+            "./.franken%2dnode/remotecap/trust-scan-token.json?view=1#token",
+            "./.franken-node/../app.js",
+            "./%66ranken_node.toml",
+        ] {
+            assert_eq!(
+                rejected(root.path(), "app.js", request, ResolutionMode::Import),
+                "ERR_INVALID_MODULE_SPECIFIER"
+            );
+            let mut resolver = Resolver::new(root.path(), &[], SymlinkPolicy::Reject).unwrap();
+            assert_eq!(
+                resolver.resolve_url("", request).unwrap_err().code,
+                "ERR_INVALID_MODULE_SPECIFIER"
+            );
+        }
+
+        // Package maps must not turn an ordinary import into control-state
+        // authority, even if the target is a valid project-contained JSON file.
+        put(
+            root.path(),
+            "package.json",
+            br##"{"name":"application","imports":{"#operator":"./.franken-node/remotecap/trust-scan-token.json"},"exports":{"./operator":"./.franken-node/remotecap/trust-scan-token.json"}}"##,
+        );
+        for request in ["#operator", "application/operator"] {
+            for mode in [ResolutionMode::Require, ResolutionMode::Import] {
+                assert_eq!(
+                    rejected(root.path(), "app.js", request, mode),
+                    "ERR_INVALID_MODULE_SPECIFIER"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn operator_state_cannot_be_reached_through_contained_links_or_project_roots() {
+        let root = fixture();
+        put(
+            root.path(),
+            ".franken-node/remotecap/trust-scan-token.json",
+            br#"{"bearer":"OPERATOR_STATE_MUST_STAY_PRIVATE"}"#,
+        );
+        link(root.path(), "state-alias", ".franken-node");
+        link(
+            root.path(),
+            "nested/token.json",
+            "../.franken-node/remotecap/trust-scan-token.json",
+        );
+        put(
+            root.path(),
+            "franken_node.toml",
+            b"registry_signing_key = 'private'",
+        );
+        link(root.path(), "configuration.cjs", "franken_node.toml");
+        for request in [
+            "./state-alias/remotecap/trust-scan-token.json",
+            "./nested/token.json",
+            "./configuration.cjs",
+        ] {
+            assert_eq!(
+                linked_error(root.path(), "app.js", request),
+                "ERR_INVALID_MODULE_SYMLINK"
+            );
+        }
+        // Selecting a narrower root must not erase the reserved component,
+        // including when an ordinary ancestor symlink names that root.
+        for project in [
+            root.path().join(".franken-node/remotecap"),
+            root.path().join("state-alias/remotecap"),
+        ] {
+            assert_eq!(
+                rejected(
+                    &project,
+                    "trust-scan-token.json",
+                    "./trust-scan-token.json",
+                    ResolutionMode::Require
+                ),
+                "ERR_INVALID_MODULE_SPECIFIER"
+            );
+        }
+        put(
+            root.path(),
+            ".FRANKEN-NODE/token.json",
+            br#"{"private":true}"#,
+        );
+        assert_eq!(
+            rejected(
+                &root.path().join(".FRANKEN-NODE"),
+                "token.json",
+                "./token.json",
+                ResolutionMode::Require
+            ),
+            "ERR_INVALID_MODULE_SPECIFIER"
+        );
+    }
+
+    #[test]
+    fn operator_state_protection_preserves_ordinary_similar_names_and_url_data() {
+        let root = fixture();
+        for path in [
+            ".franken-node-data/value.json",
+            "nested/.franken-node.json",
+            "%2efranken-node/value.json",
+            "franken_node.toml.json",
+        ] {
+            put(root.path(), path, br#"{"answer":42}"#);
+            assert_eq!(
+                run(
+                    root.path(),
+                    "app.js",
+                    &format!("./{path}"),
+                    ResolutionMode::Require
+                )
+                .source_bytes(),
+                br#"{"answer":42}"#
+            );
+        }
+        put(root.path(), "ordinary.mjs", b"export const answer = 42;");
+        let result = run(
+            root.path(),
+            "app.js",
+            "./ordinary.mjs?directory=.franken-node#/.franken-node/keys",
+            ResolutionMode::Import,
+        );
+        assert_eq!(result.report.path, "ordinary.mjs");
+        link(root.path(), "ordinary-alias", ".franken-node-data");
+        assert_eq!(
+            linked(
+                root.path(),
+                "app.js",
+                "./ordinary-alias/value.json",
+                ResolutionMode::Require
+            )
+            .unwrap()
+            .source_bytes(),
+            br#"{"answer":42}"#
+        );
+    }
+
+    #[test]
+    fn operator_state_never_enters_captured_source_capsules() {
+        use source_graph::{EdgeState, GraphOptions, capsule, capture};
+
+        let root = fixture();
+        let private = b"OPERATOR_STATE_MUST_STAY_PRIVATE";
+        put(
+            root.path(),
+            ".franken-node/remotecap/trust-scan-token.json",
+            br#"{"bearer":"OPERATOR_STATE_MUST_STAY_PRIVATE"}"#,
+        );
+        for source in [
+            "require('./.franken-node/remotecap/trust-scan-token.json');",
+            "require.resolve('./.franken-node/remotecap/trust-scan-token.json');",
+            "import.meta.resolve('./%2efranken-node/remotecap/trust-scan-token.json');",
+            "import value from './%2efranken-node/remotecap/trust-scan-token.json' with {type:'json'};",
+        ] {
+            put(root.path(), "entry.js", source.as_bytes());
+            let graph = capture(root.path(), "entry.js", GraphOptions::default()).unwrap();
+            assert!(!graph.report().fully_resolved, "{source}");
+            assert_eq!(graph.report().modules.len(), 1);
+            assert_eq!(graph.report().edges[0].state, EdgeState::Unresolved);
+            assert_eq!(
+                graph.report().edges[0].error.as_ref().unwrap().code,
+                "ERR_INVALID_MODULE_SPECIFIER"
+            );
+            assert!(
+                graph
+                    .report()
+                    .probes
+                    .iter()
+                    .all(|probe| !probe.path.contains(".franken-node")),
+                "operator state must be refused before any filesystem probe"
+            );
+            let encoded = capsule::encode(&graph).unwrap();
+            assert!(
+                !encoded
+                    .bytes()
+                    .windows(private.len())
+                    .any(|bytes| bytes == private)
+            );
+            let replayed = capsule::replay(encoded.bytes(), encoded.digest()).unwrap();
+            assert_eq!(replayed.report(), graph.report());
+        }
     }
 
     #[test]
