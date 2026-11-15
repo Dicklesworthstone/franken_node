@@ -2130,3 +2130,7 @@ path = "../../tests/security/zk_attestation_verification.rs"
 name = "operator_state_gated_host_io"
 path = "src/ops/operator_state_gated_host_io.rs"
 required-features = ["engine"]
+
+[[test]]
+name = "operator_state_execution"
+path = "tests/operator_state_execution.rs"

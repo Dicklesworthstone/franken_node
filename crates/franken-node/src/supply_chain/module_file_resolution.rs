@@ -24,6 +24,10 @@ use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::rc::Rc;
 
+#[path = "module_operator_state.rs"]
+mod operator_state;
+pub use operator_state::project_requires_operator_state_isolation;
+
 #[path = "module_source_graph.rs"]
 pub mod source_graph;
 

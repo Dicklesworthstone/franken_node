@@ -161,7 +161,7 @@ use frankenengine_node::control_plane::fleet_transport::{
     sign_fleet_convergence_receipt_payload, wait_until_fleet_converged_or_timeout,
 };
 use frankenengine_node::control_plane::fleet_transport_durable;
-use frankenengine_node::ops::engine_dispatcher::RunProjectPaths;
+use frankenengine_node::ops::engine_dispatcher::{EngineDispatcher, RunProjectPaths};
 #[cfg(test)]
 pub use frankenengine_node::testing;
 #[cfg(test)]
@@ -7063,6 +7063,14 @@ fn verify_deploy_release(release: &runtime::deployment::ReleaseRecord) -> Result
         };
         let captured = capture(&directory, &release.entrypoint, options)
             .context("release source graph is unreadable")?;
+        let protected_paths =
+            run_operator_protected_paths(&release_config, &directory, &directory)?;
+        let operator_requirements =
+            ops::engine_dispatcher::RunTrustRequirements::new(&[], &[], false)?
+                .with_operator_protected_paths(protected_paths)?;
+        for probe in &captured.report().probes {
+            operator_requirements.verify_operator_module_path(&directory, &probe.path)?;
+        }
         let graph = captured.report().input_hash.clone();
         anyhow::ensure!(
             graph == release.approval.graph_input_hash(),
@@ -30207,6 +30215,44 @@ fn resolve_fleet_config_path(
     project_root.join(path)
 }
 
+/// Preserve the exact operator inputs selected by configuration resolution.
+/// Receipt keys and TLS roots use invocation-relative paths; fleet inputs
+/// follow their existing config-directory-relative semantics.
+fn run_operator_protected_paths(
+    resolved: &config::ResolvedConfig,
+    project_root: &Path,
+    invocation_root: &Path,
+) -> Result<Vec<PathBuf>> {
+    let absolute = |path: &Path| {
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            invocation_root.join(path)
+        }
+    };
+    let mut paths = Vec::new();
+    if let Some(source) = &resolved.source_path {
+        paths.push(absolute(source));
+    }
+    if let Some(key) = &resolved.config.security.decision_receipt_signing_key_path {
+        paths.push(absolute(key));
+    }
+    if let Some(roots) = &resolved.config.security.network_policy.tls_extra_roots_pem_path {
+        paths.push(absolute(Path::new(roots)));
+    }
+    if let Some(token) = &resolved.config.fleet.control_plane_token_path {
+        paths.push(absolute(&resolve_fleet_config_path(project_root, resolved, token)));
+    }
+    if let Some(state) = &resolved.config.fleet.state_dir {
+        paths.push(absolute(&resolve_fleet_config_path(project_root, resolved, state)));
+    }
+    EngineDispatcher::operator_protected_paths_with_defaults(
+        &paths,
+        project_root,
+        invocation_root,
+    )
+}
+
 /// Read the coordinator bearer token from `path` (trimmed; must validate).
 #[cfg(feature = "http-client")]
 fn read_fleet_control_plane_token(path: &Path) -> Result<String> {
@@ -41624,18 +41670,6 @@ fn main() -> Result<()> {
             if let Err(error) = resolved.config.runtime.validate_module_conditions() {
                 return named_cli_fail("franken-node/run-error-cli/v1", "run", json, error);
             }
-            if resolved.config.runtime.frozen_module_symlinks == Some(true)
-                && resolved.config.runtime.frozen_modules != Some(true)
-            {
-                return named_cli_fail(
-                    "franken-node/run-error-cli/v1",
-                    "run",
-                    json,
-                    anyhow::anyhow!(
-                        "contained module symlinks require frozen modules; enable --frozen-modules or set runtime.frozen_modules = true"
-                    ),
-                );
-            }
             let operator_safe_mode_scope = match admitted_operator_scope
                 .as_deref()
                 .map(runtime::safe_mode::AdmittedSafeModeScope::capture)
@@ -41728,6 +41762,39 @@ fn main() -> Result<()> {
                     return named_cli_fail("franken-node/run-error-cli/v1", "run", json, error);
                 }
             };
+            let operator_protected_paths = match std::env::current_dir()
+                .map_err(anyhow::Error::from)
+                .and_then(|invocation_root| {
+                    run_operator_protected_paths(
+                        &resolved,
+                        project_paths.project_root(),
+                        &invocation_root,
+                    )
+                }) {
+                Ok(paths) => paths,
+                Err(error) => {
+                    return named_cli_fail("franken-node/run-error-cli/v1", "run", json, error);
+                }
+            };
+            if let Err(error) = EngineDispatcher::apply_operator_source_capture_defaults(
+                &mut resolved.config,
+                &project_paths,
+                &operator_protected_paths,
+            ) {
+                return named_cli_fail("franken-node/run-error-cli/v1", "run", json, error);
+            }
+            if resolved.config.runtime.frozen_module_symlinks == Some(true)
+                && resolved.config.runtime.frozen_modules != Some(true)
+            {
+                return named_cli_fail(
+                    "franken-node/run-error-cli/v1",
+                    "run",
+                    json,
+                    anyhow::anyhow!(
+                        "contained module symlinks require frozen modules; enable --frozen-modules or set runtime.frozen_modules = true"
+                    ),
+                );
+            }
             if let (Some(approval), Some(key)) = (
                 registry_artifact_approval.as_ref(),
                 publisher_public_key.as_deref(),
@@ -41863,6 +41930,7 @@ fn main() -> Result<()> {
                     .with_preflight_dependency_ids(preflight_dependency_ids)
                     .with_preflight_dependency_capture(Some(preflight.dependency_capture.clone()))
                     .with_registry_artifact_approval(registry_artifact_approval)
+                    .with_operator_protected_paths(operator_protected_paths)
                     .with_operator_safe_mode_scope(operator_safe_mode_scope)
                     .with_operator_fleet_project(admitted_operator_project)
                     .with_admitted_native_session_nonce(admitted_native_session_nonce)
