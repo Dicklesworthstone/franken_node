@@ -12184,6 +12184,18 @@ impl EngineDispatcher {
                     &config.security.network_policy,
                     run_egress_trace.clone(),
                 );
+                let gated =
+                    crate::ops::operator_state_gated_host_io::OperatorStateGatedHostIo::new(
+                        gated,
+                        sandbox_root,
+                        &[],
+                    )
+                    .map_err(|error| {
+                        native_engine_spawn_error_with_telemetry_cleanup(
+                            format!("Could not establish operator-state filesystem boundary: {error}"),
+                            &mut telemetry_guard,
+                        )
+                    })?;
                 let environment_snapshot = if config.runtime.environment_allowlist.is_empty() {
                     None
                 } else {

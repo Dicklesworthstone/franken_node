@@ -2806,6 +2806,32 @@ snapshots, evidence ledger, validation-broker receipt files, cleanup
 audit) as those subsystems are exercised; the bootstrap above is the
 minimum layout that `franken-node init` creates up-front.
 
+### Guest filesystem access to operator files
+
+Captured module loading and guest `HostIo` filesystem calls reserve the
+`.franken-node` and `franken_node.toml` path components, including ASCII case
+variants, for the operator. Ordinary `fs_read` or `fs_write` grants do not
+authorize access to these paths. A narrower capture root or a contained
+symlink does not remove the restriction.
+
+The live filesystem guard checks transfer destinations as well as sources,
+refuses mutations of directories containing protected state, and admits
+descriptor operations only for files opened through the guard. It supports
+explicit protected paths, including selected files that do not exist yet.
+Successful effects, ordinary filesystem errors, and supervisor cancellation
+still use the actual engine provider. Live filesystem access to multiply
+linked regular files is conservatively refused because a pathname alone cannot
+establish that another link is not operator state.
+
+These protections cover captured modules and `HostIo`; live engine module
+loading and explicitly authorized native child processes require their own
+admission boundaries. Child-only mount exclusions remain necessary before
+claiming the same protection for allowed external utilities. Source capture
+preserves ordinary package-manager hardlinks, so pre-existing host-created
+hardlink aliases to operator files are outside its namespace guarantee. The
+product path guard does not claim atomic exclusion against another host process
+concurrently changing the filesystem.
+
 Native-runtime evidence authority is deliberately outside this project tree,
 because the project directory is also the guest filesystem sandbox root.
 `<user-state>` is `XDG_STATE_HOME` when set, otherwise

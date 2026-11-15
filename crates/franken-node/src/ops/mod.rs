@@ -76,6 +76,8 @@ pub(crate) mod native_session_control;
 pub mod native_session_inventory;
 #[cfg(feature = "engine")]
 pub(crate) mod native_session_journal;
+#[cfg(feature = "engine")]
+pub mod operator_state_gated_host_io;
 pub mod operator_transcripts;
 pub mod proof_carrying_evidence;
 pub mod proof_pipeline;

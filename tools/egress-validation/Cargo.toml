@@ -46,3 +46,8 @@ rcgen = { version = "0.13", default-features = false, features = ["crypto", "pem
 [[test]]
 name = "ssrf_gated_host_io_egress"
 path = "../../crates/franken-node/tests/ssrf_gated_host_io_egress.rs"
+
+[[test]]
+name = "operator_state_gated_host_io"
+path = "../../crates/franken-node/src/ops/operator_state_gated_host_io.rs"
+required-features = ["engine"]
