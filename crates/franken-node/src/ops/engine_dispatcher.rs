@@ -5945,8 +5945,8 @@ pub struct NativeEffectInterruptionEvidence {
     pub control_trigger: Option<NativeRunControlTrigger>,
 }
 
-/// A native run stopped by its deadline or live control with parent-owned
-/// interrupted-effect evidence.
+/// A native run stopped by its deadline, live control, worker exit, or an
+/// unusable terminal protocol response with parent-owned effect evidence.
 ///
 /// The display text retains the actionable interruption reason. Downcasting
 /// preserves the sibling WAL artifact without ever presenting it as a
@@ -11011,72 +11011,137 @@ impl EngineDispatcher {
                 dispatch_report: None,
             }));
         }
-        request_write_result.map_err(|message| {
-            EngineDispatchError::EngineExecutionError {
-                app_path: app_path_buf.clone(),
-                error_message: message,
-                phase: "worker protocol".to_string(),
+        // The worker is already reaped. Preserve the pinned containment check
+        // even when its response is unusable; never signal a recycled numeric
+        // PID while finalizing a protocol failure.
+        let containment_cleanup: std::result::Result<(), String> = match &containment {
+            #[cfg(target_os = "linux")]
+            NativeSessionContainment::Bubblewrap(unit) => {
+                wait_for_containment_unit_empty(unit)
+                    .map(|()| session_inventory.containment_empty())
+                    .map_err(|error| {
+                        format!(
+                            "Bubblewrap exited without proving the containment unit empty: {error}"
+                        )
+                    })
             }
-            .to_actionable()
+            NativeSessionContainment::ProcessGroup => Ok(()),
+        };
+        let protocol_failure =
+            |inventory: &mut NativeSessionInventoryGuard, message: String, phase: &str| {
+                // Retain the bounded wire buffer by reference on success. Only
+                // a failed validation reparses its validated WAL prefix,
+                // without accepting the rejected response's ledger or replay.
+                let cleanup_failures = [
+                    containment_cleanup.as_ref().err(),
+                    request_write_result.as_ref().err(),
+                    response_result.as_ref().err(),
+                    diagnostic_result.as_ref().err(),
+                ]
+                .into_iter()
+                .flatten()
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+                let cleanup_failure =
+                    (!cleanup_failures.is_empty()).then(|| cleanup_failures.join("; "));
+                let mut evidence = native_worker_exit_effect_evidence(
+                    response_result
+                        .as_ref()
+                        .map(|response| (response.bytes.as_slice(), response.cap_exceeded))
+                        .map_err(String::as_str),
+                    cleanup_failure.as_deref(),
+                    &nonce,
+                    cfg!(test),
+                );
+                // Diagnostic text is untrusted and may approach the wire
+                // cap. Bound only its signed summary, keeping the exact WAL
+                // and the original actionable failure below.
+                const MAX_PROTOCOL_ERROR_BYTES: usize = 4096;
+                const TRUNCATED: &str = " [truncated]";
+                let previous = evidence.protocol_error.take();
+                let mut detail = String::with_capacity(MAX_PROTOCOL_ERROR_BYTES);
+                for part in [
+                    phase,
+                    ": ",
+                    message.as_str(),
+                    if previous.is_some() { "; " } else { "" },
+                    previous.as_deref().unwrap_or(""),
+                ] {
+                    let remaining = (MAX_PROTOCOL_ERROR_BYTES - TRUNCATED.len())
+                        .saturating_sub(detail.len());
+                    let mut end = part.len().min(remaining);
+                    while !part.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    detail.push_str(&part[..end]);
+                    if end < part.len() {
+                        detail.push_str(TRUNCATED);
+                        break;
+                    }
+                }
+                evidence.protocol_error = Some(detail);
+                // A valid WAL prefix cannot certify a rejected terminal
+                // response, even if every observed provider call returned.
+                evidence.journal_complete = false;
+                inventory.finish(
+                    NativeSessionOutcomeKind::Interrupted,
+                    NativeSessionEffectObservation::Interrupted {
+                        evidence: Box::new(evidence.clone()),
+                    },
+                );
+                let cleanup_detail = cleanup_failure.map_or_else(String::new, |error| {
+                    format!("; worker cleanup could not prove quiescence: {error}")
+                });
+                anyhow::Error::new(NativeRunInterruption {
+                    actionable: EngineDispatchError::EngineExecutionError {
+                        app_path: app_path_buf.clone(),
+                        error_message: format!("{message}{cleanup_detail}"),
+                        phase: phase.to_string(),
+                    }
+                    .to_actionable(),
+                    effect_evidence: Box::new(evidence),
+                    verified_final_host_effect_ledger: None,
+                    runtime_evidence_identity_capture: Some(expected_evidence_capture.clone()),
+                    runtime_evidence_identity_capture_path: Some(evidence_capture_path.clone()),
+                    dispatch_report: None,
+                })
+            };
+        request_write_result.as_ref().map_err(|message| {
+            protocol_failure(&mut session_inventory, message.clone(), "worker protocol")
         })?;
-        let response_read = response_result.map_err(|message| {
-            EngineDispatchError::EngineExecutionError {
-                app_path: app_path_buf.clone(),
-                error_message: message,
-                phase: "worker protocol".to_string(),
-            }
-            .to_actionable()
+        let response_read = response_result.as_ref().map_err(|message| {
+            protocol_failure(&mut session_inventory, message.clone(), "worker protocol")
         })?;
-        let diagnostic_read = diagnostic_result.map_err(|message| {
-            EngineDispatchError::EngineExecutionError {
-                app_path: app_path_buf.clone(),
-                error_message: message,
-                phase: "worker protocol".to_string(),
-            }
-            .to_actionable()
+        let diagnostic_read = diagnostic_result.as_ref().map_err(|message| {
+            protocol_failure(&mut session_inventory, message.clone(), "worker protocol")
         })?;
         if response_read.cap_exceeded {
-            let dispatch_error = EngineDispatchError::EngineExecutionError {
-                app_path: app_path_buf,
-                error_message: format!(
+            return Err(protocol_failure(
+                &mut session_inventory,
+                format!(
                     "native-session response stream exceeded {} bytes",
                     NATIVE_SESSION_MAX_OUTPUT_STREAM_BYTES
                 ),
-                phase: "worker protocol".to_string(),
-            };
-            return Err(dispatch_error.to_actionable().into());
+                "worker protocol",
+            ));
         }
         if diagnostic_read.cap_exceeded {
-            let dispatch_error = EngineDispatchError::EngineExecutionError {
-                app_path: app_path_buf,
-                error_message: format!(
+            return Err(protocol_failure(
+                &mut session_inventory,
+                format!(
                     "native-session diagnostics exceeded {} bytes",
                     NATIVE_SESSION_MAX_DIAGNOSTIC_BYTES
                 ),
-                phase: "worker protocol".to_string(),
-            };
-            return Err(dispatch_error.to_actionable().into());
+                "worker protocol",
+            ));
         }
-        let response_bytes = response_read.bytes;
-        let diagnostic_bytes = diagnostic_read.bytes;
-        #[cfg(target_os = "linux")]
-        if let NativeSessionContainment::Bubblewrap(unit) = &containment {
-            wait_for_containment_unit_empty(unit).map_err(|error| {
-                EngineDispatchError::EngineExecutionError {
-                    app_path: app_path_buf.clone(),
-                    error_message: format!(
-                        "Bubblewrap exited without proving the containment unit empty: {error}"
-                    ),
-                    phase: "worker cleanup".to_string(),
-                }
-                .to_actionable()
-            })?;
-            session_inventory.containment_empty();
-        }
-        let diagnostics = String::from_utf8_lossy(&diagnostic_bytes)
-            .trim()
-            .to_string();
-        let parsed = parse_native_session_output(&response_bytes, cfg!(test));
+        let response_bytes = response_read.bytes.as_slice();
+        let diagnostic_bytes = diagnostic_read.bytes.as_slice();
+        containment_cleanup.as_ref().map_err(|message| {
+            protocol_failure(&mut session_inventory, message.clone(), "worker cleanup")
+        })?;
+        let diagnostics = String::from_utf8_lossy(diagnostic_bytes).trim().to_string();
+        let parsed = parse_native_session_output(response_bytes, cfg!(test));
         let mut reconciled = reconcile_native_session_output(parsed, &nonce);
         if reconciled
             .entries
@@ -11090,25 +11155,23 @@ impl EngineDispatcher {
             );
         }
         if let Some(message) = reconciled.protocol_error {
-            let dispatch_error = EngineDispatchError::EngineExecutionError {
-                app_path: app_path_buf.clone(),
-                error_message: if diagnostics.is_empty() {
+            return Err(protocol_failure(
+                &mut session_inventory,
+                if diagnostics.is_empty() {
                     message
                 } else {
                     format!("{message}; worker diagnostics: {diagnostics}")
                 },
-                phase: "worker protocol".to_string(),
-            };
-            return Err(dispatch_error.to_actionable().into());
+                "worker protocol",
+            ));
         }
         let no_host_effects_admitted = reconciled.entries.is_empty();
         let response = reconciled.response.ok_or_else(|| {
-            EngineDispatchError::EngineExecutionError {
-                app_path: app_path_buf.clone(),
-                error_message: "native-session output stream had no final response".to_string(),
-                phase: "worker protocol".to_string(),
-            }
-            .to_actionable()
+            protocol_failure(
+                &mut session_inventory,
+                "native-session output stream had no final response".to_string(),
+                "worker protocol",
+            )
         })?;
 
         let validate_envelope = |schema_version: &str, response_nonce: &str| {
@@ -11135,12 +11198,7 @@ impl EngineDispatcher {
                 native_replay,
             } => {
                 validate_envelope(&schema_version, &response_nonce).map_err(|message| {
-                    EngineDispatchError::EngineExecutionError {
-                        app_path: app_path_buf.clone(),
-                        error_message: message,
-                        phase: "worker protocol".to_string(),
-                    }
-                    .to_actionable()
+                    protocol_failure(&mut session_inventory, message, "worker protocol")
                 })?;
                 if let Some(ledger) = host_effect_ledger.as_ref() {
                     validate_host_effect_ledger(
@@ -11148,25 +11206,18 @@ impl EngineDispatcher {
                         &expected_evidence_capture.evidence_verification_identity,
                     )
                     .map_err(|message| {
-                        EngineDispatchError::EngineExecutionError {
-                            app_path: app_path_buf.clone(),
-                            error_message: message,
-                            phase: "worker protocol".to_string(),
-                        }
-                        .to_actionable()
+                        protocol_failure(&mut session_inventory, message, "worker protocol")
                     })?;
                 }
                 if evidence_verification_identity
                     != expected_evidence_capture.evidence_verification_identity
                 {
-                    let dispatch_error = EngineDispatchError::EngineExecutionError {
-                        app_path: app_path_buf.clone(),
-                        error_message:
-                            "native-session response evidence identity did not match the product-signed capture"
-                                .to_string(),
-                        phase: "worker protocol".to_string(),
-                    };
-                    return Err(dispatch_error.to_actionable().into());
+                    return Err(protocol_failure(
+                        &mut session_inventory,
+                        "native-session response evidence identity did not match the product-signed capture"
+                            .to_string(),
+                        "worker protocol",
+                    ));
                 }
                 let replay_validation = if native_replay.is_some() != capture_replay {
                     Err(
@@ -11187,55 +11238,42 @@ impl EngineDispatcher {
                     })
                 };
                 replay_validation.map_err(|message| {
-                    EngineDispatchError::EngineExecutionError {
-                        app_path: app_path_buf.clone(),
-                        error_message: message,
-                        phase: "worker replay capture".to_string(),
-                    }
-                    .to_actionable()
+                    protocol_failure(&mut session_inventory, message, "worker replay capture")
                 })?;
                 let stdout = base64::engine::general_purpose::STANDARD
                     .decode(stdout_base64)
                     .map_err(|error| {
-                        EngineDispatchError::EngineExecutionError {
-                            app_path: app_path_buf.clone(),
-                            error_message: format!(
-                                "native-session stdout base64 was invalid: {error}"
-                            ),
-                            phase: "worker protocol".to_string(),
-                        }
-                        .to_actionable()
+                        protocol_failure(
+                            &mut session_inventory,
+                            format!("native-session stdout base64 was invalid: {error}"),
+                            "worker protocol",
+                        )
                     })?;
                 let stderr = base64::engine::general_purpose::STANDARD
                     .decode(stderr_base64)
                     .map_err(|error| {
-                        EngineDispatchError::EngineExecutionError {
-                            app_path: app_path_buf.clone(),
-                            error_message: format!(
-                                "native-session stderr base64 was invalid: {error}"
-                            ),
-                            phase: "worker protocol".to_string(),
-                        }
-                        .to_actionable()
+                        protocol_failure(
+                            &mut session_inventory,
+                            format!("native-session stderr base64 was invalid: {error}"),
+                            "worker protocol",
+                        )
                     })?;
                 let guest_output_len = stdout.len().checked_add(stderr.len()).ok_or_else(|| {
-                    EngineDispatchError::EngineExecutionError {
-                        app_path: app_path_buf.clone(),
-                        error_message: "native-session guest output length overflowed".to_string(),
-                        phase: "worker protocol".to_string(),
-                    }
-                    .to_actionable()
+                    protocol_failure(
+                        &mut session_inventory,
+                        "native-session guest output length overflowed".to_string(),
+                        "worker protocol",
+                    )
                 })?;
                 if guest_output_len > NATIVE_SESSION_MAX_GUEST_OUTPUT_BYTES {
-                    let dispatch_error = EngineDispatchError::EngineExecutionError {
-                        app_path: app_path_buf,
-                        error_message: format!(
+                    return Err(protocol_failure(
+                        &mut session_inventory,
+                        format!(
                             "native-session guest output exceeded {} bytes",
                             NATIVE_SESSION_MAX_GUEST_OUTPUT_BYTES
                         ),
-                        phase: "worker protocol".to_string(),
-                    };
-                    return Err(dispatch_error.to_actionable().into());
+                        "worker protocol",
+                    ));
                 }
                 session_inventory.finish(
                     NativeSessionOutcomeKind::Completed,
@@ -11269,12 +11307,7 @@ impl EngineDispatcher {
                 stderr_base64,
             } => {
                 validate_envelope(&schema_version, &response_nonce).map_err(|error| {
-                    EngineDispatchError::EngineExecutionError {
-                        app_path: app_path_buf.clone(),
-                        error_message: error,
-                        phase: "worker protocol".to_string(),
-                    }
-                    .to_actionable()
+                    protocol_failure(&mut session_inventory, error, "worker protocol")
                 })?;
                 // bd-muy9u: evidence recovered from a failed run is held to the
                 // same integrity bar as a successful run's ledger. A ledger the
@@ -11364,12 +11397,7 @@ impl EngineDispatcher {
                 message,
             } => {
                 validate_envelope(&schema_version, &response_nonce).map_err(|error| {
-                    EngineDispatchError::EngineExecutionError {
-                        app_path: app_path_buf.clone(),
-                        error_message: error,
-                        phase: "worker protocol".to_string(),
-                    }
-                    .to_actionable()
+                    protocol_failure(&mut session_inventory, error, "worker protocol")
                 })?;
                 let dispatch_error = EngineDispatchError::TelemetryError {
                     app_path: app_path_buf,
@@ -11388,12 +11416,7 @@ impl EngineDispatcher {
                 cleanup_successful,
             } => {
                 validate_envelope(&schema_version, &response_nonce).map_err(|error| {
-                    EngineDispatchError::EngineExecutionError {
-                        app_path: app_path_buf.clone(),
-                        error_message: error,
-                        phase: "worker protocol".to_string(),
-                    }
-                    .to_actionable()
+                    protocol_failure(&mut session_inventory, error, "worker protocol")
                 })?;
                 let panic_evidence = NativeSessionPanicEvidence::from_validated_response(
                     &panic_message,
