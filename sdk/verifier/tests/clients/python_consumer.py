@@ -26,7 +26,7 @@ for case in cases:
                                  max_revocation_age_secs=case.get("max_revocation_age_secs"))
     except VerifierError as error:
         assert error.code == case["expected"], (case["name"], error.code, case["expected"])
-        if case["format"] in ("publisher-source", "publisher-source-trust", "native-session-forensics"):
+        if case["format"] in ("publisher-source", "publisher-source-trust", "native-session-forensics", "signed-session"):
             assert "PRIVATE-" not in str(error)
         print(json.dumps({"case": case["name"], "result": error.code}), flush=True)
     else:
@@ -60,6 +60,11 @@ for case in cases:
             assert result["facts"]["module_graph_hash"] == case["graph_hash"]
             assert result["facts"]["selected_version"] == ("1.2.3" if case["decision"] == "admit" else None)
             assert result["facts"]["capability_budget_mode"] == "enforced"
+        if case["format"] == "signed-session":
+            assert result["scope"] == "authenticated_verification_session"
+            assert result["facts"] == case["session_facts"], case["name"]
+            assert "steps" not in result["facts"]
+            assert "replay_certified" not in result["facts"]
         if case["format"] == "publisher-source":
             assert result["scope"] == "authenticated_publisher_source_content"
             assert result["facts"] == case["publisher_facts"]
@@ -76,6 +81,29 @@ for case in cases:
         assert "PRIVATE-" not in json.dumps(result)
         print(json.dumps({"case": case["name"], "result": "verified", "scope": result["scope"]}), flush=True)
 
+session_controls = [
+    "session_wrong_scope", "session_wrong_signer", "session_unknown_field", "session_missing_field",
+    "session_boolean_count", "session_negative_count", "session_excessive_count",
+    "session_empty_pass", "session_nonempty_inconclusive", "session_bad_identity",
+    "session_empty_id", "session_long_id", "session_id_newline", "session_bad_time",
+    "session_bad_verdict", "session_bad_hash", "session_uppercase_hash",
+]
+for mode in session_controls:
+    try:
+        verify_artifact(json.dumps({"protocol_control": mode}).encode(), cases[0]["anchor"],
+                        verifier=str(root / "fake_verifier"), format="signed-session")
+    except VerifierError as error:
+        assert error.code == "PROTOCOL_INVALID", (mode, error.code)
+        print(json.dumps({"case": f"protocol_{mode}", "result": error.code}), flush=True)
+    else:
+        raise AssertionError(f"protocol_{mode}")
+for mode, verdict in (("session_valid", "pass"), ("session_fail", "fail"), ("session_empty", "inconclusive")):
+    result = verify_artifact(json.dumps({"protocol_control": mode}).encode(), cases[0]["anchor"],
+                             verifier=str(root / "fake_verifier"), format="signed-session")
+    assert result["facts"]["final_verdict"] == verdict
+    assert (result["facts"]["step_count"] == 0) == (verdict == "inconclusive")
+    print(json.dumps({"case": f"protocol_{mode}", "result": "verified"}), flush=True)
+
 client_controls = [
     ("oversize_client_input", b" " * (MAX_INPUT_BYTES + 1), {}, "INPUT_TOO_LARGE"),
     ("bad_key_shape", b"{}", {"trusted_public_key_hex": "00"}, "ANCHOR_INVALID"),
@@ -85,6 +113,8 @@ client_controls = [
     ("bad_runtime_key_shape", b"{}", {"trusted_run_public_key_hex": cases[0]["anchor"], "trusted_runtime_public_key_hex": "00"}, "RUNTIME_ANCHOR_INVALID"),
     ("native_detached_signature_refused", b"{}", {"format": "native-session-forensics", "signature_hex": "00" * 64}, "INPUT_INVALID"),
     ("native_run_anchor_refused", b"{}", {"format": "native-session-forensics", "trusted_run_public_key_hex": cases[0]["anchor"]}, "INPUT_INVALID"),
+    ("session_detached_signature_refused", b"{}", {"format": "signed-session", "signature_hex": "00" * 64}, "INPUT_INVALID"),
+    ("session_run_anchor_refused", b"{}", {"format": "signed-session", "trusted_run_public_key_hex": cases[0]["anchor"]}, "INPUT_INVALID"),
     ("invalid_timeout", b"{}", {"timeout": 0}, "TIMEOUT_INVALID"),
     ("enormous_timeout_integer", b"{}", {"timeout": 10**1000}, "TIMEOUT_INVALID"),
     ("missing_executable", b"{}", {"verifier": str(root / "does-not-exist")}, "PROCESS_UNAVAILABLE"),

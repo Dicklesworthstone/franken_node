@@ -49,6 +49,12 @@ for (const test of cases) {
       assert.equal(result.facts.selected_version, test.decision === "admit" ? "1.2.3" : null);
       assert.equal(result.facts.capability_budget_mode, "enforced");
     }
+    if (test.format === "signed-session") {
+      assert.equal(result.scope, "authenticated_verification_session");
+      assert.deepEqual(result.facts, test.session_facts, test.name);
+      assert.equal(Object.hasOwn(result.facts, "steps"), false);
+      assert.equal(Object.hasOwn(result.facts, "replay_certified"), false);
+    }
     if (test.format === "publisher-source") {
       assert.equal(result.scope, "authenticated_publisher_source_content");
       assert.deepEqual(result.facts, test.publisher_facts);
@@ -70,9 +76,29 @@ for (const test of cases) {
   } catch (error) {
     assert(error instanceof VerifierError, `${test.name}: ${error}`);
     assert.equal(error.code, test.expected, test.name);
-    if (["publisher-source", "publisher-source-trust", "native-session-forensics"].includes(test.format)) assert.equal(error.message.includes("PRIVATE-"), false);
+    if (["publisher-source", "publisher-source-trust", "native-session-forensics", "signed-session"].includes(test.format)) assert.equal(error.message.includes("PRIVATE-"), false);
     console.log(JSON.stringify({ case: test.name, result: error.code }));
   }
+}
+const sessionControls = [
+  "session_wrong_scope", "session_wrong_signer", "session_unknown_field", "session_missing_field",
+  "session_boolean_count", "session_negative_count", "session_excessive_count",
+  "session_empty_pass", "session_nonempty_inconclusive", "session_bad_identity",
+  "session_empty_id", "session_long_id", "session_id_newline", "session_bad_time",
+  "session_bad_verdict", "session_bad_hash", "session_uppercase_hash",
+];
+for (const mode of sessionControls) {
+  await assert.rejects(verifyArtifact(Buffer.from(JSON.stringify({ protocol_control: mode })), cases[0].anchor,
+    { verifier: resolve("fake_verifier"), format: "signed-session" }),
+  (error) => error instanceof VerifierError && error.code === "PROTOCOL_INVALID", "protocol_" + mode);
+  console.log(JSON.stringify({ case: "protocol_" + mode, result: "PROTOCOL_INVALID" }));
+}
+for (const [mode, verdict] of [["session_valid", "pass"], ["session_fail", "fail"], ["session_empty", "inconclusive"]]) {
+  const result = await verifyArtifact(Buffer.from(JSON.stringify({ protocol_control: mode })), cases[0].anchor,
+    { verifier: resolve("fake_verifier"), format: "signed-session" });
+  assert.equal(result.facts.final_verdict, verdict);
+  assert.equal(result.facts.step_count === 0, verdict === "inconclusive");
+  console.log(JSON.stringify({ case: "protocol_" + mode, result: "verified" }));
 }
 const clientControls = [
   ["oversize_client_input", new Uint8Array(MAX_INPUT_BYTES + 1), cases[0].anchor, {}, "INPUT_TOO_LARGE"],
@@ -83,6 +109,8 @@ const clientControls = [
   ["bad_runtime_key_shape", Buffer.from("{}"), cases[0].anchor, { trustedRunPublicKeyHex: cases[0].anchor, trustedRuntimePublicKeyHex: "00" }, "RUNTIME_ANCHOR_INVALID"],
   ["native_detached_signature_refused", Buffer.from("{}"), cases[0].anchor, { format: "native-session-forensics", signatureHex: "00".repeat(64) }, "INPUT_INVALID"],
   ["native_run_anchor_refused", Buffer.from("{}"), cases[0].anchor, { format: "native-session-forensics", trustedRunPublicKeyHex: cases[0].anchor }, "INPUT_INVALID"],
+  ["session_detached_signature_refused", Buffer.from("{}"), cases[0].anchor, { format: "signed-session", signatureHex: "00".repeat(64) }, "INPUT_INVALID"],
+  ["session_run_anchor_refused", Buffer.from("{}"), cases[0].anchor, { format: "signed-session", trustedRunPublicKeyHex: cases[0].anchor }, "INPUT_INVALID"],
   ["invalid_timeout", Buffer.from("{}"), cases[0].anchor, { timeoutMs: 0 }, "TIMEOUT_INVALID"],
   ["missing_executable", Buffer.from("{}"), cases[0].anchor, { verifier: resolve("does-not-exist") }, "PROCESS_UNAVAILABLE"],
 ];

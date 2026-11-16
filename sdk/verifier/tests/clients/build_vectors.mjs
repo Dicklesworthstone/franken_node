@@ -912,5 +912,130 @@ nativeOutcome(nativeContradiction, contradictoryOutcome, {
 nativeJournal(nativeContradiction, [nativeAdmit(0), nativeReturn(0)]);
 addNative("native_complete_outcome_contradicts_durable_return", nativeContradiction, "JOURNAL_INVALID");
 
+// Public-key session attestations, produced independently of the Rust SDK.
+// The test signer chooses canonical opaque step tags; the public transcript
+// authenticates those statements, without claiming to reconstruct private HMACs.
+const sessionDomain = "frankenengine-verifier-sdk:signed-session:v1:";
+function sealSession(session) {
+  // Rust's TranscriptHashView and SessionStep serialize in declaration order.
+  // Do not use sorted canonical JSON for the transcript's hash preimage.
+  const payload = {
+    schema_version: session.schema_version,
+    session_id: session.session_id,
+    verifier_identity: session.verifier_identity,
+    created_at: session.created_at,
+    final_verdict: session.final_verdict,
+    steps: session.steps.map((step) => ({
+      step_index: step.step_index,
+      operation: step.operation,
+      verdict: step.verdict,
+      artifact_binding_hash: step.artifact_binding_hash,
+      timestamp: step.timestamp,
+      step_signature: step.step_signature,
+    })),
+    signer_public_key_hex: session.signer_public_key_hex,
+  };
+  session.transcript_hash = hash(Buffer.concat([
+    Buffer.from("frankenengine-verifier-sdk:canonical-hash:v1:"),
+    lp(sessionDomain), lp(JSON.stringify(payload)),
+  ]));
+  session.ed25519_signature_hex = sign(null,
+    Buffer.concat([lp(sessionDomain), lp(session.transcript_hash)]), key).toString("hex");
+  return session;
+}
+function sessionFixture(verdict) {
+  const steps = verdict === "inconclusive" ? [] : ["pass", verdict].map((stepVerdict, index) => ({
+    step_index: index,
+    operation: "trust_state",
+    verdict: stepVerdict,
+    artifact_binding_hash: hash(Buffer.from("session-test-artifact-" + index)),
+    timestamp: "2026-11-16T00:00:01Z",
+    step_signature: hash(Buffer.from("opaque-test-attestation-tag-" + index)),
+  }));
+  return sealSession({
+    schema_version: "vsdk-signed-session-v1.0",
+    session_id: "independent-session-" + verdict,
+    verifier_identity: "verifier://independent-auditor",
+    created_at: "2026-11-16T00:00:00.123456789Z",
+    final_verdict: verdict,
+    steps,
+    signer_public_key_hex: anchor,
+  });
+}
+function sessionFacts(session) {
+  return {
+    session_id: session.session_id, verifier_identity: session.verifier_identity,
+    created_at: session.created_at, final_verdict: session.final_verdict,
+    step_count: session.steps.length, transcript_hash: session.transcript_hash,
+    signer_public_key_hex: anchor,
+  };
+}
+for (const verdict of ["pass", "fail", "inconclusive"]) {
+  const transcript = sessionFixture(verdict);
+  add("signed_session_" + verdict, "signed-session", JSON.stringify(transcript),
+    "verified", { session_facts: sessionFacts(transcript) });
+}
+const sessionPass = sessionFixture("pass");
+add("signed_session_reordered_json", "signed-session", canonical(sessionPass),
+  "verified", { session_facts: sessionFacts(sessionPass) });
+add("signed_session_foreign_anchor", "signed-session", JSON.stringify(sessionPass),
+  "SIGNER_UNTRUSTED", { anchor: foreign });
+const sessionForged = clone(sessionPass);
+sessionForged.ed25519_signature_hex = "00".repeat(64);
+add("signed_session_invalid_signature", "signed-session", JSON.stringify(sessionForged), "SIGNATURE_INVALID");
+const sessionShortSignature = clone(sessionPass);
+sessionShortSignature.ed25519_signature_hex = "00".repeat(63);
+add("signed_session_short_signature", "signed-session", JSON.stringify(sessionShortSignature), "SIGNATURE_MALFORMED");
+const sessionUpperSignature = clone(sessionPass);
+sessionUpperSignature.ed25519_signature_hex = sessionPass.ed25519_signature_hex.toUpperCase();
+assert.notEqual(sessionUpperSignature.ed25519_signature_hex, sessionPass.ed25519_signature_hex);
+add("signed_session_uppercase_signature", "signed-session", JSON.stringify(sessionUpperSignature), "SIGNATURE_MALFORMED");
+const sessionSpliced = clone(sessionPass);
+sessionSpliced.steps[1] = sessionFixture("fail").steps[1];
+add("signed_session_spliced_step", "signed-session", JSON.stringify(sessionSpliced), "EVIDENCE_INVALID");
+const sessionRehashed = clone(sessionPass);
+sessionRehashed.steps[0].artifact_binding_hash = "00".repeat(32);
+sealSession(sessionRehashed);
+sessionRehashed.ed25519_signature_hex = sessionPass.ed25519_signature_hex;
+add("signed_session_rehashed_without_resigning", "signed-session", JSON.stringify(sessionRehashed), "SIGNATURE_INVALID");
+const sessionTruncated = clone(sessionPass);
+sessionTruncated.steps.pop();
+add("signed_session_truncated", "signed-session", JSON.stringify(sessionTruncated), "EVIDENCE_INVALID");
+const sessionWrongHash = clone(sessionPass);
+sessionWrongHash.transcript_hash = "00".repeat(32);
+add("signed_session_wrong_hash", "signed-session", JSON.stringify(sessionWrongHash), "EVIDENCE_INVALID");
+const sessionUnknown = clone(sessionPass);
+sessionUnknown.execution_authorized = true;
+add("signed_session_unsigned_claim", "signed-session", JSON.stringify(sessionUnknown), "EVIDENCE_INVALID");
+const sessionStepUnknown = clone(sessionPass);
+sessionStepUnknown.steps[0].private_evidence = "PRIVATE-SESSION-UNSIGNED";
+add("signed_session_unsigned_step_claim", "signed-session", JSON.stringify(sessionStepUnknown), "EVIDENCE_INVALID");
+for (const [name, mutate] of [
+  ["signed_session_signed_wrong_schema", (value) => { value.schema_version = "vsdk-signed-session-v0.0"; }],
+  ["signed_session_signed_reordered_steps", (value) => { value.steps.reverse(); }],
+  ["signed_session_signed_bad_identity", (value) => { value.verifier_identity = "internal://self"; }],
+  ["signed_session_signed_long_identity", (value) => { value.verifier_identity = "verifier://" + "a".repeat(256); }],
+  ["signed_session_signed_long_id", (value) => { value.session_id = "a".repeat(256); }],
+  ["signed_session_signed_excessive_steps", (value) => {
+    value.steps = Array.from({ length: 1025 }, (_, index) => ({ ...value.steps[0], step_index: index }));
+  }],
+  ["signed_session_signed_bad_time", (value) => { value.created_at = "2026-02-30T00:00:00Z"; }],
+  ["signed_session_signed_noncanonical_tag", (value) => { value.steps[0].step_signature = "A".repeat(64); }],
+  ["signed_session_signed_contradictory_verdict", (value) => { value.final_verdict = "inconclusive"; }],
+  ["signed_session_signed_empty_pass", (value) => { value.steps = []; }],
+]) {
+  const candidate = clone(sessionPass);
+  mutate(candidate);
+  add(name, "signed-session", JSON.stringify(sealSession(candidate)), "EVIDENCE_INVALID");
+}
+const sessionCompact = JSON.stringify(sessionPass);
+add("signed_session_duplicate_member", "signed-session",
+  sessionCompact.replace('"session_id":', '"session_id":"duplicate","session_id":'), "JSON_INVALID");
+add("signed_session_escaped_duplicate", "signed-session",
+  sessionCompact.replace('"session_id":', '"session\\u005fid":"duplicate","session_id":'), "JSON_INVALID");
+add("signed_session_duplicate_step", "signed-session",
+  sessionCompact.replace('"step_index":0', '"step_index":0,"step_index":0'), "JSON_INVALID");
+add("signed_session_trailing_json", "signed-session", sessionCompact + "{}", "JSON_INVALID");
+
 writeFileSync(output, JSON.stringify(cases));
 console.log(JSON.stringify({ vectors: cases.length, incident_sha256: hash(incidentBytes), capsule_expected_hash: capsule.manifest.expected_output_hash, sdk_integrity: sdk.integrity_hash }));

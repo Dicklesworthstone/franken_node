@@ -2,13 +2,14 @@ import { readFileSync } from "node:fs";
 import assert from "node:assert/strict";
 import { resolve } from "node:path";
 import { verifyArtifact, VerifierError } from "./franken_verifier.mjs";
-import type { Verification, EvidenceFormat, PublisherSourceTrustFacts, NativeSessionForensicsFacts } from "./franken_verifier.mjs";
+import type { Verification, EvidenceFormat, PublisherSourceTrustFacts, NativeSessionForensicsFacts, SignedSessionFacts } from "./franken_verifier.mjs";
 
 const cases: Array<{ name: string; input_hex: string; anchor: string; format: EvidenceFormat;
   signature_hex?: string; run_anchor?: string; runtime_anchor?: string; event_count?: number;
   revocation_anchor?: string; provenance_anchor?: string | null; evaluation_time?: string;
   max_revocation_age_secs?: string; publisher_trust_facts?: PublisherSourceTrustFacts;
   native_facts?: NativeSessionForensicsFacts;
+  session_facts?: SignedSessionFacts;
   expected: string; artifact_sha256: string }> =
   JSON.parse(readFileSync("vectors.json", "utf8"));
 const positive = cases.find((item) => item.name === "genuine_cli_incident")!;
@@ -144,6 +145,32 @@ for (const observation of cases.filter((item) => item.format === "native-session
   }
 }
 if (nativePositive === 0 || nativeNegative === 0) throw new Error("native-session matrix is missing");
-console.log(JSON.stringify({ consumer: "typescript", positive: 8 + trustPositive + nativePositive,
-  negative: 2 + trustNegative + nativeNegative, publisher_trust_cases: trustPositive + trustNegative,
-  native_session_cases: nativePositive + nativeNegative, passed: true }));
+let sessionPositive = 0;
+let sessionNegative = 0;
+const sessionVerdicts = new Set<string>();
+for (const session of cases.filter((item) => item.format === "signed-session")) {
+  try {
+    const verified = await verifyArtifact(Buffer.from(session.input_hex, "hex"), session.anchor,
+      { verifier: resolve("verifier"), format: "signed-session" });
+    if (session.expected !== "verified" || verified.format !== "signed-session"
+        || verified.scope !== "authenticated_verification_session") {
+      throw new Error("signed-session scope mismatch: " + session.name);
+    }
+    assert.deepEqual(verified.facts, session.session_facts, session.name);
+    const decision: "pass" | "fail" | "inconclusive" = verified.facts.final_verdict;
+    const steps: number = verified.facts.step_count;
+    assert.equal(steps === 0, decision === "inconclusive");
+    sessionVerdicts.add(decision);
+    sessionPositive += 1;
+  } catch (error: unknown) {
+    if (session.expected === "verified" || !(error instanceof VerifierError)
+        || error.code !== session.expected) throw error;
+    sessionNegative += 1;
+  }
+}
+assert.deepEqual([...sessionVerdicts].sort(), ["fail", "inconclusive", "pass"]);
+if (sessionNegative === 0) throw new Error("signed-session negative matrix is missing");
+console.log(JSON.stringify({ consumer: "typescript", positive: 8 + trustPositive + nativePositive + sessionPositive,
+  negative: 2 + trustNegative + nativeNegative + sessionNegative, publisher_trust_cases: trustPositive + trustNegative,
+  native_session_cases: nativePositive + nativeNegative, signed_session_cases: sessionPositive + sessionNegative,
+  passed: true }));

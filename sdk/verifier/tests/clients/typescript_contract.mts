@@ -8,6 +8,7 @@ export async function audit(data: Uint8Array, anchor: string, executable: string
     if (verified.format === "incident-bundle") return verified.facts.incident_id;
     if (verified.format === "native-session-forensics") return verified.facts.session_nonce;
     if (verified.format === "capsule") return verified.facts.capsule_id;
+    if (verified.format === "signed-session") return verified.facts.session_id;
     if (verified.format === "resolution-receipt") return verified.facts.receipt_id;
     if (verified.format === "publisher-source") return verified.facts.package_name;
     if (verified.format === "publisher-source-trust") return verified.facts.source.package_name;
@@ -18,6 +19,23 @@ export async function audit(data: Uint8Array, anchor: string, executable: string
     if (error instanceof VerifierError) return error.code;
     throw error;
   }
+}
+
+export async function auditSignedSession(
+  data: Uint8Array, anchor: string, executable: string,
+): Promise<"pass" | "fail" | "inconclusive"> {
+  const verified = await verifyArtifact(data, anchor, {
+    verifier: executable, format: "signed-session",
+  });
+  if (verified.format !== "signed-session"
+      || verified.scope !== "authenticated_verification_session") {
+    throw new Error("signed session proof required");
+  }
+  const steps: number = verified.facts.step_count;
+  if (steps === 0 && verified.facts.final_verdict !== "inconclusive") {
+    throw new Error("empty session cannot pass");
+  }
+  return verified.facts.final_verdict;
 }
 
 export async function auditOriginalRun(

@@ -19,7 +19,7 @@ PROTOCOL = "franken-verifier-cli/v1"
 MAX_INPUT_BYTES = 64 * 1024 * 1024
 MAX_RESPONSE_BYTES = 64 * 1024 + 1
 EvidenceFormat = Literal[
-    "incident-bundle", "native-session-forensics", "capsule", "signed-bundle", "resolution-receipt",
+    "incident-bundle", "native-session-forensics", "capsule", "signed-bundle", "signed-session", "resolution-receipt",
     "publisher-source", "publisher-source-trust", "counterfactual-receipt", "ltv-evidence",
 ]
 _SCOPES = {
@@ -27,6 +27,7 @@ _SCOPES = {
     "native-session-forensics": "authenticated_supervisor_observations",
     "capsule": "authenticated_capsule_content",
     "signed-bundle": "authenticated_sdk_replay_bundle",
+    "signed-session": "authenticated_verification_session",
     "resolution-receipt": "authenticated_resolution_decision",
     "publisher-source": "authenticated_publisher_source_content",
     "publisher-source-trust": "authenticated_publisher_source_trust",
@@ -42,11 +43,24 @@ class Verification(TypedDict):
     scope: Literal["authenticated_recorded_incident", "authenticated_run_incident",
                    "authenticated_runtime_incident", "authenticated_supervisor_observations",
                    "authenticated_capsule_content", "authenticated_sdk_replay_bundle",
+                   "authenticated_verification_session",
                    "authenticated_resolution_decision", "authenticated_publisher_source_content",
                    "authenticated_publisher_source_trust",
                    "authenticated_counterfactual_receipt", "authenticated_ltv_anteriority"]
     artifact_sha256: str
     facts: dict[str, Any]
+
+
+class SignedSessionFacts(TypedDict):
+    """Authentic recorded decisions; a verified signature does not imply pass."""
+
+    session_id: str
+    verifier_identity: str
+    created_at: str
+    final_verdict: Literal["pass", "fail", "inconclusive"]
+    step_count: int
+    transcript_hash: str
+    signer_public_key_hex: str
 
 
 class RunOriginMetadata(TypedDict):
@@ -498,6 +512,8 @@ def _facts_valid(facts: Any, format: str, anchor: str, run_anchor: str | None,
                             "signing_identity", "native_capture"},
         "capsule": {"capsule_id", "expected_hash", "actual_hash", "signer_public_key_hex"},
         "signed-bundle": {"bundle_id", "incident_id", "event_count", "integrity_hash", "signer_public_key_hex"},
+        "signed-session": {"session_id", "verifier_identity", "created_at", "final_verdict",
+                           "step_count", "transcript_hash", "signer_public_key_hex"},
         "resolution-receipt": {"receipt_id", "crypto_suite", "module_graph_hash", "package_name",
                                "requested_range", "policy_profile", "capability_budget_mode", "decision",
                                "selected_version", "rejected_alternative_count", "canonical_hash",
@@ -518,6 +534,19 @@ def _facts_valid(facts: Any, format: str, anchor: str, run_anchor: str | None,
         return False
     if format == "publisher-source":
         return _publisher_source_valid(facts, anchor)
+    if format == "signed-session":
+        return (
+            isinstance(facts["session_id"], str)
+            and re.fullmatch(r"[A-Za-z0-9._-]{1,255}", facts["session_id"]) is not None
+            and isinstance(facts["verifier_identity"], str)
+            and re.fullmatch(r"verifier://[A-Za-z0-9._-]{1,255}", facts["verifier_identity"]) is not None
+            and _instant_ns(facts["created_at"]) is not None
+            and facts["final_verdict"] in ("pass", "fail", "inconclusive")
+            and type(facts["step_count"]) is int and 0 <= facts["step_count"] <= 1024
+            and (facts["step_count"] == 0) == (facts["final_verdict"] == "inconclusive")
+            and isinstance(facts["transcript_hash"], str)
+            and re.fullmatch(r"[0-9a-f]{64}", facts["transcript_hash"]) is not None
+        )
     if format == "counterfactual-receipt":
         return (
             isinstance(facts["baseline_integrity_hash"], str)

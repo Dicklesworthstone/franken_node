@@ -575,6 +575,7 @@ pub struct LongTermVerificationEvidence {
 
 /// Single append-only step in a verification session.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SessionStep {
     pub step_index: usize,
     pub operation: VerificationOperation,
@@ -593,6 +594,7 @@ pub struct SessionStep {
 
 /// Portable Ed25519-signed attestation of a sealed [`VerificationSession`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SignedSessionTranscript {
     pub schema_version: String,
     pub session_id: String,
@@ -2902,10 +2904,14 @@ fn verify_long_term_evidence(
     // artifact claim and the authenticated witness observation.
     let timeline_ordered = chain_check.is_ok()
         && witness_check.as_ref().is_ok_and(|witness| {
-            evidence.reattestation_chain.attestations.iter().all(|link| {
-                evidence.artifact.claimed_at_unix_seconds <= link.issued_at_unix_seconds
-                    && link.issued_at_unix_seconds <= witness.observed_at_unix_seconds
-            })
+            evidence
+                .reattestation_chain
+                .attestations
+                .iter()
+                .all(|link| {
+                    evidence.artifact.claimed_at_unix_seconds <= link.issued_at_unix_seconds
+                        && link.issued_at_unix_seconds <= witness.observed_at_unix_seconds
+                })
         });
     push_long_term_assertion(
         &mut assertions,
@@ -6056,10 +6062,14 @@ mod tests {
         }));
         let events = long_term_verification_audit_events(&result);
         assert!(
-            events.iter().any(|event| event.event_code == FN_LTV_BACKDATING_REJECTED)
+            events
+                .iter()
+                .any(|event| event.event_code == FN_LTV_BACKDATING_REJECTED)
         );
         assert!(
-            events.iter().all(|event| event.event_code != FN_LTV_WITNESS_ANTERIORITY_PROVEN)
+            events
+                .iter()
+                .all(|event| event.event_code != FN_LTV_WITNESS_ANTERIORITY_PROVEN)
         );
     }
 
@@ -6087,17 +6097,23 @@ mod tests {
                 "a re-attestation after its signed witness must fail",
             );
             assert_eq!(
-                result.verdict, VerificationVerdict::Fail, "issued_at={issued_at}"
+                result.verdict,
+                VerificationVerdict::Fail,
+                "issued_at={issued_at}"
             );
             assert!(result.checked_assertions.iter().any(|assertion| {
                 assertion.assertion == "ltv_timeline_ordered" && !assertion.passed
             }));
             let events = long_term_verification_audit_events(&result);
             assert!(
-                events.iter().any(|event| event.event_code == FN_LTV_BACKDATING_REJECTED)
+                events
+                    .iter()
+                    .any(|event| event.event_code == FN_LTV_BACKDATING_REJECTED)
             );
             assert!(
-                events.iter().all(|event| event.event_code != FN_LTV_WITNESS_ANTERIORITY_PROVEN)
+                events
+                    .iter()
+                    .all(|event| event.event_code != FN_LTV_WITNESS_ANTERIORITY_PROVEN)
             );
         }
     }
@@ -6110,14 +6126,17 @@ mod tests {
             let reattestation = &mut evidence.reattestation_chain.attestations[0];
             reattestation.issued_at_unix_seconds = issued_at;
             reattestation.attestation_hash = compute_long_term_reattestation_hash(reattestation);
-            evidence.as_of_unix_seconds = evidence.witness_receipt.statement.observed_at_unix_seconds;
+            evidence.as_of_unix_seconds =
+                evidence.witness_receipt.statement.observed_at_unix_seconds;
             let result = verify_as_of_ltv_for_test(
                 &sdk,
                 &evidence,
                 "equal event times remain a valid nondecreasing chronology",
             );
             assert_eq!(
-                result.verdict, VerificationVerdict::Pass, "issued_at={issued_at}"
+                result.verdict,
+                VerificationVerdict::Pass,
+                "issued_at={issued_at}"
             );
         }
     }

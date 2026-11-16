@@ -10,6 +10,7 @@ const SCOPES = Object.freeze({
   "native-session-forensics": "authenticated_supervisor_observations",
   capsule: "authenticated_capsule_content",
   "signed-bundle": "authenticated_sdk_replay_bundle",
+  "signed-session": "authenticated_verification_session",
   "resolution-receipt": "authenticated_resolution_decision",
   "publisher-source": "authenticated_publisher_source_content",
   "publisher-source-trust": "authenticated_publisher_source_trust",
@@ -279,6 +280,7 @@ function factsValid(facts, format, anchor, runAnchor, runtimeAnchor,
     "incident-bundle": ["bundle_id", "incident_id", "created_at", "policy_version", "event_count", "integrity_hash", "decision_sequence_hash", "signer_public_key_hex", "signing_identity", "native_capture"],
     capsule: ["capsule_id", "expected_hash", "actual_hash", "signer_public_key_hex"],
     "signed-bundle": ["bundle_id", "incident_id", "event_count", "integrity_hash", "signer_public_key_hex"],
+    "signed-session": ["session_id", "verifier_identity", "created_at", "final_verdict", "step_count", "transcript_hash", "signer_public_key_hex"],
     "resolution-receipt": ["receipt_id", "crypto_suite", "module_graph_hash", "package_name", "requested_range", "policy_profile", "capability_budget_mode", "decision", "selected_version", "rejected_alternative_count", "canonical_hash", "signer_key_id", "signer_public_key_hex"],
     "publisher-source": ["registration_schema", "package_name", "publisher_id", "version", "manifest_sha256", "artifact_sha256", "capsule_digest", "signer_key_id", "signer_public_key_hex", "runtime_authority", "capsule"],
     "counterfactual-receipt": ["baseline_integrity_hash", "mode", "result_count", "signer_public_key_hex"],
@@ -288,6 +290,15 @@ function factsValid(facts, format, anchor, runAnchor, runtimeAnchor,
   if (runtimeAnchor !== undefined) expected.push("runtime_origin");
   if (!keys(facts, expected) || facts.signer_public_key_hex !== anchor) return false;
   if (format === "publisher-source") return publisherSourceValid(facts, anchor);
+  if (format === "signed-session") {
+    return publisherText(facts.session_id, 255) && /^[A-Za-z0-9._-]{1,255}$/u.test(facts.session_id)
+      && publisherText(facts.verifier_identity, 266) && /^verifier:\/\/[A-Za-z0-9._-]{1,255}$/u.test(facts.verifier_identity)
+      && instantNs(facts.created_at) !== null
+      && ["pass", "fail", "inconclusive"].includes(facts.final_verdict)
+      && count(facts.step_count) && facts.step_count <= 1024
+      && (facts.step_count === 0) === (facts.final_verdict === "inconclusive")
+      && hex(facts.transcript_hash, 64) && facts.transcript_hash === facts.transcript_hash.toLowerCase();
+  }
   if (format === "counterfactual-receipt") {
     return typeof facts.baseline_integrity_hash === "string" && /^[0-9a-f]{64}$/u.test(facts.baseline_integrity_hash)
       && ["single", "sweep"].includes(facts.mode)

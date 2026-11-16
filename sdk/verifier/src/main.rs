@@ -31,7 +31,8 @@ use frankenengine_verifier_sdk::resolution::{
 };
 use frankenengine_verifier_sdk::{
     FN_LTV_HYBRID_SURVIVED_ALGO_DEATH, LongTermVerificationEvidence, LongTermWitnessTrustAnchor,
-    VerificationVerdict, VerifierSdk, long_term_verification_audit_events,
+    SignedSessionTranscript, VerificationVerdict, VerifierSdk, VerifierSdkError,
+    long_term_verification_audit_events,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -43,7 +44,7 @@ const COUNTERFACTUAL_INPUT_SCHEMA: &str = "franken-verifier/counterfactual-recei
 const LTV_INPUT_SCHEMA: &str = "franken-verifier/ltv-evidence-input/v1";
 const LTV_WITNESS_ANCHOR_DOMAIN: &[u8] = b"franken-verifier/ltv-witness-anchor/v1:";
 const MAX_LTV_WITNESS_ANCHOR_BYTES: usize = 64 * 1024;
-const USAGE: &str = "franken-verifier verify --format incident-bundle|native-session-forensics|capsule|signed-bundle|resolution-receipt|publisher-source|publisher-source-trust|counterfactual-receipt|ltv-evidence --trusted-key-hex HEX [--trusted-run-key-hex HEX [--trusted-runtime-key-hex HEX]] [--signature-hex HEX] [--trusted-revocation-key-hex HEX --evaluation-time RFC3339 --max-revocation-age-secs SECONDS [--trusted-provenance-key-hex HEX]] < artifact";
+const USAGE: &str = "franken-verifier verify --format incident-bundle|native-session-forensics|capsule|signed-bundle|signed-session|resolution-receipt|publisher-source|publisher-source-trust|counterfactual-receipt|ltv-evidence --trusted-key-hex HEX [--trusted-run-key-hex HEX [--trusted-runtime-key-hex HEX]] [--signature-hex HEX] [--trusted-revocation-key-hex HEX --evaluation-time RFC3339 --max-revocation-age-secs SECONDS [--trusted-provenance-key-hex HEX]] < artifact";
 
 #[derive(Debug)]
 struct PublisherTrustRequest {
@@ -155,6 +156,7 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
             | "native-session-forensics"
             | "capsule"
             | "signed-bundle"
+            | "signed-session"
             | "resolution-receipt"
             | "publisher-source"
             | "publisher-source-trust"
@@ -419,6 +421,53 @@ fn counterfactual_failure(error: &CounterfactualReceiptError) -> Failure {
 
 fn verify(request: &Request, bytes: &[u8]) -> Result<Value, Failure> {
     match request.format.as_str() {
+        "signed-session" => {
+            let value = decode_evidence_json(bytes).map_err(|error| incident_failure(&error))?;
+            let transcript: SignedSessionTranscript = serde_json::from_value(value)
+                .map_err(|_| failure("EVIDENCE_INVALID", "invalid signed session transcript"))?;
+            trusted_evaluation_time(&transcript.created_at)
+                .map_err(|_| failure("EVIDENCE_INVALID", "invalid signed session creation time"))?;
+            let anchor = hex::encode(request.anchor.as_bytes());
+            if transcript.signer_public_key_hex != anchor {
+                return Err(failure(
+                    "SIGNER_UNTRUSTED",
+                    "session signer differs from the independently trusted key",
+                ));
+            }
+            if transcript.ed25519_signature_hex.len() != 128
+                || !transcript
+                    .ed25519_signature_hex
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            {
+                return Err(failure(
+                    "SIGNATURE_MALFORMED",
+                    "expected a lowercase 64-byte session signature",
+                ));
+            }
+            VerifierSdk::verify_signed_session(&request.anchor, &transcript).map_err(|error| {
+                match error {
+                    VerifierSdkError::Bundle(BundleError::Ed25519SignatureInvalid) => {
+                        failure("SIGNATURE_INVALID", "session signature does not verify")
+                    }
+                    _ => failure("EVIDENCE_INVALID", "signed session verification failed"),
+                }
+            })?;
+            // Authenticate the signer's recorded decisions, without re-executing
+            // the steps or claiming independent verification of their keyed tags.
+            // Keep per-step artifacts and timestamps out of the public response.
+            Ok(
+                json!({"scope": "authenticated_verification_session", "facts": {
+                    "session_id": transcript.session_id,
+                    "verifier_identity": transcript.verifier_identity,
+                    "created_at": transcript.created_at,
+                    "final_verdict": transcript.final_verdict,
+                    "step_count": transcript.steps.len(),
+                    "transcript_hash": transcript.transcript_hash,
+                    "signer_public_key_hex": anchor,
+                }}),
+            )
+        }
         "native-session-forensics" => {
             let verified = verify_native_session_forensics(bytes, &request.anchor)
                 .map_err(native_session_failure)?;

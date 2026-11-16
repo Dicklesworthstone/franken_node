@@ -1,4 +1,4 @@
-export type EvidenceFormat = "incident-bundle" | "native-session-forensics" | "capsule" | "signed-bundle" | "resolution-receipt" | "publisher-source" | "publisher-source-trust" | "counterfactual-receipt" | "ltv-evidence";
+export type EvidenceFormat = "incident-bundle" | "native-session-forensics" | "capsule" | "signed-bundle" | "signed-session" | "resolution-receipt" | "publisher-source" | "publisher-source-trust" | "counterfactual-receipt" | "ltv-evidence";
 export interface VerifierOptions {
   /** Trusted SDK executable, installed separately; never supplied by evidence. */
   verifier: string;
@@ -229,6 +229,17 @@ export interface LtvEvidenceFacts {
   hybrid_survived_algo_death: boolean;
   signer_public_key_hex: string;
 }
+/** Authenticated recorded decisions, without re-executing the session's steps. */
+export interface SignedSessionFacts {
+  session_id: string;
+  verifier_identity: string;
+  created_at: string;
+  /** Signature authentication may succeed even when this is fail or inconclusive. */
+  final_verdict: "pass" | "fail" | "inconclusive";
+  step_count: number;
+  transcript_hash: string;
+  signer_public_key_hex: string;
+}
 export type Verification = {
   schema_version: "franken-verifier-cli/v1";
   verdict: "verified";
@@ -240,6 +251,7 @@ export type Verification = {
   | { format: "native-session-forensics"; scope: "authenticated_supervisor_observations"; facts: NativeSessionForensicsFacts }
   | { format: "capsule"; scope: "authenticated_capsule_content"; facts: CapsuleFacts }
   | { format: "signed-bundle"; scope: "authenticated_sdk_replay_bundle"; facts: SignedBundleFacts }
+  | { format: "signed-session"; scope: "authenticated_verification_session"; facts: SignedSessionFacts }
   | { format: "resolution-receipt"; scope: "authenticated_resolution_decision"; facts: ResolutionReceiptFacts }
   | { format: "publisher-source"; scope: "authenticated_publisher_source_content"; facts: PublisherSourceFacts }
   | { format: "publisher-source-trust"; scope: "authenticated_publisher_source_trust"; facts: PublisherSourceTrustFacts }

@@ -4395,9 +4395,35 @@ code, not a sandbox for running arbitrary verifier programs.
 | `incident-bundle` (default in bindings) | `authenticated_recorded_incident`: signed recorded events, hashes and bounded native-capture metadata | Embedded Ed25519 signature checked under the caller's anchor |
 | `capsule` | `authenticated_capsule_content`: independently re-derived signed payload/input hash | Signed SDK capsule JSON with strict fields |
 | `signed-bundle` | `authenticated_sdk_replay_bundle`: the distinct canonical SDK bundle format | Required detached `signature_hex` (Python), `signatureHex` (JS) or `--signature-hex` (CLI) |
+| `signed-session` | `authenticated_verification_session`: a sealed verification session's ordered steps and recorded verdict | Embedded Ed25519 signature checked under the caller's independent verifier key |
 | `resolution-receipt` | `authenticated_resolution_decision`: signed package admission or rejection, profile, capability-budget mode and module-graph commitment | Embedded Ed25519 signature checked under the caller's resolver-authority key |
 | `publisher-source` | `authenticated_publisher_source_content`: publisher-signed registration, source-capsule byte integrity, and declared execution ceilings | Required detached registration `signature_hex` (Python), `signatureHex` (JS) or `--signature-hex` (CLI), checked under the caller's publisher key |
 | `publisher-source-trust` | `authenticated_publisher_source_trust`: authenticated source, fresh signed revocations, and optional signed version lineage | Publisher signature, independent revocation/provenance authorities, evaluation time, and maximum revocation age |
+
+To authenticate a sealed session exported by
+`VerifierSdk::export_signed_session`, supply the verifier's independently
+trusted public key:
+
+```bash
+franken-verifier verify --format signed-session \
+  --trusted-key-hex "$TRUSTED_VERIFIER_PUBLIC_KEY_HEX" < signed-session.json
+```
+
+Use `format="signed-session"` in Python or `format: "signed-session"` in
+JavaScript/TypeScript. The result returns `session_id`, `verifier_identity`,
+`created_at`, `final_verdict`, `step_count`, `transcript_hash` and the
+signer's public key. Consumers must inspect `facts.final_verdict`: an authentic
+failed session returns `verdict: "verified"` with `final_verdict: "fail"`;
+an authentic empty session returns `final_verdict: "inconclusive"`.
+
+The CLI checks the schema, caller-selected signer, ordered step indices,
+transcript hash, recorded verdict consistency and Ed25519 signature. It rejects
+unknown fields, duplicate JSON keys, malformed metadata and more than 1,024
+steps. Only the bounded summary crosses the response boundary; individual
+artifact bindings and step timestamps are omitted. This authenticates the
+signer's recorded decisions. It does not re-execute their underlying checks,
+independently verify the private keyed step tags, or establish current
+revocation status.
 
 To audit a module-resolution decision, supply the independently trusted
 resolver key and the original canonical signed receipt:

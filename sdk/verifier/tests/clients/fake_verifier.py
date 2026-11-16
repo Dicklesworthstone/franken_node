@@ -50,6 +50,14 @@ if mode.startswith("runtime_"):
         "producer_id": "runtime-protocol-control", "evidence_key_id": "ed25519:" + "c" * 64,
         "signed_epoch": "18446744073709551615",
     }
+if mode.startswith("session_"):
+    response["format"] = "signed-session"
+    response["scope"] = "authenticated_verification_session"
+    response["facts"] = {
+        "session_id": "protocol-session", "verifier_identity": "verifier://protocol-test",
+        "created_at": "2026-11-16T00:00:00.123456789Z", "final_verdict": "pass",
+        "step_count": 1, "transcript_hash": "a" * 64, "signer_public_key_hex": anchor,
+    }
 if mode.startswith("native_"):
     response["format"] = "native-session-forensics"
     response["scope"] = "authenticated_supervisor_observations"
@@ -457,6 +465,45 @@ elif mode == "ltv_bad_artifact_hash":
     response["facts"]["artifact_hash"] = "sha256:invalid"
 elif mode == "ltv_unknown_field":
     response["facts"]["execution_authorized"] = True
+elif mode == "session_fail":
+    response["facts"]["final_verdict"] = "fail"
+elif mode == "session_empty":
+    response["facts"]["final_verdict"] = "inconclusive"
+    response["facts"]["step_count"] = 0
+elif mode == "session_wrong_scope":
+    response["scope"] = "guest_executed"
+elif mode == "session_wrong_signer":
+    response["facts"]["signer_public_key_hex"] = "33" * 32
+elif mode == "session_unknown_field":
+    response["facts"]["execution_authorized"] = True
+elif mode == "session_missing_field":
+    del response["facts"]["final_verdict"]
+elif mode == "session_boolean_count":
+    response["facts"]["step_count"] = True
+elif mode == "session_negative_count":
+    response["facts"]["step_count"] = -1
+elif mode == "session_excessive_count":
+    response["facts"]["step_count"] = 1025
+elif mode == "session_empty_pass":
+    response["facts"]["step_count"] = 0
+elif mode == "session_nonempty_inconclusive":
+    response["facts"]["final_verdict"] = "inconclusive"
+elif mode == "session_bad_identity":
+    response["facts"]["verifier_identity"] = "internal://protocol-test"
+elif mode == "session_empty_id":
+    response["facts"]["session_id"] = ""
+elif mode == "session_long_id":
+    response["facts"]["session_id"] = "a" * 256
+elif mode == "session_id_newline":
+    response["facts"]["session_id"] += "\n"
+elif mode == "session_bad_time":
+    response["facts"]["created_at"] = "2026-02-30T00:00:00Z"
+elif mode == "session_bad_verdict":
+    response["facts"]["final_verdict"] = "verified"
+elif mode == "session_bad_hash":
+    response["facts"]["transcript_hash"] = "sha256:" + "a" * 64
+elif mode == "session_uppercase_hash":
+    response["facts"]["transcript_hash"] = "A" * 64
 encoded = json.dumps(response, separators=(",", ":"), sort_keys=True)
 if mode == "duplicate":
     encoded = encoded[:-1] + ',"verdict":"verified"}'
