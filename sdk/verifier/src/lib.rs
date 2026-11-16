@@ -253,12 +253,14 @@ pub fn long_term_verification_audit_events(result: &VerificationResult) -> Vec<S
         ),
     )];
 
-    if result.checked_assertions.iter().any(|assertion| {
-        matches!(
-            assertion.assertion.as_str(),
-            "ltv_witness_precedes_key_compromise_records"
-        ) && assertion.passed
-    }) {
+    if result.verdict == VerificationVerdict::Pass
+        && result.checked_assertions.iter().any(|assertion| {
+            matches!(
+                assertion.assertion.as_str(),
+                "ltv_witness_precedes_key_compromise_records"
+            ) && assertion.passed
+        })
+    {
         events.push(SdkEvent::new(
             FN_LTV_WITNESS_ANTERIORITY_PROVEN,
             LONG_TERM_VERIFICATION_PASS_DETAIL,
@@ -268,22 +270,26 @@ pub fn long_term_verification_audit_events(result: &VerificationResult) -> Vec<S
     if result.checked_assertions.iter().any(|assertion| {
         matches!(
             assertion.assertion.as_str(),
-            "ltv_witness_anterior_to_as_of" | "ltv_witness_precedes_key_compromise_records"
+            "ltv_timeline_ordered"
+                | "ltv_witness_anterior_to_as_of"
+                | "ltv_witness_precedes_key_compromise_records"
         ) && !assertion.passed
     }) {
         events.push(SdkEvent::new(
             FN_LTV_BACKDATING_REJECTED,
-            "late or post-compromise witness evidence rejected",
+            "invalid claim, re-attestation, or witness chronology rejected",
         ));
     }
 
-    if result.checked_assertions.iter().any(|assertion| {
-        matches!(
-            assertion.assertion.as_str(),
-            "ltv_crypto_suite_valid_at_claimed_time"
-        ) && assertion.passed
-            && assertion.detail.contains("hybrid")
-    }) {
+    if result.verdict == VerificationVerdict::Pass
+        && result.checked_assertions.iter().any(|assertion| {
+            matches!(
+                assertion.assertion.as_str(),
+                "ltv_crypto_suite_valid_at_claimed_time"
+            ) && assertion.passed
+                && assertion.detail.contains("hybrid")
+        })
+    {
         events.push(SdkEvent::new(
             FN_LTV_HYBRID_SURVIVED_ALGO_DEATH,
             "hybrid crypto suite remained valid for the claimed artifact time",
@@ -1101,6 +1107,8 @@ impl VerifierSdk {
     /// the claimed time, verifies MMR inclusion under the origin root, verifies
     /// the re-attestation prefix chain to the witnessed root, and verifies the
     /// independent threshold witness receipt before accepting anteriority.
+    /// The artifact claim, every re-attestation, the authenticated witness
+    /// observation, and the as-of time must form a nondecreasing timeline.
     /// Re-verify long-term verification evidence offline.
     ///
     /// `witness_anchor` is the operator-supplied witness trust anchor and is
@@ -2885,6 +2893,31 @@ fn verify_long_term_evidence(
                 )
             }
             Err(reason) => reason.clone(),
+        },
+    );
+
+    // Link hashes are public commitments, not signatures. A caller can change
+    // a link timestamp and recompute its hash without changing any witness
+    // signature. Require each link to fit the interval committed to by the
+    // artifact claim and the authenticated witness observation.
+    let timeline_ordered = chain_check.is_ok()
+        && witness_check.as_ref().is_ok_and(|witness| {
+            evidence.reattestation_chain.attestations.iter().all(|link| {
+                evidence.artifact.claimed_at_unix_seconds <= link.issued_at_unix_seconds
+                    && link.issued_at_unix_seconds <= witness.observed_at_unix_seconds
+            })
+        });
+    push_long_term_assertion(
+        &mut assertions,
+        "ltv_timeline_ordered",
+        timeline_ordered,
+        || {
+            "artifact claim and all re-attestations precede the authenticated witness observation"
+                .to_string()
+        },
+        || {
+            "artifact claim or re-attestation falls outside the authenticated witness timeline"
+                .to_string()
         },
     );
 
@@ -5991,6 +6024,145 @@ mod tests {
                 .expect_err("witness after as-of must fail the self-check")
                 .contains("ltv_witness_anterior_to_as_of")
         );
+    }
+
+    #[test]
+    fn verify_as_of_ltv_rejects_rehashed_reattestation_before_artifact_claim() {
+        let sdk = create_verifier_sdk("verifier://alpha");
+        let mut evidence = reference_long_term_verification_evidence();
+        let original_witness = evidence.witness_receipt.clone();
+        let reattestation = &mut evidence.reattestation_chain.attestations[0];
+        reattestation.issued_at_unix_seconds = evidence.artifact.claimed_at_unix_seconds - 1;
+        // Link hashes are public commitments. Recomputing one must not make
+        // an impossible timeline pass under an unchanged witness signature.
+        reattestation.attestation_hash = compute_long_term_reattestation_hash(reattestation);
+        assert_eq!(evidence.witness_receipt, original_witness);
+        assert!(verify_long_term_reattestation_chain(&evidence.reattestation_chain).is_ok());
+        assert!(
+            verify_long_term_witness_receipt(
+                &evidence.witness_receipt,
+                &witness_anchor_for(&evidence),
+            )
+            .is_ok()
+        );
+        let result = verify_as_of_ltv_for_test(
+            &sdk,
+            &evidence,
+            "a re-attestation before its artifact claim must fail",
+        );
+        assert_eq!(result.verdict, VerificationVerdict::Fail);
+        assert!(result.checked_assertions.iter().any(|assertion| {
+            assertion.assertion == "ltv_timeline_ordered" && !assertion.passed
+        }));
+        let events = long_term_verification_audit_events(&result);
+        assert!(
+            events.iter().any(|event| event.event_code == FN_LTV_BACKDATING_REJECTED)
+        );
+        assert!(
+            events.iter().all(|event| event.event_code != FN_LTV_WITNESS_ANTERIORITY_PROVEN)
+        );
+    }
+
+    #[test]
+    fn verify_as_of_ltv_rejects_rehashed_reattestation_after_signed_witness() {
+        let sdk = create_verifier_sdk("verifier://alpha");
+        for issued_at in [1_701, 1_901, u64::MAX] {
+            let mut evidence = reference_long_term_verification_evidence();
+            let original_witness = evidence.witness_receipt.clone();
+            let reattestation = &mut evidence.reattestation_chain.attestations[0];
+            reattestation.issued_at_unix_seconds = issued_at;
+            reattestation.attestation_hash = compute_long_term_reattestation_hash(reattestation);
+            assert_eq!(evidence.witness_receipt, original_witness);
+            assert!(verify_long_term_reattestation_chain(&evidence.reattestation_chain).is_ok());
+            assert!(
+                verify_long_term_witness_receipt(
+                    &evidence.witness_receipt,
+                    &witness_anchor_for(&evidence),
+                )
+                .is_ok()
+            );
+            let result = verify_as_of_ltv_for_test(
+                &sdk,
+                &evidence,
+                "a re-attestation after its signed witness must fail",
+            );
+            assert_eq!(
+                result.verdict, VerificationVerdict::Fail, "issued_at={issued_at}"
+            );
+            assert!(result.checked_assertions.iter().any(|assertion| {
+                assertion.assertion == "ltv_timeline_ordered" && !assertion.passed
+            }));
+            let events = long_term_verification_audit_events(&result);
+            assert!(
+                events.iter().any(|event| event.event_code == FN_LTV_BACKDATING_REJECTED)
+            );
+            assert!(
+                events.iter().all(|event| event.event_code != FN_LTV_WITNESS_ANTERIORITY_PROVEN)
+            );
+        }
+    }
+
+    #[test]
+    fn verify_as_of_ltv_accepts_equal_chronology_boundaries() {
+        let sdk = create_verifier_sdk("verifier://alpha");
+        for issued_at in [1_000, 1_700] {
+            let mut evidence = reference_long_term_verification_evidence();
+            let reattestation = &mut evidence.reattestation_chain.attestations[0];
+            reattestation.issued_at_unix_seconds = issued_at;
+            reattestation.attestation_hash = compute_long_term_reattestation_hash(reattestation);
+            evidence.as_of_unix_seconds = evidence.witness_receipt.statement.observed_at_unix_seconds;
+            let result = verify_as_of_ltv_for_test(
+                &sdk,
+                &evidence,
+                "equal event times remain a valid nondecreasing chronology",
+            );
+            assert_eq!(
+                result.verdict, VerificationVerdict::Pass, "issued_at={issued_at}"
+            );
+        }
+    }
+
+    #[test]
+    fn public_builder_rejects_ltv_reattestations_outside_claim_and_witness() {
+        let signers = builder_witness_signers(2);
+        for issued_at in [999, 1_701, u64::MAX] {
+            let mut request = builder_reference_request();
+            request.reattested_at_unix_seconds = issued_at;
+            let error = build_long_term_verification_evidence(&request, &signers)
+                .expect_err("producer self-check must reject an impossible LTV chronology");
+            assert!(error.contains("ltv_timeline_ordered"), "{error}");
+        }
+        for issued_at in [1_000, 1_700] {
+            let mut request = builder_reference_request();
+            request.reattested_at_unix_seconds = issued_at;
+            build_long_term_verification_evidence(&request, &signers)
+                .expect("producer self-check must accept equal timeline boundaries");
+        }
+    }
+
+    #[test]
+    fn rejected_ltv_hybrid_evidence_never_emits_positive_audit_claims() {
+        let sdk = create_verifier_sdk("verifier://alpha");
+        let mut evidence =
+            reference_long_term_verification_evidence_for_suite("ed25519-pq-hybrid-v1");
+        evidence.inclusion_proof.leaf_hash = "0".repeat(64);
+        let result = verify_as_of_ltv_for_test(
+            &sdk,
+            &evidence,
+            "valid witness signatures cannot rescue an invalid inclusion proof",
+        );
+        assert_eq!(result.verdict, VerificationVerdict::Fail);
+        assert!(result.checked_assertions.iter().any(|assertion| {
+            assertion.assertion == "ltv_crypto_suite_valid_at_claimed_time" && assertion.passed
+        }));
+        assert!(result.checked_assertions.iter().any(|assertion| {
+            assertion.assertion == "ltv_witness_precedes_key_compromise_records" && assertion.passed
+        }));
+        let events = long_term_verification_audit_events(&result);
+        assert!(events.iter().all(|event| !matches!(
+            event.event_code,
+            FN_LTV_WITNESS_ANTERIORITY_PROVEN | FN_LTV_HYBRID_SURVIVED_ALGO_DEATH
+        )));
     }
 
     #[test]
