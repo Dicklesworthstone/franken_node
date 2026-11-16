@@ -35,6 +35,13 @@ for (const test of cases) {
         assert.equal(result.facts.signing_identity, "339eefa3a988f613");
         assert.equal(Object.hasOwn(result.facts, "run_origin"), false);
       }
+    } else if (test.format === "native-session-forensics") {
+      assert.equal(result.scope, "authenticated_supervisor_observations");
+      assert.deepEqual(result.facts, test.native_facts, test.name);
+      assert.equal(result.facts.replay_certified, false);
+      assert.equal(result.facts.quiescence_certified, false);
+      assert.equal(result.facts.historical_completeness, false);
+      assert.equal(typeof result.facts.security_epoch, "string");
     } else if (test.format === "resolution-receipt") {
       assert.equal(result.scope, "authenticated_resolution_decision");
       assert.equal(result.facts.decision, test.decision);
@@ -63,7 +70,7 @@ for (const test of cases) {
   } catch (error) {
     assert(error instanceof VerifierError, `${test.name}: ${error}`);
     assert.equal(error.code, test.expected, test.name);
-    if (["publisher-source", "publisher-source-trust"].includes(test.format)) assert.equal(error.message.includes("PRIVATE-"), false);
+    if (["publisher-source", "publisher-source-trust", "native-session-forensics"].includes(test.format)) assert.equal(error.message.includes("PRIVATE-"), false);
     console.log(JSON.stringify({ case: test.name, result: error.code }));
   }
 }
@@ -74,6 +81,8 @@ const clientControls = [
   ["run_key_wrong_format", Buffer.from("{}"), cases[0].anchor, { format: "capsule", trustedRunPublicKeyHex: cases[0].anchor }, "INPUT_INVALID"],
   ["runtime_key_requires_run_key", Buffer.from("{}"), cases[0].anchor, { trustedRuntimePublicKeyHex: cases[0].anchor }, "INPUT_INVALID"],
   ["bad_runtime_key_shape", Buffer.from("{}"), cases[0].anchor, { trustedRunPublicKeyHex: cases[0].anchor, trustedRuntimePublicKeyHex: "00" }, "RUNTIME_ANCHOR_INVALID"],
+  ["native_detached_signature_refused", Buffer.from("{}"), cases[0].anchor, { format: "native-session-forensics", signatureHex: "00".repeat(64) }, "INPUT_INVALID"],
+  ["native_run_anchor_refused", Buffer.from("{}"), cases[0].anchor, { format: "native-session-forensics", trustedRunPublicKeyHex: cases[0].anchor }, "INPUT_INVALID"],
   ["invalid_timeout", Buffer.from("{}"), cases[0].anchor, { timeoutMs: 0 }, "TIMEOUT_INVALID"],
   ["missing_executable", Buffer.from("{}"), cases[0].anchor, { verifier: resolve("does-not-exist") }, "PROCESS_UNAVAILABLE"],
 ];
@@ -112,6 +121,77 @@ for (const mode of runtimeControls) {
     { verifier: resolve("fake_verifier"), trustedRunPublicKeyHex: runAnchor, trustedRuntimePublicKeyHex: runtimeAnchor.toUpperCase() }),
   (error) => error instanceof VerifierError && error.code === "PROTOCOL_INVALID", `protocol_${mode}`);
   console.log(JSON.stringify({ case: `protocol_${mode}`, result: "PROTOCOL_INVALID" }));
+}
+const nativeControls = [
+  "native_wrong_scope",
+  "native_wrong_nested_scope",
+  "native_wrong_root",
+  "native_bad_nonce",
+  "native_bad_admission_digest",
+  "native_bad_paths",
+  "native_numeric_epoch",
+  "native_overflow_epoch",
+  "native_noncanonical_epoch",
+  "native_negative_epoch",
+  "native_epoch_trailing_newline",
+  "native_bad_admission_time",
+  "native_bad_observation_time",
+  "native_unknown_field",
+  "native_missing_field",
+  "native_pending_with_outcome",
+  "native_impossible_process",
+  "native_impossible_effect",
+  "native_unknown_outcome",
+  "native_unsafe_count",
+  "native_boolean_count",
+  "native_missing_count",
+  "native_impossible_wal_count",
+  "native_missing_completeness",
+  "native_impossible_ledger_count",
+  "native_replay_claim",
+  "native_quiescence_claim",
+  "native_history_claim",
+  "native_v1_with_journal",
+  "native_v2_without_journal",
+  "native_unknown_schema",
+  "native_journal_wrong_nonce",
+  "native_journal_wrong_root",
+  "native_journal_wrong_admission",
+  "native_journal_wrong_scope",
+  "native_journal_wrong_schema",
+  "native_journal_empty_prefix",
+  "native_journal_event_mismatch",
+  "native_journal_call_mismatch",
+  "native_journal_missing_pending",
+  "native_journal_bad_head",
+  "native_journal_bad_torn_flag",
+  "native_journal_unknown_field",
+  "native_journal_replay_claim",
+  "native_journal_quiescence_claim",
+  "native_journal_history_claim",
+  "native_journal_contradicts_complete_outcome"
+];
+for (const mode of nativeControls) {
+  await assert.rejects(verifyArtifact(Buffer.from(JSON.stringify({ protocol_control: mode })), cases[0].anchor,
+    { verifier: resolve("fake_verifier"), format: "native-session-forensics" }),
+  (error) => error instanceof VerifierError && error.code === "PROTOCOL_INVALID", "protocol_" + mode);
+  console.log(JSON.stringify({ case: "protocol_" + mode, result: "PROTOCOL_INVALID" }));
+}
+const nativePositives = ["native_valid", "native_zero_epoch", "native_pending_prefix", "native_incomplete_with_later_journal"];
+for (const mode of nativePositives) {
+  const verified = await verifyArtifact(Buffer.from(JSON.stringify({ protocol_control: mode })), cases[0].anchor,
+    { verifier: resolve("fake_verifier"), format: "native-session-forensics" });
+  assert.equal(verified.scope, "authenticated_supervisor_observations", mode);
+  assert.equal(verified.facts.historical_completeness, false, mode);
+  if (mode === "native_pending_prefix") {
+    assert.equal(verified.facts.completed_provider_calls, null);
+    assert.equal(verified.facts.durable_journal.admitted_provider_calls, 2);
+  }
+  if (mode === "native_incomplete_with_later_journal") {
+    assert.equal(verified.facts.journal_complete, false);
+    assert.equal(verified.facts.durable_journal.returned_provider_calls, 1);
+  }
+  console.log(JSON.stringify({ case: "protocol_" + mode, result: "verified" }));
 }
 const resolutionControls = ["resolution_invalid_decision", "resolution_reject_with_candidate", "resolution_admit_without_candidate",
   "resolution_bad_graph", "resolution_wrong_signer", "resolution_unsafe_count", "resolution_wrong_scope", "resolution_unknown_field",
@@ -218,4 +298,4 @@ console.log(JSON.stringify({ consumer: "javascript", matrix_cases: cases.length,
   client_cases: clientControls.length + publisherTrustInputs.length,
   protocol_cases: controls.length + runControls.length + runtimeControls.length + resolutionControls.length
     + publisherControls.length + publisherTrustControls.length + publisherTrustPositives.length
-    + counterfactualControls.length + ltvControls.length + 1, passed: true }));
+    + counterfactualControls.length + ltvControls.length + nativeControls.length + nativePositives.length + 1, passed: true }));

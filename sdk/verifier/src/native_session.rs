@@ -101,6 +101,13 @@ impl fmt::Debug for NativeSessionForensicOutcome {
     }
 }
 
+fn serialize_security_epoch<S: serde::Serializer>(
+    epoch: &u64,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.collect_str(epoch)
+}
+
 /// A bounded summary of authenticated statements. The private panic text, WAL
 /// request commitments and dependency inventory are deliberately not repeated.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -112,6 +119,9 @@ pub struct VerifiedNativeSessionForensics {
     pub admission_sha256: String,
     pub project_root: String,
     pub entrypoint: String,
+    /// Decimal JSON text preserves every authenticated u64 epoch in language
+    /// clients. The original signed admission retains its integer encoding.
+    #[serde(serialize_with = "serialize_security_epoch")]
     pub security_epoch: u64,
     pub admitted_at: String,
     pub observed_at: Option<String>,
@@ -1258,6 +1268,29 @@ mod tests {
         let summary = serde_json::to_string(&verified).unwrap();
         assert!(!summary.contains("private-dependency-name"));
         assert!(!summary.contains("/evidence/captures"));
+    }
+
+    #[test]
+    fn authenticated_epoch_summary_preserves_the_full_u64_range_as_decimal_text() {
+        for (epoch, expected) in [
+            (0_u64, "0"),
+            (7_u64, "7"),
+            (9_007_199_254_740_993, "9007199254740993"),
+            (u64::MAX, "18446744073709551615"),
+        ] {
+            let (key, mut bundle) = pending_fixture();
+            let mut admission: Value = serde_json::from_str(&bundle.admission_json).unwrap();
+            admission["security_epoch"] = json!(epoch);
+            bundle.admission_json = admission.to_string();
+            issue_admission(&mut bundle, &key);
+
+            let verified = verify_bundle(&bundle, &key).unwrap();
+            assert_eq!(verified.security_epoch, epoch);
+            let facts = serde_json::to_value(&verified).unwrap();
+            assert_eq!(facts["security_epoch"].as_str(), Some(expected));
+            assert!(!verified.replay_certified);
+            assert!(!verified.quiescence_certified);
+        }
     }
 
     #[test]

@@ -26,7 +26,7 @@ for case in cases:
                                  max_revocation_age_secs=case.get("max_revocation_age_secs"))
     except VerifierError as error:
         assert error.code == case["expected"], (case["name"], error.code, case["expected"])
-        if case["format"] in ("publisher-source", "publisher-source-trust"):
+        if case["format"] in ("publisher-source", "publisher-source-trust", "native-session-forensics"):
             assert "PRIVATE-" not in str(error)
         print(json.dumps({"case": case["name"], "result": error.code}), flush=True)
     else:
@@ -47,6 +47,13 @@ for case in cases:
                 assert result["facts"]["event_count"] == 3
                 assert result["facts"]["signing_identity"] == "339eefa3a988f613"
                 assert "run_origin" not in result["facts"]
+        elif case["format"] == "native-session-forensics":
+            assert result["scope"] == "authenticated_supervisor_observations"
+            assert result["facts"] == case["native_facts"], case["name"]
+            assert result["facts"]["replay_certified"] is False
+            assert result["facts"]["quiescence_certified"] is False
+            assert result["facts"]["historical_completeness"] is False
+            assert isinstance(result["facts"]["security_epoch"], str)
         elif case["format"] == "resolution-receipt":
             assert result["scope"] == "authenticated_resolution_decision"
             assert result["facts"]["decision"] == case["decision"]
@@ -76,6 +83,8 @@ client_controls = [
     ("run_key_wrong_format", b"{}", {"format": "capsule", "trusted_run_public_key_hex": cases[0]["anchor"]}, "INPUT_INVALID"),
     ("runtime_key_requires_run_key", b"{}", {"trusted_runtime_public_key_hex": cases[0]["anchor"]}, "INPUT_INVALID"),
     ("bad_runtime_key_shape", b"{}", {"trusted_run_public_key_hex": cases[0]["anchor"], "trusted_runtime_public_key_hex": "00"}, "RUNTIME_ANCHOR_INVALID"),
+    ("native_detached_signature_refused", b"{}", {"format": "native-session-forensics", "signature_hex": "00" * 64}, "INPUT_INVALID"),
+    ("native_run_anchor_refused", b"{}", {"format": "native-session-forensics", "trusted_run_public_key_hex": cases[0]["anchor"]}, "INPUT_INVALID"),
     ("invalid_timeout", b"{}", {"timeout": 0}, "TIMEOUT_INVALID"),
     ("enormous_timeout_integer", b"{}", {"timeout": 10**1000}, "TIMEOUT_INVALID"),
     ("missing_executable", b"{}", {"verifier": str(root / "does-not-exist")}, "PROCESS_UNAVAILABLE"),
@@ -137,6 +146,78 @@ for mode in runtime_controls:
         print(json.dumps({"case": f"protocol_{mode}", "result": error.code}), flush=True)
     else:
         raise AssertionError(f"protocol_{mode}")
+native_controls = [
+  "native_wrong_scope",
+  "native_wrong_nested_scope",
+  "native_wrong_root",
+  "native_bad_nonce",
+  "native_bad_admission_digest",
+  "native_bad_paths",
+  "native_numeric_epoch",
+  "native_overflow_epoch",
+  "native_noncanonical_epoch",
+  "native_negative_epoch",
+  "native_epoch_trailing_newline",
+  "native_bad_admission_time",
+  "native_bad_observation_time",
+  "native_unknown_field",
+  "native_missing_field",
+  "native_pending_with_outcome",
+  "native_impossible_process",
+  "native_impossible_effect",
+  "native_unknown_outcome",
+  "native_unsafe_count",
+  "native_boolean_count",
+  "native_missing_count",
+  "native_impossible_wal_count",
+  "native_missing_completeness",
+  "native_impossible_ledger_count",
+  "native_replay_claim",
+  "native_quiescence_claim",
+  "native_history_claim",
+  "native_v1_with_journal",
+  "native_v2_without_journal",
+  "native_unknown_schema",
+  "native_journal_wrong_nonce",
+  "native_journal_wrong_root",
+  "native_journal_wrong_admission",
+  "native_journal_wrong_scope",
+  "native_journal_wrong_schema",
+  "native_journal_empty_prefix",
+  "native_journal_event_mismatch",
+  "native_journal_call_mismatch",
+  "native_journal_missing_pending",
+  "native_journal_bad_head",
+  "native_journal_bad_torn_flag",
+  "native_journal_unknown_field",
+  "native_journal_replay_claim",
+  "native_journal_quiescence_claim",
+  "native_journal_history_claim",
+  "native_journal_contradicts_complete_outcome"
+]
+for mode in native_controls:
+    try:
+        verify_artifact(json.dumps({"protocol_control": mode}).encode(), cases[0]["anchor"],
+                        verifier=str(root / "fake_verifier"), format="native-session-forensics")
+    except VerifierError as error:
+        assert error.code == "PROTOCOL_INVALID", (mode, error.code)
+        print(json.dumps({"case": "protocol_" + mode, "result": error.code}), flush=True)
+    else:
+        raise AssertionError("protocol_" + mode)
+native_positives = ["native_valid", "native_zero_epoch", "native_pending_prefix", "native_incomplete_with_later_journal"]
+for mode in native_positives:
+    verified = verify_artifact(json.dumps({"protocol_control": mode}).encode(), cases[0]["anchor"],
+                               verifier=str(root / "fake_verifier"), format="native-session-forensics")
+    assert verified["scope"] == "authenticated_supervisor_observations", mode
+    assert verified["facts"]["historical_completeness"] is False, mode
+    if mode == "native_pending_prefix":
+        assert verified["facts"]["completed_provider_calls"] is None
+        assert verified["facts"]["durable_journal"]["admitted_provider_calls"] == 2
+    if mode == "native_incomplete_with_later_journal":
+        assert verified["facts"]["journal_complete"] is False
+        assert verified["facts"]["durable_journal"]["returned_provider_calls"] == 1
+    print(json.dumps({"case": "protocol_" + mode, "result": "verified"}), flush=True)
+
 resolution_controls = ["resolution_invalid_decision", "resolution_reject_with_candidate",
                        "resolution_admit_without_candidate", "resolution_bad_graph", "resolution_wrong_signer",
                        "resolution_unsafe_count", "resolution_wrong_scope", "resolution_unknown_field",
@@ -267,4 +348,5 @@ print(json.dumps({"consumer": "python", "matrix_cases": len(cases),
                   "protocol_cases": len(controls) + len(run_controls) + len(runtime_controls)
                   + len(resolution_controls) + len(publisher_controls)
                   + len(publisher_trust_controls) + len(publisher_trust_positives)
-                  + len(counterfactual_controls) + len(ltv_controls) + 1, "passed": True}), flush=True)
+                  + len(counterfactual_controls) + len(ltv_controls)
+                  + len(native_controls) + len(native_positives) + 1, "passed": True}), flush=True)
