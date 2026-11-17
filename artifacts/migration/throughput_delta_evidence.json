@@ -1,9 +1,9 @@
 {
-  "binary_profile": "env:FRANKEN_NODE_BIN",
+  "binary_profile": "target-release",
   "binary_provenance": {
-    "measured_at_commit": "186d5d65ac7117c5c99e43818a20df31591077cd-dirty",
-    "sha256": "sha256:44d775911149172599e6c91af19e2cbb7b8fe591b805ae988951adf4cae21a64",
-    "version": "franken-node 0.1.0"
+    "measured_at_commit": "dd8d67214cdab5741760a0221b9ea15877be1115",
+    "sha256": "sha256:1a3fe12895ced80e099f760a0f1242e3a5f4655ea3835fe18f02a4eab166961b",
+    "version": "franken-node 0.2.0"
   },
   "equivalences": {
     "corpus-commander": {
@@ -29,7 +29,7 @@
   },
   "fixtures": [
     {
-      "baseline_median_ms": 127,
+      "baseline_median_ms": 136,
       "expected_validate": "fail_static_lockfile_missing",
       "fixture_id": "rewrite-shell-commonjs",
       "input_files": [
@@ -39,107 +39,107 @@
         },
         {
           "path": "crates/franken-node/tests/fixtures/migrate/rewrite_shell_commonjs/package.json",
-          "sha256": "038acd32bfc32689338593e9278f375805b916e71aecf732f5d9f721d4d990d5"
+          "sha256": "de235752b5fed470312f75cd0ce7ee4734f630a0faa2e7b7abdea03a858f2bfe"
         },
         {
           "path": "crates/franken-node/tests/fixtures/migrate/rewrite_shell_commonjs/scripts/build.mjs",
           "sha256": "af1bbbee3899cefe1b13cb8d1079e8e277ec269408f5f023138a0aa5f22dbe03"
         }
       ],
-      "ratio_bp": 8467,
+      "ratio_bp": 28936,
       "role": "cohort",
       "runs": [
         {
           "baseline_commands_ms": [
-            43,
-            42,
-            42
+            56,
+            30,
+            26
           ],
           "baseline_exit_codes": [
             0,
             0,
             1
           ],
-          "baseline_ms": 127,
+          "baseline_ms": 112,
           "run_index": 0,
           "tool_commands_ms": [
-            4,
-            143,
-            5
+            9,
+            30,
+            9
           ],
           "tool_exit_codes": [
             0,
             0,
             1
           ],
-          "tool_ms": 152
+          "tool_ms": 48
         },
         {
           "baseline_commands_ms": [
-            49,
-            44,
-            38
+            50,
+            29,
+            57
           ],
           "baseline_exit_codes": [
             0,
             0,
             1
           ],
-          "baseline_ms": 131,
+          "baseline_ms": 136,
           "run_index": 1,
           "tool_commands_ms": [
-            4,
-            346,
-            5
+            9,
+            29,
+            9
           ],
           "tool_exit_codes": [
             0,
             0,
             1
           ],
-          "tool_ms": 355
+          "tool_ms": 47
         },
         {
           "baseline_commands_ms": [
-            44,
-            44,
-            44
+            65,
+            49,
+            27
           ],
           "baseline_exit_codes": [
             0,
             0,
             1
           ],
-          "baseline_ms": 132,
+          "baseline_ms": 141,
           "run_index": 2,
           "tool_commands_ms": [
-            5,
-            135,
-            5
+            7,
+            29,
+            10
           ],
           "tool_exit_codes": [
             0,
             0,
             1
           ],
-          "tool_ms": 145
+          "tool_ms": 46
         },
         {
           "baseline_commands_ms": [
-            38,
-            39,
-            38
+            32,
+            29,
+            62
           ],
           "baseline_exit_codes": [
             0,
             0,
             1
           ],
-          "baseline_ms": 115,
+          "baseline_ms": 123,
           "run_index": 3,
           "tool_commands_ms": [
-            4,
-            138,
+            12,
+            25,
             5
           ],
           "tool_exit_codes": [
@@ -147,39 +147,39 @@
             0,
             1
           ],
-          "tool_ms": 147
+          "tool_ms": 42
         },
         {
           "baseline_commands_ms": [
-            42,
-            44,
-            41
+            53,
+            61,
+            56
           ],
           "baseline_exit_codes": [
             0,
             0,
             1
           ],
-          "baseline_ms": 127,
+          "baseline_ms": 170,
           "run_index": 4,
           "tool_commands_ms": [
             5,
-            140,
-            5
+            39,
+            9
           ],
           "tool_exit_codes": [
             0,
             0,
             1
           ],
-          "tool_ms": 150
+          "tool_ms": 53
         }
       ],
       "source_path_rel": "crates/franken-node/tests/fixtures/migrate/rewrite_shell_commonjs",
-      "tool_median_ms": 150
+      "tool_median_ms": 47
     },
     {
-      "baseline_median_ms": 124,
+      "baseline_median_ms": 123,
       "expected_validate": "pass",
       "fixture_id": "hardened",
       "input_files": [
@@ -192,125 +192,75 @@
           "sha256": "bf353ecadf71aa5d4a388d4bc89302c18b979c3f383dca4becb86d0753de31a1"
         }
       ],
-      "ratio_bp": 13333,
+      "ratio_bp": 36176,
       "role": "cohort",
       "runs": [
         {
           "baseline_commands_ms": [
-            38,
-            43,
-            43
+            57,
+            57,
+            56
           ],
           "baseline_exit_codes": [
             0,
             0,
             0
           ],
-          "baseline_ms": 124,
+          "baseline_ms": 170,
           "run_index": 0,
           "tool_commands_ms": [
-            4,
-            85,
-            4
+            9,
+            18,
+            10
           ],
           "tool_exit_codes": [
             0,
             0,
             0
           ],
-          "tool_ms": 93
+          "tool_ms": 37
         },
         {
           "baseline_commands_ms": [
-            48,
-            36,
-            43
+            46,
+            27,
+            27
           ],
           "baseline_exit_codes": [
             0,
             0,
             0
           ],
-          "baseline_ms": 127,
+          "baseline_ms": 100,
           "run_index": 1,
           "tool_commands_ms": [
-            4,
-            85,
-            5
+            9,
+            117,
+            9
           ],
           "tool_exit_codes": [
             0,
             0,
             0
           ],
-          "tool_ms": 94
+          "tool_ms": 135
         },
         {
           "baseline_commands_ms": [
-            44,
-            44,
-            38
+            27,
+            55,
+            27
           ],
           "baseline_exit_codes": [
             0,
             0,
             0
           ],
-          "baseline_ms": 126,
+          "baseline_ms": 109,
           "run_index": 2,
           "tool_commands_ms": [
-            4,
-            85,
-            5
-          ],
-          "tool_exit_codes": [
-            0,
-            0,
-            0
-          ],
-          "tool_ms": 94
-        },
-        {
-          "baseline_commands_ms": [
-            42,
-            39,
-            35
-          ],
-          "baseline_exit_codes": [
-            0,
-            0,
-            0
-          ],
-          "baseline_ms": 116,
-          "run_index": 3,
-          "tool_commands_ms": [
-            4,
-            78,
-            5
-          ],
-          "tool_exit_codes": [
-            0,
-            0,
-            0
-          ],
-          "tool_ms": 87
-        },
-        {
-          "baseline_commands_ms": [
-            43,
-            36,
-            43
-          ],
-          "baseline_exit_codes": [
-            0,
-            0,
-            0
-          ],
-          "baseline_ms": 122,
-          "run_index": 4,
-          "tool_commands_ms": [
-            4,
-            80,
+            8,
+            18,
             4
           ],
           "tool_exit_codes": [
@@ -318,14 +268,64 @@
             0,
             0
           ],
-          "tool_ms": 88
+          "tool_ms": 30
+        },
+        {
+          "baseline_commands_ms": [
+            40,
+            57,
+            26
+          ],
+          "baseline_exit_codes": [
+            0,
+            0,
+            0
+          ],
+          "baseline_ms": 123,
+          "run_index": 3,
+          "tool_commands_ms": [
+            6,
+            19,
+            9
+          ],
+          "tool_exit_codes": [
+            0,
+            0,
+            0
+          ],
+          "tool_ms": 34
+        },
+        {
+          "baseline_commands_ms": [
+            59,
+            55,
+            62
+          ],
+          "baseline_exit_codes": [
+            0,
+            0,
+            0
+          ],
+          "baseline_ms": 176,
+          "run_index": 4,
+          "tool_commands_ms": [
+            9,
+            18,
+            4
+          ],
+          "tool_exit_codes": [
+            0,
+            0,
+            0
+          ],
+          "tool_ms": 31
         }
       ],
       "source_path_rel": "crates/franken-node/tests/fixtures/migrate/hardened",
-      "tool_median_ms": 93
+      "tool_median_ms": 34
     },
     {
-      "baseline_median_ms": 126,
+      "baseline_median_ms": 138,
       "expected_validate": "fail_risky_script",
       "fixture_id": "risky",
       "input_files": [
@@ -334,140 +334,140 @@
           "sha256": "c832f29049499123b429cb56039c998a64aa35c31c2e059351a272a20324c63a"
         }
       ],
-      "ratio_bp": 15000,
+      "ratio_bp": 34500,
       "role": "cohort",
       "runs": [
         {
           "baseline_commands_ms": [
-            41,
-            39,
-            42
+            62,
+            55,
+            25
           ],
           "baseline_exit_codes": [
             0,
             0,
             1
           ],
-          "baseline_ms": 122,
+          "baseline_ms": 142,
           "run_index": 0,
           "tool_commands_ms": [
-            4,
-            77,
-            5
+            10,
+            20,
+            9
           ],
           "tool_exit_codes": [
             0,
             0,
             1
           ],
-          "tool_ms": 86
+          "tool_ms": 39
         },
         {
           "baseline_commands_ms": [
-            43,
-            42,
-            42
+            60,
+            34,
+            25
           ],
           "baseline_exit_codes": [
             0,
             0,
             1
           ],
-          "baseline_ms": 127,
+          "baseline_ms": 119,
           "run_index": 1,
           "tool_commands_ms": [
-            4,
-            67,
-            5
+            12,
+            20,
+            8
           ],
           "tool_exit_codes": [
             0,
             0,
             1
           ],
-          "tool_ms": 76
+          "tool_ms": 40
+        },
+        {
+          "baseline_commands_ms": [
+            61,
+            27,
+            58
+          ],
+          "baseline_exit_codes": [
+            0,
+            0,
+            1
+          ],
+          "baseline_ms": 146,
+          "run_index": 2,
+          "tool_commands_ms": [
+            9,
+            22,
+            9
+          ],
+          "tool_exit_codes": [
+            0,
+            0,
+            1
+          ],
+          "tool_ms": 40
         },
         {
           "baseline_commands_ms": [
             43,
-            42,
-            43
+            28,
+            50
           ],
           "baseline_exit_codes": [
             0,
             0,
             1
           ],
-          "baseline_ms": 128,
-          "run_index": 2,
-          "tool_commands_ms": [
-            4,
-            73,
-            5
-          ],
-          "tool_exit_codes": [
-            0,
-            0,
-            1
-          ],
-          "tool_ms": 82
-        },
-        {
-          "baseline_commands_ms": [
-            42,
-            42,
-            42
-          ],
-          "baseline_exit_codes": [
-            0,
-            0,
-            1
-          ],
-          "baseline_ms": 126,
+          "baseline_ms": 121,
           "run_index": 3,
           "tool_commands_ms": [
-            4,
-            76,
-            5
+            5,
+            25,
+            11
           ],
           "tool_exit_codes": [
             0,
             0,
             1
           ],
-          "tool_ms": 85
+          "tool_ms": 41
         },
         {
           "baseline_commands_ms": [
-            41,
-            39,
-            38
+            56,
+            27,
+            55
           ],
           "baseline_exit_codes": [
             0,
             0,
             1
           ],
-          "baseline_ms": 118,
+          "baseline_ms": 138,
           "run_index": 4,
           "tool_commands_ms": [
-            5,
-            74,
-            5
+            8,
+            24,
+            8
           ],
           "tool_exit_codes": [
             0,
             0,
             1
           ],
-          "tool_ms": 84
+          "tool_ms": 40
         }
       ],
       "source_path_rel": "crates/franken-node/tests/fixtures/migrate/risky",
-      "tool_median_ms": 84
+      "tool_median_ms": 40
     },
     {
-      "baseline_median_ms": 123,
+      "baseline_median_ms": 139,
       "expected_validate": "pass",
       "fixture_id": "corpus-commander",
       "input_files": [
@@ -488,140 +488,140 @@
           "sha256": "34d3d7f57504ea34e12600ea34220038931bf9da32b0525cbd85931a40561c40"
         }
       ],
-      "ratio_bp": 12059,
+      "ratio_bp": 27255,
       "role": "cohort",
       "runs": [
         {
           "baseline_commands_ms": [
-            41,
-            42,
-            40
+            59,
+            59,
+            34
           ],
           "baseline_exit_codes": [
             0,
             0,
             0
           ],
-          "baseline_ms": 123,
+          "baseline_ms": 152,
           "run_index": 0,
           "tool_commands_ms": [
             4,
-            93,
-            5
+            41,
+            6
           ],
           "tool_exit_codes": [
             0,
             0,
             0
           ],
-          "tool_ms": 102
+          "tool_ms": 51
         },
         {
           "baseline_commands_ms": [
-            42,
-            40,
-            40
+            57,
+            32,
+            59
           ],
           "baseline_exit_codes": [
             0,
             0,
             0
           ],
-          "baseline_ms": 122,
+          "baseline_ms": 148,
           "run_index": 1,
           "tool_commands_ms": [
-            4,
-            93,
-            4
+            9,
+            24,
+            6
           ],
           "tool_exit_codes": [
             0,
             0,
             0
           ],
-          "tool_ms": 101
+          "tool_ms": 39
+        },
+        {
+          "baseline_commands_ms": [
+            55,
+            30,
+            52
+          ],
+          "baseline_exit_codes": [
+            0,
+            0,
+            0
+          ],
+          "baseline_ms": 137,
+          "run_index": 2,
+          "tool_commands_ms": [
+            5,
+            41,
+            9
+          ],
+          "tool_exit_codes": [
+            0,
+            0,
+            0
+          ],
+          "tool_ms": 55
+        },
+        {
+          "baseline_commands_ms": [
+            61,
+            37,
+            41
+          ],
+          "baseline_exit_codes": [
+            0,
+            0,
+            0
+          ],
+          "baseline_ms": 139,
+          "run_index": 3,
+          "tool_commands_ms": [
+            5,
+            27,
+            11
+          ],
+          "tool_exit_codes": [
+            0,
+            0,
+            0
+          ],
+          "tool_ms": 43
         },
         {
           "baseline_commands_ms": [
             39,
-            49,
-            43
+            34,
+            31
           ],
           "baseline_exit_codes": [
             0,
             0,
             0
           ],
-          "baseline_ms": 131,
-          "run_index": 2,
-          "tool_commands_ms": [
-            4,
-            95,
-            4
-          ],
-          "tool_exit_codes": [
-            0,
-            0,
-            0
-          ],
-          "tool_ms": 103
-        },
-        {
-          "baseline_commands_ms": [
-            43,
-            41,
-            36
-          ],
-          "baseline_exit_codes": [
-            0,
-            0,
-            0
-          ],
-          "baseline_ms": 120,
-          "run_index": 3,
-          "tool_commands_ms": [
-            4,
-            91,
-            5
-          ],
-          "tool_exit_codes": [
-            0,
-            0,
-            0
-          ],
-          "tool_ms": 100
-        },
-        {
-          "baseline_commands_ms": [
-            43,
-            45,
-            38
-          ],
-          "baseline_exit_codes": [
-            0,
-            0,
-            0
-          ],
-          "baseline_ms": 126,
+          "baseline_ms": 104,
           "run_index": 4,
           "tool_commands_ms": [
-            5,
-            126,
-            5
+            9,
+            43,
+            9
           ],
           "tool_exit_codes": [
             0,
             0,
             0
           ],
-          "tool_ms": 136
+          "tool_ms": 61
         }
       ],
       "source_path_rel": "crates/franken-node/tests/fixtures/migrate/corpus_commander",
-      "tool_median_ms": 102
+      "tool_median_ms": 51
     },
     {
-      "baseline_median_ms": 129,
+      "baseline_median_ms": 132,
       "expected_validate": "pass",
       "fixture_id": "holdout-worker-service",
       "input_files": [
@@ -642,50 +642,50 @@
           "sha256": "d67ec3f02def9625ab1a25a8a14b175bd27757cc6423500960423dbc53cbab93"
         }
       ],
-      "ratio_bp": 9847,
+      "ratio_bp": 34737,
       "role": "holdout",
       "runs": [
         {
           "baseline_commands_ms": [
-            45,
-            42,
-            38
+            53,
+            26,
+            27
           ],
           "baseline_exit_codes": [
             0,
             0,
             0
           ],
-          "baseline_ms": 125,
+          "baseline_ms": 106,
           "run_index": 0,
           "tool_commands_ms": [
-            4,
-            122,
-            5
+            9,
+            25,
+            9
           ],
           "tool_exit_codes": [
             0,
             0,
             0
           ],
-          "tool_ms": 131
+          "tool_ms": 43
         },
         {
           "baseline_commands_ms": [
-            43,
-            45,
-            43
+            58,
+            56,
+            27
           ],
           "baseline_exit_codes": [
             0,
             0,
             0
           ],
-          "baseline_ms": 131,
+          "baseline_ms": 141,
           "run_index": 1,
           "tool_commands_ms": [
             5,
-            127,
+            28,
             5
           ],
           "tool_exit_codes": [
@@ -693,13 +693,38 @@
             0,
             0
           ],
-          "tool_ms": 137
+          "tool_ms": 38
         },
         {
           "baseline_commands_ms": [
-            44,
-            43,
-            42
+            47,
+            28,
+            57
+          ],
+          "baseline_exit_codes": [
+            0,
+            0,
+            0
+          ],
+          "baseline_ms": 132,
+          "run_index": 2,
+          "tool_commands_ms": [
+            4,
+            27,
+            5
+          ],
+          "tool_exit_codes": [
+            0,
+            0,
+            0
+          ],
+          "tool_ms": 36
+        },
+        {
+          "baseline_commands_ms": [
+            36,
+            62,
+            31
           ],
           "baseline_exit_codes": [
             0,
@@ -707,79 +732,54 @@
             0
           ],
           "baseline_ms": 129,
-          "run_index": 2,
-          "tool_commands_ms": [
-            4,
-            120,
-            5
-          ],
-          "tool_exit_codes": [
-            0,
-            0,
-            0
-          ],
-          "tool_ms": 129
-        },
-        {
-          "baseline_commands_ms": [
-            43,
-            44,
-            43
-          ],
-          "baseline_exit_codes": [
-            0,
-            0,
-            0
-          ],
-          "baseline_ms": 130,
           "run_index": 3,
           "tool_commands_ms": [
-            4,
-            121,
-            4
+            7,
+            27,
+            6
           ],
           "tool_exit_codes": [
             0,
             0,
             0
           ],
-          "tool_ms": 129
+          "tool_ms": 40
         },
         {
           "baseline_commands_ms": [
-            43,
-            42,
-            43
+            59,
+            56,
+            26
           ],
           "baseline_exit_codes": [
             0,
             0,
             0
           ],
-          "baseline_ms": 128,
+          "baseline_ms": 141,
           "run_index": 4,
           "tool_commands_ms": [
             4,
-            125,
-            4
+            24,
+            9
           ],
           "tool_exit_codes": [
             0,
             0,
             0
           ],
-          "tool_ms": 133
+          "tool_ms": 37
         }
       ],
       "source_path_rel": "crates/franken-node/tests/fixtures/migrate/holdout_worker_service",
-      "tool_median_ms": 131
+      "tool_median_ms": 38
     }
   ],
   "generated_at": "1970-01-01T00:00:00Z",
   "measured_runs": 5,
   "protocol": "manual-baseline: checked-in reference codemods (scripts/migration_baseline/baseline_{audit,rewrite,validate}.cjs) executed by node/bun perform the same three duties as franken-node migrate audit/rewrite/validate \u2014 tree+manifest audit, engines/script/module-syntax rewrite, static validation \u2014 on identical fresh copies of each frozen fixture. Both sides get 1 warmup then N measured runs; wall-clock ns around each spawned command; pipeline ms is the sum of its three commands. velocity_ratio_bp = round(median(baseline_ms)*10000/median(tooled_ms)) over all cohort+holdout runs. Minutes are never invented: every row is a measured wall-clock sample committed in the evidence census.",
   "runtime_name": "node",
-  "runtime_version": "v22.2.0",
+  "runtime_version": "v26.3.0",
   "schema_version": "franken-node/migration-throughput-evidence/v1",
   "warmup_runs": 1
 }

@@ -91,32 +91,32 @@ Each claim entry uses this structure:
 - **Verification command**:
   `python3 scripts/check_migration_velocity_gate.py --json`; SDK recompute:
   `cargo test -p frankenengine-verifier-sdk --test migration_throughput_recompute`
-- **Last verified**: 2026-09-24 (live re-measurement with durability
-  restored; binary sha256 `44d775911149…` recorded in the census)
-- **Status**: pending (measured 1.24x, CI95 [0.97x, 1.35x]; below 3.0x)
+- **Last verified**: 2026-11-17 (live `target-release` re-measurement at clean commit `dd8d67214`; binary `sha256:1a3fe12895ced80e…` vs live `node v26.3.0` recorded in census)
+- **Status**: pending (live gate PASS 22/22 at 3.425x overall, CI95 [2.98x, 3.54x], holdout 3.474x; kept `pending` until producer-distinct crash-recovery verification `bd-reality-20260923-26n9r.37` completes)
 - **Notes**: The constructed Feb 2026 report
   (`artifacts/13/migration_velocity_report.json`, fictional
   `cohort-*-001` archetypes, 3.15x) is **not** evidence and the gate rejects
   its ID set (bd-reality-20260820-w0fc6.2). The live gate measures real
   `franken-node migrate audit/rewrite/validate` runs against a frozen cohort
   of checked-in apps plus pinned upstream code, wall-clock vs the checked-in
-  manual-baseline codemods (`scripts/migration_baseline/`). Measurement of
-  record (target-release binary, 5 fixtures x 5 runs): pooled median ratio
-  **2.30x**, bootstrap CI95 [1.90x, 3.30x]; per-fixture: hardened 3.48x,
-  risky 3.55x, corpus-commander 2.18x, rewrite-shell-commonjs 1.82x,
-  holdout-worker-service 1.95x. The claim stays **pending** until a
-  re-measurement meets 3.0x; `bd-3agp` remains historically closed and must
-  not be cited as verified 3x.
-  2026-09-24: the ratio later reported (5.56x, which closed bd-v0lgc) came
-  from deleting all fsync barriers in `rewrite_transaction.rs`
-  (608f2088d/318ac9360; bd-reality-20260923-26n9r.2). With batched barriers
-  restored (bb102ec67), two consecutive runs of release build 44d775911149…
-  (5 fixtures x 5 runs, load average 20-40) measured 0.97x
-  (CI95 [0.86x, 1.17x]) and 1.24x (CI95 [0.97x, 1.35x]). The committed
-  artifact is the second. Per fixture: risky 1.50x, hardened 1.33x,
-  corpus-commander 1.21x, holdout-worker-service 0.98x,
-  rewrite-shell-commonjs 0.85x. Wall-clock against scripted codemods is also
-  only a proxy for the charter's "time-to-production + confidence" metric.
+  manual-baseline codemods (`scripts/migration_baseline/`).
+  2026-09-24: an earlier 5.56x ratio came from deleting fsync barriers in
+  `rewrite_transaction.rs` (bd-reality-20260923-26n9r.2); restoring serial
+  per-file barriers dropped pooled velocity to 1.24x (holdout 0.98x).
+  2026-11-17 (`bd-reality-20260923-26n9r.36`): Aether-style two-wave
+  group-commit WAL (`PACKED_JOURNAL_VERSION` v6 in
+  `crates/franken-node/src/migration/rewrite_transaction.rs`) coalesces staging
+  and commit durability barriers without dropping fsyncs. Live `target-release`
+  measurement at clean commit `dd8d67214` (binary
+  `sha256:1a3fe12895ced80e099f760a0f1242e3a5f4655ea3835fe18f02a4eab166961b`,
+  5 fixtures x 5 runs + 1 warmup vs `node v26.3.0` in the same invocation)
+  measures pooled median **3.425x** (`34250 bp`, `137ms` baseline vs `40ms`
+  tool, bootstrap CI95 `[2.978x, 3.539x]`), holdout `holdout-worker-service`
+  **3.474x** (`34737 bp`, `132ms` vs `38ms`), `hardened` **3.618x**, `risky`
+  **3.450x**, `rewrite-shell-commonjs` **2.894x**, and `corpus-commander`
+  **2.726x**, passing `check_migration_velocity_gate.py` (`22/22`) and
+  `migration_throughput_recompute` (`9/9`). Kept `pending` pending independent
+  verification in `bd-reality-20260923-26n9r.37`.
 
 ### CLAIM-003: ≥10× reduction in successful host compromise vs. baseline
 
