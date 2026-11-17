@@ -2806,31 +2806,48 @@ snapshots, evidence ledger, validation-broker receipt files, cleanup
 audit) as those subsystems are exercised; the bootstrap above is the
 minimum layout that `franken-node init` creates up-front.
 
-### Guest filesystem access to operator files
+### Guest access to operator files
 
 Captured module loading and guest `HostIo` filesystem calls reserve the
 `.franken-node` and `franken_node.toml` path components, including ASCII case
 variants, for the operator. Ordinary `fs_read` or `fs_write` grants do not
-authorize access to these paths. A narrower capture root or a contained
-symlink does not remove the restriction.
+authorize access to these paths. Reserved source spellings are checked before
+canonicalization. The conventional state/config roots at the selected source
+and invocation directories retain their physical destinations, so selecting an
+ordinary-named alias cannot erase those controls. The active configuration file
+and explicitly configured receipt-signing key, TLS trust roots, fleet token,
+and fleet state paths are also retained in the authenticated native-worker
+requirements, including their selected and resolved spellings.
+
+When `runtime.frozen_modules` is unset, native execution automatically selects
+captured module loading if operator state is reachable from the project root.
+The bounded admission scan uses metadata only; uncertain aliases or an exhausted
+scan require capture. Explicitly setting `runtime.frozen_modules = false`
+refuses such a run instead of granting the engine's live module loader access
+to operator files. The worker repeats admission before preparing source.
+Applications admitted this way must satisfy the captured graph's existing
+resolution requirements: computed module routes may fail admission, and
+contained workspace/package symlinks require the existing
+`runtime.frozen_module_symlinks = true` opt-in.
 
 The live filesystem guard checks transfer destinations as well as sources,
-refuses mutations of directories containing protected state, and admits
-descriptor operations only for files opened through the guard. It supports
-explicit protected paths, including selected files that do not exist yet.
-Successful effects, ordinary filesystem errors, and supervisor cancellation
-still use the actual engine provider. Live filesystem access to multiply
-linked regular files is conservatively refused because a pathname alone cannot
-establish that another link is not operator state.
+refuses mutations of protected ancestors, and admits descriptor operations only
+for files opened through the guard. Explicitly selected files remain protected
+before they exist. Ordinary paths, successful effects, filesystem error
+semantics, and supervisor cancellation still use the actual engine provider.
+Live filesystem access to multiply linked regular files is conservatively
+refused because a pathname alone cannot establish that another link is not
+operator state.
 
-These protections cover captured modules and `HostIo`; live engine module
-loading and explicitly authorized native child processes require their own
-admission boundaries. Child-only mount exclusions remain necessary before
-claiming the same protection for allowed external utilities. Source capture
-preserves ordinary package-manager hardlinks, so pre-existing host-created
-hardlink aliases to operator files are outside its namespace guarantee. The
-product path guard does not claim atomic exclusion against another host process
-concurrently changing the filesystem.
+This boundary covers captured modules and `HostIo`; an explicitly authorized
+native child process has a separate filesystem view and is **not** covered by
+this guard. Child-only mount exclusions remain necessary before claiming the
+same protection for allowed external utilities. Source capture preserves
+ordinary package-manager hardlinks. Physical identity checks cover the operator
+paths retained for this run; arbitrary host-created hardlinks or targets of
+unselected nested operator-state aliases require explicit enrollment. Neither the
+metadata admission scan nor the product path guard claims atomic exclusion
+against another host process concurrently changing the filesystem.
 
 Native-runtime evidence authority is deliberately outside this project tree,
 because the project directory is also the guest filesystem sandbox root.
@@ -4378,9 +4395,35 @@ code, not a sandbox for running arbitrary verifier programs.
 | `incident-bundle` (default in bindings) | `authenticated_recorded_incident`: signed recorded events, hashes and bounded native-capture metadata | Embedded Ed25519 signature checked under the caller's anchor |
 | `capsule` | `authenticated_capsule_content`: independently re-derived signed payload/input hash | Signed SDK capsule JSON with strict fields |
 | `signed-bundle` | `authenticated_sdk_replay_bundle`: the distinct canonical SDK bundle format | Required detached `signature_hex` (Python), `signatureHex` (JS) or `--signature-hex` (CLI) |
+| `signed-session` | `authenticated_verification_session`: a sealed verification session's ordered steps and recorded verdict | Embedded Ed25519 signature checked under the caller's independent verifier key |
 | `resolution-receipt` | `authenticated_resolution_decision`: signed package admission or rejection, profile, capability-budget mode and module-graph commitment | Embedded Ed25519 signature checked under the caller's resolver-authority key |
 | `publisher-source` | `authenticated_publisher_source_content`: publisher-signed registration, source-capsule byte integrity, and declared execution ceilings | Required detached registration `signature_hex` (Python), `signatureHex` (JS) or `--signature-hex` (CLI), checked under the caller's publisher key |
 | `publisher-source-trust` | `authenticated_publisher_source_trust`: authenticated source, fresh signed revocations, and optional signed version lineage | Publisher signature, independent revocation/provenance authorities, evaluation time, and maximum revocation age |
+
+To authenticate a sealed session exported by
+`VerifierSdk::export_signed_session`, supply the verifier's independently
+trusted public key:
+
+```bash
+franken-verifier verify --format signed-session \
+  --trusted-key-hex "$TRUSTED_VERIFIER_PUBLIC_KEY_HEX" < signed-session.json
+```
+
+Use `format="signed-session"` in Python or `format: "signed-session"` in
+JavaScript/TypeScript. The result returns `session_id`, `verifier_identity`,
+`created_at`, `final_verdict`, `step_count`, `transcript_hash` and the
+signer's public key. Consumers must inspect `facts.final_verdict`: an authentic
+failed session returns `verdict: "verified"` with `final_verdict: "fail"`;
+an authentic empty session returns `final_verdict: "inconclusive"`.
+
+The CLI checks the schema, caller-selected signer, ordered step indices,
+transcript hash, recorded verdict consistency and Ed25519 signature. It rejects
+unknown fields, duplicate JSON keys, malformed metadata and more than 1,024
+steps. Only the bounded summary crosses the response boundary; individual
+artifact bindings and step timestamps are omitted. This authenticates the
+signer's recorded decisions. It does not re-execute their underlying checks,
+independently verify the private keyed step tags, or establish current
+revocation status.
 
 To audit a module-resolution decision, supply the independently trusted
 resolver key and the original canonical signed receipt:

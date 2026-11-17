@@ -6,7 +6,9 @@ export async function audit(data: Uint8Array, anchor: string, executable: string
   try {
     const verified: Verification = await verifyArtifact(data, anchor, { verifier: executable });
     if (verified.format === "incident-bundle") return verified.facts.incident_id;
+    if (verified.format === "native-session-forensics") return verified.facts.session_nonce;
     if (verified.format === "capsule") return verified.facts.capsule_id;
+    if (verified.format === "signed-session") return verified.facts.session_id;
     if (verified.format === "resolution-receipt") return verified.facts.receipt_id;
     if (verified.format === "publisher-source") return verified.facts.package_name;
     if (verified.format === "publisher-source-trust") return verified.facts.source.package_name;
@@ -17,6 +19,23 @@ export async function audit(data: Uint8Array, anchor: string, executable: string
     if (error instanceof VerifierError) return error.code;
     throw error;
   }
+}
+
+export async function auditSignedSession(
+  data: Uint8Array, anchor: string, executable: string,
+): Promise<"pass" | "fail" | "inconclusive"> {
+  const verified = await verifyArtifact(data, anchor, {
+    verifier: executable, format: "signed-session",
+  });
+  if (verified.format !== "signed-session"
+      || verified.scope !== "authenticated_verification_session") {
+    throw new Error("signed session proof required");
+  }
+  const steps: number = verified.facts.step_count;
+  if (steps === 0 && verified.facts.final_verdict !== "inconclusive") {
+    throw new Error("empty session cannot pass");
+  }
+  return verified.facts.final_verdict;
 }
 
 export async function auditOriginalRun(
@@ -81,4 +100,34 @@ export async function auditPublisherSourceTrust(
   }
   const linkCount: number = verified.facts.provenance_link_count;
   return verified.facts.provenance_chain_sha256 + ":" + exactWindow + ":" + linkCount;
+}
+
+export async function auditNativeSession(
+  data: Uint8Array, productRootAnchor: string, executable: string,
+): Promise<string> {
+  const verified = await verifyArtifact(data, productRootAnchor, {
+    verifier: executable, format: "native-session-forensics",
+  });
+  if (verified.format !== "native-session-forensics"
+      || verified.scope !== "authenticated_supervisor_observations") throw new Error("supervisor observation required");
+  const epoch: string = verified.facts.security_epoch;
+  const replay: false = verified.facts.replay_certified;
+  const cleanup: false = verified.facts.quiescence_certified;
+  const history: false = verified.facts.historical_completeness;
+  if (replay || cleanup || history) throw new Error("forensic observations cannot certify execution");
+  if (verified.facts.schema_version === "franken-node/native-session-forensics/v2") {
+    const retained: number = verified.facts.durable_journal.record_count;
+    const complete: false = verified.facts.durable_journal.historical_completeness;
+    if (complete || retained < 1) throw new Error("a journal must be a retained signed prefix");
+  } else {
+    const absent: null = verified.facts.durable_journal;
+    if (absent !== null) throw new Error("v1 carries no durable journal");
+  }
+  if (verified.facts.outcome_kind === "pending") {
+    const unknown: null = verified.facts.completed_provider_calls;
+    const observed: null = verified.facts.observed_at;
+    return epoch + ":" + unknown + ":" + observed;
+  }
+  const observed: string = verified.facts.observed_at;
+  return epoch + ":" + observed + ":" + verified.facts.outcome_kind;
 }

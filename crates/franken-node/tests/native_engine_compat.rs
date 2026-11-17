@@ -525,6 +525,257 @@ fn direct_different_executable_native_supervisor_fails_closed_bd_8gpux() {
     );
 }
 
+/// A controlled private-protocol peer proves supervisor recovery only. The
+/// provider marker below is fixture I/O, not evidence of native guest execution.
+/// The fixture waits for the durable admission ACK before its single effect.
+#[cfg(all(feature = "engine", target_os = "linux"))]
+#[test]
+fn native_protocol_failure_retains_authenticated_interruption_after_worker_exit() {
+    use frankenengine_node::ops::{
+        engine_dispatcher::{NativeEffectWalState, NativeRunInterruption},
+        native_session_inventory::export_local_native_session_forensics,
+    };
+    use frankenengine_verifier_sdk::native_session::verify_native_session_forensics;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let cases = [
+        ("bad_schema", "response schema mismatch", 1_usize),
+        ("bad_nonce", "response nonce mismatch", 1),
+        ("malformed_final", "unknown variant", 1),
+        (
+            "unmatched_effect",
+            "left an admitted host effect without completion",
+            0,
+        ),
+        ("no_final", "output stream had no final response", 1),
+        ("large_diagnostics", "unknown variant", 1),
+        ("valid_telemetry", "fixture telemetry failure", 1),
+    ];
+    for (mode, expected_error, returned_calls) in cases {
+        let workspace = TempDir::new().expect("protocol fixture workspace");
+        let app = create_test_app(
+            workspace.path(),
+            &format!("{mode}.js"),
+            "// The protocol fixture does not execute this application.\n",
+        );
+        let worker = workspace.path().join("native-protocol-fixture.py");
+        std::fs::write(
+            &worker,
+            r#"#!/usr/bin/env python3
+import hashlib
+import json
+import os
+from pathlib import Path
+import signal
+import struct
+import sys
+import uuid
+
+signal.alarm(30)
+
+def read_exact(length):
+    chunks = bytearray()
+    while len(chunks) < length:
+        part = os.read(0, length - len(chunks))
+        if not part:
+            raise RuntimeError("supervisor closed the private request stream")
+        chunks.extend(part)
+    return bytes(chunks)
+
+header = read_exact(56)
+payload = read_exact(struct.unpack(">Q", header[16:24])[0])
+if hashlib.sha256(payload).digest() != header[24:56]:
+    raise RuntimeError("request digest mismatch")
+request = json.loads(payload)
+nonce = request["nonce"]
+app = Path(request["app_path"])
+mode = app.stem
+app.with_suffix(".nonce").write_text(nonce, encoding="utf-8")
+
+def frame(value):
+    payload = json.dumps(value, separators=(",", ":")).encode("utf-8")
+    return (header[:16] + struct.pack(">Q", len(payload))
+            + hashlib.sha256(payload).digest() + payload)
+
+def emit(value):
+    sys.stdout.buffer.write(frame(value))
+    sys.stdout.buffer.flush()
+
+wal = {"schema_version": "franken-node/native-effect-wal/v1",
+       "nonce": nonce, "sequence": 0}
+emit(dict(wal, message_type="host_effect_admitted",
+          effect_kind="fs_write",
+          request_hash="sha256:" + hashlib.sha256(b"fixture effect").hexdigest()))
+# Consume the complete post-fsync ACK, including its session nonce and
+# request commitment, before the fixture provider effect.
+expected_ack = (b"FNCTRL\0\0" + bytes([1, 2]) + uuid.UUID(nonce).bytes
+                + struct.pack("<Q", 0) + hashlib.sha256(b"fixture effect").digest())
+if read_exact(66) != expected_ack:
+    raise RuntimeError("supervisor durable admission ACK did not match")
+with app.with_suffix(".effect").open("a", encoding="utf-8") as marker:
+    marker.write("effect\n")
+    marker.flush()
+    os.fsync(marker.fileno())
+if mode != "unmatched_effect":
+    emit(dict(wal, message_type="host_effect_completed"))
+if mode == "no_final":
+    sys.exit(0)
+
+response = {"outcome": "telemetry_failed",
+            "schema_version": request["schema_version"],
+            "nonce": nonce, "message": "fixture telemetry failure"}
+if mode == "bad_schema":
+    response["schema_version"] = "fixture/unsupported"
+elif mode == "bad_nonce":
+    response["nonce"] = "00000000-0000-4000-8000-000000000001"
+elif mode in ("malformed_final", "large_diagnostics"):
+    response["outcome"] = "fixture_unknown_outcome"
+if mode == "large_diagnostics":
+    # Under the diagnostic wire cap, but over the signed-outcome JSON bound
+    # if the control characters are retained without a bounded summary.
+    sys.stderr.buffer.write(("\U0001f9ea" * 2048 + "\x01" * 900000).encode("utf-8"))
+    sys.stderr.buffer.flush()
+emit({"message_type": "final", "response": response})
+"#,
+        )
+        .expect("write private-protocol fixture");
+        std::fs::set_permissions(&worker, std::fs::Permissions::from_mode(0o755))
+            .expect("make private-protocol fixture executable");
+        let config = Config {
+            profile: Profile::LegacyRisky,
+            ..Config::default()
+        };
+        let dispatcher = EngineDispatcher::new(
+            Some(create_fixture_engine_binary(workspace.path())),
+            PreferredRuntime::FrankenEngine,
+        )
+        .with_native_session_worker_path(worker);
+        let error = dispatcher
+            .dispatch_run(&app, &config, "legacy-risky", &[], 0)
+            .expect_err("the fixture must never produce an accepted completion");
+        assert!(
+            error.to_string().contains(expected_error),
+            "{mode} must preserve its original failure: {error}"
+        );
+        let marker = app.with_extension("effect");
+        assert_eq!(
+            std::fs::read_to_string(&marker).expect("fixture provider marker"),
+            "effect\n",
+            "{mode} must perform its fixture effect exactly once"
+        );
+        let nonce =
+            std::fs::read_to_string(app.with_extension("nonce")).expect("fixture session nonce");
+        let exported = export_local_native_session_forensics(&nonce)
+            .unwrap_or_else(|failure| panic!("{mode} must retain signed forensics: {failure:#}"));
+
+        if mode == "valid_telemetry" {
+            assert!(
+                error.downcast_ref::<NativeRunInterruption>().is_none(),
+                "a validated telemetry failure must keep its own terminal semantics"
+            );
+            assert_eq!(exported.verification.outcome_kind, "telemetry_failed");
+            assert_eq!(exported.verification.effect_observation, Some("unknown"));
+            continue;
+        }
+
+        let interruption = error
+            .downcast_ref::<NativeRunInterruption>()
+            .unwrap_or_else(|| panic!("{mode} must recover a typed interruption: {error}"));
+        let evidence = interruption.effect_evidence();
+        assert_eq!(evidence.session_nonce, nonce);
+        assert_eq!(evidence.terminal_state, "worker_exit_indeterminate");
+        assert!(!evidence.replay_certified);
+        assert!(!evidence.journal_complete);
+        assert_eq!(evidence.completed_effect_count, returned_calls);
+        assert_eq!(evidence.interrupted_effect_count, 1 - returned_calls);
+        assert_eq!(evidence.entries.len(), 1);
+        assert_eq!(evidence.entries[0].sequence, 0);
+        assert_eq!(evidence.entries[0].effect_kind, "fs_write");
+        assert_eq!(
+            evidence.entries[0].state,
+            if returned_calls == 1 {
+                NativeEffectWalState::ProviderReturned
+            } else {
+                NativeEffectWalState::InterruptedIndeterminate
+            }
+        );
+        let detail = evidence.protocol_error.as_deref().expect("protocol failure");
+        assert!(detail.contains(expected_error), "{mode}: {detail}");
+        assert!(detail.len() <= 4096, "{mode}: signed diagnostic byte bound");
+        if mode == "large_diagnostics" {
+            assert!(detail.ends_with(" [truncated]"));
+            assert!(detail.contains('\u{1f9ea}'), "retain a valid UTF-8 prefix");
+        }
+        assert!(interruption.verified_final_host_effect_ledger().is_none());
+        let report = interruption
+            .dispatch_report()
+            .expect("protocol failure must retain the common run-recording report");
+        assert_eq!(report.exit_code, Some(1));
+        assert!(report.host_effect_ledger.is_none());
+        assert!(report.native_replay.is_none());
+        assert!(report.engine_decision.is_none());
+        assert!(report.telemetry.is_none());
+        let capture = report
+            .runtime_evidence_identity_capture
+            .as_ref()
+            .expect("retain the supervisor's signed session identity");
+        assert_eq!(capture.session_nonce, nonce);
+        let persisted_capture: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(
+                report
+                    .runtime_evidence_identity_capture_path
+                    .as_ref()
+                    .expect("retain the persisted identity path"),
+            )
+            .expect("read persisted identity"),
+        )
+        .expect("persisted identity JSON");
+        assert_eq!(
+            persisted_capture,
+            serde_json::to_value(capture).expect("captured identity JSON")
+        );
+        let trusted_root_bytes: [u8; 32] =
+            hex::decode(&capture.product_root_verification_key_hex)
+                .expect("product root encoding")
+                .try_into()
+                .expect("product root length");
+        let trusted_root = ed25519_dalek::VerifyingKey::from_bytes(&trusted_root_bytes)
+            .expect("product root key");
+        let bundle_bytes = serde_json::to_vec(&exported.bundle).expect("forensic bundle JSON");
+        let verified = verify_native_session_forensics(&bundle_bytes, &trusted_root)
+            .expect("independently authenticate the original signed admission and outcome");
+        assert_eq!(verified, exported.verification);
+        assert_eq!(verified.outcome_kind, "interrupted");
+        assert_eq!(verified.process_observation, Some("worker_reaped"));
+        assert_eq!(verified.effect_observation, Some("interrupted"));
+        assert_eq!(verified.containment_empty_observed, Some(false));
+        assert_eq!(verified.completed_provider_calls, Some(returned_calls));
+        assert_eq!(verified.indeterminate_provider_calls, Some(1 - returned_calls));
+        assert_eq!(verified.journal_complete, Some(false));
+        assert!(!verified.replay_certified);
+        assert!(!verified.quiescence_certified);
+        assert!(!verified.historical_completeness);
+        let journal = verified.durable_journal.as_ref().expect("durable WAL prefix");
+        assert_eq!(journal.admitted_provider_calls, 1);
+        assert_eq!(journal.returned_provider_calls, returned_calls);
+        assert_eq!(journal.indeterminate_provider_calls, 1 - returned_calls);
+        let outcome: serde_json::Value = serde_json::from_str(
+            &exported.bundle.outcome.as_ref().expect("signed outcome").payload_json,
+        )
+        .expect("original outcome payload");
+        assert_eq!(
+            outcome["outcome"]["effects"]["evidence"],
+            serde_json::to_value(evidence).expect("interruption evidence JSON"),
+            "{mode} must persist the same bounded WAL and rejection, not a replacement outcome"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&marker).expect("fixture provider marker after export"),
+            "effect\n",
+            "forensic recovery must not re-execute the fixture effect"
+        );
+    }
+}
+
 #[test]
 #[cfg(feature = "engine")]
 fn test_native_engine_execution_with_telemetry() {

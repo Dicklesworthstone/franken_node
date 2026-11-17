@@ -54,6 +54,24 @@ cargo test -p frankenengine-verifier-sdk bundle_roundtrip
 cargo test -p frankenengine-verifier-sdk signed_bundle
 ```
 
+### Portable Signed Sessions
+
+`signed_session_cli.rs` exercises the actual executable with transcripts
+exported by the public SDK: passing, failing and empty sessions, independent
+anchors, signature forgery, reordered/spliced/truncated steps, unsigned fields,
+duplicate JSON keys, bounded metadata and unrelated authority options.
+
+The isolated Python, JavaScript and TypeScript consumers also exercise
+independently encoded and Ed25519-signed Node vectors from
+`clients/build_vectors.mjs`. Protocol controls reject contradictory verdicts,
+invalid counts, signer/scope substitution and extra authority claims. These
+checks authenticate a transcript's recorded decisions; they do not re-execute
+the session or claim independent verification of private keyed step tags.
+
+```bash
+cargo test -p frankenengine-verifier-sdk --test signed_session_cli
+```
+
 ### Embedded Native Module Sources
 
 `verify_incident_bundle` independently checks any embedded FNSGCAP1 source

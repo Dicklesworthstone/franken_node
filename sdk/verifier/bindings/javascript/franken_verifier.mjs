@@ -7,8 +7,10 @@ export const MAX_INPUT_BYTES = 64 * 1024 * 1024;
 const MAX_RESPONSE_BYTES = 64 * 1024 + 1;
 const SCOPES = Object.freeze({
   "incident-bundle": "authenticated_recorded_incident",
+  "native-session-forensics": "authenticated_supervisor_observations",
   capsule: "authenticated_capsule_content",
   "signed-bundle": "authenticated_sdk_replay_bundle",
+  "signed-session": "authenticated_verification_session",
   "resolution-receipt": "authenticated_resolution_decision",
   "publisher-source": "authenticated_publisher_source_content",
   "publisher-source-trust": "authenticated_publisher_source_trust",
@@ -157,8 +159,120 @@ function publisherSourceValid(facts, anchor) {
     && (summary.condition_count === null || summary.condition_count + summary.additional_condition_count <= 64);
 }
 
+// These are authenticated supervisor observations, never a replay or cleanup
+// certificate. Validate the CLI's typed relationships without reading evidence.
+function nativePathParts(value) {
+  if (typeof value !== "string" || value.length === 0 || value.includes("\0")
+      || Buffer.from(value, "utf8").toString("utf8") !== value) return null;
+  const windows = /^[a-zA-Z]:[/\\]/u.test(value);
+  const unc = value.startsWith("\\\\");
+  if (!value.startsWith("/") && !windows && !unc) return null;
+  const parts = value.split(windows || unc ? /[/\\]/u : "/");
+  while (parts.length > 1 && parts.at(-1) === "") parts.pop();
+  return parts.some((part) => part === "." || part === "..") ? null : parts;
+}
+
+function nativeJournalValid(journal, facts) {
+  if (!keys(journal, ["schema_version", "scope", "session_nonce", "product_root_key_id",
+    "admission_sha256", "record_count", "event_count", "admitted_provider_calls",
+    "returned_provider_calls", "indeterminate_provider_calls", "head_record_sha256",
+    "trailing_partial_record", "replay_certified", "quiescence_certified", "historical_completeness"])
+      || journal.schema_version !== "franken-node/native-effect-journal-record/v1"
+      || journal.scope !== "host_io_provider_calls"
+      || ["session_nonce", "product_root_key_id", "admission_sha256"].some((key) => journal[key] !== facts[key])
+      || ["replay_certified", "quiescence_certified", "historical_completeness"].some((key) => journal[key] !== false)
+      || typeof journal.trailing_partial_record !== "boolean"
+      || typeof journal.head_record_sha256 !== "string" || journal.head_record_sha256.length !== 64
+      || !/^[0-9a-f]+$/u.test(journal.head_record_sha256)
+      || ["record_count", "event_count", "admitted_provider_calls", "returned_provider_calls",
+        "indeterminate_provider_calls"].some((key) => !count(journal[key]))) return false;
+  return journal.record_count >= 1 && journal.record_count <= 2049
+    && journal.event_count === journal.record_count - 1
+    && journal.event_count === journal.admitted_provider_calls + journal.returned_provider_calls
+    && journal.admitted_provider_calls <= 1024
+    && journal.returned_provider_calls <= journal.admitted_provider_calls
+    && journal.indeterminate_provider_calls === journal.admitted_provider_calls - journal.returned_provider_calls
+    && journal.indeterminate_provider_calls <= 1;
+}
+
+function nativeSessionValid(facts, anchor) {
+  if (!keys(facts, ["schema_version", "scope", "session_nonce", "product_root_key_id", "admission_sha256",
+    "project_root", "entrypoint", "security_epoch", "admitted_at", "observed_at", "outcome_kind",
+    "process_observation", "effect_observation", "containment_empty_observed", "completed_provider_calls",
+    "indeterminate_provider_calls", "final_ledger_effect_count", "failed_effect_count", "journal_complete",
+    "durable_journal", "replay_certified", "quiescence_certified", "historical_completeness"])
+      || !["franken-node/native-session-forensics/v1", "franken-node/native-session-forensics/v2"].includes(facts.schema_version)
+      || facts.scope !== "authenticated_supervisor_observations"
+      || facts.product_root_key_id !== "ed25519:" + anchor
+      || typeof facts.session_nonce !== "string" || facts.session_nonce.length !== 36
+      || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u.test(facts.session_nonce)
+      || facts.session_nonce === "00000000-0000-0000-0000-000000000000"
+      || typeof facts.admission_sha256 !== "string" || facts.admission_sha256.length !== 64
+      || !/^[0-9a-f]+$/u.test(facts.admission_sha256)
+      || typeof facts.security_epoch !== "string" || facts.security_epoch.length > 20
+      || !/^(0|[1-9][0-9]*)$/u.test(facts.security_epoch)
+      || BigInt(facts.security_epoch).toString() !== facts.security_epoch
+      || BigInt(facts.security_epoch) > 18_446_744_073_709_551_615n
+      || instantNs(facts.admitted_at) === null
+      || ["replay_certified", "quiescence_certified", "historical_completeness"].some((key) => facts[key] !== false)) return false;
+  const project = nativePathParts(facts.project_root), entry = nativePathParts(facts.entrypoint);
+  if (project === null || entry === null || entry.length <= project.length
+      || project.some((part, index) => part !== entry[index])) return false;
+  const journal = facts.durable_journal;
+  if (facts.schema_version === "franken-node/native-session-forensics/v1") {
+    if (journal !== null) return false;
+  } else if (!nativeJournalValid(journal, facts)) return false;
+  const outcomeFields = ["observed_at", "process_observation", "effect_observation", "containment_empty_observed",
+    "completed_provider_calls", "indeterminate_provider_calls", "final_ledger_effect_count",
+    "failed_effect_count", "journal_complete"];
+  if (facts.outcome_kind === "pending") return outcomeFields.every((key) => facts[key] === null);
+  if (!["completed", "execution_failed", "control_stopped", "interrupted", "telemetry_failed",
+    "panicked", "supervision_incomplete"].includes(facts.outcome_kind)
+      || instantNs(facts.observed_at) === null
+      || !["not_spawned", "worker_reaped", "unproven"].includes(facts.process_observation)
+      || !["not_started", "no_admitted_host_effects", "final_ledger_observed", "interrupted", "unknown"].includes(facts.effect_observation)
+      || typeof facts.containment_empty_observed !== "boolean") return false;
+  if (facts.process_observation === "not_spawned") {
+    if (facts.outcome_kind !== "supervision_incomplete" || facts.effect_observation !== "not_started"
+        || facts.containment_empty_observed !== false) return false;
+  } else if (facts.effect_observation === "not_started") return false;
+  if (["completed", "execution_failed", "control_stopped", "telemetry_failed", "panicked"].includes(facts.outcome_kind)
+      && facts.process_observation !== "worker_reaped") return false;
+  if (facts.outcome_kind === "control_stopped" && facts.effect_observation !== "final_ledger_observed") return false;
+  if ((facts.outcome_kind === "interrupted") !== (facts.effect_observation === "interrupted")) return false;
+  const completed = facts.completed_provider_calls, indeterminate = facts.indeterminate_provider_calls;
+  const finalCount = facts.final_ledger_effect_count, failedCount = facts.failed_effect_count;
+  if (facts.effect_observation === "final_ledger_observed") {
+    if (!["completed", "execution_failed", "control_stopped"].includes(facts.outcome_kind)
+        || !count(finalCount) || !count(failedCount) || failedCount > finalCount
+        || completed !== null || indeterminate !== null || facts.journal_complete !== null) return false;
+  } else {
+    if (finalCount !== null || failedCount !== null) return false;
+    if (facts.effect_observation === "interrupted") {
+      if (!count(completed) || !count(indeterminate) || indeterminate > 1
+          || completed * 2 + indeterminate > 2048 || typeof facts.journal_complete !== "boolean") return false;
+    } else if (facts.effect_observation === "no_admitted_host_effects") {
+      if (facts.outcome_kind !== "panicked" || completed !== 0 || indeterminate !== 0
+          || ![null, true].includes(facts.journal_complete)) return false;
+    } else if (facts.outcome_kind === "panicked" && completed !== null) {
+      if (!count(completed) || completed > 1024 || indeterminate !== 0 || facts.journal_complete !== true) return false;
+    } else if (completed !== null || indeterminate !== null || facts.journal_complete !== null) return false;
+  }
+  if (journal !== null) {
+    if (["not_started", "no_admitted_host_effects"].includes(facts.effect_observation)
+        && journal.admitted_provider_calls !== 0) return false;
+    // An incomplete outcome may precede a later durable append; retain both
+    // observations. Only a complete WAL constrains the retained prefix counts.
+    if (facts.journal_complete === true && completed !== null
+        && (journal.admitted_provider_calls > completed + indeterminate
+          || journal.returned_provider_calls > completed)) return false;
+  }
+  return true;
+}
+
 function factsValid(facts, format, anchor, runAnchor, runtimeAnchor,
   revocationAnchor, provenanceAnchor, evaluationTime, maxAge) {
+  if (format === "native-session-forensics") return nativeSessionValid(facts, anchor);
   if (format === "publisher-source-trust") {
     return publisherSourceTrustValid(facts, anchor, revocationAnchor, provenanceAnchor, evaluationTime, maxAge);
   }
@@ -166,6 +280,7 @@ function factsValid(facts, format, anchor, runAnchor, runtimeAnchor,
     "incident-bundle": ["bundle_id", "incident_id", "created_at", "policy_version", "event_count", "integrity_hash", "decision_sequence_hash", "signer_public_key_hex", "signing_identity", "native_capture"],
     capsule: ["capsule_id", "expected_hash", "actual_hash", "signer_public_key_hex"],
     "signed-bundle": ["bundle_id", "incident_id", "event_count", "integrity_hash", "signer_public_key_hex"],
+    "signed-session": ["session_id", "verifier_identity", "created_at", "final_verdict", "step_count", "transcript_hash", "signer_public_key_hex"],
     "resolution-receipt": ["receipt_id", "crypto_suite", "module_graph_hash", "package_name", "requested_range", "policy_profile", "capability_budget_mode", "decision", "selected_version", "rejected_alternative_count", "canonical_hash", "signer_key_id", "signer_public_key_hex"],
     "publisher-source": ["registration_schema", "package_name", "publisher_id", "version", "manifest_sha256", "artifact_sha256", "capsule_digest", "signer_key_id", "signer_public_key_hex", "runtime_authority", "capsule"],
     "counterfactual-receipt": ["baseline_integrity_hash", "mode", "result_count", "signer_public_key_hex"],
@@ -175,6 +290,15 @@ function factsValid(facts, format, anchor, runAnchor, runtimeAnchor,
   if (runtimeAnchor !== undefined) expected.push("runtime_origin");
   if (!keys(facts, expected) || facts.signer_public_key_hex !== anchor) return false;
   if (format === "publisher-source") return publisherSourceValid(facts, anchor);
+  if (format === "signed-session") {
+    return publisherText(facts.session_id, 255) && /^[A-Za-z0-9._-]{1,255}$/u.test(facts.session_id)
+      && publisherText(facts.verifier_identity, 266) && /^verifier:\/\/[A-Za-z0-9._-]{1,255}$/u.test(facts.verifier_identity)
+      && instantNs(facts.created_at) !== null
+      && ["pass", "fail", "inconclusive"].includes(facts.final_verdict)
+      && count(facts.step_count) && facts.step_count <= 1024
+      && (facts.step_count === 0) === (facts.final_verdict === "inconclusive")
+      && hex(facts.transcript_hash, 64) && facts.transcript_hash === facts.transcript_hash.toLowerCase();
+  }
   if (format === "counterfactual-receipt") {
     return typeof facts.baseline_integrity_hash === "string" && /^[0-9a-f]{64}$/u.test(facts.baseline_integrity_hash)
       && ["single", "sweep"].includes(facts.mode)
@@ -227,6 +351,9 @@ function factsValid(facts, format, anchor, runAnchor, runtimeAnchor,
  * signature and matching run data. Missing proof or downgraded scope fails.
  * trustedRuntimePublicKeyHex additionally requires the original product-root
  * and session signatures; it does not establish guest execution or cleanup.
+ * Native-session forensics authenticates retained supervisor observations; a pending
+ * outcome stays pending, and durable journal prefixes never certify complete history.
+ * Its security_epoch is an exact decimal u64 string, including zero.
  * Publisher-source trust requires an independent revocation authority, an explicit
  * RFC3339 time (four-digit year, non-leap seconds, at most nine fraction digits),
  * and an exact positive decimal u64 freshness window. Optional provenance trust

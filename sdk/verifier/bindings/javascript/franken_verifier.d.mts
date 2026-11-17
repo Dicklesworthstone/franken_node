@@ -1,4 +1,4 @@
-export type EvidenceFormat = "incident-bundle" | "capsule" | "signed-bundle" | "resolution-receipt" | "publisher-source" | "publisher-source-trust" | "counterfactual-receipt" | "ltv-evidence";
+export type EvidenceFormat = "incident-bundle" | "native-session-forensics" | "capsule" | "signed-bundle" | "signed-session" | "resolution-receipt" | "publisher-source" | "publisher-source-trust" | "counterfactual-receipt" | "ltv-evidence";
 export interface VerifierOptions {
   /** Trusted SDK executable, installed separately; never supplied by evidence. */
   verifier: string;
@@ -59,6 +59,66 @@ export interface RuntimeOriginMetadata {
 export interface RuntimeIncidentFacts extends RunIncidentFacts {
   runtime_origin: RuntimeOriginMetadata;
 }
+export interface NativeSessionEffectJournalFacts {
+  schema_version: "franken-node/native-effect-journal-record/v1";
+  scope: "host_io_provider_calls";
+  session_nonce: string;
+  product_root_key_id: string;
+  admission_sha256: string;
+  record_count: number;
+  event_count: number;
+  admitted_provider_calls: number;
+  returned_provider_calls: number;
+  indeterminate_provider_calls: number;
+  head_record_sha256: string;
+  trailing_partial_record: boolean;
+  replay_certified: false;
+  quiescence_certified: false;
+  historical_completeness: false;
+}
+export type NativeSessionForensicsFacts = {
+  scope: "authenticated_supervisor_observations";
+  session_nonce: string;
+  product_root_key_id: string;
+  admission_sha256: string;
+  project_root: string;
+  entrypoint: string;
+  /** Exact decimal u64, never a rounded JavaScript number. */
+  security_epoch: string;
+  admitted_at: string;
+  replay_certified: false;
+  quiescence_certified: false;
+  historical_completeness: false;
+} & (
+  { schema_version: "franken-node/native-session-forensics/v1"; durable_journal: null }
+  | { schema_version: "franken-node/native-session-forensics/v2"; durable_journal: NativeSessionEffectJournalFacts }
+) & (
+  {
+    outcome_kind: "pending";
+    observed_at: null;
+    process_observation: null;
+    effect_observation: null;
+    containment_empty_observed: null;
+    completed_provider_calls: null;
+    indeterminate_provider_calls: null;
+    final_ledger_effect_count: null;
+    failed_effect_count: null;
+    journal_complete: null;
+  } | {
+    outcome_kind: "completed" | "execution_failed" | "control_stopped" | "interrupted"
+      | "telemetry_failed" | "panicked" | "supervision_incomplete";
+    observed_at: string;
+    process_observation: "not_spawned" | "worker_reaped" | "unproven";
+    effect_observation: "not_started" | "no_admitted_host_effects" | "final_ledger_observed"
+      | "interrupted" | "unknown";
+    containment_empty_observed: boolean;
+    completed_provider_calls: number | null;
+    indeterminate_provider_calls: number | null;
+    final_ledger_effect_count: number | null;
+    failed_effect_count: number | null;
+    journal_complete: boolean | null;
+  }
+);
 export interface CapsuleFacts {
   capsule_id: string;
   expected_hash: string;
@@ -169,6 +229,17 @@ export interface LtvEvidenceFacts {
   hybrid_survived_algo_death: boolean;
   signer_public_key_hex: string;
 }
+/** Authenticated recorded decisions, without re-executing the session's steps. */
+export interface SignedSessionFacts {
+  session_id: string;
+  verifier_identity: string;
+  created_at: string;
+  /** Signature authentication may succeed even when this is fail or inconclusive. */
+  final_verdict: "pass" | "fail" | "inconclusive";
+  step_count: number;
+  transcript_hash: string;
+  signer_public_key_hex: string;
+}
 export type Verification = {
   schema_version: "franken-verifier-cli/v1";
   verdict: "verified";
@@ -177,8 +248,10 @@ export type Verification = {
   { format: "incident-bundle"; scope: "authenticated_recorded_incident"; facts: IncidentFacts }
   | { format: "incident-bundle"; scope: "authenticated_run_incident"; facts: RunIncidentFacts }
   | { format: "incident-bundle"; scope: "authenticated_runtime_incident"; facts: RuntimeIncidentFacts }
+  | { format: "native-session-forensics"; scope: "authenticated_supervisor_observations"; facts: NativeSessionForensicsFacts }
   | { format: "capsule"; scope: "authenticated_capsule_content"; facts: CapsuleFacts }
   | { format: "signed-bundle"; scope: "authenticated_sdk_replay_bundle"; facts: SignedBundleFacts }
+  | { format: "signed-session"; scope: "authenticated_verification_session"; facts: SignedSessionFacts }
   | { format: "resolution-receipt"; scope: "authenticated_resolution_decision"; facts: ResolutionReceiptFacts }
   | { format: "publisher-source"; scope: "authenticated_publisher_source_content"; facts: PublisherSourceFacts }
   | { format: "publisher-source-trust"; scope: "authenticated_publisher_source_trust"; facts: PublisherSourceTrustFacts }

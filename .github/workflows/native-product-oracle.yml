@@ -408,7 +408,8 @@ jobs:
             frozen_module_cli_checks_filesystem_authority_when_called \
             run_blocks_secret_egress_and_proves_non_exfiltration_bd_plhag \
             run_blocks_secret_egress_to_allowed_sink_bd_n1bym \
-            run_surfaces_signed_http_request_write_end_body_ledger_bd_3894s; do
+            run_surfaces_signed_http_request_write_end_body_ledger_bd_3894s \
+            native_protocol_failure_retains_authenticated_interruption_after_worker_exit; do
             grep -Fxq "$test: test" native-buffer-product-test-list.log
           done
       - name: Execute real product Buffer filesystem and HTTP evidence controls
@@ -420,7 +421,8 @@ jobs:
             frozen_module_cli_checks_filesystem_authority_when_called \
             run_blocks_secret_egress_and_proves_non_exfiltration_bd_plhag \
             run_blocks_secret_egress_to_allowed_sink_bd_n1bym \
-            run_surfaces_signed_http_request_write_end_body_ledger_bd_3894s; do
+            run_surfaces_signed_http_request_write_end_body_ledger_bd_3894s \
+            native_protocol_failure_retains_authenticated_interruption_after_worker_exit; do
             cargo test --locked -j1 -p frankenengine-node \
               --test native_engine_compat "$test" \
               -- --exact --nocapture --test-threads=1 2>&1 | tee -a native-buffer-product-tests.log || status=1

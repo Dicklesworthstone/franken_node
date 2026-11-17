@@ -19,13 +19,15 @@ PROTOCOL = "franken-verifier-cli/v1"
 MAX_INPUT_BYTES = 64 * 1024 * 1024
 MAX_RESPONSE_BYTES = 64 * 1024 + 1
 EvidenceFormat = Literal[
-    "incident-bundle", "capsule", "signed-bundle", "resolution-receipt",
+    "incident-bundle", "native-session-forensics", "capsule", "signed-bundle", "signed-session", "resolution-receipt",
     "publisher-source", "publisher-source-trust", "counterfactual-receipt", "ltv-evidence",
 ]
 _SCOPES = {
     "incident-bundle": "authenticated_recorded_incident",
+    "native-session-forensics": "authenticated_supervisor_observations",
     "capsule": "authenticated_capsule_content",
     "signed-bundle": "authenticated_sdk_replay_bundle",
+    "signed-session": "authenticated_verification_session",
     "resolution-receipt": "authenticated_resolution_decision",
     "publisher-source": "authenticated_publisher_source_content",
     "publisher-source-trust": "authenticated_publisher_source_trust",
@@ -39,13 +41,26 @@ class Verification(TypedDict):
     verdict: Literal["verified"]
     format: EvidenceFormat
     scope: Literal["authenticated_recorded_incident", "authenticated_run_incident",
-                   "authenticated_runtime_incident",
+                   "authenticated_runtime_incident", "authenticated_supervisor_observations",
                    "authenticated_capsule_content", "authenticated_sdk_replay_bundle",
+                   "authenticated_verification_session",
                    "authenticated_resolution_decision", "authenticated_publisher_source_content",
                    "authenticated_publisher_source_trust",
                    "authenticated_counterfactual_receipt", "authenticated_ltv_anteriority"]
     artifact_sha256: str
     facts: dict[str, Any]
+
+
+class SignedSessionFacts(TypedDict):
+    """Authentic recorded decisions; a verified signature does not imply pass."""
+
+    session_id: str
+    verifier_identity: str
+    created_at: str
+    final_verdict: Literal["pass", "fail", "inconclusive"]
+    step_count: int
+    transcript_hash: str
+    signer_public_key_hex: str
 
 
 class RunOriginMetadata(TypedDict):
@@ -65,6 +80,57 @@ class RuntimeOriginMetadata(TypedDict):
     producer_id: str
     evidence_key_id: str
     signed_epoch: str
+
+
+class NativeSessionEffectJournalFacts(TypedDict):
+    """Authenticated retained prefix, with no historical-completeness claim."""
+
+    schema_version: Literal["franken-node/native-effect-journal-record/v1"]
+    scope: Literal["host_io_provider_calls"]
+    session_nonce: str
+    product_root_key_id: str
+    admission_sha256: str
+    record_count: int
+    event_count: int
+    admitted_provider_calls: int
+    returned_provider_calls: int
+    indeterminate_provider_calls: int
+    head_record_sha256: str
+    trailing_partial_record: bool
+    replay_certified: Literal[False]
+    quiescence_certified: Literal[False]
+    historical_completeness: Literal[False]
+
+
+class NativeSessionForensicsFacts(TypedDict):
+    """Supervisor observations; unknown outcome fields remain None."""
+
+    schema_version: Literal["franken-node/native-session-forensics/v1",
+                            "franken-node/native-session-forensics/v2"]
+    scope: Literal["authenticated_supervisor_observations"]
+    session_nonce: str
+    product_root_key_id: str
+    admission_sha256: str
+    project_root: str
+    entrypoint: str
+    security_epoch: str
+    admitted_at: str
+    observed_at: str | None
+    outcome_kind: Literal["pending", "completed", "execution_failed", "control_stopped",
+                          "interrupted", "telemetry_failed", "panicked", "supervision_incomplete"]
+    process_observation: Literal["not_spawned", "worker_reaped", "unproven"] | None
+    effect_observation: Literal["not_started", "no_admitted_host_effects",
+                                "final_ledger_observed", "interrupted", "unknown"] | None
+    containment_empty_observed: bool | None
+    completed_provider_calls: int | None
+    indeterminate_provider_calls: int | None
+    final_ledger_effect_count: int | None
+    failed_effect_count: int | None
+    journal_complete: bool | None
+    durable_journal: NativeSessionEffectJournalFacts | None
+    replay_certified: Literal[False]
+    quiescence_certified: Literal[False]
+    historical_completeness: Literal[False]
 
 
 class VerifierError(Exception):
@@ -280,10 +346,160 @@ def _publisher_source_valid(facts: dict[str, Any], anchor: str) -> bool:
     )
 
 
+# Validate the typed CLI protocol, not guest execution or the original source.
+def _native_path_parts(value: Any) -> list[str] | None:
+    if not isinstance(value, str) or not value or "\0" in value:
+        return None
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return None
+    windows = re.match(r"^[a-zA-Z]:[/\\]", value) is not None
+    unc = value.startswith("\\\\")
+    if not value.startswith("/") and not windows and not unc:
+        return None
+    parts = re.split(r"[/\\]", value) if windows or unc else value.split("/")
+    while len(parts) > 1 and parts[-1] == "":
+        parts.pop()
+    return None if any(part in (".", "..") for part in parts) else parts
+
+
+def _native_count(value: Any) -> bool:
+    return type(value) is int and 0 <= value <= 2**53 - 1
+
+
+def _native_journal_valid(journal: Any, facts: dict[str, Any]) -> bool:
+    if (not isinstance(journal, dict) or set(journal) != {
+            "schema_version", "scope", "session_nonce", "product_root_key_id", "admission_sha256",
+            "record_count", "event_count", "admitted_provider_calls", "returned_provider_calls",
+            "indeterminate_provider_calls", "head_record_sha256", "trailing_partial_record",
+            "replay_certified", "quiescence_certified", "historical_completeness",
+        }
+            or journal["schema_version"] != "franken-node/native-effect-journal-record/v1"
+            or journal["scope"] != "host_io_provider_calls"
+            or any(journal[key] != facts[key] for key in ("session_nonce", "product_root_key_id", "admission_sha256"))
+            or any(journal[key] is not False for key in ("replay_certified", "quiescence_certified", "historical_completeness"))
+            or type(journal["trailing_partial_record"]) is not bool
+            or not isinstance(journal["head_record_sha256"], str)
+            or re.fullmatch(r"[0-9a-f]{64}", journal["head_record_sha256"]) is None
+            or any(not _native_count(journal[key]) for key in (
+                "record_count", "event_count", "admitted_provider_calls",
+                "returned_provider_calls", "indeterminate_provider_calls",
+            ))):
+        return False
+    return (
+        1 <= journal["record_count"] <= 2049
+        and journal["event_count"] == journal["record_count"] - 1
+        and journal["event_count"] == journal["admitted_provider_calls"] + journal["returned_provider_calls"]
+        and journal["admitted_provider_calls"] <= 1024
+        and journal["returned_provider_calls"] <= journal["admitted_provider_calls"]
+        and journal["indeterminate_provider_calls"] == journal["admitted_provider_calls"] - journal["returned_provider_calls"]
+        and journal["indeterminate_provider_calls"] <= 1
+    )
+
+
+def _native_session_valid(facts: Any, anchor: str) -> bool:
+    if (not isinstance(facts, dict) or set(facts) != {
+            "schema_version", "scope", "session_nonce", "product_root_key_id", "admission_sha256",
+            "project_root", "entrypoint", "security_epoch", "admitted_at", "observed_at", "outcome_kind",
+            "process_observation", "effect_observation", "containment_empty_observed", "completed_provider_calls",
+            "indeterminate_provider_calls", "final_ledger_effect_count", "failed_effect_count", "journal_complete",
+            "durable_journal", "replay_certified", "quiescence_certified", "historical_completeness",
+        }
+            or facts["schema_version"] not in ("franken-node/native-session-forensics/v1", "franken-node/native-session-forensics/v2")
+            or facts["scope"] != "authenticated_supervisor_observations"
+            or facts["product_root_key_id"] != "ed25519:" + anchor
+            or not isinstance(facts["session_nonce"], str)
+            or re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", facts["session_nonce"]) is None
+            or facts["session_nonce"] == "00000000-0000-0000-0000-000000000000"
+            or not isinstance(facts["admission_sha256"], str)
+            or re.fullmatch(r"[0-9a-f]{64}", facts["admission_sha256"]) is None
+            or not isinstance(facts["security_epoch"], str)
+            or re.fullmatch(r"0|[1-9][0-9]{0,19}", facts["security_epoch"]) is None
+            or int(facts["security_epoch"]) > 2**64 - 1
+            or _instant_ns(facts["admitted_at"]) is None
+            or any(facts[key] is not False for key in ("replay_certified", "quiescence_certified", "historical_completeness"))):
+        return False
+    project, entry = _native_path_parts(facts["project_root"]), _native_path_parts(facts["entrypoint"])
+    if project is None or entry is None or len(entry) <= len(project) or entry[:len(project)] != project:
+        return False
+    journal = facts["durable_journal"]
+    if facts["schema_version"] == "franken-node/native-session-forensics/v1":
+        if journal is not None:
+            return False
+    elif not _native_journal_valid(journal, facts):
+        return False
+    outcome_fields = (
+        "observed_at", "process_observation", "effect_observation", "containment_empty_observed",
+        "completed_provider_calls", "indeterminate_provider_calls", "final_ledger_effect_count",
+        "failed_effect_count", "journal_complete",
+    )
+    if facts["outcome_kind"] == "pending":
+        return all(facts[key] is None for key in outcome_fields)
+    if (facts["outcome_kind"] not in ("completed", "execution_failed", "control_stopped", "interrupted",
+                                     "telemetry_failed", "panicked", "supervision_incomplete")
+            or _instant_ns(facts["observed_at"]) is None
+            or facts["process_observation"] not in ("not_spawned", "worker_reaped", "unproven")
+            or facts["effect_observation"] not in ("not_started", "no_admitted_host_effects",
+                                                  "final_ledger_observed", "interrupted", "unknown")
+            or type(facts["containment_empty_observed"]) is not bool):
+        return False
+    if facts["process_observation"] == "not_spawned":
+        if (facts["outcome_kind"] != "supervision_incomplete" or facts["effect_observation"] != "not_started"
+                or facts["containment_empty_observed"] is not False):
+            return False
+    elif facts["effect_observation"] == "not_started":
+        return False
+    if (facts["outcome_kind"] in ("completed", "execution_failed", "control_stopped", "telemetry_failed", "panicked")
+            and facts["process_observation"] != "worker_reaped"):
+        return False
+    if facts["outcome_kind"] == "control_stopped" and facts["effect_observation"] != "final_ledger_observed":
+        return False
+    if (facts["outcome_kind"] == "interrupted") != (facts["effect_observation"] == "interrupted"):
+        return False
+    completed, indeterminate = facts["completed_provider_calls"], facts["indeterminate_provider_calls"]
+    final_count, failed_count = facts["final_ledger_effect_count"], facts["failed_effect_count"]
+    if facts["effect_observation"] == "final_ledger_observed":
+        if (facts["outcome_kind"] not in ("completed", "execution_failed", "control_stopped")
+                or not _native_count(final_count) or not _native_count(failed_count) or failed_count > final_count
+                or completed is not None or indeterminate is not None or facts["journal_complete"] is not None):
+            return False
+    else:
+        if final_count is not None or failed_count is not None:
+            return False
+        if facts["effect_observation"] == "interrupted":
+            if (not _native_count(completed) or not _native_count(indeterminate) or indeterminate > 1
+                    or completed * 2 + indeterminate > 2048 or type(facts["journal_complete"]) is not bool):
+                return False
+        elif facts["effect_observation"] == "no_admitted_host_effects":
+            if (facts["outcome_kind"] != "panicked" or type(completed) is not int or completed != 0
+                    or type(indeterminate) is not int or indeterminate != 0
+                    or (facts["journal_complete"] is not None and facts["journal_complete"] is not True)):
+                return False
+        elif facts["outcome_kind"] == "panicked" and completed is not None:
+            if (not _native_count(completed) or completed > 1024 or type(indeterminate) is not int
+                    or indeterminate != 0 or facts["journal_complete"] is not True):
+                return False
+        elif completed is not None or indeterminate is not None or facts["journal_complete"] is not None:
+            return False
+    if journal is not None:
+        if (facts["effect_observation"] in ("not_started", "no_admitted_host_effects")
+                and journal["admitted_provider_calls"] != 0):
+            return False
+        # A later durable append does not repair an incomplete signed outcome.
+        if (facts["journal_complete"] is True and completed is not None
+                and (journal["admitted_provider_calls"] > completed + indeterminate
+                     or journal["returned_provider_calls"] > completed)):
+            return False
+    return True
+
+
 def _facts_valid(facts: Any, format: str, anchor: str, run_anchor: str | None,
                  runtime_anchor: str | None, revocation_anchor: str | None = None,
                  provenance_anchor: str | None = None, evaluation_time: str | None = None,
                  max_age: str | None = None) -> bool:
+    if format == "native-session-forensics":
+        return _native_session_valid(facts, anchor)
     if format == "publisher-source-trust":
         return _publisher_source_trust_valid(
             facts, anchor, revocation_anchor, provenance_anchor, evaluation_time, max_age,
@@ -296,6 +512,8 @@ def _facts_valid(facts: Any, format: str, anchor: str, run_anchor: str | None,
                             "signing_identity", "native_capture"},
         "capsule": {"capsule_id", "expected_hash", "actual_hash", "signer_public_key_hex"},
         "signed-bundle": {"bundle_id", "incident_id", "event_count", "integrity_hash", "signer_public_key_hex"},
+        "signed-session": {"session_id", "verifier_identity", "created_at", "final_verdict",
+                           "step_count", "transcript_hash", "signer_public_key_hex"},
         "resolution-receipt": {"receipt_id", "crypto_suite", "module_graph_hash", "package_name",
                                "requested_range", "policy_profile", "capability_budget_mode", "decision",
                                "selected_version", "rejected_alternative_count", "canonical_hash",
@@ -316,6 +534,19 @@ def _facts_valid(facts: Any, format: str, anchor: str, run_anchor: str | None,
         return False
     if format == "publisher-source":
         return _publisher_source_valid(facts, anchor)
+    if format == "signed-session":
+        return (
+            isinstance(facts["session_id"], str)
+            and re.fullmatch(r"[A-Za-z0-9._-]{1,255}", facts["session_id"]) is not None
+            and isinstance(facts["verifier_identity"], str)
+            and re.fullmatch(r"verifier://[A-Za-z0-9._-]{1,255}", facts["verifier_identity"]) is not None
+            and _instant_ns(facts["created_at"]) is not None
+            and facts["final_verdict"] in ("pass", "fail", "inconclusive")
+            and type(facts["step_count"]) is int and 0 <= facts["step_count"] <= 1024
+            and (facts["step_count"] == 0) == (facts["final_verdict"] == "inconclusive")
+            and isinstance(facts["transcript_hash"], str)
+            and re.fullmatch(r"[0-9a-f]{64}", facts["transcript_hash"]) is not None
+        )
     if format == "counterfactual-receipt":
         return (
             isinstance(facts["baseline_integrity_hash"], str)
@@ -414,6 +645,9 @@ def verify_artifact(
     Adding ``trusted_runtime_public_key_hex`` requires that run authority plus
     the portable product-root/session signatures over the original effect ledger.
     It does not establish guest replay, external effect completion or quiescence.
+    Native-session forensics authenticates retained supervisor observations.
+    A pending outcome and a retained journal prefix never certify complete history.
+    Its security_epoch is an exact decimal u64 string, including zero.
     Publisher-source trust requires an independent revocation authority, an
     explicit RFC3339 evaluation time, and a positive decimal u64 freshness window.
     An optional independent provenance authority requires matching chain evidence.

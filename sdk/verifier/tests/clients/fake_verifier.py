@@ -50,6 +50,42 @@ if mode.startswith("runtime_"):
         "producer_id": "runtime-protocol-control", "evidence_key_id": "ed25519:" + "c" * 64,
         "signed_epoch": "18446744073709551615",
     }
+if mode.startswith("session_"):
+    response["format"] = "signed-session"
+    response["scope"] = "authenticated_verification_session"
+    response["facts"] = {
+        "session_id": "protocol-session", "verifier_identity": "verifier://protocol-test",
+        "created_at": "2026-11-16T00:00:00.123456789Z", "final_verdict": "pass",
+        "step_count": 1, "transcript_hash": "a" * 64, "signer_public_key_hex": anchor,
+    }
+if mode.startswith("native_"):
+    response["format"] = "native-session-forensics"
+    response["scope"] = "authenticated_supervisor_observations"
+    response["facts"] = {
+        "schema_version": "franken-node/native-session-forensics/v2",
+        "scope": "authenticated_supervisor_observations",
+        "session_nonce": "0199abcd-1234-7000-8000-123456789abc",
+        "product_root_key_id": "ed25519:" + anchor, "admission_sha256": "a" * 64,
+        "project_root": "/captured/project", "entrypoint": "/captured/project/main.mjs",
+        "security_epoch": "18446744073709551615", "admitted_at": "2026-11-14T12:00:00Z",
+        "observed_at": "2026-11-14T12:00:01Z", "outcome_kind": "interrupted",
+        "process_observation": "worker_reaped", "effect_observation": "interrupted",
+        "containment_empty_observed": False, "completed_provider_calls": 1,
+        "indeterminate_provider_calls": 1, "final_ledger_effect_count": None,
+        "failed_effect_count": None, "journal_complete": True,
+        "durable_journal": {
+            "schema_version": "franken-node/native-effect-journal-record/v1",
+            "scope": "host_io_provider_calls",
+            "session_nonce": "0199abcd-1234-7000-8000-123456789abc",
+            "product_root_key_id": "ed25519:" + anchor, "admission_sha256": "a" * 64,
+            "record_count": 4, "event_count": 3, "admitted_provider_calls": 2,
+            "returned_provider_calls": 1, "indeterminate_provider_calls": 1,
+            "head_record_sha256": "b" * 64, "trailing_partial_record": False,
+            "replay_certified": False, "quiescence_certified": False,
+            "historical_completeness": False,
+        },
+        "replay_certified": False, "quiescence_certified": False, "historical_completeness": False,
+    }
 if mode.startswith("resolution_"):
     response["format"] = "resolution-receipt"
     response["scope"] = "authenticated_resolution_decision"
@@ -196,6 +232,111 @@ elif mode == "runtime_overflow_epoch":
     response["facts"]["runtime_origin"]["signed_epoch"] = str(2**64)
 elif mode == "runtime_extra_claim":
     response["facts"]["runtime_origin"]["quiescence_certified"] = True
+elif mode == "native_wrong_scope":
+    response["scope"] = "authenticated_runtime_incident"
+elif mode == "native_wrong_nested_scope":
+    response["facts"]["scope"] = "guest_executed"
+elif mode == "native_wrong_root":
+    response["facts"]["product_root_key_id"] = "ed25519:" + "0" * 64
+elif mode == "native_bad_nonce":
+    response["facts"]["session_nonce"] = "00000000-0000-0000-0000-000000000000"
+elif mode == "native_bad_admission_digest":
+    response["facts"]["admission_sha256"] = "sha256:" + "a" * 64
+elif mode == "native_bad_paths":
+    response["facts"]["entrypoint"] = "/another-project/main.mjs"
+elif mode == "native_numeric_epoch":
+    response["facts"]["security_epoch"] = 2**64 - 1
+elif mode == "native_overflow_epoch":
+    response["facts"]["security_epoch"] = str(2**64)
+elif mode == "native_noncanonical_epoch":
+    response["facts"]["security_epoch"] = "07"
+elif mode == "native_negative_epoch":
+    response["facts"]["security_epoch"] = "-1"
+elif mode == "native_epoch_trailing_newline":
+    response["facts"]["security_epoch"] = "7\n"
+elif mode == "native_bad_admission_time":
+    response["facts"]["admitted_at"] = "2026-02-30T00:00:00Z"
+elif mode == "native_bad_observation_time":
+    response["facts"]["observed_at"] = None
+elif mode == "native_unknown_field":
+    response["facts"]["execution_authorized"] = True
+elif mode == "native_missing_field":
+    del response["facts"]["journal_complete"]
+elif mode == "native_pending_with_outcome":
+    response["facts"]["outcome_kind"] = "pending"
+elif mode == "native_impossible_process":
+    response["facts"]["process_observation"] = "not_spawned"
+elif mode == "native_impossible_effect":
+    response["facts"]["effect_observation"] = "unknown"
+elif mode == "native_unknown_outcome":
+    response["facts"]["outcome_kind"] = "replayed"
+elif mode == "native_unsafe_count":
+    response["facts"]["completed_provider_calls"] = 2**53
+elif mode == "native_boolean_count":
+    response["facts"]["completed_provider_calls"] = True
+elif mode == "native_missing_count":
+    response["facts"]["indeterminate_provider_calls"] = None
+elif mode == "native_impossible_wal_count":
+    response["facts"]["indeterminate_provider_calls"] = 2
+elif mode == "native_missing_completeness":
+    response["facts"]["journal_complete"] = None
+elif mode == "native_impossible_ledger_count":
+    response["facts"]["final_ledger_effect_count"] = 2
+elif mode == "native_replay_claim":
+    response["facts"]["replay_certified"] = True
+elif mode == "native_quiescence_claim":
+    response["facts"]["quiescence_certified"] = True
+elif mode == "native_history_claim":
+    response["facts"]["historical_completeness"] = True
+elif mode == "native_v1_with_journal":
+    response["facts"]["schema_version"] = "franken-node/native-session-forensics/v1"
+elif mode == "native_v2_without_journal":
+    response["facts"]["durable_journal"] = None
+elif mode == "native_unknown_schema":
+    response["facts"]["schema_version"] = "franken-node/native-session-forensics/v99"
+elif mode == "native_journal_wrong_nonce":
+    response["facts"]["durable_journal"]["session_nonce"] = "0199abcd-1234-7000-8000-123456789abd"
+elif mode == "native_journal_wrong_root":
+    response["facts"]["durable_journal"]["product_root_key_id"] = "ed25519:" + "0" * 64
+elif mode == "native_journal_wrong_admission":
+    response["facts"]["durable_journal"]["admission_sha256"] = "c" * 64
+elif mode == "native_journal_wrong_scope":
+    response["facts"]["durable_journal"]["scope"] = "all_effects_completed"
+elif mode == "native_journal_wrong_schema":
+    response["facts"]["durable_journal"]["schema_version"] = "franken-node/native-effect-journal-record/v99"
+elif mode == "native_journal_empty_prefix":
+    response["facts"]["durable_journal"]["record_count"] = 0
+elif mode == "native_journal_event_mismatch":
+    response["facts"]["durable_journal"]["event_count"] = 4
+elif mode == "native_journal_call_mismatch":
+    response["facts"]["durable_journal"]["returned_provider_calls"] = 2
+elif mode == "native_journal_missing_pending":
+    response["facts"]["durable_journal"]["indeterminate_provider_calls"] = 0
+elif mode == "native_journal_bad_head":
+    response["facts"]["durable_journal"]["head_record_sha256"] = "invalid"
+elif mode == "native_journal_bad_torn_flag":
+    response["facts"]["durable_journal"]["trailing_partial_record"] = None
+elif mode == "native_journal_unknown_field":
+    response["facts"]["durable_journal"]["completed_external_effects"] = 1
+elif mode == "native_journal_replay_claim":
+    response["facts"]["durable_journal"]["replay_certified"] = True
+elif mode == "native_journal_quiescence_claim":
+    response["facts"]["durable_journal"]["quiescence_certified"] = True
+elif mode == "native_journal_history_claim":
+    response["facts"]["durable_journal"]["historical_completeness"] = True
+elif mode == "native_journal_contradicts_complete_outcome":
+    response["facts"]["completed_provider_calls"] = 0
+elif mode == "native_incomplete_with_later_journal":
+    response["facts"]["completed_provider_calls"] = 0
+    response["facts"]["journal_complete"] = False
+elif mode == "native_pending_prefix":
+    response["facts"]["outcome_kind"] = "pending"
+    for name in ("observed_at", "process_observation", "effect_observation", "containment_empty_observed",
+                 "completed_provider_calls", "indeterminate_provider_calls", "final_ledger_effect_count",
+                 "failed_effect_count", "journal_complete"):
+        response["facts"][name] = None
+elif mode == "native_zero_epoch":
+    response["facts"]["security_epoch"] = "0"
 elif mode == "resolution_invalid_decision":
     response["facts"]["decision"] = "verified"
 elif mode == "resolution_reject_with_candidate":
@@ -324,6 +465,45 @@ elif mode == "ltv_bad_artifact_hash":
     response["facts"]["artifact_hash"] = "sha256:invalid"
 elif mode == "ltv_unknown_field":
     response["facts"]["execution_authorized"] = True
+elif mode == "session_fail":
+    response["facts"]["final_verdict"] = "fail"
+elif mode == "session_empty":
+    response["facts"]["final_verdict"] = "inconclusive"
+    response["facts"]["step_count"] = 0
+elif mode == "session_wrong_scope":
+    response["scope"] = "guest_executed"
+elif mode == "session_wrong_signer":
+    response["facts"]["signer_public_key_hex"] = "33" * 32
+elif mode == "session_unknown_field":
+    response["facts"]["execution_authorized"] = True
+elif mode == "session_missing_field":
+    del response["facts"]["final_verdict"]
+elif mode == "session_boolean_count":
+    response["facts"]["step_count"] = True
+elif mode == "session_negative_count":
+    response["facts"]["step_count"] = -1
+elif mode == "session_excessive_count":
+    response["facts"]["step_count"] = 1025
+elif mode == "session_empty_pass":
+    response["facts"]["step_count"] = 0
+elif mode == "session_nonempty_inconclusive":
+    response["facts"]["final_verdict"] = "inconclusive"
+elif mode == "session_bad_identity":
+    response["facts"]["verifier_identity"] = "internal://protocol-test"
+elif mode == "session_empty_id":
+    response["facts"]["session_id"] = ""
+elif mode == "session_long_id":
+    response["facts"]["session_id"] = "a" * 256
+elif mode == "session_id_newline":
+    response["facts"]["session_id"] += "\n"
+elif mode == "session_bad_time":
+    response["facts"]["created_at"] = "2026-02-30T00:00:00Z"
+elif mode == "session_bad_verdict":
+    response["facts"]["final_verdict"] = "verified"
+elif mode == "session_bad_hash":
+    response["facts"]["transcript_hash"] = "sha256:" + "a" * 64
+elif mode == "session_uppercase_hash":
+    response["facts"]["transcript_hash"] = "A" * 64
 encoded = json.dumps(response, separators=(",", ":"), sort_keys=True)
 if mode == "duplicate":
     encoded = encoded[:-1] + ',"verdict":"verified"}'

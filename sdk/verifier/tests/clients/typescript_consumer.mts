@@ -2,12 +2,14 @@ import { readFileSync } from "node:fs";
 import assert from "node:assert/strict";
 import { resolve } from "node:path";
 import { verifyArtifact, VerifierError } from "./franken_verifier.mjs";
-import type { Verification, EvidenceFormat, PublisherSourceTrustFacts } from "./franken_verifier.mjs";
+import type { Verification, EvidenceFormat, PublisherSourceTrustFacts, NativeSessionForensicsFacts, SignedSessionFacts } from "./franken_verifier.mjs";
 
 const cases: Array<{ name: string; input_hex: string; anchor: string; format: EvidenceFormat;
   signature_hex?: string; run_anchor?: string; runtime_anchor?: string; event_count?: number;
   revocation_anchor?: string; provenance_anchor?: string | null; evaluation_time?: string;
   max_revocation_age_secs?: string; publisher_trust_facts?: PublisherSourceTrustFacts;
+  native_facts?: NativeSessionForensicsFacts;
+  session_facts?: SignedSessionFacts;
   expected: string; artifact_sha256: string }> =
   JSON.parse(readFileSync("vectors.json", "utf8"));
 const positive = cases.find((item) => item.name === "genuine_cli_incident")!;
@@ -107,5 +109,68 @@ for (const source of cases.filter((item) => item.format === "publisher-source-tr
   }
 }
 if (trustPositive === 0 || trustNegative === 0) throw new Error("publisher trust matrix is missing");
-console.log(JSON.stringify({ consumer: "typescript", positive: 8 + trustPositive,
-  negative: 2 + trustNegative, publisher_trust_cases: trustPositive + trustNegative, passed: true }));
+let nativePositive = 0;
+let nativeNegative = 0;
+for (const observation of cases.filter((item) => item.format === "native-session-forensics")) {
+  try {
+    const verified = await verifyArtifact(Buffer.from(observation.input_hex, "hex"), observation.anchor,
+      { verifier: resolve("verifier"), format: "native-session-forensics" });
+    if (observation.expected !== "verified" || verified.format !== "native-session-forensics"
+        || verified.scope !== "authenticated_supervisor_observations") throw new Error("native-session scope mismatch");
+    assert.deepEqual(verified.facts, observation.native_facts, observation.name);
+    const epoch: string = verified.facts.security_epoch;
+    const replay: false = verified.facts.replay_certified;
+    const cleanup: false = verified.facts.quiescence_certified;
+    const history: false = verified.facts.historical_completeness;
+    if (epoch.length === 0 || replay || cleanup || history) throw new Error("forensic claim exceeds its scope");
+    if (verified.facts.outcome_kind === "pending") {
+      const unknown: null = verified.facts.completed_provider_calls;
+      const observed: null = verified.facts.observed_at;
+      assert.equal(unknown, null);
+      assert.equal(observed, null);
+    }
+    if (verified.facts.schema_version === "franken-node/native-session-forensics/v2") {
+      const retained: number = verified.facts.durable_journal.record_count;
+      const complete: false = verified.facts.durable_journal.historical_completeness;
+      if (retained < 1 || complete) throw new Error("invalid retained prefix");
+    } else {
+      const absent: null = verified.facts.durable_journal;
+      assert.equal(absent, null);
+    }
+    nativePositive += 1;
+  } catch (error: unknown) {
+    if (observation.expected === "verified" || !(error instanceof VerifierError)
+        || error.code !== observation.expected) throw error;
+    nativeNegative += 1;
+  }
+}
+if (nativePositive === 0 || nativeNegative === 0) throw new Error("native-session matrix is missing");
+let sessionPositive = 0;
+let sessionNegative = 0;
+const sessionVerdicts = new Set<string>();
+for (const session of cases.filter((item) => item.format === "signed-session")) {
+  try {
+    const verified = await verifyArtifact(Buffer.from(session.input_hex, "hex"), session.anchor,
+      { verifier: resolve("verifier"), format: "signed-session" });
+    if (session.expected !== "verified" || verified.format !== "signed-session"
+        || verified.scope !== "authenticated_verification_session") {
+      throw new Error("signed-session scope mismatch: " + session.name);
+    }
+    assert.deepEqual(verified.facts, session.session_facts, session.name);
+    const decision: "pass" | "fail" | "inconclusive" = verified.facts.final_verdict;
+    const steps: number = verified.facts.step_count;
+    assert.equal(steps === 0, decision === "inconclusive");
+    sessionVerdicts.add(decision);
+    sessionPositive += 1;
+  } catch (error: unknown) {
+    if (session.expected === "verified" || !(error instanceof VerifierError)
+        || error.code !== session.expected) throw error;
+    sessionNegative += 1;
+  }
+}
+assert.deepEqual([...sessionVerdicts].sort(), ["fail", "inconclusive", "pass"]);
+if (sessionNegative === 0) throw new Error("signed-session negative matrix is missing");
+console.log(JSON.stringify({ consumer: "typescript", positive: 8 + trustPositive + nativePositive + sessionPositive,
+  negative: 2 + trustNegative + nativeNegative + sessionNegative, publisher_trust_cases: trustPositive + trustNegative,
+  native_session_cases: nativePositive + nativeNegative, signed_session_cases: sessionPositive + sessionNegative,
+  passed: true }));

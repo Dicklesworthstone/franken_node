@@ -694,5 +694,348 @@ add("counterfactual_unknown_schema", "counterfactual-receipt", cfWire(cfSingleOu
   signature_hex: cfSingleSig,
 });
 
+// Native-session receipt and durable-journal protocols are encoded independently
+// with Node crypto. These signed fixtures model supervisor observations; they
+// do not claim that the test guest ran, that history is complete, or cleanup.
+function nativeFixture(epoch = 7n, projectRoot = "/captured/project") {
+  const admission = {
+    session_nonce: sessionNonce, product_root_key_id: "ed25519:" + anchor,
+    identity_capture_path: "/evidence/session-identity.json", security_epoch: epoch,
+    admitted_at: "2026-11-14T12:00:00Z", project_root: projectRoot,
+    entrypoint: projectRoot + "/main.mjs", dependency_ids: ["PRIVATE-dependency"],
+    configured_node_id: null, fleet_zone_id: null, fleet_policy_sha256: null,
+    process_spawn_authority_granted: false, control_scopes: [],
+  };
+  const admissionJson = ordered(admission);
+  const receipt = {
+    schema_version: "franken-node/native-session-admission-receipt/v1",
+    session_nonce: sessionNonce, product_root_key_id: admission.product_root_key_id,
+    admission_sha256: hash(frame("franken-node/native-session-admission/v1\0", Buffer.from(admissionJson))),
+  };
+  receipt.signature_hex = sign(null, frame("franken-node/native-session-admission-signature/v1\0",
+    Buffer.from(ordered(receipt))), key).toString("hex");
+  const bundle = { schema_version: "franken-node/native-session-forensics/v1",
+    admission_json: admissionJson, admission_receipt: receipt, outcome: null };
+  const facts = {
+    schema_version: bundle.schema_version, scope: "authenticated_supervisor_observations",
+    session_nonce: sessionNonce, product_root_key_id: admission.product_root_key_id,
+    admission_sha256: receipt.admission_sha256, project_root: admission.project_root,
+    entrypoint: admission.entrypoint, security_epoch: epoch.toString(), admitted_at: admission.admitted_at,
+    observed_at: null, outcome_kind: "pending", process_observation: null, effect_observation: null,
+    containment_empty_observed: null, completed_provider_calls: null, indeterminate_provider_calls: null,
+    final_ledger_effect_count: null, failed_effect_count: null, journal_complete: null, durable_journal: null,
+    replay_certified: false, quiescence_certified: false, historical_completeness: false,
+  };
+  return { bundle, facts };
+}
+function nativeOutcome(fixture, outcome, counts = {}) {
+  const receipt = fixture.bundle.admission_receipt;
+  const payload = {
+    schema_version: "franken-node/native-session-outcome-receipt/v1",
+    session_nonce: receipt.session_nonce, product_root_key_id: receipt.product_root_key_id,
+    admission_sha256: receipt.admission_sha256, outcome,
+  };
+  const payloadJson = ordered(payload);
+  fixture.bundle.outcome = { payload_json: payloadJson,
+    signature_hex: sign(null, frame("franken-node/native-session-outcome-signature/v1\0",
+      Buffer.from(payloadJson)), key).toString("hex") };
+  Object.assign(fixture.facts, { observed_at: outcome.observed_at, outcome_kind: outcome.kind,
+    process_observation: outcome.process, effect_observation: outcome.effects.kind,
+    containment_empty_observed: outcome.containment_empty_observed, ...counts });
+  return fixture;
+}
+const nativeWal = (sequence, state) => ({ sequence, effect_kind: "fs.readFile",
+  request_hash: "sha256:" + String(sequence + 1).repeat(64), state });
+function nativeInterrupted(complete = true) {
+  const evidence = {
+    schema_version: "franken-node/native-effect-interruption-evidence/v1",
+    session_nonce: sessionNonce, terminal_state: "worker_exit_indeterminate", replay_certified: false,
+    journal_complete: complete, journal_event_cap: 2048,
+    completed_effect_count: complete ? 1 : 0, interrupted_effect_count: 1,
+    entries: complete ? [nativeWal(0, "provider_returned"), nativeWal(1, "interrupted_indeterminate")]
+      : [nativeWal(0, "interrupted_indeterminate")],
+  };
+  if (!complete) evidence.protocol_error = "PRIVATE-response-drain-failed";
+  return { observed_at: "2026-11-14T12:00:01Z", kind: "interrupted", process: "worker_reaped",
+    containment_empty_observed: false, effects: { kind: "interrupted", evidence } };
+}
+function nativeJournal(fixture, events, torn = false) {
+  const receipt = fixture.bundle.admission_receipt;
+  const journalEvents = [{ kind: "header", scope: "host_io_provider_calls",
+    event_cap: 2048, byte_cap: 4 * 1024 * 1024 }, ...events];
+  let previous = "0".repeat(64), admitted = 0, returned = 0;
+  const records = journalEvents.map((event, index) => {
+    const payloadJson = ordered({
+      schema_version: "franken-node/native-effect-journal-record/v1",
+      session_nonce: receipt.session_nonce, product_root_key_id: receipt.product_root_key_id,
+      admission_sha256: receipt.admission_sha256, event_index: index,
+      previous_record_sha256: previous, event,
+    });
+    const raw = ordered({ payload_json: payloadJson,
+      signature_hex: sign(null, frame("franken-node/native-effect-journal-signature/v1\0",
+        Buffer.from(payloadJson)), key).toString("hex") });
+    previous = hash(frame("franken-node/native-effect-journal-record/v1\0", Buffer.from(raw)));
+    if (event.kind === "admitted") admitted += 1;
+    if (event.kind === "provider_returned") returned += 1;
+    return raw + "\n";
+  });
+  fixture.bundle.schema_version = "franken-node/native-session-forensics/v2";
+  fixture.bundle.journal_jsonl = records.join("") + (torn ? '{"payload_json":"torn' : "");
+  fixture.facts.schema_version = fixture.bundle.schema_version;
+  fixture.facts.durable_journal = {
+    schema_version: "franken-node/native-effect-journal-record/v1", scope: "host_io_provider_calls",
+    session_nonce: receipt.session_nonce, product_root_key_id: receipt.product_root_key_id,
+    admission_sha256: receipt.admission_sha256, record_count: records.length, event_count: events.length,
+    admitted_provider_calls: admitted, returned_provider_calls: returned,
+    indeterminate_provider_calls: admitted - returned, head_record_sha256: previous,
+    trailing_partial_record: torn, replay_certified: false, quiescence_certified: false,
+    historical_completeness: false,
+  };
+  return fixture;
+}
+const nativeAdmit = (sequence) => ({ kind: "admitted", sequence, effect_kind: "fs.readFile",
+  request_hash: nativeWal(sequence, "interrupted_indeterminate").request_hash });
+const nativeReturn = (sequence) => ({ kind: "provider_returned", sequence });
+function addNative(name, fixture, expected = "verified", options = {}) {
+  add(name, "native-session-forensics", ordered(fixture.bundle), expected,
+    { native_facts: fixture.facts, ...options });
+}
+const nativePending = nativeFixture(18_446_744_073_709_551_615n);
+addNative("native_pending_max_epoch", nativePending);
+addNative("native_pending_zero_epoch", nativeFixture(0n));
+addNative("native_pending_long_path", nativeFixture(7n, "/captured/" + "p".repeat(5000)));
+const nativeComplete = nativeOutcome(nativeFixture(), nativeInterrupted(), {
+  completed_provider_calls: 1, indeterminate_provider_calls: 1, journal_complete: true,
+});
+addNative("native_interrupted_complete", nativeComplete);
+const nativeDurable = nativeJournal(clone(nativeComplete),
+  [nativeAdmit(0), nativeReturn(0), nativeAdmit(1)]);
+addNative("native_v2_interrupted_complete", nativeDurable);
+const nativeIncomplete = nativeOutcome(nativeFixture(), nativeInterrupted(false), {
+  completed_provider_calls: 0, indeterminate_provider_calls: 1, journal_complete: false,
+});
+nativeJournal(nativeIncomplete, [nativeAdmit(0), nativeReturn(0), nativeAdmit(1), nativeReturn(1)]);
+addNative("native_v2_incomplete_outcome_later_journal", nativeIncomplete);
+const panicMessage = "PRIVATE-native-panic";
+const nativePanicOutcome = { observed_at: "2026-11-14T12:00:01Z", kind: "panicked",
+  process: "worker_reaped", containment_empty_observed: true, effects: { kind: "unknown" },
+  panic_evidence: { panic_message: panicMessage, panic_message_bytes: Buffer.byteLength(panicMessage),
+    panic_message_sha256: hash(panicMessage), panic_message_truncated: false, cleanup_successful: true,
+    host_effect_wal: [nativeWal(0, "provider_returned")] } };
+const nativePanic = nativeOutcome(nativeFixture(), nativePanicOutcome, {
+  completed_provider_calls: 1, indeterminate_provider_calls: 0, journal_complete: true,
+});
+addNative("native_panic_retained", nativePanic);
+addNative("native_panic_no_effects", nativeOutcome(nativeFixture(), {
+  observed_at: "2026-11-14T12:00:01Z", kind: "panicked", process: "worker_reaped",
+  containment_empty_observed: true, effects: { kind: "no_admitted_host_effects" },
+}, { completed_provider_calls: 0, indeterminate_provider_calls: 0 }));
+for (const kind of ["completed", "execution_failed", "control_stopped"]) {
+  addNative("native_" + kind + "_final_ledger", nativeOutcome(nativeFixture(), {
+    observed_at: "2026-11-14T12:00:01Z", kind, process: "worker_reaped",
+    containment_empty_observed: true, effects: { kind: "final_ledger_observed", effect_count: 3,
+      allowed_count: 2, denied_count: 0, failed_count: 1, chain_head_hash: "sha256:" + "a".repeat(64),
+      ledger_sha256: "b".repeat(64) },
+  }, { final_ledger_effect_count: 3, failed_effect_count: 1 }));
+}
+addNative("native_telemetry_failed_unknown", nativeOutcome(nativeFixture(), {
+  observed_at: "2026-11-14T12:00:01Z", kind: "telemetry_failed", process: "worker_reaped",
+  containment_empty_observed: false, effects: { kind: "unknown" },
+}));
+addNative("native_supervision_not_spawned", nativeOutcome(nativeFixture(), {
+  observed_at: "2026-11-14T12:00:01Z", kind: "supervision_incomplete", process: "not_spawned",
+  containment_empty_observed: false, effects: { kind: "not_started" },
+}));
+addNative("native_v2_pending_torn_journal", nativeJournal(nativeFixture(), [nativeAdmit(0)], true));
+addNative("native_v2_header_only_pending", nativeJournal(nativeFixture(), []));
+addNative("native_foreign_anchor", nativePending, "SIGNER_UNTRUSTED", { anchor: foreign });
+function mutateNative(name, fixture, mutate, expected) {
+  const changed = clone(fixture);
+  mutate(changed.bundle);
+  addNative(name, changed, expected);
+}
+mutateNative("native_tampered_admission", nativePending,
+  (bundle) => { bundle.admission_json = bundle.admission_json.replace("/captured/project/main.mjs", "/captured/project/other.mjs"); },
+  "INTEGRITY_MISMATCH");
+mutateNative("native_invalid_admission_signature", nativePending,
+  (bundle) => { bundle.admission_receipt.signature_hex = "00".repeat(64); }, "SIGNATURE_INVALID");
+mutateNative("native_invalid_outcome_signature", nativeComplete,
+  (bundle) => { bundle.outcome.signature_hex = "00".repeat(64); }, "SIGNATURE_INVALID");
+mutateNative("native_missing_outcome_field", nativePending,
+  (bundle) => { delete bundle.outcome; }, "JSON_INVALID");
+mutateNative("native_unknown_transport_field", nativePending,
+  (bundle) => { bundle.execution_authorized = true; }, "JSON_INVALID");
+mutateNative("native_duplicate_admission_member", nativePending,
+  (bundle) => { bundle.admission_json = bundle.admission_json.slice(0, -1) + ',"security_epoch":7}'; }, "JSON_INVALID");
+mutateNative("native_v2_missing_journal", nativeDurable,
+  (bundle) => { delete bundle.journal_jsonl; }, "SCHEMA_UNSUPPORTED");
+mutateNative("native_v1_cannot_attach_journal", nativeDurable,
+  (bundle) => { bundle.schema_version = "franken-node/native-session-forensics/v1"; }, "SCHEMA_UNSUPPORTED");
+mutateNative("native_journal_null_is_not_absent", nativeDurable,
+  (bundle) => { bundle.journal_jsonl = null; }, "JSON_INVALID");
+mutateNative("native_outcome_bound_to_another_session", nativeComplete,
+  (bundle) => { bundle.outcome.payload_json = bundle.outcome.payload_json.replace(sessionNonce, "0199abcd-1234-7000-8000-123456789abd"); },
+  "IDENTITY_INVALID");
+const nativeBadCounts = nativeInterrupted();
+nativeBadCounts.effects.evidence.completed_effect_count = 99;
+addNative("native_signed_impossible_counts", nativeOutcome(nativeFixture(), nativeBadCounts), "OBSERVATION_INVALID");
+const nativeBadPanic = clone(nativePanicOutcome);
+nativeBadPanic.panic_evidence.panic_message_sha256 = "0".repeat(64);
+addNative("native_signed_bad_panic_digest", nativeOutcome(nativeFixture(), nativeBadPanic), "OBSERVATION_INVALID");
+const nativeNullPanic = clone(nativePanicOutcome);
+nativeNullPanic.panic_evidence = null;
+addNative("native_signed_null_panic", nativeOutcome(nativeFixture(), nativeNullPanic), "JSON_INVALID");
+mutateNative("native_journal_terminated_corruption", nativeDurable,
+  (bundle) => { bundle.journal_jsonl += '{"broken":true}\n'; }, "JSON_INVALID");
+mutateNative("native_journal_invalid_signature", nativeDurable, (bundle) => {
+  const lines = bundle.journal_jsonl.trimEnd().split("\n");
+  const last = JSON.parse(lines.at(-1));
+  last.signature_hex = "00".repeat(64);
+  lines[lines.length - 1] = ordered(last);
+  bundle.journal_jsonl = lines.join("\n") + "\n";
+}, "SIGNATURE_INVALID");
+mutateNative("native_journal_omitted_middle_record", nativeDurable, (bundle) => {
+  const lines = bundle.journal_jsonl.trimEnd().split("\n");
+  lines.splice(1, 1);
+  bundle.journal_jsonl = lines.join("\n") + "\n";
+}, "JOURNAL_INVALID");
+addNative("native_journal_return_without_admission", nativeJournal(nativeFixture(), [nativeReturn(0)]), "JOURNAL_INVALID");
+const nativeContradiction = nativeOutcome(nativeFixture(), nativeInterrupted(false), {
+  completed_provider_calls: 0, indeterminate_provider_calls: 1, journal_complete: true,
+});
+const contradictoryOutcome = nativeInterrupted(false);
+contradictoryOutcome.effects.evidence.journal_complete = true;
+delete contradictoryOutcome.effects.evidence.protocol_error;
+nativeOutcome(nativeContradiction, contradictoryOutcome, {
+  completed_provider_calls: 0, indeterminate_provider_calls: 1, journal_complete: true,
+});
+nativeJournal(nativeContradiction, [nativeAdmit(0), nativeReturn(0)]);
+addNative("native_complete_outcome_contradicts_durable_return", nativeContradiction, "JOURNAL_INVALID");
+
+// Public-key session attestations, produced independently of the Rust SDK.
+// The test signer chooses canonical opaque step tags; the public transcript
+// authenticates those statements, without claiming to reconstruct private HMACs.
+const sessionDomain = "frankenengine-verifier-sdk:signed-session:v1:";
+function sealSession(session) {
+  // Rust's TranscriptHashView and SessionStep serialize in declaration order.
+  // Do not use sorted canonical JSON for the transcript's hash preimage.
+  const payload = {
+    schema_version: session.schema_version,
+    session_id: session.session_id,
+    verifier_identity: session.verifier_identity,
+    created_at: session.created_at,
+    final_verdict: session.final_verdict,
+    steps: session.steps.map((step) => ({
+      step_index: step.step_index,
+      operation: step.operation,
+      verdict: step.verdict,
+      artifact_binding_hash: step.artifact_binding_hash,
+      timestamp: step.timestamp,
+      step_signature: step.step_signature,
+    })),
+    signer_public_key_hex: session.signer_public_key_hex,
+  };
+  session.transcript_hash = hash(Buffer.concat([
+    Buffer.from("frankenengine-verifier-sdk:canonical-hash:v1:"),
+    lp(sessionDomain), lp(JSON.stringify(payload)),
+  ]));
+  session.ed25519_signature_hex = sign(null,
+    Buffer.concat([lp(sessionDomain), lp(session.transcript_hash)]), key).toString("hex");
+  return session;
+}
+function sessionFixture(verdict) {
+  const steps = verdict === "inconclusive" ? [] : ["pass", verdict].map((stepVerdict, index) => ({
+    step_index: index,
+    operation: "trust_state",
+    verdict: stepVerdict,
+    artifact_binding_hash: hash(Buffer.from("session-test-artifact-" + index)),
+    timestamp: "2026-11-16T00:00:01Z",
+    step_signature: hash(Buffer.from("opaque-test-attestation-tag-" + index)),
+  }));
+  return sealSession({
+    schema_version: "vsdk-signed-session-v1.0",
+    session_id: "independent-session-" + verdict,
+    verifier_identity: "verifier://independent-auditor",
+    created_at: "2026-11-16T00:00:00.123456789Z",
+    final_verdict: verdict,
+    steps,
+    signer_public_key_hex: anchor,
+  });
+}
+function sessionFacts(session) {
+  return {
+    session_id: session.session_id, verifier_identity: session.verifier_identity,
+    created_at: session.created_at, final_verdict: session.final_verdict,
+    step_count: session.steps.length, transcript_hash: session.transcript_hash,
+    signer_public_key_hex: anchor,
+  };
+}
+for (const verdict of ["pass", "fail", "inconclusive"]) {
+  const transcript = sessionFixture(verdict);
+  add("signed_session_" + verdict, "signed-session", JSON.stringify(transcript),
+    "verified", { session_facts: sessionFacts(transcript) });
+}
+const sessionPass = sessionFixture("pass");
+add("signed_session_reordered_json", "signed-session", canonical(sessionPass),
+  "verified", { session_facts: sessionFacts(sessionPass) });
+add("signed_session_foreign_anchor", "signed-session", JSON.stringify(sessionPass),
+  "SIGNER_UNTRUSTED", { anchor: foreign });
+const sessionForged = clone(sessionPass);
+sessionForged.ed25519_signature_hex = "00".repeat(64);
+add("signed_session_invalid_signature", "signed-session", JSON.stringify(sessionForged), "SIGNATURE_INVALID");
+const sessionShortSignature = clone(sessionPass);
+sessionShortSignature.ed25519_signature_hex = "00".repeat(63);
+add("signed_session_short_signature", "signed-session", JSON.stringify(sessionShortSignature), "SIGNATURE_MALFORMED");
+const sessionUpperSignature = clone(sessionPass);
+sessionUpperSignature.ed25519_signature_hex = sessionPass.ed25519_signature_hex.toUpperCase();
+assert.notEqual(sessionUpperSignature.ed25519_signature_hex, sessionPass.ed25519_signature_hex);
+add("signed_session_uppercase_signature", "signed-session", JSON.stringify(sessionUpperSignature), "SIGNATURE_MALFORMED");
+const sessionSpliced = clone(sessionPass);
+sessionSpliced.steps[1] = sessionFixture("fail").steps[1];
+add("signed_session_spliced_step", "signed-session", JSON.stringify(sessionSpliced), "EVIDENCE_INVALID");
+const sessionRehashed = clone(sessionPass);
+sessionRehashed.steps[0].artifact_binding_hash = "00".repeat(32);
+sealSession(sessionRehashed);
+sessionRehashed.ed25519_signature_hex = sessionPass.ed25519_signature_hex;
+add("signed_session_rehashed_without_resigning", "signed-session", JSON.stringify(sessionRehashed), "SIGNATURE_INVALID");
+const sessionTruncated = clone(sessionPass);
+sessionTruncated.steps.pop();
+add("signed_session_truncated", "signed-session", JSON.stringify(sessionTruncated), "EVIDENCE_INVALID");
+const sessionWrongHash = clone(sessionPass);
+sessionWrongHash.transcript_hash = "00".repeat(32);
+add("signed_session_wrong_hash", "signed-session", JSON.stringify(sessionWrongHash), "EVIDENCE_INVALID");
+const sessionUnknown = clone(sessionPass);
+sessionUnknown.execution_authorized = true;
+add("signed_session_unsigned_claim", "signed-session", JSON.stringify(sessionUnknown), "EVIDENCE_INVALID");
+const sessionStepUnknown = clone(sessionPass);
+sessionStepUnknown.steps[0].private_evidence = "PRIVATE-SESSION-UNSIGNED";
+add("signed_session_unsigned_step_claim", "signed-session", JSON.stringify(sessionStepUnknown), "EVIDENCE_INVALID");
+for (const [name, mutate] of [
+  ["signed_session_signed_wrong_schema", (value) => { value.schema_version = "vsdk-signed-session-v0.0"; }],
+  ["signed_session_signed_reordered_steps", (value) => { value.steps.reverse(); }],
+  ["signed_session_signed_bad_identity", (value) => { value.verifier_identity = "internal://self"; }],
+  ["signed_session_signed_long_identity", (value) => { value.verifier_identity = "verifier://" + "a".repeat(256); }],
+  ["signed_session_signed_long_id", (value) => { value.session_id = "a".repeat(256); }],
+  ["signed_session_signed_excessive_steps", (value) => {
+    value.steps = Array.from({ length: 1025 }, (_, index) => ({ ...value.steps[0], step_index: index }));
+  }],
+  ["signed_session_signed_bad_time", (value) => { value.created_at = "2026-02-30T00:00:00Z"; }],
+  ["signed_session_signed_noncanonical_tag", (value) => { value.steps[0].step_signature = "A".repeat(64); }],
+  ["signed_session_signed_contradictory_verdict", (value) => { value.final_verdict = "inconclusive"; }],
+  ["signed_session_signed_empty_pass", (value) => { value.steps = []; }],
+]) {
+  const candidate = clone(sessionPass);
+  mutate(candidate);
+  add(name, "signed-session", JSON.stringify(sealSession(candidate)), "EVIDENCE_INVALID");
+}
+const sessionCompact = JSON.stringify(sessionPass);
+add("signed_session_duplicate_member", "signed-session",
+  sessionCompact.replace('"session_id":', '"session_id":"duplicate","session_id":'), "JSON_INVALID");
+add("signed_session_escaped_duplicate", "signed-session",
+  sessionCompact.replace('"session_id":', '"session\\u005fid":"duplicate","session_id":'), "JSON_INVALID");
+add("signed_session_duplicate_step", "signed-session",
+  sessionCompact.replace('"step_index":0', '"step_index":0,"step_index":0'), "JSON_INVALID");
+add("signed_session_trailing_json", "signed-session", sessionCompact + "{}", "JSON_INVALID");
+
 writeFileSync(output, JSON.stringify(cases));
 console.log(JSON.stringify({ vectors: cases.length, incident_sha256: hash(incidentBytes), capsule_expected_hash: capsule.manifest.expected_output_hash, sdk_integrity: sdk.integrity_hash }));
