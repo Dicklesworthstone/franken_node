@@ -46161,7 +46161,7 @@ mod run_trust_gate_tests {
         write_demo_project(tmp.path(), &[("@acme/auth-guard", "^1.4.2")]);
         write_fixture_registry_to(tmp.path());
         let preflight = evaluate_preflight(tmp.path(), Profile::Balanced);
-        let mut config = Config::for_profile(Profile::Balanced);
+        let mut config = config::Config::for_profile(Profile::Balanced);
         config.runtime.max_instructions = Some(123_456);
         let runtime = EngineDispatcher::map_config_to_runtime_config_for_tests(&config);
         let expected = NativeInvocationSettings {

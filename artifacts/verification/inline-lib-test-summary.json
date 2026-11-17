@@ -1,0 +1,21 @@
+{
+  "completed_shards": 152,
+  "elapsed_seconds": 1652.61,
+  "exit_code": 0,
+  "failed_shard_count": 0,
+  "failed_tests": [],
+  "features": "extended-surfaces,test-support",
+  "generated_at": "2026-11-17T17:20:12Z",
+  "ignored_tests": 10,
+  "missing_test_count": 0,
+  "missing_tests_sample": [],
+  "observed_tests": 22716,
+  "ok_tests": 22706,
+  "override_cfg": "franken_node_inline_tests",
+  "plan_id": "d39947d5868d1a7d",
+  "planned_shards": 152,
+  "planned_tests": 22716,
+  "schema_version": "franken-node/inline-lib-test-shard-summary/v1",
+  "target_kind": "lib",
+  "target_name": "frankenengine-node::lib"
+}
