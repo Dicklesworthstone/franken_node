@@ -91,7 +91,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: Dicklesworthstone/franken_engine
-          ref: bbc96b724d68cb9cb0cb3de25b1c494a490eb71d
+          ref: 4566c5890b0434a206430d7bd1d3a62b37b02961
           path: franken_engine
           persist-credentials: false
       - uses: actions/setup-node@v4

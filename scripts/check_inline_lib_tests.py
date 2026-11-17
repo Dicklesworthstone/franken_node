@@ -28,7 +28,9 @@ from pathlib import Path
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 TEST_LINE_RE = re.compile(r"^[^\s:].*: test$")
-TEST_RESULT_RE = re.compile(r"^test (?P<name>.*?) \.\.\. (?P<status>ok|FAILED|ignored)$")
+TEST_RESULT_RE = re.compile(
+    r"^test (?P<name>.*?)(?: - should panic)? \.\.\. (?P<status>ok|FAILED|ignored)(?:, .*)?$"
+)
 FN_HEADER_RE = re.compile(r"\bfn\s+(?:r#)?[A-Za-z_][A-Za-z0-9_]*\b")
 MACRO_HEADER_RE = re.compile(r"\bmacro_rules!\s*[A-Za-z_][A-Za-z0-9_]*")
 TEST_ATTR_RE = re.compile(r"#\s*\[\s*(?:[\w:]+::)?test(?:\s*\([^)]*\))?\s*\]")
@@ -123,8 +125,9 @@ def group_tests_by_prefix(
         if len(bucket) <= max_tests_per_shard:
             groups.append(bucket)
             continue
-        if all(len(name.split("::")) <= depth for name in bucket):
-            groups.extend([[name] for name in bucket])
+        if all(len(name.split("::")) <= depth + 1 for name in bucket):
+            for offset in range(0, len(bucket), max_tests_per_shard):
+                groups.append(bucket[offset : offset + max_tests_per_shard])
             continue
         groups.extend(group_tests_by_prefix(bucket, max_tests_per_shard, depth + 1))
     return groups
@@ -139,6 +142,7 @@ def shard_command(
     bin_name: str = "franken-node",
     features: str = "extended-surfaces,test-support",
     use_rch: bool = True,
+    exact_targets: Sequence[str] | None = None,
 ) -> list[str]:
     target_args = ["--lib"] if target_kind == "lib" else ["--bin", bin_name]
     prefix = [rch_bin, "exec", "--"] if use_rch else []
@@ -154,10 +158,13 @@ def shard_command(
         *target_args,
         "--features",
         features,
-        test_filter,
     ]
-    if exact:
-        command.extend(["--", "--exact"])
+    if exact and exact_targets and len(exact_targets) > 1:
+        command.extend(["--", "--exact", *exact_targets])
+    else:
+        command.append(test_filter)
+        if exact:
+            command.extend(["--", "--exact"])
     return command
 
 
@@ -185,8 +192,13 @@ def build_shard_plan(
     prefix = "inline-lib" if target_kind == "lib" else f"inline-bin-{bin_name}"
 
     for index, group in enumerate(groups, start=1):
-        exact = len(group) == 1
-        test_filter = group[0] if exact else common_test_prefix(group)
+        raw_prefix = common_test_prefix(group)
+        group_set = set(group)
+        unambiguous_prefix = bool(raw_prefix) and all(
+            (name in group_set) for name in tests if raw_prefix in name
+        )
+        exact = len(group) == 1 or not unambiguous_prefix
+        test_filter = group[0] if len(group) == 1 else (raw_prefix or group[0])
         command = shard_command(
             test_filter,
             exact,
@@ -196,6 +208,7 @@ def build_shard_plan(
             bin_name=bin_name,
             features=features,
             use_rch=use_rch,
+            exact_targets=group if exact else None,
         )
         shard_id = f"{prefix}-{index:04d}"
         shards.append(
@@ -433,7 +446,7 @@ def summarize_shard_execution(
     receipt_jsonl: Path,
     exit_code: int,
 ) -> dict[str, object]:
-    observed_ok = 0
+    merged_results: dict[str, str] = {}
     if receipt_jsonl.is_file():
         for raw_line in receipt_jsonl.read_text(encoding="utf-8").splitlines():
             if not raw_line.strip():
@@ -446,7 +459,9 @@ def summarize_shard_execution(
                 continue
             results = rec.get("observed_results", {})
             if isinstance(results, dict):
-                observed_ok += sum(1 for status in results.values() if status == "ok")
+                for name, status in results.items():
+                    merged_results[str(name)] = str(status)
+    observed_ok = sum(1 for status in merged_results.values() if status == "ok")
     return {
         "schema_version": "franken-node/inline-test-execution-summary/v1",
         "target_name": plan.get("target_name", "frankenengine-node::lib"),

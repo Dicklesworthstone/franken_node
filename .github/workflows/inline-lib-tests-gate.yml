@@ -58,6 +58,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     needs: inline-lib-test-preflight
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
     defaults:
       run:
         shell: bash
@@ -72,7 +76,7 @@ jobs:
         run: |
           set -euo pipefail
           bash scripts/bootstrap_source.sh --workspace "$PWD" \
-            --engine-ref bbc96b724d68cb9cb0cb3de25b1c494a490eb71d \
+            --engine-ref 4566c5890b0434a206430d7bd1d3a62b37b02961 \
             --receipt "$RUNNER_TEMP/inline-bin-source-inputs.tsv"
 
       - name: Install pinned Rust nightly
@@ -144,6 +148,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 180
     needs: inline-lib-test-preflight
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
     defaults:
       run:
         shell: bash
@@ -158,7 +166,7 @@ jobs:
         run: |
           set -euo pipefail
           bash scripts/bootstrap_source.sh --workspace "$PWD" \
-            --engine-ref bbc96b724d68cb9cb0cb3de25b1c494a490eb71d \
+            --engine-ref 4566c5890b0434a206430d7bd1d3a62b37b02961 \
             --receipt "$RUNNER_TEMP/inline-source-inputs.tsv"
 
       - name: Install pinned Rust nightly

@@ -300,6 +300,50 @@ class InlineLibShardPlanTest(unittest.TestCase):
             ],
         )
 
+    def test_ambiguous_root_prefix_uses_multi_target_exact_filter(self) -> None:
+        colliding_list = """
+tests::push_bounded_evicts_oldest: test
+tests::push_bounded_zero_cap_clears: test
+security::threshold_sig::tests::accepts_quorum: test
+security::threshold_sig::tests::rejects_duplicate: test
+
+4 tests, 0 benchmarks
+"""
+        plan = build_shard_plan(colliding_list, max_tests_per_shard=2)
+        self.assertEqual(plan["total_shards"], 2)
+        by_filter = {s["test_filter"]: s for s in plan["shards"]}
+        root_shard = by_filter["tests"]
+        self.assertTrue(root_shard["exact"])
+        self.assertEqual(
+            root_shard["command"][-4:],
+            [
+                "--",
+                "--exact",
+                "tests::push_bounded_evicts_oldest",
+                "tests::push_bounded_zero_cap_clears",
+            ],
+        )
+        sec_shard = by_filter["security::threshold_sig::tests"]
+        self.assertFalse(sec_shard["exact"])
+
+    def test_oversized_leaf_module_chunks_into_multi_target_exact_shards(self) -> None:
+        oversized_leaf = "\n".join(
+            f"ops::engine_dispatcher::tests::case_{idx}: test" for idx in range(5)
+        )
+        plan = build_shard_plan(oversized_leaf, max_tests_per_shard=2)
+        self.assertEqual(plan["total_shards"], 3)
+        self.assertEqual([s["test_count"] for s in plan["shards"]], [2, 2, 1])
+        self.assertTrue(all(s["exact"] for s in plan["shards"]))
+        self.assertEqual(
+            plan["shards"][0]["command"][-4:],
+            [
+                "--",
+                "--exact",
+                "ops::engine_dispatcher::tests::case_0",
+                "ops::engine_dispatcher::tests::case_1",
+            ],
+        )
+
 
 class InlineLibShardReceiptTest(unittest.TestCase):
     def test_run_shards_writes_receipts_and_output_files(self) -> None:
@@ -513,9 +557,10 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(franken_node_inline_tests)
                 0,
                 stdout="",
                 stderr=(
-                    "running 2 tests\n"
-                    "test security::threshold_sig::tests::rejects_duplicate_signer ... ok\n"
+                    "running 3 tests\n"
+                    "test security::threshold_sig::tests::rejects_duplicate_signer - should panic ... ok\n"
                     "test runtime::lane_scheduler::tests::control_lane_preempts_background ... ok\n"
+                    "test perf::timing::tests::manual_timing_probe ... ignored, manual benchmark\n"
                 ),
             )
 
@@ -531,7 +576,11 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(franken_node_inline_tests)
             )
             receipt = json.loads((root / "receipts.jsonl").read_text(encoding="utf-8"))
             self.assertEqual(rc, 0)
-            self.assertEqual(len(receipt["observed_results"]), 2)
+            self.assertEqual(len(receipt["observed_results"]), 3)
+            self.assertEqual(
+                receipt["observed_results"]["perf::timing::tests::manual_timing_probe"],
+                "ignored",
+            )
 
 
 if __name__ == "__main__":
