@@ -8489,6 +8489,7 @@ impl EngineDispatcher {
         paths: &RunProjectPaths,
         operator_protected_paths: &[PathBuf],
     ) -> Result<()> {
+        validate_native_frozen_modules(config)?;
         let requirements = RunTrustRequirements::new(&[], &[], false)?
             .with_operator_protected_paths(operator_protected_paths.to_vec())?;
         requirements.verify_operator_source_authority(paths)?;
@@ -8552,6 +8553,7 @@ impl EngineDispatcher {
         Self::apply_replay_capture_defaults(&mut execution_config, self.capture_replay);
         execution_config.runtime.validate_execution_budget()?;
         execution_config.runtime.validate_parse_budget()?;
+        validate_native_frozen_modules(&execution_config)?;
 
         // Environment authority is replayable through the same typed host-I/O
         // transcript as filesystem/network effects; no profile needs a replay

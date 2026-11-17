@@ -1135,7 +1135,60 @@ fn protect_sidecars(protected_root: &Path) -> Result<()> {
     Ok(())
 }
 
+fn lock_inventory_file(protected_root: &Path, create: bool) -> Result<Option<std::fs::File>> {
+    let database_path = protected_root.join(INVENTORY_FILE);
+    if !validate_private_path_if_present(&database_path)? {
+        if !create {
+            return Ok(None);
+        }
+        create_new_runtime_evidence_private_file(&database_path, &[])?;
+        validate_private_path_if_present(&database_path)?;
+    }
+    let observed = std::fs::symlink_metadata(&database_path)
+        .with_context(|| format!("inspect {}", database_path.display()))?;
+    #[cfg(unix)]
+    let file = {
+        use rustix::fs::{Mode, OFlags, open};
+        use std::os::unix::fs::MetadataExt as _;
+        let file = std::fs::File::from(open(
+            &database_path,
+            OFlags::RDWR | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )?);
+        let opened = file.metadata()?;
+        if observed.dev() != opened.dev()
+            || observed.ino() != opened.ino()
+            || opened.nlink() != 1
+            || opened.uid() != rustix::process::geteuid().as_raw()
+        {
+            bail!("native-session inventory lock target identity changed");
+        }
+        validate_runtime_evidence_private_file_metadata(&database_path, &opened)?;
+        file
+    };
+    #[cfg(not(unix))]
+    let file = {
+        validate_runtime_evidence_private_file_metadata(&database_path, &observed)?;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&database_path)?
+    };
+    file.lock()
+        .context("acquire native-session inventory write lock")?;
+    Ok(Some(file))
+}
+
 fn open_inventory(protected_root: &Path, create: bool) -> Result<Option<Connection>> {
+    let _write_lock = if create {
+        lock_inventory_file(protected_root, true)?
+    } else {
+        None
+    };
+    open_inventory_unlocked(protected_root, create)
+}
+
+fn open_inventory_unlocked(protected_root: &Path, create: bool) -> Result<Option<Connection>> {
     let database_path = protected_root.join(INVENTORY_FILE);
     let database_name = database_path
         .to_str()
@@ -1193,9 +1246,10 @@ fn open_inventory(protected_root: &Path, create: bool) -> Result<Option<Connecti
 }
 
 fn retry_snapshot_conflict<T>(mut operation: impl FnMut() -> Result<T>) -> Result<T> {
-    for attempt in 0..6_u32 {
+    let pid_jitter_ms = u64::from(std::process::id() % 17);
+    for attempt in 0..10_u32 {
         match operation() {
-            Err(error) if attempt < 5 => {
+            Err(error) if attempt < 9 => {
                 let message = format!("{error:#}").to_ascii_lowercase();
                 if !message.contains("snapshot conflict")
                     && !message.contains("database is busy")
@@ -1203,7 +1257,8 @@ fn retry_snapshot_conflict<T>(mut operation: impl FnMut() -> Result<T>) -> Resul
                 {
                     return Err(error);
                 }
-                std::thread::sleep(std::time::Duration::from_millis(20 << attempt));
+                let base_ms = 15_u64 << attempt.min(5);
+                std::thread::sleep(std::time::Duration::from_millis(base_ms + pid_jitter_ms));
             }
             result => return result,
         }
@@ -1474,13 +1529,17 @@ fn recover_retained_outcomes(
     if recoveries.is_empty() {
         return Ok(());
     }
+    let _write_lock = lock_inventory_file(protected_root, false)?;
     retry_snapshot_conflict(|| {
-        let mut tx = connection.transaction()?;
+        let fresh = open_inventory_unlocked(protected_root, false)?;
+        let active_conn = fresh.as_ref().unwrap_or(connection);
+        let mut tx = active_conn.transaction()?;
         for (admission, outcome) in &recoveries {
             write_observed_outcome(&mut tx, admission, outcome)?;
         }
         check_bounds(&tx)?;
         tx.commit()?;
+        protect_sidecars(protected_root)?;
         Ok(())
     })?;
     tracing::info!(
@@ -1523,7 +1582,8 @@ impl NativeSessionInventoryGuard {
         }
         verify_admission_capture(protected_root, &admission)?;
         let admission_json = bounded_json(&admission, MAX_ADMISSION_BYTES)?;
-        let connection = retry_snapshot_conflict(|| open_inventory(protected_root, true))?
+        let write_lock = lock_inventory_file(protected_root, true)?;
+        let connection = retry_snapshot_conflict(|| open_inventory_unlocked(protected_root, true))?
             .context("native-session inventory was not created")?;
         retain_admission_receipt(protected_root, &admission)?;
         // A refused attempt keeps the same decision and timestamp through
@@ -1569,9 +1629,11 @@ impl NativeSessionInventoryGuard {
             )?;
             check_bounds(&tx)?;
             tx.commit()?;
+            protect_sidecars(protected_root)?;
             Ok(admitted)
         })
         .context("persist native-session admission before worker spawn")?;
+        drop(write_lock);
         if !admitted {
             // No worker was started for this committed row. A crash before
             // receipt persistence leaves its unsigned outcome indeterminate;
@@ -1704,11 +1766,15 @@ impl NativeSessionInventoryGuard {
 
     fn persist_outcome(&self, outcome: &NativeSessionOutcome) -> Result<()> {
         retain_outcome_receipt(&self.protected_root, &self.admission, outcome)?;
+        let _write_lock = lock_inventory_file(&self.protected_root, false)?;
         retry_snapshot_conflict(|| {
-            let mut tx = self.connection.transaction()?;
+            let fresh = open_inventory_unlocked(&self.protected_root, false)?;
+            let active_conn = fresh.as_ref().unwrap_or(&self.connection);
+            let mut tx = active_conn.transaction()?;
             write_observed_outcome(&mut tx, &self.admission, outcome)?;
             check_bounds(&tx)?;
             tx.commit()?;
+            protect_sidecars(&self.protected_root)?;
             Ok(())
         })
     }
@@ -2289,8 +2355,11 @@ fn begin_drain_at(
     let product_root = load_runtime_evidence_product_root(
         &protected_root.join(RUNTIME_EVIDENCE_ROOT_KEY_RELATIVE_PATH),
     )?;
+    let _write_lock = lock_inventory_file(protected_root, true)?;
     retry_snapshot_conflict(|| {
-        let mut tx = connection.transaction()?;
+        let fresh = open_inventory_unlocked(protected_root, true)?;
+        let active_conn = fresh.as_ref().unwrap_or(&connection);
+        let mut tx = active_conn.transaction()?;
         serialize_project_admission(&mut tx, project_root)?;
         let previous = latest_drain(&tx, project_root)?;
         let records = read_records_in_transaction(&tx)?;
@@ -2448,8 +2517,11 @@ fn finish_drain_at(
     let product_root = load_runtime_evidence_product_root(
         &protected_root.join(RUNTIME_EVIDENCE_ROOT_KEY_RELATIVE_PATH),
     )?;
+    let _write_lock = lock_inventory_file(protected_root, false)?;
     retry_snapshot_conflict(|| {
-        let mut tx = connection.transaction()?;
+        let fresh = open_inventory_unlocked(protected_root, false)?;
+        let active_conn = fresh.as_ref().unwrap_or(&connection);
+        let mut tx = active_conn.transaction()?;
         serialize_project_admission(&mut tx, project_root)?;
         let mut drain =
             latest_drain(&tx, project_root)?.context("no retained native-session drain")?;
@@ -2524,8 +2596,11 @@ fn attest_drain_at(
     let root = load_runtime_evidence_product_root(
         &protected_root.join(RUNTIME_EVIDENCE_ROOT_KEY_RELATIVE_PATH),
     )?;
+    let _write_lock = lock_inventory_file(protected_root, false)?;
     retry_snapshot_conflict(|| {
-        let mut tx = connection.transaction()?;
+        let fresh = open_inventory_unlocked(protected_root, false)?;
+        let active_conn = fresh.as_ref().unwrap_or(&connection);
+        let mut tx = active_conn.transaction()?;
         // Serialize with both admission and fence transitions. Do not freshly
         // sign an earlier read that can omit a newly committed session.
         serialize_project_admission(&mut tx, project_root)?;

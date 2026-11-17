@@ -3012,12 +3012,12 @@ mod signed_process_capture {
 }
 
 #[cfg(feature = "engine")]
-fn write_authenticated_native_candidate(
+fn write_signed_native_candidate(
     workspace: &Path,
     bundle: &serde_json::Value,
     file_name: &str,
     payload_json: String,
-) {
+) -> ed25519_dalek::VerifyingKey {
     use frankenengine_node::ops::native_replay::NativeReplayCapture;
     use frankenengine_node::tools::replay_bundle::{
         ReplayBundleSigningMaterial, generate_replay_bundle_from_evidence, sign_replay_bundle,
@@ -3068,9 +3068,20 @@ fn write_authenticated_native_candidate(
         to_canonical_json(&candidate).unwrap(),
     )
     .expect("write authenticated candidate");
+    signing_key.verifying_key()
+}
+
+#[cfg(feature = "engine")]
+fn write_authenticated_native_candidate(
+    workspace: &Path,
+    bundle: &serde_json::Value,
+    file_name: &str,
+    payload_json: String,
+) {
+    let verifying_key = write_signed_native_candidate(workspace, bundle, file_name, payload_json);
     frankenengine_verifier_sdk::incident_bundle::verify_incident_bundle(
         &fs::read(workspace.join(file_name)).unwrap(),
-        &signing_key.verifying_key(),
+        &verifying_key,
     )
     .expect("independent SDK accepts structure and signature before guest execution is tested");
 }
@@ -3248,7 +3259,24 @@ fn native_incident_replay_restores_frozen_esm_after_the_original_project_is_move
             1,
         );
         assert_ne!(altered, raw);
-        write_authenticated_native_candidate(&root, &bundle, "wrong-capsule.fnbundle", altered);
+        let verifying_key =
+            write_signed_native_candidate(&root, &bundle, "wrong-capsule.fnbundle", altered);
+        frankenengine_verifier_sdk::incident_bundle::verify_incident_bundle(
+            &fs::read(root.join(&name)).unwrap(),
+            &verifying_key,
+        )
+        .expect("independent SDK accepts genuine frozen-ESM replay bundle");
+        let sdk_err = frankenengine_verifier_sdk::incident_bundle::verify_incident_bundle(
+            &fs::read(root.join("wrong-capsule.fnbundle")).unwrap(),
+            &verifying_key,
+        )
+        .expect_err("independent SDK also rejects altered source capsule digest");
+        assert!(
+            sdk_err
+                .to_string()
+                .contains("source capsule digest does not match captured bytes"),
+            "{sdk_err:?}"
+        );
 
         let replay_root = parent.path().join("replay-operator");
         fs::create_dir_all(replay_root.join(".franken-node/keys")).unwrap();

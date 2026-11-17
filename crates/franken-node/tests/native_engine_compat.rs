@@ -105,22 +105,33 @@ fn invoke_product_supervisor_with_options(
     // same-executable parent channel.
     let mut cli_config = config.clone();
     let _synthesis = cli_config.synthesize_init_security_defaults();
-    let config_name = "bd-8gpux-franken-node.toml";
-    std::fs::write(
-        working_dir.join(config_name),
-        cli_config
-            .to_toml()
-            .map_err(|error| format!("serialize product test config: {error}"))?,
-    )
-    .map_err(|error| format!("write product test config: {error}"))?;
+    let serialized = cli_config
+        .to_toml()
+        .map_err(|error| format!("serialize product test config: {error}"))?;
+    let config_dir =
+        TempDir::new().map_err(|error| format!("allocate product test config dir: {error}"))?;
 
-    let output = Command::new(franken_node_bin())
+    let mut command = Command::new(franken_node_bin());
+    command
         .arg("run")
         .arg(relative_app)
         .arg("--policy")
-        .arg(policy_mode)
-        .arg("--config")
-        .arg(config_name)
+        .arg(policy_mode);
+    if working_dir.join("franken_node.toml").exists() {
+        let config_name = "bd-8gpux-franken-node.toml";
+        std::fs::write(working_dir.join(config_name), serialized)
+            .map_err(|error| format!("write product test config: {error}"))?;
+        command.arg("--config").arg(config_name);
+    } else {
+        let xdg_app_dir = config_dir.path().join("franken-node");
+        std::fs::create_dir_all(&xdg_app_dir)
+            .map_err(|error| format!("create XDG product test config dir: {error}"))?;
+        std::fs::write(xdg_app_dir.join("config.toml"), serialized)
+            .map_err(|error| format!("write XDG product test config: {error}"))?;
+        command.env("XDG_CONFIG_HOME", config_dir.path());
+    }
+
+    let output = command
         .arg("--runtime")
         .arg("franken-engine")
         .arg("--engine-bin")
