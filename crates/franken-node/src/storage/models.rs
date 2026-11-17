@@ -1253,6 +1253,507 @@ pub fn all_model_metadata() -> Vec<ModelMeta> {
 }
 
 // ---------------------------------------------------------------------------
+// Production sqlmodel_rust typed schema & drift-audit boundary (bd-tenx3.1)
+// ---------------------------------------------------------------------------
+
+pub const EVENT_SQLMODEL_MODEL_REGISTERED: &str = "SQLMODEL_MODEL_REGISTERED";
+pub const EVENT_SQLMODEL_SCHEMA_DRIFT_DETECTED: &str = "SQLMODEL_SCHEMA_DRIFT_DETECTED";
+pub const EVENT_SQLMODEL_ROUND_TRIP_PASS: &str = "SQLMODEL_ROUND_TRIP_PASS";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoreSchemaAuditReport {
+    pub store_id: String,
+    pub event_code: String,
+    pub is_drift_free: bool,
+    pub expected_table_count: usize,
+    pub observed_table_count: usize,
+    pub expected_tables: Vec<String>,
+    pub observed_tables: Vec<String>,
+    pub operation_count: usize,
+    pub destructive_operation_count: usize,
+    pub operations_summary: Vec<String>,
+    pub remediation_ddl: Vec<String>,
+}
+
+/// Build a typed [`sqlmodel_schema::ColumnInfo`] from [`sqlmodel_core::SqlType`].
+pub fn typed_column(
+    name: &str,
+    sql_type: sqlmodel_core::SqlType,
+    nullable: bool,
+    primary_key: bool,
+    auto_increment: bool,
+) -> sqlmodel_schema::ColumnInfo {
+    let type_name = sql_type.sql_name_for(sqlmodel_core::Dialect::Sqlite);
+    sqlmodel_schema::ColumnInfo {
+        name: name.to_string(),
+        parsed_type: sqlmodel_schema::ParsedSqlType::parse(&type_name),
+        sql_type: type_name,
+        nullable,
+        default: None,
+        primary_key,
+        auto_increment,
+        comment: None,
+    }
+}
+
+/// Build a typed [`sqlmodel_schema::TableInfo`] with explicit primary keys and unique constraints.
+pub fn typed_table(
+    name: &str,
+    columns: Vec<sqlmodel_schema::ColumnInfo>,
+    primary_key: Vec<&str>,
+    unique_sets: Vec<(&str, Vec<&str>)>,
+) -> sqlmodel_schema::TableInfo {
+    sqlmodel_schema::TableInfo {
+        name: name.to_string(),
+        columns,
+        primary_key: primary_key.into_iter().map(str::to_string).collect(),
+        foreign_keys: Vec::new(),
+        unique_constraints: unique_sets
+            .into_iter()
+            .map(|(uk_name, cols)| sqlmodel_schema::UniqueConstraintInfo {
+                name: if uk_name.is_empty() {
+                    None
+                } else {
+                    Some(uk_name.to_string())
+                },
+                columns: cols.into_iter().map(str::to_string).collect(),
+            })
+            .collect(),
+        check_constraints: Vec::new(),
+        indexes: Vec::new(),
+        comment: None,
+    }
+}
+
+fn infer_domain_column_spec(
+    model_table: &str,
+    col_name: &str,
+    idx: usize,
+) -> (sqlmodel_core::SqlType, bool) {
+    use sqlmodel_core::SqlType;
+    let nullable = matches!(
+        (model_table, col_name),
+        ("lease_quorum_coordination", "decided_at")
+            | ("rollout_state", "activated_at")
+            | ("health_gate_policy_state", "message")
+            | ("artifact_journal", "metadata_json")
+            | ("tiered_trust_storage", "expires_at")
+            | ("snapshot_policy_state", "last_snapshot_at")
+            | ("retention_policy_state", "last_purge_at")
+    );
+    let sql_type = if matches!(
+        col_name,
+        "health_gate_passed"
+            | "required"
+            | "passed"
+            | "revoked"
+            | "wal_enabled"
+            | "reversible"
+            | "released"
+    ) {
+        SqlType::Boolean
+    } else if col_name == "coverage_pct" {
+        SqlType::Real
+    } else if matches!(
+        col_name,
+        "lease_seq"
+            | "epoch"
+            | "rollout_epoch"
+            | "last_seq"
+            | "window_low"
+            | "window_high"
+            | "input_count"
+            | "sync_interval_ms"
+            | "interval_seconds"
+            | "merge_count"
+            | "max_age_seconds"
+            | "max_entries"
+            | "items_repaired"
+            | "items_failed"
+            | "sample_size"
+    ) {
+        SqlType::BigInt
+    } else if matches!(
+        col_name,
+        "fence_version"
+            | "renewed_count"
+            | "ack_count"
+            | "required_acks"
+            | "version"
+            | "assurance_level"
+            | "retention_count"
+    ) {
+        SqlType::Integer
+    } else {
+        let _ = idx;
+        SqlType::Text
+    };
+    (sql_type, nullable)
+}
+
+/// Construct the canonical [`sqlmodel_schema::DatabaseSchema`] for all 21 classified domain models.
+pub fn canonical_domain_database_schema() -> sqlmodel_schema::DatabaseSchema {
+    let mut schema = sqlmodel_schema::DatabaseSchema::new(sqlmodel_schema::Dialect::Sqlite);
+    for meta in all_model_metadata() {
+        let mut cols = Vec::with_capacity(meta.columns.len());
+        let mut pk_cols = Vec::new();
+        for (idx, &col_name) in meta.columns.iter().enumerate() {
+            let (sql_type, nullable) = infer_domain_column_spec(meta.table, col_name, idx);
+            let is_pk = idx == 0;
+            if is_pk {
+                pk_cols.push(col_name);
+            }
+            cols.push(typed_column(
+                col_name,
+                sql_type,
+                nullable && !is_pk,
+                is_pk,
+                false,
+            ));
+        }
+        let table = typed_table(meta.table, cols, pk_cols, Vec::new());
+        schema.tables.insert(meta.table.to_string(), table);
+    }
+    schema
+}
+
+/// Render deterministic SQLite DDL statements for all 21 domain models via [`sqlmodel_schema::SqliteDdlGenerator`].
+pub fn canonical_domain_sqlite_ddl() -> Vec<String> {
+    use sqlmodel_schema::DdlGenerator as _;
+    let expected = canonical_domain_database_schema();
+    let empty = sqlmodel_schema::DatabaseSchema::new(sqlmodel_schema::Dialect::Sqlite);
+    let mut table_names: Vec<&String> = expected.tables.keys().collect();
+    table_names.sort();
+    let ops: Vec<sqlmodel_schema::diff::SchemaOperation> = table_names
+        .into_iter()
+        .filter_map(|name| expected.tables.get(name).cloned())
+        .map(sqlmodel_schema::diff::SchemaOperation::CreateTable)
+        .collect();
+    let _ = empty;
+    sqlmodel_schema::SqliteDdlGenerator.generate_all(&ops)
+}
+
+/// Expected [`sqlmodel_schema::DatabaseSchema`] for `.franken-node/state/frankensqlite/telemetry.db`.
+pub fn expected_telemetry_store_schema() -> sqlmodel_schema::DatabaseSchema {
+    use sqlmodel_core::SqlType;
+    let mut schema = sqlmodel_schema::DatabaseSchema::new(sqlmodel_schema::Dialect::Sqlite);
+    schema.tables.insert(
+        "adapter_store".to_string(),
+        typed_table(
+            "adapter_store",
+            vec![
+                typed_column("class", SqlType::Text, false, true, false),
+                typed_column("key", SqlType::Text, false, true, false),
+                typed_column("value", SqlType::Blob, false, false, false),
+                typed_column("updated_at", SqlType::Text, false, false, false),
+            ],
+            vec!["class", "key"],
+            Vec::new(),
+        ),
+    );
+    schema.tables.insert(
+        "adapter_audit_journal".to_string(),
+        typed_table(
+            "adapter_audit_journal",
+            vec![
+                typed_column("seq", SqlType::Integer, true, true, true),
+                typed_column("class", SqlType::Text, false, false, false),
+                typed_column("key", SqlType::Text, false, false, false),
+                typed_column("value_sha256", SqlType::Text, false, false, false),
+                typed_column("recorded_at", SqlType::Text, false, false, false),
+            ],
+            vec!["seq"],
+            vec![("uk_adapter_audit_journal_key", vec!["key"])],
+        ),
+    );
+    schema.tables.insert(
+        "adapter_schema_versions".to_string(),
+        typed_table(
+            "adapter_schema_versions",
+            vec![
+                typed_column("version", SqlType::Integer, true, true, false),
+                typed_column("applied_at", SqlType::Text, false, false, false),
+                typed_column("description", SqlType::Text, false, false, false),
+            ],
+            vec!["version"],
+            Vec::new(),
+        ),
+    );
+    schema
+}
+
+/// Expected [`sqlmodel_schema::DatabaseSchema`] for `.franken-node/state/fleet-state.db`.
+pub fn expected_fleet_store_schema() -> sqlmodel_schema::DatabaseSchema {
+    use sqlmodel_core::SqlType;
+    let mut schema = sqlmodel_schema::DatabaseSchema::new(sqlmodel_schema::Dialect::Sqlite);
+    schema.tables.insert(
+        "fleet_meta".to_string(),
+        typed_table(
+            "fleet_meta",
+            vec![
+                typed_column("key", SqlType::Text, true, true, false),
+                typed_column("value", SqlType::Text, false, false, false),
+            ],
+            vec!["key"],
+            Vec::new(),
+        ),
+    );
+    schema.tables.insert(
+        "fleet_actions".to_string(),
+        typed_table(
+            "fleet_actions",
+            vec![
+                typed_column("seq", SqlType::Integer, true, true, true),
+                typed_column("action_id", SqlType::Text, false, false, false),
+                typed_column("emitted_at", SqlType::Text, false, false, false),
+                typed_column("action_json", SqlType::Text, false, false, false),
+            ],
+            vec!["seq"],
+            vec![("uk_fleet_actions_action_id", vec!["action_id"])],
+        ),
+    );
+    for table_name in ["fleet_nodes", "fleet_node_supervisor_heads"] {
+        schema.tables.insert(
+            table_name.to_string(),
+            typed_table(
+                table_name,
+                vec![
+                    typed_column("zone_id", SqlType::Text, false, true, false),
+                    typed_column("node_id", SqlType::Text, false, true, false),
+                    typed_column("status_json", SqlType::Text, false, false, false),
+                ],
+                vec!["zone_id", "node_id"],
+                Vec::new(),
+            ),
+        );
+    }
+    schema.tables.insert(
+        "fleet_epoch_commits".to_string(),
+        typed_table(
+            "fleet_epoch_commits",
+            vec![
+                typed_column("epoch", SqlType::Text, true, true, false),
+                typed_column("commit_json", SqlType::Text, false, false, false),
+            ],
+            vec!["epoch"],
+            Vec::new(),
+        ),
+    );
+    schema.tables.insert(
+        "fleet_guarded_policy_publications".to_string(),
+        typed_table(
+            "fleet_guarded_policy_publications",
+            vec![
+                typed_column("action_id", SqlType::Text, true, true, false),
+                typed_column("hold_action_id", SqlType::Text, false, false, false),
+                typed_column("receipt_json", SqlType::Text, false, false, false),
+            ],
+            vec!["action_id"],
+            Vec::new(),
+        ),
+    );
+    schema
+}
+
+/// Expected [`sqlmodel_schema::DatabaseSchema`] for `.franken-node/state/trust-card-registry.v1.db`.
+pub fn expected_trust_card_registry_schema() -> sqlmodel_schema::DatabaseSchema {
+    use sqlmodel_core::SqlType;
+    let mut schema = sqlmodel_schema::DatabaseSchema::new(sqlmodel_schema::Dialect::Sqlite);
+    schema.tables.insert(
+        "registry_meta".to_string(),
+        typed_table(
+            "registry_meta",
+            vec![
+                typed_column("key", SqlType::Text, true, true, false),
+                typed_column("value", SqlType::Text, false, false, false),
+            ],
+            vec!["key"],
+            Vec::new(),
+        ),
+    );
+    schema.tables.insert(
+        "registry_state".to_string(),
+        typed_table(
+            "registry_state",
+            vec![
+                typed_column("slot", SqlType::Text, true, true, false),
+                typed_column("canonical_json", SqlType::Text, false, false, false),
+            ],
+            vec!["slot"],
+            Vec::new(),
+        ),
+    );
+    schema
+}
+
+/// Expected [`sqlmodel_schema::DatabaseSchema`] for `.franken-node/state/native-sessions.db`.
+pub fn expected_native_sessions_schema() -> sqlmodel_schema::DatabaseSchema {
+    use sqlmodel_core::SqlType;
+    let mut schema = sqlmodel_schema::DatabaseSchema::new(sqlmodel_schema::Dialect::Sqlite);
+    schema.tables.insert(
+        "native_sessions".to_string(),
+        typed_table(
+            "native_sessions",
+            vec![
+                typed_column("session_nonce", SqlType::Text, false, true, false),
+                typed_column("admission_json", SqlType::Text, false, false, false),
+                typed_column("outcome_json", SqlType::Text, true, false, false),
+            ],
+            vec!["session_nonce"],
+            Vec::new(),
+        ),
+    );
+    schema.tables.insert(
+        "native_session_drains".to_string(),
+        typed_table(
+            "native_session_drains",
+            vec![
+                typed_column("drain_id", SqlType::Text, false, true, false),
+                typed_column("project_root", SqlType::Text, false, false, false),
+                typed_column("generation", SqlType::Integer, false, false, false),
+                typed_column("state_json", SqlType::Text, false, false, false),
+            ],
+            vec!["drain_id"],
+            vec![(
+                "uk_native_session_drains_project_root_generation",
+                vec!["project_root", "generation"],
+            )],
+        ),
+    );
+    schema.tables.insert(
+        "native_session_admission_serialization".to_string(),
+        typed_table(
+            "native_session_admission_serialization",
+            vec![
+                typed_column("project_root", SqlType::Text, false, true, false),
+                typed_column("transaction_nonce", SqlType::Text, false, false, false),
+            ],
+            vec!["project_root"],
+            Vec::new(),
+        ),
+    );
+    schema
+}
+
+fn describe_schema_operation(op: &sqlmodel_schema::diff::SchemaOperation) -> String {
+    use sqlmodel_schema::diff::SchemaOperation;
+    match op {
+        SchemaOperation::CreateTable(t) => format!("missing_table:{}", t.name),
+        SchemaOperation::DropTable(name) => format!("unexpected_table:{name}"),
+        SchemaOperation::RenameTable { from, to } => format!("rename_table:{from}->{to}"),
+        SchemaOperation::AddColumn { table, column } => {
+            format!("missing_column:{table}.{}", column.name)
+        }
+        SchemaOperation::DropColumn { table, column, .. } => {
+            format!("unexpected_column:{table}.{column}")
+        }
+        SchemaOperation::AlterColumnType {
+            table,
+            column,
+            from_type,
+            to_type,
+            ..
+        } => format!("column_type_drift:{table}.{column}:{from_type}->{to_type}"),
+        SchemaOperation::AlterColumnNullable {
+            table,
+            column,
+            from_nullable,
+            to_nullable,
+            ..
+        } => format!(
+            "column_nullability_drift:{table}.{}:{from_nullable}->{to_nullable}",
+            column.name
+        ),
+        SchemaOperation::AlterColumnDefault { table, column, .. } => {
+            format!("column_default_drift:{table}.{column}")
+        }
+        SchemaOperation::RenameColumn { table, from, to } => {
+            format!("rename_column:{table}.{from}->{to}")
+        }
+        SchemaOperation::AddPrimaryKey { table, columns, .. } => {
+            format!("missing_pk:{table}({})", columns.join(","))
+        }
+        SchemaOperation::DropPrimaryKey { table, .. } => format!("unexpected_pk:{table}"),
+        SchemaOperation::AddForeignKey { table, fk, .. } => {
+            format!("missing_fk:{table}.{}", fk.column)
+        }
+        SchemaOperation::DropForeignKey { table, name, .. } => {
+            format!("unexpected_fk:{table}.{name}")
+        }
+        SchemaOperation::AddUnique {
+            table, constraint, ..
+        } => format!("missing_unique:{table}({})", constraint.columns.join(",")),
+        SchemaOperation::DropUnique { table, name, .. } => {
+            format!("unexpected_unique:{table}.{name}")
+        }
+        SchemaOperation::CreateIndex { table, index } => {
+            format!("missing_index:{table}.{}", index.name)
+        }
+        SchemaOperation::DropIndex { table, name } => {
+            format!("unexpected_index:{table}.{name}")
+        }
+    }
+}
+
+/// Compare an introspected [`sqlmodel_schema::DatabaseSchema`] against an expected schema.
+///
+/// Constraint-name-only differences on SQLite auto-generated `sqlite_autoindex_*`
+/// unique constraints are normalized by matching unique column sets before diffing.
+pub fn audit_database_schema(
+    store_id: &str,
+    observed: &sqlmodel_schema::DatabaseSchema,
+    expected: &sqlmodel_schema::DatabaseSchema,
+) -> StoreSchemaAuditReport {
+    use sqlmodel_schema::DdlGenerator as _;
+    let mut normalized_observed = observed.clone();
+    for (table_name, obs_table) in &mut normalized_observed.tables {
+        if let Some(exp_table) = expected.tables.get(table_name) {
+            for obs_uk in &mut obs_table.unique_constraints {
+                if let Some(exp_uk) = exp_table
+                    .unique_constraints
+                    .iter()
+                    .find(|candidate| candidate.columns == obs_uk.columns)
+                {
+                    obs_uk.name.clone_from(&exp_uk.name);
+                }
+            }
+        }
+    }
+
+    let diff = sqlmodel_schema::diff::schema_diff(&normalized_observed, expected);
+    let mut expected_tables: Vec<String> = expected.tables.keys().cloned().collect();
+    expected_tables.sort();
+    let mut observed_tables: Vec<String> = normalized_observed.tables.keys().cloned().collect();
+    observed_tables.sort();
+
+    let operations_summary: Vec<String> = diff
+        .operations
+        .iter()
+        .map(describe_schema_operation)
+        .collect();
+    let remediation_ddl = sqlmodel_schema::SqliteDdlGenerator.generate_all(&diff.operations);
+    let is_drift_free = diff.is_empty();
+
+    StoreSchemaAuditReport {
+        store_id: store_id.to_string(),
+        event_code: if is_drift_free {
+            EVENT_SQLMODEL_ROUND_TRIP_PASS.to_string()
+        } else {
+            EVENT_SQLMODEL_SCHEMA_DRIFT_DETECTED.to_string()
+        },
+        is_drift_free,
+        expected_table_count: expected_tables.len(),
+        observed_table_count: observed_tables.len(),
+        expected_tables,
+        observed_tables,
+        operation_count: diff.len(),
+        destructive_operation_count: diff.destructive_operations().len(),
+        operations_summary,
+        remediation_ddl,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -2427,5 +2928,51 @@ mod tests {
                 assert_eq!(m.version, "1.0.0");
             }
         }
+    }
+
+    #[test]
+    fn canonical_domain_database_schema_covers_all_21_models_and_generates_ddl() {
+        let schema = canonical_domain_database_schema();
+        assert_eq!(schema.tables.len(), 21);
+        for meta in all_model_metadata() {
+            let table = schema
+                .table(meta.table)
+                .expect("every classified model must map to a TableInfo");
+            assert_eq!(table.columns.len(), meta.columns.len());
+            assert_eq!(table.primary_key, vec![meta.columns[0].to_string()]);
+        }
+        let ddl = canonical_domain_sqlite_ddl();
+        assert_eq!(ddl.len(), 21);
+        let audit = audit_database_schema("canonical_21", &schema, &schema);
+        assert!(audit.is_drift_free);
+        assert_eq!(audit.event_code, EVENT_SQLMODEL_ROUND_TRIP_PASS);
+        assert_eq!(audit.operation_count, 0);
+    }
+
+    #[test]
+    fn audit_database_schema_detects_missing_table_and_column_drift() {
+        let expected = expected_telemetry_store_schema();
+        let mut drifted = expected.clone();
+        drifted.tables.remove("adapter_schema_versions");
+        if let Some(store_table) = drifted.tables.get_mut("adapter_store") {
+            store_table.columns.pop();
+        }
+        let audit = audit_database_schema("telemetry", &drifted, &expected);
+        assert!(!audit.is_drift_free);
+        assert_eq!(audit.event_code, EVENT_SQLMODEL_SCHEMA_DRIFT_DETECTED);
+        assert!(audit.operation_count >= 2);
+        assert!(
+            audit
+                .operations_summary
+                .iter()
+                .any(|op| op == "missing_table:adapter_schema_versions")
+        );
+        assert!(
+            audit
+                .operations_summary
+                .iter()
+                .any(|op| op == "missing_column:adapter_store.updated_at")
+        );
+        assert!(!audit.remediation_ddl.is_empty());
     }
 }

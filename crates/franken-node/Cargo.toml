@@ -134,7 +134,7 @@ profiling = ["dep:hdrhistogram"]
 fleet-control-plane-server = ["http-client", "dep:fastapi_rust", "dep:asupersync"]
 # Default stays limited to features needed for a usable node binary.
 # Heavy product surfaces and optional export formats require explicit opt-in.
-default = ["engine", "http-client", "external-commands", "fleet-control-plane-server"]
+default = ["engine", "http-client", "external-commands", "fleet-control-plane-server", "asupersync-transport"]
 
 [dependencies]
 anyhow.workspace = true
@@ -216,6 +216,12 @@ loom = { version = "0.7", optional = true }
 # different 0.1.19s. Re-point at the path only once frankensqlite's async
 # migration (their bd-2jpu6) has landed and been released.
 fsqlite = { version = "0.1.19", default-features = false, features = ["native"] }
+# bd-tenx3.1: promoted from [dev-dependencies] to the live persistence boundary —
+# DurableFrankensqliteAdapter and storage::models drive SQLite DDL generation,
+# canonical 21-model schema construction, and live schema-drift auditing via
+# sqlmodel-core + sqlmodel-schema.
+sqlmodel-core = { path = "../../../sqlmodel_rust/crates/sqlmodel-core" }
+sqlmodel-schema = { path = "../../../sqlmodel_rust/crates/sqlmodel-schema" }
 
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1.1.4", default-features = false, features = ["std", "event", "fs", "process"] }
@@ -246,8 +252,6 @@ fastapi_rust = { package = "fastapi-rust", path = "../../../fastapi_rust/crates/
 tokio = { workspace = true, features = ["sync", "time"] }
 regex = "1.11.1"
 sqlmodel = { path = "../../../sqlmodel_rust/crates/sqlmodel", default-features = false }
-sqlmodel-core = { path = "../../../sqlmodel_rust/crates/sqlmodel-core" }
-sqlmodel-schema = { path = "../../../sqlmodel_rust/crates/sqlmodel-schema" }
 syn = { version = "2.0", features = ["full"] }
 tracing-subscriber = { workspace = true }
 insta = { version = "1.40", features = ["json", "filters", "redactions"] }

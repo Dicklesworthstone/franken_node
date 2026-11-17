@@ -539,6 +539,10 @@ pub enum RuntimeCommand {
     /// Exercise and audit supervision restart budgets, three-phase task cancellation, two-phase obligation channels, VEF policy constraints, policy checkpoints, and subsystem capability narrowing.
     #[command(name = "supervision-audit")]
     SupervisionAudit(RuntimeSupervisionAuditArgs),
+
+    /// Audit hierarchical execution-region quiescence, all-point cancellation injection, saga compensation, VOI diagnostic scheduling, admission budgets, perf budget guards, and durability violation halt bundles.
+    #[command(name = "region-quiescence-audit")]
+    RegionQuiescenceAudit(RuntimeRegionQuiescenceAuditArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -633,6 +637,33 @@ pub struct RuntimeSupervisionAuditArgs {
     pub trace_id: String,
 
     /// Emit `franken-node/runtime-supervision-audit-cli/v1` JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Parser)]
+pub struct RuntimeRegionQuiescenceAuditArgs {
+    /// Default drain budget in milliseconds for the region hierarchy.
+    #[arg(long, default_value_t = 500)]
+    pub drain_budget_ms: u64,
+
+    /// Simulated elapsed drain duration in milliseconds when closing the root region.
+    #[arg(long, default_value_t = 120)]
+    pub elapsed_drain_ms: u64,
+
+    /// VOI diagnostic scheduling budget units per window.
+    #[arg(long, default_value_t = 1000.0)]
+    pub voi_budget_units: f64,
+
+    /// Inject a durability contract violation to verify halt-gate enforcement.
+    #[arg(long)]
+    pub inject_durability_violation: bool,
+
+    /// Correlation trace identifier.
+    #[arg(long, default_value = "trace-region-quiescence-audit")]
+    pub trace_id: String,
+
+    /// Emit `franken-node/runtime-region-quiescence-audit-cli/v1` JSON.
     #[arg(long)]
     pub json: bool,
 }
@@ -1087,6 +1118,10 @@ pub enum MigrateCommand {
 
     /// Progressive rollout state machine (shadow -> canary -> ramp -> default) with fail-closed gates.
     Rollout(MigrateRolloutArgs),
+
+    /// Generate archetype migration plans, activation transcripts, and optional source-fix / product minimization reports.
+    #[command(name = "kit-plan")]
+    KitPlan(MigrateKitPlanArgs),
 }
 
 #[derive(Debug, Parser)]
@@ -1780,6 +1815,18 @@ pub struct MigrateRolloutArgs {
     #[arg(long)]
     pub operator_id: Option<String>,
 
+    /// Optional fleet zone synchronized through the durable fleet transport (`fleet-state.db`) on promotion and rollback.
+    #[arg(long)]
+    pub fleet_zone: Option<String>,
+
+    /// Explicitly cancel the active migration rollout and record structured cancellation/rollback state.
+    #[arg(long)]
+    pub cancel: bool,
+
+    /// Emit structured rollout lifecycle log events as JSONL to stderr.
+    #[arg(long)]
+    pub structured_logs_jsonl: bool,
+
     /// Emit structured JSON output.
     #[arg(long)]
     pub json: bool,
@@ -1790,7 +1837,10 @@ impl MigrateRolloutArgs {
     /// Ignoring promotion flags on rollback could otherwise restore sources
     /// even though the operator submitted a contradictory request.
     pub fn validate_intent(&self) -> Result<()> {
-        if self.action != MigrateRolloutAction::Promote {
+        if self.cancel && self.action == MigrateRolloutAction::Status {
+            anyhow::bail!("--cancel cannot be combined with --action status");
+        }
+        if self.action != MigrateRolloutAction::Promote || self.cancel {
             for (flag, supplied) in [
                 ("--stage", self.stage.is_some()),
                 ("--ramp-pct", self.ramp_pct.is_some()),
@@ -1801,7 +1851,7 @@ impl MigrateRolloutArgs {
             ] {
                 anyhow::ensure!(
                     !supplied,
-                    "{flag} applies only to --action promote; the requested action was not performed"
+                    "{flag} applies only to non-cancelled --action promote; the requested action was not performed"
                 );
             }
         }
@@ -1840,8 +1890,38 @@ impl MigrateRolloutArgs {
                 "--ramp-pct requires the ramp stage; the requested action was not performed"
             );
         }
+        if let Some(zone) = &self.fleet_zone {
+            anyhow::ensure!(!zone.trim().is_empty(), "--fleet-zone must not be empty");
+        }
         Ok(())
     }
+}
+
+#[derive(Debug, Parser)]
+pub struct MigrateKitPlanArgs {
+    /// Application archetype (`express`, `fastify`, `koa`, `nextjs`, `bun_native`).
+    #[arg(long, default_value = "express")]
+    pub archetype: String,
+
+    /// Optional project path to inspect source-fix transactions when present.
+    #[arg(long)]
+    pub project_path: Option<PathBuf>,
+
+    /// Optional transaction identifier to inspect with `migration::source_fix::inspect`.
+    #[arg(long)]
+    pub transaction_id: Option<String>,
+
+    /// Connector identifier exercised through the deterministic activation pipeline.
+    #[arg(long, default_value = "conn:migration-pilot")]
+    pub connector_id: String,
+
+    /// Correlation trace identifier.
+    #[arg(long, default_value = "trace-migrate-kit-plan")]
+    pub trace_id: String,
+
+    /// Emit `franken-node/migrate-kit-plan-cli/v1` JSON.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -2239,6 +2319,10 @@ pub enum TrustCommand {
     /// Audit suspicious-artifact challenge verification, publisher stake gating/slashing, and extension intent firewall policies.
     #[command(name = "governance-audit")]
     GovernanceAudit(TrustGovernanceAuditArgs),
+
+    /// Audit gossip trust-fabric convergence, compiled claim scoreboards, ecosystem registry/reputation, revocation freshness tiers, adversarial campaign gates, and isolation-rail routing.
+    #[command(name = "fabric-convergence-audit")]
+    FabricConvergenceAudit(TrustFabricConvergenceAuditArgs),
 }
 
 #[derive(Debug, Parser)]
@@ -2442,6 +2526,36 @@ pub struct TrustGovernanceAuditArgs {
     pub extension_id: String,
 
     /// Emit `franken-node/trust-governance-audit-cli/v1` JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Parser)]
+pub struct TrustFabricConvergenceAuditArgs {
+    /// Number of trust-fabric fleet nodes simulated in gossip convergence (`2..=16`).
+    #[arg(long, default_value_t = 3)]
+    pub fleet_nodes: usize,
+
+    /// Workload risk score (`0.0..=1.0`) evaluated by the isolation-rail router.
+    #[arg(long, default_value_t = 0.72)]
+    pub workload_risk_score: f64,
+
+    /// Revocation propagation age in seconds evaluated against the safety-tier policy.
+    #[arg(long, default_value_t = 15)]
+    pub revocation_age_secs: u64,
+
+    /// Claim text compiled into an evidence-linked trust scoreboard entry.
+    #[arg(
+        long,
+        default_value = "Verified lockstep and revocation freshness gates active"
+    )]
+    pub claim_text: String,
+
+    /// Correlation trace identifier.
+    #[arg(long, default_value = "trace-trust-fabric-audit")]
+    pub trace_id: String,
+
+    /// Emit `franken-node/trust-fabric-convergence-audit-cli/v1` JSON.
     #[arg(long)]
     pub json: bool,
 }
@@ -3328,6 +3442,12 @@ pub enum OpsCommand {
     /// Run deterministic virtual transport fault campaigns and DPOR control-plane schedule exploration.
     #[command(name = "fault-schedule-audit")]
     FaultScheduleAudit(OpsFaultScheduleAuditArgs),
+    /// Audit canonical 21-domain `sqlmodel` schemas and introspect live workspace SQLite databases (`telemetry.db`, `fleet-state.db`, `trust-card-registry.v1.db`, `native-sessions.db`) for schema drift.
+    #[command(name = "storage-schema-audit")]
+    StorageSchemaAudit(OpsStorageSchemaAuditArgs),
+    /// Evaluate DGIS maintainer/publisher fragility fixtures, deterministic npm graph seeds, and validation-proof economics SLO reports.
+    #[command(name = "dgis-fixture-suite")]
+    DgisFixtureSuite(OpsDgisFixtureSuiteArgs),
 }
 
 #[derive(Debug, Parser)]
@@ -3426,6 +3546,40 @@ pub struct OpsFaultScheduleAuditArgs {
     pub dpor_time_budget_secs: u64,
 
     /// Emit `franken-node/ops-fault-schedule-audit-cli/v1` JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Parser)]
+pub struct OpsStorageSchemaAuditArgs {
+    /// Workspace directory whose `.franken-node/state` SQLite databases are introspected.
+    #[arg(long, default_value = ".")]
+    pub workspace: PathBuf,
+
+    /// Bootstrap `.franken-node/state/frankensqlite/telemetry.db` via `DurableFrankensqliteAdapter` (`sqlmodel_schema` DDL) before auditing.
+    #[arg(long)]
+    pub bootstrap_telemetry: bool,
+
+    /// Emit structured JSONL schema-audit log events to stderr.
+    #[arg(long)]
+    pub structured_logs_jsonl: bool,
+
+    /// Emit `franken-node/ops-storage-schema-audit-cli/v1` JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Parser)]
+pub struct OpsDgisFixtureSuiteArgs {
+    /// Optional JSON file containing a custom `FragilityFixture` to evaluate in addition to the canonical 10-fixture suite.
+    #[arg(long)]
+    pub fixture_file: Option<PathBuf>,
+
+    /// Optional JSON file containing a custom `GraphSeed` to ingest and validate instead of `realistic_npm_topology`.
+    #[arg(long)]
+    pub seed_file: Option<PathBuf>,
+
+    /// Emit `franken-node/ops-dgis-fixture-suite-cli/v1` JSON.
     #[arg(long)]
     pub json: bool,
 }

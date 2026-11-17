@@ -116,19 +116,21 @@ use crate::cli::{
     DebugExplainArgs, DebugTraceArgs, DoctorCloseConditionArgs, DoctorCommand,
     DoctorEvidenceReadinessArgs, DoctorExpectedLossActionsArgs, DoctorPolicyActivationInput,
     DoctorProcessSpawnReadinessArgs, DoctorWorkspacePressureArgs, FleetAgentArgs, FleetCommand,
-    IncidentCommand, LtvCommand, MigrateCommand, MigrateReportArgs, OpsCommand,
-    OpsCompatCorpusRunArgs, OpsConfigAuditArgs, OpsEvidenceIndexArgs, OpsFaultScheduleAuditArgs,
-    OpsMetricsFormat, OpsProofCarryingEvidenceArgs, OpsResourceGovernorArgs, OpsSwarmHandoffArgs,
-    OpsSwarmScenarioArgs, OpsValidationCloseoutArgs, OpsValidationReadinessArgs, ProofQueueCommand,
-    ProofQueueStatusArgs, ProofWorkersCommand, ProofWorkersRestartArgs, ProofsCommand,
-    RegistryCommand, RemoteCapCommand, RemoteCapIssueArgs, RemoteCapRevokeArgs, RemoteCapUseArgs,
-    RemoteCapVerifyArgs, RuntimeCommand, RuntimeLaneCommand, RuntimeSupervisionAuditArgs,
+    IncidentCommand, LtvCommand, MigrateCommand, MigrateKitPlanArgs, MigrateReportArgs, OpsCommand,
+    OpsCompatCorpusRunArgs, OpsConfigAuditArgs, OpsDgisFixtureSuiteArgs, OpsEvidenceIndexArgs,
+    OpsFaultScheduleAuditArgs, OpsMetricsFormat, OpsProofCarryingEvidenceArgs,
+    OpsResourceGovernorArgs, OpsStorageSchemaAuditArgs, OpsSwarmHandoffArgs, OpsSwarmScenarioArgs,
+    OpsValidationCloseoutArgs, OpsValidationReadinessArgs, ProofQueueCommand, ProofQueueStatusArgs,
+    ProofWorkersCommand, ProofWorkersRestartArgs, ProofsCommand, RegistryCommand, RemoteCapCommand,
+    RemoteCapIssueArgs, RemoteCapRevokeArgs, RemoteCapUseArgs, RemoteCapVerifyArgs, RuntimeCommand,
+    RuntimeLaneCommand, RuntimeRegionQuiescenceAuditArgs, RuntimeSupervisionAuditArgs,
     SafeModeCommand, SafeModeEnterArgs, SafeModeExitArgs, SafeModeStatusArgs, TrustCardCommand,
-    TrustCardReputationArgs, TrustCommand, TrustEcosystemTelemetryArgs, TrustGovernanceAuditArgs,
-    TrustResolutionReceiptArgs, TrustVefProveArgs, TrustZkAttestArgs, VerifyCommand,
-    VerifyCompatibilityArgs, VerifyCorpusArgs, VerifyMigrationArgs, VerifyModuleArgs,
-    VerifyRecoveryRunbookArgs, VerifyReleaseArgs, VerifySourceGraphArgs, VerifyTransparencyLogArgs,
-    VerifyVefProofArgs, VerifyZkAttestationArgs, load_doctor_policy_activation_input,
+    TrustCardReputationArgs, TrustCommand, TrustEcosystemTelemetryArgs,
+    TrustFabricConvergenceAuditArgs, TrustGovernanceAuditArgs, TrustResolutionReceiptArgs,
+    TrustVefProveArgs, TrustZkAttestArgs, VerifyCommand, VerifyCompatibilityArgs, VerifyCorpusArgs,
+    VerifyMigrationArgs, VerifyModuleArgs, VerifyRecoveryRunbookArgs, VerifyReleaseArgs,
+    VerifySourceGraphArgs, VerifyTransparencyLogArgs, VerifyVefProofArgs, VerifyZkAttestationArgs,
+    load_doctor_policy_activation_input,
 };
 use crate::ops::workspace_pressure_policy::WorkspacePressureInputs;
 use crate::policy::{
@@ -6960,6 +6962,169 @@ fn sync_rollout_deployment(
     Ok(())
 }
 
+fn sync_rollout_fleet(
+    args: &cli::MigrateRolloutArgs,
+    manager: &migration::rollout::RolloutManager,
+    report: &mut migration::rollout::RolloutReport,
+) -> Result<()> {
+    use control_plane::fleet_transport::{FleetAction, FleetActionRecord, FleetTargetKind};
+
+    let Some(zone_id) = args
+        .fleet_zone
+        .as_deref()
+        .map(str::trim)
+        .filter(|zone| !zone.is_empty())
+    else {
+        return Ok(());
+    };
+
+    let (_, _state_dir, mut transport) = open_fleet_transport(&args.project_path)?;
+    let transport_kind = transport.kind().label().to_string();
+    let incident_id = format!("inc-rollout-{}", report.migration_id);
+
+    let actions = transport
+        .list_actions()
+        .map_err(|err| anyhow::anyhow!("failed reading durable fleet actions: {err}"))?;
+    let active_quarantines = active_fleet_quarantines(&actions, zone_id);
+    let current_qv = actions
+        .iter()
+        .filter_map(|rec| match &rec.action {
+            FleetAction::Quarantine {
+                quarantine_version, ..
+            } => Some(*quarantine_version),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0);
+    let incident_quarantined = active_quarantines
+        .iter()
+        .any(|((_, inc), list)| *inc == incident_id.as_str() && !list.is_empty());
+
+    if args.action == cli::MigrateRolloutAction::Status {
+        report.fleet_sync = Some(migration::rollout::RolloutFleetSync {
+            zone_id: zone_id.to_string(),
+            transport_kind,
+            action: if incident_quarantined {
+                "quarantined_in_fleet".to_string()
+            } else {
+                "observed_clear".to_string()
+            },
+            action_id: None,
+            quarantine_version: current_qv,
+        });
+        return Ok(());
+    }
+
+    if args.cancel
+        || args.action == cli::MigrateRolloutAction::Rollback
+        || report.rollback_triggered
+    {
+        let next_qv = current_qv.saturating_add(1);
+        let action_id = format!(
+            "fleet-rollout-quarantine-{}-v{next_qv}",
+            report.migration_id
+        );
+        let target_digest = report
+            .validation_confidence
+            .as_ref()
+            .map(|vc| vc.candidate_input_sha256.clone())
+            .or_else(|| {
+                report
+                    .source_rollback
+                    .as_ref()
+                    .map(|sr| sr.journal_sha256.clone())
+            })
+            .unwrap_or_else(|| {
+                use sha2::{Digest, Sha256};
+                hex::encode(Sha256::digest(report.migration_id.as_bytes()))
+            });
+        let record = FleetActionRecord {
+            action_id: action_id.clone(),
+            emitted_at: Utc::now(),
+            action: FleetAction::Quarantine {
+                zone_id: zone_id.to_string(),
+                incident_id,
+                target_id: format!("sha256:{target_digest}"),
+                target_kind: FleetTargetKind::Artifact,
+                reason: if args.cancel {
+                    format!(
+                        "operator cancelled migration rollout {}",
+                        report.migration_id
+                    )
+                } else {
+                    format!(
+                        "migration rollout {} rolled back: {}",
+                        report.migration_id, report.message
+                    )
+                },
+                quarantine_version: next_qv,
+            },
+        };
+        transport.publish_action(&record).map_err(|err| {
+            anyhow::anyhow!("failed publishing rollout quarantine to fleet: {err}")
+        })?;
+        report.fleet_sync = Some(migration::rollout::RolloutFleetSync {
+            zone_id: zone_id.to_string(),
+            transport_kind,
+            action: if args.cancel {
+                "cancelled_and_quarantined".to_string()
+            } else {
+                "quarantined_on_rollback".to_string()
+            },
+            action_id: Some(action_id),
+            quarantine_version: next_qv,
+        });
+        return Ok(());
+    }
+
+    if incident_quarantined && report.stage != migration::rollout::RolloutStage::Default {
+        let reason = format!(
+            "durable fleet store has an active quarantine `{incident_id}` in zone `{zone_id}`; refusing stage promotion"
+        );
+        let _ = manager.rollback(&reason);
+        anyhow::bail!("{reason}");
+    }
+
+    if report.stage == migration::rollout::RolloutStage::Default {
+        let action_id = format!(
+            "fleet-rollout-release-{}-{}",
+            report.migration_id,
+            Utc::now().timestamp_millis()
+        );
+        let record = FleetActionRecord {
+            action_id: action_id.clone(),
+            emitted_at: Utc::now(),
+            action: FleetAction::Release {
+                zone_id: zone_id.to_string(),
+                incident_id,
+                reason: Some(format!(
+                    "migration rollout {} promoted to default",
+                    report.migration_id
+                )),
+            },
+        };
+        transport
+            .publish_action(&record)
+            .map_err(|err| anyhow::anyhow!("failed publishing rollout release to fleet: {err}"))?;
+        report.fleet_sync = Some(migration::rollout::RolloutFleetSync {
+            zone_id: zone_id.to_string(),
+            transport_kind,
+            action: "released_on_default_promotion".to_string(),
+            action_id: Some(action_id),
+            quarantine_version: current_qv,
+        });
+    } else {
+        report.fleet_sync = Some(migration::rollout::RolloutFleetSync {
+            zone_id: zone_id.to_string(),
+            transport_kind,
+            action: format!("verified_clear_at_{}", report.stage),
+            action_id: None,
+            quarantine_version: current_qv,
+        });
+    }
+    Ok(())
+}
+
 fn deploy_require<'a>(value: Option<&'a str>, flag: &str, command: &str) -> Result<&'a str> {
     value
         .filter(|value| !value.trim().is_empty())
@@ -8734,6 +8899,9 @@ fn handle_runtime_command(command: RuntimeCommand) -> Result<()> {
         }
         RuntimeCommand::SupervisionAudit(args) => {
             handle_runtime_supervision_audit(&args)?;
+        }
+        RuntimeCommand::RegionQuiescenceAudit(args) => {
+            handle_runtime_region_quiescence_audit(&args)?;
         }
     }
     Ok(())
@@ -18248,6 +18416,57 @@ fn build_doctor_report_with_cwd_and_policy_input(
             )
         },
     ));
+
+    // DR-SQLMODEL-015: When live workspace SQLite stores exist on disk, introspect
+    // them via `DurableFrankensqliteAdapter` + `sqlmodel_schema::diff::schema_diff`.
+    let live_store_specs = workspace_sqlite_store_specs(Path::new("."));
+    let existing_stores: Vec<_> = live_store_specs
+        .into_iter()
+        .filter(|(_, path, _)| path.is_file())
+        .collect();
+    if !existing_stores.is_empty() {
+        checks.push(evaluate_doctor_check(
+            "DR-SQLMODEL-015",
+            "DOC-015",
+            "storage.sqlmodel_schema",
+            || {
+                let mut audited = 0_usize;
+                let mut drifted = Vec::new();
+                for (store_id, db_path, expected) in &existing_stores {
+                    match frankenengine_node::storage::durable_adapter::DurableFrankensqliteAdapter::introspect_sqlite_file(db_path) {
+                        Ok(observed) => {
+                            audited += 1;
+                            let audit = frankenengine_node::storage::models::audit_database_schema(store_id, &observed, expected);
+                            if !audit.is_drift_free {
+                                drifted.push(format!("{store_id}({})", audit.operations_summary.join(",")));
+                            }
+                        }
+                        Err(err) => {
+                            drifted.push(format!("{store_id}(introspect_error:{err})"));
+                        }
+                    }
+                }
+                if drifted.is_empty() {
+                    (
+                        DoctorStatus::Pass,
+                        format!(
+                            "Verified {audited} live SQLite store(s) against typed sqlmodel schemas with zero drift."
+                        ),
+                        "No action required.".to_string(),
+                    )
+                } else {
+                    (
+                        DoctorStatus::Fail,
+                        format!(
+                            "Detected sqlmodel schema drift across live SQLite store(s): {}",
+                            drifted.join("; ")
+                        ),
+                        "Run `franken-node ops storage-schema-audit --json` to inspect remediation DDL.".to_string(),
+                    )
+                }
+            },
+        ));
+    }
 
     let (status_counts, overall_status) = summarize_statuses(&checks);
     let structured_logs = checks
@@ -32175,21 +32394,59 @@ fn install_fleet_agent_shutdown_flag() -> Result<std::sync::Arc<std::sync::atomi
     Ok(Arc::new(AtomicBool::new(false)))
 }
 
+fn persist_fleet_degraded_fallback_receipt(
+    node_id: &str,
+    zone_id: &str,
+    mode: &str,
+) -> Option<String> {
+    use frankenengine_node::storage::durable_adapter::{
+        AdapterWriteBackend, CallerContext, DurableFrankensqliteAdapter, PersistenceClass,
+    };
+    let mut adapter = DurableFrankensqliteAdapter::open_default().ok()?;
+    let caller = CallerContext::system("fleet_agent::fallback", "trace-fleet-fallback");
+    let receipt_key = format!(
+        "fleet_degraded_fallback:{}:{}:{}",
+        zone_id,
+        node_id,
+        Utc::now().timestamp_nanos_opt().unwrap_or_default()
+    );
+    let payload = serde_json::json!({
+        "schema_version": "franken-node/fleet-degraded-fallback-receipt/v1",
+        "node_id": node_id,
+        "zone_id": zone_id,
+        "mode": mode,
+        "recorded_at": Utc::now().to_rfc3339(),
+    });
+    let bytes = serde_json::to_vec(&payload).ok()?;
+    adapter
+        .write(&caller, PersistenceClass::AuditLog, &receipt_key, &bytes)
+        .ok()?;
+    Some(receipt_key)
+}
+
 fn sleep_until_next_fleet_poll(
     poll_interval: std::time::Duration,
     shutdown_requested: &std::sync::atomic::AtomicBool,
-) {
+    #[cfg(feature = "asupersync-transport")] asupersync_cx: Option<&asupersync::Cx>,
+) -> bool {
     use std::sync::atomic::Ordering;
     use std::time::Instant;
 
     let started = Instant::now();
     while started.elapsed() < poll_interval {
         if shutdown_requested.load(Ordering::SeqCst) {
-            return;
+            return true;
+        }
+        #[cfg(feature = "asupersync-transport")]
+        if let Some(cx) = asupersync_cx
+            && cx.checkpoint().is_err()
+        {
+            return true;
         }
         let remaining = poll_interval.saturating_sub(started.elapsed());
         std::thread::sleep(remaining.min(config::timeouts::FLEET_AGENT_POLL_SLEEP_SLICE));
     }
+    false
 }
 
 fn resolve_fleet_agent_action_targets(
@@ -32616,51 +32873,29 @@ fn run_fleet_agent(args: &FleetAgentArgs) -> Result<()> {
         );
     }
 
-    // Without a coordinator the agent runs over the local DurableFleetTransport.
-    // The asupersync feature compiles the substrate in but does not route this
-    // loop through it, so the event must not claim an asupersync control lane
-    // (it previously reported ASUPERSYNC_CONTROL_LANE_ACTIVATED /
-    // "charter_compliant_control_lane"; bd-reality-20260923-26n9r.16).
-    #[cfg(feature = "asupersync-transport")]
-    if transport_kind == FleetTransportKind::File {
-        eprintln!(
-            "{}",
-            serde_json::to_string(&serde_json::json!({
-                "event_code": "FLEET_TRANSPORT_DURABLE",
-                "node_id": resolved.node_id,
-                "zone_id": resolved.zone_id,
-                "substrate": "frankensqlite_durable",
-                "charter_status": "asupersync_transport_compiled_not_wired",
-            }))
-            .unwrap_or_default()
-        );
-    }
+    let fleet_cfg = config::Config::resolve_for_fleet(None, config::CliOverrides::default())
+        .map(|r| r.config.fleet)
+        .unwrap_or_else(|_| config::FleetConfig {
+            state_dir: None,
+            node_id: None,
+            poll_interval_seconds: None,
+            convergence_timeout_seconds: 30,
+            barrier_timeout_ms: None,
+            allow_degraded_file_transport: false,
+            control_plane_url: None,
+            control_plane_token_path: None,
+        });
+    let explicit_degraded_fallback =
+        args.fallback_file_transport || fleet_cfg.allow_degraded_file_transport;
 
-    #[cfg(not(feature = "asupersync-transport"))]
-    if transport_kind == FleetTransportKind::File {
-        let fleet_cfg = config::Config::resolve_for_fleet(None, config::CliOverrides::default())
-            .map(|r| r.config.fleet)
-            .unwrap_or_else(|_| config::FleetConfig {
-                state_dir: None,
-                node_id: None,
-                poll_interval_seconds: None,
-                convergence_timeout_seconds: 30,
-                barrier_timeout_ms: None,
-                allow_degraded_file_transport: false,
-                control_plane_url: None,
-                control_plane_token_path: None,
-            });
-        if !args.fallback_file_transport && !fleet_cfg.allow_degraded_file_transport {
-            eprintln!(
-                "{}",
-                serde_json::to_string(&serde_json::json!({
-                    "event_code": "FLEET_TRANSPORT_FAIL_CLOSED",
-                    "reason": "asupersync control-lane transport required by charter",
-                    "remediation": "Build with `--features asupersync-transport` or pass `--fallback-file-transport` / set `[fleet] allow_degraded_file_transport = true` to explicitly operate in degraded mode with an audit receipt.",
-                }))
-                .unwrap_or_default()
+    #[cfg(feature = "asupersync-transport")]
+    let mut asupersync_control_lane = if transport_kind == FleetTransportKind::File {
+        if explicit_degraded_fallback {
+            let receipt_key = persist_fleet_degraded_fallback_receipt(
+                &resolved.node_id,
+                &resolved.zone_id,
+                "explicit_degraded_file_transport",
             );
-        } else {
             eprintln!(
                 "{}",
                 serde_json::to_string(&serde_json::json!({
@@ -32670,10 +32905,81 @@ fn run_fleet_agent(args: &FleetAgentArgs) -> Result<()> {
                     "mode": "degraded_file_transport",
                     "substrate": "frankensqlite_durable_fallback",
                     "charter_status": "degraded_mode_receipt_emitted",
+                    "receipt_persisted": receipt_key.is_some(),
+                    "receipt_key": receipt_key,
                 }))
                 .unwrap_or_default()
             );
+            None
+        } else {
+            let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+                .build()
+                .map_err(|err| {
+                    anyhow::anyhow!("failed building asupersync control runtime: {err}")
+                })?;
+            let cx = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
+            let network = control_plane::fleet_transport::AsupersyncFleetNetwork::new();
+            let mut lane = control_plane::fleet_transport::AsupersyncFleetTransport::with_cx(
+                cx.clone(),
+                resolved.node_id.clone(),
+                network,
+            );
+            use control_plane::fleet_transport::FleetTransport as _;
+            lane.initialize().map_err(|err| {
+                anyhow::anyhow!("failed initializing asupersync control lane: {err}")
+            })?;
+            eprintln!(
+                "{}",
+                serde_json::to_string(&serde_json::json!({
+                    "event_code": "ASUPERSYNC_CONTROL_LANE_ACTIVATED",
+                    "node_id": resolved.node_id,
+                    "zone_id": resolved.zone_id,
+                    "substrate": "asupersync+frankensqlite_durable",
+                    "charter_status": "charter_compliant_control_lane",
+                }))
+                .unwrap_or_default()
+            );
+            Some((runtime, cx, lane))
         }
+    } else {
+        None
+    };
+
+    #[cfg(not(feature = "asupersync-transport"))]
+    if transport_kind == FleetTransportKind::File {
+        if !explicit_degraded_fallback {
+            eprintln!(
+                "{}",
+                serde_json::to_string(&serde_json::json!({
+                    "event_code": "FLEET_TRANSPORT_FAIL_CLOSED",
+                    "reason": "asupersync control-lane transport required by charter",
+                    "remediation": "Build with `--features asupersync-transport` or pass `--fallback-file-transport` / set `[fleet] allow_degraded_file_transport = true` to explicitly operate in degraded mode with an audit receipt.",
+                }))
+                .unwrap_or_default()
+            );
+            anyhow::bail!(
+                "asupersync control-lane transport required by charter; pass --fallback-file-transport or set [fleet] allow_degraded_file_transport = true"
+            );
+        }
+        let receipt_key = persist_fleet_degraded_fallback_receipt(
+            &resolved.node_id,
+            &resolved.zone_id,
+            "compiled_without_asupersync_transport",
+        );
+        eprintln!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "event_code": "FLEET_TRANSPORT_DEGRADED_FALLBACK",
+                "node_id": resolved.node_id,
+                "zone_id": resolved.zone_id,
+                "mode": "degraded_file_transport",
+                "substrate": "frankensqlite_durable_fallback",
+                "charter_status": "degraded_mode_receipt_emitted",
+                "receipt_persisted": receipt_key.is_some(),
+                "receipt_key": receipt_key,
+            }))
+            .unwrap_or_default()
+        );
     }
 
     let mut last_seen_action_id: Option<String> = None;
@@ -33109,6 +33415,27 @@ fn run_fleet_agent(args: &FleetAgentArgs) -> Result<()> {
                 .then_some(expected_checkpoint),
             native_session_drain,
         };
+        #[cfg(feature = "asupersync-transport")]
+        if let Some((_rt, cx, lane)) = asupersync_control_lane.as_mut() {
+            use control_plane::fleet_transport::FleetTransport as _;
+            cx.checkpoint().map_err(|err| {
+                anyhow::anyhow!("asupersync control-lane cancelled before heartbeat: {err}")
+            })?;
+            let existing_lane_ids: BTreeSet<String> = lane
+                .list_actions()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|rec| rec.action_id)
+                .collect();
+            for rec in &latest_actions {
+                if !existing_lane_ids.contains(&rec.action_id) {
+                    let _ = lane.publish_action(rec);
+                }
+            }
+            lane.upsert_node_status(&node_status).map_err(|err| {
+                anyhow::anyhow!("failed upserting status on asupersync control lane: {err}")
+            })?;
+        }
         transport
             .upsert_node_status(&node_status)
             .map_err(|err| anyhow::anyhow!("failed upserting node status: {err}"))?;
@@ -33176,7 +33503,17 @@ fn run_fleet_agent(args: &FleetAgentArgs) -> Result<()> {
         }
 
         // Sleep until next poll
-        sleep_until_next_fleet_poll(poll_interval, shutdown_requested.as_ref());
+        #[cfg(feature = "asupersync-transport")]
+        let cancelled = sleep_until_next_fleet_poll(
+            poll_interval,
+            shutdown_requested.as_ref(),
+            asupersync_control_lane.as_ref().map(|(_, cx, _)| cx),
+        );
+        #[cfg(not(feature = "asupersync-transport"))]
+        let cancelled = sleep_until_next_fleet_poll(poll_interval, shutdown_requested.as_ref());
+        if cancelled {
+            break;
+        }
     }
 
     Ok(())
@@ -42177,6 +42514,892 @@ fn handle_runtime_supervision_audit(args: &RuntimeSupervisionAuditArgs) -> Resul
     Ok(())
 }
 
+fn workspace_sqlite_store_specs(
+    workspace: &Path,
+) -> Vec<(&'static str, PathBuf, sqlmodel_schema::DatabaseSchema)> {
+    use frankenengine_node::storage::models;
+    let state_dir = workspace.join(".franken-node/state");
+    let fleet_db = if state_dir.join("fleet/fleet-state.db").is_file() {
+        state_dir.join("fleet/fleet-state.db")
+    } else {
+        state_dir.join("fleet-state.db")
+    };
+    vec![
+        (
+            "telemetry",
+            state_dir.join("frankensqlite/telemetry.db"),
+            models::expected_telemetry_store_schema(),
+        ),
+        (
+            "fleet_state",
+            fleet_db,
+            models::expected_fleet_store_schema(),
+        ),
+        (
+            "trust_card_registry",
+            state_dir.join("trust-card-registry.v1.db"),
+            models::expected_trust_card_registry_schema(),
+        ),
+        (
+            "native_sessions",
+            state_dir.join("native-sessions.db"),
+            models::expected_native_sessions_schema(),
+        ),
+    ]
+}
+
+fn handle_ops_storage_schema_audit(args: &OpsStorageSchemaAuditArgs) -> Result<()> {
+    use frankenengine_node::storage::durable_adapter::DurableFrankensqliteAdapter;
+    use frankenengine_node::storage::models;
+
+    if args.bootstrap_telemetry {
+        let telemetry_path = args
+            .workspace
+            .join(".franken-node/state/frankensqlite/telemetry.db");
+        let adapter = DurableFrankensqliteAdapter::new(&telemetry_path)
+            .map_err(|err| anyhow::anyhow!("failed bootstrapping telemetry.db: {err}"))?;
+        let _ = adapter
+            .audit_live_schema()
+            .map_err(|err| anyhow::anyhow!("failed auditing bootstrapped telemetry.db: {err}"))?;
+    }
+
+    let model_meta = models::all_model_metadata();
+    let canonical_schema = models::canonical_domain_database_schema();
+    let canonical_ddl = models::canonical_domain_sqlite_ddl();
+    let canonical_audit = models::audit_database_schema(
+        "canonical_21_domain_models",
+        &canonical_schema,
+        &canonical_schema,
+    );
+
+    let mut store_reports = Vec::new();
+    let mut missing_stores = Vec::new();
+    let mut drift_count = 0_usize;
+
+    for (store_id, db_path, expected) in workspace_sqlite_store_specs(&args.workspace) {
+        if !db_path.is_file() {
+            missing_stores.push(serde_json::json!({
+                "store_id": store_id,
+                "path": db_path.display().to_string(),
+            }));
+            continue;
+        }
+        let observed = DurableFrankensqliteAdapter::introspect_sqlite_file(&db_path)
+            .map_err(|err| anyhow::anyhow!("failed introspecting {}: {err}", db_path.display()))?;
+        let audit = models::audit_database_schema(store_id, &observed, &expected);
+        if !audit.is_drift_free {
+            drift_count = drift_count.saturating_add(1);
+        }
+        if args.structured_logs_jsonl {
+            eprintln!(
+                "{}",
+                serde_json::to_string(&serde_json::json!({
+                    "event_code": audit.event_code,
+                    "store_id": audit.store_id,
+                    "path": db_path.display().to_string(),
+                    "is_drift_free": audit.is_drift_free,
+                    "operation_count": audit.operation_count,
+                }))
+                .unwrap_or_default()
+            );
+        }
+        store_reports.push(serde_json::json!({
+            "path": db_path.display().to_string(),
+            "audit": audit,
+        }));
+    }
+
+    let ok = canonical_audit.is_drift_free && drift_count == 0;
+    let payload = serde_json::json!({
+        "schema_version": "franken-node/ops-storage-schema-audit-cli/v1",
+        "command": "ops.storage-schema-audit",
+        "ok": ok,
+        "substrate": "sqlmodel_rust+frankensqlite",
+        "canonical_domain_models": {
+            "model_count": model_meta.len(),
+            "table_count": canonical_schema.tables.len(),
+            "generated_sqlite_ddl_count": canonical_ddl.len(),
+            "self_audit_event_code": canonical_audit.event_code,
+        },
+        "live_store_count": store_reports.len(),
+        "drifted_store_count": drift_count,
+        "live_stores": store_reports,
+        "uninitialized_stores": missing_stores,
+    });
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        println!(
+            "ops storage-schema-audit: ok={} domain_models={} live_stores={} drifted={}",
+            ok,
+            model_meta.len(),
+            store_reports.len(),
+            drift_count
+        );
+    }
+    if !ok {
+        if args.json {
+            fail_closed_after_json();
+        }
+        anyhow::bail!("storage schema drift detected across {drift_count} live SQLite store(s)");
+    }
+    Ok(())
+}
+
+fn handle_ops_dgis_fixture_suite(args: &OpsDgisFixtureSuiteArgs) -> Result<()> {
+    use frankenengine_node::dgis::fragility_fixtures::{
+        evaluate_fixture, load_fixture_from_json, synthesize_active_maintainers_recent_commits,
+        synthesize_dependency_chain_fragile, synthesize_diverse_org_ownership,
+        synthesize_independent_packages_no_chains, synthesize_key_person_high_share,
+        synthesize_multi_quorum_publishers, synthesize_org_concentrated, synthesize_orphaned_pkg,
+        synthesize_single_maintainer_dominant, synthesize_well_distributed_maintainers,
+    };
+    use frankenengine_node::dgis::graph_seeds::{
+        build_windowed_graph_from_seed, load_seed_from_json, realistic_npm_topology,
+        seed_expected_invariants,
+    };
+    use frankenengine_node::observability::validation_proof_economics::{
+        EconomicsReportingPeriod, ValidationProofEconomicsGenerator,
+    };
+
+    let mut fixtures = vec![
+        synthesize_single_maintainer_dominant(),
+        synthesize_key_person_high_share(),
+        synthesize_dependency_chain_fragile(),
+        synthesize_org_concentrated(),
+        synthesize_orphaned_pkg(),
+        synthesize_well_distributed_maintainers(),
+        synthesize_diverse_org_ownership(),
+        synthesize_active_maintainers_recent_commits(),
+        synthesize_independent_packages_no_chains(),
+        synthesize_multi_quorum_publishers(),
+    ];
+    if let Some(fixture_path) = &args.fixture_file {
+        let raw = std::fs::read_to_string(fixture_path)
+            .with_context(|| format!("failed reading fixture {}", fixture_path.display()))?;
+        let custom = load_fixture_from_json(&raw)
+            .map_err(|err| anyhow::anyhow!("invalid fragility fixture JSON: {err}"))?;
+        fixtures.push(custom);
+    }
+
+    let mut verdicts = Vec::with_capacity(fixtures.len());
+    let mut passed_fixtures = 0_usize;
+    for fixture in &fixtures {
+        fixture
+            .validate()
+            .map_err(|err| anyhow::anyhow!("fixture `{}` invalid: {err}", fixture.name))?;
+        let verdict = evaluate_fixture(fixture).map_err(|err| {
+            anyhow::anyhow!("fixture `{}` evaluation failed: {err}", fixture.name)
+        })?;
+        if verdict.passed {
+            passed_fixtures = passed_fixtures.saturating_add(1);
+        }
+        verdicts.push(verdict);
+    }
+
+    let seed = if let Some(seed_path) = &args.seed_file {
+        let raw = std::fs::read_to_string(seed_path)
+            .with_context(|| format!("failed reading seed {}", seed_path.display()))?;
+        load_seed_from_json(&raw)
+            .map_err(|err| anyhow::anyhow!("invalid graph seed JSON: {err}"))?
+    } else {
+        realistic_npm_topology()
+    };
+    seed.validate()
+        .map_err(|err| anyhow::anyhow!("graph seed validation failed: {err}"))?;
+    let windowed_graph = build_windowed_graph_from_seed(&seed)
+        .map_err(|err| anyhow::anyhow!("failed building windowed graph from seed: {err}"))?;
+    let expected_invariants = seed_expected_invariants(&seed);
+
+    let now = Utc::now();
+    let economics_gen = ValidationProofEconomicsGenerator::new();
+    let debt_ledger = ops::validation_proof_debt_ledger::ValidationProofDebtLedger {
+        schema_version: "1.0".to_string(),
+        generated_at: now,
+        summary: ops::validation_proof_debt_ledger::ValidationProofDebtLedgerSummary {
+            total_entries: 0,
+            retryable_entries: 0,
+            blocked_entries: 0,
+            stale_entries: 0,
+            product_failures: 0,
+            source_only_fallbacks: 0,
+            proof_cache_reuses: 0,
+            entries_blocking_other_beads: 0,
+            by_class: BTreeMap::new(),
+        },
+        entries: Vec::new(),
+    };
+    let economics_report = economics_gen.generate_report(
+        &[],
+        &debt_ledger,
+        EconomicsReportingPeriod {
+            start_time: now,
+            end_time: now,
+            duration_seconds: 60,
+        },
+    );
+
+    let ok = passed_fixtures == verdicts.len() && !windowed_graph.nodes.is_empty();
+    let payload = serde_json::json!({
+        "schema_version": "franken-node/ops-dgis-fixture-suite-cli/v1",
+        "command": "ops.dgis-fixture-suite",
+        "ok": ok,
+        "fragility_suite": {
+            "total_fixtures": verdicts.len(),
+            "passed_fixtures": passed_fixtures,
+            "verdicts": verdicts,
+        },
+        "graph_seed": {
+            "name": seed.name,
+            "observation_count": seed.observations.len(),
+            "node_count": windowed_graph.nodes.len(),
+            "edge_count": windowed_graph.edges.len(),
+            "expected_invariants": {
+                "expected_unique_package_versions": expected_invariants.expected_unique_package_versions,
+                "expected_unique_maintainers": expected_invariants.expected_unique_maintainers,
+                "expected_unique_dependency_targets": expected_invariants.expected_unique_dependency_targets,
+                "min_total_nodes": expected_invariants.min_total_nodes,
+                "min_total_edges": expected_invariants.min_total_edges,
+                "total_observations": expected_invariants.total_observations,
+                "expected_unique_observations": expected_invariants.expected_unique_observations,
+            },
+        },
+        "proof_economics_slo": {
+            "schema_version": economics_report.schema_version,
+            "overall_slo_status": format!("{:?}", economics_report.slo_compliance.overall_status),
+        },
+    });
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        println!(
+            "ops dgis-fixture-suite: ok={} passed={}/{} seed_nodes={} seed_edges={}",
+            ok,
+            passed_fixtures,
+            verdicts.len(),
+            windowed_graph.nodes.len(),
+            windowed_graph.edges.len()
+        );
+    }
+    if !ok {
+        if args.json {
+            fail_closed_after_json();
+        }
+        anyhow::bail!(
+            "dgis fixture suite failed closed ({passed_fixtures}/{} passed)",
+            verdicts.len()
+        );
+    }
+    Ok(())
+}
+
+fn handle_runtime_region_quiescence_audit(args: &RuntimeRegionQuiescenceAuditArgs) -> Result<()> {
+    use connector::admission_budget::{AdmissionBudget, AdmissionBudgetTracker, AdmissionRequest};
+    use connector::cancel_injection_gate::CancelInjectionGate;
+    use connector::control_evidence_replay::ControlReplayGate;
+    use connector::diagnostic_registry::{VoiConfig, VoiScheduler, default_diagnostics};
+    use connector::perf_budget_guard::{BudgetPolicy, HotPath, MeasurementResult, OverheadGate};
+    use connector::saga::{SagaExecutor, SagaState, SagaStepDef, StepOutcome};
+    use control_plane::evidence_replay_gate::EvidenceReplayGate;
+    use frankenengine_node::observability::durability_violation::{
+        CausalEvent, CausalEventType, DurabilityViolationDetector, FailedArtifact, ProofContext,
+        ViolationContext,
+    };
+    use runtime::region_tree::{RegionId, RegionState, RegionTree, TaskId};
+
+    anyhow::ensure!(args.drain_budget_ms > 0, "--drain-budget-ms must be > 0");
+
+    let mut tree = RegionTree::new(args.drain_budget_ms);
+    let root = RegionId::new("root");
+    let lifecycle = RegionId::new("lifecycle");
+    let rollout = RegionId::new("rollout");
+    let fencing = RegionId::new("fencing");
+    tree.open_region(&root, 100)
+        .map_err(|err| anyhow::anyhow!("{err}"))?;
+    tree.open_child_region(&lifecycle, &root, 110)
+        .map_err(|err| anyhow::anyhow!("{err}"))?;
+    tree.open_child_region(&rollout, &lifecycle, 120)
+        .map_err(|err| anyhow::anyhow!("{err}"))?;
+    tree.open_child_region(&fencing, &lifecycle, 130)
+        .map_err(|err| anyhow::anyhow!("{err}"))?;
+
+    let rollout_task = TaskId::new("task-rollout-drain");
+    tree.register_task(&rollout, rollout_task.clone(), 140)
+        .map_err(|err| anyhow::anyhow!("{err}"))?;
+    if args.elapsed_drain_ms <= args.drain_budget_ms {
+        tree.deregister_task(&rollout, &rollout_task, 140 + args.elapsed_drain_ms)
+            .map_err(|err| anyhow::anyhow!("{err}"))?;
+    }
+    let close_events = tree
+        .close(&root, 150 + args.elapsed_drain_ms)
+        .map_err(|err| anyhow::anyhow!("{err}"))?;
+    let root_closed = tree.region_state(&root) == Some(RegionState::Closed);
+    let forced_terminations = close_events
+        .iter()
+        .filter(|ev| ev.event_code == runtime::region_tree::event_codes::REG_005)
+        .count();
+
+    let mut cancel_gate = CancelInjectionGate::new();
+    cancel_gate.register_default_control_workflows(&args.trace_id);
+    let cancel_report = cancel_gate.run_full_gate(&args.trace_id);
+    let cancel_gate_passed = cancel_report.total_failed == 0 && cancel_report.verdict == "PASS";
+
+    let mut saga_exec = SagaExecutor::new();
+    let saga_id = saga_exec
+        .create_saga(
+            vec![
+                SagaStepDef {
+                    name: "fence_acquire".to_string(),
+                    computation_name: None,
+                    is_remote: false,
+                    idempotency_key: Some("idem-fence-1".to_string()),
+                },
+                SagaStepDef {
+                    name: "rollout_commit".to_string(),
+                    computation_name: None,
+                    is_remote: false,
+                    idempotency_key: Some("idem-commit-1".to_string()),
+                },
+            ],
+            &args.trace_id,
+        )
+        .map_err(|err| anyhow::anyhow!("{err}"))?;
+    saga_exec
+        .execute_step(
+            &saga_id,
+            StepOutcome::Success {
+                result_data: b"fenced".to_vec(),
+            },
+            5,
+            &args.trace_id,
+        )
+        .map_err(|err| anyhow::anyhow!("{err}"))?;
+    saga_exec
+        .execute_step(
+            &saga_id,
+            StepOutcome::Success {
+                result_data: b"committed".to_vec(),
+            },
+            7,
+            &args.trace_id,
+        )
+        .map_err(|err| anyhow::anyhow!("{err}"))?;
+    saga_exec
+        .commit(&saga_id, &args.trace_id)
+        .map_err(|err| anyhow::anyhow!("{err}"))?;
+    let saga_committed = saga_exec
+        .get_saga(&saga_id)
+        .is_some_and(|inst| inst.state == SagaState::Committed);
+
+    let voi_cfg = VoiConfig {
+        budget_units: args.voi_budget_units,
+        ..VoiConfig::default()
+    };
+    let mut voi_scheduler = VoiScheduler::new(voi_cfg).map_err(|err| anyhow::anyhow!("{err}"))?;
+    for diag in default_diagnostics() {
+        voi_scheduler
+            .register_diagnostic(diag)
+            .map_err(|err| anyhow::anyhow!("{err}"))?;
+    }
+    let voi_cycle = voi_scheduler
+        .schedule(1_000)
+        .map_err(|err| anyhow::anyhow!("{err}"))?;
+
+    let mut budget_tracker = AdmissionBudgetTracker::new(AdmissionBudget::default_budget())
+        .map_err(|err| anyhow::anyhow!("{err}"))?;
+    let (admission_verdict, _) = budget_tracker.admit(
+        &AdmissionRequest {
+            peer_id: "peer:control-01".to_string(),
+            bytes_requested: 4_096,
+            symbols_requested: 16,
+            decode_cpu_estimate_ms: 5,
+        },
+        &args.trace_id,
+        "2026-11-17T00:00:00Z",
+    );
+
+    let default_perf_policy = BudgetPolicy::default_policy();
+    let lifecycle_budget = default_perf_policy
+        .budget_for(HotPath::LifecycleTransition)
+        .ok_or_else(|| anyhow::anyhow!("missing default LifecycleTransition perf budget"))?
+        .clone();
+    let mut perf_gate = OverheadGate::new(default_perf_policy);
+    let perf_decision = perf_gate.evaluate(MeasurementResult::from_measurements(
+        HotPath::LifecycleTransition,
+        10.0,
+        12.0,
+        15.0,
+        10.5,
+        12.5,
+        15.5,
+        2.0,
+        &lifecycle_budget,
+        None,
+    ));
+
+    let control_replay_gate = ControlReplayGate::new();
+    let mut cp_evidence_gate = EvidenceReplayGate::new();
+    let cp_gate_res = cp_evidence_gate.evaluate_gate("2026-11-17T00:00:00Z");
+
+    let mut violation_detector = DurabilityViolationDetector::with_defaults();
+    if args.inject_durability_violation {
+        let mut ctx = ViolationContext {
+            events: Vec::new(),
+            artifacts: Vec::new(),
+            proofs: ProofContext::new(),
+            hardening_level: "critical".to_string(),
+            epoch_id: 1,
+            timestamp_ms: 2_000,
+        };
+        ctx.add_causal_event(CausalEvent {
+            event_type: CausalEventType::IntegrityCheckFailed,
+            timestamp_ms: 1_990,
+            description: "injected durability violation probe".to_string(),
+            evidence_ref: Some(args.trace_id.clone()),
+        });
+        ctx.add_failed_artifact(FailedArtifact {
+            artifact_path: "state/injected.wal".to_string(),
+            expected_hash: "aa".repeat(32),
+            actual_hash: "bb".repeat(32),
+            failure_reason: "digest mismatch".to_string(),
+        });
+        let _ = violation_detector.generate_bundle(&ctx);
+    }
+    let durability_halted = violation_detector.is_halted();
+    let halt_blocks_durable_op = violation_detector.check_durable_op("rollout").is_err();
+
+    let ok = root_closed
+        && forced_terminations == 0
+        && cancel_gate_passed
+        && saga_committed
+        && admission_verdict.admitted
+        && perf_decision.is_pass()
+        && !durability_halted;
+
+    let payload = serde_json::json!({
+        "schema_version": "franken-node/runtime-region-quiescence-audit-cli/v1",
+        "command": "runtime.region-quiescence-audit",
+        "ok": ok,
+        "region_tree": {
+            "region_count": tree.region_count(),
+            "root_closed": root_closed,
+            "forced_terminations": forced_terminations,
+            "event_count": tree.event_log().len(),
+        },
+        "cancel_injection_gate": {
+            "gate_passed": cancel_gate_passed,
+            "workflows_tested": cancel_gate.control_workflow_count(),
+            "total_points": cancel_report.total_injection_points,
+            "points_failed": cancel_report.total_failed,
+        },
+        "saga": {
+            "saga_id": saga_id,
+            "committed": saga_committed,
+            "content_hash": saga_exec.content_hash(),
+        },
+        "voi_diagnostics": {
+            "registered": voi_scheduler.diagnostic_count(),
+            "selected": voi_cycle.selected.len(),
+            "deferred": voi_cycle.deferred.len(),
+        },
+        "admission_budget": {
+            "admitted": admission_verdict.admitted,
+        },
+        "perf_budget_guard": {
+            "lifecycle_transition_pass": perf_decision.is_pass(),
+        },
+        "evidence_replay": {
+            "control_replay_events": control_replay_gate.events().len(),
+            "cp_evidence_replays": cp_gate_res.replay_results.len(),
+        },
+        "durability_violation": {
+            "halted": durability_halted,
+            "halt_blocks_durable_op": halt_blocks_durable_op,
+            "bundle_count": violation_detector.bundle_count(),
+        },
+    });
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        println!(
+            "runtime region-quiescence-audit: ok={} root_closed={} forced_terminations={} cancel_points={} durability_halted={}",
+            ok,
+            root_closed,
+            forced_terminations,
+            cancel_report.total_injection_points,
+            durability_halted
+        );
+    }
+    if !ok {
+        if args.json {
+            fail_closed_after_json();
+        }
+        anyhow::bail!(
+            "runtime region-quiescence-audit failed closed (forced_terminations={forced_terminations}, durability_halted={durability_halted})"
+        );
+    }
+    Ok(())
+}
+
+fn handle_trust_fabric_convergence_audit(args: &TrustFabricConvergenceAuditArgs) -> Result<()> {
+    use connector::claim_compiler::{
+        ClaimCompiler, ClaimCompilerConfig, ClaimSource, EvidenceLink, RawClaim,
+        SCHEMA_VERSION as CLAIM_SCHEMA_VERSION,
+    };
+    use connector::ecosystem_compliance::{ComplianceEvidenceStore, EvidenceSource};
+    use connector::ecosystem_registry::{EcosystemRegistry, ExtensionMetadata, ExtensionStatus};
+    use connector::ecosystem_reputation::{EcosystemReputationApi, ReputationInputs};
+    use connector::trust_fabric::{TrustFabricConfig, TrustFabricFleet, TrustFabricNode};
+    use frankenengine_node::security::adversarial_runner::{
+        AdversarialRunner, RunnerConfig, build_default_corpus,
+    };
+    use frankenengine_node::security::isolation_rail_router::RailRouter;
+    use supply_chain::revocation_integration::{
+        ExtensionOperation, ExtensionOperationContext, ExtensionSafetyTier,
+        RevocationDecisionStatus, RevocationIntegrationEngine, RevocationIntegrationPolicy,
+    };
+
+    anyhow::ensure!(
+        (2..=16).contains(&args.fleet_nodes),
+        "--fleet-nodes must be in 2..=16"
+    );
+
+    let tf_cfg = TrustFabricConfig::default();
+    let mut fleet = TrustFabricFleet::new();
+    for idx in 0..args.fleet_nodes {
+        let mut node = TrustFabricNode::new(&format!("node-{idx}"), tf_cfg.clone(), 1)
+            .map_err(|err| anyhow::anyhow!("{err}"))?;
+        if idx == 0 {
+            node.add_trust_card("tc:verified-001")
+                .map_err(|err| anyhow::anyhow!("{err}"))?;
+            node.apply_revocation("ext:compromised-001");
+        }
+        fleet.add_node(node);
+    }
+    for _ in 0..args.fleet_nodes {
+        fleet.gossip_round();
+    }
+    let fleet_converged = fleet.is_converged();
+
+    let mut compiler = ClaimCompiler::new(ClaimCompilerConfig::default());
+    let compiled = compiler
+        .compile_claim(&RawClaim {
+            claim_id: "claim:trust-fabric-001".to_string(),
+            claim_text: args.claim_text.clone(),
+            source: Some(ClaimSource {
+                submitter_id: "operator:local".to_string(),
+                origin: "cli_audit".to_string(),
+                received_at_ms: 1_700_000_000_000,
+            }),
+            evidence_links: vec![EvidenceLink {
+                label: "lockstep_bundle".to_string(),
+                uri: "artifact://verification/lockstep".to_string(),
+                content_digest: "cc".repeat(32),
+            }],
+            schema_version: CLAIM_SCHEMA_VERSION.to_string(),
+            trace_id: args.trace_id.clone(),
+        })
+        .map_err(|err| anyhow::anyhow!("claim compilation failed: {}", err.code()))?;
+    let snapshot = compiler
+        .publish_batch(&[compiled])
+        .map_err(|err| anyhow::anyhow!("scoreboard publish failed: {}", err.code()))?;
+    let snapshot_verified = compiler
+        .verify_snapshot_digest(&snapshot)
+        .map_err(|err| anyhow::anyhow!("scoreboard digest verification failed: {}", err.code()))?;
+
+    let mut eco_reg = EcosystemRegistry::new();
+    eco_reg
+        .register_extension(
+            ExtensionMetadata {
+                extension_id: "ext:verified-telemetry".to_string(),
+                publisher_id: "pub:trusted".to_string(),
+                publisher_key: "ed25519:trusted-key-01".to_string(),
+                name: "verified-telemetry".to_string(),
+                description: "Signed telemetry connector".to_string(),
+                version: "1.0.0".to_string(),
+                status: ExtensionStatus::Active,
+                created_at: "2026-11-17T00:00:00Z".to_string(),
+                updated_at: "2026-11-17T00:00:00Z".to_string(),
+                signature: "dd".repeat(64),
+                tags: vec!["telemetry".to_string()],
+            },
+            "2026-11-17T00:00:00Z",
+            &args.trace_id,
+        )
+        .map_err(|err| anyhow::anyhow!("{err}"))?;
+    eco_reg
+        .verify_audit_integrity()
+        .map_err(|err| anyhow::anyhow!("{err}"))?;
+
+    let mut rep_api = EcosystemReputationApi::new();
+    rep_api
+        .register_publisher(
+            "pub:trusted",
+            "ed25519:trusted-key-01",
+            "2026-11-17T00:00:00Z",
+        )
+        .map_err(|err| anyhow::anyhow!("{err}"))?;
+    let reputation_score = rep_api
+        .compute_reputation(
+            "pub:trusted",
+            ReputationInputs {
+                compatibility_pass_rate: 0.98,
+                migration_success_rate: 0.96,
+                trust_artifact_validity: 1.0,
+                verifier_audit_frequency: 0.90,
+            },
+            "2026-11-17T00:01:00Z",
+        )
+        .map_err(|err| anyhow::anyhow!("{err}"))?;
+
+    let mut compliance_store = ComplianceEvidenceStore::new();
+    let evidence_hash = compliance_store
+        .store_evidence(
+            "pub:trusted",
+            EvidenceSource::TrustFabric,
+            "Trust Fabric Audit Evidence",
+            "{\"converged\":true}",
+            None,
+            &["trust-fabric".to_string()],
+            "2026-11-17T00:01:00Z",
+            &args.trace_id,
+        )
+        .map_err(|err| anyhow::anyhow!("{err}"))?;
+    let tamper_free = compliance_store
+        .verify_tamper_evidence(&evidence_hash, "2026-11-17T00:02:00Z", &args.trace_id)
+        .map_err(|err| anyhow::anyhow!("{err}"))?;
+
+    let mut rev_engine =
+        RevocationIntegrationEngine::new(RevocationIntegrationPolicy::default_policy());
+    rev_engine
+        .init_zone("zone-default")
+        .map_err(|err| anyhow::anyhow!("{}", err.code()))?;
+    let rev_decision = rev_engine.evaluate_operation(&ExtensionOperationContext {
+        extension_id: "ext:verified-telemetry".to_string(),
+        operation: ExtensionOperation::Install,
+        safety_tier: ExtensionSafetyTier::for_operation(ExtensionOperation::Install),
+        zone_id: "zone-default".to_string(),
+        revocation_data_age_secs: args.revocation_age_secs,
+        now_epoch: 1_700_000_000,
+        trace_id: args.trace_id.clone(),
+        dependent_extensions: Vec::new(),
+        active_sessions: Vec::new(),
+    });
+    let revocation_allowed = matches!(rev_decision.status, RevocationDecisionStatus::Passed);
+
+    let adv_runner = AdversarialRunner::new(RunnerConfig::default_config(), build_default_corpus());
+    let (corpus_valid, _) = adv_runner.validate_corpus();
+    let (mutations_valid, _) = adv_runner.validate_mutations();
+
+    let mut rail_router = RailRouter::with_default_policy();
+    let workload_class = rail_router
+        .classify_workload("workload:extension-pilot", args.workload_risk_score)
+        .map_err(|err| anyhow::anyhow!("{err:?}"))?;
+
+    let ok = fleet_converged
+        && snapshot_verified
+        && tamper_free
+        && revocation_allowed
+        && corpus_valid
+        && mutations_valid;
+
+    let payload = serde_json::json!({
+        "schema_version": "franken-node/trust-fabric-convergence-audit-cli/v1",
+        "command": "trust.fabric-convergence-audit",
+        "ok": ok,
+        "trust_fabric": {
+            "fleet_nodes": fleet.node_count(),
+            "converged": fleet_converged,
+        },
+        "claim_scoreboard": {
+            "entry_count": snapshot.entries.len(),
+            "snapshot_digest": snapshot.snapshot_digest,
+            "digest_verified": snapshot_verified,
+        },
+        "ecosystem": {
+            "registered_extensions": eco_reg.extension_count(),
+            "audit_trail_len": eco_reg.audit_trail_len(),
+            "publisher_reputation_score": reputation_score,
+            "compliance_evidence_hash": evidence_hash,
+            "tamper_free": tamper_free,
+        },
+        "revocation_freshness": {
+            "age_secs": args.revocation_age_secs,
+            "allowed": revocation_allowed,
+            "status": format!("{:?}", rev_decision.status),
+        },
+        "adversarial_corpus": {
+            "corpus_valid": corpus_valid,
+            "mutations_valid": mutations_valid,
+        },
+        "isolation_rail": {
+            "workload_id": workload_class.workload_id,
+            "assigned_rail": format!("{:?}", workload_class.rail),
+        },
+    });
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        println!(
+            "trust fabric-convergence-audit: ok={} converged={} reputation={:.3} revocation_allowed={} rail={:?}",
+            ok, fleet_converged, reputation_score, revocation_allowed, workload_class.rail
+        );
+    }
+    if !ok {
+        if args.json {
+            fail_closed_after_json();
+        }
+        anyhow::bail!(
+            "trust fabric-convergence-audit failed closed (converged={fleet_converged}, revocation_allowed={revocation_allowed})"
+        );
+    }
+    Ok(())
+}
+
+fn handle_migrate_kit_plan(args: &MigrateKitPlanArgs) -> Result<()> {
+    use connector::activation_pipeline::{
+        ActivationInput, DefaultExecutor, FixtureActivationExecutor, activate, verify_stage_order,
+    };
+    use connector::device_profile::{DeviceProfile, DeviceProfileRegistry};
+    use connector::error_surface::{ProductSurface, is_registered_product_prefix};
+    use supply_chain::migration_kit::{
+        Archetype, CompatibilityMapping, MigrationComplexity, MigrationKitEcosystem,
+        MigrationPhase, MigrationStep, MkeConfig, StepStatus,
+    };
+
+    let archetype = match args.archetype.trim().to_ascii_lowercase().as_str() {
+        "express" => Archetype::Express,
+        "fastify" => Archetype::Fastify,
+        "koa" => Archetype::Koa,
+        "nextjs" | "next" => Archetype::NextJs,
+        "bun_native" | "bun-native" | "bun" => Archetype::BunNative,
+        other => anyhow::bail!(
+            "unsupported --archetype `{other}` (expected express, fastify, koa, nextjs, or bun_native)"
+        ),
+    };
+
+    let mut mke = MigrationKitEcosystem::new(MkeConfig::default());
+    let steps = MigrationPhase::all()
+        .iter()
+        .enumerate()
+        .map(|(idx, &phase)| MigrationStep {
+            step_id: format!("step-{}", idx + 1),
+            phase,
+            title: format!("{:?} gate", phase),
+            description: format!("Execute {:?} for {}", phase, archetype.label()),
+            dependencies: if idx == 0 {
+                Vec::new()
+            } else {
+                vec![format!("step-{idx}")]
+            },
+            rollback_procedure: format!("Restore checkpoint prior to step-{}", idx + 1),
+            status: StepStatus::Pending,
+            estimated_duration_min: 5,
+        })
+        .collect::<Vec<_>>();
+
+    let kit_id = mke
+        .load_kit(
+            archetype,
+            CompatibilityMapping {
+                archetype,
+                supported_versions: vec![">=18.0.0".to_string()],
+                api_coverage_pct: 96.5,
+                known_incompatibilities: Vec::new(),
+                migration_complexity: MigrationComplexity::Medium,
+            },
+            steps,
+            &args.trace_id,
+        )
+        .map_err(|err| anyhow::anyhow!("{err}"))?;
+    let plan = mke
+        .generate_plan(&kit_id, &args.trace_id)
+        .map_err(|err| anyhow::anyhow!("{err}"))?
+        .clone();
+
+    let activation_input = ActivationInput {
+        connector_id: args.connector_id.clone(),
+        sandbox_config: r#"{"mode":"strict-bwrap"}"#.to_string(),
+        secret_refs: vec!["secret:migration-token".to_string()],
+        capabilities: vec!["cap:fs:read".to_string(), "cap:migration:plan".to_string()],
+        trace_id: args.trace_id.clone(),
+        timestamp: "2026-11-17T00:00:00Z".to_string(),
+    };
+    let default_transcript = activate(&activation_input, &DefaultExecutor);
+    let default_executor_fails_closed = !default_transcript.completed;
+    let preview_transcript = activate(&activation_input, &FixtureActivationExecutor);
+    let stage_order_valid = verify_stage_order(&preview_transcript);
+
+    let mut device_registry = DeviceProfileRegistry::new();
+    device_registry
+        .register(DeviceProfile {
+            device_id: "dev:linux-x86_64-runner".to_string(),
+            capabilities: vec!["bwrap".to_string(), "fsqlite-wal".to_string()],
+            region: "local".to_string(),
+            tier: "tier-1".to_string(),
+            registered_at: 1_700_000_000,
+            schema_version: 1,
+        })
+        .map_err(|err| anyhow::anyhow!("{}", err.code()))?;
+    let cli_prefix_registered = is_registered_product_prefix(ProductSurface::Migration.prefix());
+
+    let ok = default_executor_fails_closed
+        && stage_order_valid
+        && preview_transcript.completed
+        && device_registry.count() == 1
+        && cli_prefix_registered;
+
+    let payload = serde_json::json!({
+        "schema_version": "franken-node/migrate-kit-plan-cli/v1",
+        "command": "migrate.kit-plan",
+        "ok": ok,
+        "kit": {
+            "kit_id": plan.kit_id,
+            "archetype": archetype.label(),
+            "kit_version": plan.kit_version,
+            "step_count": plan.steps.len(),
+            "content_hash": plan.content_hash,
+        },
+        "activation_preview": {
+            "connector_id": preview_transcript.connector_id,
+            "live_execution": false,
+            "default_executor_fails_closed": default_executor_fails_closed,
+            "completed": preview_transcript.completed,
+            "stage_order_valid": stage_order_valid,
+            "stage_count": preview_transcript.stages.len(),
+        },
+        "device_registry": {
+            "registered_devices": device_registry.count(),
+            "cli_error_prefix_registered": cli_prefix_registered,
+        },
+        "audit_records": mke.audit_log().len(),
+    });
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        println!(
+            "migrate kit-plan: ok={} kit_id={} archetype={} steps={} preview_completed={}",
+            ok,
+            plan.kit_id,
+            archetype.label(),
+            plan.steps.len(),
+            preview_transcript.completed
+        );
+    }
+    if !ok {
+        if args.json {
+            fail_closed_after_json();
+        }
+        anyhow::bail!("migrate kit-plan failed closed");
+    }
+    Ok(())
+}
+
 fn clap_error_should_emit_json(err: &clap::Error) -> bool {
     use clap::error::ErrorKind;
     if matches!(
@@ -43367,12 +44590,14 @@ fn main() -> Result<()> {
                 RuntimeCommand::Lane(RuntimeLaneCommand::Assign(args)) => args.json,
                 RuntimeCommand::Epoch(args) => args.json,
                 RuntimeCommand::SupervisionAudit(args) => args.json,
+                RuntimeCommand::RegionQuiescenceAudit(args) => args.json,
             };
             let command_name = match &sub {
                 RuntimeCommand::Lane(RuntimeLaneCommand::Status(_)) => "runtime.lane.status",
                 RuntimeCommand::Lane(RuntimeLaneCommand::Assign(_)) => "runtime.lane.assign",
                 RuntimeCommand::Epoch(_) => "runtime.epoch",
                 RuntimeCommand::SupervisionAudit(_) => "runtime.supervision-audit",
+                RuntimeCommand::RegionQuiescenceAudit(_) => "runtime.region-quiescence-audit",
             };
             if let Err(err) = handle_runtime_command(sub) {
                 return runtime_fail(command_name, json, err);
@@ -43779,15 +45004,19 @@ fn main() -> Result<()> {
 
                 let target_stage = args.stage.map(Into::into);
 
-                let report = match args.action {
-                    cli::MigrateRolloutAction::Status => {
-                        manager.status().map_err(|e| e.to_string())
-                    }
-                    cli::MigrateRolloutAction::Rollback => {
-                        manager.rollback("operator requested rollout rollback")
-                    }
-                    cli::MigrateRolloutAction::Promote => {
-                        manager.promote(&config, target_stage, args.ramp_pct)
+                let report = if args.cancel {
+                    manager.rollback("operator cancelled migration rollout")
+                } else {
+                    match args.action {
+                        cli::MigrateRolloutAction::Status => {
+                            manager.status().map_err(|e| e.to_string())
+                        }
+                        cli::MigrateRolloutAction::Rollback => {
+                            manager.rollback("operator requested rollout rollback")
+                        }
+                        cli::MigrateRolloutAction::Promote => {
+                            manager.promote(&config, target_stage, args.ramp_pct)
+                        }
                     }
                 };
 
@@ -43798,6 +45027,33 @@ fn main() -> Result<()> {
 
                 if let Err(err) = sync_rollout_deployment(&args, &manager, &mut report) {
                     return migrate_fail("migrate.rollout", args.json, err);
+                }
+                if let Err(err) = sync_rollout_fleet(&args, &manager, &mut report) {
+                    return migrate_fail("migrate.rollout", args.json, err);
+                }
+
+                if args.structured_logs_jsonl {
+                    eprintln!(
+                        "{}",
+                        serde_json::to_string(&serde_json::json!({
+                            "event_code": if args.cancel {
+                                "MIGRATE_ROLLOUT_CANCELLED"
+                            } else if report.rollback_triggered {
+                                "MIGRATE_ROLLOUT_ROLLED_BACK"
+                            } else {
+                                "MIGRATE_ROLLOUT_STAGE_OBSERVED"
+                            },
+                            "migration_id": report.migration_id,
+                            "stage": report.stage,
+                            "status": report.status,
+                            "ramp_pct": report.ramp_pct,
+                            "lockstep_verified": report.lockstep_verified,
+                            "confidence_delta_summary": report.confidence_delta_summary,
+                            "fleet_sync": report.fleet_sync,
+                            "deployment_sync": report.deployment_sync,
+                        }))
+                        .unwrap_or_default()
+                    );
                 }
 
                 if args.json {
@@ -43815,6 +45071,12 @@ fn main() -> Result<()> {
                         fail_closed_after_json();
                     }
                     anyhow::bail!("migration rollout failed: {}", report.message);
+                }
+            }
+
+            MigrateCommand::KitPlan(args) => {
+                if let Err(err) = handle_migrate_kit_plan(&args) {
+                    return migrate_fail("migrate.kit-plan", args.json, err);
                 }
             }
         },
@@ -44304,6 +45566,11 @@ fn main() -> Result<()> {
             TrustCommand::GovernanceAudit(args) => {
                 if let Err(err) = handle_trust_governance_audit(&args) {
                     return trust_fail("trust.governance-audit", args.json, err);
+                }
+            }
+            TrustCommand::FabricConvergenceAudit(args) => {
+                if let Err(err) = handle_trust_fabric_convergence_audit(&args) {
+                    return trust_fail("trust.fabric-convergence-audit", args.json, err);
                 }
             }
         },
@@ -44926,6 +46193,16 @@ fn main() -> Result<()> {
             OpsCommand::FaultScheduleAudit(args) => {
                 if let Err(err) = handle_ops_fault_schedule_audit(&args) {
                     return ops_fail("ops.fault-schedule-audit", args.json, err);
+                }
+            }
+            OpsCommand::StorageSchemaAudit(args) => {
+                if let Err(err) = handle_ops_storage_schema_audit(&args) {
+                    return ops_fail("ops.storage-schema-audit", args.json, err);
+                }
+            }
+            OpsCommand::DgisFixtureSuite(args) => {
+                if let Err(err) = handle_ops_dgis_fixture_suite(&args) {
+                    return ops_fail("ops.dgis-fixture-suite", args.json, err);
                 }
             }
         },

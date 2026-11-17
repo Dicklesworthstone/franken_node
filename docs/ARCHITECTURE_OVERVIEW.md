@@ -197,6 +197,7 @@ FrankenNode uses granular feature flags for compile-time optimization and option
 - **`http-client`** - HTTP client functionality (default: enabled)
 - **`external-commands`** - External process execution (default: enabled)
 - **`fleet-control-plane-server`** - Live HTTP fleet coordinator over durable fleet state; enables `franken-node fleet serve` (default: enabled)
+- **`asupersync-transport`** - `Cx`-checkpointed `asupersync` control-lane transport for `franken-node fleet agent` with receipted degraded fallback (default: enabled)
 
 ### Product Surface Features
 - **`extended-surfaces`** - Legacy umbrella for `control-plane`, `policy-engine`, `remote-ops`, `admin-tools`, `verifier-tools`, and `advanced-features`
@@ -210,7 +211,6 @@ FrankenNode uses granular feature flags for compile-time optimization and option
 ### Development Features
 - **`test-support`** - Test utilities and extended testing surfaces; composes `control-plane` and `admin-tools`
 - **`loom-models`** - Library-level `#[cfg(loom)]` model helpers for explicit Loom test invocations; not enabled by default or by `test-support`
-- **`asupersync-transport`** - Direct asupersync integration
 
 ### Optional Dependencies
 - **`compression`** - GZIP/deflate support via flate2
@@ -251,15 +251,15 @@ Supply Chain Input → Trust Card Validation → Policy Engine → Decision Rece
 | Kernel | Repository | Integration |
 |--------|------------|-------------|
 | **franken_engine** | sibling `../franken_engine/` | Default `run` uses the embedded engine; `--engine-bin` is an optional process path |
-| **asupersync** | Optional feature | Direct crate dependency |
+| **asupersync** | Published `0.6.2` | Default-enabled (`fleet-control-plane-server` + `asupersync-transport`) `Cx`-checkpointed control-lane runtime for `fleet serve` and `fleet agent` |
 
 ### Substrate Dependencies
 | Substrate | Repository | Purpose |
 |-----------|------------|---------|
-| **frankentui** | `../frankentui/` (`packaging/source-siblings.tsv`) | Terminal rendering and buffer formatting for doctor/fleet CLI surfaces |
-| **frankensqlite (`fsqlite`)** | Published `0.4.1` | Live WAL-backed durable SQLite store across 5 product stores (trust-card registry, deployment store, fleet transport, rollout store, replay/quarantine persistence) |
+| **frankentui** | `../frankentui/` (`packaging/source-siblings.tsv`) | Structured widget/frame operator screens (`doctor --screen`, `fleet status --screen`) |
+| **frankensqlite (`fsqlite`)** | Published `0.1.19` | Live WAL-backed durable SQLite store across product stores (telemetry/audit adapter, trust-card registry, deployment store, fleet transport, native session inventory) |
 | **fastapi_rust** | `../fastapi_rust/` (`packaging/source-siblings.tsv`) | Default-enabled (`fleet-control-plane-server`) live HTTP fleet coordinator (`franken-node fleet serve`) on `asupersync` |
-| **sqlmodel_rust** | `../sqlmodel_rust/` (`packaging/source-siblings.tsv`) | Dev-dependency for SQL schema/model conformance tests (not linked into the production binary) |
+| **sqlmodel_rust** | `../sqlmodel_rust/` (`packaging/source-siblings.tsv`) | Production typed schema/DDL boundary (`sqlmodel-core` + `sqlmodel-schema`) for `DurableFrankensqliteAdapter`, the 21 canonical domain models, `ops storage-schema-audit`, and `doctor` live SQLite drift checks |
 
 ## Test Infrastructure
 

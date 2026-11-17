@@ -1447,3 +1447,195 @@ fn migrate_rollout_ed25519_transition_signatures_and_deployment_store_sync() {
     assert_eq!(rb_sync.action, "rolled_back_to_known_good");
     assert_eq!(rb_sync.active_release_id, "1.0.0");
 }
+
+#[test]
+fn migrate_audit_rewrite_validate_to_rollout_durable_fleet_sync_and_cancellation_e2e() {
+    use frankenengine_node::migration::rollout::RolloutReport;
+
+    let outer = tempfile::tempdir().unwrap();
+    let root = outer.path().join("project");
+    let state_home = tempfile::tempdir().unwrap();
+    let run_cli = |dir: &Path, args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_franken-node"))
+            .current_dir(dir)
+            .env("XDG_STATE_HOME", state_home.path())
+            .env_remove("FRANKEN_NODE_PROFILE")
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::write(
+        root.join("package.json"),
+        r#"{"name":"rollout-fleet-e2e","version":"1.0.0","main":"src/index.js"}"#,
+    )
+    .unwrap();
+    fs::write(
+        root.join("package-lock.json"),
+        r#"{"name":"rollout-fleet-e2e","version":"1.0.0","lockfileVersion":3,"packages":{}}"#,
+    )
+    .unwrap();
+    fs::write(
+        root.join("src/index.js"),
+        "const path = require('path');\nconsole.log(path.basename('/a/b.js'));\n",
+    )
+    .unwrap();
+
+    // 1. Audit -> Rewrite -> Validate (static)
+    assert!(
+        run_cli(
+            outer.path(),
+            &[
+                "migrate",
+                "audit",
+                root.to_str().unwrap(),
+                "--format",
+                "json"
+            ],
+        )
+        .status
+        .success()
+    );
+    assert!(
+        run_cli(
+            outer.path(),
+            &[
+                "migrate",
+                "rewrite",
+                root.to_str().unwrap(),
+                "--apply",
+                "--json",
+            ],
+        )
+        .status
+        .success()
+    );
+    assert!(
+        run_cli(
+            outer.path(),
+            &[
+                "migrate",
+                "validate",
+                root.to_str().unwrap(),
+                "--static-only",
+                "--format",
+                "json",
+            ],
+        )
+        .status
+        .success()
+    );
+
+    // 2. Promote rollout through Canary -> Default synchronized with DurableFleetTransport (`zone-mig`).
+    let canary_out = run_cli(
+        outer.path(),
+        &[
+            "migrate",
+            "rollout",
+            root.to_str().unwrap(),
+            "--migration-id",
+            "mig-fleet-e2e",
+            "--stage",
+            "canary",
+            "--force",
+            "--fleet-zone",
+            "zone-mig",
+            "--structured-logs-jsonl",
+            "--json",
+        ],
+    );
+    assert!(
+        canary_out.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&canary_out.stdout),
+        String::from_utf8_lossy(&canary_out.stderr)
+    );
+    let canary_rep: RolloutReport = serde_json::from_slice(&canary_out.stdout).unwrap();
+    assert_eq!(
+        canary_rep.fleet_sync.as_ref().unwrap().action,
+        "verified_clear_at_canary"
+    );
+    assert!(String::from_utf8_lossy(&canary_out.stderr).contains("MIGRATE_ROLLOUT_STAGE_OBSERVED"));
+
+    let default_out = run_cli(
+        outer.path(),
+        &[
+            "migrate",
+            "rollout",
+            root.to_str().unwrap(),
+            "--migration-id",
+            "mig-fleet-e2e",
+            "--stage",
+            "default",
+            "--force",
+            "--fleet-zone",
+            "zone-mig",
+            "--structured-logs-jsonl",
+            "--json",
+        ],
+    );
+    assert!(default_out.status.success());
+    let default_rep: RolloutReport = serde_json::from_slice(&default_out.stdout).unwrap();
+    assert_eq!(
+        default_rep.fleet_sync.as_ref().unwrap().action,
+        "released_on_default_promotion"
+    );
+    assert!(default_rep.fleet_sync.as_ref().unwrap().action_id.is_some());
+
+    // 3. Explicit `--cancel` aborts the rollout, emits `MIGRATE_ROLLOUT_CANCELLED`, and publishes
+    // a durable `FleetAction::Quarantine` into `.franken-node/state/fleet-state.db`.
+    let cancel_out = run_cli(
+        outer.path(),
+        &[
+            "migrate",
+            "rollout",
+            root.to_str().unwrap(),
+            "--migration-id",
+            "mig-fleet-e2e",
+            "--cancel",
+            "--fleet-zone",
+            "zone-mig",
+            "--structured-logs-jsonl",
+            "--json",
+        ],
+    );
+    assert!(
+        cancel_out.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&cancel_out.stdout),
+        String::from_utf8_lossy(&cancel_out.stderr)
+    );
+    let cancel_rep: RolloutReport = serde_json::from_slice(&cancel_out.stdout).unwrap();
+    assert!(cancel_rep.rollback_triggered);
+    let cancel_fleet = cancel_rep.fleet_sync.as_ref().unwrap();
+    assert_eq!(cancel_fleet.action, "cancelled_and_quarantined");
+    assert_eq!(cancel_fleet.quarantine_version, 1);
+    assert!(String::from_utf8_lossy(&cancel_out.stderr).contains("MIGRATE_ROLLOUT_CANCELLED"));
+
+    // 4. Restart-safe status check observes `quarantined_in_fleet` from durable `fleet-state.db`.
+    let status_out = run_cli(
+        outer.path(),
+        &[
+            "migrate",
+            "rollout",
+            root.to_str().unwrap(),
+            "--migration-id",
+            "mig-fleet-e2e",
+            "--action",
+            "status",
+            "--fleet-zone",
+            "zone-mig",
+            "--json",
+        ],
+    );
+    assert!(
+        !status_out.status.success(),
+        "aborted rollout status must exit non-zero fail-closed"
+    );
+    let status_rep: RolloutReport = serde_json::from_slice(&status_out.stdout).unwrap();
+    assert!(!status_rep.ok);
+    assert_eq!(
+        status_rep.fleet_sync.as_ref().unwrap().action,
+        "quarantined_in_fleet"
+    );
+}

@@ -147,47 +147,37 @@ impl DurableFrankensqliteAdapter {
     }
 
     fn ensure_schema(&self) -> Result<(), AdapterError> {
+        use sqlmodel_schema::DdlGenerator as _;
         self.with_connection(|connection| {
-            connection
-                .execute(
-                    "CREATE TABLE IF NOT EXISTS adapter_store (
-                        class TEXT NOT NULL,
-                        key TEXT NOT NULL,
-                        value BLOB NOT NULL,
-                        updated_at TEXT NOT NULL,
-                        PRIMARY KEY (class, key)
-                    );",
-                )
-                .map_err(|err| AdapterError::WriteFailure {
-                    key: String::new(),
-                    reason: format!("create adapter_store: {err}"),
-                })?;
-            connection
-                .execute(
-                    "CREATE TABLE IF NOT EXISTS adapter_audit_journal (
-                        seq INTEGER PRIMARY KEY AUTOINCREMENT,
-                        class TEXT NOT NULL,
-                        key TEXT NOT NULL UNIQUE,
-                        value_sha256 TEXT NOT NULL,
-                        recorded_at TEXT NOT NULL
-                    );",
-                )
-                .map_err(|err| AdapterError::WriteFailure {
-                    key: String::new(),
-                    reason: format!("create adapter_audit_journal: {err}"),
-                })?;
-            connection
-                .execute(
-                    "CREATE TABLE IF NOT EXISTS adapter_schema_versions (
-                        version INTEGER PRIMARY KEY,
-                        applied_at TEXT NOT NULL,
-                        description TEXT NOT NULL
-                    );",
-                )
-                .map_err(|err| AdapterError::WriteFailure {
-                    key: String::new(),
-                    reason: format!("create adapter_schema_versions: {err}"),
-                })?;
+            let observed = introspect_connection_schema(connection)?;
+            let expected = crate::storage::models::expected_telemetry_store_schema();
+            let diff = sqlmodel_schema::diff::schema_diff(&observed, &expected);
+            // Only apply non-destructive additive DDL automatically; destructive drift
+            // is surfaced by `audit_live_schema` without silently dropping user data.
+            let additive_ops: Vec<sqlmodel_schema::diff::SchemaOperation> = diff
+                .operations
+                .into_iter()
+                .filter(|op| !op.is_destructive())
+                .collect();
+            for statement in sqlmodel_schema::SqliteDdlGenerator.generate_all(&additive_ops) {
+                let trimmed = statement.trim();
+                if trimmed.is_empty() || trimmed.starts_with("--") {
+                    continue;
+                }
+                let idempotent = if let Some(rest) = trimmed.strip_prefix("CREATE UNIQUE INDEX ") {
+                    format!("CREATE UNIQUE INDEX IF NOT EXISTS {rest}")
+                } else if let Some(rest) = trimmed.strip_prefix("CREATE INDEX ") {
+                    format!("CREATE INDEX IF NOT EXISTS {rest}")
+                } else {
+                    trimmed.to_string()
+                };
+                connection
+                    .execute(&idempotent)
+                    .map_err(|err| AdapterError::WriteFailure {
+                        key: String::new(),
+                        reason: format!("apply sqlmodel DDL `{idempotent}`: {err}"),
+                    })?;
+            }
             connection
                 .execute_with_params(
                     "INSERT INTO adapter_schema_versions(version, applied_at, description)
@@ -197,7 +187,8 @@ impl DurableFrankensqliteAdapter {
                         SqliteValue::Integer(DURABLE_ADAPTER_SCHEMA_VERSION),
                         SqliteValue::Text(now_rfc3339().into()),
                         SqliteValue::Text(
-                            "initial durable adapter schema (WAL/FULL tier mapping)".into(),
+                            "initial durable adapter schema (sqlmodel_schema WAL/FULL tier mapping)"
+                                .into(),
                         ),
                     ],
                 )
@@ -207,6 +198,43 @@ impl DurableFrankensqliteAdapter {
                 })?;
             Ok(())
         })
+    }
+
+    /// Introspect the live SQLite schema on this adapter's connection and compare
+    /// it against [`crate::storage::models::expected_telemetry_store_schema`] via
+    /// [`sqlmodel_schema::diff::schema_diff`].
+    pub fn audit_live_schema(
+        &self,
+    ) -> Result<crate::storage::models::StoreSchemaAuditReport, AdapterError> {
+        self.with_connection(|connection| {
+            let observed = introspect_connection_schema(connection)?;
+            let expected = crate::storage::models::expected_telemetry_store_schema();
+            let report =
+                crate::storage::models::audit_database_schema("telemetry", &observed, &expected);
+            self.emit_event(
+                &report.event_code,
+                PersistenceClass::AuditLog.label(),
+                format!(
+                    "is_drift_free={}, ops={}",
+                    report.is_drift_free, report.operation_count
+                ),
+            );
+            Ok(report)
+        })
+    }
+
+    /// Open an existing SQLite database file and introspect its live
+    /// [`sqlmodel_schema::DatabaseSchema`] without mutating tables.
+    pub fn introspect_sqlite_file(
+        db_path: &Path,
+    ) -> Result<sqlmodel_schema::DatabaseSchema, AdapterError> {
+        let connection = Connection::open(db_path.to_string_lossy().as_ref()).map_err(|err| {
+            AdapterError::ConfigValidationFailed {
+                reason: format!("open {} for schema introspection: {err}", db_path.display()),
+            }
+        })?;
+        let _ = connection.query("PRAGMA busy_timeout=5000;");
+        introspect_connection_schema(&connection)
     }
 
     fn emit_event(&self, code: &str, class_label: &str, detail: String) {
@@ -718,4 +746,334 @@ impl DurableFrankensqliteAdapter {
 fn constant_time_eq_hex(left: &str, right: &str) -> bool {
     use subtle::ConstantTimeEq as _;
     left.as_bytes().ct_eq(right.as_bytes()).into()
+}
+
+fn unquote_sqlite_ident(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.len() >= 2
+        && ((trimmed.starts_with('"') && trimmed.ends_with('"'))
+            || (trimmed.starts_with('`') && trimmed.ends_with('`'))
+            || (trimmed.starts_with('[') && trimmed.ends_with(']')))
+    {
+        trimmed[1..trimmed.len() - 1].replace("\"\"", "\"")
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn split_top_level_commas(body: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut depth = 0_usize;
+    let mut in_quotes = false;
+    let mut start = 0_usize;
+    for (idx, ch) in body.char_indices() {
+        match ch {
+            '"' => in_quotes = !in_quotes,
+            '(' if !in_quotes => depth = depth.saturating_add(1),
+            ')' if !in_quotes => depth = depth.saturating_sub(1),
+            ',' if !in_quotes && depth == 0 => {
+                parts.push(body[start..idx].trim());
+                start = idx + 1;
+            }
+            _ => {}
+        }
+    }
+    let tail = body[start..].trim();
+    if !tail.is_empty() {
+        parts.push(tail);
+    }
+    parts
+}
+
+fn parse_ident_list_in_parens(clause: &str) -> Vec<String> {
+    let Some(open) = clause.find('(') else {
+        return Vec::new();
+    };
+    let Some(close) = clause[open + 1..].find(')') else {
+        return Vec::new();
+    };
+    clause[open + 1..open + 1 + close]
+        .split(',')
+        .map(unquote_sqlite_ident)
+        .filter(|c| !c.is_empty())
+        .collect()
+}
+
+fn parse_table_from_create_sql(
+    table_name: &str,
+    create_sql: &str,
+    index_sqls: &[String],
+) -> sqlmodel_schema::TableInfo {
+    let mut columns = Vec::new();
+    let mut primary_key = Vec::new();
+    let mut unique_constraints = Vec::new();
+
+    if let Some(open) = create_sql.find('(')
+        && let Some(close) = create_sql.rfind(')')
+        && close > open
+    {
+        let body = &create_sql[open + 1..close];
+        for item in split_top_level_commas(body) {
+            let upper = item.to_ascii_uppercase();
+            let trimmed_upper = upper.trim_start();
+            if trimmed_upper.starts_with("PRIMARY KEY") {
+                primary_key = parse_ident_list_in_parens(item);
+                continue;
+            }
+            if trimmed_upper.starts_with("UNIQUE") {
+                let cols = parse_ident_list_in_parens(item);
+                if !cols.is_empty() {
+                    unique_constraints.push(sqlmodel_schema::UniqueConstraintInfo {
+                        name: None,
+                        columns: cols,
+                    });
+                }
+                continue;
+            }
+            if trimmed_upper.starts_with("CONSTRAINT ") {
+                if trimmed_upper.contains(" PRIMARY KEY") {
+                    primary_key = parse_ident_list_in_parens(item);
+                } else if trimmed_upper.contains(" UNIQUE") {
+                    let cols = parse_ident_list_in_parens(item);
+                    if !cols.is_empty() {
+                        unique_constraints.push(sqlmodel_schema::UniqueConstraintInfo {
+                            name: None,
+                            columns: cols,
+                        });
+                    }
+                }
+                continue;
+            }
+            if trimmed_upper.starts_with("FOREIGN KEY") || trimmed_upper.starts_with("CHECK") {
+                continue;
+            }
+
+            let tokens: Vec<&str> = item.split_whitespace().collect();
+            if tokens.len() < 2 {
+                continue;
+            }
+            let col_name = unquote_sqlite_ident(tokens[0]);
+            let raw_type = tokens[1].trim_end_matches(',').to_ascii_uppercase();
+            let inline_pk = trimmed_upper.contains(" PRIMARY KEY");
+            let inline_auto = trimmed_upper.contains("AUTOINCREMENT");
+            let inline_unique =
+                trimmed_upper.ends_with(" UNIQUE") || trimmed_upper.contains(" UNIQUE ");
+            let nullable = !trimmed_upper.contains("NOT NULL");
+            if inline_pk && !primary_key.contains(&col_name) {
+                primary_key.push(col_name.clone());
+            }
+            if inline_unique {
+                unique_constraints.push(sqlmodel_schema::UniqueConstraintInfo {
+                    name: None,
+                    columns: vec![col_name.clone()],
+                });
+            }
+            columns.push(sqlmodel_schema::ColumnInfo {
+                name: col_name,
+                parsed_type: sqlmodel_schema::ParsedSqlType::parse(&raw_type),
+                sql_type: raw_type,
+                nullable,
+                default: None,
+                primary_key: inline_pk,
+                auto_increment: inline_auto,
+                comment: None,
+            });
+        }
+    }
+
+    for col in &mut columns {
+        if primary_key.contains(&col.name) {
+            col.primary_key = true;
+        }
+    }
+
+    for idx_sql in index_sqls {
+        let upper = idx_sql.to_ascii_uppercase();
+        if upper.contains("CREATE UNIQUE INDEX") {
+            let cols = parse_ident_list_in_parens(idx_sql);
+            if !cols.is_empty()
+                && !unique_constraints
+                    .iter()
+                    .any(|existing| existing.columns == cols)
+            {
+                unique_constraints.push(sqlmodel_schema::UniqueConstraintInfo {
+                    name: None,
+                    columns: cols,
+                });
+            }
+        }
+    }
+
+    sqlmodel_schema::TableInfo {
+        name: table_name.to_string(),
+        columns,
+        primary_key,
+        foreign_keys: Vec::new(),
+        unique_constraints,
+        check_constraints: Vec::new(),
+        indexes: Vec::new(),
+        comment: None,
+    }
+}
+
+fn introspect_connection_schema(
+    connection: &Connection,
+) -> Result<sqlmodel_schema::DatabaseSchema, AdapterError> {
+    let mut schema = sqlmodel_schema::DatabaseSchema::new(sqlmodel_schema::Dialect::Sqlite);
+    let table_rows = connection
+        .query(
+            "SELECT name, sql FROM sqlite_master
+             WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+             ORDER BY name ASC;",
+        )
+        .map_err(|err| AdapterError::ConfigValidationFailed {
+            reason: format!("query sqlite_master tables: {err}"),
+        })?;
+
+    for row in table_rows {
+        let values = row.values();
+        let Some(SqliteValue::Text(name)) = values.first() else {
+            continue;
+        };
+        let create_sql = match values.get(1) {
+            Some(SqliteValue::Text(sql)) => sql.to_string(),
+            _ => String::new(),
+        };
+        let idx_rows = connection
+            .query_with_params(
+                "SELECT sql FROM sqlite_master
+                 WHERE type = 'index' AND tbl_name = ?1 AND sql IS NOT NULL;",
+                &[SqliteValue::Text(name.clone())],
+            )
+            .unwrap_or_default();
+        let index_sqls: Vec<String> = idx_rows
+            .into_iter()
+            .filter_map(|r| match r.values().first() {
+                Some(SqliteValue::Text(s)) => Some(s.to_string()),
+                _ => None,
+            })
+            .collect();
+
+        let mut table_info = parse_table_from_create_sql(name.as_ref(), &create_sql, &index_sqls);
+
+        // Enrich column metadata via PRAGMA table_info when supported by the connection.
+        let pragma_sql = format!("PRAGMA table_info(\"{}\");", name.replace('"', "\"\""));
+        if let Ok(pragma_rows) = connection.query(&pragma_sql)
+            && !pragma_rows.is_empty()
+        {
+            let mut pragma_cols = Vec::new();
+            let mut pk_ordered: Vec<(i64, String)> = Vec::new();
+            for p_row in pragma_rows {
+                let pv = p_row.values();
+                let Some(SqliteValue::Text(col_name)) = pv.get(1) else {
+                    continue;
+                };
+                let col_type = match pv.get(2) {
+                    Some(SqliteValue::Text(t)) => t.to_ascii_uppercase(),
+                    _ => "TEXT".to_string(),
+                };
+                let notnull = match pv.get(3) {
+                    Some(SqliteValue::Integer(n)) => *n != 0,
+                    _ => false,
+                };
+                let pk_ord = match pv.get(5) {
+                    Some(SqliteValue::Integer(pk)) => *pk,
+                    _ => 0,
+                };
+                if pk_ord > 0 {
+                    pk_ordered.push((pk_ord, col_name.to_string()));
+                }
+                let auto_inc = table_info
+                    .column(col_name.as_ref())
+                    .is_some_and(|c| c.auto_increment);
+                pragma_cols.push(sqlmodel_schema::ColumnInfo {
+                    name: col_name.to_string(),
+                    parsed_type: sqlmodel_schema::ParsedSqlType::parse(&col_type),
+                    sql_type: col_type,
+                    nullable: !notnull,
+                    default: None,
+                    primary_key: pk_ord > 0,
+                    auto_increment: auto_inc,
+                    comment: None,
+                });
+            }
+            if !pragma_cols.is_empty() {
+                pk_ordered.sort_by_key(|(ord, _)| *ord);
+                table_info.columns = pragma_cols;
+                table_info.primary_key = pk_ordered.into_iter().map(|(_, col)| col).collect();
+            }
+        }
+
+        schema.tables.insert(name.to_string(), table_info);
+    }
+
+    Ok(schema)
+}
+
+#[cfg(test)]
+mod sqlmodel_schema_tests {
+    use super::*;
+    use crate::storage::frankensqlite_adapter::PersistenceClass;
+
+    #[test]
+    fn durable_adapter_sqlmodel_ddl_roundtrips_and_reopens_drift_free() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("telemetry.db");
+
+        let mut adapter = DurableFrankensqliteAdapter::new(&db_path).expect("open adapter");
+        let audit = adapter.audit_live_schema().expect("audit live schema");
+        assert!(
+            audit.is_drift_free,
+            "unexpected schema drift on newly created telemetry.db: {:?}",
+            audit.operations_summary
+        );
+        assert_eq!(
+            audit.event_code,
+            crate::storage::models::EVENT_SQLMODEL_ROUND_TRIP_PASS
+        );
+
+        let caller = CallerContext::system("durable_adapter::test", "trace-sqlmodel-test");
+        adapter
+            .write(&caller, PersistenceClass::AuditLog, "entry-1", b"payload-1")
+            .expect("write audit entry");
+        drop(adapter);
+
+        let mut reopened = DurableFrankensqliteAdapter::new(&db_path).expect("reopen adapter");
+        let reopened_audit = reopened.audit_live_schema().expect("audit reopened schema");
+        assert!(reopened_audit.is_drift_free);
+        assert_eq!(
+            reopened.replay().expect("replay"),
+            vec![("entry-1".to_string(), true)]
+        );
+    }
+
+    #[test]
+    fn durable_adapter_audit_live_schema_flags_rogue_table_drift() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("telemetry.db");
+        let adapter = DurableFrankensqliteAdapter::new(&db_path).expect("open adapter");
+        adapter
+            .with_connection(|conn| {
+                conn.execute("CREATE TABLE rogue_drift_probe (id TEXT PRIMARY KEY);")
+                    .map_err(|err| AdapterError::WriteFailure {
+                        key: String::new(),
+                        reason: err.to_string(),
+                    })?;
+                Ok(())
+            })
+            .expect("inject rogue table");
+
+        let audit = adapter.audit_live_schema().expect("audit drifted schema");
+        assert!(!audit.is_drift_free);
+        assert_eq!(
+            audit.event_code,
+            crate::storage::models::EVENT_SQLMODEL_SCHEMA_DRIFT_DETECTED
+        );
+        assert!(
+            audit
+                .operations_summary
+                .iter()
+                .any(|op| op == "unexpected_table:rogue_drift_probe")
+        );
+    }
 }

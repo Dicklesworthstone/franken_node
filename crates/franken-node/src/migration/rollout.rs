@@ -289,6 +289,26 @@ pub struct RolloutDeploymentSync {
     pub activation_sequence: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RolloutFleetSync {
+    pub zone_id: String,
+    pub transport_kind: String,
+    pub action: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_id: Option<String>,
+    pub quarantine_version: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RolloutConfidenceDeltaSummary {
+    pub observed_match_rate_bp: i64,
+    pub wilson_lower_95_bp: i64,
+    pub wilson_upper_95_bp: i64,
+    pub uncertainty_width_95_bp: i64,
+    pub operator_ceiling_bp: i64,
+    pub delta_wilson_lower_vs_ceiling_bp: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RolloutReport {
     pub schema_version: String,
@@ -307,7 +327,11 @@ pub struct RolloutReport {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub validation_confidence: Option<cohort::CohortConfidence>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence_delta_summary: Option<RolloutConfidenceDeltaSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deployment_sync: Option<RolloutDeploymentSync>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fleet_sync: Option<RolloutFleetSync>,
     pub message: String,
     pub history: Vec<RolloutTransitionEvent>,
 }
@@ -383,6 +407,14 @@ impl RolloutReport {
             writeln!(out, "  Restore recorded:   {}", source.restoration_recorded).unwrap();
         } else {
             writeln!(out, "  Source restoration: no transaction bound").unwrap();
+        }
+        if let Some(fleet) = &self.fleet_sync {
+            writeln!(
+                out,
+                "  Fleet sync:         zone={} action={} transport={} qv={}",
+                fleet.zone_id, fleet.action, fleet.transport_kind, fleet.quarantine_version
+            )
+            .unwrap();
         }
         writeln!(out, "  Summary:            {}", self.message).unwrap();
         if !self.history.is_empty() {
@@ -1017,6 +1049,20 @@ impl RolloutManager {
                 journal_sha256: pin.clone(),
                 restoration_recorded: state.status == RolloutStatus::RolledBack,
             });
+        let confidence_delta_summary = state.validation_confidence.as_ref().map(|vc| {
+            let obs_bp = (vc.observed_match_rate * 10_000.0).round() as i64;
+            let low_bp = (vc.wilson_lower_95 * 10_000.0).round() as i64;
+            let high_bp = (vc.wilson_upper_95 * 10_000.0).round() as i64;
+            let ceil_bp = (state.confidence_score * 10_000.0).round() as i64;
+            RolloutConfidenceDeltaSummary {
+                observed_match_rate_bp: obs_bp,
+                wilson_lower_95_bp: low_bp,
+                wilson_upper_95_bp: high_bp,
+                uncertainty_width_95_bp: high_bp.saturating_sub(low_bp),
+                operator_ceiling_bp: ceil_bp,
+                delta_wilson_lower_vs_ceiling_bp: low_bp.saturating_sub(ceil_bp),
+            }
+        });
         RolloutReport {
             schema_version: ROLLOUT_REPORT_SCHEMA_VERSION.into(),
             command: "migrate.rollout".into(),
@@ -1031,7 +1077,9 @@ impl RolloutManager {
             rollback_triggered: state.current_stage == RolloutStage::Aborted,
             source_rollback,
             validation_confidence: state.validation_confidence,
+            confidence_delta_summary,
             deployment_sync: None,
+            fleet_sync: None,
             message,
             history: state.history,
         }
@@ -1860,8 +1908,10 @@ mod tests {
             lockstep_verified: true,
             rollback_triggered: false,
             validation_confidence: None,
+            confidence_delta_summary: None,
             source_rollback: None,
             deployment_sync: None,
+            fleet_sync: None,
             message: "canary running smoothly".to_string(),
             history: vec![],
         };

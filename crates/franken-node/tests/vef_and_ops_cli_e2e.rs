@@ -625,3 +625,223 @@ fn runtime_supervision_audit_verifies_lifecycle_and_fails_on_budget_exhaustion()
     );
     assert_eq!(exhausted["ok"], false);
 }
+
+#[test]
+fn charter_substrates_sqlmodel_doctor_and_asupersync_fleet_agent_e2e() {
+    let dir = TempDir::new().expect("tempdir");
+
+    // 1. Default `fleet agent` activates the live `asupersync` control lane and initializes `fleet-state.db`.
+    let agent_out = cli(
+        dir.path(),
+        &[
+            "fleet",
+            "agent",
+            "--node-id",
+            "node-charter-1",
+            "--zone",
+            "zone-charter",
+            "--poll-interval-secs",
+            "1",
+            "--max-cycles",
+            "1",
+            "--json",
+        ],
+    );
+    assert!(
+        agent_out.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&agent_out.stdout),
+        String::from_utf8_lossy(&agent_out.stderr)
+    );
+    let agent_stderr = String::from_utf8_lossy(&agent_out.stderr);
+    assert!(
+        agent_stderr.contains("ASUPERSYNC_CONTROL_LANE_ACTIVATED"),
+        "expected ASUPERSYNC_CONTROL_LANE_ACTIVATED in stderr: {agent_stderr}"
+    );
+    assert!(
+        agent_stderr.contains("charter_compliant_control_lane"),
+        "expected charter_compliant_control_lane in stderr: {agent_stderr}"
+    );
+
+    // 2. Explicit `--fallback-file-transport` persists a durable AuditLog fallback receipt in `telemetry.db`.
+    let fallback_out = cli(
+        dir.path(),
+        &[
+            "fleet",
+            "agent",
+            "--node-id",
+            "node-charter-1",
+            "--zone",
+            "zone-charter",
+            "--poll-interval-secs",
+            "1",
+            "--max-cycles",
+            "1",
+            "--fallback-file-transport",
+            "--json",
+        ],
+    );
+    assert!(
+        fallback_out.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&fallback_out.stdout),
+        String::from_utf8_lossy(&fallback_out.stderr)
+    );
+    let fallback_stderr = String::from_utf8_lossy(&fallback_out.stderr);
+    assert!(
+        fallback_stderr.contains("FLEET_TRANSPORT_DEGRADED_FALLBACK")
+            && fallback_stderr.contains("\"receipt_persisted\":true"),
+        "expected persisted degraded fallback receipt in stderr: {fallback_stderr}"
+    );
+
+    // 3. `ops storage-schema-audit` introspects live `telemetry.db` + `fleet-state.db` against `sqlmodel_schema`.
+    let schema_out = cli(
+        dir.path(),
+        &[
+            "ops",
+            "storage-schema-audit",
+            "--workspace",
+            dir.path().to_str().unwrap(),
+            "--structured-logs-jsonl",
+            "--json",
+        ],
+    );
+    assert!(
+        schema_out.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&schema_out.stdout),
+        String::from_utf8_lossy(&schema_out.stderr)
+    );
+    let schema_json: Value = serde_json::from_slice(&schema_out.stdout).expect("schema audit json");
+    assert_eq!(schema_json["ok"], true);
+    assert_eq!(schema_json["canonical_domain_models"]["model_count"], 21);
+    assert_eq!(
+        schema_json["canonical_domain_models"]["generated_sqlite_ddl_count"],
+        21
+    );
+    assert!(schema_json["live_store_count"].as_u64().unwrap_or(0) >= 2);
+    assert_eq!(schema_json["drifted_store_count"], 0);
+    assert!(
+        String::from_utf8_lossy(&schema_out.stderr).contains("SQLMODEL_ROUND_TRIP_PASS"),
+        "expected SQLMODEL_ROUND_TRIP_PASS JSONL event"
+    );
+
+    // 4. `doctor --json` and `doctor --screen` (`frankentui`) surface `DR-SQLMODEL-015` over the live workspace stores.
+    let doc_json = json_ok(dir.path(), &["doctor", "--json"]);
+    let checks = doc_json["checks"].as_array().expect("doctor checks array");
+    let sqlmodel_check = checks
+        .iter()
+        .find(|c| c["code"] == "DR-SQLMODEL-015")
+        .expect("DR-SQLMODEL-015 present when live SQLite stores exist");
+    assert_eq!(sqlmodel_check["status"], "pass");
+
+    let screen_out = cli(dir.path(), &["doctor", "--screen"]);
+    assert!(
+        screen_out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&screen_out.stderr)
+    );
+    let screen_text = String::from_utf8_lossy(&screen_out.stdout);
+    assert!(
+        screen_text.contains("DR-SQLMODEL-015"),
+        "expected DR-SQLMODEL-015 in frankentui operator screen: {screen_text}"
+    );
+}
+
+#[test]
+fn ops_dgis_fixture_suite_and_migrate_kit_plan_cli_e2e() {
+    let dir = TempDir::new().expect("tempdir");
+
+    let dgis = json_ok(dir.path(), &["ops", "dgis-fixture-suite", "--json"]);
+    assert_eq!(dgis["ok"], true);
+    assert_eq!(dgis["fragility_suite"]["total_fixtures"], 10);
+    assert_eq!(dgis["fragility_suite"]["passed_fixtures"], 10);
+    assert!(dgis["graph_seed"]["node_count"].as_u64().unwrap_or(0) > 0);
+    assert!(dgis["graph_seed"]["edge_count"].as_u64().unwrap_or(0) > 0);
+
+    let kit = json_ok(
+        dir.path(),
+        &["migrate", "kit-plan", "--archetype", "fastify", "--json"],
+    );
+    assert_eq!(kit["ok"], true);
+    assert_eq!(kit["kit"]["archetype"], "fastify");
+    assert_eq!(kit["kit"]["step_count"], 5);
+    assert_eq!(kit["activation_preview"]["live_execution"], false);
+    assert_eq!(
+        kit["activation_preview"]["default_executor_fails_closed"],
+        true
+    );
+    assert_eq!(kit["activation_preview"]["completed"], true);
+    assert_eq!(kit["activation_preview"]["stage_order_valid"], true);
+
+    let bad_kit = json_err(
+        dir.path(),
+        &[
+            "migrate",
+            "kit-plan",
+            "--archetype",
+            "nonexistent",
+            "--json",
+        ],
+    );
+    assert_eq!(bad_kit["ok"], false);
+}
+
+#[test]
+fn runtime_region_quiescence_and_trust_fabric_convergence_cli_e2e() {
+    let dir = TempDir::new().expect("tempdir");
+
+    let region_ok = json_ok(
+        dir.path(),
+        &["runtime", "region-quiescence-audit", "--json"],
+    );
+    assert_eq!(region_ok["ok"], true);
+    assert_eq!(region_ok["region_tree"]["root_closed"], true);
+    assert_eq!(region_ok["region_tree"]["forced_terminations"], 0);
+    assert_eq!(region_ok["cancel_injection_gate"]["gate_passed"], true);
+    assert_eq!(region_ok["saga"]["committed"], true);
+
+    let region_halted = json_err(
+        dir.path(),
+        &[
+            "runtime",
+            "region-quiescence-audit",
+            "--inject-durability-violation",
+            "--json",
+        ],
+    );
+    assert_eq!(region_halted["ok"], false);
+    assert_eq!(region_halted["durability_violation"]["halted"], true);
+    assert_eq!(
+        region_halted["durability_violation"]["halt_blocks_durable_op"],
+        true
+    );
+
+    let fabric_ok = json_ok(
+        dir.path(),
+        &[
+            "trust",
+            "fabric-convergence-audit",
+            "--fleet-nodes",
+            "4",
+            "--json",
+        ],
+    );
+    assert_eq!(fabric_ok["ok"], true);
+    assert_eq!(fabric_ok["trust_fabric"]["converged"], true);
+    assert_eq!(fabric_ok["claim_scoreboard"]["digest_verified"], true);
+    assert_eq!(fabric_ok["ecosystem"]["tamper_free"], true);
+
+    let stale_revocation = json_err(
+        dir.path(),
+        &[
+            "trust",
+            "fabric-convergence-audit",
+            "--revocation-age-secs",
+            "999999",
+            "--json",
+        ],
+    );
+    assert_eq!(stale_revocation["ok"], false);
+    assert_eq!(stale_revocation["revocation_freshness"]["allowed"], false);
+}

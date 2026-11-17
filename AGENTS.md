@@ -147,6 +147,7 @@ Current crate features:
 | `http-client` | default: enabled | Enables outbound HTTP client support via `ureq` and `url`. |
 | `external-commands` | default: enabled | Enables external command/process helpers via `which` and `ctrlc`. |
 | `fleet-control-plane-server` | default: enabled | `franken-node fleet serve`: the live HTTP fleet coordinator (fastapi_rust on the asupersync runtime) over the durable fleet store; implies `http-client`. |
+| `asupersync-transport` | default: enabled | Direct `asupersync` `Cx`-checkpointed control-lane transport for `franken-node fleet agent` (with receipted `--fallback-file-transport` degraded mode). |
 | `extended-surfaces` | opt-in | Legacy umbrella for `control-plane`, `policy-engine`, `remote-ops`, `admin-tools`, `verifier-tools`, and `advanced-features`. |
 | `control-plane` | opt-in | API middleware, fleet operations, and control-plane functionality. |
 | `policy-engine` | opt-in | Security policies, guardrail monitors, and hardening state machines. |
@@ -156,7 +157,6 @@ Current crate features:
 | `advanced-features` | opt-in | Claims, conformance, encoding, extensions, federation, performance, and repair surfaces. |
 | `test-support` | opt-in | Shared test helpers; currently enables `control-plane` and `admin-tools`, and compiles the native-engine panic fault injection (`TEST_SUPPORT_NATIVE_ENGINE_PANIC_MARKER` in an entry source) used by crash-loop recovery drills. Never part of default or release builds. |
 | `loom-models` | opt-in | Compiles library-level `#[cfg(loom)]` model helpers for explicit Loom test invocations; it is not part of default or `test-support` builds. |
-| `asupersync-transport` | opt-in | Direct asupersync transport integration. |
 | `compression` | opt-in | Gzip/deflate support via `flate2`. |
 | `cbor-serialization` | opt-in | CBOR encoding support via `ciborium`. |
 | `blake3` | opt-in | Optional BLAKE3 hashing support. |
@@ -331,7 +331,7 @@ CLI / config / profiles
 
 ### Feature Flags and Packaging Reality
 
-- `default` enables only `engine`, `http-client`, `external-commands`, and `fleet-control-plane-server`.
+- `default` enables only `engine`, `http-client`, `external-commands`, `fleet-control-plane-server`, and `asupersync-transport`.
 - `extended-surfaces` is a legacy umbrella over the current granular product features: `control-plane`, `policy-engine`, `remote-ops`, `admin-tools`, `verifier-tools`, and `advanced-features`.
 - `test-support` enables shared testing helpers by composing `control-plane` and `admin-tools`.
 - Deployment/profile defaults live in `packaging/profiles.toml`, which currently defines `local`, `dev`, and `enterprise` packaging metadata for packaging/release flows. The live runtime `--profile <name>` / `FRANKEN_NODE_PROFILE` path still selects `strict`, `balanced`, or `legacy-risky`.
