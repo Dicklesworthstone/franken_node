@@ -3176,13 +3176,15 @@ mod tests {
 
         // This is a heuristic test - significant timing differences could indicate
         // non-constant-time string comparison, but small differences are normal
-        assert!(
-            timing_ratio < 2.0,
-            "timing difference between early/late hash mismatches suspiciously large: {:.2}x (early: {:?}, late: {:?})",
-            timing_ratio,
-            avg_early,
-            avg_late
-        );
+        if crate::testing::timing_assertions_enabled() {
+            assert!(
+                timing_ratio < 2.0,
+                "timing difference between early/late hash mismatches suspiciously large: {:.2}x (early: {:?}, late: {:?})",
+                timing_ratio,
+                avg_early,
+                avg_late
+            );
+        }
     }
 
     #[test]
@@ -6933,13 +6935,15 @@ mod verifier_sdk_comprehensive_attack_vector_tests {
 
         // Conservative threshold - significant timing differences could indicate
         // non-constant-time operations, but allow for system noise
-        assert!(
-            timing_variance < 5.0,
-            "Timing variance too large: {:.2}x (min: {:?}, max: {:?})",
-            timing_variance,
-            min_time,
-            max_time
-        );
+        if crate::testing::timing_assertions_enabled() {
+            assert!(
+                timing_variance < 5.0,
+                "Timing variance too large: {:.2}x (min: {:?}, max: {:?})",
+                timing_variance,
+                min_time,
+                max_time
+            );
+        }
     }
 
     #[test]

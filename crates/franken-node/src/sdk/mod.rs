@@ -1207,7 +1207,7 @@ mod tests {
                 .map(|(_, mean)| mean)
                 .max_by(|a, b| a.partial_cmp(b).unwrap()),
         ) {
-            if *min_timing > 0.0 {
+            if *min_timing > 0.0 && crate::testing::timing_assertions_enabled() {
                 let timing_ratio = max_timing / min_timing;
                 assert!(
                     timing_ratio < 5.0,

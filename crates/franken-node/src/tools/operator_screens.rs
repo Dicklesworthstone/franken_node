@@ -181,12 +181,12 @@ pub fn render_fleet_screen(model: &FleetScreenModel, width: u16) -> String {
         Some(note) => format!(" nodes ({note}) "),
         None => " nodes ".to_string(),
     };
+    let empty_nodes = Paragraph::new(
+        "node  zone  health  quarantine v  last seen\n(no node has reported a heartbeat)",
+    )
+    .block(panel(&nodes_title));
     let nodes = Table::new(
-        if node_rows.is_empty() {
-            vec![Row::new(["(no node has reported a heartbeat)"])]
-        } else {
-            node_rows
-        },
+        node_rows,
         [
             Constraint::Percentage(24.0),
             Constraint::Percentage(16.0),
@@ -203,6 +203,11 @@ pub fn render_fleet_screen(model: &FleetScreenModel, width: u16) -> String {
         "last seen",
     ]))
     .block(panel(&nodes_title));
+    let nodes_widget: &dyn Widget = if node_count == 0 {
+        &empty_nodes
+    } else {
+        &nodes
+    };
 
     let (convergence_rows, convergences_omitted) =
         bounded_rows(&model.convergences, |convergence| {
@@ -238,7 +243,7 @@ pub fn render_fleet_screen(model: &FleetScreenModel, width: u16) -> String {
         width,
         &[
             (4, &summary),
-            (table_height(node_count), &nodes),
+            (table_height(node_count), nodes_widget),
             (table_height(convergence_count), &convergences),
         ],
     )
@@ -269,12 +274,10 @@ pub fn render_doctor_screen(model: &DoctorScreenModel, width: u16) -> String {
         Some(note) => format!(" checks ({note}) "),
         None => " checks ".to_string(),
     };
+    let empty_checks =
+        Paragraph::new("status  code  scope  message\n(no checks ran)").block(panel(&title));
     let checks = Table::new(
-        if rows.is_empty() {
-            vec![Row::new(["(no checks ran)"])]
-        } else {
-            rows
-        },
+        rows,
         [
             Constraint::Fixed(6),
             Constraint::Fixed(16),
@@ -284,7 +287,11 @@ pub fn render_doctor_screen(model: &DoctorScreenModel, width: u16) -> String {
     )
     .header(Row::new(["status", "code", "scope", "message"]))
     .block(panel(&title));
-    render_panels(width, &[(3, &summary), (table_height(count), &checks)])
+    let checks_widget: &dyn Widget = if count == 0 { &empty_checks } else { &checks };
+    render_panels(
+        width,
+        &[(3, &summary), (table_height(count), checks_widget)],
+    )
 }
 
 #[cfg(test)]

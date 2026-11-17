@@ -4232,7 +4232,8 @@ impl RunTrustRequirements {
         for selected in [paths.project_root(), paths.entrypoint()] {
             validate_guest_source_spelling(selected)?;
             anyhow::ensure!(
-                !self.operator_protected_paths
+                !self
+                    .operator_protected_paths
                     .iter()
                     .any(|protected| selected.starts_with(protected)),
                 "guest project root or entrypoint selects protected operator state"
@@ -4295,8 +4296,10 @@ impl RunTrustRequirements {
         anyhow::ensure!(
             !relative.is_absolute()
                 && relative.components().all(|component| {
-                    matches!(component, std::path::Component::Normal(_)
-                        | std::path::Component::CurDir)
+                    matches!(
+                        component,
+                        std::path::Component::Normal(_) | std::path::Component::CurDir
+                    )
                 }),
             "captured module path is outside its admitted project"
         );
@@ -4307,7 +4310,10 @@ impl RunTrustRequirements {
                 if matches!(
                     error.kind(),
                     io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
-                ) => None,
+                ) =>
+            {
+                None
+            }
             Err(error) => return Err(error).context("failed inspecting captured operator alias"),
         };
         for protected in &self.operator_protected_paths {
@@ -4343,7 +4349,10 @@ impl RunTrustRequirements {
                                 if matches!(
                                     error.kind(),
                                     io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
-                                ) => continue,
+                                ) =>
+                            {
+                                continue;
+                            }
                             Err(error) => {
                                 return Err(error)
                                     .context("failed inspecting captured operator ancestor");
@@ -4535,7 +4544,10 @@ impl RunTrustRequirements {
         Self::validate_bounds(&self.dependency_ids, &self.required_card_ids)?;
         anyhow::ensure!(
             self.operator_protected_paths.len() <= 128
-                && self.operator_protected_paths.windows(2).all(|pair| pair[0] < pair[1]),
+                && self
+                    .operator_protected_paths
+                    .windows(2)
+                    .all(|pair| pair[0] < pair[1]),
             "operator protected paths are not bounded, sorted, and unique"
         );
         for path in &self.operator_protected_paths {
@@ -7445,6 +7457,7 @@ fn apply_publisher_runtime_authority(
 /// rechecks. Publisher runs consume the authenticated capsule directly; other
 /// frozen runs capture the live project. Neither retains loader disk authority.
 #[cfg(feature = "engine")]
+#[allow(clippy::too_many_arguments)]
 fn prepare_native_frozen_modules(
     project_paths: &RunProjectPaths,
     orchestrator_config: &OrchestratorConfig,
@@ -8448,8 +8461,8 @@ impl EngineDispatcher {
             if index == 1 && root == project_root {
                 continue;
             }
-            let entries = std::fs::read_dir(root)
-                .context("failed inspecting conventional operator state")?;
+            let entries =
+                std::fs::read_dir(root).context("failed inspecting conventional operator state")?;
             for (entry_index, entry) in entries.enumerate() {
                 anyhow::ensure!(
                     entry_index < MAX_ROOT_ENTRIES,
@@ -8464,8 +8477,7 @@ impl EngineDispatcher {
                 }
             }
         }
-        let requirements = RunTrustRequirements::default()
-            .with_operator_protected_paths(paths)?;
+        let requirements = RunTrustRequirements::default().with_operator_protected_paths(paths)?;
         Ok(requirements.operator_protected_paths)
     }
 
@@ -11016,15 +11028,11 @@ impl EngineDispatcher {
         // PID while finalizing a protocol failure.
         let containment_cleanup: std::result::Result<(), String> = match &containment {
             #[cfg(target_os = "linux")]
-            NativeSessionContainment::Bubblewrap(unit) => {
-                wait_for_containment_unit_empty(unit)
-                    .map(|()| session_inventory.containment_empty())
-                    .map_err(|error| {
-                        format!(
-                            "Bubblewrap exited without proving the containment unit empty: {error}"
-                        )
-                    })
-            }
+            NativeSessionContainment::Bubblewrap(unit) => wait_for_containment_unit_empty(unit)
+                .map(|()| session_inventory.containment_empty())
+                .map_err(|error| {
+                    format!("Bubblewrap exited without proving the containment unit empty: {error}")
+                }),
             NativeSessionContainment::ProcessGroup => Ok(()),
         };
         let protocol_failure =
@@ -11067,8 +11075,8 @@ impl EngineDispatcher {
                     if previous.is_some() { "; " } else { "" },
                     previous.as_deref().unwrap_or(""),
                 ] {
-                    let remaining = (MAX_PROTOCOL_ERROR_BYTES - TRUNCATED.len())
-                        .saturating_sub(detail.len());
+                    let remaining =
+                        (MAX_PROTOCOL_ERROR_BYTES - TRUNCATED.len()).saturating_sub(detail.len());
                     let mut end = part.len().min(remaining);
                     while !part.is_char_boundary(end) {
                         end -= 1;
@@ -12041,6 +12049,7 @@ impl EngineDispatcher {
         OrchestratorConfig {
             loss_matrix_preset,
             force_lane: None, // Allow dynamic lane selection based on code analysis
+            sandbox_policy: frankenengine_engine::containment_executor::SandboxPolicy::default(),
             work_pool: None,
             drain_deadline_ticks: match config.profile {
                 Profile::Strict => 1000,       // Quick drain for strict safety
@@ -12580,7 +12589,9 @@ impl EngineDispatcher {
                     )
                     .map_err(|error| {
                         native_engine_spawn_error_with_telemetry_cleanup(
-                            format!("Could not establish operator-state filesystem boundary: {error}"),
+                            format!(
+                                "Could not establish operator-state filesystem boundary: {error}"
+                            ),
                             &mut telemetry_guard,
                         )
                     })?;
@@ -13872,8 +13883,7 @@ mod tests {
         let mut config = Config::for_profile(Profile::Balanced);
         let original = config.clone();
 
-        EngineDispatcher::apply_operator_source_capture_defaults(&mut config, &paths, &[])
-            .unwrap();
+        EngineDispatcher::apply_operator_source_capture_defaults(&mut config, &paths, &[]).unwrap();
         assert_eq!(config, original, "a clean root keeps its source selection");
 
         let custom = root.join("operator.toml");
@@ -13886,7 +13896,10 @@ mod tests {
         .unwrap();
         assert_eq!(config.runtime.frozen_modules, Some(true));
         config.runtime.frozen_modules = original.runtime.frozen_modules;
-        assert_eq!(config, original, "capture must not expand any other authority");
+        assert_eq!(
+            config, original,
+            "capture must not expand any other authority"
+        );
 
         config.runtime.frozen_modules = Some(false);
         let error = EngineDispatcher::apply_operator_source_capture_defaults(
@@ -13899,17 +13912,22 @@ mod tests {
         assert_eq!(config.runtime.frozen_modules, Some(false));
 
         let requirements = RunTrustRequirements::default();
-        requirements.verify_operator_source_capture(&paths, &config).unwrap();
+        requirements
+            .verify_operator_source_capture(&paths, &config)
+            .unwrap();
         std::fs::create_dir_all(root.join("nested/.franken-node")).unwrap();
         assert!(
-            requirements.verify_operator_source_capture(&paths, &config).is_err(),
+            requirements
+                .verify_operator_source_capture(&paths, &config)
+                .is_err(),
             "worker startup must recheck state added after a clean parent scan"
         );
         config.runtime.frozen_modules = None;
-        EngineDispatcher::apply_operator_source_capture_defaults(&mut config, &paths, &[])
-            .unwrap();
+        EngineDispatcher::apply_operator_source_capture_defaults(&mut config, &paths, &[]).unwrap();
         assert_eq!(config.runtime.frozen_modules, Some(true));
-        requirements.verify_operator_source_capture(&paths, &config).unwrap();
+        requirements
+            .verify_operator_source_capture(&paths, &config)
+            .unwrap();
     }
 
     #[cfg(unix)]
@@ -13927,7 +13945,11 @@ mod tests {
             .unwrap()
             .with_operator_protected_paths(vec![configured.clone()])
             .unwrap();
-        assert!(requirements.operator_protected_paths().contains(&configured));
+        assert!(
+            requirements
+                .operator_protected_paths()
+                .contains(&configured)
+        );
         assert!(requirements.operator_protected_paths().contains(&canonical));
         let wire = serde_json::to_value(&requirements).unwrap();
         let decoded: RunTrustRequirements = serde_json::from_value(wire.clone()).unwrap();
@@ -13966,38 +13988,54 @@ mod tests {
         let protected = RunTrustRequirements::default()
             .with_operator_protected_paths(vec![root.join("control")])
             .unwrap();
-        assert!(protected.verify_operator_module_path(&root, "app.cjs").is_ok());
         assert!(
-            protected.verify_operator_module_path(&root, "control-alias/private.json").is_err()
+            protected
+                .verify_operator_module_path(&root, "app.cjs")
+                .is_ok()
         );
         assert!(
-            protected.verify_operator_module_path(&root, "control-alias/absent.json").is_err(),
+            protected
+                .verify_operator_module_path(&root, "control-alias/private.json")
+                .is_err()
+        );
+        assert!(
+            protected
+                .verify_operator_module_path(&root, "control-alias/absent.json")
+                .is_err(),
             "negative probes through a protected directory alias are protected too"
         );
         if root.join("CONTROL/private.json").exists() {
             assert!(
-                protected.verify_operator_module_path(&root, "CONTROL/private.json").is_err(),
+                protected
+                    .verify_operator_module_path(&root, "CONTROL/private.json")
+                    .is_err(),
                 "case-insensitive directory aliases retain the same operator identity"
             );
         }
         let narrowed = RunProjectPaths::resolve(Path::new("control/app.cjs"), &root).unwrap();
-        assert!(protected.verify_operator_source_authority(&narrowed).is_err());
+        assert!(
+            protected
+                .verify_operator_source_authority(&narrowed)
+                .is_err()
+        );
 
         let key = root.join("control/private.json");
         std::fs::hard_link(&key, root.join("ordinary-name.json")).unwrap();
         let file = RunTrustRequirements::default()
             .with_operator_protected_paths(vec![key])
             .unwrap();
-        assert!(file.verify_operator_module_path(&root, "ordinary-name.json").is_err());
+        assert!(
+            file.verify_operator_module_path(&root, "ordinary-name.json")
+                .is_err()
+        );
         std::fs::write(root.join("ordinary.json"), "{}").unwrap();
         std::fs::hard_link(root.join("ordinary.json"), root.join("ordinary-link.json")).unwrap();
-        file.verify_operator_module_path(&root, "ordinary-link.json").unwrap();
+        file.verify_operator_module_path(&root, "ordinary-link.json")
+            .unwrap();
 
         std::fs::create_dir_all(root.join(".franken-node")).unwrap();
         std::fs::write(root.join(".franken-node/app.cjs"), "module.exports = 1;\n").unwrap();
-        assert!(
-            RunProjectPaths::resolve(Path::new(".franken-node/app.cjs"), &root).is_err()
-        );
+        assert!(RunProjectPaths::resolve(Path::new(".franken-node/app.cjs"), &root).is_err());
     }
 
     #[cfg(unix)]
@@ -14009,8 +14047,11 @@ mod tests {
         let root = directory.path().canonicalize().unwrap();
         std::fs::create_dir(root.join("control-store")).unwrap();
         std::fs::write(root.join("control-store/index.js"), "console.log(1);\n").unwrap();
-        std::fs::write(root.join("control-store/private.json"), r#"{"secret":"private"}"#)
-            .unwrap();
+        std::fs::write(
+            root.join("control-store/private.json"),
+            r#"{"secret":"private"}"#,
+        )
+        .unwrap();
         assert!(
             EngineDispatcher::operator_protected_paths_with_defaults(&[], &root, &root)
                 .unwrap()
@@ -14026,13 +14067,32 @@ mod tests {
             .with_operator_protected_paths(protected)
             .unwrap();
         assert!(
-            requirements.verify_operator_module_path(&root, "control-store/private.json").is_err()
+            requirements
+                .verify_operator_module_path(&root, "control-store/private.json")
+                .is_err()
         );
-        let narrowed = RunProjectPaths::resolve(Path::new("control-store"), &root).unwrap();
+        assert!(
+            RunProjectPaths::resolve(Path::new("control-store"), &root).is_err(),
+            "fleet policy ancestor inspection refuses linked .franken-node state paths"
+        );
+        let second_directory = tempfile::tempdir().unwrap();
+        let second_root = second_directory.path().canonicalize().unwrap();
+        std::fs::create_dir(second_root.join("control-store")).unwrap();
+        std::fs::write(
+            second_root.join("control-store/index.js"),
+            "console.log(1);\n",
+        )
+        .unwrap();
+        symlink(
+            "control-store/index.js",
+            second_root.join("franken_node.toml"),
+        )
+        .unwrap();
+        let narrowed = RunProjectPaths::resolve(Path::new("control-store"), &second_root).unwrap();
         let retained = EngineDispatcher::operator_protected_paths_with_defaults(
             &[],
             narrowed.project_root(),
-            &root,
+            &second_root,
         )
         .unwrap();
         assert!(
@@ -14101,14 +14161,17 @@ mod tests {
         .err()
         .expect("custom operator file must not become a module or replay source");
         assert!(error.contains("protected operator state"), "{error}");
-        assert!(!error.contains("OPERATOR_SECRET_MUST_NOT_APPEAR"), "{error}");
+        assert!(
+            !error.contains("OPERATOR_SECRET_MUST_NOT_APPEAR"),
+            "{error}"
+        );
     }
 
     #[cfg(unix)]
     #[test]
     fn replay_capture_defaults_admit_source_constraints_without_overriding_explicit_false() {
         let mut config = Config::for_profile(Profile::Balanced);
-        config.runtime.frozen_module_graph_hash = Some("12".repeat(32));
+        config.runtime.frozen_module_graph_hash = Some(format!("sha256:{}", "12".repeat(32)));
         config.runtime.frozen_module_symlinks = Some(true);
         config.runtime.module_conditions = vec!["development".to_string()];
         let original = config.clone();
@@ -18243,18 +18306,21 @@ mod tests {
 
         let installed = work.path().join("installed-worker");
         let replacement = work.path().join("replacement-worker");
-        std::fs::copy("/bin/echo", &installed).expect("copy original executable");
+        let worker_script = b"#!/bin/sh\nprintf '%s\\n' \"$1\"\n";
+        std::fs::write(&installed, worker_script).expect("write original executable");
+        std::fs::set_permissions(&installed, std::fs::Permissions::from_mode(0o755))
+            .expect("mark original executable");
         std::fs::copy("/bin/false", &replacement).expect("copy different executable");
         let opened = std::fs::File::open(&installed).expect("pin original executable");
         std::fs::rename(&replacement, &installed).expect("replace installed executable");
-        // The installed path now names false, and the opened echo inode has
+        // The installed path now names false, and the opened worker inode has
         // been unlinked. Any canonicalized/reopened path would lose the image.
         let image = BubblewrapNativeWorkerImage::from_open_file(opened, &state_root)
             .expect("snapshot the opened, unlinked executable");
         let staged_path = image.executable.clone();
         assert_eq!(
             std::fs::read(&staged_path).expect("read staged executable"),
-            std::fs::read("/bin/echo").expect("read original executable bytes")
+            worker_script
         );
         assert_eq!(
             std::fs::metadata(&staged_path)

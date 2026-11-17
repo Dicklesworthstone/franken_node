@@ -2641,6 +2641,7 @@ mod tests {
     #[test]
     fn hash_comparison_timing_attack_protection() {
         // Regression test for bd-hash-timing: hash comparisons must use constant-time
+        let _guard = test_guard();
         reset_verifier_state();
         let identity = test_identity();
         let trace = test_trace();

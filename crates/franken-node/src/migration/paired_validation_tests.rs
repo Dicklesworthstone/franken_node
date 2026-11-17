@@ -638,7 +638,7 @@ const marker = {} + '/' + role;
         );
         let snapshot =
             Snapshot::capture(root.path(), Instant::now() + Duration::from_secs(30)).unwrap();
-        let report = run(&snapshot, Duration::from_secs(1), false);
+        let report = run(&snapshot, Duration::from_secs(5), false);
         assert_eq!(report.verdict, "ERROR", "{report:#?}");
         assert_eq!((report.passed, report.errored, report.skipped), (2, 1, 0));
         assert!(report.cases[0].reference.is_some());

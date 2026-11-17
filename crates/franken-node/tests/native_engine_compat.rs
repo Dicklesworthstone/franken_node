@@ -699,7 +699,10 @@ emit({"message_type": "final", "response": response})
                 NativeEffectWalState::InterruptedIndeterminate
             }
         );
-        let detail = evidence.protocol_error.as_deref().expect("protocol failure");
+        let detail = evidence
+            .protocol_error
+            .as_deref()
+            .expect("protocol failure");
         assert!(detail.contains(expected_error), "{mode}: {detail}");
         assert!(detail.len() <= 4096, "{mode}: signed diagnostic byte bound");
         if mode == "large_diagnostics" {
@@ -734,13 +737,12 @@ emit({"message_type": "final", "response": response})
             persisted_capture,
             serde_json::to_value(capture).expect("captured identity JSON")
         );
-        let trusted_root_bytes: [u8; 32] =
-            hex::decode(&capture.product_root_verification_key_hex)
-                .expect("product root encoding")
-                .try_into()
-                .expect("product root length");
-        let trusted_root = ed25519_dalek::VerifyingKey::from_bytes(&trusted_root_bytes)
-            .expect("product root key");
+        let trusted_root_bytes: [u8; 32] = hex::decode(&capture.product_root_verification_key_hex)
+            .expect("product root encoding")
+            .try_into()
+            .expect("product root length");
+        let trusted_root =
+            ed25519_dalek::VerifyingKey::from_bytes(&trusted_root_bytes).expect("product root key");
         let bundle_bytes = serde_json::to_vec(&exported.bundle).expect("forensic bundle JSON");
         let verified = verify_native_session_forensics(&bundle_bytes, &trusted_root)
             .expect("independently authenticate the original signed admission and outcome");
@@ -750,17 +752,28 @@ emit({"message_type": "final", "response": response})
         assert_eq!(verified.effect_observation, Some("interrupted"));
         assert_eq!(verified.containment_empty_observed, Some(false));
         assert_eq!(verified.completed_provider_calls, Some(returned_calls));
-        assert_eq!(verified.indeterminate_provider_calls, Some(1 - returned_calls));
+        assert_eq!(
+            verified.indeterminate_provider_calls,
+            Some(1 - returned_calls)
+        );
         assert_eq!(verified.journal_complete, Some(false));
         assert!(!verified.replay_certified);
         assert!(!verified.quiescence_certified);
         assert!(!verified.historical_completeness);
-        let journal = verified.durable_journal.as_ref().expect("durable WAL prefix");
+        let journal = verified
+            .durable_journal
+            .as_ref()
+            .expect("durable WAL prefix");
         assert_eq!(journal.admitted_provider_calls, 1);
         assert_eq!(journal.returned_provider_calls, returned_calls);
         assert_eq!(journal.indeterminate_provider_calls, 1 - returned_calls);
         let outcome: serde_json::Value = serde_json::from_str(
-            &exported.bundle.outcome.as_ref().expect("signed outcome").payload_json,
+            &exported
+                .bundle
+                .outcome
+                .as_ref()
+                .expect("signed outcome")
+                .payload_json,
         )
         .expect("original outcome payload");
         assert_eq!(

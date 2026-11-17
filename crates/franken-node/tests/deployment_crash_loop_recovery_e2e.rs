@@ -1279,7 +1279,9 @@ fn effect_free_native_panic_retains_a_terminal_authenticated_observation() {
     // The panic never reached a finalized run receipt. Incident operators
     // must still discover the pre-admitted session and authenticate the exact
     // supervisor observation in a fresh CLI process.
-    let nonce = panic["session_nonce"].as_str().expect("panic session nonce");
+    let nonce = panic["session_nonce"]
+        .as_str()
+        .expect("panic session nonce");
     let database_path = PathBuf::from(inventory["database_path"].as_str().unwrap());
     let database_before = fs::read(&database_path).expect("retained inventory");
     let forensic = drill.ok(&release, &["incident", "sessions", "--json"]);
@@ -1304,12 +1306,18 @@ fn effect_free_native_panic_retains_a_terminal_authenticated_observation() {
     assert_eq!(selected["records"], forensic["records"]);
     assert_eq!(selected["session_filter"], nonce);
     let listing = drill.ok(&release, &["incident", "list", "--json"]);
-    assert!(listing["incidents"].as_array().unwrap().iter().any(|entry| {
-        entry["source"] == "native_session"
-            && entry["incident_id"] == format!("native-session:{nonce}")
-            && entry["severity"] == "unknown"
-            && entry["status"].as_str().unwrap().contains("panicked")
-    }));
+    assert!(
+        listing["incidents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| {
+                entry["source"] == "native_session"
+                    && entry["incident_id"] == format!("native-session:{nonce}")
+                    && entry["severity"] == "unknown"
+                    && entry["status"].as_str().unwrap().contains("panicked")
+            })
+    );
 
     let unrelated = drill.ok(drill.root.path(), &["incident", "sessions", "--json"]);
     assert_eq!(unrelated["records"], serde_json::json!([]));
@@ -1361,24 +1369,35 @@ fn effect_free_native_panic_retains_a_terminal_authenticated_observation() {
                     .join("invalid-inspection-capture.json"),
             )
             .expect("create an unscoped malformed capture");
-        std::io::Write::write_all(&mut corrupt, b"not-json")
-            .expect("write malformed capture");
+        std::io::Write::write_all(&mut corrupt, b"not-json").expect("write malformed capture");
     }
     let unattributed = drill.ok(drill.root.path(), &["incident", "list", "--json"]);
     assert_eq!(unattributed["incidents"], serde_json::json!([]));
     let inspection = &unattributed["native_session_inspection"];
     assert_eq!(inspection["scope"], "operator_protected_state");
     assert_eq!(inspection["authenticated_project_admissions"], 0);
-    assert!(inspection["source_errors"].as_array().unwrap().iter().any(|error| {
-        error["session_nonce"] == nonce && error["kind"] == "admission_receipt_missing"
-    }));
+    assert!(
+        inspection["source_errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| {
+                error["session_nonce"] == nonce && error["kind"] == "admission_receipt_missing"
+            })
+    );
     assert_eq!(
         inspection["untracked_identity_captures"][0]["session_nonce"],
         nonce
     );
-    assert!(inspection["source_errors"].as_array().unwrap().iter().any(|error| {
-        error["session_nonce"].is_null() && error["kind"] == "identity_inventory_invalid"
-    }));
+    assert!(
+        inspection["source_errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| {
+                error["session_nonce"].is_null() && error["kind"] == "identity_inventory_invalid"
+            })
+    );
 
     let unknown = drill.cli(
         drill.root.path(),
@@ -1395,7 +1414,10 @@ fn effect_free_native_panic_retains_a_terminal_authenticated_observation() {
         "an unscoped inventory error must not satisfy a different session selector"
     );
     let error: Value = serde_json::from_slice(&unknown.stdout).expect("unknown session refusal");
-    assert_eq!(error["schema_version"], "franken-node/incident-error-cli/v1");
+    assert_eq!(
+        error["schema_version"],
+        "franken-node/incident-error-cli/v1"
+    );
 }
 
 #[test]
@@ -1425,9 +1447,11 @@ fn incident_sessions_empty_and_invalid_selection_do_not_provision_authority() {
             &["incident", "sessions", "--session", nonce, "--json"],
         );
         assert!(!refused.status.success());
-        let error: Value =
-            serde_json::from_slice(&refused.stdout).expect("structured refusal");
-        assert_eq!(error["schema_version"], "franken-node/incident-error-cli/v1");
+        let error: Value = serde_json::from_slice(&refused.stdout).expect("structured refusal");
+        assert_eq!(
+            error["schema_version"],
+            "franken-node/incident-error-cli/v1"
+        );
         assert!(!state.exists());
     }
 }

@@ -113,6 +113,7 @@ pub(crate) fn read_control_frame(
 /// Read one cancellation request, rejecting effect acknowledgments as well as
 /// malformed frames. Replay workers that cannot issue live effects use this
 /// narrower interface. A repeated matching cancellation remains idempotent.
+#[cfg(test)]
 pub(crate) fn read_cancel_request(reader: &mut impl Read, expected_nonce: &str) -> io::Result<()> {
     match read_control_frame(reader, expected_nonce)? {
         NativeSessionControlFrame::Cancel => Ok(()),

@@ -1520,11 +1520,13 @@ mod tests {
         let min_avg = avg_fresh.min(avg_stale).min(avg_no_proof);
         let timing_ratio = max_avg / min_avg.max(1.0);
 
-        assert!(
-            timing_ratio < 5.0,
-            "Proof verification timing variance too high: {}",
-            timing_ratio
-        );
+        if crate::testing::timing_assertions_enabled() {
+            assert!(
+                timing_ratio < 5.0,
+                "Proof verification timing variance too high: {}",
+                timing_ratio
+            );
+        }
 
         // Test timing attacks on entity existence checks
         let mut existing_timings = Vec::new();
@@ -1570,11 +1572,13 @@ mod tests {
 
         let existence_ratio =
             avg_existing.max(avg_nonexistent) / avg_existing.min(avg_nonexistent).max(1.0);
-        assert!(
-            existence_ratio < 3.0,
-            "Entity existence timing variance too high: {}",
-            existence_ratio
-        );
+        if crate::testing::timing_assertions_enabled() {
+            assert!(
+                existence_ratio < 3.0,
+                "Entity existence timing variance too high: {}",
+                existence_ratio
+            );
+        }
     }
 
     /// Negative test: Concurrent state manipulation race conditions

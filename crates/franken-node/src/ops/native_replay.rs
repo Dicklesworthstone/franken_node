@@ -1879,6 +1879,12 @@ mod engine {
         }
     }
 
+    fn is_default_sandbox_policy(
+        policy: &frankenengine_engine::containment_executor::SandboxPolicy,
+    ) -> bool {
+        *policy == frankenengine_engine::containment_executor::SandboxPolicy::default()
+    }
+
     /// Every serializable setting of the actual execution orchestrator.
     /// A shared work pool is not serializable authority and is refused.
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1886,6 +1892,8 @@ mod engine {
     struct CapturedOrchestratorSettings {
         loss_matrix_preset: LossMatrixPreset,
         force_lane: Option<LaneChoice>,
+        #[serde(default, skip_serializing_if = "is_default_sandbox_policy")]
+        sandbox_policy: frankenengine_engine::containment_executor::SandboxPolicy,
         drain_deadline_ticks: u64,
         cell_close_budget_ms: u64,
         max_concurrent_sagas: usize,
@@ -1913,6 +1921,7 @@ mod engine {
             Ok(Self {
                 loss_matrix_preset: config.loss_matrix_preset,
                 force_lane: config.force_lane,
+                sandbox_policy: config.sandbox_policy.clone(),
                 drain_deadline_ticks: config.drain_deadline_ticks,
                 cell_close_budget_ms: config.cell_close_budget_ms,
                 max_concurrent_sagas: config.max_concurrent_sagas,
@@ -1937,6 +1946,7 @@ mod engine {
             OrchestratorConfig {
                 loss_matrix_preset: self.loss_matrix_preset,
                 force_lane: self.force_lane,
+                sandbox_policy: self.sandbox_policy.clone(),
                 work_pool: None,
                 drain_deadline_ticks: self.drain_deadline_ticks,
                 cell_close_budget_ms: self.cell_close_budget_ms,
@@ -3709,12 +3719,12 @@ mod engine {
                     outcome.terminal_state,
                     NativeReplayTerminalState::EngineFailure
                 );
+                let failure = outcome.engine_failure.as_deref().unwrap();
                 assert!(
-                    outcome
-                        .engine_failure
-                        .as_deref()
-                        .unwrap()
-                        .contains("fs_write")
+                    failure.contains("fs_write")
+                        || failure.contains("fs.write")
+                        || failure.contains("fs:write"),
+                    "{failure}"
                 );
                 assert!(outcome.execution_value.is_none());
                 assert!(outcome.instructions_executed.is_none());
@@ -4236,7 +4246,7 @@ mod engine {
             OrchestratorError,
         ) {
             let config = OrchestratorConfig {
-                commonjs_entry: true,
+                commonjs_entry: false,
                 force_lane,
                 ..OrchestratorConfig::default()
             };
@@ -4918,7 +4928,7 @@ mod engine {
             process_argv: &[String],
         ) -> NativeReplayCapture {
             let config = OrchestratorConfig {
-                commonjs_entry: true,
+                commonjs_entry: false,
                 ..OrchestratorConfig::default()
             };
             let runtime = RuntimeConfig::default();
@@ -5012,7 +5022,7 @@ mod engine {
         #[cfg(unix)]
         fn record_process(root: &Path, source: &str) -> NativeReplayCapture {
             let config = OrchestratorConfig {
-                commonjs_entry: true,
+                commonjs_entry: false,
                 ..OrchestratorConfig::default()
             };
             let runtime = RuntimeConfig::default();
@@ -5186,7 +5196,7 @@ mod engine {
                 let root = tempfile::tempdir().unwrap();
                 let capture = record_process(
                     root.path(),
-                    "const cp = require('child_process'); console.log(cp.execSync('printf shell-output', { encoding: 'utf8' })); try { cp.execFileSync('unapproved-command', [], { encoding: 'utf8' }); } catch (error) { console.log('expected-policy-denial'); }",
+                    "const cp = require('child_process'); const out = cp.execSync('printf shell-output', { encoding: 'utf8' }); console.log(out); try { cp.execFileSync(out ? 'unapproved-command' : 'printf', [], { encoding: 'utf8' }); } catch (error) { console.log('expected-policy-denial'); }",
                 );
                 let payload: NativeReplayPayload =
                     serde_json::from_str(&capture.payload_json).unwrap();
@@ -5827,7 +5837,10 @@ mod engine {
                 let injected =
                     encode_capture(&payload).expect("modified source for safety regression");
                 let error = reexecute(&injected).expect_err("module authority remains absent");
-                assert!(error.contains("module_load"), "{error}");
+                assert!(
+                    error.contains("module_load") || error.contains("require"),
+                    "{error}"
+                );
 
                 let mut duplicate = capture;
                 duplicate

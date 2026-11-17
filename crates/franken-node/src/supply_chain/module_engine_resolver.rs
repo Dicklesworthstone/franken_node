@@ -4721,10 +4721,10 @@ console.log((<{{value:number}}>raw).value, typeof (<number><unknown>'7'),
                     "node_modules/assertion-kit/value.mjs",
                     "export const seed=40;",
                 );
-                // Node requires its explicit transformation mode for prefix
-                // assertions. Run the same original TypeScript and installed
-                // JavaScript package, not a hand-translated reference fixture.
-                let reference = std::process::Command::new("node")
+                // Node >= 22.7 supports `--experimental-transform-types` for prefix
+                // assertions; older Node releases reject that flag, in which case
+                // Bun executes the identical untouched `.cts`/`.mts` source tree.
+                let mut reference = std::process::Command::new("node")
                     .args(["--no-warnings", "--experimental-transform-types"])
                     .arg(root.path().join(entrypoint))
                     .current_dir(root.path())
@@ -4732,6 +4732,20 @@ console.log((<{{value:number}}>raw).value, typeof (<number><unknown>'7'),
                     .env_remove("NODE_PATH")
                     .output()
                     .unwrap();
+                if !reference.status.success()
+                    && String::from_utf8_lossy(&reference.stderr)
+                        .contains("bad option: --experimental-transform-types")
+                {
+                    reference = std::process::Command::new("bun")
+                        .arg(root.path().join(entrypoint))
+                        .current_dir(root.path())
+                        .env_remove("NODE_OPTIONS")
+                        .env_remove("NODE_PATH")
+                        .output()
+                        .expect(
+                            "Bun fallback required when Node lacks --experimental-transform-types",
+                        );
+                }
                 assert!(reference.status.success(), "{reference:?}");
                 assert!(reference.stderr.is_empty(), "{reference:?}");
                 let expected = String::from_utf8(reference.stdout).unwrap();
@@ -5434,11 +5448,11 @@ exports.nonmain = module !== require.main;
                     "app.cjs",
                     "const load = require; const next = load; \
                      const crypto = next('crypto'); const zlib = next('node:zlib'); \
-                     const createHash = crypto.createHash; const kit = next('archive-kit');",
+                     const pbkdf2Sync = crypto.pbkdf2Sync; const kit = next('archive-kit');",
                 ),
                 (
                     "app.mjs",
-                    "import crypto, { createHash } from 'crypto'; \
+                    "import crypto, { pbkdf2Sync } from 'crypto'; \
                      import zlib from 'node:zlib'; import kit from 'archive-kit';",
                 ),
             ] {
@@ -5454,15 +5468,18 @@ exports.nonmain = module !== require.main;
                     r#"
 const crypto = require('node:crypto');
 const zlib = require('zlib');
-const hash = crypto.createHash;
-const hmac = crypto.createHmac;
+const derive = crypto.pbkdf2Sync;
+const compare = crypto.timingSafeEqual;
 const compress = zlib.gzipSync;
 const decompress = zlib.gunzipSync;
 module.exports = {
     crypto: crypto,
     zlib: zlib,
-    digest: function(value) { return hash('sha256').update(value).digest('hex'); },
-    authenticate: function(value) { return hmac('sha256', 'key').update(value).digest('hex'); },
+    digest: function(value) { return derive(value, 'salt', 1000, 16, 'sha256').toString('hex'); },
+    authenticate: function(value) {
+        const key = derive(value, 'auth', 1000, 16, 'sha256');
+        return key.toString('hex') + ':' + compare(key, Buffer.from(key));
+    },
     pack: function(value) { return compress(value); },
     unpack: function(value) { return decompress(value).toString('utf8'); }
 };
@@ -5470,15 +5487,16 @@ module.exports = {
                 );
                 let source = format!(
                     r#"{imports}
-console.log(crypto === kit.crypto, zlib === kit.zlib, createHash === kit.crypto.createHash);
+const savedPbkdf2Sync = pbkdf2Sync;
+console.log(crypto === kit.crypto, zlib === kit.zlib, pbkdf2Sync === kit.crypto.pbkdf2Sync);
 console.log(kit.digest('abc'));
 console.log(kit.authenticate('payload'));
 console.log(kit.unpack(kit.pack('frozen npm archive')));
 // An independently produced gzip member prevents a paired implementation
 // error in compression and decompression from making the roundtrip pass.
 console.log(kit.unpack(Buffer.from('1f8b08000000000000034b4c4a0600c241243503000000', 'hex')));
-crypto.createHash = function() {{ return 'shared mutation'; }};
-console.log(kit.crypto.createHash(), createHash('sha256').update('abc').digest('hex'));
+crypto.pbkdf2Sync = function() {{ return 'shared mutation'; }};
+console.log(kit.crypto.pbkdf2Sync(), savedPbkdf2Sync('abc', 'salt', 1000, 16, 'sha256').toString('hex'));
 import('node:zlib').then(function(again) {{
     console.log(again.default === zlib, again.gunzipSync === kit.zlib.gunzipSync);
 }});
@@ -6335,8 +6353,41 @@ import consumers, { text, json, buffer, arrayBuffer, blob } from 'node:stream/co
 import web, { ReadableStream, WritableStream, TransformStream } from 'stream/web';
 import * as namespace from 'node:stream/web';
 import common from 'stream-body-user';
+const staticOk = consumers === common.consumers
+    && web === common.web
+    && ReadableStream === common.web.ReadableStream
+    && namespace.default === web
+    && consumers.text === text
+    && consumers.json === json
+    && consumers.buffer === buffer
+    && consumers.arrayBuffer === arrayBuffer
+    && consumers.blob === blob
+    && web.WritableStream === WritableStream
+    && web.TransformStream === TransformStream;
+const verifyStatic = staticOk ? function() {} : null;
+verifyStatic();
+console.log('esm-stream-identity-ok');
+import('stream/web').then(function(dynamic) {
+    const verifyDynamic = (dynamic === namespace && dynamic.ReadableStream === ReadableStream)
+        ? function() {}
+        : null;
+    verifyDynamic();
+    console.log('dynamic-stream-identity-ok');
+});
+"#,
+            );
+            put(
+                root.path(),
+                "app.cjs",
+                r#"
+const consumers = require('node:stream/consumers');
+const { text, json, buffer, arrayBuffer, blob } = consumers;
+const web = require('stream/web');
+const webNs = require('node:stream/web');
+const { ReadableStream, WritableStream, TransformStream } = web;
+const common = require('stream-body-user');
 console.log(consumers === common.consumers, web === common.web,
-    ReadableStream === common.web.ReadableStream, namespace.default === web);
+    ReadableStream === common.web.ReadableStream, webNs === web);
 function chunks(values) {
     return new ReadableStream({start(controller) {
         for (const value of values) controller.enqueue(value);
@@ -6363,8 +6414,8 @@ async function run() {
         transform(value, controller) { controller.enqueue(value.toUpperCase()); }
     })).pipeTo(new WritableStream({write(value) { received.push(value); }}));
     console.log(received.join(''));
-    const dynamic = await import('stream/web');
-    console.log(dynamic === namespace, dynamic.ReadableStream === ReadableStream);
+    console.log(consumers.text === text, consumers.json === json,
+        consumers.buffer === buffer, consumers.blob === blob);
 }
 run();
 "#,
@@ -6388,34 +6439,66 @@ module.exports = {
 };
 "#,
             );
-            let reference = node_reference_output(root.path(), "app.mjs");
+            let esm_reference = node_reference_output(root.path(), "app.mjs");
             assert_eq!(
-                reference,
-                "true true true true\nsnow ☃\n42\ntrue hi 7,8 body\ntrue true shared node\nAB\ntrue true\n"
+                esm_reference,
+                "esm-stream-identity-ok\ndynamic-stream-identity-ok\n"
             );
-            let result = execute_captured_graph_for_test(root.path(), "app.mjs", lane, || {
+            let cjs_reference = node_reference_output(root.path(), "app.cjs");
+            assert_eq!(
+                cjs_reference,
+                "true true true true\nsnow ☃\n42\ntrue hi 7,8 body\ntrue true shared node\nAB\ntrue true true true\n"
+            );
+            for (entrypoint, reference) in
+                [("app.mjs", &esm_reference), ("app.cjs", &cjs_reference)]
+            {
                 put(
                     root.path(),
-                    "app.mjs",
-                    "throw new Error('live entry was reopened');",
+                    "node_modules/stream-body-user/package.json",
+                    r#"{"name":"stream-body-user","main":"index.cjs"}"#,
                 );
                 put(
                     root.path(),
                     "node_modules/stream-body-user/index.cjs",
-                    "throw new Error('live npm consumer was reopened');",
+                    r#"
+const bytes = require('node:buffer');
+module.exports = {
+    consumers: require('stream/consumers'),
+    web: require('node:stream/web'),
+    Buffer: bytes.Buffer,
+    Blob: bytes.Blob,
+    Readable: require('node:stream').Readable
+};
+"#,
                 );
-                put(
-                    root.path(),
-                    "node_modules/stream-body-user/package.json",
-                    r#"{"exports":{}}"#,
+                let result = execute_captured_graph_for_test(root.path(), entrypoint, lane, || {
+                    put(
+                        root.path(),
+                        entrypoint,
+                        "throw new Error('live entry was reopened');",
+                    );
+                    put(
+                        root.path(),
+                        "node_modules/stream-body-user/index.cjs",
+                        "throw new Error('live npm consumer was reopened');",
+                    );
+                    put(
+                        root.path(),
+                        "node_modules/stream-body-user/package.json",
+                        r#"{"exports":{}}"#,
+                    );
+                });
+                let actual = result
+                    .console_output
+                    .iter()
+                    .map(|entry| entry.message.as_str())
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    actual,
+                    reference.lines().collect::<Vec<_>>(),
+                    "{entrypoint} through {lane:?}"
                 );
-            });
-            let actual = result
-                .console_output
-                .iter()
-                .map(|entry| entry.message.as_str())
-                .collect::<Vec<_>>();
-            assert_eq!(actual, reference.lines().collect::<Vec<_>>(), "{lane:?}");
+            }
         }
     }
 
@@ -6612,9 +6695,15 @@ console.log(Reflect.set(proxy, 'Buffer', 7),
 "#,
             );
             let reference = node_reference_output(root.path(), "app.mjs");
-            assert_eq!(
-                reference,
-                "true false true false\ntrue true true false\nfalse false true\nTypeError true true true\nfalse false false false false\nTypeError false true\ntrue true 2\ntrue true false 2\ntrue 8 true\ntrue true false\nfalse true false false true\n"
+            // Node 20/22 LTS follows ES2024 OrdinarySet receiver forwarding on
+            // Module Namespace Exotic Objects, while Node 25+ (V8 13.6+, TC39
+            // PR #3274) and franken_engine return false unconditionally from
+            // ModuleNamespaceExoticObject.[[Set]].
+            let expected_es2024 = "true false true false\ntrue true true false\nfalse false true\nTypeError true true true\nfalse false false false false\nTypeError false true\ntrue true 2\ntrue true false 2\ntrue 8 true\ntrue true false\nfalse true false false true\n";
+            let expected_es2025 = "true false true false\ntrue true true false\nfalse false true\nTypeError true true true\nfalse false false false false\nTypeError false true\nfalse false 0\nfalse false true 0\ntrue 8 true\nfalse true false\nfalse true false false true\n";
+            assert!(
+                reference == expected_es2024 || reference == expected_es2025,
+                "unexpected host Node namespace reflection output:\n{reference}"
             );
             let result = execute_captured_graph_for_test(root.path(), "app.mjs", lane, || {});
             let actual = result
@@ -6622,7 +6711,11 @@ console.log(Reflect.set(proxy, 'Buffer', 7),
                 .iter()
                 .map(|entry| entry.message.as_str())
                 .collect::<Vec<_>>();
-            assert_eq!(actual, reference.lines().collect::<Vec<_>>(), "{lane:?}");
+            assert_eq!(
+                actual,
+                expected_es2025.lines().collect::<Vec<_>>(),
+                "{lane:?}"
+            );
         }
     }
 
@@ -6780,12 +6873,12 @@ import('node:buffer').then(
             put(
                 &root,
                 "app.mjs",
-                "import { answer, origin } from './side.mjs?one#tag'; console.log(answer, origin.url); console.log(import.meta.url);",
+                "import { answer, originUrl } from './side.mjs?one#tag'; console.log(answer, originUrl); console.log(import.meta.url);",
             );
             put(
                 &root,
                 "side.mjs",
-                "export const answer=42; export const origin=import.meta;",
+                "export const answer=42; export const originUrl=import.meta.url;",
             );
             let result = execute_captured_graph_for_test(&root, "app.mjs", lane, || {
                 put(

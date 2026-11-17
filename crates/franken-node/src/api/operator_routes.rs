@@ -1107,6 +1107,7 @@ mod tests {
 
     #[test]
     fn get_health_returns_live_ready() {
+        let _lock = process_start_test_lock();
         clear_resource_admission_readiness_for_tests();
         let identity = test_identity();
         let trace = test_trace();
@@ -1127,6 +1128,7 @@ mod tests {
             AdmissionDecisionCounts, AdmissionTelemetrySnapshot, RA_REJECT_MEMORY_BUDGET_EXCEEDED,
         };
 
+        let _lock = process_start_test_lock();
         clear_resource_admission_readiness_for_tests();
         update_resource_admission_readiness(AdmissionTelemetrySnapshot::new(
             AdmissionDecisionCounts {
@@ -1364,6 +1366,7 @@ mod tests {
     fn future_process_start_offset_saturates_uptime_to_zero() {
         let _lock = process_start_test_lock();
         clear_process_start_override_for_tests();
+        init_process_start();
         let future_offset = now_epoch_nanos().saturating_add(60_000_000_000);
         install_process_start(future_offset, "2099-01-01T00:00:00Z".to_string());
 
@@ -1691,6 +1694,7 @@ mod tests {
 
         #[test]
         fn unicode_injection_in_authentication_identifiers_handled_safely() {
+            let _lock = process_start_test_lock();
             // Unicode control characters, NULL bytes, path traversal attempts
             let malicious_principals = vec![
                 "op\u{0000}null_injection",
@@ -1756,6 +1760,7 @@ mod tests {
         fn arithmetic_overflow_protection_in_uptime_calculations() {
             let _lock = process_start_test_lock();
             clear_process_start_override_for_tests();
+            init_process_start();
 
             // Test near u64::MAX boundaries for timing calculations
             let extreme_offsets = vec![u64::MAX - 1000, u64::MAX - 1, u64::MAX];
@@ -1903,6 +1908,7 @@ mod tests {
         fn process_timing_boundary_attack_scenarios() {
             let _lock = process_start_test_lock();
             clear_process_start_override_for_tests();
+            init_process_start();
 
             // Test timing consistency across process start boundaries
             let identity = test_identity();

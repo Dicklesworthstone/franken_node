@@ -883,10 +883,14 @@ process.stdout.write(result);
     #[test]
     fn pair_and_product_replay_recover_original_argv_not_later_manifest_arguments() {
         use native_replay::failure_capture::product;
+        use std::os::unix::fs::PermissionsExt;
         for three_roles in [false, true] {
             let root = argument_fixture();
             let output = tempfile::tempdir().unwrap();
             let path = output.path().join("argument-capsule.json");
+            let empty_consumer = output.path().join("consume-stdin-true.sh");
+            fs::write(&empty_consumer, b"#!/bin/sh\ncat >/dev/null\n").unwrap();
+            fs::set_permissions(&empty_consumer, fs::Permissions::from_mode(0o755)).unwrap();
             // Deliberate failing/empty executables only: these tests are about
             // replaying the measured failure, NOT passing Bun/Franken parity.
             let (pin, cases) = if three_roles {
@@ -894,7 +898,7 @@ process.stdout.write(result);
                     root.path(),
                     None,
                     Path::new("/bin/false"),
-                    Path::new("/bin/true"),
+                    &empty_consumer,
                     true,
                 )
                 .unwrap();
@@ -923,14 +927,8 @@ process.stdout.write(result);
                 fs::read(root.path().join(".franken-node/migration-tests.json")).unwrap();
             let replayed = if three_roles {
                 serde_json::to_value(
-                    product::replay(
-                        &path,
-                        &pin,
-                        Path::new("/bin/false"),
-                        Path::new("/bin/true"),
-                        false,
-                    )
-                    .unwrap(),
+                    product::replay(&path, &pin, Path::new("/bin/false"), &empty_consumer, false)
+                        .unwrap(),
                 )
                 .unwrap()
             } else {

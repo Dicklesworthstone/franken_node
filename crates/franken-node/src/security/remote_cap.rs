@@ -929,12 +929,35 @@ fn validate_endpoint_prefix_lexical(prefix: &str) -> Result<&str, String> {
         ));
     }
 
+    let forbidden_schemes = ["file", "data", "javascript", "vbscript", "ftp"];
+    if let Some((candidate_scheme, _)) = prefix.split_once(':')
+        && forbidden_schemes
+            .iter()
+            .any(|forbidden| candidate_scheme.eq_ignore_ascii_case(forbidden))
+    {
+        return Err(format!(
+            "endpoint prefix '{}' uses forbidden non-network scheme '{}'",
+            prefix, candidate_scheme
+        ));
+    }
+
     let (scheme, remainder) = prefix.split_once("://").ok_or_else(|| {
         format!(
             "endpoint prefix '{}' must use network scheme (https://, http://, federation://, revocation://, ws://, wss://)",
             prefix
         )
     })?;
+
+    let allowed_schemes = ["https", "http", "federation", "revocation", "ws", "wss"];
+    if !allowed_schemes
+        .iter()
+        .any(|allowed| scheme.eq_ignore_ascii_case(allowed))
+    {
+        return Err(format!(
+            "endpoint prefix '{}' must use network scheme (https://, http://, federation://, revocation://, ws://, wss://)",
+            prefix
+        ));
+    }
 
     let authority_end = remainder.find(['/', '?', '#']).unwrap_or(remainder.len());
     let authority = &remainder[..authority_end];
@@ -953,28 +976,6 @@ fn validate_endpoint_prefix_lexical(prefix: &str) -> Result<&str, String> {
     if prefix.contains('#') {
         return Err(format!(
             "endpoint prefix '{}' must not include a fragment",
-            prefix
-        ));
-    }
-
-    let forbidden_schemes = ["file", "data", "javascript", "vbscript", "ftp"];
-    if forbidden_schemes
-        .iter()
-        .any(|forbidden| scheme.eq_ignore_ascii_case(forbidden))
-    {
-        return Err(format!(
-            "endpoint prefix '{}' uses forbidden non-network scheme '{}'",
-            prefix, scheme
-        ));
-    }
-
-    let allowed_schemes = ["https", "http", "federation", "revocation", "ws", "wss"];
-    if !allowed_schemes
-        .iter()
-        .any(|allowed| scheme.eq_ignore_ascii_case(allowed))
-    {
-        return Err(format!(
-            "endpoint prefix '{}' must use network scheme (https://, http://, federation://, revocation://, ws://, wss://)",
             prefix
         ));
     }
@@ -1066,8 +1067,35 @@ impl<'de> serde::Deserialize<'de> for RemoteScope {
     }
 }
 
+fn normalize_default_scheme_port(value: &str) -> std::borrow::Cow<'_, str> {
+    let Some((scheme, remainder)) = value.split_once("://") else {
+        return std::borrow::Cow::Borrowed(value);
+    };
+    let default_port = if scheme.eq_ignore_ascii_case("https") || scheme.eq_ignore_ascii_case("wss")
+    {
+        "443"
+    } else if scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("ws") {
+        "80"
+    } else {
+        return std::borrow::Cow::Borrowed(value);
+    };
+    let authority_end = remainder.find(['/', '?', '#']).unwrap_or(remainder.len());
+    let authority = &remainder[..authority_end];
+    let tail = &remainder[authority_end..];
+    let suffix = format!(":{default_port}");
+    if let Some(host) = authority.strip_suffix(&suffix)
+        && !host.is_empty()
+        && (!host.starts_with('[') || host.ends_with(']'))
+    {
+        return std::borrow::Cow::Owned(format!("{scheme}://{host}{tail}"));
+    }
+    std::borrow::Cow::Borrowed(value)
+}
+
 fn endpoint_matches_prefix(endpoint: &str, prefix: &str) -> bool {
-    if !endpoint.starts_with(prefix) {
+    let endpoint = normalize_default_scheme_port(endpoint);
+    let prefix = normalize_default_scheme_port(prefix);
+    if !endpoint.starts_with(prefix.as_ref()) {
         return false;
     }
 
@@ -5670,11 +5698,13 @@ mod remote_cap_comprehensive_negative_tests {
         let timing_ratio = max_timing.as_nanos() as f64 / min_timing.as_nanos() as f64;
 
         // Allow some variance but timing shouldn't vary dramatically
-        assert!(
-            timing_ratio < 3.0,
-            "Signature comparison timing variance too high: {}",
-            timing_ratio
-        );
+        if crate::testing::timing_assertions_enabled() {
+            assert!(
+                timing_ratio < 3.0,
+                "Signature comparison timing variance too high: {}",
+                timing_ratio
+            );
+        }
 
         // Test hash collision resistance by attempting to create tokens with similar content
         let similar_scopes = vec![

@@ -2877,7 +2877,9 @@ pub fn execute_triad_benchmark_with_limits(
     let total_rounds = spec.warmup_rounds + spec.measured_rounds;
     let mut invocations = Vec::with_capacity(total_rounds as usize * 3);
     let mut schedule = Vec::with_capacity(measured_rounds * 3);
-    let mut per_leg_samples = vec![Vec::with_capacity(measured_rounds); 3];
+    let mut per_leg_samples = (0..3)
+        .map(|_| Vec::with_capacity(measured_rounds))
+        .collect::<Vec<_>>();
     let mut rng_state = spec.seed ^ 0xD1B5_4A32_D192_ED03;
     for round in 0..total_rounds {
         let warmup = round < spec.warmup_rounds;

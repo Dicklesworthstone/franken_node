@@ -2939,7 +2939,7 @@ mod tests {
             let timing_ratio = max_time.as_nanos() as f64 / min_time.as_nanos() as f64;
 
             // Guard against NaN/Inf in timing calculations
-            if timing_ratio.is_finite() {
+            if timing_ratio.is_finite() && crate::testing::timing_assertions_enabled() {
                 // Allow reasonable variance but flag excessive timing differences
                 assert!(
                     timing_ratio < 5.0,

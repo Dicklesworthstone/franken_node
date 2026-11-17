@@ -117,17 +117,18 @@ use crate::cli::{
     DoctorEvidenceReadinessArgs, DoctorExpectedLossActionsArgs, DoctorPolicyActivationInput,
     DoctorProcessSpawnReadinessArgs, DoctorWorkspacePressureArgs, FleetAgentArgs, FleetCommand,
     IncidentCommand, LtvCommand, MigrateCommand, MigrateReportArgs, OpsCommand,
-    OpsCompatCorpusRunArgs, OpsConfigAuditArgs, OpsEvidenceIndexArgs, OpsMetricsFormat,
-    OpsProofCarryingEvidenceArgs, OpsResourceGovernorArgs, OpsSwarmHandoffArgs,
-    OpsValidationCloseoutArgs, OpsValidationReadinessArgs, ProofQueueCommand, ProofQueueStatusArgs,
-    ProofWorkersCommand, ProofWorkersRestartArgs, ProofsCommand, RegistryCommand, RemoteCapCommand,
-    RemoteCapIssueArgs, RemoteCapRevokeArgs, RemoteCapUseArgs, RemoteCapVerifyArgs, RuntimeCommand,
-    RuntimeLaneCommand, SafeModeCommand, SafeModeEnterArgs, SafeModeExitArgs, SafeModeStatusArgs,
-    TrustCardCommand, TrustCardReputationArgs, TrustCommand, TrustVefProveArgs, TrustZkAttestArgs,
-    VerifyCommand, VerifyCompatibilityArgs, VerifyCorpusArgs, VerifyMigrationArgs,
-    VerifyModuleArgs, VerifyRecoveryRunbookArgs, VerifyReleaseArgs, VerifySourceGraphArgs,
-    VerifyTransparencyLogArgs, VerifyVefProofArgs, VerifyZkAttestationArgs,
-    load_doctor_policy_activation_input,
+    OpsCompatCorpusRunArgs, OpsConfigAuditArgs, OpsEvidenceIndexArgs, OpsFaultScheduleAuditArgs,
+    OpsMetricsFormat, OpsProofCarryingEvidenceArgs, OpsResourceGovernorArgs, OpsSwarmHandoffArgs,
+    OpsSwarmScenarioArgs, OpsValidationCloseoutArgs, OpsValidationReadinessArgs, ProofQueueCommand,
+    ProofQueueStatusArgs, ProofWorkersCommand, ProofWorkersRestartArgs, ProofsCommand,
+    RegistryCommand, RemoteCapCommand, RemoteCapIssueArgs, RemoteCapRevokeArgs, RemoteCapUseArgs,
+    RemoteCapVerifyArgs, RuntimeCommand, RuntimeLaneCommand, RuntimeSupervisionAuditArgs,
+    SafeModeCommand, SafeModeEnterArgs, SafeModeExitArgs, SafeModeStatusArgs, TrustCardCommand,
+    TrustCardReputationArgs, TrustCommand, TrustEcosystemTelemetryArgs, TrustGovernanceAuditArgs,
+    TrustResolutionReceiptArgs, TrustVefProveArgs, TrustZkAttestArgs, VerifyCommand,
+    VerifyCompatibilityArgs, VerifyCorpusArgs, VerifyMigrationArgs, VerifyModuleArgs,
+    VerifyRecoveryRunbookArgs, VerifyReleaseArgs, VerifySourceGraphArgs, VerifyTransparencyLogArgs,
+    VerifyVefProofArgs, VerifyZkAttestationArgs, load_doctor_policy_activation_input,
 };
 use crate::ops::workspace_pressure_policy::WorkspacePressureInputs;
 use crate::policy::{
@@ -8730,6 +8731,9 @@ fn handle_runtime_command(command: RuntimeCommand) -> Result<()> {
                     report.verdict
                 )
             })?;
+        }
+        RuntimeCommand::SupervisionAudit(args) => {
+            handle_runtime_supervision_audit(&args)?;
         }
     }
     Ok(())
@@ -30237,20 +30241,29 @@ fn run_operator_protected_paths(
     if let Some(key) = &resolved.config.security.decision_receipt_signing_key_path {
         paths.push(absolute(key));
     }
-    if let Some(roots) = &resolved.config.security.network_policy.tls_extra_roots_pem_path {
+    if let Some(roots) = &resolved
+        .config
+        .security
+        .network_policy
+        .tls_extra_roots_pem_path
+    {
         paths.push(absolute(Path::new(roots)));
     }
     if let Some(token) = &resolved.config.fleet.control_plane_token_path {
-        paths.push(absolute(&resolve_fleet_config_path(project_root, resolved, token)));
+        paths.push(absolute(&resolve_fleet_config_path(
+            project_root,
+            resolved,
+            token,
+        )));
     }
     if let Some(state) = &resolved.config.fleet.state_dir {
-        paths.push(absolute(&resolve_fleet_config_path(project_root, resolved, state)));
+        paths.push(absolute(&resolve_fleet_config_path(
+            project_root,
+            resolved,
+            state,
+        )));
     }
-    EngineDispatcher::operator_protected_paths_with_defaults(
-        &paths,
-        project_root,
-        invocation_root,
-    )
+    EngineDispatcher::operator_protected_paths_with_defaults(&paths, project_root, invocation_root)
 }
 
 /// Read the coordinator bearer token from `path` (trimmed; must validate).
@@ -41178,6 +41191,992 @@ fn handle_ops_swarm_handoff(args: &OpsSwarmHandoffArgs) -> Result<()> {
     Ok(())
 }
 
+fn handle_ops_swarm_scenario(args: &OpsSwarmScenarioArgs) -> Result<()> {
+    use tools::swarm_scenario::{
+        SwarmScenarioSpec, SwarmScenarioVerdict, registered_swarm_scenarios,
+        run_deterministic_swarm_scenario,
+    };
+
+    let registered = registered_swarm_scenarios();
+    if args.list {
+        let scenario_ids: Vec<&str> = registered.iter().map(|s| s.scenario_id.as_str()).collect();
+        if args.json {
+            let payload = serde_json::json!({
+                "schema_version": "franken-node/ops-swarm-scenario-cli/v1",
+                "command": "ops.swarm-scenario",
+                "mode": "list",
+                "scenario_count": registered.len(),
+                "scenarios": registered,
+            });
+            println!("{}", serde_json::to_string_pretty(&payload)?);
+        } else {
+            println!(
+                "ops swarm-scenario: {} registered scenarios: {}",
+                registered.len(),
+                scenario_ids.join(", ")
+            );
+        }
+        return Ok(());
+    }
+
+    let spec = if let Some(spec_path) = &args.spec {
+        let raw =
+            bounded_read_to_string(spec_path, MAX_EVIDENCE_INPUT_BYTES).with_context(|| {
+                format!("failed reading swarm scenario spec {}", spec_path.display())
+            })?;
+        serde_json::from_str::<SwarmScenarioSpec>(&raw)
+            .with_context(|| format!("invalid SwarmScenarioSpec JSON in {}", spec_path.display()))?
+    } else {
+        registered
+            .into_iter()
+            .find(|candidate| candidate.scenario_id == args.scenario)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "unknown registered swarm scenario `{}` (pass --list to inspect available scenarios)",
+                    args.scenario
+                )
+            })?
+    };
+
+    let ephemeral_workspace;
+    let workspace_root = if let Some(explicit) = &args.workspace {
+        explicit.as_path()
+    } else {
+        ephemeral_workspace =
+            tempfile::tempdir().context("failed creating ephemeral swarm scenario workspace")?;
+        ephemeral_workspace.path()
+    };
+    std::fs::create_dir_all(workspace_root).with_context(|| {
+        format!(
+            "failed creating swarm scenario workspace {}",
+            workspace_root.display()
+        )
+    })?;
+
+    let scenario_report = run_deterministic_swarm_scenario(&spec, workspace_root)
+        .with_context(|| format!("swarm scenario `{}` execution failed", spec.scenario_id))?;
+
+    let payload = serde_json::json!({
+        "schema_version": "franken-node/ops-swarm-scenario-cli/v1",
+        "command": "ops.swarm-scenario",
+        "mode": "execute",
+        "workspace_persisted": args.workspace.is_some(),
+        "report": scenario_report,
+    });
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        println!(
+            "ops swarm-scenario: scenario={} verdict={} artifacts={} assertions={}",
+            scenario_report.scenario_id,
+            scenario_report.verdict.as_str(),
+            scenario_report.artifacts.len(),
+            scenario_report.assertions.len()
+        );
+    }
+    if scenario_report.verdict == SwarmScenarioVerdict::Fail {
+        if args.json {
+            fail_closed_after_json();
+        }
+        anyhow::bail!(
+            "swarm scenario `{}` failed one or more deterministic assertions",
+            scenario_report.scenario_id
+        );
+    }
+    Ok(())
+}
+
+fn handle_ops_fault_schedule_audit(args: &OpsFaultScheduleAuditArgs) -> Result<()> {
+    use connector::dpor_schedule_gate::{ALL_SCENARIOS, DporScheduleGate, DporScheduleGateConfig};
+    use connector::transport_fault_gate::{
+        ControlProtocol, FaultMode, TransportFaultGate, TransportFaultGateConfig,
+    };
+
+    let seeds: Vec<u64> = args
+        .seeds
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|raw| {
+            raw.parse::<u64>()
+                .with_context(|| format!("invalid u64 seed `{raw}` in --seeds"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    anyhow::ensure!(
+        !seeds.is_empty(),
+        "ops fault-schedule-audit requires at least one seed in --seeds"
+    );
+    anyhow::ensure!(
+        args.messages_per_run > 0,
+        "ops fault-schedule-audit requires --messages-per-run > 0"
+    );
+
+    let baseline_no_fault = frankenengine_node::remote::virtual_transport_faults::no_faults();
+    baseline_no_fault
+        .validate()
+        .map_err(|err| anyhow::anyhow!("baseline virtual transport fault config invalid: {err}"))?;
+    let _budget = control_plane::dpor_exploration::ExplorationBudget {
+        time_seconds: args.dpor_time_budget_secs,
+        memory_bytes: 256 * 1024 * 1024,
+    };
+
+    let tfg_config = TransportFaultGateConfig {
+        seeds,
+        messages_per_run: args.messages_per_run,
+        protocols: ControlProtocol::all().to_vec(),
+        fault_modes: FaultMode::all_modes().to_vec(),
+    };
+    let mut tfg =
+        TransportFaultGate::with_config(tfg_config).map_err(|err| anyhow::anyhow!("{err}"))?;
+    let fault_verdict = tfg
+        .run_full_gate()
+        .map_err(|err| anyhow::anyhow!("{err}"))?;
+
+    let dsg_config = DporScheduleGateConfig {
+        time_budget_per_scenario_secs: args.dpor_time_budget_secs,
+        memory_budget_bytes: 256 * 1024 * 1024,
+    };
+    let mut dsg = DporScheduleGate::new(dsg_config).map_err(|err| anyhow::anyhow!("{err}"))?;
+    dsg.register_all_scenarios()
+        .map_err(|err| anyhow::anyhow!("{err}"))?;
+    let schedule_result = dsg
+        .run_full_gate()
+        .map_err(|err| anyhow::anyhow!("{err}"))?;
+
+    let overall_passed = fault_verdict.passed && schedule_result.is_pass();
+    let payload = serde_json::json!({
+        "schema_version": "franken-node/ops-fault-schedule-audit-cli/v1",
+        "command": "ops.fault-schedule-audit",
+        "ok": overall_passed,
+        "transport_fault_gate": {
+            "schema_version": fault_verdict.schema_version,
+            "passed": fault_verdict.passed,
+            "total_tests": fault_verdict.total_tests,
+            "passed_tests": fault_verdict.passed_tests,
+            "failed_tests": fault_verdict.failed_tests,
+            "protocols_tested": fault_verdict.protocols_tested,
+            "fault_modes_tested": fault_verdict.fault_modes_tested,
+            "seeds_used": fault_verdict.seeds_used,
+            "content_hash": fault_verdict.content_hash,
+            "audit_event_count": tfg.audit_log().len(),
+        },
+        "dpor_schedule_gate": {
+            "schema_version": schedule_result.schema_version,
+            "passed": schedule_result.is_pass(),
+            "verdict": schedule_result.verdict,
+            "scenarios_explored": schedule_result.scenarios_explored,
+            "scenarios_total": schedule_result.scenarios_total,
+            "total_schedules_explored": schedule_result.total_schedules_explored,
+            "total_violations": schedule_result.total_violations,
+            "registered_scenarios": ALL_SCENARIOS,
+            "event_count": dsg.events().len(),
+        },
+    });
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        println!(
+            "ops fault-schedule-audit: ok={} fault_tests={}/{} dpor_schedules={} violations={}",
+            overall_passed,
+            fault_verdict.passed_tests,
+            fault_verdict.total_tests,
+            schedule_result.total_schedules_explored,
+            schedule_result.total_violations
+        );
+    }
+    if !overall_passed {
+        if args.json {
+            fail_closed_after_json();
+        }
+        anyhow::bail!("ops fault-schedule-audit detected protocol or schedule violations");
+    }
+    Ok(())
+}
+
+fn handle_trust_resolution_receipt(args: &TrustResolutionReceiptArgs) -> Result<()> {
+    use supply_chain::resolution_receipt::{
+        AdmissionDecision, AdmissionProfile, CandidateAssessment, CapabilityBudgetMode,
+        CapabilityBudgetPolicy, CapabilityBudgetUsage, CompatibilityStatus,
+        ModuleResolveBudgetAttempt, ResolutionReceiptRequest, RevocationFreshness, RiskTier,
+        SignedResolutionReceipt, TrustCardStatus, build_resolution_receipt_from_request,
+        meter_module_resolve_capability_budget, recompute_resolution_receipt_hash,
+        resolution_receipt_event_codes, serialize_signed_resolution_receipt,
+        sign_resolution_receipt, verify_signed_resolution_receipt,
+    };
+
+    if let Some(verify_path) = &args.verify {
+        let trusted_pk_path = args.trusted_public_key.as_deref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "trust resolution-receipt --verify requires --trusted-public-key <PATH> (unanchored self-asserted receipts are refused)"
+            )
+        })?;
+        let pk_meta = std::fs::metadata(trusted_pk_path).with_context(|| {
+            format!(
+                "failed reading trusted public key {}",
+                trusted_pk_path.display()
+            )
+        })?;
+        anyhow::ensure!(
+            pk_meta.is_file(),
+            "trusted public key path is not a regular file: {}",
+            trusted_pk_path.display()
+        );
+        let pk_raw = bounded_read(trusted_pk_path, MAX_SIGNING_KEY_BYTES)?;
+        let verifying_key = parse_verifying_key_from_blob(&pk_raw).ok_or_else(|| {
+            anyhow::anyhow!(
+                "invalid Ed25519 verifying key in {} (PEM and malformed blobs are refused)",
+                trusted_pk_path.display()
+            )
+        })?;
+
+        let raw = bounded_read_to_string(verify_path, MAX_EVIDENCE_INPUT_BYTES)
+            .with_context(|| format!("failed reading {}", verify_path.display()))?;
+        let signed: SignedResolutionReceipt = serde_json::from_str(&raw).with_context(|| {
+            format!(
+                "invalid SignedResolutionReceipt JSON in {}",
+                verify_path.display()
+            )
+        })?;
+        let verified = verify_signed_resolution_receipt(&signed, &verifying_key)
+            .map_err(|err| anyhow::anyhow!("{err}"))?;
+        let recomputed_hash = recompute_resolution_receipt_hash(&signed.receipt)
+            .map_err(|err| anyhow::anyhow!("{err}"))?;
+        let event_codes = resolution_receipt_event_codes(&signed.receipt)
+            .map_err(|err| anyhow::anyhow!("{err}"))?;
+
+        let payload = serde_json::json!({
+            "schema_version": "franken-node/trust-resolution-receipt-cli/v1",
+            "command": "trust.resolution-receipt",
+            "mode": "verify",
+            "ok": verified,
+            "receipt_id": signed.receipt.receipt_id,
+            "package_name": signed.receipt.package_name,
+            "decision": signed.receipt.decision,
+            "signer_key_id": signed.signer_key_id,
+            "canonical_hash": recomputed_hash,
+            "event_codes": event_codes,
+        });
+        if args.json {
+            println!("{}", serde_json::to_string_pretty(&payload)?);
+        } else {
+            println!(
+                "trust resolution-receipt verify: ok={} receipt_id={} decision={:?}",
+                verified, signed.receipt.receipt_id, signed.receipt.decision
+            );
+        }
+        return Ok(());
+    }
+
+    anyhow::ensure!(
+        !args.package_name.trim().is_empty(),
+        "trust resolution-receipt requires --package-name <NAME> when issuing a receipt"
+    );
+    let signing_key_path = args.signing_key.as_deref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "trust resolution-receipt requires an explicit Ed25519 --signing-key <PATH> when issuing a receipt"
+        )
+    })?;
+    let signing_key = load_vef_signing_key(Some(signing_key_path))?;
+
+    let policy_profile = match args.policy_profile.trim() {
+        "strict" => AdmissionProfile::Strict,
+        "balanced" => AdmissionProfile::Balanced,
+        "legacy-risky" | "legacy_risky" => AdmissionProfile::LegacyRisky,
+        other => anyhow::bail!(
+            "unsupported --policy-profile `{other}` (expected strict, balanced, or legacy-risky)"
+        ),
+    };
+    let capability_budget_mode = match args.budget_mode.trim() {
+        "advisory" => CapabilityBudgetMode::Advisory,
+        "enforced" => CapabilityBudgetMode::Enforced,
+        other => {
+            anyhow::bail!("unsupported --budget-mode `{other}` (expected advisory or enforced)")
+        }
+    };
+
+    let parse_risk = |raw: &str, flag: &str| -> Result<RiskTier> {
+        match raw.trim() {
+            "low" => Ok(RiskTier::Low),
+            "moderate" => Ok(RiskTier::Moderate),
+            "high" => Ok(RiskTier::High),
+            "critical" => Ok(RiskTier::Critical),
+            other => anyhow::bail!("unsupported {flag} `{other}`"),
+        }
+    };
+    let trust_status = match args.trust_status.trim() {
+        "trusted" => TrustCardStatus::Trusted,
+        "unknown" => TrustCardStatus::Unknown,
+        "quarantined" => TrustCardStatus::Quarantined,
+        "revoked" => TrustCardStatus::Revoked,
+        other => anyhow::bail!("unsupported --trust-status `{other}`"),
+    };
+    let revocation_freshness = match args.revocation_freshness.trim() {
+        "fresh" => RevocationFreshness::Fresh,
+        "stale" => RevocationFreshness::Stale,
+        "missing" => RevocationFreshness::Missing,
+        "revoked" => RevocationFreshness::Revoked,
+        other => anyhow::bail!("unsupported --revocation-freshness `{other}`"),
+    };
+    let compat_status = match args.compat_status.trim() {
+        "compatible" => CompatibilityStatus::Compatible,
+        "needs-shim" | "needs_shim" => CompatibilityStatus::NeedsShim,
+        "unknown" => CompatibilityStatus::Unknown,
+        "divergent" => CompatibilityStatus::Divergent,
+        other => anyhow::bail!("unsupported --compat-status `{other}`"),
+    };
+
+    let candidates = if let Some(path) = &args.candidates_file {
+        let raw = bounded_read_to_string(path, MAX_EVIDENCE_INPUT_BYTES)
+            .with_context(|| format!("failed reading candidates file {}", path.display()))?;
+        serde_json::from_str::<Vec<CandidateAssessment>>(&raw)
+            .with_context(|| format!("invalid CandidateAssessment list in {}", path.display()))?
+    } else {
+        let pkg = args.package_name.trim();
+        let ver = args.candidate_version.trim();
+        vec![CandidateAssessment {
+            version: ver.to_string(),
+            package_path: format!("node_modules/{pkg}"),
+            resolved_url: None,
+            integrity: None,
+            trust_card_ref: format!("trust-card:{pkg}@{ver}"),
+            trust_status,
+            bpet_risk_ref: format!("bpet:{pkg}@{ver}"),
+            bpet_risk: parse_risk(&args.bpet_risk, "--bpet-risk")?,
+            dgis_risk_ref: format!("dgis:{pkg}@{ver}"),
+            dgis_risk: parse_risk(&args.dgis_risk, "--dgis-risk")?,
+            revocation_freshness_ref: format!("revocation:{pkg}@{ver}"),
+            revocation_freshness,
+            compat_oracle_ref: format!("compat:{pkg}@{ver}"),
+            compat_status,
+            capability_budget_ref: format!("cap-budget:{pkg}@{ver}"),
+        }]
+    };
+
+    let receipt = build_resolution_receipt_from_request(ResolutionReceiptRequest {
+        receipt_id: args.receipt_id.clone(),
+        issued_at_millis: args.issued_at_millis,
+        module_graph_hash: args.module_graph_hash.clone(),
+        package_name: args.package_name.trim().to_string(),
+        requested_range: args.requested_range.clone(),
+        policy_profile,
+        capability_budget_mode,
+        candidates,
+    })
+    .map_err(|err| anyhow::anyhow!("{err}"))?;
+
+    let signed =
+        sign_resolution_receipt(&receipt, &signing_key).map_err(|err| anyhow::anyhow!("{err}"))?;
+    verify_signed_resolution_receipt(&signed, &signing_key.verifying_key())
+        .map_err(|err| anyhow::anyhow!("self-verification failed: {err}"))?;
+    let event_codes =
+        resolution_receipt_event_codes(&receipt).map_err(|err| anyhow::anyhow!("{err}"))?;
+
+    let budget_metering = if receipt.decision == AdmissionDecision::Admit {
+        let decision = meter_module_resolve_capability_budget(
+            &receipt,
+            CapabilityBudgetPolicy {
+                max_module_resolve_effects: args.max_resolve_effects,
+            },
+            CapabilityBudgetUsage {
+                module_resolve_effects_used: args.used_resolve_effects,
+            },
+            ModuleResolveBudgetAttempt {
+                seq: 1,
+                trace_id: format!("trace-resolve-{}", receipt.receipt_id),
+                pre_state_hash: frankenengine_node::storage::cas::content_hash(
+                    receipt.module_graph_hash.as_bytes(),
+                ),
+                args_hash: frankenengine_node::storage::cas::content_hash(
+                    receipt.package_name.as_bytes(),
+                ),
+                recorded_at_millis: args.issued_at_millis,
+            },
+        )
+        .map_err(|err| anyhow::anyhow!("{err}"))?;
+        Some(serde_json::json!({
+            "allowed": decision.allowed,
+            "over_budget": decision.over_budget,
+            "used_before": decision.used_before,
+            "attempted_after": decision.attempted_after,
+            "max_allowed": decision.max_allowed,
+            "event_codes": decision.event_codes,
+        }))
+    } else {
+        None
+    };
+
+    if let Some(output_path) = &args.output {
+        if let Some(parent) = output_path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)?;
+        }
+        let canonical =
+            serialize_signed_resolution_receipt(&signed).map_err(|err| anyhow::anyhow!("{err}"))?;
+        std::fs::write(output_path, canonical)
+            .with_context(|| format!("failed writing {}", output_path.display()))?;
+    }
+
+    let budget_denied = budget_metering
+        .as_ref()
+        .and_then(|m| m.get("allowed").and_then(serde_json::Value::as_bool))
+        == Some(false);
+    let ok = receipt.decision == AdmissionDecision::Admit && !budget_denied;
+    let payload = serde_json::json!({
+        "schema_version": "franken-node/trust-resolution-receipt-cli/v1",
+        "command": "trust.resolution-receipt",
+        "mode": "issue",
+        "ok": ok,
+        "signed_receipt": signed,
+        "event_codes": event_codes,
+        "capability_budget_metering": budget_metering,
+    });
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        println!(
+            "trust resolution-receipt: ok={} package={} decision={:?} signer={}",
+            ok, signed.receipt.package_name, signed.receipt.decision, signed.signer_key_id
+        );
+    }
+    if !ok {
+        if args.json {
+            fail_closed_after_json();
+        }
+        anyhow::bail!(
+            "resolution receipt rejected or exceeded enforced capability budget for {}",
+            signed.receipt.package_name
+        );
+    }
+    Ok(())
+}
+
+fn handle_trust_ecosystem_telemetry(args: &TrustEcosystemTelemetryArgs) -> Result<()> {
+    use supply_chain::ecosystem_telemetry::{
+        AnomalyConfig, DataGovernance, MetricKind, RetentionPolicy, TelemetryDataPoint,
+        TelemetryPipeline, TelemetryQuery, TrustMetricKind, certification_distribution_contract,
+        compromise_reduction_factor_contract, load_compromise_reduction_report,
+    };
+
+    anyhow::ensure!(
+        args.deviation_threshold_pct.is_finite()
+            && (0.0..=100.0).contains(&args.deviation_threshold_pct),
+        "trust ecosystem-telemetry requires finite --deviation-threshold-pct in 0.0..=100.0"
+    );
+
+    let governance = DataGovernance {
+        collection_enabled: args.enable_collection,
+        min_aggregation_k: args.min_aggregation_k,
+        retention: RetentionPolicy::default(),
+        collected_categories: vec!["trust_metrics".to_owned(), "adoption_metrics".to_owned()],
+        published_categories: vec!["aggregate_trust_metrics".to_owned()],
+    };
+    let mut pipeline = TelemetryPipeline::with_governance(governance);
+
+    let mut ingested_points = 0usize;
+    let mut rejected_points = 0usize;
+    if let Some(points_path) = &args.points_file {
+        let raw = bounded_read_to_string(points_path, MAX_EVIDENCE_INPUT_BYTES)
+            .with_context(|| format!("failed reading {}", points_path.display()))?;
+        let points: Vec<TelemetryDataPoint> = serde_json::from_str(&raw).with_context(|| {
+            format!(
+                "invalid Vec<TelemetryDataPoint> JSON in {}",
+                points_path.display()
+            )
+        })?;
+        for point in points {
+            if pipeline.ingest(point) {
+                ingested_points += 1;
+            } else {
+                rejected_points += 1;
+            }
+        }
+    }
+
+    let mut baseline = BTreeMap::new();
+    baseline.insert(
+        MetricKind::Trust(TrustMetricKind::ProvenanceCoverageRate),
+        0.95,
+    );
+    let _anomaly_cfg = AnomalyConfig::new(args.deviation_threshold_pct, 10, 30)
+        .ok_or_else(|| anyhow::anyhow!("invalid anomaly configuration"))?;
+    let alerts = pipeline.detect_anomalies(&baseline);
+
+    let query_result = pipeline.query(&TelemetryQuery {
+        metric: None,
+        from: None,
+        to: None,
+        aggregation: None,
+        labels: BTreeMap::new(),
+        limit: Some(64),
+    });
+
+    let compromise_report = match &args.compromise_report {
+        Some(path) => Some(
+            load_compromise_reduction_report(path)
+                .map_err(|err| anyhow::anyhow!("invalid compromise reduction report: {err}"))?,
+        ),
+        None => None,
+    };
+    let health_export =
+        pipeline.export_health(&args.exported_at, compromise_report.as_ref(), None, None);
+
+    let payload = serde_json::json!({
+        "schema_version": "franken-node/trust-ecosystem-telemetry-cli/v1",
+        "command": "trust.ecosystem-telemetry",
+        "collection_enabled": args.enable_collection,
+        "ingested_points": ingested_points,
+        "rejected_points": rejected_points,
+        "queried_total_count": query_result.total_count,
+        "privacy_filtered": query_result.privacy_filtered,
+        "anomaly_alerts": alerts,
+        "health_export": health_export,
+        "contracts": {
+            "compromise_reduction_factor": compromise_reduction_factor_contract(),
+            "certification_distribution": certification_distribution_contract(),
+        },
+    });
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        println!(
+            "trust ecosystem-telemetry: ingested={} alerts={} privacy_filtered={}",
+            ingested_points,
+            alerts.len(),
+            query_result.privacy_filtered
+        );
+    }
+    Ok(())
+}
+
+fn handle_trust_governance_audit(args: &TrustGovernanceAuditArgs) -> Result<()> {
+    use frankenengine_node::security::challenge_flow::{
+        ArtifactId, ChallengeConfig, ChallengeError, ChallengeFlowController, ERR_PROOF_INVALID,
+        ProofSubmission, RequiredProofType, SuspicionReason, proof_data_hash_matches_constant_time,
+    };
+    use frankenengine_node::security::intent_firewall::{
+        EffectsFirewall, FirewallVerdict, RemoteEffect, TrafficOrigin,
+    };
+    use frankenengine_node::security::staking_governance::{
+        RiskTier as StakeRiskTier, SlashEvidence, TrustGovernanceState,
+    };
+
+    let expected_hash = args.expected_proof_hash.clone();
+    let mut challenge_ctl = ChallengeFlowController::with_proof_verifier(
+        ChallengeConfig::default(),
+        move |_artifact, proof| {
+            if proof_data_hash_matches_constant_time(&proof.data_hash, &expected_hash) {
+                Ok(())
+            } else {
+                Err(ChallengeError::new(
+                    ERR_PROOF_INVALID,
+                    "submitted proof digest did not match expected provenance digest",
+                ))
+            }
+        },
+    );
+
+    let challenge_id = challenge_ctl
+        .issue_challenge(
+            ArtifactId::new(args.artifact_id.clone()),
+            SuspicionReason::UnexpectedProvenance,
+            vec![RequiredProofType::ProvenanceAttestation],
+            "operator:cli",
+            1_000,
+        )
+        .map_err(|err| anyhow::anyhow!("challenge issuance failed: {err}"))?;
+
+    challenge_ctl
+        .submit_proof(
+            &challenge_id,
+            ProofSubmission {
+                proof_type: RequiredProofType::ProvenanceAttestation,
+                data_hash: args.submitted_proof_hash.clone(),
+                submitter_id: args.publisher.clone(),
+                submitted_at_ms: 1_500,
+            },
+            &args.publisher,
+            1_500,
+        )
+        .map_err(|err| anyhow::anyhow!("challenge proof submission failed: {err}"))?;
+
+    let challenge_verified = challenge_ctl
+        .verify_proof(&challenge_id, "verifier:cli", 2_000)
+        .is_ok();
+    let challenge_promoted = if challenge_verified {
+        challenge_ctl
+            .promote(&challenge_id, "verifier:cli", 2_100)
+            .is_ok()
+    } else {
+        false
+    };
+
+    let stake_tier = match args.risk_tier.trim() {
+        "low" => StakeRiskTier::Low,
+        "medium" => StakeRiskTier::Medium,
+        "high" => StakeRiskTier::High,
+        "critical" => StakeRiskTier::Critical,
+        other => anyhow::bail!(
+            "unsupported --risk-tier `{other}` (expected low, medium, high, or critical)"
+        ),
+    };
+    let mut governance = TrustGovernanceState::new();
+    governance.set_time(1_700_000_000);
+    let stake_deposit = governance.deposit_stake(
+        &args.publisher,
+        args.stake_amount,
+        stake_tier,
+        1_700_086_400,
+    );
+    let stake_id = stake_deposit.ok();
+    let gate_before_slash =
+        governance.check_capability_gate(&args.publisher, "cap:network:connect", stake_tier);
+    let slash_event = if let (Some(id), Some(evidence_hash)) = (stake_id, &args.slash_evidence_hash)
+    {
+        Some(
+            governance
+                .slash(
+                    id,
+                    SlashEvidence {
+                        evidence_hash: evidence_hash.clone(),
+                        description: "validated policy violation".to_string(),
+                        collected_at: 1_700_000_010,
+                        capability: "cap:network:connect".to_string(),
+                    },
+                )
+                .map_err(|err| anyhow::anyhow!("slashing failed: {err}"))?,
+        )
+    } else {
+        None
+    };
+    let gate_after =
+        governance.check_capability_gate(&args.publisher, "cap:network:connect", stake_tier);
+
+    let mut firewall = EffectsFirewall::with_default_policy();
+    firewall.register_extension(&args.extension_id);
+    let benign_decision = firewall
+        .evaluate(
+            &RemoteEffect {
+                effect_id: "eff-benign-health".to_string(),
+                origin: TrafficOrigin::Extension {
+                    extension_id: args.extension_id.clone(),
+                },
+                target_host: "telemetry.example.org".to_string(),
+                target_port: 443,
+                method: "GET".to_string(),
+                path: "/health".to_string(),
+                has_sensitive_payload: false,
+                carries_credentials: false,
+                metadata: BTreeMap::new(),
+            },
+            "trace-fw-benign",
+            "2026-11-17T00:00:00Z",
+        )
+        .map_err(|err| anyhow::anyhow!("firewall benign evaluation failed: {err}"))?;
+    let risky_decision = firewall
+        .evaluate(
+            &RemoteEffect {
+                effect_id: "eff-risky-exfil".to_string(),
+                origin: TrafficOrigin::Extension {
+                    extension_id: args.extension_id.clone(),
+                },
+                target_host: "drop.example.net".to_string(),
+                target_port: 443,
+                method: "POST".to_string(),
+                path: "/upload".to_string(),
+                has_sensitive_payload: true,
+                carries_credentials: true,
+                metadata: BTreeMap::new(),
+            },
+            "trace-fw-risky",
+            "2026-11-17T00:00:01Z",
+        )
+        .map_err(|err| anyhow::anyhow!("firewall risky evaluation failed: {err}"))?;
+
+    let ok = challenge_promoted
+        && gate_after.passed
+        && benign_decision.verdict == FirewallVerdict::Allow
+        && risky_decision.verdict == FirewallVerdict::Deny;
+
+    let payload = serde_json::json!({
+        "schema_version": "franken-node/trust-governance-audit-cli/v1",
+        "command": "trust.governance-audit",
+        "ok": ok,
+        "challenge_flow": {
+            "challenge_id": challenge_id,
+            "verified": challenge_verified,
+            "promoted": challenge_promoted,
+            "audit_entries": challenge_ctl.audit_log().len(),
+            "metrics": challenge_ctl.metrics(),
+        },
+        "staking_governance": {
+            "stake_deposited": stake_id.is_some(),
+            "gate_before_slash": gate_before_slash,
+            "slash_event": slash_event,
+            "gate_after": gate_after,
+            "audit_entries": governance.audit_log.len(),
+        },
+        "intent_firewall": {
+            "benign_verdict": benign_decision.verdict,
+            "risky_verdict": risky_decision.verdict,
+            "audit_entries": firewall.audit_log().len(),
+        },
+    });
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        println!(
+            "trust governance-audit: ok={} challenge_promoted={} stake_gate={} risky_firewall={}",
+            ok, challenge_promoted, gate_after.passed, risky_decision.verdict
+        );
+    }
+    if !ok {
+        if args.json {
+            fail_closed_after_json();
+        }
+        anyhow::bail!(
+            "trust governance-audit failed closed on challenge, stake, or firewall check"
+        );
+    }
+    Ok(())
+}
+
+fn handle_runtime_supervision_audit(args: &RuntimeSupervisionAuditArgs) -> Result<()> {
+    use connector::capability_guard::{
+        CapabilityGuard, CapabilityProfile, RiskLevel as CapRiskLevel,
+    };
+    use connector::policy_checkpoint::{PolicyCheckpointChain, ReleaseChannel};
+    use connector::supervision::{
+        ChildSpec, RestartType, SupervisionAction, SupervisionStrategy, Supervisor,
+    };
+    use connector::vef_policy_constraints::{
+        ActionClass, LANGUAGE_VERSION, PolicyRule, RuleEffect, RuntimePolicy, compile_policy,
+    };
+    use runtime::cancellable_task::{
+        CancellationRuntime, DrainConfig, DrainResult, ObligationClosureProof, ObligationTerminal,
+    };
+    use runtime::obligation_channel::{ObligationChannel, ObligationLedger, ObligationStatus};
+
+    let strategy = match args.strategy.trim() {
+        "one-for-one" | "one_for_one" => SupervisionStrategy::OneForOne,
+        "one-for-all" | "one_for_all" => SupervisionStrategy::OneForAll,
+        "rest-for-one" | "rest_for_one" => SupervisionStrategy::RestForOne,
+        other => anyhow::bail!(
+            "unsupported --strategy `{other}` (expected one-for-one, one-for-all, or rest-for-one)"
+        ),
+    };
+
+    let mut supervisor =
+        Supervisor::with_deterministic_clock(strategy, args.max_restarts, args.window_ms, 2, 1_000);
+    supervisor
+        .add_child(ChildSpec {
+            name: "worker-primary".to_string(),
+            restart_type: RestartType::Permanent,
+            shutdown_timeout_ms: 2_000,
+        })
+        .map_err(|err| anyhow::anyhow!("{err}"))?;
+    supervisor
+        .add_child(ChildSpec {
+            name: "worker-replica".to_string(),
+            restart_type: RestartType::Permanent,
+            shutdown_timeout_ms: 2_000,
+        })
+        .map_err(|err| anyhow::anyhow!("{err}"))?;
+
+    let mut supervision_actions = Vec::new();
+    let mut budget_exhausted = false;
+    for step_idx in 0..args.failures {
+        let _ = supervisor.advance_clock_ms(100);
+        let action = supervisor
+            .handle_failure("worker-primary")
+            .map_err(|err| anyhow::anyhow!("supervision step {step_idx} failed: {err}"))?;
+        if matches!(
+            action,
+            SupervisionAction::Escalate { .. } | SupervisionAction::Shutdown { .. }
+        ) {
+            budget_exhausted = true;
+        }
+        supervision_actions.push(action);
+    }
+    let health_before_shutdown = supervisor.health_status();
+    let shutdown_report = supervisor.shutdown();
+
+    let mut cancel_rt = CancellationRuntime::new(DrainConfig::new(args.drain_timeout_ms, false));
+    cancel_rt
+        .register_task("sup-parent", 1_000, &args.trace_id)
+        .map_err(|err| anyhow::anyhow!("{err}"))?;
+    cancel_rt
+        .register_task("sup-child", 1_010, &args.trace_id)
+        .map_err(|err| anyhow::anyhow!("{err}"))?;
+    cancel_rt
+        .register_child("sup-parent", "sup-child")
+        .map_err(|err| anyhow::anyhow!("{err}"))?;
+    cancel_rt
+        .cancel_task(
+            "sup-parent",
+            "supervision_audit_shutdown",
+            1_100,
+            &args.trace_id,
+        )
+        .map_err(|err| anyhow::anyhow!("{err}"))?;
+
+    let mut channel: ObligationChannel<String> =
+        ObligationChannel::with_deadline("supervision-drain", args.drain_timeout_ms);
+    let obligation_id = channel
+        .send("flush-session-journal".to_string(), 1_050, &args.trace_id)
+        .map_err(|err| anyhow::anyhow!("obligation channel send failed: {err}"))?;
+    let mut obligation_ledger = ObligationLedger::new();
+    if let Some(created) = channel.get_obligation(&obligation_id).cloned() {
+        obligation_ledger.record(created);
+    }
+    channel
+        .fulfill(&obligation_id, 1_150, &args.trace_id)
+        .map_err(|err| anyhow::anyhow!("obligation fulfill failed: {err}"))?;
+    obligation_ledger
+        .update_status(
+            &obligation_id,
+            ObligationStatus::Fulfilled,
+            1_150,
+            &args.trace_id,
+        )
+        .map_err(|err| anyhow::anyhow!("obligation ledger update failed: {err}"))?;
+
+    cancel_rt
+        .start_drain("sup-parent", 1_120, &args.trace_id)
+        .map_err(|err| anyhow::anyhow!("{err}"))?;
+    cancel_rt
+        .complete_drain("sup-parent", DrainResult::Completed, 1_180, &args.trace_id)
+        .map_err(|err| anyhow::anyhow!("{err}"))?;
+    let finalize_record = cancel_rt
+        .finalize_task(
+            "sup-parent",
+            "supervision_audit_shutdown",
+            ObligationClosureProof::new(vec![ObligationTerminal {
+                obligation_id: obligation_id.clone(),
+                terminal_state: "fulfilled".to_string(),
+            }]),
+            1_200,
+            &args.trace_id,
+        )
+        .map_err(|err| anyhow::anyhow!("{err}"))?;
+
+    let rules: Vec<PolicyRule> = ActionClass::all()
+        .iter()
+        .enumerate()
+        .map(|(idx, &action_class)| PolicyRule {
+            rule_id: format!("rule-{}", idx + 1),
+            action_class,
+            effect: RuleEffect::Require,
+            required_capabilities: vec!["cap:trust:read".to_string()],
+            constraints: BTreeMap::from([("audit".to_string(), "mandatory".to_string())]),
+        })
+        .collect();
+    let compiled_policy = compile_policy(
+        &RuntimePolicy {
+            schema_version: LANGUAGE_VERSION.to_string(),
+            policy_id: args.policy_id.clone(),
+            require_full_action_coverage: true,
+            rules,
+        },
+        &args.trace_id,
+    )
+    .map_err(|err| anyhow::anyhow!("{err}"))?;
+
+    let mut checkpoint_chain = PolicyCheckpointChain::new();
+    let genesis = checkpoint_chain
+        .create_checkpoint(
+            1,
+            ReleaseChannel::Stable,
+            &compiled_policy.policy_snapshot_hash,
+            "operator:local",
+            &args.trace_id,
+        )
+        .map_err(|err| anyhow::anyhow!("{err}"))?
+        .clone();
+    let verified_chain_len = checkpoint_chain
+        .verify_chain()
+        .map_err(|(idx, err)| anyhow::anyhow!("checkpoint chain broken at {idx}: {err}"))?;
+
+    let mut cap_profile =
+        CapabilityProfile::new(args.subsystem.clone(), "1.0.0", CapRiskLevel::Medium);
+    cap_profile.add_capability("cap:trust:read", "verify supervision policy state");
+    cap_profile.add_capability("cap:fs:read", "inspect persisted runtime state");
+    let mut cap_guard = CapabilityGuard::new();
+    cap_guard
+        .register_profile(cap_profile)
+        .map_err(|err| anyhow::anyhow!("{err}"))?;
+    cap_guard
+        .check_capability(&args.subsystem, "cap:trust:read", "2026-11-17T00:00:00Z")
+        .map_err(|err| anyhow::anyhow!("{err}"))?;
+    let undeclared_spawn_denied = cap_guard
+        .check_capability(&args.subsystem, "cap:process:spawn", "2026-11-17T00:00:01Z")
+        .is_err();
+
+    let ok = !budget_exhausted
+        && finalize_record.obligation_closure_proof.all_closed
+        && obligation_ledger.query_outstanding().is_empty()
+        && verified_chain_len == 1
+        && undeclared_spawn_denied;
+
+    let payload = serde_json::json!({
+        "schema_version": "franken-node/runtime-supervision-audit-cli/v1",
+        "command": "runtime.supervision-audit",
+        "ok": ok,
+        "supervision": {
+            "strategy": strategy.to_string(),
+            "actions": supervision_actions,
+            "budget_exhausted": budget_exhausted,
+            "health_before_shutdown": health_before_shutdown,
+            "shutdown_report": shutdown_report,
+        },
+        "cancellation": {
+            "finalize_record": finalize_record,
+        },
+        "obligation_channel": {
+            "obligation_id": obligation_id,
+            "outstanding_count": obligation_ledger.query_outstanding().len(),
+            "total_recorded": obligation_ledger.total(),
+            "channel_audit_entries": channel.audit_log().len(),
+        },
+        "vef_policy_constraints": {
+            "policy_id": compiled_policy.policy_id,
+            "policy_snapshot_hash": compiled_policy.policy_snapshot_hash,
+            "predicate_count": compiled_policy.predicates.len(),
+        },
+        "policy_checkpoint": {
+            "verified_chain_len": verified_chain_len,
+            "head_hash": genesis.checkpoint_hash,
+            "frontier_channels": checkpoint_chain.policy_frontier().len(),
+        },
+        "capability_guard": {
+            "subsystem": args.subsystem,
+            "undeclared_spawn_denied": undeclared_spawn_denied,
+            "audit_entries": cap_guard.audit_trail.len(),
+        },
+    });
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        println!(
+            "runtime supervision-audit: ok={} restarts={} predicates={} checkpoint_len={} undeclared_denied={}",
+            ok,
+            health_before_shutdown.restart_count,
+            compiled_policy.predicates.len(),
+            verified_chain_len,
+            undeclared_spawn_denied
+        );
+    }
+    if !ok {
+        if args.json {
+            fail_closed_after_json();
+        }
+        anyhow::bail!(
+            "runtime supervision-audit failed closed (budget_exhausted={budget_exhausted})"
+        );
+    }
+    Ok(())
+}
+
 fn clap_error_should_emit_json(err: &clap::Error) -> bool {
     use clap::error::ErrorKind;
     if matches!(
@@ -41222,6 +42221,17 @@ fn clap_json_error_surface() -> (&'static str, &'static str) {
         ("trust", Some("release")) => ("franken-node/trust-release-error/v1", "trust.release"),
         ("trust", Some("zk-attest")) => ("franken-node/trust-error-cli/v1", "trust.zk-attest"),
         ("trust", Some("vef-prove")) => ("franken-node/trust-error-cli/v1", "trust.vef-prove"),
+        ("trust", Some("resolution-receipt")) => (
+            "franken-node/trust-error-cli/v1",
+            "trust.resolution-receipt",
+        ),
+        ("trust", Some("ecosystem-telemetry")) => (
+            "franken-node/trust-error-cli/v1",
+            "trust.ecosystem-telemetry",
+        ),
+        ("trust", Some("governance-audit")) => {
+            ("franken-node/trust-error-cli/v1", "trust.governance-audit")
+        }
         ("trust-card", Some("show")) => ("franken-node/trust-card-error-cli/v1", "trust-card.show"),
         ("trust-card", Some("export")) => {
             ("franken-node/trust-card-error-cli/v1", "trust-card.export")
@@ -41276,6 +42286,10 @@ fn clap_json_error_surface() -> (&'static str, &'static str) {
         }
         ("ops", Some("evidence-index")) => (OPS_ERROR_CLI_SCHEMA_VERSION, "ops.evidence-index"),
         ("ops", Some("swarm-handoff")) => (OPS_ERROR_CLI_SCHEMA_VERSION, "ops.swarm-handoff"),
+        ("ops", Some("swarm-scenario")) => (OPS_ERROR_CLI_SCHEMA_VERSION, "ops.swarm-scenario"),
+        ("ops", Some("fault-schedule-audit")) => {
+            (OPS_ERROR_CLI_SCHEMA_VERSION, "ops.fault-schedule-audit")
+        }
         ("doctor", Some("evidence-readiness")) => {
             (DOCTOR_ERROR_CLI_SCHEMA_VERSION, "doctor.evidence-readiness")
         }
@@ -41301,6 +42315,10 @@ fn clap_json_error_surface() -> (&'static str, &'static str) {
             _ => (RUNTIME_ERROR_CLI_SCHEMA_VERSION, "runtime.lane"),
         },
         ("runtime", Some("epoch")) => (RUNTIME_ERROR_CLI_SCHEMA_VERSION, "runtime.epoch"),
+        ("runtime", Some("supervision-audit")) => (
+            RUNTIME_ERROR_CLI_SCHEMA_VERSION,
+            "runtime.supervision-audit",
+        ),
         ("verify", Some("release")) => (VERIFY_RELEASE_ERROR_CLI_SCHEMA_VERSION, "verify.release"),
         ("verify", Some("source-graph")) => (
             VERIFY_SOURCE_GRAPH_ERROR_CLI_SCHEMA_VERSION,
@@ -42348,11 +43366,13 @@ fn main() -> Result<()> {
                 RuntimeCommand::Lane(RuntimeLaneCommand::Status(args)) => args.json,
                 RuntimeCommand::Lane(RuntimeLaneCommand::Assign(args)) => args.json,
                 RuntimeCommand::Epoch(args) => args.json,
+                RuntimeCommand::SupervisionAudit(args) => args.json,
             };
             let command_name = match &sub {
                 RuntimeCommand::Lane(RuntimeLaneCommand::Status(_)) => "runtime.lane.status",
                 RuntimeCommand::Lane(RuntimeLaneCommand::Assign(_)) => "runtime.lane.assign",
                 RuntimeCommand::Epoch(_) => "runtime.epoch",
+                RuntimeCommand::SupervisionAudit(_) => "runtime.supervision-audit",
             };
             if let Err(err) = handle_runtime_command(sub) {
                 return runtime_fail(command_name, json, err);
@@ -43271,6 +44291,21 @@ fn main() -> Result<()> {
                     return trust_fail("trust.vef-prove", args.json, err);
                 }
             }
+            TrustCommand::ResolutionReceipt(args) => {
+                if let Err(err) = handle_trust_resolution_receipt(&args) {
+                    return trust_fail("trust.resolution-receipt", args.json, err);
+                }
+            }
+            TrustCommand::EcosystemTelemetry(args) => {
+                if let Err(err) = handle_trust_ecosystem_telemetry(&args) {
+                    return trust_fail("trust.ecosystem-telemetry", args.json, err);
+                }
+            }
+            TrustCommand::GovernanceAudit(args) => {
+                if let Err(err) = handle_trust_governance_audit(&args) {
+                    return trust_fail("trust.governance-audit", args.json, err);
+                }
+            }
         },
 
         Command::Remotecap(sub) => match sub {
@@ -43881,6 +44916,16 @@ fn main() -> Result<()> {
             OpsCommand::SwarmHandoff(args) => {
                 if let Err(err) = handle_ops_swarm_handoff(&args) {
                     return ops_fail("ops.swarm-handoff", args.json, err);
+                }
+            }
+            OpsCommand::SwarmScenario(args) => {
+                if let Err(err) = handle_ops_swarm_scenario(&args) {
+                    return ops_fail("ops.swarm-scenario", args.json, err);
+                }
+            }
+            OpsCommand::FaultScheduleAudit(args) => {
+                if let Err(err) = handle_ops_fault_schedule_audit(&args) {
+                    return ops_fail("ops.fault-schedule-audit", args.json, err);
                 }
             }
         },
@@ -48688,6 +49733,65 @@ mod time_math_wraparound_tests {
         assert_eq!(
             refused_report["crash_loop_detector"]["error_code"],
             "CLD_NO_KNOWN_GOOD"
+        );
+    }
+
+    #[test]
+    fn ops_swarm_scenario_executes_registered_scenarios_and_rejects_unknown_id() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let list_args = OpsSwarmScenarioArgs {
+            scenario: "all-green-fleet-replay".to_string(),
+            spec: None,
+            workspace: None,
+            list: true,
+            json: false,
+        };
+        handle_ops_swarm_scenario(&list_args).expect("listing swarm scenarios succeeds");
+
+        let green_workspace = tmp.path().join("green");
+        let green_args = OpsSwarmScenarioArgs {
+            scenario: "all-green-fleet-replay".to_string(),
+            spec: None,
+            workspace: Some(green_workspace.clone()),
+            list: false,
+            json: false,
+        };
+        handle_ops_swarm_scenario(&green_args).expect("all-green scenario succeeds");
+        assert!(
+            green_workspace
+                .join("scenario_artifacts/all-green-fleet-replay/incident_timeline.json")
+                .is_file()
+        );
+
+        let fail_closed_workspace = tmp.path().join("fail-closed");
+        let fail_closed_args = OpsSwarmScenarioArgs {
+            scenario: "negative-recovery-fail-closed".to_string(),
+            spec: None,
+            workspace: Some(fail_closed_workspace.clone()),
+            list: false,
+            json: false,
+        };
+        handle_ops_swarm_scenario(&fail_closed_args)
+            .expect("fail-closed recovery scenario succeeds");
+        assert!(
+            fail_closed_workspace
+                .join("scenario_artifacts/negative-recovery-fail-closed/replay_bundle.json")
+                .is_file()
+        );
+
+        let unknown_args = OpsSwarmScenarioArgs {
+            scenario: "nonexistent-scenario-id".to_string(),
+            spec: None,
+            workspace: None,
+            list: false,
+            json: false,
+        };
+        let err = handle_ops_swarm_scenario(&unknown_args)
+            .expect_err("unknown scenario id must fail closed");
+        assert!(
+            err.to_string()
+                .contains("unknown registered swarm scenario"),
+            "unexpected error: {err:#}"
         );
     }
 }

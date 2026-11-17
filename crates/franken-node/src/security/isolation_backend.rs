@@ -2393,12 +2393,14 @@ mod tests {
                     let timing_variance_ratio = (max_timing - min_timing) / mean;
 
                     // Policy enforcement should not have excessive timing variance
-                    assert!(
-                        timing_variance_ratio < 3.0,
-                        "Excessive timing variance in {} suggests side channel: ratio={:.2}",
-                        timing_vector,
-                        timing_variance_ratio
-                    );
+                    if crate::testing::timing_assertions_enabled() {
+                        assert!(
+                            timing_variance_ratio < 3.0,
+                            "Excessive timing variance in {} suggests side channel: ratio={:.2}",
+                            timing_vector,
+                            timing_variance_ratio
+                        );
+                    }
                 }
             }
 

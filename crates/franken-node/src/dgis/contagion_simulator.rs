@@ -47,6 +47,23 @@ use super::node_interner::{NodeId as InternedNodeId, NodeInterner};
 /// is well-targeted.
 static SIMULATION_STEPS_TOTAL: AtomicU64 = AtomicU64::new(0);
 
+#[cfg(test)]
+std::thread_local! {
+    static THREAD_SIMULATION_STEPS_TOTAL: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[inline]
+fn record_simulation_step_attempt() {
+    SIMULATION_STEPS_TOTAL.fetch_add(1, Ordering::Relaxed);
+    #[cfg(test)]
+    THREAD_SIMULATION_STEPS_TOTAL.with(|count| count.set(count.get().saturating_add(1)));
+}
+
+#[cfg(test)]
+fn thread_simulation_steps_total() -> u64 {
+    THREAD_SIMULATION_STEPS_TOTAL.with(std::cell::Cell::get)
+}
+
 /// Read the process-wide DGIS simulation-step counter. Used by the ops
 /// metric renderer to emit `franken_node_dgis_simulation_steps_total`.
 #[must_use]
@@ -348,7 +365,7 @@ pub fn step(
     // Count attempted simulation work for bd-98xo5.5.5 perf-budget telemetry.
     // Placed AFTER `config.validate()` so we don't count rejected-config
     // calls that never touched graph state.
-    SIMULATION_STEPS_TOTAL.fetch_add(1, Ordering::Relaxed);
+    record_simulation_step_attempt();
 
     let (interner, reindexed) = state.reindexed_for_graph(graph)?;
     let infected_internal = reindexed.infected();
@@ -690,11 +707,18 @@ mod tests {
         };
 
         let baseline = simulation_steps_total();
+        let thread_baseline = thread_simulation_steps_total();
         let _ = step(&graph, &state, &valid_config).expect("validated step succeeds");
         let after_valid = simulation_steps_total();
+        let thread_after_valid = thread_simulation_steps_total();
         assert!(
             after_valid >= baseline + 1,
             "validated step must bump counter; baseline={baseline}, after={after_valid}"
+        );
+        assert_eq!(
+            thread_after_valid,
+            thread_baseline + 1,
+            "validated step must bump thread-local attempt counter by 1"
         );
 
         let invalid_config = SimulatorConfig {
@@ -705,10 +729,10 @@ mod tests {
             seed: 11,
         };
         let _ = step(&graph, &state, &invalid_config).expect_err("validate rejects NaN");
-        let after_invalid = simulation_steps_total();
+        let thread_after_invalid = thread_simulation_steps_total();
         assert_eq!(
-            after_invalid, after_valid,
-            "rejected-config step must NOT bump counter; after_valid={after_valid}, after_invalid={after_invalid}"
+            thread_after_invalid, thread_after_valid,
+            "rejected-config step must NOT bump counter; thread_after_valid={thread_after_valid}, thread_after_invalid={thread_after_invalid}"
         );
     }
 

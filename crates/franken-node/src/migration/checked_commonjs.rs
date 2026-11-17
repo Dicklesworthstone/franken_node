@@ -859,15 +859,42 @@ mod tests {
         assert_eq!(pair(root.path()).status, CheckedRewriteStatus::Unchanged);
     }
 
+    fn install_admitted_dependency(root: &Path, pkg: &str, index_source: &str) {
+        fs::create_dir_all(root.join("node_modules").join(pkg)).unwrap();
+        fs::write(
+            root.join("node_modules").join(pkg).join("package.json"),
+            format!(r#"{{"name":"{pkg}","version":"1.0.0","main":"index.js"}}"#),
+        )
+        .unwrap();
+        fs::write(
+            root.join("node_modules").join(pkg).join("index.js"),
+            index_source,
+        )
+        .unwrap();
+        fs::write(
+            root.join("package.json"),
+            format!(
+                r#"{{"name":"checked-cjs","engines":{{"node":">=20"}},"dependencies":{{"{pkg}":"1.0.0"}}}}"#
+            ),
+        )
+        .unwrap();
+        fs::write(
+            root.join("package-lock.json"),
+            format!(
+                r#"{{"lockfileVersion":3,"packages":{{"":{{"dependencies":{{"{pkg}":"1.0.0"}}}},"node_modules/{pkg}":{{"version":"1.0.0"}}}}}}"#
+            ),
+        )
+        .unwrap();
+    }
+
     #[test]
     fn checked_lazy_load_order_and_commonjs_wrapper_observations_are_preserved() {
         let root = project();
-        fs::create_dir_all(root.path().join("node_modules/late")).unwrap();
-        fs::write(
-            root.path().join("node_modules/late/index.js"),
+        install_admitted_dependency(
+            root.path(),
+            "late",
             "console.log('loaded');module.exports='late';",
-        )
-        .unwrap();
+        );
         let source = "console.log('before',this === module.exports);\nfunction load(on) {\n if (!on) return 'off';\n const value = require('late');\n const path = require('path');\n return value + ':' + path.basename(__filename);\n}\nconsole.log(load(false));\nconsole.log(load(true));\n";
         fs::write(root.path().join("case.test.cjs"), source).unwrap();
         let report = pair(root.path());
@@ -910,12 +937,11 @@ mod tests {
     #[test]
     fn dependency_cache_injection_is_measured_and_rejected_not_declared_equivalent() {
         let root = project();
-        fs::create_dir_all(root.path().join("node_modules/shim")).unwrap();
-        fs::write(
-            root.path().join("node_modules/shim/index.js"),
+        install_admitted_dependency(
+            root.path(),
+            "shim",
             "require.cache.path={exports:{marker:'injected'}};",
-        )
-        .unwrap();
+        );
         let source = "const shim = require('shim');\nconst path = require('path');\nconsole.log(path.marker || 'native');\n";
         fs::write(root.path().join("case.test.cjs"), source).unwrap();
         let report = pair(root.path());

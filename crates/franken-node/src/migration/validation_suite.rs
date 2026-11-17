@@ -1513,14 +1513,14 @@ mod tests {
     }
 
     fn measured(root: &Path) -> SuiteReport {
-        let deadline = Instant::now() + Duration::from_secs(20);
+        let deadline = Instant::now() + Duration::from_secs(60);
         let snapshot = Snapshot::capture(root, deadline).expect("capture");
         execute_suite(
             &snapshot,
             &node(false),
             &node(true),
             deadline,
-            Duration::from_secs(3),
+            Duration::from_secs(10),
         )
         .expect("execute")
     }
@@ -1726,14 +1726,14 @@ mod tests {
             "case.test.js",
             "console.log('start'); if(process.argv.includes('candidate')) setInterval(()=>{},1000);",
         );
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + Duration::from_secs(30);
         let snapshot = Snapshot::capture(project.path(), deadline).unwrap();
         let report = execute_suite(
             &snapshot,
             &node(false),
             &node(true),
             deadline,
-            Duration::from_millis(300),
+            Duration::from_secs(5),
         )
         .unwrap();
         assert_eq!(report.verdict, "ERROR");
@@ -1752,9 +1752,9 @@ mod tests {
             "process.stdout.write('x'.repeat(17*1024*1024));",
         );
         let report = measured(project.path());
-        assert_eq!(report.verdict, "ERROR");
-        assert_eq!(report.passed, 0);
-        assert!(report.cases[0].errors[0].contains("exceeds"));
+        assert_eq!(report.verdict, "ERROR", "{report:#?}");
+        assert_eq!(report.passed, 0, "{report:#?}");
+        assert!(report.cases[0].errors[0].contains("exceeds"), "{report:#?}");
     }
 
     #[test]

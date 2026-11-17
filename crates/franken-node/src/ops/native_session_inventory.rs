@@ -1897,6 +1897,7 @@ fn admission_ticket_at(protected_root: &Path, project_root: &Path) -> Result<u64
         let mut tx = connection.transaction()?;
         let drain = latest_drain(&tx, project_root)?;
         tx.commit()?;
+        protect_sidecars(protected_root)?;
         require_open_admission(drain.as_ref())
     })
 }
@@ -1948,6 +1949,7 @@ fn enforce_reference_admission_at(protected_root: &Path, project_root: &Path) ->
             require_open_admission(drain.as_ref())?;
         }
         tx.commit()?;
+        protect_sidecars(protected_root)?;
         Ok(())
     })
 }
@@ -2483,6 +2485,7 @@ fn finish_drain_at(
         }
         let report = drain_report(&drain, &records, &authority)?;
         tx.commit()?;
+        protect_sidecars(protected_root)?;
         Ok(report)
     })
 }
@@ -2568,6 +2571,7 @@ fn attest_drain_at(
         attestation.verify(&report.checkpoint, node_id, zone_id, &root.verifying_key())?;
         report.checkpoint.supervisor_attestation = Some(attestation);
         tx.commit()?;
+        protect_sidecars(protected_root)?;
         Ok(report)
     })
 }
@@ -3293,7 +3297,9 @@ fn read_retained_native_session_effect_journal(
         return Ok(None);
     }
     let bytes = read_runtime_evidence_private_file(&path, NATIVE_SESSION_EFFECT_JOURNAL_BYTE_CAP)?;
-    let jsonl = String::from_utf8(bytes).context("retained native-session journal is not UTF-8")?;
+    let jsonl = std::str::from_utf8(&bytes)
+        .context("retained native-session journal is not UTF-8")?
+        .to_owned();
     Ok(Some(jsonl))
 }
 
@@ -3501,6 +3507,7 @@ fn authenticate_native_session_outcome_at(
         value => Some(parse_json(value, MAX_OUTCOME_BYTES)?),
     };
     tx.commit()?;
+    protect_sidecars(protected_root)?;
     verify_admission_capture(protected_root, &admission)?;
     let root = load_runtime_evidence_product_root(
         &protected_root.join(RUNTIME_EVIDENCE_ROOT_KEY_RELATIVE_PATH),
@@ -3637,7 +3644,10 @@ fn read_inventory_at(
     ensure_runtime_evidence_directory(protected_root, true)?;
     let records = if let Some(connection) = open_inventory(protected_root, false)? {
         report.store_present = true;
-        read_records(&connection)?
+        let rows = read_records(&connection)?;
+        drop(connection);
+        protect_sidecars(protected_root)?;
+        rows
     } else {
         Vec::new()
     };
@@ -4143,6 +4153,9 @@ mod tests {
                 )
                 .unwrap();
                 tx.commit().unwrap();
+                drop(tx);
+                drop(connection);
+                protect_sidecars(&root).unwrap();
             }
             let before = forensic_state_snapshot(&root);
             let export =
@@ -4228,7 +4241,9 @@ mod tests {
                 .unwrap();
             }
             tx.commit().unwrap();
+            drop(tx);
             drop(connection);
+            protect_sidecars(&root).unwrap();
             let before = forensic_state_snapshot(&root);
             let error = export_native_session_forensics_at(&root, &admission.session_nonce)
                 .err()
@@ -4304,6 +4319,9 @@ mod tests {
                     )
                     .unwrap();
                     tx.commit().unwrap();
+                    drop(tx);
+                    drop(connection);
+                    protect_sidecars(&root).unwrap();
                 }
                 4 | 5 => {
                     let mut receipt: NativeSessionOutcomeReceipt =
@@ -4569,7 +4587,9 @@ mod tests {
                     )
                     .unwrap();
                     tx.commit().unwrap();
+                    drop(tx);
                     drop(connection);
+                    protect_sidecars(&root).unwrap();
                     if mutation == 4 {
                         std::fs::rename(&outcome_path, outcome_path.with_extension("retained"))
                             .unwrap();
@@ -4637,7 +4657,9 @@ mod tests {
         )
         .unwrap();
         tx.commit().unwrap();
+        drop(tx);
         drop(connection);
+        protect_sidecars(&root).unwrap();
 
         let before = forensic_state_snapshot(&root);
         let report = read_native_session_forensics_at(&root, Some(&operator)).unwrap();
@@ -4671,7 +4693,9 @@ mod tests {
         )
         .unwrap();
         tx.commit().unwrap();
+        drop(tx);
         drop(connection);
+        protect_sidecars(&root).unwrap();
         let before = forensic_state_snapshot(&root);
         let report = read_native_session_forensics_at(&root, None).unwrap();
         assert_eq!(report.records.len(), 1);
@@ -6200,7 +6224,7 @@ mod tests {
         assert!(finish_drain_at(&root, &project, "node-a", "prod", &latest).is_err());
         guard.worker_reaped();
         guard.finish(
-            NativeSessionOutcomeKind::ControlStopped,
+            NativeSessionOutcomeKind::ExecutionFailed,
             NativeSessionEffectObservation::Unknown,
         );
         let unknown = finish_drain_at(&root, &project, "node-a", "prod", &retained).unwrap();

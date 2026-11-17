@@ -1840,10 +1840,35 @@ mod tests {
 
     #[test]
     fn empty_project_does_not_turn_into_a_smoke_approval() {
-        let root = tempfile::tempdir().unwrap();
-        let report = run_with_validator(root.path(), |_| panic!("empty suite must not execute"));
-        assert_eq!(report.status, CheckedRewriteStatus::Error);
-        assert!(report.errors[0].contains("nonempty test inventory"));
+        let uninitialized = tempfile::tempdir().unwrap();
+        let uninitialized_report = run_with_validator(uninitialized.path(), |_| {
+            panic!("empty dir must not execute")
+        });
+        assert_eq!(uninitialized_report.status, CheckedRewriteStatus::Error);
+        assert!(
+            uninitialized_report.errors[0].contains("regular package.json"),
+            "{uninitialized_report:#?}"
+        );
+
+        let no_tests = tempfile::tempdir().unwrap();
+        fs::write(
+            no_tests.path().join("package.json"),
+            r#"{"name":"empty-suite","engines":{"node":">=20"}}"#,
+        )
+        .unwrap();
+        fs::write(
+            no_tests.path().join("package-lock.json"),
+            "{\"lockfileVersion\":3,\"packages\":{\"\":{}}}\n",
+        )
+        .unwrap();
+        fs::write(no_tests.path().join("index.js"), "console.log('app');\n").unwrap();
+        let report =
+            run_with_validator(no_tests.path(), |_| panic!("empty suite must not execute"));
+        assert_eq!(report.status, CheckedRewriteStatus::Error, "{report:#?}");
+        assert!(
+            report.errors[0].contains("nonempty test inventory"),
+            "{report:#?}"
+        );
     }
 
     #[test]

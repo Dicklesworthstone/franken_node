@@ -1574,43 +1574,55 @@ mod tests {
             let (dir, service) = service_with_committed_epoch(&root);
             drop(service);
             let state_dir = dir.path().join("fleet");
-            let connection = fsqlite::Connection::open(
-                state_dir.join("fleet-state.db").to_string_lossy().as_ref(),
-            )
-            .unwrap();
-            match scenario {
-                "changed_key" => {}
-                "altered_certificate" => {
-                    let rows = connection
-                        .query("SELECT commit_json FROM fleet_epoch_commits WHERE epoch = '1';")
-                        .unwrap();
-                    let fsqlite::SqliteValue::Text(raw) = &rows[0].values()[0] else {
-                        panic!("stored epoch commit must be JSON text");
-                    };
-                    let mut commit: serde_json::Value = serde_json::from_str(raw.as_ref()).unwrap();
-                    commit["certificate"]["participants"][0]["session_set_sha256"] =
-                        serde_json::Value::String("a".repeat(64));
-                    connection
-                        .execute_with_params(
+            if scenario != "changed_key" {
+                use fsqlite::compat::TransactionExt as _;
+                let connection = fsqlite::Connection::open(
+                    state_dir.join("fleet-state.db").to_string_lossy().as_ref(),
+                )
+                .unwrap();
+                for pragma in [
+                    "PRAGMA journal_mode=WAL;",
+                    "PRAGMA synchronous=FULL;",
+                    "PRAGMA busy_timeout=5000;",
+                ] {
+                    connection.query(pragma).unwrap();
+                }
+                let mut tx = connection.transaction().unwrap();
+                match scenario {
+                    "altered_certificate" => {
+                        let rows = tx
+                            .query("SELECT commit_json FROM fleet_epoch_commits WHERE epoch = '1';")
+                            .unwrap();
+                        let fsqlite::SqliteValue::Text(raw) = &rows[0].values()[0] else {
+                            panic!("stored epoch commit must be JSON text");
+                        };
+                        let mut commit: serde_json::Value =
+                            serde_json::from_str(raw.as_ref()).unwrap();
+                        commit["certificate"]["participants"][0]["session_set_sha256"] =
+                            serde_json::Value::String("a".repeat(64));
+                        tx.execute_with_params(
                             "UPDATE fleet_epoch_commits SET commit_json = ?1 WHERE epoch = '1';",
                             &[fsqlite::SqliteValue::Text(
                                 serde_json::to_string(&commit).unwrap().into(),
                             )],
                         )
                         .unwrap();
-                }
-                "missing_head" => {
-                    connection.execute(
-                        "UPDATE fleet_meta SET key = 'lost_epoch_head' WHERE key = 'authenticated_epoch_head';",
-                    ).unwrap();
-                }
-                _ => {
-                    connection
-                        .execute("UPDATE fleet_epoch_commits SET epoch = '99' WHERE epoch = '1';")
+                    }
+                    "missing_head" => {
+                        tx.execute(
+                            "UPDATE fleet_meta SET key = 'lost_epoch_head' WHERE key = 'authenticated_epoch_head';",
+                        )
                         .unwrap();
+                    }
+                    _ => {
+                        tx.execute(
+                            "UPDATE fleet_epoch_commits SET epoch = '99' WHERE epoch = '1';",
+                        )
+                        .unwrap();
+                    }
                 }
+                tx.commit().unwrap();
             }
-            drop(connection);
             let token = if scenario == "changed_key" {
                 "changed-operator-token-0123456789abcdef0123456789abcdef"
             } else {
@@ -1957,6 +1969,7 @@ mod tests {
         let root = ed25519_dalek::SigningKey::from_bytes(&[29; 32]);
         let dir = tempfile::tempdir().unwrap();
         let mut store = DurableFleetTransport::new(dir.path()).unwrap();
+        store.initialize().unwrap();
         let mut original = signed_maintenance(&root, fixed_clock());
         original.last_seen = fixed_clock();
         store

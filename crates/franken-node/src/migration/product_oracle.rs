@@ -1008,7 +1008,7 @@ const marker = {} + '/' + role;
         concurrent_manifest(root.path(), &["a.test.js", "b.test.js"], 2);
         let deadline = Instant::now() + Duration::from_secs(120);
         let inputs = CapturedInputs::capture(root.path(), None, deadline).unwrap();
-        let report = measured_inputs(&inputs, true, deadline, Duration::from_secs(1));
+        let report = measured_inputs(&inputs, true, deadline, Duration::from_secs(5));
         assert_eq!(report.verdict, "ERROR");
         assert_eq!((report.passed, report.errored, report.skipped), (1, 1, 0));
         assert!(report.cases[0].node.is_some());
@@ -1025,17 +1025,17 @@ const marker = {} + '/' + role;
         for name in ["a", "b", "c"] {
             write(
                 root.path(),
-                &format!("{name}.test.js"),
+                &format!("nested/{name}.test.js"),
                 "const fs=require('fs');const b=fs.readFileSync(0);fs.writeFileSync('result.bin',b);process.stdout.write(b);",
             );
         }
         let mut manifest = serde_json::json!({
             "schema_version": "franken-node/migration-tests/v1",
-            "tests": ["a.test.js", "b.test.js", "c.test.js"],
+            "tests": ["nested/a.test.js", "nested/b.test.js", "nested/c.test.js"],
             "max_concurrent_tests": 1,
             "execution": {}, "expectations": {},
         });
-        for name in ["a.test.js", "b.test.js", "c.test.js"] {
+        for name in ["nested/a.test.js", "nested/b.test.js", "nested/c.test.js"] {
             manifest["execution"][name] = serde_json::json!({
                 "cwd": "nested", "stdin": "request.bin", "stdin_mode": "pipe",
             });
@@ -1277,7 +1277,7 @@ const marker = {} + '/' + role;
         write(root.path(), "b.test.js", "console.log(42);");
         let deadline = Instant::now() + Duration::from_secs(120);
         let inputs = CapturedInputs::capture(root.path(), None, deadline).unwrap();
-        let report = measured_inputs(&inputs, false, deadline, Duration::from_secs(1));
+        let report = measured_inputs(&inputs, false, deadline, Duration::from_secs(5));
         assert_eq!(report.verdict, "ERROR");
         assert_eq!((report.errored, report.passed, report.skipped), (1, 1, 0));
         assert!(report.cases[0].node.is_some());

@@ -1391,18 +1391,26 @@ fn generate_benchmark_metrics(now_secs: u64) -> Result<RealBenchmarkMetrics, Cat
     // Extract compatibility percentage from actual compatibility corpus results
     let compatibility_percent = load_compatibility_corpus_pass_rate().unwrap_or(default_compat); // fallback to configurable baseline if corpus not available
 
-    // Calculate throughput from benchmark scenarios
-    let throughput_scenario = benchmark_report
+    // Calculate throughput (ops/sec) from benchmark scenarios. Latency-unit
+    // scenarios (`ms` per operation) convert via `1000.0 / ms` so sub-millisecond
+    // runs do not truncate `0.x as u64` to `0`.
+    let throughput_ops_per_sec = benchmark_report
         .scenarios
         .iter()
         .find(|s| {
             s.name.contains("throughput")
                 || s.dimension == BenchmarkDimension::PerformanceUnderHardening
         })
-        .map(|s| s.raw_value)
-        .unwrap_or(default_throughput);
-
-    let throughput_ops_per_sec = throughput_scenario as u64;
+        .map(|s| {
+            if s.unit.eq_ignore_ascii_case("ms") && s.raw_value.is_finite() && s.raw_value > 0.0 {
+                (1000.0 / s.raw_value).round().max(1.0) as u64
+            } else if s.raw_value.is_finite() && s.raw_value > 0.0 {
+                s.raw_value.round().max(1.0) as u64
+            } else {
+                default_throughput as u64
+            }
+        })
+        .unwrap_or(default_throughput as u64);
 
     // Extract latency from cold start or latency scenarios
     let latency_p99_ms = benchmark_report

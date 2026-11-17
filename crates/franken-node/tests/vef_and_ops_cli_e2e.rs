@@ -358,3 +358,270 @@ fn ops_swarm_handoff_evaluates_beads_overlap_risk_and_compliance() {
     assert!(out["bead_templates"].is_object(), "{out}");
     assert_eq!(out["operator_transcript_audit"]["status"], "pass");
 }
+
+#[test]
+fn ops_swarm_scenario_and_fault_schedule_audit_execute_deterministically() {
+    let dir = TempDir::new().expect("tempdir");
+    let listed = json_ok(dir.path(), &["ops", "swarm-scenario", "--list", "--json"]);
+    assert_eq!(
+        listed["schema_version"],
+        "franken-node/ops-swarm-scenario-cli/v1"
+    );
+    assert!(listed["scenario_count"].as_u64().unwrap() >= 8);
+
+    let ws = dir.path().join("scenario-ws");
+    let executed = json_ok(
+        dir.path(),
+        &[
+            "ops",
+            "swarm-scenario",
+            "--scenario",
+            "all-green-fleet-replay",
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert_eq!(executed["report"]["verdict"], "pass");
+    assert!(
+        ws.join("scenario_artifacts/all-green-fleet-replay/incident_timeline.json")
+            .is_file()
+    );
+
+    let unknown = json_err(
+        dir.path(),
+        &[
+            "ops",
+            "swarm-scenario",
+            "--scenario",
+            "does-not-exist",
+            "--json",
+        ],
+    );
+    assert_eq!(unknown["ok"], false);
+
+    let audit = json_ok(
+        dir.path(),
+        &[
+            "ops",
+            "fault-schedule-audit",
+            "--seeds",
+            "42,137",
+            "--messages-per-run",
+            "16",
+            "--dpor-time-budget-secs",
+            "15",
+            "--json",
+        ],
+    );
+    assert_eq!(audit["ok"], true);
+    assert_eq!(audit["transport_fault_gate"]["passed"], true);
+    assert_eq!(audit["dpor_schedule_gate"]["passed"], true);
+    assert_eq!(audit["dpor_schedule_gate"]["scenarios_explored"], 6);
+    assert_eq!(audit["dpor_schedule_gate"]["total_violations"], 0);
+}
+
+#[test]
+fn trust_resolution_receipt_ed25519_roundtrip_budget_denial_and_tamper_refusal() {
+    let dir = TempDir::new().expect("tempdir");
+    let sk_path = dir.path().join("resolver.key");
+    let pk_path = dir.path().join("resolver.pub");
+    let wrong_pk_path = dir.path().join("wrong.pub");
+    let receipt_path = dir.path().join("resolution-receipt.json");
+
+    let sk = SigningKey::from_bytes(&[0x55; 32]);
+    let pk = sk.verifying_key();
+    let wrong_pk = SigningKey::from_bytes(&[0x77; 32]).verifying_key();
+
+    std::fs::write(&sk_path, hex::encode(sk.to_bytes())).unwrap();
+    std::fs::write(&pk_path, hex::encode(pk.to_bytes())).unwrap();
+    std::fs::write(&wrong_pk_path, hex::encode(wrong_pk.to_bytes())).unwrap();
+
+    let issued = json_ok(
+        dir.path(),
+        &[
+            "trust",
+            "resolution-receipt",
+            "--package-name",
+            "chalk",
+            "--candidate-version",
+            "5.3.0",
+            "--signing-key",
+            sk_path.to_str().unwrap(),
+            "--output",
+            receipt_path.to_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert_eq!(issued["ok"], true);
+    assert_eq!(issued["signed_receipt"]["receipt"]["decision"], "admit");
+    assert_eq!(issued["capability_budget_metering"]["allowed"], true);
+
+    let verified = json_ok(
+        dir.path(),
+        &[
+            "trust",
+            "resolution-receipt",
+            "--verify",
+            receipt_path.to_str().unwrap(),
+            "--trusted-public-key",
+            pk_path.to_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert_eq!(verified["ok"], true);
+    assert_eq!(verified["package_name"], "chalk");
+
+    // Unanchored verification without --trusted-public-key must fail closed.
+    let unanchored = json_err(
+        dir.path(),
+        &[
+            "trust",
+            "resolution-receipt",
+            "--verify",
+            receipt_path.to_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert_eq!(unanchored["ok"], false);
+
+    // Wrong public key must fail closed.
+    let wrong = json_err(
+        dir.path(),
+        &[
+            "trust",
+            "resolution-receipt",
+            "--verify",
+            receipt_path.to_str().unwrap(),
+            "--trusted-public-key",
+            wrong_pk_path.to_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert_eq!(wrong["ok"], false);
+
+    // Enforced capability budget over-limit must fail closed.
+    let over_budget = json_err(
+        dir.path(),
+        &[
+            "trust",
+            "resolution-receipt",
+            "--package-name",
+            "chalk",
+            "--signing-key",
+            sk_path.to_str().unwrap(),
+            "--budget-mode",
+            "enforced",
+            "--max-resolve-effects",
+            "2",
+            "--used-resolve-effects",
+            "2",
+            "--json",
+        ],
+    );
+    assert_eq!(over_budget["ok"], false);
+    assert_eq!(over_budget["capability_budget_metering"]["allowed"], false);
+}
+
+#[test]
+fn trust_ecosystem_telemetry_and_governance_audit_enforce_contracts() {
+    let dir = TempDir::new().expect("tempdir");
+    let telemetry = json_ok(
+        dir.path(),
+        &[
+            "trust",
+            "ecosystem-telemetry",
+            "--enable-collection",
+            "--json",
+        ],
+    );
+    assert_eq!(
+        telemetry["schema_version"],
+        "franken-node/trust-ecosystem-telemetry-cli/v1"
+    );
+    assert_eq!(
+        telemetry["health_export"]["compromise_reduction_metadata"]["availability"],
+        "missing_upstream"
+    );
+
+    let gov_ok = json_ok(dir.path(), &["trust", "governance-audit", "--json"]);
+    assert_eq!(gov_ok["ok"], true);
+    assert_eq!(gov_ok["challenge_flow"]["promoted"], true);
+    assert_eq!(gov_ok["staking_governance"]["gate_after"]["passed"], true);
+    assert_eq!(gov_ok["intent_firewall"]["benign_verdict"], "allow");
+    assert_eq!(gov_ok["intent_firewall"]["risky_verdict"], "deny");
+
+    // Mismatched proof hash must fail closed.
+    let gov_bad_proof = json_err(
+        dir.path(),
+        &[
+            "trust",
+            "governance-audit",
+            "--submitted-proof-hash",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "--json",
+        ],
+    );
+    assert_eq!(gov_bad_proof["ok"], false);
+    assert_eq!(gov_bad_proof["challenge_flow"]["promoted"], false);
+
+    // Insufficient stake for high tier (< 500) must fail closed.
+    let gov_low_stake = json_err(
+        dir.path(),
+        &[
+            "trust",
+            "governance-audit",
+            "--stake-amount",
+            "10",
+            "--risk-tier",
+            "high",
+            "--json",
+        ],
+    );
+    assert_eq!(gov_low_stake["ok"], false);
+    assert_eq!(
+        gov_low_stake["staking_governance"]["gate_after"]["passed"],
+        false
+    );
+}
+
+#[test]
+fn runtime_supervision_audit_verifies_lifecycle_and_fails_on_budget_exhaustion() {
+    let dir = TempDir::new().expect("tempdir");
+    let ok = json_ok(
+        dir.path(),
+        &[
+            "runtime",
+            "supervision-audit",
+            "--strategy",
+            "rest-for-one",
+            "--max-restarts",
+            "3",
+            "--failures",
+            "2",
+            "--json",
+        ],
+    );
+    assert_eq!(ok["ok"], true);
+    assert_eq!(
+        ok["cancellation"]["finalize_record"]["obligation_closure_proof"]["all_closed"],
+        true
+    );
+    assert_eq!(ok["obligation_channel"]["outstanding_count"], 0);
+    assert_eq!(ok["policy_checkpoint"]["verified_chain_len"], 1);
+    assert_eq!(ok["capability_guard"]["undeclared_spawn_denied"], true);
+
+    let exhausted = json_err(
+        dir.path(),
+        &[
+            "runtime",
+            "supervision-audit",
+            "--max-restarts",
+            "1",
+            "--failures",
+            "2",
+            "--json",
+        ],
+    );
+    assert_eq!(exhausted["ok"], false);
+}

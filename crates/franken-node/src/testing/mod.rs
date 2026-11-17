@@ -3083,6 +3083,18 @@ mod testing_module_negative_tests {
                 transport.send_message("empty_test_src", "empty_test_tgt", large_payload);
             match large_send_result {
                 Ok(_) => {
+                    // Drain the two preceding FIFO messages (empty + single-byte) first
+                    let first = transport
+                        .deliver_next("empty_test_src->empty_test_tgt")
+                        .expect("Empty delivery should work")
+                        .expect("Empty message should be delivered");
+                    assert_eq!(first.payload.len(), 0);
+                    let second = transport
+                        .deliver_next("empty_test_src->empty_test_tgt")
+                        .expect("Single-byte delivery should work")
+                        .expect("Single-byte message should be delivered");
+                    assert_eq!(second.payload, vec![0xFF]);
+
                     // Large payloads accepted - verify delivery works
                     let delivered = transport
                         .deliver_next("empty_test_src->empty_test_tgt")

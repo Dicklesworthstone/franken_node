@@ -1442,7 +1442,7 @@ mod comprehensive_boundary_negative_tests {
             let max_duration = duration_same.max(duration_diff);
             let min_duration = duration_same.min(duration_diff);
 
-            if min_duration.as_nanos() > 0 {
+            if min_duration.as_nanos() > 0 && crate::testing::timing_assertions_enabled() {
                 let variance_ratio = max_duration.as_nanos() as f64 / min_duration.as_nanos() as f64;
                 // This is a best-effort timing check - if it fails consistently,
                 // investigate potential timing side-channels

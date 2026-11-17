@@ -587,6 +587,7 @@ mod tests {
             vec![RemoteOperation::NetworkEgress],
             vec![
                 "http://api.example.com".to_string(),
+                "http://api.example.com:443".to_string(),
                 "http://unknown.com".to_string(),
                 "http://evil.com".to_string(),
             ],

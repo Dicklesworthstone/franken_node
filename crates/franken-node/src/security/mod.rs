@@ -473,21 +473,33 @@ mod security_root_additional_negative_tests {
     fn negative_ssrf_rejects_public_ipv6_literal_as_unsupported() {
         let mut template = SsrfPolicyTemplate::default_template("connector-additional".to_string());
 
-        let err = template
+        let allowed = template
             .check_ssrf(
                 "2001:4860:4860::8888",
                 443,
                 Protocol::Http,
-                "trace-ipv6-host",
+                "trace-ipv6-public",
                 "2026-01-01T00:00:00Z",
             )
-            .unwrap_err();
+            .expect("public global unicast IPv6 literal is parsed and allowed");
+        assert_eq!(allowed, super::network_guard::Action::Allow);
 
-        assert!(matches!(
-            err,
-            SsrfError::SsrfDenied { cidr, .. } if cidr == "ipv6_unsupported"
-        ));
-        assert_eq!(template.audit_log.len(), 1);
+        for private_ipv6 in ["::1", "fe80::1", "fc00::1", "::ffff:169.254.169.254"] {
+            let err = template
+                .check_ssrf(
+                    private_ipv6,
+                    443,
+                    Protocol::Http,
+                    "trace-ipv6-private",
+                    "2026-01-01T00:00:00Z",
+                )
+                .expect_err("non-global IPv6 literal must fail closed");
+            assert!(
+                matches!(err, SsrfError::SsrfDenied { .. }),
+                "{private_ipv6}: {err:?}"
+            );
+        }
+        assert_eq!(template.audit_log.len(), 5);
     }
 }
 

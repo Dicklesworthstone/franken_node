@@ -23,6 +23,7 @@ use std::time::{Duration, Instant};
 const MAX_STREAM_BYTES: usize = 16 * 1024 * 1024;
 pub(super) const MAX_INPUT_BYTES: usize = 1024 * 1024;
 const POLL_INTERVAL: Duration = Duration::from_millis(5);
+const CONTROL_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const REAP_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Explicit, one-way cancellation for a single trusted operator invocation.
@@ -801,7 +802,12 @@ fn supervise_with_input_until(
                 .take()
                 .context("runtime smoke stdin pipe unavailable")?;
             nonblocking(&pipe).context("configure runtime smoke stdin")?;
-            Some(PipeInput::new(pipe, bytes))
+            let mut pipe_input = PipeInput::new(pipe, bytes);
+            let _ = pipe_input
+                .pump()
+                .context("failed writing runtime smoke stdin")?;
+            queued = pipe_input.queued;
+            Some(pipe_input)
         } else {
             None
         };
@@ -811,11 +817,17 @@ fn supervise_with_input_until(
             let _ = stderr.pump(&mut |bytes| observe(Stream::Stderr, bytes));
             return Err(error).context("runtime startup hook failed");
         }
-        let mut exited_at = None;
+        let mut exited_at: Option<Instant> = None;
+        let mut last_control_check: Option<Instant> = None;
         loop {
             check_cancellation(cancellation)?;
-            check_control(control)?;
             let now = Instant::now();
+            if last_control_check
+                .is_none_or(|prev| now.duration_since(prev) >= CONTROL_POLL_INTERVAL)
+            {
+                check_control(control)?;
+                last_control_check = Some(Instant::now());
+            }
             if now >= deadline {
                 return Ok(StopReason::RuntimeTimeout);
             }
@@ -832,8 +844,11 @@ fn supervise_with_input_until(
                 .pump(&mut |bytes| observe(Stream::Stderr, bytes))
                 .context("failed reading runtime smoke stderr")?;
             check_cancellation(cancellation)?;
-            check_control(control)?;
             if exited {
+                if exited_at.is_none() || (stdout.eof && stderr.eof) {
+                    check_control(control)?;
+                    last_control_check = Some(Instant::now());
+                }
                 if stdout.eof && stderr.eof {
                     return Ok(StopReason::Exited);
                 }

@@ -535,6 +535,10 @@ pub enum RuntimeCommand {
 
     /// Inspect the operator-authenticated durable epoch, or compare explicit epoch integers.
     Epoch(RuntimeEpochArgs),
+
+    /// Exercise and audit supervision restart budgets, three-phase task cancellation, two-phase obligation channels, VEF policy constraints, policy checkpoints, and subsystem capability narrowing.
+    #[command(name = "supervision-audit")]
+    SupervisionAudit(RuntimeSupervisionAuditArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -590,6 +594,45 @@ pub struct RuntimeEpochArgs {
     pub peer_epoch: Option<u64>,
 
     /// Emit structured JSON output.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Parser)]
+pub struct RuntimeSupervisionAuditArgs {
+    /// Supervision restart strategy (`one-for-one`, `one-for-all`, `rest-for-one`).
+    #[arg(long, default_value = "one-for-one")]
+    pub strategy: String,
+
+    /// Maximum restarts permitted in the sliding supervision window.
+    #[arg(long, default_value_t = 2)]
+    pub max_restarts: u32,
+
+    /// Sliding supervision window in milliseconds.
+    #[arg(long, default_value_t = 10_000)]
+    pub window_ms: u64,
+
+    /// Number of child failures to inject deterministically during the audit.
+    #[arg(long, default_value_t = 1)]
+    pub failures: u32,
+
+    /// Drain timeout in milliseconds for three-phase task cancellation.
+    #[arg(long, default_value_t = 5_000)]
+    pub drain_timeout_ms: u64,
+
+    /// Subsystem name audited against least-privilege capability narrowing.
+    #[arg(long, default_value = "runtime_supervisor")]
+    pub subsystem: String,
+
+    /// Policy identifier compiled into VEF predicates and anchored in the policy checkpoint chain.
+    #[arg(long, default_value = "runtime-supervision-policy")]
+    pub policy_id: String,
+
+    /// Correlation trace identifier.
+    #[arg(long, default_value = "trace-runtime-supervision-audit")]
+    pub trace_id: String,
+
+    /// Emit `franken-node/runtime-supervision-audit-cli/v1` JSON.
     #[arg(long)]
     pub json: bool,
 }
@@ -2184,6 +2227,18 @@ pub enum TrustCommand {
     /// Compile policy constraints, chain execution receipts, and issue an Ed25519-signed VEF compliance proof bundle.
     #[command(name = "vef-prove")]
     VefProve(TrustVefProveArgs),
+
+    /// Issue or verify an Ed25519-signed package resolution admission receipt with capability-budget metering.
+    #[command(name = "resolution-receipt")]
+    ResolutionReceipt(Box<TrustResolutionReceiptArgs>),
+
+    /// Ingest privacy-governed ecosystem telemetry, detect anomalies, and export authoritative Section 13 health metrics.
+    #[command(name = "ecosystem-telemetry")]
+    EcosystemTelemetry(TrustEcosystemTelemetryArgs),
+
+    /// Audit suspicious-artifact challenge verification, publisher stake gating/slashing, and extension intent firewall policies.
+    #[command(name = "governance-audit")]
+    GovernanceAudit(TrustGovernanceAuditArgs),
 }
 
 #[derive(Debug, Parser)]
@@ -2221,6 +2276,172 @@ pub struct TrustVefProveArgs {
     pub output: Option<PathBuf>,
 
     /// Emit `franken-node/trust-vef-prove-cli/v1` JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Parser)]
+pub struct TrustResolutionReceiptArgs {
+    /// Optional path to an existing `SignedResolutionReceipt` JSON file to verify instead of issuing.
+    #[arg(long)]
+    pub verify: Option<PathBuf>,
+
+    /// Trusted Ed25519 verifying key file used when `--verify` is supplied.
+    #[arg(long)]
+    pub trusted_public_key: Option<PathBuf>,
+
+    /// Ed25519 signing key file used when issuing a signed resolution receipt.
+    #[arg(long)]
+    pub signing_key: Option<PathBuf>,
+
+    /// Receipt identifier bound into the canonical resolution receipt payload.
+    #[arg(long, default_value = "rcpt-resolution-cli")]
+    pub receipt_id: String,
+
+    /// Package name being resolved.
+    #[arg(long, default_value = "")]
+    pub package_name: String,
+
+    /// Semver range requested by the importer.
+    #[arg(long, default_value = "^1.0.0")]
+    pub requested_range: String,
+
+    /// Authenticated module-graph digest (`sha256:<64hex>`).
+    #[arg(
+        long,
+        default_value = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+    )]
+    pub module_graph_hash: String,
+
+    /// Admission profile (`strict`, `balanced`, `legacy-risky`).
+    #[arg(long, default_value = "balanced")]
+    pub policy_profile: String,
+
+    /// Capability-budget enforcement mode (`advisory`, `enforced`).
+    #[arg(long, default_value = "enforced")]
+    pub budget_mode: String,
+
+    /// Maximum `module_resolve` host effects permitted by policy.
+    #[arg(long, default_value_t = 8)]
+    pub max_resolve_effects: u64,
+
+    /// Prior `module_resolve` host effects already consumed before this attempt.
+    #[arg(long, default_value_t = 0)]
+    pub used_resolve_effects: u64,
+
+    /// Optional JSON file containing `Vec<CandidateAssessment>`.
+    #[arg(long)]
+    pub candidates_file: Option<PathBuf>,
+
+    /// Single-candidate version when `--candidates-file` is omitted.
+    #[arg(long, default_value = "1.0.0")]
+    pub candidate_version: String,
+
+    /// Single-candidate trust-card status (`trusted`, `unknown`, `quarantined`, `revoked`).
+    #[arg(long, default_value = "trusted")]
+    pub trust_status: String,
+
+    /// Single-candidate BPET risk tier (`low`, `moderate`, `high`, `critical`).
+    #[arg(long, default_value = "low")]
+    pub bpet_risk: String,
+
+    /// Single-candidate DGIS risk tier (`low`, `moderate`, `high`, `critical`).
+    #[arg(long, default_value = "low")]
+    pub dgis_risk: String,
+
+    /// Single-candidate revocation freshness (`fresh`, `stale`, `missing`, `revoked`).
+    #[arg(long, default_value = "fresh")]
+    pub revocation_freshness: String,
+
+    /// Single-candidate compatibility status (`compatible`, `needs-shim`, `unknown`, `divergent`).
+    #[arg(long, default_value = "compatible")]
+    pub compat_status: String,
+
+    /// Timestamp in epoch milliseconds when the receipt is issued.
+    #[arg(long, default_value_t = 1_700_000_000_000)]
+    pub issued_at_millis: u64,
+
+    /// Optional output path where the canonical `SignedResolutionReceipt` JSON is written.
+    #[arg(long)]
+    pub output: Option<PathBuf>,
+
+    /// Emit `franken-node/trust-resolution-receipt-cli/v1` JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Parser)]
+pub struct TrustEcosystemTelemetryArgs {
+    /// Optional JSON file containing `Vec<TelemetryDataPoint>` to ingest.
+    #[arg(long)]
+    pub points_file: Option<PathBuf>,
+
+    /// Optional path to a verified `CompromiseReductionReport` JSON file.
+    #[arg(long)]
+    pub compromise_report: Option<PathBuf>,
+
+    /// Minimum k-anonymity threshold for privacy filtering.
+    #[arg(long, default_value_t = 5)]
+    pub min_aggregation_k: u32,
+
+    /// Deviation threshold percentage (`0.0..=100.0`) for anomaly alerts.
+    #[arg(long, default_value_t = 30.0)]
+    pub deviation_threshold_pct: f64,
+
+    /// Explicitly enable opt-in telemetry collection during ingestion.
+    #[arg(long)]
+    pub enable_collection: bool,
+
+    /// RFC 3339 export timestamp.
+    #[arg(long, default_value = "2026-11-17T00:00:00Z")]
+    pub exported_at: String,
+
+    /// Emit `franken-node/trust-ecosystem-telemetry-cli/v1` JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Parser)]
+pub struct TrustGovernanceAuditArgs {
+    /// Suspicious artifact identifier evaluated in the challenge state machine.
+    #[arg(long, default_value = "ext:suspicious-package@1.0.0")]
+    pub artifact_id: String,
+
+    /// Expected SHA-256 hex digest of the provenance proof artifact (`32..=128` hex chars).
+    #[arg(
+        long,
+        default_value = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    )]
+    pub expected_proof_hash: String,
+
+    /// Submitted SHA-256 hex digest presented to the challenge proof verifier.
+    #[arg(
+        long,
+        default_value = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    )]
+    pub submitted_proof_hash: String,
+
+    /// Publisher identity evaluated against the staking governance ledger.
+    #[arg(long, default_value = "publisher:verified")]
+    pub publisher: String,
+
+    /// Stake amount deposited by the publisher.
+    #[arg(long, default_value_t = 600)]
+    pub stake_amount: u64,
+
+    /// Capability risk tier (`low`, `medium`, `high`, `critical`).
+    #[arg(long, default_value = "high")]
+    pub risk_tier: String,
+
+    /// Optional slash evidence hash to trigger deterministic slashing after gate evaluation.
+    #[arg(long)]
+    pub slash_evidence_hash: Option<String>,
+
+    /// Extension identifier evaluated by the intent-aware remote effects firewall.
+    #[arg(long, default_value = "ext:telemetry-client")]
+    pub extension_id: String,
+
+    /// Emit `franken-node/trust-governance-audit-cli/v1` JSON.
     #[arg(long)]
     pub json: bool,
 }
@@ -3101,6 +3322,12 @@ pub enum OpsCommand {
     /// Evaluate deterministic read-only swarm handoff readiness, overlap risk, and blocker templates.
     #[command(name = "swarm-handoff")]
     SwarmHandoff(OpsSwarmHandoffArgs),
+    /// Execute or list deterministic swarm scenarios over file-backed fleet, replay, and timeline contracts.
+    #[command(name = "swarm-scenario")]
+    SwarmScenario(OpsSwarmScenarioArgs),
+    /// Run deterministic virtual transport fault campaigns and DPOR control-plane schedule exploration.
+    #[command(name = "fault-schedule-audit")]
+    FaultScheduleAudit(OpsFaultScheduleAuditArgs),
 }
 
 #[derive(Debug, Parser)]
@@ -3157,6 +3384,48 @@ pub struct OpsSwarmHandoffArgs {
     pub candidate_paths: Vec<String>,
 
     /// Emit `franken-node/ops-swarm-handoff-cli/v1` JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Parser)]
+pub struct OpsSwarmScenarioArgs {
+    /// Registered scenario identifier to execute (defaults to `all-green-fleet-replay`).
+    #[arg(long, default_value = "all-green-fleet-replay")]
+    pub scenario: String,
+
+    /// Optional path to a custom `SwarmScenarioSpec` JSON file.
+    #[arg(long)]
+    pub spec: Option<PathBuf>,
+
+    /// Optional workspace directory where scenario artifacts are written (uses an ephemeral temp dir if omitted).
+    #[arg(long)]
+    pub workspace: Option<PathBuf>,
+
+    /// List registered deterministic swarm scenarios without executing.
+    #[arg(long)]
+    pub list: bool,
+
+    /// Emit `franken-node/ops-swarm-scenario-cli/v1` JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Parser)]
+pub struct OpsFaultScheduleAuditArgs {
+    /// Comma-separated u64 PRNG seeds for virtual transport fault campaigns.
+    #[arg(long, default_value = "42,137")]
+    pub seeds: String,
+
+    /// Messages simulated per protocol x fault-mode x seed campaign.
+    #[arg(long, default_value_t = 32)]
+    pub messages_per_run: usize,
+
+    /// Per-scenario time budget in seconds for DPOR schedule exploration.
+    #[arg(long, default_value_t = 30)]
+    pub dpor_time_budget_secs: u64,
+
+    /// Emit `franken-node/ops-fault-schedule-audit-cli/v1` JSON.
     #[arg(long)]
     pub json: bool,
 }

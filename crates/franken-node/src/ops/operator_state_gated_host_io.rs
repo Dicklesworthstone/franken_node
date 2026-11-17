@@ -39,8 +39,7 @@ fn denied(detail: &str) -> HostIoError {
 
 fn reserved_name(name: &OsStr) -> bool {
     name.to_str().is_some_and(|name| {
-        name.eq_ignore_ascii_case(".franken-node")
-            || name.eq_ignore_ascii_case("franken_node.toml")
+        name.eq_ignore_ascii_case(".franken-node") || name.eq_ignore_ascii_case("franken_node.toml")
     })
 }
 
@@ -215,10 +214,7 @@ impl<P: HostIoProvider> OperatorStateGatedHostIo<P> {
     }
 
     fn components(raw: &str) -> Result<VecDeque<OsString>, HostIoError> {
-        if raw.is_empty()
-            || raw.len() > MAX_PATH_BYTES
-            || raw.contains(['\0', '\\'])
-        {
+        if raw.is_empty() || raw.len() > MAX_PATH_BYTES || raw.contains(['\0', '\\']) {
             return Err(denied("invalid or oversized guest filesystem path"));
         }
         let mut parts = VecDeque::new();
@@ -279,9 +275,7 @@ impl<P: HostIoProvider> OperatorStateGatedHostIo<P> {
                         match part.as_os_str() {
                             name if name == OsStr::new("..") => {
                                 if resolved == self.root || !resolved.pop() {
-                                    return Err(denied(
-                                        "symlink target escapes guest authority",
-                                    ));
+                                    return Err(denied("symlink target escapes guest authority"));
                                 }
                             }
                             name => {
@@ -303,9 +297,9 @@ impl<P: HostIoProvider> OperatorStateGatedHostIo<P> {
                     .map_err(|_| denied("cannot inspect guest filesystem alias"))?;
                 let relative = if target.is_absolute() {
                     resolved = self.root.clone();
-                    target.strip_prefix(&self.root).map_err(|_| {
-                        denied("symlink target escapes guest filesystem authority")
-                    })?
+                    target
+                        .strip_prefix(&self.root)
+                        .map_err(|_| denied("symlink target escapes guest filesystem authority"))?
                 } else {
                     target.as_path()
                 };
@@ -366,12 +360,13 @@ impl<P: HostIoProvider> OperatorStateGatedHostIo<P> {
                         "directory mutation exceeds operator-state inspection bounds",
                     ));
                 }
-                let entry = entry
-                    .map_err(|_| denied("cannot inspect directory mutation descendants"))?;
+                let entry =
+                    entry.map_err(|_| denied("cannot inspect directory mutation descendants"))?;
                 self.check_operator_path(&entry.path())?;
                 // Never traverse a link during a recursive namespace check.
                 // Moving/removing the link does not move/remove its referent.
-                let kind = entry.file_type()
+                let kind = entry
+                    .file_type()
                     .map_err(|_| denied("cannot inspect directory mutation descendants"))?;
                 if kind.is_dir() {
                     pending.push(entry.path());
@@ -414,7 +409,11 @@ impl<P: HostIoProvider> OperatorStateGatedHostIo<P> {
             })
     }
 
-    fn check_request(&self, request: &HostIoRequest, files: &GuestFiles) -> Result<(), HostIoError> {
+    fn check_request(
+        &self,
+        request: &HostIoRequest,
+        files: &GuestFiles,
+    ) -> Result<(), HostIoError> {
         self.check_root()?;
         match request {
             HostIoRequest::FsRead { path } => self.inspect_path(path).map(|_| ()),
@@ -465,9 +464,11 @@ impl<P: HostIoProvider> OperatorStateGatedHostIo<P> {
                                 relative.push(part);
                             }
                             relative.push(path);
-                            self.inspect_path(relative.to_str().ok_or_else(|| {
-                                denied("invalid alias spelling")
-                            })?)?;
+                            self.inspect_path(
+                                relative
+                                    .to_str()
+                                    .ok_or_else(|| denied("invalid alias spelling"))?,
+                            )?;
                         }
                         Ok(())
                     }
@@ -677,11 +678,13 @@ mod tests {
         fs::write(
             root.path().join(".franken-node/keys/signing.key"),
             b"private key",
-        ).unwrap();
+        )
+        .unwrap();
         fs::write(
             root.path().join("franken_node.toml"),
             b"registry_signing_key = 'private'",
-        ).unwrap();
+        )
+        .unwrap();
         let (gate, calls) = observed(root.path(), &[]);
         for path in [
             ".franken-node/keys/signing.key",
@@ -728,9 +731,11 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         fs::create_dir_all(root.path().join("nested/.franken-node/safe-mode")).unwrap();
         fs::write(
-            root.path().join("nested/.franken-node/safe-mode/state.json"),
+            root.path()
+                .join("nested/.franken-node/safe-mode/state.json"),
             b"held",
-        ).unwrap();
+        )
+        .unwrap();
         fs::write(root.path().join("ordinary.txt"), b"ordinary").unwrap();
         let (gate, calls) = observed(root.path(), &[]);
         for operation in [
@@ -752,7 +757,10 @@ mod tests {
             );
         }
         assert_refused(&gate, &meta(FsOperation::Rename, "nested", &["renamed"]));
-        assert_refused(&gate, &meta(FsOperation::Rename, "ordinary.txt", &["nested"]));
+        assert_refused(
+            &gate,
+            &meta(FsOperation::Rename, "ordinary.txt", &["nested"]),
+        );
         assert_refused(
             &gate,
             &meta(FsOperation::Remove, "nested", &["recursive=true"]),
@@ -760,7 +768,11 @@ mod tests {
         assert_refused(&gate, &meta(FsOperation::Chmod, "nested", &["mode=0"]));
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         assert_eq!(
-            fs::read(root.path().join("nested/.franken-node/safe-mode/state.json")).unwrap(),
+            fs::read(
+                root.path()
+                    .join("nested/.franken-node/safe-mode/state.json")
+            )
+            .unwrap(),
             b"held",
         );
     }
@@ -781,7 +793,10 @@ mod tests {
             assert_refused(&gate, &write(path));
         }
         assert_refused(&gate, &meta(FsOperation::Rename, "ops", &["renamed"]));
-        assert_refused(&gate, &meta(FsOperation::Remove, "ops", &["recursive=true"]));
+        assert_refused(
+            &gate,
+            &meta(FsOperation::Remove, "ops", &["recursive=true"]),
+        );
         assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
@@ -848,12 +863,11 @@ mod tests {
         fs::create_dir(root.path().join("private")).unwrap();
         symlink("private", root.path().join("selected-location")).unwrap();
         symlink("private", root.path().join("public-alias")).unwrap();
-        let protected = [
-            root.path()
-                .canonicalize()
-                .unwrap()
-                .join("selected-location/future.key"),
-        ];
+        let protected = [root
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join("selected-location/future.key")];
         let (gate, calls) = observed(root.path(), &protected);
 
         for path in [
@@ -889,17 +903,17 @@ mod tests {
         use std::os::unix::fs::symlink;
         let root = tempfile::tempdir().unwrap();
         symlink("missing-parent", root.path().join("selected-location")).unwrap();
-        let protected = [
-            root.path()
-                .canonicalize()
-                .unwrap()
-                .join("selected-location/future.key"),
-        ];
+        let protected = [root
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join("selected-location/future.key")];
         let error = OperatorStateGatedHostIo::new(
             SandboxedHostIo::with_root(root.path()).unwrap(),
             root.path(),
             &protected,
-        ).unwrap_err();
+        )
+        .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
     }
 
@@ -911,17 +925,24 @@ mod tests {
         fs::write(
             root.path().join(".franken-node-public/data.txt"),
             b"ordinary",
-        ).unwrap();
+        )
+        .unwrap();
         let (gate, calls) = observed(root.path(), &[]);
         assert_eq!(
             gate.filesystem_exception_provenance(),
             HostIoExceptionProvenance::ProviderInternal,
         );
         assert_eq!(
-            gate.perform(&read("/.franken-node-public/data.txt"), GRANTS).unwrap(),
-            HostIoResponse::FsRead { bytes: b"ordinary".to_vec() },
+            gate.perform(&read("/.franken-node-public/data.txt"), GRANTS)
+                .unwrap(),
+            HostIoResponse::FsRead {
+                bytes: b"ordinary".to_vec()
+            },
         );
-        assert!(gate.perform(&write("franken_node.toml.example"), GRANTS).is_ok());
+        assert!(
+            gate.perform(&write("franken_node.toml.example"), GRANTS)
+                .is_ok()
+        );
         let opened = gate
             .perform(
                 &meta(
@@ -934,7 +955,8 @@ mod tests {
             .unwrap();
         let HostIoResponse::FsMeta {
             result: FsMetaResult::Unsigned(fd),
-        } = opened else {
+        } = opened
+        else {
             panic!("missing real descriptor")
         };
         let fd = format!("fd={fd}");
@@ -975,7 +997,8 @@ mod tests {
             .unwrap();
         let HostIoResponse::FsMeta {
             result: FsMetaResult::Unsigned(fd),
-        } = opened else {
+        } = opened
+        else {
             panic!("missing real descriptor")
         };
         let gate = OperatorStateGatedHostIo::new(inner, root.path(), &[]).unwrap();
@@ -999,7 +1022,9 @@ mod tests {
         struct Stopped;
         impl HostIoControl for Stopped {
             fn checkpoint(&self) -> Result<(), HostIoError> {
-                Err(HostIoError::Denied { reason: "stop".into() })
+                Err(HostIoError::Denied {
+                    reason: "stop".into(),
+                })
             }
         }
         let root = tempfile::tempdir().unwrap();
@@ -1019,7 +1044,8 @@ mod tests {
                 &read("ordinary"),
                 GRANTS,
                 Arc::new(UnrestrictedHostIoControl),
-            ).is_ok(),
+            )
+            .is_ok(),
         );
         assert_eq!(gate.inner.controlled.load(Ordering::SeqCst), 1);
     }
@@ -1034,12 +1060,14 @@ mod tests {
         fs::write(
             root.path().join(".franken-node/keys/token.json"),
             b"private token",
-        ).unwrap();
+        )
+        .unwrap();
         fs::write(root.path().join("ordinary"), b"ok").unwrap();
         symlink(
             ".franken-node/keys/token.json",
             root.path().join("alias.json"),
-        ).unwrap();
+        )
+        .unwrap();
         symlink("../.franken-node/keys", root.path().join("nested/hidden")).unwrap();
         symlink("ordinary", root.path().join("safe-alias")).unwrap();
         let (gate, calls) = observed(root.path(), &[]);
@@ -1056,7 +1084,9 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         assert_eq!(
             gate.perform(&read("safe-alias"), GRANTS).unwrap(),
-            HostIoResponse::FsRead { bytes: b"ok".to_vec() },
+            HostIoResponse::FsRead {
+                bytes: b"ok".to_vec()
+            },
         );
     }
 
@@ -1074,7 +1104,8 @@ mod tests {
                 SandboxedHostIo::with_root(&root).unwrap(),
                 &root,
                 &[],
-            ).unwrap_err();
+            )
+            .unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
         }
     }
@@ -1088,10 +1119,13 @@ mod tests {
         fs::write(
             root.path().join("parent/.franken-node/private"),
             b"private state",
-        ).unwrap();
+        )
+        .unwrap();
         let root_mode = fs::metadata(root.path()).unwrap().permissions().mode();
         let parent_mode = fs::metadata(root.path().join("parent"))
-            .unwrap().permissions().mode();
+            .unwrap()
+            .permissions()
+            .mode();
         let (gate, calls) = observed(root.path(), &[]);
         for path in [".", "parent"] {
             assert!(matches!(
@@ -1124,7 +1158,10 @@ mod tests {
             root_mode,
         );
         assert_eq!(
-            fs::metadata(root.path().join("parent")).unwrap().permissions().mode(),
+            fs::metadata(root.path().join("parent"))
+                .unwrap()
+                .permissions()
+                .mode(),
             parent_mode,
         );
         assert_eq!(
@@ -1140,10 +1177,7 @@ mod tests {
         let root = parent.path().join("project");
         fs::create_dir_all(root.join(".franken-node")).unwrap();
         fs::write(root.join(".franken-node/private"), b"private token").unwrap();
-        fs::hard_link(
-            root.join(".franken-node/private"),
-            root.join("public-name"),
-        ).unwrap();
+        fs::hard_link(root.join(".franken-node/private"), root.join("public-name")).unwrap();
         let (gate, calls) = observed(&root, &[]);
         assert_refused(&gate, &read("public-name"));
         assert_refused(&gate, &write("public-name"));
@@ -1152,7 +1186,8 @@ mod tests {
                 SandboxedHostIo::with_root(root.join(".franken-node")).unwrap(),
                 &root.join(".franken-node"),
                 &[],
-            ).is_err(),
+            )
+            .is_err(),
         );
         fs::rename(&root, parent.path().join("retained-project")).unwrap();
         fs::create_dir(&root).unwrap();

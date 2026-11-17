@@ -11,6 +11,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+#[cfg(test)]
 use crate::push_bounded;
 use serde::{Deserialize, Serialize};
 
@@ -322,6 +323,76 @@ impl Xorshift64 {
 
 // ── Core: VirtualTransportLayer ──────────────────────────────────────────────
 
+/// Contiguous sliding window over `Vec<TransportEvent>` with amortized `O(1)`
+/// bounded insertion and wire-identical JSON array serialization.
+#[derive(Debug, Clone, Default)]
+struct BoundedEventLog {
+    buf: Vec<TransportEvent>,
+    head: usize,
+}
+
+impl BoundedEventLog {
+    const fn new() -> Self {
+        Self {
+            buf: Vec::new(),
+            head: 0,
+        }
+    }
+
+    fn clear(&mut self) {
+        self.buf.clear();
+        self.head = 0;
+    }
+
+    #[cfg(test)]
+    fn capacity(&self) -> usize {
+        self.buf.capacity().saturating_sub(self.head)
+    }
+
+    fn push_bounded(&mut self, item: TransportEvent, cap: usize) {
+        if cap == 0 {
+            self.clear();
+            return;
+        }
+        let active_len = self.buf.len().saturating_sub(self.head);
+        if active_len >= cap {
+            let overflow = active_len.saturating_sub(cap).saturating_add(1);
+            self.head = self.head.saturating_add(overflow);
+            if self.head >= cap {
+                self.buf.drain(0..self.head);
+                self.head = 0;
+            }
+        }
+        self.buf.push(item);
+    }
+}
+
+impl std::ops::Deref for BoundedEventLog {
+    type Target = [TransportEvent];
+
+    fn deref(&self) -> &Self::Target {
+        &self.buf[self.head..]
+    }
+}
+
+impl PartialEq for BoundedEventLog {
+    fn eq(&self, other: &Self) -> bool {
+        **self == **other
+    }
+}
+
+impl Serialize for BoundedEventLog {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        (**self).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for BoundedEventLog {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Vec::<TransportEvent>::deserialize(deserializer).map(|buf| Self { buf, head: 0 })
+    }
+}
+
 /// The virtual transport layer simulates a network of links between nodes
 /// with configurable, deterministic fault injection.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -345,7 +416,7 @@ pub struct VirtualTransportLayer {
     /// Current simulation tick.
     current_tick: u64,
     /// Accumulated event log.
-    event_log: Vec<TransportEvent>,
+    event_log: BoundedEventLog,
     #[serde(default = "default_max_event_log_capacity")]
     max_event_log_entries: usize,
 }
@@ -368,7 +439,7 @@ impl VirtualTransportLayer {
             rng: Xorshift64::new(rng_seed),
             next_message_id: 1,
             current_tick: 0,
-            event_log: Vec::new(),
+            event_log: BoundedEventLog::new(),
             max_event_log_entries: max_event_log_entries.max(1),
         }
     }
@@ -737,7 +808,7 @@ impl VirtualTransportLayer {
 
     fn push_event(&mut self, event: TransportEvent) {
         let cap = self.max_event_log_entries;
-        push_bounded(&mut self.event_log, event, cap);
+        self.event_log.push_bounded(event, cap);
     }
 }
 

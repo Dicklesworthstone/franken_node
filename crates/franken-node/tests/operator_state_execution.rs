@@ -44,7 +44,10 @@ impl Project {
             .current_dir(&self.root)
             .env("XDG_STATE_HOME", &self.state_home);
         for (name, _) in std::env::vars_os() {
-            if name.to_str().is_some_and(|name| name.starts_with("FRANKEN_NODE_")) {
+            if name
+                .to_str()
+                .is_some_and(|name| name.starts_with("FRANKEN_NODE_"))
+            {
                 command.env_remove(name);
             }
         }
@@ -113,9 +116,7 @@ fn conventional_operator_aliases_retain_their_ordinary_targets() {
             .verify_operator_source_authority(&selected)
             .is_err()
     );
-    assert!(
-        RunProjectPaths::resolve(std::path::Path::new(".FRANKEN-NODE"), &root).is_err()
-    );
+    assert!(RunProjectPaths::resolve(std::path::Path::new(".FRANKEN-NODE"), &root).is_err());
 }
 
 #[test]
@@ -130,19 +131,27 @@ fn future_operator_files_retain_directory_aliases_and_wire_requirements() {
         .with_operator_protected_paths(vec![root.join("credential-alias/future.key")])
         .unwrap();
     assert!(
-        retained.operator_protected_paths().contains(&root.join("credentials/future.key"))
+        retained
+            .operator_protected_paths()
+            .contains(&root.join("credentials/future.key"))
     );
     // The source resolver records a non-directory traversal as a missing
     // target. Auditing that negative probe must preserve ordinary resolution
     // while still finding protected identities among its ancestors.
     fs::write(root.join("ordinary-file"), "ordinary").unwrap();
     fs::write(root.join("credentials/regular"), "operator").unwrap();
-    symlink("ordinary-file/../ordinary-file", root.join("non-directory-link")).unwrap();
+    symlink(
+        "ordinary-file/../ordinary-file",
+        root.join("non-directory-link"),
+    )
+    .unwrap();
     let directory_boundary = RunTrustRequirements::default()
         .with_operator_protected_paths(vec![root.join("credentials")])
         .unwrap();
     for probe in ["ordinary-file/absent.json", "non-directory-link"] {
-        directory_boundary.verify_operator_module_path(&root, probe).unwrap();
+        directory_boundary
+            .verify_operator_module_path(&root, probe)
+            .unwrap();
     }
     assert!(
         directory_boundary
@@ -169,7 +178,11 @@ fn explicit_live_loader_is_refused_for_a_custom_in_project_config() {
     let mut project = Project::new();
     project.config.runtime.frozen_modules = Some(false);
     project.write_config();
-    fs::write(project.root.join("app.cjs"), "console.log('GUEST_EXECUTED');\n").unwrap();
+    fs::write(
+        project.root.join("app.cjs"),
+        "console.log('GUEST_EXECUTED');\n",
+    )
+    .unwrap();
     let output = project.run(&["--json"]);
     let text = combined(&output);
     assert!(!output.status.success(), "{text}");
@@ -183,8 +196,11 @@ fn explicit_live_loader_is_refused_for_a_custom_in_project_config() {
 fn automatic_capture_runs_an_ordinary_project_with_custom_operator_config() {
     let project = Project::new();
     project.write_config();
-    fs::write(project.root.join("ordinary.json"), r#"{"answer":"ORDINARY_MODULE_OK"}"#)
-        .unwrap();
+    fs::write(
+        project.root.join("ordinary.json"),
+        r#"{"answer":"ORDINARY_MODULE_OK"}"#,
+    )
+    .unwrap();
     fs::write(
         project.root.join("app.cjs"),
         "console.log(require('./ordinary.json').answer);\n",
@@ -193,7 +209,10 @@ fn automatic_capture_runs_an_ordinary_project_with_custom_operator_config() {
     let output = project.run(&["--console-only"]);
     let text = combined(&output);
     assert!(output.status.success(), "{text}");
-    assert!(String::from_utf8_lossy(&output.stdout).contains("ORDINARY_MODULE_OK"), "{text}");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("ORDINARY_MODULE_OK"),
+        "{text}"
+    );
 }
 
 #[cfg(feature = "engine")]
@@ -201,7 +220,13 @@ fn automatic_capture_runs_an_ordinary_project_with_custom_operator_config() {
 fn guest_filesystem_read_cannot_expose_the_active_custom_config() {
     let project = Project::new();
     let original = project.write_config();
-    let secret = project.config.security.authorized_api_keys.iter().next().unwrap();
+    let secret = project
+        .config
+        .security
+        .authorized_api_keys
+        .iter()
+        .next()
+        .unwrap();
     fs::write(project.root.join("ordinary.txt"), "ORDINARY_READ_OK").unwrap();
     fs::write(
         project.root.join("app.cjs"),
@@ -276,5 +301,8 @@ fn receipt_key_uses_invocation_relative_protection_before_replay_export() {
     let text = combined(&output);
     assert!(!output.status.success(), "{text}");
     assert!(text.contains("protected operator state"), "{text}");
-    assert!(!text.contains("PRIVATE_RECEIPT_KEY_MUST_NOT_LEAK"), "{text}");
+    assert!(
+        !text.contains("PRIVATE_RECEIPT_KEY_MUST_NOT_LEAK"),
+        "{text}"
+    );
 }

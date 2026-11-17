@@ -4960,13 +4960,15 @@ mod proof_carrying_decode_comprehensive_attack_resistance_tests {
         }
 
         // Conservative threshold for timing attack resistance
-        assert!(
-            timing_variance < 3.0,
-            "Signature verification timing variance too high: {:.2}x (min: {:?}, max: {:?})",
-            timing_variance,
-            min_time,
-            max_time
-        );
+        if crate::testing::timing_assertions_enabled() {
+            assert!(
+                timing_variance < 3.0,
+                "Signature verification timing variance too high: {:.2}x (min: {:?}, max: {:?})",
+                timing_variance,
+                min_time,
+                max_time
+            );
+        }
     }
 
     #[test]

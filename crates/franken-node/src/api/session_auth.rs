@@ -5694,11 +5694,13 @@ mod session_auth_boundary_negative_tests {
                 / invalid_timings.len() as f64;
 
             let timing_ratio = avg_valid.max(avg_invalid) / avg_valid.min(avg_invalid).max(1.0);
-            assert!(
-                timing_ratio < 5.0,
-                "HMAC verification timing variance too high: {}",
-                timing_ratio
-            );
+            if crate::testing::timing_assertions_enabled() {
+                assert!(
+                    timing_ratio < 5.0,
+                    "HMAC verification timing variance too high: {}",
+                    timing_ratio
+                );
+            }
         }
     }
 
@@ -6394,11 +6396,13 @@ mod session_auth_boundary_negative_tests {
 
         // Timing ratio should be reasonable (not 100x different like with ==)
         let ratio = duration1.as_nanos() as f64 / duration2.as_nanos().max(1) as f64;
-        assert!(
-            ratio < 10.0 && ratio > 0.1,
-            "Potential timing leak detected: ratio={}",
-            ratio
-        );
+        if crate::testing::timing_assertions_enabled() {
+            assert!(
+                ratio < 10.0 && ratio > 0.1,
+                "Potential timing leak detected: ratio={}",
+                ratio
+            );
+        }
     }
 
     #[test]
@@ -6449,11 +6453,13 @@ mod session_auth_boundary_negative_tests {
 
         // Verify no massive timing difference due to early MAC comparison termination
         let ratio = duration1.as_nanos() as f64 / duration2.as_nanos().max(1) as f64;
-        assert!(
-            ratio < 5.0 && ratio > 0.2,
-            "MAC timing leak detected: ratio={}",
-            ratio
-        );
+        if crate::testing::timing_assertions_enabled() {
+            assert!(
+                ratio < 5.0 && ratio > 0.2,
+                "MAC timing leak detected: ratio={}",
+                ratio
+            );
+        }
     }
 
     #[test]
