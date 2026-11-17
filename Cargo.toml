@@ -32,7 +32,7 @@ toml = "1.1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
-frankentui = { package = "ftui", path = "../frankentui/crates/ftui", default-features = false }
+frankentui = { package = "ftui", path = "../frankentui/crates/ftui", default-features = false, features = ["runtime"] }
 
 # NO `[patch.crates-io]` BLOCK. Removed 2026-07-27 (bd-3mj98); do not reintroduce
 # one without reading that bead and the matching franken_engine note (bd-h5cl7).

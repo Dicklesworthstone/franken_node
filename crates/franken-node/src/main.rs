@@ -43400,6 +43400,738 @@ fn handle_migrate_kit_plan(args: &MigrateKitPlanArgs) -> Result<()> {
     Ok(())
 }
 
+fn build_operator_console_models(
+    workspace: &Path,
+    zone: &str,
+) -> Result<(
+    frankenengine_node::tools::operator_screens::DoctorScreenModel,
+    frankenengine_node::tools::operator_screens::FleetScreenModel,
+)> {
+    let config_candidate = workspace.join("franken_node.toml");
+    let config_override = config_candidate
+        .is_file()
+        .then_some(config_candidate.as_path());
+    let resolved = config::Config::resolve_without_validation_with_env(
+        config_override,
+        CliOverrides { profile: None },
+        &|key| std::env::var(key).ok(),
+    )
+    .context("failed resolving configuration for ops operator-console")?;
+    let doctor_report =
+        build_doctor_report_with_policy_input(&resolved, "trace-ops-operator-console", None);
+    let mut doc_model = doctor_screen_model(&doctor_report);
+    if !doc_model.checks.iter().any(|c| c.code == "DR-SQLMODEL-015") {
+        let existing_stores: Vec<_> = workspace_sqlite_store_specs(workspace)
+            .into_iter()
+            .filter(|(_, path, _)| path.is_file())
+            .collect();
+        if !existing_stores.is_empty() {
+            let mut audited = 0_usize;
+            let mut drifted = Vec::new();
+            for (store_id, db_path, expected) in &existing_stores {
+                match frankenengine_node::storage::durable_adapter::DurableFrankensqliteAdapter::introspect_sqlite_file(
+                    db_path,
+                ) {
+                    Ok(live_schema) => {
+                        audited = audited.saturating_add(1);
+                        let audit = frankenengine_node::storage::models::audit_database_schema(
+                            store_id,
+                            &live_schema,
+                            expected,
+                        );
+                        if !audit.is_drift_free {
+                            drifted.push(format!("{store_id}({})", audit.event_code));
+                        }
+                    }
+                    Err(err) => drifted.push(format!("{store_id}(ERR:{err})")),
+                }
+            }
+            let (status, message) = if drifted.is_empty() {
+                (
+                    "pass".to_string(),
+                    format!(
+                        "Audited {audited} live SQLite store(s) via sqlmodel_schema::diff with zero drift."
+                    ),
+                )
+            } else {
+                (
+                    "fail".to_string(),
+                    format!("sqlmodel schema drift in {}", drifted.join(", ")),
+                )
+            };
+            doc_model.checks.push(
+                frankenengine_node::tools::operator_screens::DoctorScreenCheck {
+                    status,
+                    code: "DR-SQLMODEL-015".to_string(),
+                    scope: "storage.sqlmodel_schema".to_string(),
+                    message,
+                },
+            );
+        }
+    }
+
+    let fleet_report = fleet_status_report(workspace, zone)?;
+    let fleet_model = fleet_screen_model(&fleet_report);
+    Ok((doc_model, fleet_model))
+}
+
+fn handle_ops_operator_console(args: &cli::OpsOperatorConsoleArgs) -> Result<()> {
+    use frankenengine_node::tools::operator_screens::{
+        MIN_CONSOLE_HEIGHT, MIN_SCREEN_WIDTH, OperatorConsoleModel,
+        OperatorConsoleSimulationReport, OperatorConsoleStepFrame, buffer_to_string,
+        parse_console_key_token,
+    };
+    use frankentui::render::diff::BufferDiff;
+    use frankentui::runtime::simulator::ProgramSimulator;
+    use std::io::BufRead as _;
+
+    let (doc_model, fleet_model) = build_operator_console_models(&args.workspace, &args.zone)?;
+    let width = args.width.max(MIN_SCREEN_WIDTH);
+    let height = args.height.max(MIN_CONSOLE_HEIGHT);
+    let mut sim = ProgramSimulator::new(
+        OperatorConsoleModel::new(doc_model, fleet_model).with_dimensions(width, height),
+    );
+    sim.init();
+    let mut prev_buffer = sim.capture_frame(width, height).clone();
+    let mut steps = Vec::new();
+    let mut total_changed_cells = 0_usize;
+    let mut live_reprobes = 0_u64;
+
+    let apply_token = |raw_token: &str,
+                       sim: &mut ProgramSimulator<OperatorConsoleModel>,
+                       prev_buffer: &mut frankentui::Buffer,
+                       steps: &mut Vec<OperatorConsoleStepFrame>,
+                       total_changed_cells: &mut usize,
+                       live_reprobes: &mut u64|
+     -> Result<bool> {
+        if !sim.is_running() {
+            return Ok(false);
+        }
+        let event = parse_console_key_token(raw_token).map_err(|e| anyhow::anyhow!(e))?;
+        let is_refresh = raw_token.trim().eq_ignore_ascii_case("r")
+            || raw_token.trim().eq_ignore_ascii_case("refresh");
+        if is_refresh {
+            let (fresh_doc, fresh_fleet) =
+                build_operator_console_models(&args.workspace, &args.zone)?;
+            sim.model_mut().replace_snapshots(fresh_doc, fresh_fleet);
+            *live_reprobes = live_reprobes.saturating_add(1);
+        }
+        sim.inject_event(event.clone());
+        let cur_w = sim.model().width;
+        let cur_h = sim.model().height;
+        let next_buffer = sim.capture_frame(cur_w, cur_h).clone();
+        let (changed_cells, diff_runs) = if prev_buffer.width() == next_buffer.width()
+            && prev_buffer.height() == next_buffer.height()
+        {
+            let diff = BufferDiff::compute(prev_buffer, &next_buffer);
+            (diff.len(), diff.runs().len())
+        } else {
+            (
+                usize::from(next_buffer.width()) * usize::from(next_buffer.height()),
+                usize::from(next_buffer.height()),
+            )
+        };
+        *total_changed_cells = total_changed_cells.saturating_add(changed_cells);
+        *prev_buffer = next_buffer;
+        let step = OperatorConsoleStepFrame {
+            step_index: steps.len(),
+            event_label: format!("{}:{}", event.event_type_label(), raw_token.trim()),
+            active_tab: sim.model().active_tab,
+            filter: sim.model().filter,
+            scroll_offset: sim.model().scroll_offset,
+            visible_rows: sim.model().visible_row_total(),
+            changed_cells,
+            diff_runs,
+            running: sim.is_running(),
+        };
+        if args.structured_logs_jsonl {
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "event_code": if sim.is_running() {
+                        "FTUI_OPERATOR_CONSOLE_FRAME"
+                    } else {
+                        "FTUI_OPERATOR_CONSOLE_QUIT"
+                    },
+                    "step_index": step.step_index,
+                    "token": raw_token.trim(),
+                    "active_tab": step.active_tab.as_str(),
+                    "filter": step.filter.as_str(),
+                    "scroll_offset": step.scroll_offset,
+                    "visible_rows": step.visible_rows,
+                    "changed_cells": step.changed_cells,
+                    "diff_runs": step.diff_runs,
+                    "running": step.running,
+                })
+            );
+        }
+        steps.push(step);
+        Ok(sim.is_running())
+    };
+
+    if let Some(script) = &args.keys {
+        for raw in script.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            if !apply_token(
+                raw,
+                &mut sim,
+                &mut prev_buffer,
+                &mut steps,
+                &mut total_changed_cells,
+                &mut live_reprobes,
+            )? {
+                break;
+            }
+        }
+    }
+
+    if args.interactive_stdin && sim.is_running() {
+        let stdin = std::io::stdin();
+        for line in stdin.lock().lines() {
+            let line = line.context("failed reading interactive stdin line")?;
+            let mut keep_running = true;
+            for raw in line
+                .split(|c: char| c == ',' || c.is_ascii_whitespace())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                if !apply_token(
+                    raw,
+                    &mut sim,
+                    &mut prev_buffer,
+                    &mut steps,
+                    &mut total_changed_cells,
+                    &mut live_reprobes,
+                )? {
+                    keep_running = false;
+                    break;
+                }
+            }
+            if !keep_running {
+                break;
+            }
+        }
+    }
+
+    let final_screen = buffer_to_string(&prev_buffer);
+    let m = sim.model();
+    let summary = OperatorConsoleSimulationReport {
+        initialized: m.initialized,
+        running_at_end: sim.is_running(),
+        quit_requested: m.quit_requested,
+        active_tab: m.active_tab,
+        filter: m.filter,
+        scroll_offset: m.scroll_offset,
+        events_processed: m.events_processed,
+        refreshes_requested: m.refreshes_requested,
+        ticks_observed: m.ticks_observed,
+        frame_count: sim.frame_count(),
+        total_changed_cells,
+        steps,
+        final_screen,
+    };
+
+    if args.json {
+        let payload = serde_json::json!({
+            "schema_version": "franken-node/ops-operator-console-cli/v1",
+            "command": "ops.operator-console",
+            "ok": summary.initialized,
+            "workspace": args.workspace.display().to_string(),
+            "zone": args.zone,
+            "live_reprobes": live_reprobes,
+            "doctor_check_count": m.doctor.checks.len(),
+            "fleet_node_count": m.fleet.nodes.len(),
+            "simulation": summary,
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        println!("{}", summary.final_screen);
+    }
+    Ok(())
+}
+
+fn handle_ops_contract_and_transport_audit(
+    args: &cli::OpsContractAndTransportAuditArgs,
+) -> Result<()> {
+    use frankenengine_node::connector::anti_amplification::{
+        AmplificationPolicy, BoundCheckRequest, ResponseBound, check_response_bound,
+    };
+    use frankenengine_node::connector::frame_parser::{FrameInput, ParserConfig, check_frame};
+    use frankenengine_node::connector::prestage_engine::{
+        ArtifactCandidate, PrestageConfig, evaluate_candidates,
+    };
+    use frankenengine_node::connector::trace_context::{TraceContext, TraceStore};
+    use frankenengine_node::operator_json_contracts::{
+        OperatorJsonSurface, all_operator_json_contracts, operator_json_registry_report,
+        validate_operator_json_value,
+    };
+    use frankenengine_node::runtime::checkpoint_guard::{
+        CheckpointGuard, CheckpointGuardConfig, GuardMode,
+    };
+
+    let config_candidate = args.workspace.join("franken_node.toml");
+    let config_override = config_candidate
+        .is_file()
+        .then_some(config_candidate.as_path());
+    let resolved = config::Config::resolve_without_validation_with_env(
+        config_override,
+        CliOverrides { profile: None },
+        &|key| std::env::var(key).ok(),
+    )
+    .context("failed resolving configuration for contract audit")?;
+    let doctor_report = build_doctor_report_with_policy_input(&resolved, &args.trace_id, None);
+    let doctor_json = serde_json::to_value(&doctor_report)?;
+    let doctor_contract_ok =
+        validate_operator_json_value(OperatorJsonSurface::DoctorReport, &doctor_json).is_ok();
+
+    let epoch_report = RuntimeEpochReport {
+        schema_version: "runtime-epoch-v1",
+        command: "runtime.epoch",
+        live_node: false,
+        compares_live_control_epoch: false,
+        local_epoch: 7,
+        peer_epoch: Some(7),
+        verdict: "matched",
+        epoch_delta: Some(0),
+        live_seqlock_sequence: None,
+        live_quarantine_version: None,
+        epoch_guard_accepted: None,
+        checkpoint_guard_ok: None,
+        evidence_replay_verified: None,
+    };
+    let epoch_json = serde_json::to_value(&epoch_report)?;
+    let epoch_contract_ok =
+        validate_operator_json_value(OperatorJsonSurface::RuntimeEpochReport, &epoch_json).is_ok();
+    let broken_json = serde_json::json!({"command": "doctor"});
+    let broken_contract_rejected =
+        validate_operator_json_value(OperatorJsonSurface::DoctorReport, &broken_json).is_err();
+    let registry_report = operator_json_registry_report();
+    let contract_total = all_operator_json_contracts().len();
+
+    // 2. W3C trace correlation lineage + orphan rejection
+    let mut trace_store = TraceStore::new();
+    let root_span = TraceContext {
+        trace_id: "4bf92f3577b34da6a3ce929d0e0e4736".to_string(),
+        span_id: "00f067aa0ba902b7".to_string(),
+        parent_span_id: None,
+        timestamp: "2026-11-17T00:00:00Z".to_string(),
+    };
+    let child_span = root_span.child("b7ad6b7169203331", "2026-11-17T00:00:01Z");
+    trace_store
+        .record(&root_span)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    trace_store
+        .record(&child_span)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let orphan_span = TraceContext {
+        trace_id: "4bf92f3577b34da6a3ce929d0e0e4736".to_string(),
+        span_id: "c9912a3310bc4411".to_string(),
+        parent_span_id: Some("deadbeefdeadbeef".to_string()),
+        timestamp: "2026-11-17T00:00:02Z".to_string(),
+    };
+    let orphan_rejected = trace_store.record(&orphan_span).is_err();
+
+    // 3. Anti-amplification response bounds
+    let amp_policy = AmplificationPolicy::default_policy();
+    let (auth_verdict, _) = check_response_bound(
+        &BoundCheckRequest {
+            request_id: "req-auth-1".to_string(),
+            peer_id: "peer:enrolled".to_string(),
+            authenticated: true,
+            request_bytes: 512,
+            declared_bound: ResponseBound {
+                max_bytes: 4_096,
+                max_items: 16,
+            },
+            actual_response_bytes: 2_048,
+            actual_items: 4,
+        },
+        &amp_policy,
+        &args.trace_id,
+        "2026-11-17T00:00:00Z",
+    )
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let (unauth_verdict, _) = check_response_bound(
+        &BoundCheckRequest {
+            request_id: "req-unauth-flood".to_string(),
+            peer_id: "peer:anonymous".to_string(),
+            authenticated: false,
+            request_bytes: 64,
+            declared_bound: ResponseBound {
+                max_bytes: 64_000,
+                max_items: 16,
+            },
+            actual_response_bytes: 8_192,
+            actual_items: 4,
+        },
+        &amp_policy,
+        &args.trace_id,
+        "2026-11-17T00:00:00Z",
+    )
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    // 4. Control-frame decode guardrails
+    let parser_cfg = ParserConfig::default_config();
+    let (valid_frame, _) = check_frame(
+        &FrameInput {
+            frame_id: "frame-ok-1".to_string(),
+            raw_bytes_len: 4_096,
+            nesting_depth: 4,
+            decode_cpu_ms: 3,
+        },
+        &parser_cfg,
+        "2026-11-17T00:00:00Z",
+    )
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let (dos_frame, _) = check_frame(
+        &FrameInput {
+            frame_id: "frame-dos-1".to_string(),
+            raw_bytes_len: 4_000_000,
+            nesting_depth: 64,
+            decode_cpu_ms: 250,
+        },
+        &parser_cfg,
+        "2026-11-17T00:00:00Z",
+    )
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    // 5. Predictive artifact pre-staging budget
+    let (_, prestage_report) = evaluate_candidates(
+        &[
+            ArtifactCandidate {
+                artifact_id: "art:core-stdlib".to_string(),
+                size_bytes: 400_000,
+                predicted_probability: 0.91,
+            },
+            ArtifactCandidate {
+                artifact_id: "art:rare-addon".to_string(),
+                size_bytes: 900_000,
+                predicted_probability: 0.22,
+            },
+        ],
+        &PrestageConfig {
+            max_bytes: 1_000_000,
+            probability_threshold: 0.50,
+            max_artifacts_per_cycle: 8,
+        },
+        &args.trace_id,
+        "2026-11-17T00:00:00Z",
+    )
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    // 6. Strict loop checkpoint placement guard
+    let mut ck_guard = CheckpointGuard::new(
+        "orch:control-loop",
+        args.trace_id.clone(),
+        CheckpointGuardConfig {
+            max_iterations_between_checkpoints: 4,
+            max_duration_between_checkpoints_ms: 5_000,
+            mode: GuardMode::Strict,
+            strict_abort_multiplier: 2,
+        },
+    );
+    ck_guard
+        .on_iteration(2)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    ck_guard.checkpoint(2);
+    let strict_violation_caught = ck_guard.on_iteration(12).is_err();
+
+    let ok = doctor_contract_ok
+        && epoch_contract_ok
+        && broken_contract_rejected
+        && orphan_rejected
+        && auth_verdict.allowed
+        && !unauth_verdict.allowed
+        && valid_frame.allowed
+        && !dos_frame.allowed
+        && prestage_report.staged_count == 1
+        && strict_violation_caught;
+
+    let payload = serde_json::json!({
+        "schema_version": "franken-node/ops-contract-and-transport-audit-cli/v1",
+        "command": "ops.contract-and-transport-audit",
+        "ok": ok,
+        "operator_json_contracts": {
+            "registry_schema_id": registry_report.schema_id,
+            "contract_count": contract_total,
+            "doctor_live_valid": doctor_contract_ok,
+            "runtime_epoch_valid": epoch_contract_ok,
+            "missing_required_rejected": broken_contract_rejected,
+        },
+        "trace_correlation": {
+            "root_and_child_recorded": true,
+            "orphan_span_rejected": orphan_rejected,
+        },
+        "anti_amplification": {
+            "authenticated_allowed": auth_verdict.allowed,
+            "unauthenticated_flood_blocked": !unauth_verdict.allowed,
+        },
+        "frame_guardrails": {
+            "bounded_frame_allowed": valid_frame.allowed,
+            "oversized_frame_blocked": !dos_frame.allowed,
+        },
+        "prestage_engine": {
+            "staged_count": prestage_report.staged_count,
+            "skipped_count": prestage_report.skipped_count,
+            "budget_used": prestage_report.budget_used,
+        },
+        "checkpoint_guard": {
+            "events_emitted": ck_guard.events().len(),
+            "strict_uncheckpointed_violation_caught": strict_violation_caught,
+        },
+    });
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        println!(
+            "ops contract-and-transport-audit: ok={} contracts={} prestaged={} checkpoint_events={}",
+            ok,
+            contract_total,
+            prestage_report.staged_count,
+            ck_guard.events().len()
+        );
+    }
+    if !ok {
+        if args.json {
+            fail_closed_after_json();
+        }
+        anyhow::bail!("ops contract-and-transport-audit failed closed");
+    }
+    Ok(())
+}
+
+fn handle_trust_provenance_and_cohort_audit(
+    args: &cli::TrustProvenanceAndCohortAuditArgs,
+) -> Result<()> {
+    use frankenengine_node::connector::vef_claim_integration::{
+        ClaimRequirement, VefClaimConfig, VefClaimIntegration, VefMetrics,
+    };
+    use frankenengine_node::security::bpet::cohort_baselines::CohortBaselineModel;
+    use frankenengine_node::security::bpet::economic_integration::{
+        PhenotypeObservation, PhenotypeTrajectory,
+    };
+    use frankenengine_node::security::degraded_mode_audit::{
+        DegradedModeAuditLog, DegradedModeEvent,
+    };
+    use frankenengine_node::supply_chain::provenance_gate::{
+        ArtifactProvenance, AttestationType, BuildAssurance, ProvenancePolicy, evaluate_gate,
+    };
+
+    // 1. Supply-chain SLSA/Sigstore provenance gate
+    let prov_policy = ProvenancePolicy {
+        required_attestations: vec![AttestationType::Slsa, AttestationType::Sigstore],
+        min_build_assurance: BuildAssurance::Verified,
+        trusted_builders: vec![args.builder_id.clone()],
+    };
+    let compliant_decision = evaluate_gate(
+        &prov_policy,
+        &ArtifactProvenance {
+            artifact_id: args.artifact_id.clone(),
+            connector_id: "conn:registry-admission".to_string(),
+            attestations: vec![AttestationType::Slsa, AttestationType::Sigstore],
+            build_assurance: BuildAssurance::Hardened,
+            builder_id: args.builder_id.clone(),
+        },
+        &args.trace_id,
+        "2026-11-17T00:00:00Z",
+    );
+    let untrusted_decision = evaluate_gate(
+        &prov_policy,
+        &ArtifactProvenance {
+            artifact_id: args.artifact_id.clone(),
+            connector_id: "conn:registry-admission".to_string(),
+            attestations: vec![AttestationType::Slsa],
+            build_assurance: BuildAssurance::Basic,
+            builder_id: "builder:untrusted-laptop".to_string(),
+        },
+        &args.trace_id,
+        "2026-11-17T00:00:00Z",
+    );
+
+    // 2. Cohort-aware BPET baseline modeling + deviation scoring
+    let cohort_model = CohortBaselineModel::build(
+        8,
+        [(
+            "npm-runtime-adapters",
+            vec![
+                PhenotypeTrajectory {
+                    package_name: "@acme/base-a".to_string(),
+                    observations: vec![PhenotypeObservation {
+                        timestamp: "2026-11-01T00:00:00Z".to_string(),
+                        maintainer_activity_score: 0.90,
+                        commit_velocity: 4.0,
+                        issue_response_time_hours: 6.0,
+                        dependency_churn_rate: 0.05,
+                        security_patch_latency_hours: 4.0,
+                        contributor_diversity_index: 0.80,
+                    }],
+                },
+                PhenotypeTrajectory {
+                    package_name: "@acme/base-b".to_string(),
+                    observations: vec![PhenotypeObservation {
+                        timestamp: "2026-11-02T00:00:00Z".to_string(),
+                        maintainer_activity_score: 0.86,
+                        commit_velocity: 3.5,
+                        issue_response_time_hours: 8.0,
+                        dependency_churn_rate: 0.07,
+                        security_patch_latency_hours: 5.0,
+                        contributor_diversity_index: 0.76,
+                    }],
+                },
+            ],
+        )],
+    )
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let candidate_deviation = cohort_model
+        .compare_trajectory(
+            "npm-runtime-adapters",
+            &PhenotypeTrajectory {
+                package_name: args.artifact_id.clone(),
+                observations: vec![PhenotypeObservation {
+                    timestamp: "2026-11-17T00:00:00Z".to_string(),
+                    maintainer_activity_score: 0.25,
+                    commit_velocity: 18.0,
+                    issue_response_time_hours: 72.0,
+                    dependency_churn_rate: 0.65,
+                    security_patch_latency_hours: 96.0,
+                    contributor_diversity_index: 0.15,
+                }],
+            },
+        )
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    // 3. VEF claim coverage & proof-validity gate
+    let mut vef_claims = VefClaimIntegration::new(VefClaimConfig {
+        min_coverage_pct: args.min_coverage,
+        min_validity_rate: 0.95,
+        max_proof_age_secs: 3_600,
+        scoreboard_publish_interval: 60,
+    })
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let claim_pass = vef_claims.evaluate_claim(
+        &ClaimRequirement {
+            claim_id: "CLAIM-PROVENANCE-001".to_string(),
+            claim_text: "Admitted runtime artifacts carry verified SLSA + VEF coverage".to_string(),
+            min_coverage: args.min_coverage,
+            min_validity: 0.95,
+            required_action_classes: vec!["fs.read".to_string(), "net.connect".to_string()],
+        },
+        &VefMetrics {
+            coverage_pct: 0.92,
+            validity_rate: 0.99,
+            proof_count: 24,
+            gap_count: 0,
+            avg_proof_age_secs: 45,
+            degraded_time_frac: 0.0,
+            covered_classes: vec![
+                "fs.read".to_string(),
+                "net.connect".to_string(),
+                "child_process.spawn".to_string(),
+            ],
+            gap_classes: Vec::new(),
+        },
+    );
+    let claim_gap_blocked = vef_claims.evaluate_claim(
+        &ClaimRequirement {
+            claim_id: "CLAIM-PROVENANCE-GAP".to_string(),
+            claim_text: "Missing action class must block".to_string(),
+            min_coverage: args.min_coverage,
+            min_validity: 0.95,
+            required_action_classes: vec!["ffi.dlopen".to_string()],
+        },
+        &VefMetrics {
+            coverage_pct: 0.92,
+            validity_rate: 0.99,
+            proof_count: 24,
+            gap_count: 1,
+            avg_proof_age_secs: 45,
+            degraded_time_frac: 0.0,
+            covered_classes: vec!["fs.read".to_string()],
+            gap_classes: vec!["ffi.dlopen".to_string()],
+        },
+    );
+
+    // 4. Degraded-mode stale-revocation override audit log
+    let mut dm_log = DegradedModeAuditLog::new();
+    dm_log
+        .emit(DegradedModeEvent {
+            event_type: "degraded_mode_override".to_string(),
+            action_id: "act-revocation-override-1".to_string(),
+            actor: "operator:break-glass".to_string(),
+            tier: "Risky".to_string(),
+            revocation_age_secs: 4_200,
+            max_age_secs: 3_600,
+            override_reason: "offline airgapped maintenance window".to_string(),
+            trace_id: args.trace_id.clone(),
+            timestamp: "2026-11-17T00:00:00Z".to_string(),
+        })
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let malformed_dm_rejected = dm_log
+        .emit(DegradedModeEvent {
+            event_type: "wrong_type".to_string(),
+            action_id: "act-bad".to_string(),
+            actor: "operator:break-glass".to_string(),
+            tier: "Risky".to_string(),
+            revocation_age_secs: 4_200,
+            max_age_secs: 3_600,
+            override_reason: "".to_string(),
+            trace_id: args.trace_id.clone(),
+            timestamp: "2026-11-17T00:00:00Z".to_string(),
+        })
+        .is_err();
+
+    let ok = compliant_decision.passed
+        && !untrusted_decision.passed
+        && candidate_deviation.mean_absolute_delta > 0.0
+        && claim_pass.passed
+        && !claim_gap_blocked.passed
+        && malformed_dm_rejected;
+
+    let payload = serde_json::json!({
+        "schema_version": "franken-node/trust-provenance-and-cohort-audit-cli/v1",
+        "command": "trust.provenance-and-cohort-audit",
+        "ok": ok,
+        "provenance_gate": {
+            "artifact_id": compliant_decision.artifact_id,
+            "compliant_passed": compliant_decision.passed,
+            "untrusted_rejected": !untrusted_decision.passed,
+        },
+        "bpet_cohort_baseline": {
+            "cohort_id": candidate_deviation.cohort_id,
+            "mean_absolute_delta": candidate_deviation.mean_absolute_delta,
+            "event_code": candidate_deviation.event_code,
+        },
+        "vef_claim_gate": {
+            "compliant_claim_passed": claim_pass.passed,
+            "gap_claim_blocked": !claim_gap_blocked.passed,
+            "detected_gaps": claim_gap_blocked.gaps,
+        },
+        "degraded_mode_audit": {
+            "valid_override_recorded": true,
+            "malformed_override_rejected": malformed_dm_rejected,
+        },
+    });
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        println!(
+            "trust provenance-and-cohort-audit: ok={} compliant_passed={} cohort_delta={:.4} vef_passed={}",
+            ok,
+            compliant_decision.passed,
+            candidate_deviation.mean_absolute_delta,
+            claim_pass.passed
+        );
+    }
+    if !ok {
+        if args.json {
+            fail_closed_after_json();
+        }
+        anyhow::bail!("trust provenance-and-cohort-audit failed closed");
+    }
+    Ok(())
+}
+
 fn clap_error_should_emit_json(err: &clap::Error) -> bool {
     use clap::error::ErrorKind;
     if matches!(
@@ -45573,6 +46305,11 @@ fn main() -> Result<()> {
                     return trust_fail("trust.fabric-convergence-audit", args.json, err);
                 }
             }
+            TrustCommand::ProvenanceAndCohortAudit(args) => {
+                if let Err(err) = handle_trust_provenance_and_cohort_audit(&args) {
+                    return trust_fail("trust.provenance-and-cohort-audit", args.json, err);
+                }
+            }
         },
 
         Command::Remotecap(sub) => match sub {
@@ -46203,6 +46940,16 @@ fn main() -> Result<()> {
             OpsCommand::DgisFixtureSuite(args) => {
                 if let Err(err) = handle_ops_dgis_fixture_suite(&args) {
                     return ops_fail("ops.dgis-fixture-suite", args.json, err);
+                }
+            }
+            OpsCommand::OperatorConsole(args) => {
+                if let Err(err) = handle_ops_operator_console(&args) {
+                    return ops_fail("ops.operator-console", args.json, err);
+                }
+            }
+            OpsCommand::ContractAndTransportAudit(args) => {
+                if let Err(err) = handle_ops_contract_and_transport_audit(&args) {
+                    return ops_fail("ops.contract-and-transport-audit", args.json, err);
                 }
             }
         },

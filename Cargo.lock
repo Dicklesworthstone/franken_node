@@ -1985,6 +1985,7 @@ dependencies = [
  "ftui-core",
  "ftui-layout",
  "ftui-render",
+ "ftui-runtime",
  "ftui-style",
  "ftui-text",
  "ftui-widgets",

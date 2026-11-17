@@ -9,13 +9,18 @@
 
 use frankentui::core::geometry::Rect;
 use frankentui::layout::{Constraint, Flex};
+use frankentui::render::buffer::Buffer;
+use frankentui::render::diff::BufferDiff;
 use frankentui::render::frame::Frame;
 use frankentui::render::grapheme_pool::GraphemePool;
+use frankentui::runtime::simulator::ProgramSimulator;
 use frankentui::widgets::Widget;
 use frankentui::widgets::block::Block;
 use frankentui::widgets::borders::Borders;
 use frankentui::widgets::paragraph::Paragraph;
 use frankentui::widgets::table::{Row, Table};
+use frankentui::{Cmd, Event, KeyCode, KeyEvent, Model};
+use serde::{Deserialize, Serialize};
 
 /// Screens are never narrower than this, whatever the caller asks for.
 pub const MIN_SCREEN_WIDTH: u16 = 60;
@@ -294,6 +299,627 @@ pub fn render_doctor_screen(model: &DoctorScreenModel, width: u16) -> String {
     )
 }
 
+/// Default frame height for the interactive operator console.
+pub const DEFAULT_CONSOLE_HEIGHT: u16 = 26;
+/// Minimum frame height for the interactive operator console.
+pub const MIN_CONSOLE_HEIGHT: u16 = 12;
+
+/// Active operator console tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperatorConsoleTab {
+    Doctor,
+    Fleet,
+}
+
+impl OperatorConsoleTab {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Doctor => "doctor",
+            Self::Fleet => "fleet",
+        }
+    }
+
+    #[must_use]
+    pub const fn toggle(self) -> Self {
+        match self {
+            Self::Doctor => Self::Fleet,
+            Self::Fleet => Self::Doctor,
+        }
+    }
+}
+
+/// Interactive filter applied to the active tab's rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperatorRowFilter {
+    All,
+    WarnOrDegraded,
+    FailOnly,
+    HealthyOrPassOnly,
+}
+
+impl OperatorRowFilter {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::WarnOrDegraded => "warn_or_degraded",
+            Self::FailOnly => "fail_only",
+            Self::HealthyOrPassOnly => "healthy_or_pass_only",
+        }
+    }
+
+    #[must_use]
+    pub const fn next(self) -> Self {
+        match self {
+            Self::All => Self::WarnOrDegraded,
+            Self::WarnOrDegraded => Self::FailOnly,
+            Self::FailOnly => Self::HealthyOrPassOnly,
+            Self::HealthyOrPassOnly => Self::All,
+        }
+    }
+
+    fn matches_doctor_status(self, status: &str) -> bool {
+        match self {
+            Self::All => true,
+            Self::WarnOrDegraded => {
+                status.eq_ignore_ascii_case("warn") || status.eq_ignore_ascii_case("fail")
+            }
+            Self::FailOnly => status.eq_ignore_ascii_case("fail"),
+            Self::HealthyOrPassOnly => status.eq_ignore_ascii_case("pass"),
+        }
+    }
+
+    fn matches_node_health(self, health: &str) -> bool {
+        match self {
+            Self::All => true,
+            Self::WarnOrDegraded => !health.eq_ignore_ascii_case("healthy"),
+            Self::FailOnly => {
+                health.eq_ignore_ascii_case("unhealthy")
+                    || health.eq_ignore_ascii_case("quarantined")
+                    || health.eq_ignore_ascii_case("offline")
+            }
+            Self::HealthyOrPassOnly => health.eq_ignore_ascii_case("healthy"),
+        }
+    }
+}
+
+/// Messages processed by [`OperatorConsoleModel::update`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OperatorConsoleMsg {
+    SwitchTab,
+    SelectTab(OperatorConsoleTab),
+    CycleFilter,
+    ScrollDown,
+    ScrollUp,
+    ScrollHome,
+    Resize { width: u16, height: u16 },
+    RefreshRequested,
+    Tick,
+    Quit,
+    Noop,
+}
+
+impl From<Event> for OperatorConsoleMsg {
+    fn from(event: Event) -> Self {
+        match event {
+            Event::Key(key) => match key.code {
+                KeyCode::Tab | KeyCode::BackTab => Self::SwitchTab,
+                KeyCode::Char('1') => Self::SelectTab(OperatorConsoleTab::Doctor),
+                KeyCode::Char('2') => Self::SelectTab(OperatorConsoleTab::Fleet),
+                KeyCode::Char('f') | KeyCode::Char('F') => Self::CycleFilter,
+                KeyCode::Char('j') | KeyCode::Down => Self::ScrollDown,
+                KeyCode::Char('k') | KeyCode::Up => Self::ScrollUp,
+                KeyCode::Char('g') | KeyCode::Home => Self::ScrollHome,
+                KeyCode::Char('r') | KeyCode::Char('R') => Self::RefreshRequested,
+                KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Escape => Self::Quit,
+                _ => Self::Noop,
+            },
+            Event::Resize { width, height } => Self::Resize { width, height },
+            Event::Tick => Self::Tick,
+            _ => Self::Noop,
+        }
+    }
+}
+
+/// Elm/Bubbletea [`frankentui::Model`] combining live `doctor` and `fleet` operator views.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OperatorConsoleModel {
+    pub doctor: DoctorScreenModel,
+    pub fleet: FleetScreenModel,
+    pub active_tab: OperatorConsoleTab,
+    pub filter: OperatorRowFilter,
+    pub scroll_offset: usize,
+    pub width: u16,
+    pub height: u16,
+    pub events_processed: u64,
+    pub refreshes_requested: u64,
+    pub ticks_observed: u64,
+    pub initialized: bool,
+    pub quit_requested: bool,
+}
+
+impl OperatorConsoleModel {
+    #[must_use]
+    pub fn new(doctor: DoctorScreenModel, fleet: FleetScreenModel) -> Self {
+        Self {
+            doctor,
+            fleet,
+            active_tab: OperatorConsoleTab::Doctor,
+            filter: OperatorRowFilter::All,
+            scroll_offset: 0,
+            width: DEFAULT_SCREEN_WIDTH,
+            height: DEFAULT_CONSOLE_HEIGHT,
+            events_processed: 0,
+            refreshes_requested: 0,
+            ticks_observed: 0,
+            initialized: false,
+            quit_requested: false,
+        }
+    }
+
+    #[must_use]
+    pub fn with_dimensions(mut self, width: u16, height: u16) -> Self {
+        self.width = width.max(MIN_SCREEN_WIDTH);
+        self.height = height.max(MIN_CONSOLE_HEIGHT);
+        self
+    }
+
+    /// Replace underlying live store snapshots (e.g. when `r` triggers a live workspace re-probe).
+    pub fn replace_snapshots(&mut self, doctor: DoctorScreenModel, fleet: FleetScreenModel) {
+        self.doctor = doctor;
+        self.fleet = fleet;
+        self.clamp_scroll();
+    }
+
+    #[must_use]
+    pub fn visible_row_total(&self) -> usize {
+        match self.active_tab {
+            OperatorConsoleTab::Doctor => self
+                .doctor
+                .checks
+                .iter()
+                .filter(|c| self.filter.matches_doctor_status(&c.status))
+                .count(),
+            OperatorConsoleTab::Fleet => self
+                .fleet
+                .nodes
+                .iter()
+                .filter(|n| self.filter.matches_node_health(&n.health))
+                .count(),
+        }
+    }
+
+    fn clamp_scroll(&mut self) {
+        let max_offset = self.visible_row_total().saturating_sub(1);
+        if self.scroll_offset > max_offset {
+            self.scroll_offset = max_offset;
+        }
+    }
+}
+
+impl Model for OperatorConsoleModel {
+    type Message = OperatorConsoleMsg;
+
+    fn init(&mut self) -> Cmd<Self::Message> {
+        self.initialized = true;
+        self.clamp_scroll();
+        Cmd::none()
+    }
+
+    fn update(&mut self, msg: Self::Message) -> Cmd<Self::Message> {
+        self.events_processed = self.events_processed.saturating_add(1);
+        match msg {
+            OperatorConsoleMsg::SwitchTab => {
+                self.active_tab = self.active_tab.toggle();
+                self.scroll_offset = 0;
+                Cmd::none()
+            }
+            OperatorConsoleMsg::SelectTab(tab) => {
+                if self.active_tab != tab {
+                    self.active_tab = tab;
+                    self.scroll_offset = 0;
+                }
+                Cmd::none()
+            }
+            OperatorConsoleMsg::CycleFilter => {
+                self.filter = self.filter.next();
+                self.scroll_offset = 0;
+                Cmd::none()
+            }
+            OperatorConsoleMsg::ScrollDown => {
+                let max_offset = self.visible_row_total().saturating_sub(1);
+                if self.scroll_offset < max_offset {
+                    self.scroll_offset = self.scroll_offset.saturating_add(1);
+                }
+                Cmd::none()
+            }
+            OperatorConsoleMsg::ScrollUp => {
+                self.scroll_offset = self.scroll_offset.saturating_sub(1);
+                Cmd::none()
+            }
+            OperatorConsoleMsg::ScrollHome => {
+                self.scroll_offset = 0;
+                Cmd::none()
+            }
+            OperatorConsoleMsg::Resize { width, height } => {
+                self.width = width.max(MIN_SCREEN_WIDTH);
+                self.height = height.max(MIN_CONSOLE_HEIGHT);
+                Cmd::none()
+            }
+            OperatorConsoleMsg::RefreshRequested => {
+                self.refreshes_requested = self.refreshes_requested.saturating_add(1);
+                self.clamp_scroll();
+                Cmd::none()
+            }
+            OperatorConsoleMsg::Tick => {
+                self.ticks_observed = self.ticks_observed.saturating_add(1);
+                Cmd::none()
+            }
+            OperatorConsoleMsg::Quit => {
+                self.quit_requested = true;
+                Cmd::quit()
+            }
+            OperatorConsoleMsg::Noop => Cmd::none(),
+        }
+    }
+
+    fn view(&self, frame: &mut Frame) {
+        let width = frame.buffer.width();
+        let height = frame.buffer.height();
+        let root = Rect::new(0, 0, width, height);
+
+        let tab_header = match self.active_tab {
+            OperatorConsoleTab::Doctor => "[1:DOCTOR*]  2:fleet",
+            OperatorConsoleTab::Fleet => " 1:doctor   [2:FLEET*]",
+        };
+        let nav_bar = Paragraph::new(format!(
+            "{tab_header}  |  filter={}  scroll={}  events={}  refreshes={}\n\
+             keys: Tab/1/2 switch  f filter  j/k scroll  g top  r refresh  q quit",
+            self.filter.as_str(),
+            self.scroll_offset,
+            self.events_processed,
+            self.refreshes_requested,
+        ))
+        .block(panel(" franken-node operator console (frankentui::Model) "));
+
+        match self.active_tab {
+            OperatorConsoleTab::Doctor => {
+                let filtered: Vec<&DoctorScreenCheck> = self
+                    .doctor
+                    .checks
+                    .iter()
+                    .filter(|check| self.filter.matches_doctor_status(&check.status))
+                    .skip(self.scroll_offset)
+                    .take(MAX_TABLE_ROWS)
+                    .collect();
+                let summary = Paragraph::new(format!(
+                    "overall {}  profile {}  total {} (pass {}  warn {}  fail {})  showing {}",
+                    self.doctor.overall_status,
+                    self.doctor.profile,
+                    self.doctor.checks.len(),
+                    self.doctor.count("pass"),
+                    self.doctor.count("warn"),
+                    self.doctor.count("fail"),
+                    filtered.len(),
+                ))
+                .block(panel(" doctor summary "));
+                let rows: Vec<Row> = filtered
+                    .iter()
+                    .map(|check| {
+                        Row::new([
+                            check.status.clone(),
+                            check.code.clone(),
+                            check.scope.clone(),
+                            check.message.clone(),
+                        ])
+                    })
+                    .collect();
+                let title = format!(
+                    " doctor checks (filter={}, offset={}) ",
+                    self.filter.as_str(),
+                    self.scroll_offset
+                );
+                let areas = Flex::vertical()
+                    .constraints([Constraint::Fixed(4), Constraint::Fixed(3), Constraint::Fill])
+                    .split(root);
+                nav_bar.render(areas[0], frame);
+                summary.render(areas[1], frame);
+                if rows.is_empty() {
+                    Paragraph::new("status  code  scope  message\n(no matching checks)")
+                        .block(panel(&title))
+                        .render(areas[2], frame);
+                } else {
+                    Table::new(
+                        rows,
+                        [
+                            Constraint::Fixed(6),
+                            Constraint::Fixed(16),
+                            Constraint::Percentage(24.0),
+                            Constraint::Fill,
+                        ],
+                    )
+                    .header(Row::new(["status", "code", "scope", "message"]))
+                    .block(panel(&title))
+                    .render(areas[2], frame);
+                }
+            }
+            OperatorConsoleTab::Fleet => {
+                let filtered_nodes: Vec<&FleetScreenNode> = self
+                    .fleet
+                    .nodes
+                    .iter()
+                    .filter(|node| self.filter.matches_node_health(&node.health))
+                    .skip(self.scroll_offset)
+                    .take(MAX_TABLE_ROWS)
+                    .collect();
+                let summary_title = format!(" fleet: zone {} ", self.fleet.zone_id);
+                let summary = Paragraph::new(format!(
+                    "transport {}{}  live_cp={}  activated={}  nodes {}/{}  quarantines {}  revocations {}  converging {}",
+                    self.fleet.transport,
+                    self.fleet
+                        .control_plane_url
+                        .as_deref()
+                        .map(|url| format!(" ({url})"))
+                        .unwrap_or_default(),
+                    if self.fleet.live_control_plane { "yes" } else { "no" },
+                    if self.fleet.activated { "yes" } else { "no" },
+                    self.fleet.healthy_nodes,
+                    self.fleet.total_nodes,
+                    self.fleet.active_quarantines,
+                    self.fleet.active_revocations,
+                    self.fleet.convergences.len(),
+                ))
+                .block(panel(&summary_title));
+                let node_rows: Vec<Row> = filtered_nodes
+                    .iter()
+                    .map(|node| {
+                        Row::new([
+                            node.node_id.clone(),
+                            node.zone_id.clone(),
+                            node.health.clone(),
+                            node.quarantine_version.to_string(),
+                            node.last_seen.clone(),
+                        ])
+                    })
+                    .collect();
+                let nodes_title = format!(
+                    " fleet nodes (filter={}, offset={}) ",
+                    self.filter.as_str(),
+                    self.scroll_offset
+                );
+                let conv_rows: Vec<Row> = if self.fleet.convergences.is_empty() {
+                    vec![Row::new(["(none)"])]
+                } else {
+                    self.fleet
+                        .convergences
+                        .iter()
+                        .take(MAX_TABLE_ROWS)
+                        .map(|conv| {
+                            Row::new([
+                                conv.incident_id.clone(),
+                                conv.target_kind.clone(),
+                                conv.target.clone(),
+                                format!("{}%", conv.progress_pct),
+                            ])
+                        })
+                        .collect()
+                };
+                let conv_height = table_height(conv_rows.len()).min(7);
+                let areas = Flex::vertical()
+                    .constraints([
+                        Constraint::Fixed(4),
+                        Constraint::Fixed(3),
+                        Constraint::Fill,
+                        Constraint::Fixed(conv_height),
+                    ])
+                    .split(root);
+                nav_bar.render(areas[0], frame);
+                summary.render(areas[1], frame);
+                if node_rows.is_empty() {
+                    Paragraph::new(
+                        "node  zone  health  quarantine v  last seen\n(no matching fleet nodes)",
+                    )
+                    .block(panel(&nodes_title))
+                    .render(areas[2], frame);
+                } else {
+                    Table::new(
+                        node_rows,
+                        [
+                            Constraint::Percentage(24.0),
+                            Constraint::Percentage(16.0),
+                            Constraint::Percentage(14.0),
+                            Constraint::Percentage(16.0),
+                            Constraint::Fill,
+                        ],
+                    )
+                    .header(Row::new([
+                        "node",
+                        "zone",
+                        "health",
+                        "quarantine v",
+                        "last seen",
+                    ]))
+                    .block(panel(&nodes_title))
+                    .render(areas[2], frame);
+                }
+                Table::new(
+                    conv_rows,
+                    [
+                        Constraint::Percentage(30.0),
+                        Constraint::Percentage(16.0),
+                        Constraint::Fill,
+                        Constraint::Fixed(9),
+                    ],
+                )
+                .header(Row::new(["incident", "kind", "target", "progress"]))
+                .block(panel(" pending convergence "))
+                .render(areas[3], frame);
+            }
+        }
+    }
+}
+
+/// Convert a rendered [`Buffer`] into trimmed newline-joined text.
+#[must_use]
+pub fn buffer_to_string(buffer: &Buffer) -> String {
+    let mut lines = Vec::with_capacity(usize::from(buffer.height()));
+    for y in 0..buffer.height() {
+        let mut line = String::with_capacity(usize::from(buffer.width()));
+        for x in 0..buffer.width() {
+            line.push(
+                buffer
+                    .get(x, y)
+                    .and_then(|cell| cell.content.as_char())
+                    .unwrap_or(' '),
+            );
+        }
+        lines.push(line.trim_end().to_string());
+    }
+    lines.join("\n")
+}
+
+/// Parse one symbolic key/event token (`tab`, `1`, `2`, `f`, `j`, `k`, `g`, `r`, `tick`, `q`, `resize:110x28`).
+pub fn parse_console_key_token(token: &str) -> Result<Event, String> {
+    let trimmed = token.trim();
+    if trimmed.is_empty() {
+        return Err("empty console event token".to_string());
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    match lower.as_str() {
+        "tab" => Ok(Event::Key(KeyEvent::new(KeyCode::Tab))),
+        "backtab" => Ok(Event::Key(KeyEvent::new(KeyCode::BackTab))),
+        "1" | "doctor" => Ok(Event::Key(KeyEvent::new(KeyCode::Char('1')))),
+        "2" | "fleet" => Ok(Event::Key(KeyEvent::new(KeyCode::Char('2')))),
+        "f" | "filter" => Ok(Event::Key(KeyEvent::new(KeyCode::Char('f')))),
+        "j" | "down" => Ok(Event::Key(KeyEvent::new(KeyCode::Down))),
+        "k" | "up" => Ok(Event::Key(KeyEvent::new(KeyCode::Up))),
+        "g" | "home" | "top" => Ok(Event::Key(KeyEvent::new(KeyCode::Home))),
+        "r" | "refresh" => Ok(Event::Key(KeyEvent::new(KeyCode::Char('r')))),
+        "tick" => Ok(Event::Tick),
+        "q" | "quit" | "esc" | "escape" => Ok(Event::Key(KeyEvent::new(KeyCode::Char('q')))),
+        _ if lower.starts_with("resize:") => {
+            let spec = &lower["resize:".len()..];
+            let Some((w_raw, h_raw)) = spec.split_once('x') else {
+                return Err(format!(
+                    "invalid resize token `{trimmed}` (expected resize:WxH)"
+                ));
+            };
+            let width = w_raw
+                .parse::<u16>()
+                .map_err(|_| format!("invalid resize width in `{trimmed}`"))?;
+            let height = h_raw
+                .parse::<u16>()
+                .map_err(|_| format!("invalid resize height in `{trimmed}`"))?;
+            Ok(Event::Resize { width, height })
+        }
+        _ => Err(format!("unsupported console event token `{trimmed}`")),
+    }
+}
+
+/// Telemetry for one step in [`run_operator_console_simulation`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OperatorConsoleStepFrame {
+    pub step_index: usize,
+    pub event_label: String,
+    pub active_tab: OperatorConsoleTab,
+    pub filter: OperatorRowFilter,
+    pub scroll_offset: usize,
+    pub visible_rows: usize,
+    pub changed_cells: usize,
+    pub diff_runs: usize,
+    pub running: bool,
+}
+
+/// Summary returned by [`run_operator_console_simulation`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OperatorConsoleSimulationReport {
+    pub initialized: bool,
+    pub running_at_end: bool,
+    pub quit_requested: bool,
+    pub active_tab: OperatorConsoleTab,
+    pub filter: OperatorRowFilter,
+    pub scroll_offset: usize,
+    pub events_processed: u64,
+    pub refreshes_requested: u64,
+    pub ticks_observed: u64,
+    pub frame_count: usize,
+    pub total_changed_cells: usize,
+    pub steps: Vec<OperatorConsoleStepFrame>,
+    pub final_screen: String,
+}
+
+/// Execute [`OperatorConsoleModel`] through [`ProgramSimulator`] with exact [`BufferDiff`] cell accounting.
+#[must_use]
+pub fn run_operator_console_simulation(
+    model: OperatorConsoleModel,
+    events: &[Event],
+    width: u16,
+    height: u16,
+) -> OperatorConsoleSimulationReport {
+    let w = width.max(MIN_SCREEN_WIDTH);
+    let h = height.max(MIN_CONSOLE_HEIGHT);
+    let mut sim = ProgramSimulator::new(model.with_dimensions(w, h));
+    sim.init();
+    let mut prev_buffer = sim.capture_frame(w, h).clone();
+    let mut steps = Vec::with_capacity(events.len());
+    let mut total_changed_cells = 0_usize;
+
+    for (idx, event) in events.iter().enumerate() {
+        if !sim.is_running() {
+            break;
+        }
+        sim.inject_event(event.clone());
+        let cur_w = sim.model().width;
+        let cur_h = sim.model().height;
+        let next_buffer = sim.capture_frame(cur_w, cur_h).clone();
+        let (changed_cells, diff_runs) = if prev_buffer.width() == next_buffer.width()
+            && prev_buffer.height() == next_buffer.height()
+        {
+            let diff = BufferDiff::compute(&prev_buffer, &next_buffer);
+            (diff.len(), diff.runs().len())
+        } else {
+            (
+                usize::from(next_buffer.width()) * usize::from(next_buffer.height()),
+                usize::from(next_buffer.height()),
+            )
+        };
+        total_changed_cells = total_changed_cells.saturating_add(changed_cells);
+        prev_buffer = next_buffer;
+        steps.push(OperatorConsoleStepFrame {
+            step_index: idx,
+            event_label: event.event_type_label().to_string(),
+            active_tab: sim.model().active_tab,
+            filter: sim.model().filter,
+            scroll_offset: sim.model().scroll_offset,
+            visible_rows: sim.model().visible_row_total(),
+            changed_cells,
+            diff_runs,
+            running: sim.is_running(),
+        });
+    }
+
+    let final_screen = buffer_to_string(&prev_buffer);
+    let m = sim.model();
+    OperatorConsoleSimulationReport {
+        initialized: m.initialized,
+        running_at_end: sim.is_running(),
+        quit_requested: m.quit_requested,
+        active_tab: m.active_tab,
+        filter: m.filter,
+        scroll_offset: m.scroll_offset,
+        events_processed: m.events_processed,
+        refreshes_requested: m.refreshes_requested,
+        ticks_observed: m.ticks_observed,
+        frame_count: sim.frame_count(),
+        total_changed_cells,
+        steps,
+        final_screen,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -395,5 +1021,52 @@ mod tests {
         let screen = render_doctor_screen(&model, 100);
         assert!(screen.contains("pass 1  warn 1  fail 0"), "{screen}");
         assert!(screen.contains("DR-SECURITY-013"), "{screen}");
+    }
+
+    #[test]
+    fn operator_console_model_tabs_filters_scrolls_diffs_and_quits() {
+        let doctor = DoctorScreenModel {
+            overall_status: "warn".to_string(),
+            profile: "balanced".to_string(),
+            checks: vec![
+                DoctorScreenCheck {
+                    status: "PASS".to_string(),
+                    code: "DR-CONFIG-001".to_string(),
+                    scope: "config.resolve".to_string(),
+                    message: "configuration resolved".to_string(),
+                },
+                DoctorScreenCheck {
+                    status: "WARN".to_string(),
+                    code: "DR-SECURITY-013".to_string(),
+                    scope: "security.signing_key".to_string(),
+                    message: "no receipt signing key".to_string(),
+                },
+                DoctorScreenCheck {
+                    status: "FAIL".to_string(),
+                    code: "DR-SQLMODEL-015".to_string(),
+                    scope: "storage.sqlmodel_schema".to_string(),
+                    message: "schema drift detected".to_string(),
+                },
+            ],
+        };
+        let events = ["j", "f", "tab", "f", "tick", "q"]
+            .into_iter()
+            .map(|tok| parse_console_key_token(tok).expect("valid token"))
+            .collect::<Vec<_>>();
+        let report = run_operator_console_simulation(
+            OperatorConsoleModel::new(doctor, fleet_model()),
+            &events,
+            100,
+            24,
+        );
+        assert!(report.initialized);
+        assert!(!report.running_at_end);
+        assert!(report.quit_requested);
+        assert_eq!(report.active_tab, OperatorConsoleTab::Fleet);
+        assert_eq!(report.filter, OperatorRowFilter::FailOnly);
+        assert_eq!(report.ticks_observed, 1);
+        assert_eq!(report.events_processed, 6);
+        assert!(report.total_changed_cells > 0);
+        assert!(report.final_screen.contains("[2:FLEET*]"));
     }
 }

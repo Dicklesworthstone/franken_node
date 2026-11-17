@@ -24,14 +24,16 @@ fn fixture(verdict: VerificationVerdict) -> (VerifyingKey, SignedSessionTranscri
     );
     let mut session = sdk.create_session("portable-audit-session").unwrap();
     if verdict != VerificationVerdict::Inconclusive {
-        let bundle: Value = serde_json::from_slice(BUNDLE).unwrap();
+        let bundle: frankenengine_verifier_sdk::bundle::ReplayBundle =
+            serde_json::from_slice(BUNDLE).unwrap();
+        let canonical = frankenengine_verifier_sdk::bundle::serialize(&bundle).unwrap();
         let pass = sdk
-            .verify_trust_state(BUNDLE, bundle["integrity_hash"].as_str().unwrap())
+            .verify_trust_state(&canonical, &bundle.integrity_hash)
             .unwrap();
         assert_eq!(pass.verdict, VerificationVerdict::Pass);
         sdk.record_session_step(&mut session, &pass).unwrap();
         if verdict == VerificationVerdict::Fail {
-            let fail = sdk.verify_migration_artifact(BUNDLE).unwrap();
+            let fail = sdk.verify_migration_artifact(&canonical).unwrap();
             assert_eq!(fail.verdict, VerificationVerdict::Fail);
             sdk.record_session_step(&mut session, &fail).unwrap();
         } else {

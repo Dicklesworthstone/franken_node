@@ -2323,6 +2323,10 @@ pub enum TrustCommand {
     /// Audit gossip trust-fabric convergence, compiled claim scoreboards, ecosystem registry/reputation, revocation freshness tiers, adversarial campaign gates, and isolation-rail routing.
     #[command(name = "fabric-convergence-audit")]
     FabricConvergenceAudit(TrustFabricConvergenceAuditArgs),
+
+    /// Audit SLSA/Sigstore provenance admission gates, cohort-aware BPET phenotype baselines, VEF claim coverage gates, and degraded-mode override audit schemas.
+    #[command(name = "provenance-and-cohort-audit")]
+    ProvenanceAndCohortAudit(TrustProvenanceAndCohortAuditArgs),
 }
 
 #[derive(Debug, Parser)]
@@ -2556,6 +2560,29 @@ pub struct TrustFabricConvergenceAuditArgs {
     pub trace_id: String,
 
     /// Emit `franken-node/trust-fabric-convergence-audit-cli/v1` JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Parser)]
+pub struct TrustProvenanceAndCohortAuditArgs {
+    /// Candidate artifact identifier evaluated by the provenance admission gate.
+    #[arg(long, default_value = "pkg:npm/@acme/runtime-adapter@1.4.0")]
+    pub artifact_id: String,
+
+    /// Builder identifier attested on the candidate artifact.
+    #[arg(long, default_value = "builder:github-actions-slsa-l3")]
+    pub builder_id: String,
+
+    /// Minimum VEF claim coverage threshold (`0.0..=1.0`).
+    #[arg(long, default_value_t = 0.80)]
+    pub min_coverage: f64,
+
+    /// Correlation trace identifier.
+    #[arg(long, default_value = "trace-provenance-cohort-audit")]
+    pub trace_id: String,
+
+    /// Emit `franken-node/trust-provenance-and-cohort-audit-cli/v1` JSON.
     #[arg(long)]
     pub json: bool,
 }
@@ -3448,6 +3475,12 @@ pub enum OpsCommand {
     /// Evaluate DGIS maintainer/publisher fragility fixtures, deterministic npm graph seeds, and validation-proof economics SLO reports.
     #[command(name = "dgis-fixture-suite")]
     DgisFixtureSuite(OpsDgisFixtureSuiteArgs),
+    /// Run the interactive `frankentui::Model` operator console over live workspace `doctor` and `fleet` stores (`--keys` event script or `--interactive-stdin` event loop).
+    #[command(name = "operator-console")]
+    OperatorConsole(OpsOperatorConsoleArgs),
+    /// Audit live operator JSON output contracts alongside W3C trace correlation, anti-amplification bounds, control-frame decode guardrails, pre-staging budgets, and strict loop checkpoint guards.
+    #[command(name = "contract-and-transport-audit")]
+    ContractAndTransportAudit(OpsContractAndTransportAuditArgs),
 }
 
 #[derive(Debug, Parser)]
@@ -3580,6 +3613,56 @@ pub struct OpsDgisFixtureSuiteArgs {
     pub seed_file: Option<PathBuf>,
 
     /// Emit `franken-node/ops-dgis-fixture-suite-cli/v1` JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Parser)]
+pub struct OpsOperatorConsoleArgs {
+    /// Workspace root whose `.franken-node` configuration and SQLite stores back the live `doctor` and `fleet` console models.
+    #[arg(long, default_value = ".")]
+    pub workspace: PathBuf,
+
+    /// Fleet zone filter (`all` or a specific zone identifier).
+    #[arg(long, default_value = "all")]
+    pub zone: String,
+
+    /// Comma-separated symbolic event script (`tab`, `1`, `2`, `f`, `j`, `k`, `g`, `r`, `tick`, `q`, `resize:WxH`) injected before stdin.
+    #[arg(long)]
+    pub keys: Option<String>,
+
+    /// Drive an interactive line/key event loop from standard input (`tab`, `1`, `2`, `f`, `j`, `k`, `g`, `r`, `q`), re-probing live workspace stores on `r`.
+    #[arg(long)]
+    pub interactive_stdin: bool,
+
+    /// Console frame width in columns (clamped to `>= 60`).
+    #[arg(long, default_value_t = 100)]
+    pub width: u16,
+
+    /// Console frame height in rows (clamped to `>= 12`).
+    #[arg(long, default_value_t = 26)]
+    pub height: u16,
+
+    /// Emit structured JSONL frame/diff/lifecycle events to stderr.
+    #[arg(long)]
+    pub structured_logs_jsonl: bool,
+
+    /// Emit `franken-node/ops-operator-console-cli/v1` JSON instead of rendered frame text.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Parser)]
+pub struct OpsContractAndTransportAuditArgs {
+    /// Workspace directory used to generate live `doctor` and `runtime epoch` envelopes validated against `operator_json_contracts`.
+    #[arg(long, default_value = ".")]
+    pub workspace: PathBuf,
+
+    /// Correlation trace identifier.
+    #[arg(long, default_value = "trace-contract-transport-audit")]
+    pub trace_id: String,
+
+    /// Emit `franken-node/ops-contract-and-transport-audit-cli/v1` JSON.
     #[arg(long)]
     pub json: bool,
 }

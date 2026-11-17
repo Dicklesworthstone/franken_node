@@ -156,3 +156,108 @@ fn fleet_screen_bounds_large_fleets() {
     );
     assert!(screen.contains("50 more not shown"), "{screen}");
 }
+
+#[test]
+fn operator_console_interactive_event_loop_updates_tabs_filters_reprobes_and_quits() {
+    use std::io::Write as _;
+    use std::process::Stdio;
+
+    let workspace = workspace();
+    let agent = cli(
+        workspace.path(),
+        &[
+            "fleet",
+            "agent",
+            "--node-id",
+            "edge-console-1",
+            "--zone",
+            "us-west",
+            "--once",
+            "--json",
+        ],
+    );
+    assert!(
+        agent.status.success(),
+        "fleet agent: {}\n{}",
+        String::from_utf8_lossy(&agent.stdout),
+        String::from_utf8_lossy(&agent.stderr)
+    );
+
+    // 1. Scripted `--keys` simulation through `ProgramSimulator<OperatorConsoleModel>`.
+    let scripted = cli(
+        workspace.path(),
+        &[
+            "ops",
+            "operator-console",
+            "--keys",
+            "j,f,tab,tick,q",
+            "--json",
+        ],
+    );
+    assert!(
+        scripted.status.success(),
+        "ops operator-console --keys: {}\n{}",
+        String::from_utf8_lossy(&scripted.stdout),
+        String::from_utf8_lossy(&scripted.stderr)
+    );
+    let rep: serde_json::Value = serde_json::from_slice(&scripted.stdout).expect("console json");
+    assert_eq!(
+        rep["schema_version"],
+        "franken-node/ops-operator-console-cli/v1"
+    );
+    assert_eq!(rep["ok"], true);
+    assert_eq!(rep["fleet_node_count"], 1);
+    assert_eq!(rep["simulation"]["active_tab"], "fleet");
+    assert_eq!(rep["simulation"]["filter"], "warn_or_degraded");
+    assert_eq!(rep["simulation"]["quit_requested"], true);
+    assert_eq!(rep["simulation"]["running_at_end"], false);
+    assert!(
+        rep["simulation"]["total_changed_cells"]
+            .as_u64()
+            .unwrap_or(0)
+            > 0
+    );
+
+    // 2. Live `--interactive-stdin` loop with `r` re-probing live SQLite stores + JSONL frame logs.
+    let mut child = Command::new(env!("CARGO_BIN_EXE_franken-node"))
+        .current_dir(workspace.path())
+        .env_remove("FRANKEN_NODE_PROFILE")
+        .env_remove("FRANKEN_NODE_FLEET_CONTROL_PLANE_URL")
+        .env("NO_COLOR", "1")
+        .args([
+            "ops",
+            "operator-console",
+            "--interactive-stdin",
+            "--structured-logs-jsonl",
+            "--json",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn interactive operator-console");
+    {
+        let stdin = child.stdin.as_mut().expect("child stdin");
+        writeln!(stdin, "tab\nr\nresize:110x28\nq").expect("write stdin events");
+    }
+    let interactive = child.wait_with_output().expect("wait interactive console");
+    assert!(
+        interactive.status.success(),
+        "interactive console failed: {}\n{}",
+        String::from_utf8_lossy(&interactive.stdout),
+        String::from_utf8_lossy(&interactive.stderr)
+    );
+    let irep: serde_json::Value =
+        serde_json::from_slice(&interactive.stdout).expect("interactive json");
+    assert_eq!(irep["live_reprobes"], 1);
+    assert_eq!(irep["simulation"]["refreshes_requested"], 1);
+    assert_eq!(irep["simulation"]["active_tab"], "fleet");
+    assert_eq!(irep["simulation"]["quit_requested"], true);
+    let final_screen = irep["simulation"]["final_screen"]
+        .as_str()
+        .expect("final_screen");
+    assert!(final_screen.contains("edge-console-1"), "{final_screen}");
+    let stderr = String::from_utf8_lossy(&interactive.stderr);
+    assert!(stderr.contains("FTUI_OPERATOR_CONSOLE_FRAME"), "{stderr}");
+    assert!(stderr.contains("FTUI_OPERATOR_CONSOLE_QUIT"), "{stderr}");
+}

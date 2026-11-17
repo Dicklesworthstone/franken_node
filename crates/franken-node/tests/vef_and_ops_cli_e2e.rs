@@ -845,3 +845,85 @@ fn runtime_region_quiescence_and_trust_fabric_convergence_cli_e2e() {
     assert_eq!(stale_revocation["ok"], false);
     assert_eq!(stale_revocation["revocation_freshness"]["allowed"], false);
 }
+
+#[test]
+fn contract_transport_and_provenance_cohort_audits_enforce_contracts() {
+    let dir = TempDir::new().expect("tempdir");
+
+    let contract_ok = json_ok(
+        dir.path(),
+        &["ops", "contract-and-transport-audit", "--json"],
+    );
+    assert_eq!(
+        contract_ok["schema_version"],
+        "franken-node/ops-contract-and-transport-audit-cli/v1"
+    );
+    assert_eq!(contract_ok["ok"], true);
+    assert_eq!(
+        contract_ok["operator_json_contracts"]["doctor_live_valid"],
+        true
+    );
+    assert_eq!(
+        contract_ok["operator_json_contracts"]["runtime_epoch_valid"],
+        true
+    );
+    assert_eq!(
+        contract_ok["operator_json_contracts"]["missing_required_rejected"],
+        true
+    );
+    assert_eq!(
+        contract_ok["trace_correlation"]["orphan_span_rejected"],
+        true
+    );
+    assert_eq!(
+        contract_ok["anti_amplification"]["unauthenticated_flood_blocked"],
+        true
+    );
+    assert_eq!(
+        contract_ok["frame_guardrails"]["oversized_frame_blocked"],
+        true
+    );
+    assert_eq!(
+        contract_ok["checkpoint_guard"]["strict_uncheckpointed_violation_caught"],
+        true
+    );
+
+    let prov_ok = json_ok(
+        dir.path(),
+        &["trust", "provenance-and-cohort-audit", "--json"],
+    );
+    assert_eq!(
+        prov_ok["schema_version"],
+        "franken-node/trust-provenance-and-cohort-audit-cli/v1"
+    );
+    assert_eq!(prov_ok["ok"], true);
+    assert_eq!(prov_ok["provenance_gate"]["compliant_passed"], true);
+    assert_eq!(prov_ok["provenance_gate"]["untrusted_rejected"], true);
+    assert_eq!(
+        prov_ok["bpet_cohort_baseline"]["event_code"],
+        "BPET-COHORT-004"
+    );
+    assert_eq!(prov_ok["vef_claim_gate"]["compliant_claim_passed"], true);
+    assert_eq!(prov_ok["vef_claim_gate"]["gap_claim_blocked"], true);
+    assert_eq!(
+        prov_ok["degraded_mode_audit"]["malformed_override_rejected"],
+        true
+    );
+
+    // Requiring coverage above the 0.92 snapshot must fail closed.
+    let prov_low_cov = json_err(
+        dir.path(),
+        &[
+            "trust",
+            "provenance-and-cohort-audit",
+            "--min-coverage",
+            "0.99",
+            "--json",
+        ],
+    );
+    assert_eq!(prov_low_cov["ok"], false);
+    assert_eq!(
+        prov_low_cov["vef_claim_gate"]["compliant_claim_passed"],
+        false
+    );
+}
