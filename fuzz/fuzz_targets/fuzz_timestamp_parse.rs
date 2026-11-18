@@ -1,7 +1,7 @@
 #![no_main]
 
+use chrono::{DateTime, Datelike, NaiveDateTime, TimeZone, Timelike, Utc};
 use libfuzzer_sys::fuzz_target;
-use chrono::{DateTime, Utc, NaiveDateTime, TimeZone};
 
 fuzz_target!(|data: &[u8]| {
     // Convert bytes to string, handling invalid UTF-8 gracefully
@@ -20,19 +20,34 @@ fuzz_target!(|data: &[u8]| {
             // Re-formatting should produce valid timestamp
             let formatted = dt.to_rfc3339();
             let re_parsed = formatted.parse::<DateTime<Utc>>();
-            assert!(re_parsed.is_ok(), "Round-trip RFC 3339 parsing should succeed");
+            assert!(
+                re_parsed.is_ok(),
+                "Round-trip RFC 3339 parsing should succeed"
+            );
 
             // Verify temporal bounds (prevent overflow/underflow attacks)
-            assert!(dt.timestamp() >= -62135596800, "Timestamp should not underflow");
-            assert!(dt.timestamp() <= 253402300799, "Timestamp should not overflow");
+            assert!(
+                dt.timestamp() >= -62135596800,
+                "Timestamp should not underflow"
+            );
+            assert!(
+                dt.timestamp() <= 253402300799,
+                "Timestamp should not overflow"
+            );
 
             // Verify nanosecond precision is reasonable
-            assert!(dt.timestamp_subsec_nanos() < 1_000_000_000, "Nanoseconds should be valid");
+            assert!(
+                dt.timestamp_subsec_nanos() < 1_000_000_000,
+                "Nanoseconds should be valid"
+            );
 
             // Test timestamp consistency
             let unix_timestamp = dt.timestamp();
             let reconstructed = Utc.timestamp_opt(unix_timestamp, dt.timestamp_subsec_nanos());
-            assert!(reconstructed.single().is_some(), "Timestamp reconstruction should succeed");
+            assert!(
+                reconstructed.single().is_some(),
+                "Timestamp reconstruction should succeed"
+            );
         }
 
         // 2. Test NaiveDateTime parsing (no timezone)
@@ -42,12 +57,22 @@ fuzz_target!(|data: &[u8]| {
             // Re-formatting should be consistent
             let formatted = naive_dt.format("%Y-%m-%d %H:%M:%S").to_string();
             let re_parsed = NaiveDateTime::parse_from_str(&formatted, "%Y-%m-%d %H:%M:%S");
-            assert!(re_parsed.is_ok(), "Round-trip naive datetime should succeed");
-            assert_eq!(naive_dt, re_parsed.unwrap(), "Round-trip should preserve value");
+            assert!(
+                re_parsed.is_ok(),
+                "Round-trip naive datetime should succeed"
+            );
+            assert_eq!(
+                naive_dt,
+                re_parsed.unwrap(),
+                "Round-trip should preserve value"
+            );
 
             // Verify date components are reasonable
             let year = naive_dt.year();
-            assert!(year >= -262144 && year <= 262143, "Year should be within reasonable bounds");
+            assert!(
+                year >= -262144 && year <= 262143,
+                "Year should be within reasonable bounds"
+            );
 
             let month = naive_dt.month();
             assert!(month >= 1 && month <= 12, "Month should be 1-12");
@@ -87,8 +112,11 @@ fuzz_target!(|data: &[u8]| {
                 let re_parsed = NaiveDateTime::parse_from_str(&reformatted, format);
 
                 if re_parsed.is_ok() {
-                    assert_eq!(parsed, re_parsed.unwrap(),
-                              "Format round-trip should be consistent");
+                    assert_eq!(
+                        parsed,
+                        re_parsed.unwrap(),
+                        "Format round-trip should be consistent"
+                    );
                 }
             }
         }
@@ -102,12 +130,18 @@ fuzz_target!(|data: &[u8]| {
                     // Valid timestamp conversion
 
                     // Verify round-trip
-                    assert_eq!(dt.timestamp(), timestamp_num,
-                              "Timestamp round-trip should be exact");
+                    assert_eq!(
+                        dt.timestamp(),
+                        timestamp_num,
+                        "Timestamp round-trip should be exact"
+                    );
 
                     // Test formatting
                     let formatted = dt.to_rfc3339();
-                    assert!(!formatted.is_empty(), "Formatted timestamp should not be empty");
+                    assert!(
+                        !formatted.is_empty(),
+                        "Formatted timestamp should not be empty"
+                    );
                 }
             }
         }
@@ -115,8 +149,11 @@ fuzz_target!(|data: &[u8]| {
         // 5. Test malformed timestamp handling
 
         // Test obviously invalid formats
-        if timestamp_input.contains("32/") || timestamp_input.contains("/32/") ||
-           timestamp_input.contains("25:") || timestamp_input.contains(":70") {
+        if timestamp_input.contains("32/")
+            || timestamp_input.contains("/32/")
+            || timestamp_input.contains("25:")
+            || timestamp_input.contains(":70")
+        {
             // These should fail parsing in most reasonable formats
             let rfc3339_result = timestamp_input.parse::<DateTime<Utc>>();
             // Don't assert failure here as some edge cases might be valid
@@ -126,14 +163,20 @@ fuzz_target!(|data: &[u8]| {
         if timestamp_input.contains('\0') {
             let result = timestamp_input.parse::<DateTime<Utc>>();
             // Null bytes should be rejected
-            assert!(result.is_err(), "Null bytes in timestamps should be rejected");
+            assert!(
+                result.is_err(),
+                "Null bytes in timestamps should be rejected"
+            );
         }
 
         // Test extremely long numeric strings (potential DoS)
         if timestamp_input.chars().all(|c| c.is_ascii_digit()) && timestamp_input.len() > 50 {
             let result = timestamp_input.parse::<i64>();
             // Extremely long numbers should be rejected
-            assert!(result.is_err(), "Extremely long numeric timestamps should be rejected");
+            assert!(
+                result.is_err(),
+                "Extremely long numeric timestamps should be rejected"
+            );
         }
 
         // Test special date edge cases
@@ -151,8 +194,10 @@ fuzz_target!(|data: &[u8]| {
             if let Ok(dt) = timestamp_input.parse::<DateTime<Utc>>() {
                 let year = dt.year();
                 // Verify it's actually a leap year
-                assert!(year % 4 == 0 && (year % 100 != 0 || year % 400 == 0),
-                        "February 29th should only occur in leap years");
+                assert!(
+                    year % 4 == 0 && (year % 100 != 0 || year % 400 == 0),
+                    "February 29th should only occur in leap years"
+                );
             }
         }
     }

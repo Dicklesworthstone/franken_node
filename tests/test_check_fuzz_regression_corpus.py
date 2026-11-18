@@ -91,6 +91,62 @@ class CheckFuzzRegressionCorpusTests(unittest.TestCase):
             report_ok = gate.evaluate_fuzz_corpus(repo)
             self.assertEqual(report_ok["verdict"], "PASS", report_ok["issues"])
 
+    def test_risk_weighted_smoke_subset_and_seeded_crash_negative_control(self) -> None:
+        import subprocess
+
+        subset = gate.select_fuzz_smoke_subset(ROOT, count=8, rotation_key="sha-alpha")
+        self.assertEqual(len(subset), 8)
+        self.assertEqual(len(set(subset)), 8)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "fuzz/artifacts/fuzz_ssrf_policy").mkdir(parents=True)
+            (repo / "fuzz/Cargo.toml").write_text(
+                '[[bin]]\nname = "fuzz_ssrf_policy"\npath = "fuzz_targets/fuzz_ssrf_policy.rs"\n'
+                '[[bin]]\nname = "fuzz_plain_helper"\npath = "fuzz_targets/fuzz_plain_helper.rs"\n',
+                encoding="utf-8",
+            )
+            (repo / "fuzz/regression").mkdir(parents=True)
+            (repo / "fuzz/regression/manifest.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "franken-node/fuzz-regression-manifest/v1",
+                        "promoted_target_regressions": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            # Clean smoke run passes and emits verified sha256 receipts.
+            receipt_ok = repo / "ok_receipts.jsonl"
+            rc_ok = gate.run_fuzz_smoke_subset(
+                repo,
+                targets=["fuzz_ssrf_policy", "fuzz_plain_helper"],
+                max_total_time_secs=5,
+                receipt_jsonl=receipt_ok,
+                runner=lambda cmd, _cwd, _t: subprocess.CompletedProcess(cmd, 0, "", ""),
+            )
+            self.assertEqual(rc_ok, 0)
+            rows_ok = [json.loads(line) for line in receipt_ok.read_text().splitlines()]
+            self.assertEqual(len(rows_ok), 2)
+            self.assertTrue(all(gate.verify_smoke_receipt_sha256(r) for r in rows_ok))
+
+            # Seeded crash artifact or nonzero exit fails closed (no `|| true` masking!).
+            (repo / "fuzz/artifacts/fuzz_ssrf_policy/crash-deadbeef").write_bytes(b"\xde\xad")
+            receipt_fail = repo / "fail_receipts.jsonl"
+            rc_fail = gate.run_fuzz_smoke_subset(
+                repo,
+                targets=["fuzz_ssrf_policy"],
+                max_total_time_secs=5,
+                receipt_jsonl=receipt_fail,
+                runner=lambda cmd, _cwd, _t: subprocess.CompletedProcess(cmd, 0, "", ""),
+            )
+            self.assertEqual(rc_fail, 1)
+            row_fail = json.loads(receipt_fail.read_text().splitlines()[0])
+            self.assertTrue(row_fail["crash"])
+            self.assertFalse(row_fail["passed"])
+            self.assertTrue(gate.verify_smoke_receipt_sha256(row_fail))
+
 
 if __name__ == "__main__":
     unittest.main()

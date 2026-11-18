@@ -43,6 +43,103 @@ SCHEMA_LIST = "franken-node/inline-lib-test-gate/v1"
 SCHEMA_PREFLIGHT = "franken-node/inline-lib-test-preflight/v1"
 SCHEMA_SHARD_PLAN = "franken-node/inline-lib-test-shard-plan/v1"
 SCHEMA_SHARD_RECEIPT = "franken-node/inline-lib-test-shard-receipt/v1"
+RECEIPT_DIGEST_DOMAIN = b"franken-node:inline-shard-receipt:v1:"
+
+
+def compute_receipt_sha256(receipt: dict[str, object]) -> str:
+    unsigned = {k: v for k, v in receipt.items() if k != "receipt_sha256"}
+    canonical = json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    hasher = hashlib.sha256()
+    hasher.update(RECEIPT_DIGEST_DOMAIN)
+    hasher.update(len(canonical).to_bytes(8, "little"))
+    hasher.update(canonical)
+    return f"sha256:{hasher.hexdigest()}"
+
+
+def verify_receipt_sha256(receipt: dict[str, object]) -> bool:
+    claimed = receipt.get("receipt_sha256")
+    if not isinstance(claimed, str) or not claimed.startswith("sha256:"):
+        return False
+    return compute_receipt_sha256(receipt) == claimed
+
+
+def changed_module_prefixes(changed_files: Sequence[str]) -> list[str]:
+    prefixes: set[str] = set()
+    src_marker = "crates/franken-node/src/"
+    for raw in changed_files:
+        norm = raw.strip().replace("\\", "/")
+        if not norm.startswith(src_marker) or not norm.endswith(".rs"):
+            continue
+        rel = norm[len(src_marker) :]
+        if rel in {"lib.rs", "main.rs"}:
+            continue
+        parts = [p for p in rel[:-3].split("/") if p and p != "mod"]
+        if parts:
+            prefixes.add("::".join(parts))
+            prefixes.add(parts[0])
+    return sorted(prefixes, key=lambda s: (-s.count("::"), s))
+
+
+def select_bounded_shards(
+    plan: dict[str, object],
+    shard_budget: int,
+    rotation_key: str = "default",
+    changed_files: Sequence[str] = (),
+) -> dict[str, object]:
+    if shard_budget < 1:
+        raise ValueError("shard_budget must be at least 1")
+    shards = list(plan.get("shards", []))  # type: ignore[arg-type]
+    full_count = len(shards)
+    if full_count == 0 or shard_budget >= full_count:
+        updated = dict(plan)
+        updated["full_total_shards"] = full_count
+        updated["selected_shards"] = full_count
+        updated["selection_policy"] = "all"
+        return updated
+
+    mod_prefixes = changed_module_prefixes(changed_files)
+    prioritized: list[dict[str, object]] = []
+    remaining: list[dict[str, object]] = []
+    for shard in shards:
+        targets = shard.get("target_set", [])
+        matched = False
+        if mod_prefixes and isinstance(targets, list):
+            for t_name in targets:
+                t_str = str(t_name)
+                if any(
+                    t_str == pref or t_str.startswith(f"{pref}::")
+                    for pref in mod_prefixes
+                ):
+                    matched = True
+                    break
+        if matched:
+            prioritized.append(shard)
+        else:
+            remaining.append(shard)
+
+    selected: list[dict[str, object]] = prioritized[:shard_budget]
+    slots_left = shard_budget - len(selected)
+    if slots_left > 0 and remaining:
+        seed_int = int.from_bytes(
+            hashlib.sha256(rotation_key.encode("utf-8")).digest()[:8], "little"
+        )
+        start = seed_int % len(remaining)
+        for offset in range(min(slots_left, len(remaining))):
+            selected.append(remaining[(start + offset) % len(remaining)])
+
+    selected.sort(key=lambda s: int(s["shard_index"]))
+    selected_tests = sum(int(s.get("test_count", 0)) for s in selected)
+    updated = dict(plan)
+    updated["full_total_shards"] = full_count
+    updated["full_total_tests"] = int(plan.get("total_tests", 0))
+    updated["selected_shards"] = len(selected)
+    updated["total_shards"] = len(selected)
+    updated["total_tests"] = selected_tests
+    updated["selection_policy"] = "changed_modules_plus_rotating_slice"
+    updated["rotation_key"] = rotation_key
+    updated["matched_changed_shards"] = min(len(prioritized), shard_budget)
+    updated["shards"] = selected
+    return updated
 
 
 def strip_ansi(text: str) -> str:
@@ -385,8 +482,11 @@ def run_shards(
             stdout_path.write_text(stdout, encoding="utf-8")
             stderr_path.write_text(stderr, encoding="utf-8")
             observed = test_results_from_run(f"{stdout}\n{stderr}")
+            passed_count = sum(1 for v in observed.values() if v == "ok")
+            failed_count = sum(1 for v in observed.values() if v == "FAILED")
+            ignored_count = sum(1 for v in observed.values() if v == "ignored")
             outcome_class = classify_outcome(returncode, stdout, stderr)
-            receipt = {
+            receipt: dict[str, object] = {
                 "schema_version": SCHEMA_SHARD_RECEIPT,
                 "plan_id": plan["plan_id"],
                 "shard_id": shard_id,
@@ -404,12 +504,16 @@ def run_shards(
                 "exit_code": returncode,
                 "passed": returncode == 0,
                 "outcome_class": outcome_class,
+                "passed_count": passed_count,
+                "failed_count": failed_count,
+                "ignored_count": ignored_count,
                 "stdout_path": str(stdout_path),
                 "stderr_path": str(stderr_path),
                 "stdout_summary": stream_summary(stdout),
                 "stderr_summary": stream_summary(stderr),
                 "observed_results": observed,
             }
+            receipt["receipt_sha256"] = compute_receipt_sha256(receipt)
             handle.write(json.dumps(receipt, sort_keys=True) + "\n")
             handle.flush()
 
@@ -462,15 +566,21 @@ def summarize_shard_execution(
                 for name, status in results.items():
                     merged_results[str(name)] = str(status)
     observed_ok = sum(1 for status in merged_results.values() if status == "ok")
+    observed_failed = sum(1 for status in merged_results.values() if status == "FAILED")
+    observed_ignored = sum(1 for status in merged_results.values() if status == "ignored")
     return {
         "schema_version": "franken-node/inline-test-execution-summary/v1",
         "target_name": plan.get("target_name", "frankenengine-node::lib"),
         "target_kind": plan.get("target_kind", "lib"),
         "discovered_tests": int(plan.get("total_tests", 0)),
         "executed_tests": observed_ok,
+        "failed_tests": observed_failed,
+        "ignored_tests": observed_ignored,
         "crash_inputs_replayed": 0,
         "seed_count": 0,
         "total_shards": int(plan.get("total_shards", 0)),
+        "full_total_shards": int(plan.get("full_total_shards", plan.get("total_shards", 0))),
+        "selection_policy": str(plan.get("selection_policy", "all")),
         "exit_code": exit_code,
     }
 
@@ -711,6 +821,23 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--max-tests-per-shard", type=int, default=DEFAULT_MAX_TESTS_PER_SHARD)
     parser.add_argument(
+        "--shard-budget",
+        type=int,
+        default=None,
+        help="Optional bounded number of shards to select (changed modules prioritized, plus deterministic rotation).",
+    )
+    parser.add_argument(
+        "--rotation-key",
+        default=os.environ.get("GITHUB_SHA", "default"),
+        help="Deterministic rotation key (e.g., commit SHA) when --shard-budget is set.",
+    )
+    parser.add_argument(
+        "--changed-files-from",
+        type=Path,
+        default=None,
+        help="Optional newline-delimited changed file list used to prioritize matching module shards.",
+    )
+    parser.add_argument(
         "--shard-timeout-seconds",
         type=int,
         default=DEFAULT_SHARD_TIMEOUT_SECONDS,
@@ -821,6 +948,16 @@ def main(argv: list[str] | None = None) -> int:
             features=args.features,
             use_rch=not args.no_rch,
         )
+        if args.shard_budget is not None:
+            changed_lines: list[str] = []
+            if args.changed_files_from is not None and args.changed_files_from.is_file():
+                changed_lines = args.changed_files_from.read_text(encoding="utf-8").splitlines()
+            plan = select_bounded_shards(
+                plan,
+                shard_budget=args.shard_budget,
+                rotation_key=args.rotation_key,
+                changed_files=changed_lines,
+            )
         if args.plan_jsonl_out:
             write_plan_jsonl(plan, args.plan_jsonl_out)
         if args.emit_shard_plan:

@@ -142,7 +142,8 @@ fuzz_target!(|case: ReplayTraceDigestFuzzCase| {
         ),
     };
     assert_ne!(
-        first, flipped,
+        first,
+        flipped,
         "INV-TRACE-DIGEST-FIELD-SENSITIVITY violated: flipping scalar field \
          selector {} did not change the digest — a field was dropped from \
          the preimage",
@@ -152,20 +153,10 @@ fuzz_target!(|case: ReplayTraceDigestFuzzCase| {
     // ── (D) Length-prefix safety ────────────────────────────────────
     // ("ab", "cd") and ("a", "bcd") have identical concatenated content
     // but different length prefixes; their digests MUST differ.
-    let split_a = WorkflowTrace::compute_digest_bytes(
-        "ab",
-        "cd",
-        &steps,
-        &environment,
-        &schema_version,
-    );
-    let split_b = WorkflowTrace::compute_digest_bytes(
-        "a",
-        "bcd",
-        &steps,
-        &environment,
-        &schema_version,
-    );
+    let split_a =
+        WorkflowTrace::compute_digest_bytes("ab", "cd", &steps, &environment, &schema_version);
+    let split_b =
+        WorkflowTrace::compute_digest_bytes("a", "bcd", &steps, &environment, &schema_version);
     assert_ne!(
         split_a, split_b,
         "INV-TRACE-DIGEST-LENGTH-PREFIX violated: (\"ab\", \"cd\") collided \
@@ -235,7 +226,8 @@ fn bounded_step(mut step: TraceStep) -> TraceStep {
     step.output.truncate(MAX_BYTES_PER_FIELD);
     step.side_effects.truncate(8);
     for effect in &mut step.side_effects {
-        effect.kind = bounded_str(&effect.kind, MAX_FIELD_BYTES);
+        effect.effect_kind = bounded_str(&effect.effect_kind, MAX_FIELD_BYTES);
+        effect.capability_ref = bounded_str(&effect.capability_ref, MAX_FIELD_BYTES);
         effect.payload.truncate(MAX_BYTES_PER_FIELD);
     }
     step

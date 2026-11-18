@@ -7,6 +7,7 @@ on:
       - 'crates/franken-node/tests/golden_artifacts_comprehensive.rs'
       - 'tests/golden/**'
       - 'fuzz/**'
+      - '.github/workflows/security-golden-artifacts.yml'
   push:
     branches: [main]
     paths:
@@ -14,15 +15,18 @@ on:
       - 'crates/franken-node/tests/golden_artifacts_comprehensive.rs'
       - 'tests/golden/**'
       - 'fuzz/**'
+      - '.github/workflows/security-golden-artifacts.yml'
+  workflow_dispatch: {}
 
 jobs:
   golden-artifacts:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust nightly
-        uses: dtolnay/rust-toolchain@nightly
+      - name: Checkout sibling repositories and pinned toolchain
+        uses: ./.github/actions/franken-siblings
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -33,38 +37,28 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Run golden artifacts tests (fail if mismatched)
+      - name: Run security golden artifacts tests (fail if mismatched)
         run: |
-          echo "Running golden artifacts tests..."
-          cargo test golden_artifacts_comprehensive --verbose
+          set -euo pipefail
+          cargo test --locked -p frankenengine-node --features extended-surfaces,test-support \
+            --test golden_security_serialization \
+            --test artifact_signing_golden_tests \
+            --test decision_receipt_signed_golden_conformance \
+            --test decision_receipt_golden_vectors_conformance
 
-          echo "Checking for any uncommitted .golden files..."
-          if git diff --name-only | grep -E '\.golden$'; then
-            echo "ERROR: Found uncommitted .golden files after test run"
-            echo "This indicates golden files were auto-generated during CI"
-            echo "Golden files should be committed in advance, not generated in CI"
-            echo "To fix: Run 'UPDATE_GOLDENS=1 cargo test golden_artifacts_comprehensive' locally"
-            echo "Then commit the updated .golden files"
+          if [ -n "$(git status --porcelain -- '*.golden' 'tests/golden/**' 'crates/franken-node/tests/golden/**')" ]; then
+            echo "ERROR: Uncommitted or newly created .golden files detected during CI run"
+            git status --short -- '*.golden' 'tests/golden/**' 'crates/franken-node/tests/golden/**'
             exit 1
           fi
 
-          echo "Verifying no .golden files were created..."
-          if find tests/golden/ -name "*.golden" -newer . 2>/dev/null | head -1; then
-            echo "ERROR: New .golden files were created during CI run"
-            echo "Golden files must be committed in advance"
-            exit 1
-          fi
-
-      - name: Run security regression tests
+      - name: Run promoted security fuzz regression suite
         run: |
-          echo "Running security regression tests..."
-          cargo test --test '' security::fuzz_regression
-
-      - name: Validate golden artifacts coverage
-        run: |
-          echo "Validating golden test coverage..."
-          cargo test --verbose golden_infrastructure_test
-          cargo test --verbose golden_tests_require_update_goldens_env_for_creation
+          set -euo pipefail
+          python3 tests/test_check_fuzz_regression_corpus.py
+          python3 scripts/check_fuzz_regression_corpus.py --json > fuzz_corpus_gate.json
+          cargo test --locked -p frankenengine-node --features extended-surfaces,test-support \
+            --test remote_capability_gate_fuzz_regression
 
       - name: Upload test evidence
         if: always()
@@ -72,62 +66,46 @@ jobs:
         with:
           name: security-golden-test-evidence
           path: |
-            target/debug/deps/
-            tests/golden/
+            fuzz_corpus_gate.json
+            crates/franken-node/tests/golden/
           retention-days: 7
 
   security-fuzzing:
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+    timeout-minutes: 120
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust nightly
-        uses: dtolnay/rust-toolchain@nightly
+      - name: Checkout sibling repositories and pinned toolchain
+        uses: ./.github/actions/franken-siblings
 
-      - name: Cache cargo registry
+      - name: Cache cargo registry and fuzz target
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             fuzz/target
-          key: ${{ runner.os }}-fuzz-${{ hashFiles('fuzz/Cargo.lock') }}
+          key: ${{ runner.os }}-fuzz-${{ hashFiles('Cargo.lock', 'fuzz/Cargo.toml') }}
 
-      - name: Validate fuzz targets compile
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: Compile all 146 registered fuzz targets
         run: |
-          echo "Validating fuzz targets compile correctly..."
-          cd fuzz
-          cargo check --bin fuzz_constant_time_comparison
-          cargo check --bin fuzz_threshold_signature_verification
-          cargo check --bin fuzz_epoch_key_derivation
-          cargo check --bin fuzz_intent_firewall
-          cargo check --bin fuzz_ssrf_policy
+          set -euo pipefail
+          cargo check --locked --manifest-path fuzz/Cargo.toml --bins
 
-      - name: Run short fuzzing campaigns (CI validation)
+      - name: Run unmasked risk-weighted + rotating fuzz smoke subset with sha256 receipts
         run: |
-          echo "Running short fuzzing validation campaigns..."
-          cd fuzz
-
-          # Run each fuzzer for 30 seconds to validate they work
-          timeout 30s cargo fuzz run fuzz_constant_time_comparison -- -max_total_time=25 || true
-          timeout 30s cargo fuzz run fuzz_threshold_signature_verification -- -max_total_time=25 || true
-          timeout 30s cargo fuzz run fuzz_epoch_key_derivation -- -max_total_time=25 || true
-          timeout 30s cargo fuzz run fuzz_intent_firewall -- -max_total_time=25 || true
-          timeout 30s cargo fuzz run fuzz_ssrf_policy -- -max_total_time=25 || true
-
-      - name: Check for fuzzing crashes
-        run: |
-          echo "Checking for any fuzzing crashes..."
-          if find fuzz/artifacts/ -name "crash-*" 2>/dev/null | head -1; then
-            echo "ERROR: Fuzzing discovered crashes!"
-            echo "Found crash artifacts:"
-            find fuzz/artifacts/ -name "crash-*" || true
-            echo "Run 'cargo fuzz tmin <target> <crash-file>' to minimize and debug"
-            exit 1
-          else
-            echo "No crashes found during fuzzing validation"
-          fi
+          set -euo pipefail
+          mkdir -p artifacts/verification
+          python3 scripts/check_fuzz_regression_corpus.py \
+            --run-smoke-subset 8 \
+            --rotation-key "${GITHUB_SHA}" \
+            --max-total-time 20 \
+            --receipt-jsonl artifacts/verification/fuzz_smoke_receipts.jsonl
 
       - name: Upload fuzzing evidence
         if: always()
@@ -135,48 +113,40 @@ jobs:
         with:
           name: security-fuzzing-evidence
           path: |
+            artifacts/verification/fuzz_smoke_receipts.jsonl
             fuzz/artifacts/
             fuzz/corpus/
           retention-days: 7
 
   security-integration:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     needs: [golden-artifacts, security-fuzzing]
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust nightly
-        uses: dtolnay/rust-toolchain@nightly
+      - name: Checkout sibling repositories and pinned toolchain
+        uses: ./.github/actions/franken-siblings
 
-      - name: Run full security module tests
+      - name: "Run inline security:: module unit tests"
         run: |
-          echo "Running comprehensive security module tests..."
-          cargo test --verbose --test '' -- security::
+          set -euo pipefail
+          env CARGO_INCREMENTAL=0 RUSTFLAGS="--cfg franken_node_inline_tests" cargo test \
+            --locked \
+            -p frankenengine-node \
+            --lib \
+            --features extended-surfaces,test-support \
+            security::
 
       - name: Validate security hardening patterns
         run: |
-          echo "Validating security hardening patterns are present..."
-
-          # Check for constant-time comparison usage
-          if ! grep -r "ct_eq\|ct_eq_bytes" crates/franken-node/src/security/ --include="*.rs"; then
-            echo "WARNING: No constant-time comparisons found in security module"
-          fi
-
-          # Check for saturating arithmetic
-          if ! grep -r "saturating_" crates/franken-node/src/security/ --include="*.rs"; then
-            echo "WARNING: No saturating arithmetic found in security module"
-          fi
-
-          # Check for proper error handling
-          if grep -r "unwrap()" crates/franken-node/src/security/ --include="*.rs"; then
-            echo "WARNING: Found unwrap() calls in security module - consider proper error handling"
-          fi
+          set -euo pipefail
+          grep -rq "ct_eq\|ct_eq_bytes\|ConstantTimeEq" crates/franken-node/src/security/ --include="*.rs"
+          grep -rq "saturating_" crates/franken-node/src/security/ --include="*.rs"
 
       - name: Security gate summary
         run: |
           echo "=== Security Domain CI Gate Summary ==="
-          echo "✅ Golden artifacts tests passed (no mismatches)"
-          echo "✅ Security fuzzing targets compile and run"
-          echo "✅ Security regression tests passed"
-          echo "✅ Security module integration tests passed"
-          echo "🔒 Security domain validation complete"
+          echo "Golden artifacts tests passed (no mismatches)"
+          echo "All 146 fuzz targets compiled and risk-weighted subset smoked cleanly"
+          echo "Promoted fuzz regressions and inline security:: unit tests passed"

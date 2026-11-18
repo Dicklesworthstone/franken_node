@@ -54,14 +54,15 @@ jobs:
   # cohort end-to-end so the claim stays measured, not merely attested.
   migration-velocity-live:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        run: rustup toolchain install stable --profile minimal
+      - name: Checkout sibling repositories and pinned toolchain
+        uses: ./.github/actions/franken-siblings
 
       - name: Build franken-node (release)
-        run: cargo build -p frankenengine-node --release --bin franken-node
+        run: cargo build --locked -p frankenengine-node --release --bin franken-node
 
       - name: Live re-measurement over the frozen cohort
         run: |

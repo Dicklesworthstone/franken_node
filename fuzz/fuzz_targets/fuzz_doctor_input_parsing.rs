@@ -125,6 +125,20 @@ fn assert_doctor_cli_shape(cli: &Cli) {
                     );
                 }
             }
+            Some(DoctorCommand::ProcessSpawnReadiness(readiness)) => {
+                if let Some(path) = &readiness.bubblewrap_path {
+                    assert!(
+                        !path.as_os_str().is_empty(),
+                        "process-spawn-readiness bubblewrap_path should remain non-empty when parsed"
+                    );
+                }
+            }
+            Some(DoctorCommand::ExpectedLossActions(actions)) => {
+                assert!(
+                    !actions.operator.trim().is_empty(),
+                    "expected-loss-actions operator should remain non-empty"
+                );
+            }
             None => {
                 assert!(
                     !args.trace_id.trim().is_empty(),

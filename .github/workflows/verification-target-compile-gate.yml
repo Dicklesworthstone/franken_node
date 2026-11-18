@@ -77,7 +77,7 @@ jobs:
         run: |
           set +e
           cargo build --manifest-path fuzz/Cargo.toml --bins --keep-going \
-            > fuzz_census.log 2>&1 || true
+            > fuzz_census.log 2>&1
           echo "fuzz census exit: $?"
       - name: Evaluate gate (warn-only unless BLOCKING=1)
         run: |

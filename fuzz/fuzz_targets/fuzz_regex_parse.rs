@@ -39,8 +39,8 @@ fn validate_safe_regex(pattern: &str) -> Result<(), String> {
 }
 
 fn calculate_nesting_depth(pattern: &str) -> usize {
-    let mut max_depth = 0;
-    let mut current_depth = 0;
+    let mut max_depth: usize = 0;
+    let mut current_depth: usize = 0;
 
     for ch in pattern.chars() {
         match ch {
@@ -62,8 +62,8 @@ fn has_dangerous_quantifiers(pattern: &str) -> bool {
     // Look for patterns that could cause exponential backtracking
     let dangerous_patterns = [
         "(.*).*", "(.*)+", "(.+)*", "(.+)+", // Nested quantifiers
-        "(a*)*", "(a+)+", "(a?)?",           // Self-referential quantifiers
-        "(a|a)*", "(a|b)*a*",                // Alternation with overlapping quantifiers
+        "(a*)*", "(a+)+", "(a?)?", // Self-referential quantifiers
+        "(a|a)*", "(a|b)*a*", // Alternation with overlapping quantifiers
     ];
 
     for dangerous in &dangerous_patterns {
@@ -81,8 +81,11 @@ fn has_dangerous_quantifiers(pattern: &str) -> bool {
     }
 
     // Look for excessive repetition in quantifiers
-    if pattern.matches('{').count() > 10 || pattern.matches('*').count() > 20 ||
-       pattern.matches('+').count() > 20 || pattern.matches('?').count() > 20 {
+    if pattern.matches('{').count() > 10
+        || pattern.matches('*').count() > 20
+        || pattern.matches('+').count() > 20
+        || pattern.matches('?').count() > 20
+    {
         return true;
     }
 
@@ -103,17 +106,23 @@ fn is_balanced_brackets(pattern: &str) -> bool {
             '(' => paren_count += 1,
             ')' => {
                 paren_count -= 1;
-                if paren_count < 0 { return false; }
+                if paren_count < 0 {
+                    return false;
+                }
             }
             '[' => bracket_count += 1,
             ']' => {
                 bracket_count -= 1;
-                if bracket_count < 0 { return false; }
+                if bracket_count < 0 {
+                    return false;
+                }
             }
             '{' => brace_count += 1,
             '}' => {
                 brace_count -= 1;
-                if brace_count < 0 { return false; }
+                if brace_count < 0 {
+                    return false;
+                }
             }
             _ => {}
         }
@@ -136,8 +145,10 @@ fuzz_target!(|data: &[u8]| {
         let validation_duration = start_time.elapsed();
 
         // Validation should not take too long (ReDoS protection)
-        assert!(validation_duration < Duration::from_millis(100),
-               "Regex validation should not take too long");
+        assert!(
+            validation_duration < Duration::from_millis(100),
+            "Regex validation should not take too long"
+        );
 
         match validation_result {
             Ok(()) => {
@@ -147,30 +158,45 @@ fuzz_target!(|data: &[u8]| {
                 assert!(!regex_input.is_empty(), "Valid pattern should not be empty");
 
                 // 2. Pattern should not be excessively long
-                assert!(regex_input.len() <= 10000, "Valid pattern should have reasonable length");
+                assert!(
+                    regex_input.len() <= 10000,
+                    "Valid pattern should have reasonable length"
+                );
 
                 // 3. Nesting depth should be reasonable
                 let depth = calculate_nesting_depth(regex_input);
-                assert!(depth <= 100, "Valid pattern should have reasonable nesting depth");
+                assert!(
+                    depth <= 100,
+                    "Valid pattern should have reasonable nesting depth"
+                );
 
                 // 4. Should not contain dangerous quantifier patterns
-                assert!(!has_dangerous_quantifiers(regex_input),
-                       "Valid pattern should not have dangerous quantifiers");
+                assert!(
+                    !has_dangerous_quantifiers(regex_input),
+                    "Valid pattern should not have dangerous quantifiers"
+                );
 
                 // 5. Should not contain null bytes
-                assert!(!regex_input.contains('\0'), "Valid pattern should not contain null bytes");
+                assert!(
+                    !regex_input.contains('\0'),
+                    "Valid pattern should not contain null bytes"
+                );
 
                 // 6. Brackets should be balanced
-                assert!(is_balanced_brackets(regex_input), "Valid pattern should have balanced brackets");
+                assert!(
+                    is_balanced_brackets(regex_input),
+                    "Valid pattern should have balanced brackets"
+                );
 
                 // 7. Test that the pattern can be used safely (simulate compilation)
                 let compile_start = Instant::now();
                 // In a real implementation, you'd compile the regex here
                 // For now, we just simulate the time constraint
                 let compile_duration = compile_start.elapsed();
-                assert!(compile_duration < Duration::from_millis(50),
-                       "Regex compilation should be fast");
-
+                assert!(
+                    compile_duration < Duration::from_millis(50),
+                    "Regex compilation should be fast"
+                );
             }
             Err(_err) => {
                 // Invalid regex pattern - verify security checks are working
@@ -178,40 +204,56 @@ fuzz_target!(|data: &[u8]| {
                 // 1. Dangerous patterns should be consistently rejected
                 if has_dangerous_quantifiers(regex_input) {
                     let result2 = validate_safe_regex(regex_input);
-                    assert!(result2.is_err(), "Dangerous quantifiers should be consistently rejected");
+                    assert!(
+                        result2.is_err(),
+                        "Dangerous quantifiers should be consistently rejected"
+                    );
                 }
 
                 // 2. Extremely long patterns should be rejected
                 if regex_input.len() > 10000 {
-                    assert!(validate_safe_regex(regex_input).is_err(),
-                           "Extremely long patterns should be rejected");
+                    assert!(
+                        validate_safe_regex(regex_input).is_err(),
+                        "Extremely long patterns should be rejected"
+                    );
                 }
 
                 // 3. Deep nesting should be rejected
                 if calculate_nesting_depth(regex_input) > 100 {
-                    assert!(validate_safe_regex(regex_input).is_err(),
-                           "Deep nesting should be rejected");
+                    assert!(
+                        validate_safe_regex(regex_input).is_err(),
+                        "Deep nesting should be rejected"
+                    );
                 }
 
                 // 4. Null bytes should be rejected
                 if regex_input.contains('\0') {
-                    assert!(validate_safe_regex(regex_input).is_err(),
-                           "Null bytes should be rejected");
+                    assert!(
+                        validate_safe_regex(regex_input).is_err(),
+                        "Null bytes should be rejected"
+                    );
                 }
 
                 // 5. Unbalanced brackets should be rejected
                 if !is_balanced_brackets(regex_input) {
-                    assert!(validate_safe_regex(regex_input).is_err(),
-                           "Unbalanced brackets should be rejected");
+                    assert!(
+                        validate_safe_regex(regex_input).is_err(),
+                        "Unbalanced brackets should be rejected"
+                    );
                 }
             }
         }
 
         // Test common ReDoS patterns
         let redos_patterns = [
-            "(a+)+", "(a*)*", "(a+)+b", "(a|a)*", "(a|b)*a*",
+            "(a+)+",
+            "(a*)*",
+            "(a+)+b",
+            "(a|a)*",
+            "(a|b)*a*",
             "a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*",
-            "(((((((((a)))))))))", "a{1000000}",
+            "(((((((((a)))))))))",
+            "a{1000000}",
         ];
 
         for pattern in &redos_patterns {
@@ -273,7 +315,10 @@ fuzz_target!(|data: &[u8]| {
             let result = validate_safe_regex(regex_input);
             // Check for overlapping alternations that could cause backtracking
             if regex_input.contains("(a|a)") || regex_input.contains("(.*|.*)") {
-                assert!(result.is_err(), "Overlapping alternations should be rejected");
+                assert!(
+                    result.is_err(),
+                    "Overlapping alternations should be rejected"
+                );
             }
         }
 
@@ -281,7 +326,9 @@ fuzz_target!(|data: &[u8]| {
         let perf_start = Instant::now();
         let _result = validate_safe_regex(regex_input);
         let perf_duration = perf_start.elapsed();
-        assert!(perf_duration < Duration::from_millis(100),
-               "Regex validation should always be fast (ReDoS protection)");
+        assert!(
+            perf_duration < Duration::from_millis(100),
+            "Regex validation should always be fast (ReDoS protection)"
+        );
     }
 });

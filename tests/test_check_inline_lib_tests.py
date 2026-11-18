@@ -22,9 +22,12 @@ from check_inline_lib_tests import (  # noqa: E402
     evaluate,
     inline_test_names,
     main,
-    run_shards,
     preflight,
     readme_documents_inline_lane_compiled_out,
+    run_shards,
+    select_bounded_shards,
+    summarize_shard_execution,
+    verify_receipt_sha256,
 )
 
 
@@ -581,6 +584,92 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(franken_node_inline_tests)
                 receipt["observed_results"]["perf::timing::tests::manual_timing_probe"],
                 "ignored",
             )
+            self.assertEqual(receipt["passed_count"], 2)
+            self.assertEqual(receipt["failed_count"], 0)
+            self.assertEqual(receipt["ignored_count"], 1)
+            self.assertTrue(verify_receipt_sha256(receipt))
+
+    def test_select_bounded_shards_prioritizes_changed_modules_and_rotates(self) -> None:
+        multi_list = "\n".join(
+            [
+                "api::routes::tests::a1: test",
+                "connector::saga::tests::c1: test",
+                "runtime::lane_scheduler::tests::r1: test",
+                "security::remote_cap::tests::s1: test",
+                "storage::models::tests::st1: test",
+                "vef::proof::tests::v1: test",
+            ]
+        )
+        full_plan = build_shard_plan(multi_list, max_tests_per_shard=1, use_rch=False)
+        self.assertEqual(full_plan["total_shards"], 6)
+
+        selected_a = select_bounded_shards(
+            full_plan,
+            shard_budget=2,
+            rotation_key="commit-aaa",
+            changed_files=["crates/franken-node/src/security/remote_cap.rs"],
+        )
+        self.assertEqual(selected_a["total_shards"], 2)
+        self.assertEqual(selected_a["full_total_shards"], 6)
+        self.assertEqual(selected_a["matched_changed_shards"], 1)
+        flat_targets = [t for s in selected_a["shards"] for t in s["target_set"]]
+        self.assertIn("security::remote_cap::tests::s1", flat_targets)
+
+        # Sweeping distinct rotation keys covers every shard.
+        covered: set[str] = set()
+        for idx in range(24):
+            sub = select_bounded_shards(
+                full_plan,
+                shard_budget=2,
+                rotation_key=f"sha-{idx}",
+                changed_files=[],
+            )
+            for s in sub["shards"]:
+                covered.update(s["target_set"])
+        self.assertEqual(len(covered), 6)
+
+    def test_seeded_broken_shard_fails_closed_with_tamper_evident_receipt(self) -> None:
+        plan = build_shard_plan(SHARD_LIST_OUTPUT, max_tests_per_shard=2, use_rch=False)
+
+        def broken_runner(command: list[str], timeout_seconds: int) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(
+                command,
+                101,
+                stdout=(
+                    "running 2 tests\n"
+                    "test security::threshold_sig::tests::accepts_quorum ... ok\n"
+                    "test security::threshold_sig::tests::rejects_duplicate_signer ... FAILED\n"
+                    "test result: FAILED. 1 passed; 1 failed; 0 ignored\n"
+                ),
+                stderr="",
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            receipt_jsonl = root / "receipts.jsonl"
+            rc = run_shards(
+                plan,
+                receipt_jsonl=receipt_jsonl,
+                output_dir=root / "shards",
+                resume=False,
+                fail_fast=True,
+                runner=broken_runner,
+            )
+            self.assertEqual(rc, 1)
+            lines = receipt_jsonl.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(lines), 1)
+            rec = json.loads(lines[0])
+            self.assertFalse(rec["passed"])
+            self.assertEqual(rec["outcome_class"], "test_failure")
+            self.assertEqual(rec["passed_count"], 1)
+            self.assertEqual(rec["failed_count"], 1)
+            self.assertTrue(verify_receipt_sha256(rec))
+            rec["passed"] = True
+            self.assertFalse(verify_receipt_sha256(rec))
+
+            summary = summarize_shard_execution(plan, receipt_jsonl, rc)
+            self.assertEqual(summary["exit_code"], 1)
+            self.assertEqual(summary["failed_tests"], 1)
 
 
 if __name__ == "__main__":

@@ -143,6 +143,97 @@ jobs:
             franken_node/inline-bin-tests.stdout.txt
             franken_node/inline-bin-tests.summary.json
 
+  pr-sharded-inline-lib-tests:
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.run_full_inline_tests) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    needs: inline-lib-test-preflight
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    defaults:
+      run:
+        shell: bash
+        working-directory: franken_node
+    steps:
+      - name: Check out franken_node
+        uses: actions/checkout@v4
+        with:
+          path: franken_node
+          fetch-depth: 2
+
+      - name: Materialize the complete pinned test source set
+        run: |
+          set -euo pipefail
+          bash scripts/bootstrap_source.sh --workspace "$PWD" \
+            --engine-ref 4566c5890b0434a206430d7bd1d3a62b37b02961 \
+            --receipt "$RUNNER_TEMP/inline-pr-source-inputs.tsv"
+
+      - name: Install pinned Rust nightly
+        uses: dtolnay/rust-toolchain@7c8d7d138f5c09cef361f8214cf96882cd029cdb
+        with:
+          toolchain: nightly-2026-09-21
+          components: clippy, rustfmt
+
+      - name: Cache cargo home and target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: inline-lib-tests
+          key: ${{ hashFiles('franken_node/Cargo.lock', 'franken_node/crates/franken-node/Cargo.toml') }}
+          workspaces: |
+            franken_node -> target
+          cache-all-crates: "true"
+
+      - name: Discover >=20,000 inline library tests and compute changed-module shard slice
+        run: |
+          set -euo pipefail
+          git diff --name-only HEAD~1..HEAD > changed-files.txt 2>/dev/null || : > changed-files.txt
+          env CARGO_INCREMENTAL=0 RUSTFLAGS="--cfg franken_node_inline_tests" cargo build \
+            --locked \
+            -p frankenengine-node \
+            --bin franken-node \
+            --features extended-surfaces,test-support
+          env CARGO_INCREMENTAL=0 RUSTFLAGS="--cfg franken_node_inline_tests" cargo test \
+            --locked \
+            -p frankenengine-node \
+            --lib \
+            --features extended-surfaces,test-support \
+            -- --list \
+            | tee inline-lib-pr.list
+          python3 scripts/check_inline_lib_tests.py inline-lib-pr.list --min-tests 20000 --json
+
+      - name: Execute bounded changed-module + rotating inline library shards with sha256 receipts
+        run: |
+          set -euo pipefail
+          python3 scripts/check_inline_lib_tests.py inline-lib-pr.list \
+            --run-shards \
+            --fail-fast \
+            --no-rch \
+            --max-tests-per-shard 500 \
+            --shard-budget 12 \
+            --rotation-key "${GITHUB_SHA}" \
+            --changed-files-from changed-files.txt \
+            --shard-timeout-seconds 1800 \
+            --plan-jsonl-out inline-lib-pr.plan.jsonl \
+            --receipt-jsonl inline-lib-pr.receipts.jsonl \
+            --summary-json inline-lib-pr.summary.json \
+            --output-dir inline-lib-pr-shards
+
+      - name: Upload PR/push inline library shard receipts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: inline-lib-pr-shard-evidence
+          path: |
+            ${{ runner.temp }}/inline-pr-source-inputs.tsv
+            franken_node/changed-files.txt
+            franken_node/inline-lib-pr.list
+            franken_node/inline-lib-pr.plan.jsonl
+            franken_node/inline-lib-pr.receipts.jsonl
+            franken_node/inline-lib-pr.summary.json
+            franken_node/inline-lib-pr-shards/
+
   full-inline-lib-tests:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_full_inline_tests }}
     runs-on: ubuntu-latest

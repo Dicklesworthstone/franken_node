@@ -6,14 +6,17 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
+use base64::Engine as _;
+use libfuzzer_sys::fuzz_target;
 use serde_json::json;
 
 // Mock types for fuzzing
-use frankenengine_node::dgis::fragility_fixtures::{load_fixture_from_json, SpofKindLabel, ExpectedFinding};
+use frankenengine_node::dgis::fragility_fixtures::{
+    load_fixture_from_json, ExpectedFinding, SpofKindLabel,
+};
 use frankenengine_node::dgis::fragility_model::{MaintainerProfile, PublisherProfile};
-use frankenengine_node::dgis::graph_ingestion::{GraphNode, GraphEdge};
+use frankenengine_node::dgis::graph_ingestion::{GraphEdge, GraphNode};
 use frankenengine_node::dgis::spof_detection::SpofDetectorConfig;
 
 #[derive(Debug, Clone, Arbitrary)]
@@ -177,7 +180,7 @@ impl MockFragilityFixture {
                         "trust_score": (i as f64) * 0.1,
                         "verification_status": "verified",
                         "last_activity_days": i * 10
-                    })
+                    }),
                 )
             })
             .collect();
@@ -190,7 +193,7 @@ impl MockFragilityFixture {
                         "trust_score": (i as f64) * 0.15,
                         "package_count": i * 5,
                         "verification_status": "verified"
-                    })
+                    }),
                 )
             })
             .collect();
@@ -258,21 +261,24 @@ impl MockFragilityFixture {
         match variant {
             SerializationVariant::Standard => serde_json::to_string(&fixture).unwrap(),
             SerializationVariant::Pretty => serde_json::to_string_pretty(&fixture).unwrap(),
-            SerializationVariant::Compact => serde_json::to_string(&fixture).unwrap().replace(" ", ""),
+            SerializationVariant::Compact => {
+                serde_json::to_string(&fixture).unwrap().replace(" ", "")
+            }
             SerializationVariant::WithNulls => {
                 let mut s = serde_json::to_string(&fixture).unwrap();
                 s.insert_str(10, "null,");
                 s
-            },
-            SerializationVariant::MixedSpacing => {
-                serde_json::to_string(&fixture).unwrap().replace(":", " : ").replace(",", " , ")
-            },
+            }
+            SerializationVariant::MixedSpacing => serde_json::to_string(&fixture)
+                .unwrap()
+                .replace(":", " : ")
+                .replace(",", " , "),
             SerializationVariant::ExtraFields => {
                 let mut obj = fixture.as_object().unwrap().clone();
                 obj.insert("extra_field".to_string(), json!("extra_value"));
                 obj.insert("unknown_config".to_string(), json!(42));
                 serde_json::to_string(&obj).unwrap()
-            },
+            }
         }
     }
 }
@@ -282,41 +288,39 @@ impl JsonMalformationType {
         match self {
             JsonMalformationType::UnterminatedString => {
                 format!("{{\"name\":\"test\"")
-            },
+            }
             JsonMalformationType::UnterminatedObject => {
                 format!("{{\"name\":\"test\",\"description\":\"test\"")
-            },
+            }
             JsonMalformationType::UnterminatedArray => {
                 format!("{{\"nodes\":[{{\"id\":1}}")
-            },
-            JsonMalformationType::MissingCommas => {
-                base_content.replace(",", "")
-            },
-            JsonMalformationType::ExtraCommas => {
-                base_content.replace(":", ":,").replace("}", ",}")
-            },
-            JsonMalformationType::WrongBrackets => {
-                base_content.replace("{", "[").replace("}", "]")
-            },
-            JsonMalformationType::InvalidEscapes => {
-                base_content.replace("\"", "\\\"\\x").replace("\\", "\\\\\\")
-            },
+            }
+            JsonMalformationType::MissingCommas => base_content.replace(",", ""),
+            JsonMalformationType::ExtraCommas => base_content.replace(":", ":,").replace("}", ",}"),
+            JsonMalformationType::WrongBrackets => base_content.replace("{", "[").replace("}", "]"),
+            JsonMalformationType::InvalidEscapes => base_content
+                .replace("\"", "\\\"\\x")
+                .replace("\\", "\\\\\\"),
             JsonMalformationType::TrailingGarbage => {
                 format!("{}<script>alert(1)</script>", base_content)
-            },
+            }
             JsonMalformationType::LeadingGarbage => {
                 format!("/*comment*/{}", base_content)
-            },
+            }
             JsonMalformationType::MiddleGarbage => {
                 let mid = base_content.len() / 2;
-                format!("{}/**/garbage/**/{}", &base_content[..mid], &base_content[mid..])
-            },
+                format!(
+                    "{}/**/garbage/**/{}",
+                    &base_content[..mid],
+                    &base_content[mid..]
+                )
+            }
             JsonMalformationType::ControlChars => {
                 format!("{}\x00\x01\x02", base_content)
-            },
+            }
             JsonMalformationType::UnicodeErrors => {
                 format!("{}\u{202E}\u{FEFF}", base_content)
-            },
+            }
         }
     }
 }
@@ -346,7 +350,8 @@ impl InjectionType {
             "config_overrides": null,
             "expected_findings": [],
             target_field: format!("{}{}", payload, injection_payload)
-        }).to_string()
+        })
+        .to_string()
     }
 }
 
@@ -464,7 +469,8 @@ impl StructureConfusionType {
                 "edges": null,
                 "config_overrides": "invalid",
                 "expected_findings": 123
-            }).to_string(),
+            })
+            .to_string(),
             StructureConfusionType::NestedArrays => json!({
                 "name": "nested_test",
                 "description": "test",
@@ -475,18 +481,24 @@ impl StructureConfusionType {
                 "edges": [],
                 "config_overrides": null,
                 "expected_findings": []
-            }).to_string(),
+            })
+            .to_string(),
             StructureConfusionType::ObjectAsArray => json!([
-                "name", "test",
-                "description", "test",
-                "now_ms", 1672531200000i64
-            ]).to_string(),
+                "name",
+                "test",
+                "description",
+                "test",
+                "now_ms",
+                1672531200000i64
+            ])
+            .to_string(),
             StructureConfusionType::ArrayAsObject => json!({
                 "0": "name",
                 "1": "test",
                 "2": "description",
                 "length": 3
-            }).to_string(),
+            })
+            .to_string(),
             StructureConfusionType::StringAsNumber => json!({
                 "name": "123.456e7",
                 "description": "test",
@@ -497,7 +509,8 @@ impl StructureConfusionType {
                 "edges": [],
                 "config_overrides": null,
                 "expected_findings": []
-            }).to_string(),
+            })
+            .to_string(),
             StructureConfusionType::NumberAsString => json!({
                 "name": "test",
                 "description": "test",
@@ -512,7 +525,8 @@ impl StructureConfusionType {
                     "min_count": "5",
                     "max_count": true
                 }]
-            }).to_string(),
+            })
+            .to_string(),
             StructureConfusionType::BoolAsString => json!({
                 "name": "test",
                 "description": "test",
@@ -523,7 +537,8 @@ impl StructureConfusionType {
                 "edges": [],
                 "config_overrides": "true",
                 "expected_findings": []
-            }).to_string(),
+            })
+            .to_string(),
             StructureConfusionType::NullConfusion => json!({
                 "name": null,
                 "description": null,
@@ -534,7 +549,8 @@ impl StructureConfusionType {
                 "edges": null,
                 "config_overrides": null,
                 "expected_findings": null
-            }).to_string(),
+            })
+            .to_string(),
         }
     }
 }
@@ -553,7 +569,8 @@ impl BoundaryType {
                 "edges": [],
                 "config_overrides": null,
                 "expected_findings": []
-            }).to_string(),
+            })
+            .to_string(),
             BoundaryType::MinI64 => json!({
                 "name": "boundary_test",
                 "description": "test",
@@ -564,7 +581,8 @@ impl BoundaryType {
                 "edges": [],
                 "config_overrides": null,
                 "expected_findings": []
-            }).to_string(),
+            })
+            .to_string(),
             BoundaryType::MaxU32 => json!({
                 "name": "boundary_test",
                 "description": "test",
@@ -575,7 +593,8 @@ impl BoundaryType {
                 "edges": [],
                 "config_overrides": null,
                 "expected_findings": []
-            }).to_string(),
+            })
+            .to_string(),
             BoundaryType::MinU32 => json!({
                 "name": "boundary_test",
                 "description": "test",
@@ -586,7 +605,8 @@ impl BoundaryType {
                 "edges": [],
                 "config_overrides": null,
                 "expected_findings": []
-            }).to_string(),
+            })
+            .to_string(),
             BoundaryType::ZeroValues => json!({
                 "name": "zero_test",
                 "description": "test",
@@ -601,7 +621,8 @@ impl BoundaryType {
                     "min_count": 0,
                     "max_count": 0
                 }]
-            }).to_string(),
+            })
+            .to_string(),
             BoundaryType::PowerOfTwo => json!({
                 "name": "power_of_two_test",
                 "description": "test",
@@ -612,7 +633,8 @@ impl BoundaryType {
                 "edges": [],
                 "config_overrides": null,
                 "expected_findings": []
-            }).to_string(),
+            })
+            .to_string(),
             BoundaryType::NearOverflow => json!({
                 "name": "near_overflow_test",
                 "description": "test",
@@ -623,7 +645,8 @@ impl BoundaryType {
                 "edges": [],
                 "config_overrides": null,
                 "expected_findings": []
-            }).to_string(),
+            })
+            .to_string(),
             BoundaryType::ExactLimits => json!({
                 "name": "exact_limits_test",
                 "description": "test",
@@ -638,7 +661,8 @@ impl BoundaryType {
                     "min_count": u32::MAX,
                     "max_count": u32::MAX
                 }]
-            }).to_string(),
+            })
+            .to_string(),
         }
     }
 }
@@ -658,28 +682,42 @@ impl EncodingType {
         });
 
         match self {
-            EncodingType::UrlEncoded => {
-                payload.chars().map(|c| format!("%{:02X}", c as u8)).collect::<String>()
-            },
+            EncodingType::UrlEncoded => payload
+                .chars()
+                .map(|c| format!("%{:02X}", c as u8))
+                .collect::<String>(),
             EncodingType::Base64Encoded => {
                 base64::prelude::BASE64_STANDARD.encode(base_fixture.to_string().as_bytes())
-            },
-            EncodingType::HtmlEntities => {
-                base_fixture.to_string().replace("\"", "&quot;").replace("<", "&lt;").replace(">", "&gt;")
-            },
+            }
+            EncodingType::HtmlEntities => base_fixture
+                .to_string()
+                .replace("\"", "&quot;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;"),
             EncodingType::UnicodeNormalization => {
                 "{\u{FF02}name\u{FF02}:\u{FF02}test\u{FF02}}".to_string() // Fullwidth quotes
-            },
+            }
             EncodingType::DoubleEncoded => {
-                let url_encoded = payload.chars().map(|c| format!("%{:02X}", c as u8)).collect::<String>();
-                url_encoded.chars().map(|c| format!("%{:02X}", c as u8)).collect()
-            },
+                let url_encoded = payload
+                    .chars()
+                    .map(|c| format!("%{:02X}", c as u8))
+                    .collect::<String>();
+                url_encoded
+                    .chars()
+                    .map(|c| format!("%{:02X}", c as u8))
+                    .collect()
+            }
             EncodingType::MixedEncoding => {
-                format!("data:application/json;base64,{}", base64::prelude::BASE64_STANDARD.encode(base_fixture.to_string().as_bytes()))
-            },
-            EncodingType::BinaryData => {
-                base_fixture.to_string().bytes().map(|b| format!("\\x{:02x}", b)).collect()
-            },
+                format!(
+                    "data:application/json;base64,{}",
+                    base64::prelude::BASE64_STANDARD.encode(base_fixture.to_string().as_bytes())
+                )
+            }
+            EncodingType::BinaryData => base_fixture
+                .to_string()
+                .bytes()
+                .map(|b| format!("\\x{:02x}", b))
+                .collect(),
         }
     }
 }
@@ -694,14 +732,14 @@ impl NestingType {
                     nested = format!("{{\"level_{}\":{}}}", i, nested);
                 }
                 nested
-            },
+            }
             NestingType::DeepArrays => {
                 let mut nested = "[]".to_string();
                 for _ in 0..max_depth {
                     nested = format!("[{}]", nested);
                 }
                 nested
-            },
+            }
             NestingType::MixedNesting => {
                 let mut nested = "{}".to_string();
                 for i in 0..max_depth {
@@ -712,7 +750,7 @@ impl NestingType {
                     }
                 }
                 nested
-            },
+            }
             NestingType::CyclicalStructure => {
                 // Attempt to create a self-referencing structure (will fail in JSON)
                 json!({
@@ -727,8 +765,9 @@ impl NestingType {
                     "edges": [],
                     "config_overrides": null,
                     "expected_findings": []
-                }).to_string()
-            },
+                })
+                .to_string()
+            }
             NestingType::WideFanout => {
                 let maintainers: serde_json::Value = (0..max_depth)
                     .map(|i| (format!("maintainer_{}", i), json!({"id": i})))
@@ -743,16 +782,19 @@ impl NestingType {
                     "edges": [],
                     "config_overrides": null,
                     "expected_findings": []
-                }).to_string()
-            },
+                })
+                .to_string()
+            }
             NestingType::LinearChain => {
                 let nodes: Vec<serde_json::Value> = (0..max_depth)
-                    .map(|i| json!({
-                        "package_id": format!("pkg_{}", i),
-                        "package_name": format!("package_{}", i),
-                        "version": "1.0.0",
-                        "maintainer_id": format!("maintainer_{}", i)
-                    }))
+                    .map(|i| {
+                        json!({
+                            "package_id": format!("pkg_{}", i),
+                            "package_name": format!("package_{}", i),
+                            "version": "1.0.0",
+                            "maintainer_id": format!("maintainer_{}", i)
+                        })
+                    })
                     .collect();
                 json!({
                     "name": "linear_chain",
@@ -764,8 +806,9 @@ impl NestingType {
                     "edges": [],
                     "config_overrides": null,
                     "expected_findings": []
-                }).to_string()
-            },
+                })
+                .to_string()
+            }
         }
     }
 }
@@ -775,41 +818,70 @@ fuzz_target!(|data: &[u8]| {
 
     if let Ok(fuzz_input) = FuzzInput::arbitrary(&mut u) {
         match fuzz_input.operation {
-            FragilityFixtureTest::ValidFixture { fixture_data, serialization_variant } => {
+            FragilityFixtureTest::ValidFixture {
+                fixture_data,
+                serialization_variant,
+            } => {
                 let json_str = fixture_data.to_json(&serialization_variant);
                 // Test deterministic fixture loading
                 let result1 = load_fixture_from_json(&json_str);
                 let result2 = load_fixture_from_json(&json_str);
-                assert_eq!(result1.is_ok(), result2.is_ok(), "Fixture loading should be deterministic");
-            },
-            FragilityFixtureTest::MalformedJson { attack_type, base_content } => {
+                assert_eq!(
+                    result1.is_ok(),
+                    result2.is_ok(),
+                    "Fixture loading should be deterministic"
+                );
+            }
+            FragilityFixtureTest::MalformedJson {
+                attack_type,
+                base_content,
+            } => {
                 let malformed_json = attack_type.apply(&base_content);
                 let _ = load_fixture_from_json(&malformed_json);
-            },
-            FragilityFixtureTest::InjectionAttacks { injection_type, target_field, payload } => {
+            }
+            FragilityFixtureTest::InjectionAttacks {
+                injection_type,
+                target_field,
+                payload,
+            } => {
                 let attack_json = injection_type.inject(&target_field, &payload);
                 let _ = load_fixture_from_json(&attack_json);
-            },
-            FragilityFixtureTest::ValidationBypass { bypass_type, invalid_data } => {
+            }
+            FragilityFixtureTest::ValidationBypass {
+                bypass_type,
+                invalid_data,
+            } => {
                 let bypass_json = bypass_type.generate(&invalid_data);
                 let _ = load_fixture_from_json(&bypass_json);
-            },
-            FragilityFixtureTest::StructureConfusion { confusion_type, modifier } => {
+            }
+            FragilityFixtureTest::StructureConfusion {
+                confusion_type,
+                modifier,
+            } => {
                 let confused_json = confusion_type.apply(modifier);
                 let _ = load_fixture_from_json(&confused_json);
-            },
-            FragilityFixtureTest::BoundaryTests { boundary_type, magnitude } => {
+            }
+            FragilityFixtureTest::BoundaryTests {
+                boundary_type,
+                magnitude,
+            } => {
                 let boundary_json = boundary_type.generate(magnitude);
                 let _ = load_fixture_from_json(&boundary_json);
-            },
-            FragilityFixtureTest::EncodingAttacks { encoding_type, payload } => {
+            }
+            FragilityFixtureTest::EncodingAttacks {
+                encoding_type,
+                payload,
+            } => {
                 let encoded_json = encoding_type.apply(&payload);
                 let _ = load_fixture_from_json(&encoded_json);
-            },
-            FragilityFixtureTest::NestedObjectAttacks { nesting_type, depth } => {
+            }
+            FragilityFixtureTest::NestedObjectAttacks {
+                nesting_type,
+                depth,
+            } => {
                 let nested_json = nesting_type.apply(depth);
                 let _ = load_fixture_from_json(&nested_json);
-            },
+            }
         }
     }
 });

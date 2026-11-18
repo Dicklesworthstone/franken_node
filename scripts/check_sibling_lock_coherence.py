@@ -268,6 +268,88 @@ def check_workflows(workflows_dir: Path) -> list[dict[str, Any]]:
                 }
             )
 
+    # bd-tenx3.2 / bd-reality-20260923-26n9r.9: scan all workflow files for
+    # malformed `--test ''`, masked `cargo fuzz run ... || true`, missing
+    # franken-siblings on workspace builds, and missing PR inline-lib shard job.
+    bad_empty_test: list[str] = []
+    masked_fuzz_run: list[str] = []
+    for wf_path in sorted(workflows_dir.glob("*.yml")):
+        txt = wf_path.read_text(encoding="utf-8")
+        if "--test ''" in txt or '--test ""' in txt:
+            bad_empty_test.append(wf_path.name)
+        if re.search(r"cargo\s+fuzz\s+run[^\n]*\|\|\s*true", txt):
+            masked_fuzz_run.append(wf_path.name)
+
+    checks.append(
+        {
+            "check": "workflows:no_empty_cargo_test_target",
+            "pass": len(bad_empty_test) == 0,
+            "detail": "clean" if not bad_empty_test else f"found={bad_empty_test}",
+        }
+    )
+    checks.append(
+        {
+            "check": "workflows:no_masked_cargo_fuzz_run",
+            "pass": len(masked_fuzz_run) == 0,
+            "detail": "clean" if not masked_fuzz_run else f"found={masked_fuzz_run}",
+        }
+    )
+
+    for req_wf, req_job in (
+        ("migration-velocity-gate.yml", "migration-velocity-live"),
+        ("security-golden-artifacts.yml", "golden-artifacts"),
+        ("security-golden-artifacts.yml", "security-fuzzing"),
+        ("security-golden-artifacts.yml", "security-integration"),
+    ):
+        p = workflows_dir / req_wf
+        uses_sib = False
+        if p.is_file():
+            try:
+                parsed_wf = yaml.safe_load(p.read_text(encoding="utf-8"))
+                steps = (
+                    parsed_wf.get("jobs", {}).get(req_job, {}).get("steps", [])
+                    if isinstance(parsed_wf, dict)
+                    else []
+                )
+                uses_sib = any(
+                    isinstance(s, dict)
+                    and s.get("uses") == "./.github/actions/franken-siblings"
+                    for s in steps
+                )
+            except yaml.YAMLError:
+                uses_sib = False
+        checks.append(
+            {
+                "check": f"workflow_uses_franken_siblings:{req_wf}:{req_job}",
+                "pass": uses_sib,
+                "detail": "ok" if uses_sib else "missing ./.github/actions/franken-siblings",
+            }
+        )
+
+    inline_wf = workflows_dir / "inline-lib-tests-gate.yml"
+    has_pr_inline_shards = False
+    if inline_wf.is_file():
+        try:
+            parsed_inline = yaml.safe_load(inline_wf.read_text(encoding="utf-8"))
+            jobs_map = parsed_inline.get("jobs", {}) if isinstance(parsed_inline, dict) else {}
+            pr_job = jobs_map.get("pr-sharded-inline-lib-tests", {})
+            if isinstance(pr_job, dict):
+                run_blobs = "\n".join(
+                    str(s.get("run", "")) for s in pr_job.get("steps", []) if isinstance(s, dict)
+                )
+                has_pr_inline_shards = "--run-shards" in run_blobs and "--shard-budget" in run_blobs
+        except yaml.YAMLError:
+            has_pr_inline_shards = False
+    checks.append(
+        {
+            "check": "inline_lib_tests_gate:pr_sharded_lane_wired",
+            "pass": has_pr_inline_shards,
+            "detail": "pr-sharded-inline-lib-tests runs --run-shards --shard-budget"
+            if has_pr_inline_shards
+            else "missing pr-sharded-inline-lib-tests job",
+        }
+    )
+
     return checks
 
 

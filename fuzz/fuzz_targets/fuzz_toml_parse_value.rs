@@ -22,19 +22,26 @@ fuzz_target!(|data: &[u8]| {
                 // 1. Re-serialization should produce valid TOML
                 let serialized = toml::to_string(&parsed_value);
                 assert!(serialized.is_ok(), "Re-serialization should succeed");
+                let serialized_str = serialized.unwrap();
 
                 // 2. Round-trip parsing should succeed
-                let re_parsed: Result<TomlValue, _> = toml::from_str(&serialized.unwrap());
+                let re_parsed: Result<TomlValue, _> = toml::from_str(&serialized_str);
                 assert!(re_parsed.is_ok(), "Round-trip parsing should succeed");
 
                 // 3. Round-trip should preserve semantic equality
                 let re_parsed_value = re_parsed.unwrap();
-                assert_eq!(parsed_value, re_parsed_value, "Round-trip should preserve value");
+                assert_eq!(
+                    parsed_value, re_parsed_value,
+                    "Round-trip should preserve value"
+                );
 
                 // 4. Test value type consistency
                 match &parsed_value {
                     TomlValue::String(s) => {
-                        assert!(s.len() < 1_000_000, "String values should be reasonable size");
+                        assert!(
+                            s.len() < 1_000_000,
+                            "String values should be reasonable size"
+                        );
                     }
                     TomlValue::Integer(i) => {
                         // Integer should be within reasonable bounds
@@ -51,7 +58,10 @@ fuzz_target!(|data: &[u8]| {
                     TomlValue::Datetime(dt) => {
                         // Datetime should have valid string representation
                         let dt_str = dt.to_string();
-                        assert!(!dt_str.is_empty(), "Datetime should have valid string representation");
+                        assert!(
+                            !dt_str.is_empty(),
+                            "Datetime should have valid string representation"
+                        );
                     }
                     TomlValue::Array(arr) => {
                         // Array should have reasonable size
@@ -78,8 +88,11 @@ fuzz_target!(|data: &[u8]| {
                 }
 
                 // 5. Test serialized size is reasonable
-                let serialized_size = serialized.unwrap().len();
-                assert!(serialized_size < 10_000_000, "Serialized TOML should not be excessively large");
+                let serialized_size = serialized_str.len();
+                assert!(
+                    serialized_size < 10_000_000,
+                    "Serialized TOML should not be excessively large"
+                );
 
                 // 6. Test conversion to JSON (common operation)
                 if let Ok(json_str) = serde_json::to_string(&parsed_value) {
@@ -87,7 +100,6 @@ fuzz_target!(|data: &[u8]| {
                     // Conversion should be consistent
                     assert!(json_parse.is_ok(), "TOML->JSON conversion should be valid");
                 }
-
             }
             Err(_err) => {
                 // Invalid TOML parse - verify error handling consistency
@@ -158,12 +170,8 @@ fuzz_target!(|data: &[u8]| {
 
 fn calculate_toml_depth(value: &TomlValue) -> usize {
     match value {
-        TomlValue::Array(arr) => {
-            1 + arr.iter().map(calculate_toml_depth).max().unwrap_or(0)
-        }
-        TomlValue::Table(table) => {
-            1 + table.values().map(calculate_toml_depth).max().unwrap_or(0)
-        }
+        TomlValue::Array(arr) => 1 + arr.iter().map(calculate_toml_depth).max().unwrap_or(0),
+        TomlValue::Table(table) => 1 + table.values().map(calculate_toml_depth).max().unwrap_or(0),
         _ => 0,
     }
 }
