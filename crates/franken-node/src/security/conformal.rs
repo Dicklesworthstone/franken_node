@@ -15,6 +15,12 @@ use crate::connector::canonical_serializer::canonical_bytes;
 pub const CONFORMAL_SAMPLE_SCHEMA_VERSION: &str = "conformal.score_sample.v1";
 pub const CONFORMAL_FROZEN_QUANTILE_SCHEMA_VERSION: &str = "conformal.frozen_quantile_artifact.v1";
 pub const CONFORMAL_ACI_STATE_SCHEMA_VERSION: &str = "conformal.aci_state.v1";
+pub const CONFORMAL_CALIBRATION_RECEIPT_SCHEMA_VERSION: &str =
+    "franken-node/conformal-calibration-receipt/v1";
+pub const CONFORMAL_CALIBRATION_SIGNATURE_DOMAIN: &[u8] =
+    b"franken-node:conformal-calibration-receipt:v1:";
+pub const DEFAULT_MIN_CALIBRATION_SAMPLES: u64 = 16;
+pub const STRICT_CONSERVATIVE_FALLBACK_MODE: &str = "strict_conservative";
 pub const CONFORMAL_GENERATED_AT: &str = "1970-01-01T00:00:00Z";
 pub const MAX_BASIS_POINTS: u16 = 10_000;
 pub const LABEL_BENIGN: &str = "benign";
@@ -51,6 +57,10 @@ pub enum ConformalCalibrationError {
     RiskClassMismatch { expected: String, actual: String },
     #[error("ACI learning rate must be <= 10000 basis points, got {0}")]
     InvalidLearningRate(u16),
+    #[error("minimum calibration sample floor must be >= 1, got {0}")]
+    InvalidMinSamples(u64),
+    #[error("conformal receipt signature verification failed: {reason}")]
+    InvalidSignature { reason: String },
     #[error("failed to serialize conformal artifact: {source}")]
     Serialize { source: serde_json::Error },
 }
@@ -364,6 +374,320 @@ pub fn canonical_artifact_bytes(
     let value = serde_json::to_value(artifact)
         .map_err(|source| ConformalCalibrationError::Serialize { source })?;
     Ok(canonical_bytes(&value))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConformalClassCalibrationPolicy {
+    pub risk_class: String,
+    pub sample_count: u64,
+    pub min_samples_required: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_mode: Option<String>,
+    pub effective_benign_refusal_ceiling_bp: u16,
+    pub quantile: FrozenConformalQuantile,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConformalCandidateAdvisory {
+    pub sample_id: String,
+    pub risk_class: String,
+    pub score_bp: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConformalCandidateVerdict {
+    pub sample_id: String,
+    pub risk_class: String,
+    pub score_bp: u16,
+    pub decision: String,
+    pub fallback_applied: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risk_set: Option<ConformalRiskSet>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConformalReceiptSignature {
+    pub algorithm: String,
+    pub signer_public_key_hex: String,
+    pub signature_hex: String,
+}
+
+#[derive(Serialize)]
+struct ConformalCalibrationUnsignedPayload<'a> {
+    schema_version: &'a str,
+    generated_at: &'a str,
+    target_alpha_bp: u16,
+    min_samples_required: u64,
+    artifact: &'a FrozenConformalArtifact,
+    class_policies: &'a [ConformalClassCalibrationPolicy],
+    evaluations: &'a [ConformalCandidateVerdict],
+    aci_updates: &'a [AciQuantileUpdate],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConformalCalibrationReceipt {
+    pub schema_version: String,
+    pub generated_at: String,
+    pub target_alpha_bp: u16,
+    pub min_samples_required: u64,
+    pub artifact: FrozenConformalArtifact,
+    pub class_policies: Vec<ConformalClassCalibrationPolicy>,
+    pub evaluations: Vec<ConformalCandidateVerdict>,
+    pub aci_updates: Vec<AciQuantileUpdate>,
+    pub receipt_payload_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<ConformalReceiptSignature>,
+}
+
+impl ConformalCalibrationReceipt {
+    pub fn unsigned_canonical_bytes(&self) -> Result<Vec<u8>, ConformalCalibrationError> {
+        let unsigned = ConformalCalibrationUnsignedPayload {
+            schema_version: &self.schema_version,
+            generated_at: &self.generated_at,
+            target_alpha_bp: self.target_alpha_bp,
+            min_samples_required: self.min_samples_required,
+            artifact: &self.artifact,
+            class_policies: &self.class_policies,
+            evaluations: &self.evaluations,
+            aci_updates: &self.aci_updates,
+        };
+        let value = serde_json::to_value(unsigned)
+            .map_err(|source| ConformalCalibrationError::Serialize { source })?;
+        Ok(canonical_bytes(&value))
+    }
+
+    pub fn sign_with_ed25519(
+        &mut self,
+        signing_key: &ed25519_dalek::SigningKey,
+    ) -> Result<(), ConformalCalibrationError> {
+        use ed25519_dalek::Signer as _;
+
+        let payload_bytes = self.unsigned_canonical_bytes()?;
+        let mut msg =
+            Vec::with_capacity(CONFORMAL_CALIBRATION_SIGNATURE_DOMAIN.len() + payload_bytes.len());
+        msg.extend_from_slice(CONFORMAL_CALIBRATION_SIGNATURE_DOMAIN);
+        msg.extend_from_slice(&payload_bytes);
+        let sig = signing_key.sign(&msg);
+        self.signature = Some(ConformalReceiptSignature {
+            algorithm: "ed25519".to_string(),
+            signer_public_key_hex: hex::encode(signing_key.verifying_key().to_bytes()),
+            signature_hex: hex::encode(sig.to_bytes()),
+        });
+        Ok(())
+    }
+
+    pub fn verify_ed25519_signature(
+        &self,
+        trusted_verifying_key: &ed25519_dalek::VerifyingKey,
+    ) -> Result<(), ConformalCalibrationError> {
+        use subtle::ConstantTimeEq as _;
+
+        let sig =
+            self.signature
+                .as_ref()
+                .ok_or_else(|| ConformalCalibrationError::InvalidSignature {
+                    reason: "receipt carries no Ed25519 signature".to_string(),
+                })?;
+        if sig.algorithm != "ed25519" {
+            return Err(ConformalCalibrationError::InvalidSignature {
+                reason: format!("unsupported signature algorithm `{}`", sig.algorithm),
+            });
+        }
+        let expected_pk_hex = hex::encode(trusted_verifying_key.to_bytes());
+        if !bool::from(
+            sig.signer_public_key_hex
+                .as_bytes()
+                .ct_eq(expected_pk_hex.as_bytes()),
+        ) {
+            return Err(ConformalCalibrationError::InvalidSignature {
+                reason: "signer_public_key_hex does not match trusted verifying key".to_string(),
+            });
+        }
+        let payload_bytes = self.unsigned_canonical_bytes()?;
+        let expected_hash = sha256_prefixed(b"conformal.calibration_receipt.v1", &payload_bytes);
+        if !bool::from(
+            self.receipt_payload_sha256
+                .as_bytes()
+                .ct_eq(expected_hash.as_bytes()),
+        ) {
+            return Err(ConformalCalibrationError::InvalidSignature {
+                reason: "receipt_payload_sha256 does not match unsigned canonical payload"
+                    .to_string(),
+            });
+        }
+        let sig_bytes: [u8; 64] = hex::decode(&sig.signature_hex)
+            .map_err(|_| ConformalCalibrationError::InvalidSignature {
+                reason: "signature_hex is not valid hex".to_string(),
+            })?
+            .try_into()
+            .map_err(|_| ConformalCalibrationError::InvalidSignature {
+                reason: "signature_hex must decode to 64 bytes".to_string(),
+            })?;
+        let ed_sig = ed25519_dalek::Signature::from_bytes(&sig_bytes);
+        let mut msg =
+            Vec::with_capacity(CONFORMAL_CALIBRATION_SIGNATURE_DOMAIN.len() + payload_bytes.len());
+        msg.extend_from_slice(CONFORMAL_CALIBRATION_SIGNATURE_DOMAIN);
+        msg.extend_from_slice(&payload_bytes);
+        trusted_verifying_key
+            .verify_strict(&msg, &ed_sig)
+            .map_err(|_| ConformalCalibrationError::InvalidSignature {
+                reason: "Ed25519 signature verification failed".to_string(),
+            })
+    }
+}
+
+/// Calibrate split-conformal quantiles (`q_{1-alpha}`) per risk class and evaluate
+/// candidate advisories with conservative strict fallback whenever `n < min_samples_required`
+/// (`bd-reality-20260923-26n9r.13`).
+pub fn calibrate_advisories_with_fallback(
+    samples: &[ConformalScoreSample],
+    target_alpha_bp: u16,
+    min_samples_required: u64,
+    generated_at: &str,
+    candidates: &[ConformalCandidateAdvisory],
+    aci_learning_rate_bp: Option<u16>,
+    aci_observations: &[AciCoverageObservation],
+) -> Result<ConformalCalibrationReceipt, ConformalCalibrationError> {
+    if min_samples_required == 0 {
+        return Err(ConformalCalibrationError::InvalidMinSamples(0));
+    }
+    let artifact = freeze_quantiles_with_generated_at(samples, target_alpha_bp, generated_at)?;
+    let mut class_policies = Vec::with_capacity(artifact.quantiles.len());
+    for quantile in &artifact.quantiles {
+        let under_sampled = quantile.sample_count < min_samples_required;
+        let effective_benign_refusal_ceiling_bp =
+            MAX_BASIS_POINTS.saturating_sub(quantile.finite_sample_coverage_floor_bp);
+        class_policies.push(ConformalClassCalibrationPolicy {
+            risk_class: quantile.risk_class.clone(),
+            sample_count: quantile.sample_count,
+            min_samples_required,
+            fallback_mode: under_sampled.then(|| STRICT_CONSERVATIVE_FALLBACK_MODE.to_string()),
+            effective_benign_refusal_ceiling_bp,
+            quantile: quantile.clone(),
+        });
+    }
+
+    let mut evaluations = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        if candidate.sample_id.trim().is_empty() {
+            return Err(ConformalCalibrationError::InvalidSample {
+                sample_id: candidate.sample_id.clone(),
+                field: "sample_id",
+                reason: "must not be empty".to_string(),
+            });
+        }
+        let policy = class_policies
+            .iter()
+            .find(|p| p.risk_class == candidate.risk_class)
+            .ok_or_else(|| ConformalCalibrationError::MissingRiskClassQuantile {
+                risk_class: candidate.risk_class.clone(),
+            })?;
+        if policy.fallback_mode.is_some() {
+            // Conservative strict fallback when `n < n_min`: never rely on an
+            // under-sampled conformal quantile; any nonzero anomaly score fails closed.
+            let decision = if candidate.score_bp == 0 {
+                "strict_fallback_allow_zero_score"
+            } else {
+                "strict_fallback_refuse"
+            };
+            evaluations.push(ConformalCandidateVerdict {
+                sample_id: candidate.sample_id.clone(),
+                risk_class: candidate.risk_class.clone(),
+                score_bp: candidate.score_bp,
+                decision: decision.to_string(),
+                fallback_applied: true,
+                risk_set: None,
+            });
+        } else {
+            let risk_set = calibrated_binary_risk_set(
+                &candidate.sample_id,
+                &candidate.risk_class,
+                candidate.score_bp,
+                &policy.quantile,
+            )?;
+            let has_benign = risk_set.included_labels.iter().any(|l| l == LABEL_BENIGN);
+            let has_positive = risk_set.included_labels.iter().any(|l| l == LABEL_POSITIVE);
+            let decision = match (has_benign, has_positive) {
+                (true, false) => "allow_benign",
+                (false, true) => "refuse_positive",
+                _ => "review_ambiguous",
+            };
+            evaluations.push(ConformalCandidateVerdict {
+                sample_id: candidate.sample_id.clone(),
+                risk_class: candidate.risk_class.clone(),
+                score_bp: candidate.score_bp,
+                decision: decision.to_string(),
+                fallback_applied: false,
+                risk_set: Some(risk_set),
+            });
+        }
+    }
+
+    let mut aci_updates = Vec::new();
+    if let Some(lr_bp) = aci_learning_rate_bp {
+        validate_learning_rate(lr_bp)?;
+        let mut states: BTreeMap<String, AciQuantileState> = BTreeMap::new();
+        for quantile in &artifact.quantiles {
+            states.insert(
+                quantile.risk_class.clone(),
+                initialize_aci_state(quantile, lr_bp)?,
+            );
+        }
+        for obs in aci_observations {
+            let state = states.get_mut(&obs.risk_class).ok_or_else(|| {
+                ConformalCalibrationError::MissingRiskClassQuantile {
+                    risk_class: obs.risk_class.clone(),
+                }
+            })?;
+            aci_updates.push(update_aci_quantile(state, obs)?);
+        }
+    }
+
+    let mut receipt = ConformalCalibrationReceipt {
+        schema_version: CONFORMAL_CALIBRATION_RECEIPT_SCHEMA_VERSION.to_string(),
+        generated_at: generated_at.to_string(),
+        target_alpha_bp,
+        min_samples_required,
+        artifact,
+        class_policies,
+        evaluations,
+        aci_updates,
+        receipt_payload_sha256: String::new(),
+        signature: None,
+    };
+    let payload_bytes = receipt.unsigned_canonical_bytes()?;
+    receipt.receipt_payload_sha256 =
+        sha256_prefixed(b"conformal.calibration_receipt.v1", &payload_bytes);
+    Ok(receipt)
+}
+
+/// Deterministic held-out benign + adversarial migration advisory corpus (`24` samples)
+/// used when `--builtin-benign-corpus` is requested on `franken-node trust calibrate-conformal`.
+#[must_use]
+pub fn builtin_benign_migration_calibration_corpus() -> Vec<ConformalScoreSample> {
+    let benign_scores_bp: [u16; 20] = [
+        40, 65, 80, 95, 110, 125, 140, 155, 170, 185, 200, 215, 230, 250, 275, 300, 325, 360, 410,
+        480,
+    ];
+    let positive_scores_bp: [u16; 4] = [9_100, 9_350, 9_600, 9_850];
+    let mut out = Vec::with_capacity(benign_scores_bp.len() + positive_scores_bp.len());
+    for (idx, score_bp) in benign_scores_bp.into_iter().enumerate() {
+        out.push(ConformalScoreSample {
+            sample_id: format!("benign-migration-{:02}", idx + 1),
+            risk_class: "migration_advisory".to_string(),
+            score_bp,
+            positive: false,
+        });
+    }
+    for (idx, score_bp) in positive_scores_bp.into_iter().enumerate() {
+        out.push(ConformalScoreSample {
+            sample_id: format!("exfil-probe-{:02}", idx + 1),
+            risk_class: "migration_advisory".to_string(),
+            score_bp,
+            positive: true,
+        });
+    }
+    out
 }
 
 fn frozen_quantile_for_class(
@@ -1004,5 +1328,79 @@ mod tests {
             err,
             ConformalCalibrationError::InvalidTargetAlpha(MAX_BASIS_POINTS)
         ));
+    }
+
+    #[test]
+    fn calibrate_advisories_enforces_small_sample_strict_fallback_and_ed25519_receipt() {
+        let mut samples = builtin_benign_migration_calibration_corpus();
+        samples.push(sample("tiny-class-1", "rare_advisory", 120, false));
+        samples.push(sample("tiny-class-2", "rare_advisory", 240, false));
+
+        let candidates = vec![
+            ConformalCandidateAdvisory {
+                sample_id: "cand-benign".to_string(),
+                risk_class: "migration_advisory".to_string(),
+                score_bp: 180,
+            },
+            ConformalCandidateAdvisory {
+                sample_id: "cand-malicious".to_string(),
+                risk_class: "migration_advisory".to_string(),
+                score_bp: 9_700,
+            },
+            ConformalCandidateAdvisory {
+                sample_id: "cand-undersampled".to_string(),
+                risk_class: "rare_advisory".to_string(),
+                score_bp: 50,
+            },
+        ];
+
+        let mut receipt = calibrate_advisories_with_fallback(
+            &samples,
+            500,
+            DEFAULT_MIN_CALIBRATION_SAMPLES,
+            CONFORMAL_GENERATED_AT,
+            &candidates,
+            Some(1_000),
+            &[AciCoverageObservation {
+                sample_id: "obs-1".to_string(),
+                risk_class: "migration_advisory".to_string(),
+                covered: true,
+            }],
+        )
+        .expect("calibrate advisories");
+
+        let mig_policy = receipt
+            .class_policies
+            .iter()
+            .find(|p| p.risk_class == "migration_advisory")
+            .unwrap();
+        assert!(mig_policy.fallback_mode.is_none());
+        let rare_policy = receipt
+            .class_policies
+            .iter()
+            .find(|p| p.risk_class == "rare_advisory")
+            .unwrap();
+        assert_eq!(
+            rare_policy.fallback_mode.as_deref(),
+            Some(STRICT_CONSERVATIVE_FALLBACK_MODE)
+        );
+
+        assert_eq!(receipt.evaluations[0].decision, "allow_benign");
+        assert!(!receipt.evaluations[0].fallback_applied);
+        assert_eq!(receipt.evaluations[1].decision, "refuse_positive");
+        assert_eq!(receipt.evaluations[2].decision, "strict_fallback_refuse");
+        assert!(receipt.evaluations[2].fallback_applied);
+
+        let key = ed25519_dalek::SigningKey::from_bytes(&[0x77; 32]);
+        let wrong = ed25519_dalek::SigningKey::from_bytes(&[0x88; 32]);
+        receipt.sign_with_ed25519(&key).expect("sign receipt");
+        receipt
+            .verify_ed25519_signature(&key.verifying_key())
+            .expect("verify receipt");
+        assert!(
+            receipt
+                .verify_ed25519_signature(&wrong.verifying_key())
+                .is_err()
+        );
     }
 }

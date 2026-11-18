@@ -178,6 +178,7 @@ impl Config {
                     authorized_api_keys: std::collections::BTreeSet::new(),
                     network_policy: NetworkPolicyConfig::default(),
                     child_process_spawn: None,
+                    ifc: IfcConfig::default(),
                 },
                 engine: EngineConfig::default(),
                 runtime: RuntimeConfig::strict_defaults(),
@@ -254,6 +255,7 @@ impl Config {
                     authorized_api_keys: std::collections::BTreeSet::new(),
                     network_policy: NetworkPolicyConfig::default(),
                     child_process_spawn: None,
+                    ifc: IfcConfig::default(),
                 },
                 engine: EngineConfig::default(),
                 runtime: RuntimeConfig::balanced_defaults(),
@@ -330,6 +332,7 @@ impl Config {
                     authorized_api_keys: std::collections::BTreeSet::new(),
                     network_policy: NetworkPolicyConfig::default(),
                     child_process_spawn: None,
+                    ifc: IfcConfig::default(),
                 },
                 engine: EngineConfig::default(),
                 runtime: RuntimeConfig::legacy_defaults(),
@@ -1364,6 +1367,20 @@ impl Config {
                         value.backend,
                         value.binary_path.display()
                     ),
+                ),
+                MAX_MERGE_DECISIONS,
+            );
+        }
+        if let Some(section) = &overrides.security
+            && let Some(value) = &section.ifc
+        {
+            self.security.ifc = value.clone();
+            push_bounded(
+                decisions,
+                MergeDecision::new(
+                    stage.clone(),
+                    "security.ifc",
+                    format!("declassify_rules={}", value.declassify.len()),
                 ),
                 MAX_MERGE_DECISIONS,
             );
@@ -2525,6 +2542,7 @@ impl Config {
             )?;
             validate_child_process_execution_policy(&process_spawn.execution_policy)?;
         }
+        self.security.ifc.validate_shape()?;
         if self.runtime.remote_max_in_flight == 0 {
             return Err(ConfigError::ValidationFailed(
                 "runtime.remote_max_in_flight must be > 0".to_string(),
@@ -3442,6 +3460,7 @@ struct SecurityOverrides {
     /// emitted by `init` fails to re-load with `unknown field network_policy`.
     pub network_policy: Option<NetworkPolicyConfig>,
     pub child_process_spawn: Option<ChildProcessSpawnConfig>,
+    pub ifc: Option<IfcConfig>,
 }
 
 impl std::fmt::Debug for SecurityOverrides {
@@ -3459,6 +3478,7 @@ impl std::fmt::Debug for SecurityOverrides {
             .field("authorized_api_keys", &"[REDACTED]")
             .field("network_policy", &self.network_policy)
             .field("child_process_spawn", &self.child_process_spawn)
+            .field("ifc", &self.ifc)
             .finish()
     }
 }
@@ -4022,6 +4042,10 @@ pub struct SecurityConfig {
     /// profile supplies this value by default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub child_process_spawn: Option<ChildProcessSpawnConfig>,
+
+    /// Operator-signed information-flow declassification rules (`[security.ifc]`).
+    #[serde(default, skip_serializing_if = "IfcConfig::is_empty")]
+    pub ifc: IfcConfig,
 }
 
 impl std::fmt::Debug for SecurityConfig {
@@ -4039,7 +4063,357 @@ impl std::fmt::Debug for SecurityConfig {
             .field("authorized_api_keys", &"[REDACTED]")
             .field("network_policy", &self.network_policy)
             .field("child_process_spawn", &self.child_process_spawn)
+            .field("ifc", &self.ifc)
             .finish()
+    }
+}
+
+/// Domain-separation prefix for operator-signed `[security.ifc.declassify]` rules.
+pub const IFC_DECLASSIFY_RULE_DOMAIN: &[u8] = b"franken-node:ifc-declassify-rule:v1:";
+
+/// Maximum lifetime (`30` days) for an operator-signed IFC declassification rule.
+pub const MAX_IFC_DECLASSIFY_TTL_MS: u64 = 30 * 24 * 60 * 60 * 1_000;
+
+/// Maximum number of IFC declassification rules permitted per configuration.
+pub const MAX_IFC_DECLASSIFY_RULES: usize = 64;
+
+/// Information-flow control configuration (`[security.ifc]`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct IfcConfig {
+    /// Operator-signed sink declassification rules (`[[security.ifc.declassify]]`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub declassify: Vec<IfcDeclassifyRuleConfig>,
+}
+
+impl IfcConfig {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.declassify.is_empty()
+    }
+
+    /// Validate syntactic, bound, and label invariants independent of runtime clock/keys.
+    pub fn validate_shape(&self) -> Result<(), ConfigError> {
+        if self.declassify.len() > MAX_IFC_DECLASSIFY_RULES {
+            return Err(ConfigError::ValidationFailed(format!(
+                "security.ifc.declassify exceeds maximum rule count ({MAX_IFC_DECLASSIFY_RULES})"
+            )));
+        }
+        for (idx, rule) in self.declassify.iter().enumerate() {
+            rule.validate_shape().map_err(|reason| {
+                ConfigError::ValidationFailed(format!("security.ifc.declassify[{idx}]: {reason}"))
+            })?;
+        }
+        Ok(())
+    }
+}
+
+/// Canonical signing payload for [`IfcDeclassifyRuleConfig`].
+#[derive(Serialize)]
+struct IfcDeclassifySigningPayload<'a> {
+    sink: &'a str,
+    labels: &'a BTreeSet<String>,
+    actor: &'a str,
+    purpose: &'a str,
+    issued_at_ms: u64,
+    expires_at_ms: u64,
+}
+
+/// Operator-signed sink declassification rule (`[[security.ifc.declassify]]`,
+/// `bd-reality-20260923-26n9r.13`).
+///
+/// Unauthenticated configuration text never grants declassification authority:
+/// every rule must carry a strict Ed25519 signature verified against the
+/// project's operator receipt trust anchor before guest execution begins.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct IfcDeclassifyRuleConfig {
+    /// Exact target network sink (`host:port` or `http(s)://host[:port]`, no wildcards).
+    pub sink: String,
+    /// Secret labels authorized to cross this sink (`secret_file`, `secret_environment`).
+    pub labels: BTreeSet<String>,
+    /// Operator identity recorded in emitted [`DeclassificationReceipt`](crate::security::lineage_tracker::DeclassificationReceipt)s.
+    pub actor: String,
+    /// Audited operational purpose recorded in emitted [`DeclassificationReceipt`](crate::security::lineage_tracker::DeclassificationReceipt)s.
+    pub purpose: String,
+    /// Issuance timestamp in Unix epoch milliseconds.
+    pub issued_at_ms: u64,
+    /// Expiration timestamp in Unix epoch milliseconds (`> issued_at_ms`).
+    pub expires_at_ms: u64,
+    /// Lowercase 64-hex Ed25519 public key of the signing operator.
+    pub signer_public_key_hex: String,
+    /// Lowercase 128-hex Ed25519 signature over the canonical domain-separated rule payload.
+    pub signature_hex: String,
+}
+
+impl IfcDeclassifyRuleConfig {
+    /// Normalize an exact network sink (`host:port`, `[ipv6]:port`, or `http(s)://host[:port][/]`)
+    /// to lowercase `host:port`, rejecting wildcards, userinfo, non-root paths, and invalid ports.
+    pub fn normalize_network_sink(raw: &str) -> Result<String, String> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Err("sink must not be empty".to_string());
+        }
+        if trimmed.contains('*')
+            || trimmed.contains('?')
+            || trimmed.contains('#')
+            || trimmed.contains('@')
+            || trimmed.chars().any(char::is_control)
+            || trimmed.chars().any(char::is_whitespace)
+        {
+            return Err(format!(
+                "sink `{trimmed}` must be an exact host:port or http(s) origin without wildcards or userinfo"
+            ));
+        }
+
+        let (authority, default_port) = if let Some(rest) = trimmed.strip_prefix("https://") {
+            let authority = rest.strip_suffix('/').unwrap_or(rest);
+            if authority.contains('/') {
+                return Err(format!(
+                    "sink `{trimmed}` must not include a URL path beyond `/`"
+                ));
+            }
+            (authority, Some(443_u16))
+        } else if let Some(rest) = trimmed.strip_prefix("http://") {
+            let authority = rest.strip_suffix('/').unwrap_or(rest);
+            if authority.contains('/') {
+                return Err(format!(
+                    "sink `{trimmed}` must not include a URL path beyond `/`"
+                ));
+            }
+            (authority, Some(80_u16))
+        } else if trimmed.contains("://") || trimmed.contains('/') {
+            return Err(format!(
+                "sink `{trimmed}` uses an unsupported scheme or path; expected host:port or http(s)://host[:port]"
+            ));
+        } else {
+            (trimmed, None)
+        };
+
+        let (host_part, port) = if let Some(after_bracket) = authority.strip_prefix('[') {
+            let (ipv6_host, rest) = after_bracket
+                .split_once(']')
+                .ok_or_else(|| format!("sink `{trimmed}` has unclosed IPv6 bracket"))?;
+            if ipv6_host.is_empty() || ipv6_host.parse::<std::net::Ipv6Addr>().is_err() {
+                return Err(format!("sink `{trimmed}` has invalid IPv6 literal"));
+            }
+            let port = if let Some(port_str) = rest.strip_prefix(':') {
+                port_str
+                    .parse::<u16>()
+                    .ok()
+                    .filter(|p| *p > 0)
+                    .ok_or_else(|| format!("sink `{trimmed}` has invalid TCP port"))?
+            } else if rest.is_empty() {
+                default_port
+                    .ok_or_else(|| format!("sink `{trimmed}` must include an explicit :port"))?
+            } else {
+                return Err(format!(
+                    "sink `{trimmed}` has trailing characters after IPv6 literal"
+                ));
+            };
+            (format!("[{}]", ipv6_host.to_ascii_lowercase()), port)
+        } else if let Some((host, port_str)) = authority.rsplit_once(':') {
+            if host.is_empty() || host.contains(':') {
+                return Err(format!(
+                    "sink `{trimmed}` has invalid host (wrap IPv6 literals in brackets)"
+                ));
+            }
+            let port = port_str
+                .parse::<u16>()
+                .ok()
+                .filter(|p| *p > 0)
+                .ok_or_else(|| format!("sink `{trimmed}` has invalid TCP port"))?;
+            (host.to_ascii_lowercase(), port)
+        } else {
+            let port = default_port
+                .ok_or_else(|| format!("sink `{trimmed}` must include an explicit :port"))?;
+            if authority.is_empty() {
+                return Err(format!("sink `{trimmed}` has empty host"));
+            }
+            (authority.to_ascii_lowercase(), port)
+        };
+
+        Ok(format!("{host_part}:{port}"))
+    }
+
+    pub fn canonical_signing_bytes(
+        normalized_sink: &str,
+        labels: &BTreeSet<String>,
+        actor: &str,
+        purpose: &str,
+        issued_at_ms: u64,
+        expires_at_ms: u64,
+    ) -> Result<Vec<u8>, String> {
+        let payload = IfcDeclassifySigningPayload {
+            sink: normalized_sink,
+            labels,
+            actor,
+            purpose,
+            issued_at_ms,
+            expires_at_ms,
+        };
+        let json_bytes = serde_json::to_vec(&payload)
+            .map_err(|err| format!("failed serializing IFC declassification payload: {err}"))?;
+        let mut message = Vec::with_capacity(IFC_DECLASSIFY_RULE_DOMAIN.len() + json_bytes.len());
+        message.extend_from_slice(IFC_DECLASSIFY_RULE_DOMAIN);
+        message.extend_from_slice(&json_bytes);
+        Ok(message)
+    }
+
+    pub fn canonicalize_ifc_label(raw: &str) -> Result<String, String> {
+        use crate::security::lineage_tracker::{SECRET_ENVIRONMENT_LABEL, SECRET_FILE_LABEL};
+
+        match raw.trim() {
+            "secret_file" | SECRET_FILE_LABEL => Ok(SECRET_FILE_LABEL.to_string()),
+            "secret_environment" | SECRET_ENVIRONMENT_LABEL => {
+                Ok(SECRET_ENVIRONMENT_LABEL.to_string())
+            }
+            other => Err(format!(
+                "unsupported IFC label `{other}`; expected `secret_file` (`{SECRET_FILE_LABEL}`) or `secret_environment` (`{SECRET_ENVIRONMENT_LABEL}`)"
+            )),
+        }
+    }
+
+    /// Construct and Ed25519-sign a canonical [`IfcDeclassifyRuleConfig`].
+    pub fn sign(
+        sink: &str,
+        labels: BTreeSet<String>,
+        actor: &str,
+        purpose: &str,
+        issued_at_ms: u64,
+        expires_at_ms: u64,
+        signing_key: &ed25519_dalek::SigningKey,
+    ) -> Result<Self, String> {
+        use ed25519_dalek::Signer as _;
+
+        let normalized_sink = Self::normalize_network_sink(sink)?;
+        let labels = labels
+            .iter()
+            .map(|label| Self::canonicalize_ifc_label(label))
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        let actor = actor.trim().to_string();
+        let purpose = purpose.trim().to_string();
+        let message = Self::canonical_signing_bytes(
+            &normalized_sink,
+            &labels,
+            &actor,
+            &purpose,
+            issued_at_ms,
+            expires_at_ms,
+        )?;
+        let signature = signing_key.sign(&message);
+        let rule = Self {
+            sink: normalized_sink,
+            labels,
+            actor,
+            purpose,
+            issued_at_ms,
+            expires_at_ms,
+            signer_public_key_hex: hex::encode(signing_key.verifying_key().to_bytes()),
+            signature_hex: hex::encode(signature.to_bytes()),
+        };
+        rule.validate_shape()?;
+        Ok(rule)
+    }
+
+    pub fn validate_shape(&self) -> Result<String, String> {
+        use crate::security::lineage_tracker::{SECRET_ENVIRONMENT_LABEL, SECRET_FILE_LABEL};
+
+        let normalized_sink = Self::normalize_network_sink(&self.sink)?;
+        if self.labels.is_empty() {
+            return Err("labels must contain at least one secret label".to_string());
+        }
+        for label in &self.labels {
+            if label != SECRET_FILE_LABEL && label != SECRET_ENVIRONMENT_LABEL {
+                return Err(format!(
+                    "unsupported IFC label `{label}`; expected `{SECRET_FILE_LABEL}` or `{SECRET_ENVIRONMENT_LABEL}`"
+                ));
+            }
+        }
+        if self.actor.trim().is_empty() || self.actor.chars().any(char::is_control) {
+            return Err("actor must be non-empty without control characters".to_string());
+        }
+        if self.purpose.trim().is_empty() || self.purpose.chars().any(char::is_control) {
+            return Err("purpose must be non-empty without control characters".to_string());
+        }
+        if self.expires_at_ms <= self.issued_at_ms {
+            return Err("expires_at_ms must be greater than issued_at_ms".to_string());
+        }
+        let ttl_ms = self.expires_at_ms.saturating_sub(self.issued_at_ms);
+        if ttl_ms > MAX_IFC_DECLASSIFY_TTL_MS {
+            return Err(format!(
+                "rule TTL {ttl_ms}ms exceeds maximum {MAX_IFC_DECLASSIFY_TTL_MS}ms"
+            ));
+        }
+        if self.signer_public_key_hex.len() != 64
+            || !self
+                .signer_public_key_hex
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err("signer_public_key_hex must be 64 lowercase hex characters".to_string());
+        }
+        if self.signature_hex.len() != 128
+            || !self
+                .signature_hex
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err("signature_hex must be 128 lowercase hex characters".to_string());
+        }
+        Ok(normalized_sink)
+    }
+
+    /// Authenticate this rule against the project's trusted operator Ed25519 verifying key
+    /// and current Unix timestamp (`current_time_ms`), returning the normalized `host:port` sink.
+    pub fn verify_against_verifying_key(
+        &self,
+        trusted_verifying_key: &ed25519_dalek::VerifyingKey,
+        current_time_ms: u64,
+    ) -> Result<String, String> {
+        let normalized_sink = self.validate_shape()?;
+        let expected_pk_hex = hex::encode(trusted_verifying_key.to_bytes());
+        if !bool::from(
+            self.signer_public_key_hex
+                .as_bytes()
+                .ct_eq(expected_pk_hex.as_bytes()),
+        ) {
+            return Err(format!(
+                "signer_public_key_hex `{}` does not match project operator trust anchor `{expected_pk_hex}`",
+                self.signer_public_key_hex
+            ));
+        }
+        if self.issued_at_ms > current_time_ms {
+            return Err(format!(
+                "declassification rule issued_at_ms ({}) is in the future (now={current_time_ms})",
+                self.issued_at_ms
+            ));
+        }
+        if current_time_ms >= self.expires_at_ms {
+            return Err(format!(
+                "declassification rule expired at {} (now={current_time_ms})",
+                self.expires_at_ms
+            ));
+        }
+        let sig_bytes: [u8; 64] = hex::decode(&self.signature_hex)
+            .map_err(|_| "signature_hex is not valid hex".to_string())?
+            .try_into()
+            .map_err(|_| "signature_hex must decode to 64 bytes".to_string())?;
+        let signature = ed25519_dalek::Signature::from_bytes(&sig_bytes);
+        let message = Self::canonical_signing_bytes(
+            &normalized_sink,
+            &self.labels,
+            self.actor.trim(),
+            self.purpose.trim(),
+            self.issued_at_ms,
+            self.expires_at_ms,
+        )?;
+        trusted_verifying_key
+            .verify_strict(&message, &signature)
+            .map_err(|_| {
+                "Ed25519 signature verification failed for IFC declassification rule".to_string()
+            })?;
+        Ok(normalized_sink)
     }
 }
 
@@ -8674,5 +9048,60 @@ max_merge_decisions = 100
                 .to_string()
                 .contains("authorized_api_keys")
         );
+    }
+
+    #[test]
+    fn ifc_declassify_rule_signs_roundtrips_and_rejects_tamper_or_wrong_anchor() {
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[0x42; 32]);
+        let wrong_key = ed25519_dalek::SigningKey::from_bytes(&[0x99; 32]);
+        let rule = IfcDeclassifyRuleConfig::sign(
+            "https://Vault.Internal.Corp:8443/",
+            BTreeSet::from(["secret_file".to_string()]),
+            "secops@acme.corp",
+            "kms-envelope-unwrap",
+            10_000,
+            70_000,
+            &signing_key,
+        )
+        .expect("sign valid rule");
+        assert_eq!(rule.sink, "vault.internal.corp:8443");
+        assert_eq!(
+            rule.verify_against_verifying_key(&signing_key.verifying_key(), 25_000)
+                .expect("verify valid rule"),
+            "vault.internal.corp:8443"
+        );
+        assert!(
+            rule.verify_against_verifying_key(&wrong_key.verifying_key(), 25_000)
+                .is_err(),
+            "wrong operator trust anchor must fail closed"
+        );
+        assert!(
+            rule.verify_against_verifying_key(&signing_key.verifying_key(), 70_000)
+                .is_err(),
+            "expired rule must fail closed"
+        );
+
+        let mut tampered = rule.clone();
+        tampered.sink = "evil.example:8443".to_string();
+        assert!(
+            tampered
+                .verify_against_verifying_key(&signing_key.verifying_key(), 25_000)
+                .is_err(),
+            "sink mutation without re-signing must fail closed"
+        );
+
+        let mut config = valid_base_config(Profile::Balanced);
+        let baseline_toml = config.to_toml().expect("baseline toml");
+        assert!(
+            !baseline_toml.contains("[security.ifc"),
+            "empty ifc config must elide TOML section for snapshot stability"
+        );
+        config.security.ifc.declassify.push(rule.clone());
+        let encoded = config.to_toml().expect("serialize with ifc rule");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("franken_node.toml");
+        std::fs::write(&path, &encoded).expect("write ifc config");
+        let reloaded = Config::load(&path).expect("reload ifc rule");
+        assert_eq!(reloaded.security.ifc.declassify, vec![rule]);
     }
 }

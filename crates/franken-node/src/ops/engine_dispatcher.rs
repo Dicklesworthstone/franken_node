@@ -298,6 +298,8 @@ struct NativeSessionRequest {
     config: Config,
     telemetry_socket_path: PathBuf,
     process_spawn_trust_key_hex: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ifc_trust_key_hex: Option<String>,
     runtime_evidence_grant: RuntimeEvidenceSessionGrant,
     /// The program's own arguments, for `process.argv` (bd-my9hk).
     app_args: Vec<String>,
@@ -3013,6 +3015,7 @@ struct NativeEngineRunContext {
     telemetry_guard: NativeTelemetryGuard,
     cancellation: NativeEngineCancellation,
     process_spawn_admission: Option<ChildProcessSpawnAdmission>,
+    ifc_trust_key_hex: Option<String>,
     evidence_authority: RuntimeEvidenceAuthority,
     effect_wal: Option<NativeEffectWalEmitter>,
     project_paths: RunProjectPaths,
@@ -3316,12 +3319,29 @@ impl CancellationGatedHostIo {
 /// `None` preserves the existing provider's environment behavior, while
 /// `Some(empty)` supplies an explicitly empty snapshot whose reads return None.
 /// The caller supplies the already SSRF-gated provider with its inner effect WAL.
-#[cfg(feature = "engine")]
+#[cfg(all(feature = "engine", test))]
 fn compose_native_host_io<P: HostIoProvider + 'static>(
     inner: P,
     environment_snapshot: Option<std::collections::BTreeMap<String, String>>,
     trace_id: impl Into<String>,
     cancellation: NativeEngineCancellation,
+) -> std::result::Result<Arc<dyn HostIoProvider>, HostIoError> {
+    compose_native_host_io_with_declassifications(
+        inner,
+        environment_snapshot,
+        trace_id,
+        cancellation,
+        None,
+    )
+}
+
+#[cfg(feature = "engine")]
+fn compose_native_host_io_with_declassifications<P: HostIoProvider + 'static>(
+    inner: P,
+    environment_snapshot: Option<std::collections::BTreeMap<String, String>>,
+    trace_id: impl Into<String>,
+    cancellation: NativeEngineCancellation,
+    declassifications: Option<Arc<crate::ops::flow_gated_host_io::FlowDeclassificationTracker>>,
 ) -> std::result::Result<Arc<dyn HostIoProvider>, HostIoError> {
     use crate::ops::flow_gated_host_io::FlowGatedHostIo;
 
@@ -3329,11 +3349,16 @@ fn compose_native_host_io<P: HostIoProvider + 'static>(
     // Arc<dyn HostIoProvider> is not itself a HostIoProvider implementation.
     // Wrap each concrete source first, then erase the two flow-gate types.
     let flow_gated: Arc<dyn HostIoProvider> = match environment_snapshot {
-        Some(values) => Arc::new(FlowGatedHostIo::new(
+        Some(values) => Arc::new(FlowGatedHostIo::with_declassifications(
             EnvironmentSnapshotHostIo::with_provider(values, Arc::new(inner))?,
             trace_id,
+            declassifications,
         )),
-        None => Arc::new(FlowGatedHostIo::new(inner, trace_id)),
+        None => Arc::new(FlowGatedHostIo::with_declassifications(
+            inner,
+            trace_id,
+            declassifications,
+        )),
     };
     Ok(Arc::new(CancellationGatedHostIo::new(
         flow_gated,
@@ -5353,6 +5378,11 @@ pub struct EngineContainmentDecision {
     /// application and its resolved npm dependencies (`bd-reality-20260923-26n9r.15`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub package_attribution: Option<PackageAttributionReport>,
+    /// Canonical [`DeclassificationReceipt`](crate::security::lineage_tracker::DeclassificationReceipt)s
+    /// emitted when operator-signed `[[security.ifc.declassify]]` rules authorized
+    /// secret-bearing payloads across exact network sinks (`bd-reality-20260923-26n9r.13`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub declassification_receipts: Vec<crate::security::lineage_tracker::DeclassificationReceipt>,
 }
 
 /// Basis explaining how a recorded host effect was attributed across loaded packages.
@@ -8427,6 +8457,155 @@ fn prepare_best_effort_package_attribution_tracker(
     }
 }
 
+fn parse_ifc_operator_key_blob(
+    raw: &[u8],
+    expect_public: bool,
+) -> Result<ed25519_dalek::VerifyingKey, String> {
+    if let Ok(text) = std::str::from_utf8(raw) {
+        if text.contains("-----BEGIN") {
+            return Err("PEM key material is not accepted; supply raw 32-byte or 64-hex Ed25519 key material".to_string());
+        }
+        let trimmed = text.trim();
+        if trimmed.len() == 64
+            && trimmed.bytes().all(|b| b.is_ascii_hexdigit())
+            && let Ok(decoded) = hex::decode(trimmed)
+            && let Ok(bytes) = <[u8; 32]>::try_from(decoded.as_slice())
+        {
+            return if expect_public {
+                ed25519_dalek::VerifyingKey::from_bytes(&bytes)
+                    .map_err(|err| format!("invalid Ed25519 verifying key: {err}"))
+            } else {
+                Ok(ed25519_dalek::SigningKey::from_bytes(&bytes).verifying_key())
+            };
+        }
+    }
+    if let Ok(bytes) = <[u8; 32]>::try_from(raw) {
+        return if expect_public {
+            ed25519_dalek::VerifyingKey::from_bytes(&bytes)
+                .map_err(|err| format!("invalid Ed25519 verifying key: {err}"))
+        } else {
+            Ok(ed25519_dalek::SigningKey::from_bytes(&bytes).verifying_key())
+        };
+    }
+    Err("expected 32-byte raw or 64-hex Ed25519 key material".to_string())
+}
+
+/// Resolve the project's operator Ed25519 verifying key used to authenticate
+/// `[[security.ifc.declassify]]` rules (`bd-reality-20260923-26n9r.13`).
+fn resolve_project_ifc_trust_verifying_key(
+    project_root: &Path,
+    config: &Config,
+) -> std::result::Result<ed25519_dalek::VerifyingKey, String> {
+    const MAX_KEY_BYTES: u64 = 4_096;
+
+    if let Some(configured) = config.security.decision_receipt_signing_key_path.as_deref() {
+        let candidate = if configured.is_absolute() {
+            configured.to_path_buf()
+        } else {
+            project_root.join(configured)
+        };
+        let meta = std::fs::symlink_metadata(&candidate).map_err(|err| {
+            format!(
+                "configured decision_receipt_signing_key_path `{}` is unavailable: {err}",
+                candidate.display()
+            )
+        })?;
+        if meta.is_dir() {
+            return Err(format!(
+                "configured decision_receipt_signing_key_path `{}` must be a file, not a directory",
+                candidate.display()
+            ));
+        }
+        let raw = crate::bounded_read(&candidate, MAX_KEY_BYTES)
+            .map_err(|err| format!("failed reading `{}`: {err}", candidate.display()))?;
+        return parse_ifc_operator_key_blob(&raw, false);
+    }
+
+    let pub_path = project_root.join(".franken-node/keys/receipt-signing.pub");
+    if pub_path.exists() {
+        let meta = std::fs::symlink_metadata(&pub_path).map_err(|err| {
+            format!(
+                "operator trust anchor `{}` unavailable: {err}",
+                pub_path.display()
+            )
+        })?;
+        if meta.is_dir() {
+            return Err(format!(
+                "operator trust anchor `{}` must be a file, not a directory",
+                pub_path.display()
+            ));
+        }
+        let raw = crate::bounded_read(&pub_path, MAX_KEY_BYTES)
+            .map_err(|err| format!("failed reading `{}`: {err}", pub_path.display()))?;
+        return parse_ifc_operator_key_blob(&raw, true);
+    }
+
+    let priv_path = project_root.join(".franken-node/keys/receipt-signing.key");
+    if priv_path.exists() {
+        let meta = std::fs::symlink_metadata(&priv_path).map_err(|err| {
+            format!(
+                "operator signing key `{}` unavailable: {err}",
+                priv_path.display()
+            )
+        })?;
+        if meta.is_dir() {
+            return Err(format!(
+                "operator signing key `{}` must be a file, not a directory",
+                priv_path.display()
+            ));
+        }
+        let raw = crate::bounded_read(&priv_path, MAX_KEY_BYTES)
+            .map_err(|err| format!("failed reading `{}`: {err}", priv_path.display()))?;
+        return parse_ifc_operator_key_blob(&raw, false);
+    }
+
+    Err(format!(
+        "missing project operator receipt trust anchor (`{}`); run `franken-node init` first",
+        pub_path.display()
+    ))
+}
+
+#[cfg(feature = "engine")]
+fn verify_configured_ifc_declassifications(
+    project_root: &Path,
+    config: &Config,
+    trusted_key_hex_override: Option<&str>,
+    epoch: u64,
+) -> std::result::Result<
+    Option<(
+        String,
+        Vec<crate::ops::flow_gated_host_io::AuthorizedFlowDeclassification>,
+    )>,
+    String,
+> {
+    if config.security.ifc.declassify.is_empty() {
+        return Ok(None);
+    }
+    let verifying_key = match trusted_key_hex_override {
+        Some(hex_key) => parse_ifc_operator_key_blob(hex_key.as_bytes(), true)?,
+        None => resolve_project_ifc_trust_verifying_key(project_root, config)?,
+    };
+    let current_time_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|err| format!("system clock before UNIX_EPOCH: {err}"))?
+        .as_millis();
+    let current_time_ms =
+        u64::try_from(current_time_ms).map_err(|_| "system clock overflowed u64 ms".to_string())?;
+    let mut grants = Vec::with_capacity(config.security.ifc.declassify.len());
+    for (idx, rule) in config.security.ifc.declassify.iter().enumerate() {
+        let grant =
+            crate::ops::flow_gated_host_io::AuthorizedFlowDeclassification::from_verified_rule(
+                rule,
+                &verifying_key,
+                current_time_ms,
+                epoch,
+            )
+            .map_err(|err| format!("security.ifc.declassify[{idx}]: {err}"))?;
+        grants.push(grant);
+    }
+    Ok(Some((hex::encode(verifying_key.to_bytes()), grants)))
+}
+
 #[cfg(feature = "engine")]
 const ZERO_ANOMALY_CAPABILITY_BREADTH_BENIGN_FLOOR_MILLIONTHS: i64 = 800_000;
 
@@ -8550,6 +8729,7 @@ fn engine_containment_decision(
         frozen_modules: None,
         clock_epoch_ms: None,
         package_attribution: None,
+        declassification_receipts: Vec::new(),
     }
 }
 
@@ -9510,6 +9690,19 @@ impl EngineDispatcher {
         })?;
         #[cfg(not(feature = "engine"))]
         let _ = &process_spawn_admission;
+        #[cfg(feature = "engine")]
+        verify_configured_ifc_declassifications(
+            project_paths.project_root(),
+            config,
+            None,
+            security_epoch_for_profile(config.profile).as_u64(),
+        )
+        .map_err(|error| {
+            ActionableError::new(
+                format!("IFC declassification policy admission failed: {error}"),
+                "Sign rules with `franken-node trust sign-declassification` using the project operator key, or remove invalid `[[security.ifc.declassify]]` entries",
+            )
+        })?;
 
         let mut trust_requirements = RunTrustRequirements::new(
             &self.preflight_dependency_ids,
@@ -10326,6 +10519,7 @@ impl EngineDispatcher {
         let policy_mode = request.policy_mode;
         let app_args = request.app_args;
         let capture_replay = request.capture_replay;
+        let ifc_trust_key_hex = request.ifc_trust_key_hex;
         let nonce = request.nonce;
         let effect_wal =
             NativeEffectWalEmitter::new(nonce.clone(), Box::new(io::stdout()), admission_acks);
@@ -10342,6 +10536,7 @@ impl EngineDispatcher {
                     telemetry_guard,
                     cancellation,
                     process_spawn_admission,
+                    ifc_trust_key_hex,
                     evidence_authority,
                     effect_wal: Some(effect_wal),
                     project_paths,
@@ -11099,6 +11294,21 @@ impl EngineDispatcher {
         .context("native-session inventory admission failed; worker was not started")?;
         let effect_journal = session_inventory.prepare_effect_journal()
             .context("native-session durable effect journal could not be established; worker was not started")?;
+        let ifc_trust_key_hex = verify_configured_ifc_declassifications(
+            project_paths.project_root(),
+            config,
+            None,
+            security_epoch_for_profile(config.profile).as_u64(),
+        )
+        .map_err(|error| {
+            EngineDispatchError::EngineExecutionError {
+                app_path: app_path_buf.clone(),
+                error_message: format!("IFC declassification policy admission failed: {error}"),
+                phase: "worker startup".to_string(),
+            }
+            .to_actionable()
+        })?
+        .map(|(pk_hex, _)| pk_hex);
         let request = NativeSessionRequest {
             schema_version: NATIVE_SESSION_SCHEMA.to_string(),
             nonce: nonce.clone(),
@@ -11111,6 +11321,7 @@ impl EngineDispatcher {
             config: config.clone(),
             telemetry_socket_path: telemetry_socket_path.to_path_buf(),
             process_spawn_trust_key_hex: process_spawn_trust_key_hex.map(str::to_string),
+            ifc_trust_key_hex,
             runtime_evidence_grant,
             app_args: app_args.to_vec(),
             capture_replay,
@@ -12956,6 +13167,7 @@ impl EngineDispatcher {
                 telemetry_guard: telemetry_guard.take().expect("telemetry guard exists"),
                 cancellation: NativeEngineCancellation::new(),
                 process_spawn_admission: None,
+                ifc_trust_key_hex: None,
                 evidence_authority,
                 effect_wal: None,
                 project_paths,
@@ -12984,6 +13196,7 @@ impl EngineDispatcher {
             telemetry_guard,
             cancellation,
             process_spawn_admission,
+            ifc_trust_key_hex,
             evidence_authority,
             effect_wal,
             project_paths,
@@ -13397,6 +13610,22 @@ impl EngineDispatcher {
         // cannot be established the run proceeds with no provider installed —
         // host effects then fail closed (the ledger is honestly empty), never
         // faked.
+        let declassification_tracker = verify_configured_ifc_declassifications(
+            project_paths.project_root(),
+            config,
+            ifc_trust_key_hex.as_deref(),
+            host_effect_ledger_epoch.as_u64(),
+        )
+        .map_err(|error| {
+            native_engine_spawn_error_with_telemetry_cleanup(
+                format!("IFC declassification policy admission failed: {error}"),
+                &mut telemetry_guard,
+            )
+        })?
+        .map(|(_, grants)| {
+            Arc::new(crate::ops::flow_gated_host_io::FlowDeclassificationTracker::new(grants))
+        });
+
         let sandbox_root = project_paths.project_root();
         match SandboxedHostIo::with_root(sandbox_root) {
             Ok(provider) => {
@@ -13496,11 +13725,12 @@ impl EngineDispatcher {
                 // same flow observer. It refuses sensitive network payloads before
                 // SSRF evaluation, DNS, and WAL admission. Product cancellation
                 // wraps that whole chain, including direct snapshot responses.
-                let host_io = compose_native_host_io(
+                let host_io = compose_native_host_io_with_declassifications(
                     gated,
                     environment_snapshot,
                     run_egress_trace,
                     cancellation.clone(),
+                    declassification_tracker.clone(),
                 )
                 .map_err(|error| {
                     native_engine_spawn_error_with_telemetry_cleanup(
@@ -13605,7 +13835,7 @@ impl EngineDispatcher {
                         ),
                     ) {
                         (Some(failed_trace_id), Ok(())) => Some(
-                            Self::build_host_effect_journal_ledger(
+                            Self::build_host_effect_journal_ledger_with_declassifications(
                                 failed_trace_id,
                                 orchestrator.last_failed_host_effect_journal(),
                                 process_spawn_admission.as_ref(),
@@ -13614,6 +13844,7 @@ impl EngineDispatcher {
                                     .child_process_spawn
                                     .as_ref()
                                     .map(|configured| &configured.execution_policy),
+                                declassification_tracker.as_deref(),
                                 &host_effect_ledger_authority,
                                 host_effect_ledger_epoch,
                             )
@@ -13717,7 +13948,7 @@ impl EngineDispatcher {
         // producing path, so the ledger is always present (empty when the program
         // performed no host effects) — never omitted, never fabricated.
         let host_effect_ledger = if process_spawn_admission.is_some() {
-            Self::build_host_effect_journal_ledger(
+            Self::build_host_effect_journal_ledger_with_declassifications(
                 &execution_result.trace_id,
                 &execution_result.host_effect_journal,
                 process_spawn_admission.as_ref(),
@@ -13726,13 +13957,15 @@ impl EngineDispatcher {
                     .child_process_spawn
                     .as_ref()
                     .map(|configured| &configured.execution_policy),
+                declassification_tracker.as_deref(),
                 &host_effect_ledger_authority,
                 host_effect_ledger_epoch,
             )
         } else {
-            Self::build_host_effect_ledger(
+            Self::build_host_effect_ledger_with_declassifications(
                 &execution_result.trace_id,
                 &execution_result.host_effect_transcript,
+                declassification_tracker.as_deref(),
                 &host_effect_ledger_authority,
                 host_effect_ledger_epoch,
             )
@@ -13829,6 +14062,9 @@ impl EngineDispatcher {
                 &host_effect_ledger,
             )
         });
+        engine_decision.declassification_receipts = declassification_tracker
+            .as_ref()
+            .map_or_else(Vec::new, |tracker| tracker.emitted_receipts());
 
         // Stop telemetry and return
         let telemetry_guard = telemetry_guard.take().ok_or_else(|| {
@@ -13861,12 +14097,35 @@ impl EngineDispatcher {
     /// hashes use the same canonical domains as the verifier SDK, so the SDK
     /// re-derives the chain offline from the surfaced entries.
     #[cfg(feature = "engine")]
+    #[allow(dead_code)]
     fn build_host_effect_ledger(
         trace_id: &str,
         transcript: &[(
             frankenengine_extension_host::host_io::HostIoRequest,
             frankenengine_extension_host::host_io::HostIoOutcome,
         )],
+        signing_authority: &RuntimeEvidenceAuthority,
+        signed_epoch: SecurityEpoch,
+    ) -> Result<HostEffectLedger> {
+        Self::build_host_effect_ledger_with_declassifications(
+            trace_id,
+            transcript,
+            None,
+            signing_authority,
+            signed_epoch,
+        )
+    }
+
+    #[cfg(feature = "engine")]
+    fn build_host_effect_ledger_with_declassifications(
+        trace_id: &str,
+        transcript: &[(
+            frankenengine_extension_host::host_io::HostIoRequest,
+            frankenengine_extension_host::host_io::HostIoOutcome,
+        )],
+        declassification_tracker: Option<
+            &crate::ops::flow_gated_host_io::FlowDeclassificationTracker,
+        >,
         signing_authority: &RuntimeEvidenceAuthority,
         signed_epoch: SecurityEpoch,
     ) -> Result<HostEffectLedger> {
@@ -13877,11 +14136,12 @@ impl EngineDispatcher {
                 outcome: outcome.clone(),
             })
             .collect::<Vec<_>>();
-        Self::build_host_effect_journal_ledger(
+        Self::build_host_effect_journal_ledger_with_declassifications(
             trace_id,
             &journal,
             None,
             None,
+            declassification_tracker,
             signing_authority,
             signed_epoch,
         )
@@ -13892,11 +14152,35 @@ impl EngineDispatcher {
     /// mapping; process entries become `EffectKind::Spawn` receipts bound to the
     /// authenticated token id and policy subject that authorized the provider.
     #[cfg(feature = "engine")]
+    #[allow(dead_code)]
     fn build_host_effect_journal_ledger(
         trace_id: &str,
         journal: &[HostEffectJournalEntry],
         process_spawn_admission: Option<&ChildProcessSpawnAdmission>,
         process_execution_policy: Option<&crate::config::ChildProcessExecutionPolicy>,
+        signing_authority: &RuntimeEvidenceAuthority,
+        signed_epoch: SecurityEpoch,
+    ) -> Result<HostEffectLedger> {
+        Self::build_host_effect_journal_ledger_with_declassifications(
+            trace_id,
+            journal,
+            process_spawn_admission,
+            process_execution_policy,
+            None,
+            signing_authority,
+            signed_epoch,
+        )
+    }
+
+    #[cfg(feature = "engine")]
+    fn build_host_effect_journal_ledger_with_declassifications(
+        trace_id: &str,
+        journal: &[HostEffectJournalEntry],
+        process_spawn_admission: Option<&ChildProcessSpawnAdmission>,
+        process_execution_policy: Option<&crate::config::ChildProcessExecutionPolicy>,
+        declassification_tracker: Option<
+            &crate::ops::flow_gated_host_io::FlowDeclassificationTracker,
+        >,
         signing_authority: &RuntimeEvidenceAuthority,
         signed_epoch: SecurityEpoch,
     ) -> Result<HostEffectLedger> {
@@ -14417,17 +14701,35 @@ impl EngineDispatcher {
                     // violation — honest DETECTION that the ledger does not
                     // retroactively pretend was prevention. Byte-level prevention
                     // at an allowed sink is a gate-level follow-up.
-                    let lineage = match &taint_commitment {
-                        Some(commitment) => EffectLineageFields {
-                            input_lineage_hash: EFFECT_RECEIPT_EMPTY_LINEAGE_HASH.to_string(),
-                            output_lineage_hash: Some(
-                                EFFECT_RECEIPT_EMPTY_LINEAGE_HASH.to_string(),
-                            ),
-                            label_set_commitment: commitment.clone(),
-                            declassification_ref: None,
-                            flow_policy_verdict: FlowPolicyVerdict::LabelClean,
-                        },
-                        None => EffectLineageFields::label_clean_allowed(),
+                    let matched_declassification = match request {
+                        HostIoRequest::NetworkSend { endpoint, payload }
+                        | HostIoRequest::NetworkRequest {
+                            endpoint, payload, ..
+                        } => declassification_tracker.and_then(|tracker| {
+                            tracker.take_for_allowed_network_effect(endpoint, payload)
+                        }),
+                        _ => None,
+                    };
+                    let lineage = if let Some(declass_receipt) = matched_declassification {
+                        EffectLineageFields::declassified(
+                            EFFECT_RECEIPT_EMPTY_LINEAGE_HASH.to_string(),
+                            EFFECT_RECEIPT_EMPTY_LINEAGE_HASH.to_string(),
+                            format!("sha256:{}", declass_receipt.label_set_commitment),
+                            declass_receipt.receipt_id,
+                        )
+                    } else {
+                        match &taint_commitment {
+                            Some(commitment) => EffectLineageFields {
+                                input_lineage_hash: EFFECT_RECEIPT_EMPTY_LINEAGE_HASH.to_string(),
+                                output_lineage_hash: Some(
+                                    EFFECT_RECEIPT_EMPTY_LINEAGE_HASH.to_string(),
+                                ),
+                                label_set_commitment: commitment.clone(),
+                                declassification_ref: None,
+                                flow_policy_verdict: FlowPolicyVerdict::LabelClean,
+                            },
+                            None => EffectLineageFields::label_clean_allowed(),
+                        }
                     };
                     EffectReceipt::allowed_with_lineage(
                         seq,
@@ -16836,6 +17138,7 @@ mod tests {
             frozen_modules: None,
             clock_epoch_ms: None,
             package_attribution: None,
+            declassification_receipts: Vec::new(),
         }
     }
 
@@ -26136,6 +26439,7 @@ exec "$2" pinned-worker-image"#,
             },
             telemetry_socket_path: PathBuf::from("/tmp/native-session-frame.sock"),
             process_spawn_trust_key_hex: Some("11".repeat(32)),
+            ifc_trust_key_hex: None,
             runtime_evidence_grant: runtime_evidence_grant_for_test(&nonce, [0x21; 32], [0x42; 32]),
             app_args: vec!["alpha".to_string()],
             capture_replay: true,

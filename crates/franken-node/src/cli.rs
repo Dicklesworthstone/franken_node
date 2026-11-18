@@ -2327,6 +2327,14 @@ pub enum TrustCommand {
     /// Audit SLSA/Sigstore provenance admission gates, cohort-aware BPET phenotype baselines, VEF claim coverage gates, and degraded-mode override audit schemas.
     #[command(name = "provenance-and-cohort-audit")]
     ProvenanceAndCohortAudit(TrustProvenanceAndCohortAuditArgs),
+
+    /// Sign an exact, TTL-bounded `[[security.ifc.declassify]]` network sink rule with the project operator Ed25519 key (`bd-reality-20260923-26n9r.13`).
+    #[command(name = "sign-declassification")]
+    SignDeclassification(TrustSignDeclassificationArgs),
+
+    /// Calibrate split-conformal (`q_{1-alpha}`) risk/anomaly advisories with conservative `n < n_min` strict fallback and Ed25519-signed receipts (`bd-reality-20260923-26n9r.13`).
+    #[command(name = "calibrate-conformal")]
+    CalibrateConformal(TrustCalibrateConformalArgs),
 }
 
 #[derive(Debug, Parser)]
@@ -2583,6 +2591,80 @@ pub struct TrustProvenanceAndCohortAuditArgs {
     pub trace_id: String,
 
     /// Emit `franken-node/trust-provenance-and-cohort-audit-cli/v1` JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Parser)]
+pub struct TrustSignDeclassificationArgs {
+    /// Exact target network sink (`host:port` or `http(s)://host[:port]`, no wildcards).
+    #[arg(long, default_value = "")]
+    pub sink: String,
+
+    /// Secret source label(s) authorized for declassification (`secret_file`, `secret_environment`).
+    #[arg(long = "label", required = false)]
+    pub labels: Vec<String>,
+
+    /// Operator identity recorded in emitted `DeclassificationReceipt`s.
+    #[arg(long, default_value = "")]
+    pub actor: String,
+
+    /// Audited operational purpose recorded in emitted `DeclassificationReceipt`s.
+    #[arg(long, default_value = "")]
+    pub purpose: String,
+
+    /// Rule validity window in seconds (`1..=2592000`, default `3600`).
+    #[arg(long, default_value_t = 3_600)]
+    pub ttl_secs: u64,
+
+    /// Optional explicit issuance timestamp in Unix epoch milliseconds (defaults to UTC clock).
+    #[arg(long)]
+    pub issued_at_ms: Option<u64>,
+
+    /// Ed25519 signing key file (defaults to `.franken-node/keys/receipt-signing.key`).
+    #[arg(long)]
+    pub signing_key: Option<PathBuf>,
+
+    /// Emit `franken-node/trust-sign-declassification-cli/v1` JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Parser)]
+pub struct TrustCalibrateConformalArgs {
+    /// JSON file containing `[ConformalScoreSample]`; mutually composable with `--builtin-benign-corpus`.
+    #[arg(long)]
+    pub samples: Option<PathBuf>,
+
+    /// Include the deterministic held-out benign + exfil migration advisory corpus (`24` samples).
+    #[arg(long)]
+    pub builtin_benign_corpus: bool,
+
+    /// Target miscoverage rate `alpha` in basis points (`1..=9999`, default `500` = `5.00%`).
+    #[arg(long, default_value_t = 500)]
+    pub alpha_bp: u16,
+
+    /// Minimum sample count `n_min` per risk class before trusting split-conformal quantiles (`>=1`, default `16`).
+    #[arg(long, default_value_t = 16)]
+    pub min_samples: u64,
+
+    /// Optional JSON file containing `[ConformalCandidateAdvisory]` records to evaluate.
+    #[arg(long)]
+    pub evaluate: Option<PathBuf>,
+
+    /// Optional ACI online learning rate in basis points (`0..=10000`).
+    #[arg(long)]
+    pub aci_learning_rate_bp: Option<u16>,
+
+    /// Optional Ed25519 signing key file (defaults to `.franken-node/keys/receipt-signing.key` when present).
+    #[arg(long)]
+    pub signing_key: Option<PathBuf>,
+
+    /// Optional path to write the calibrated receipt JSON atomically.
+    #[arg(long)]
+    pub out: Option<PathBuf>,
+
+    /// Emit `franken-node/conformal-calibration-receipt/v1` JSON.
     #[arg(long)]
     pub json: bool,
 }
