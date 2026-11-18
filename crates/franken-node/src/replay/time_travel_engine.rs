@@ -1538,11 +1538,309 @@ impl ReplayEngine {
         }
         removed
     }
+
+    /// Open a deterministic stepwise [`StepNavigator`] over a registered trace.
+    ///
+    /// Enforces [`contract_invariants::INV_REPLAY_STEP_NAVIGATION`] and
+    /// re-validates trace integrity before exposing step state views.
+    pub fn navigator(&self, trace_id: &str) -> Result<StepNavigator, TimeTravelError> {
+        let trace = self
+            .traces
+            .get(trace_id)
+            .ok_or_else(|| TimeTravelError::TraceNotFound {
+                trace_id: trace_id.to_string(),
+            })?;
+        StepNavigator::new(trace.clone())
+    }
 }
 
 impl Default for ReplayEngine {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Stepwise time-travel navigation (INV-REPLAY-STEP-NAVIGATION)
+// ---------------------------------------------------------------------------
+
+/// Maximum number of step views returned in a single navigation inspection window.
+pub const MAX_STEP_NAVIGATION_WINDOW: usize = 256;
+
+/// Maximum UTF-8 character length rendered in `input_preview` / `output_preview`.
+pub const MAX_STEP_PREVIEW_CHARS: usize = 256;
+
+const STEP_PREFIX_HASH_DOMAIN: &[u8] = b"replay_step_prefix_v1:";
+
+fn bounded_step_preview(bytes: &[u8]) -> String {
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        let sanitized = sanitize_log_identifier(text);
+        let mut out = String::new();
+        for (idx, ch) in sanitized.chars().enumerate() {
+            if idx >= MAX_STEP_PREVIEW_CHARS {
+                out.push_str("...");
+                break;
+            }
+            out.push(ch);
+        }
+        out
+    } else {
+        let prefix = &bytes[..bytes.len().min(64)];
+        if bytes.len() > 64 {
+            format!("hex:{}...", hex::encode(prefix))
+        } else {
+            format!("hex:{}", hex::encode(prefix))
+        }
+    }
+}
+
+fn compute_step_prefix_digests(trace: &WorkflowTrace) -> Vec<String> {
+    let mut running = Sha256::new();
+    running.update(STEP_PREFIX_HASH_DOMAIN);
+    update_hash_str_len_prefixed(&mut running, &trace.trace_id);
+    update_hash_str_len_prefixed(&mut running, &trace.workflow_name);
+    update_hash_str_len_prefixed(&mut running, &trace.schema_version);
+    update_environment_hash_len_prefixed(&mut running, &trace.environment);
+
+    let mut digests = Vec::with_capacity(trace.steps.len());
+    for step in &trace.steps {
+        running.update(step.seq.to_le_bytes());
+        running.update(step.timestamp_ns.to_le_bytes());
+        update_hash_len_prefixed(&mut running, &step.input);
+        update_hash_len_prefixed(&mut running, &step.output);
+        update_side_effects_hash_len_prefixed(&mut running, &step.side_effects);
+        digests.push(hex::encode(running.clone().finalize()));
+    }
+    digests
+}
+
+/// Serializable inspection view of a single recorded [`TraceStep`] with its
+/// cumulative state-prefix commitment (`prefix_digest`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimeTravelStepView {
+    pub seq: u64,
+    pub timestamp_ns: u64,
+    pub input_bytes: usize,
+    pub output_bytes: usize,
+    pub input_preview: String,
+    pub output_preview: String,
+    pub output_digest: String,
+    pub side_effects_digest: String,
+    pub prefix_digest: String,
+    pub side_effect_count: usize,
+    pub effect_kinds: Vec<String>,
+    pub capability_refs: Vec<String>,
+    pub pre_state_hashes: Vec<String>,
+    pub result_hashes: Vec<String>,
+    pub post_state_hashes: Vec<String>,
+}
+
+/// Operator/CLI report summarizing verified time-travel replay and stepwise
+/// cursor inspection (`INV-REPLAY-STEP-NAVIGATION`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimeTravelNavigationReport {
+    pub schema_version: String,
+    pub invariant: String,
+    pub trace_id: String,
+    pub workflow_name: String,
+    pub trace_digest: String,
+    pub replay_verdict: ReplayVerdict,
+    pub total_steps: usize,
+    pub cursor_seq: u64,
+    pub selected_step: TimeTravelStepView,
+    pub steps: Vec<TimeTravelStepView>,
+}
+
+/// Deterministic forward/backward cursor over an integrity-verified [`WorkflowTrace`].
+#[derive(Debug, Clone)]
+pub struct StepNavigator {
+    trace: WorkflowTrace,
+    cursor: usize,
+    prefix_digests: Vec<String>,
+}
+
+impl StepNavigator {
+    /// Validate `trace` and initialize the step cursor at `seq = 0`.
+    pub fn new(trace: WorkflowTrace) -> Result<Self, TimeTravelError> {
+        trace.validate()?;
+        let prefix_digests = compute_step_prefix_digests(&trace);
+        Ok(Self {
+            trace,
+            cursor: 0,
+            prefix_digests,
+        })
+    }
+
+    /// Underlying verified workflow trace.
+    #[must_use]
+    pub fn trace(&self) -> &WorkflowTrace {
+        &self.trace
+    }
+
+    /// Total number of recorded steps in the trace (`>= 1`).
+    #[must_use]
+    pub fn step_count(&self) -> usize {
+        self.trace.steps.len()
+    }
+
+    /// Current 0-based cursor sequence number.
+    #[must_use]
+    pub fn cursor(&self) -> u64 {
+        u64::try_from(self.cursor).unwrap_or(u64::MAX)
+    }
+
+    fn view_at(&self, index: usize) -> TimeTravelStepView {
+        let step = &self.trace.steps[index];
+        TimeTravelStepView {
+            seq: step.seq,
+            timestamp_ns: step.timestamp_ns,
+            input_bytes: step.input.len(),
+            output_bytes: step.output.len(),
+            input_preview: bounded_step_preview(&step.input),
+            output_preview: bounded_step_preview(&step.output),
+            output_digest: step.output_digest(),
+            side_effects_digest: step.side_effects_digest(),
+            prefix_digest: self.prefix_digests[index].clone(),
+            side_effect_count: step.side_effects.len(),
+            effect_kinds: step
+                .side_effects
+                .iter()
+                .map(|effect| effect.effect_kind.clone())
+                .collect(),
+            capability_refs: step
+                .side_effects
+                .iter()
+                .map(|effect| effect.capability_ref.clone())
+                .collect(),
+            pre_state_hashes: step
+                .side_effects
+                .iter()
+                .map(|effect| effect.pre_state_hash.as_str().to_string())
+                .collect(),
+            result_hashes: step
+                .side_effects
+                .iter()
+                .map(|effect| effect.result_hash.as_str().to_string())
+                .collect(),
+            post_state_hashes: step
+                .side_effects
+                .iter()
+                .map(|effect| effect.post_state_hash.as_str().to_string())
+                .collect(),
+        }
+    }
+
+    /// View of the step at the current cursor position.
+    #[must_use]
+    pub fn current(&self) -> TimeTravelStepView {
+        self.view_at(self.cursor)
+    }
+
+    /// Seek directly to `seq` (0-based). Fails closed with
+    /// [`error_codes::ERR_REPLAY_STEP_OVERFLOW`] when `seq >= step_count()`.
+    pub fn step_to(&mut self, seq: u64) -> Result<TimeTravelStepView, TimeTravelError> {
+        let Some(index) = usize::try_from(seq)
+            .ok()
+            .filter(|&idx| idx < self.trace.steps.len())
+        else {
+            return Err(TimeTravelError::ReplayFailed {
+                trace_id: self.trace.trace_id.clone(),
+                reason: format!(
+                    "[{}] requested step {} exceeds trace step count {}",
+                    error_codes::ERR_REPLAY_STEP_OVERFLOW,
+                    seq,
+                    self.trace.steps.len()
+                ),
+            });
+        };
+        self.cursor = index;
+        Ok(self.current())
+    }
+
+    /// Advance the cursor by one step (`cursor + 1`), failing closed with
+    /// [`error_codes::ERR_REPLAY_STEP_OVERFLOW`] at the end of the trace.
+    pub fn step_forward(&mut self) -> Result<TimeTravelStepView, TimeTravelError> {
+        let next = self
+            .cursor
+            .checked_add(1)
+            .and_then(|idx| u64::try_from(idx).ok())
+            .unwrap_or(u64::MAX);
+        self.step_to(next)
+    }
+
+    /// Move the cursor back by one step (`cursor - 1`), failing closed with
+    /// [`error_codes::ERR_REPLAY_STEP_OVERFLOW`] when already at step `0`.
+    pub fn step_backward(&mut self) -> Result<TimeTravelStepView, TimeTravelError> {
+        if self.cursor == 0 {
+            return Err(TimeTravelError::ReplayFailed {
+                trace_id: self.trace.trace_id.clone(),
+                reason: format!(
+                    "[{}] cannot step backward before initial step 0",
+                    error_codes::ERR_REPLAY_STEP_OVERFLOW
+                ),
+            });
+        }
+        self.cursor -= 1;
+        Ok(self.current())
+    }
+
+    /// Inspect a bounded window of steps starting at `start_seq` (clamped to
+    /// [`MAX_STEP_NAVIGATION_WINDOW`]). Fails closed with
+    /// [`error_codes::ERR_REPLAY_STEP_OVERFLOW`] if `start_seq >= step_count()`.
+    pub fn inspect_window(
+        &self,
+        start_seq: u64,
+        limit: usize,
+    ) -> Result<Vec<TimeTravelStepView>, TimeTravelError> {
+        let Some(start) = usize::try_from(start_seq)
+            .ok()
+            .filter(|&idx| idx < self.trace.steps.len())
+        else {
+            return Err(TimeTravelError::ReplayFailed {
+                trace_id: self.trace.trace_id.clone(),
+                reason: format!(
+                    "[{}] window start step {} exceeds trace step count {}",
+                    error_codes::ERR_REPLAY_STEP_OVERFLOW,
+                    start_seq,
+                    self.trace.steps.len()
+                ),
+            });
+        };
+        let bounded_limit = limit.clamp(1, MAX_STEP_NAVIGATION_WINDOW);
+        let end = self
+            .trace
+            .steps
+            .len()
+            .min(start.saturating_add(bounded_limit));
+        Ok((start..end).map(|idx| self.view_at(idx)).collect())
+    }
+
+    /// Build a structured [`TimeTravelNavigationReport`] at the current cursor.
+    #[must_use]
+    pub fn build_report(
+        &self,
+        replay_verdict: ReplayVerdict,
+        include_all_steps: bool,
+    ) -> TimeTravelNavigationReport {
+        let selected_step = self.current();
+        let steps = if include_all_steps {
+            let end = self.trace.steps.len().min(MAX_STEP_NAVIGATION_WINDOW);
+            (0..end).map(|idx| self.view_at(idx)).collect()
+        } else {
+            vec![selected_step.clone()]
+        };
+        TimeTravelNavigationReport {
+            schema_version: SCHEMA_VERSION.to_string(),
+            invariant: contract_invariants::INV_REPLAY_STEP_NAVIGATION.to_string(),
+            trace_id: self.trace.trace_id.clone(),
+            workflow_name: self.trace.workflow_name.clone(),
+            trace_digest: self.trace.trace_digest.clone(),
+            replay_verdict,
+            total_steps: self.trace.steps.len(),
+            cursor_seq: self.cursor(),
+            selected_step,
+            steps,
+        }
     }
 }
 
@@ -5563,5 +5861,136 @@ mod tests {
                     .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase())
             );
         }
+    }
+
+    #[test]
+    fn step_navigator_supports_forward_backward_prefix_digests_and_overflow_refusal() {
+        let cas_dir = tempfile::tempdir().expect("cas tempdir");
+        let cas = ContentAddressedStore::with_directory(cas_dir.path()).expect("open cas");
+
+        let mut builder = TraceBuilder::new("nav-trace-001", "incident-replay", demo_env());
+        let s0 = cas.put(b"state-0").expect("put s0");
+        let r0 = cas.put(b"result-0").expect("put r0");
+        let s1 = cas.put(b"state-1").expect("put s1");
+        let r1 = cas.put(b"result-1").expect("put r1");
+        let s2 = cas.put(b"state-2").expect("put s2");
+        let r2 = cas.put(b"result-2").expect("put r2");
+        let s3 = cas.put(b"state-3").expect("put s3");
+
+        builder.record_step(
+            b"step-0-in".to_vec(),
+            b"step-0-out".to_vec(),
+            vec![SideEffect::recorded(
+                "state_change",
+                "policy:v1",
+                s0,
+                r0,
+                s1.clone(),
+                b"result-0".to_vec(),
+            )],
+            1_000,
+        );
+        builder.record_step(
+            b"step-1-in".to_vec(),
+            b"step-1-out".to_vec(),
+            vec![SideEffect::recorded(
+                "policy_eval",
+                "policy:v1",
+                s1,
+                r1,
+                s2.clone(),
+                b"result-1".to_vec(),
+            )],
+            2_000,
+        );
+        builder.record_step(
+            vec![0xff, 0x00, 0xfe],
+            b"step-2-out".to_vec(),
+            vec![SideEffect::recorded(
+                "operator_action",
+                "policy:v1",
+                s2,
+                r2,
+                s3,
+                b"result-2".to_vec(),
+            )],
+            3_000,
+        );
+        let (trace, _audit) = builder.build().expect("build trace");
+
+        let mut tampered = trace.clone();
+        tampered.steps[1].output = b"mutated".to_vec();
+        let err = StepNavigator::new(tampered).expect_err("tampered trace must fail validation");
+        assert_eq!(err.code(), error_codes::ERR_TTR_DIGEST_MISMATCH);
+
+        let mut engine = ReplayEngine::new();
+        engine.register_trace(trace).expect("register trace");
+        let replay = engine
+            .verify_replay_from_cas("nav-trace-001", &cas)
+            .expect("verify replay from cas");
+        assert_eq!(replay.verdict, ReplayVerdict::Identical);
+
+        let mut nav = engine.navigator("nav-trace-001").expect("open navigator");
+        assert_eq!(nav.step_count(), 3);
+        assert_eq!(nav.cursor(), 0);
+
+        let initial = nav.current();
+        assert_eq!(initial.seq, 0);
+        assert_eq!(initial.input_preview, "step-0-in");
+        assert_eq!(initial.effect_kinds, vec!["state_change".to_string()]);
+
+        let back_underflow = nav
+            .step_backward()
+            .expect_err("step_backward at seq 0 must fail");
+        assert!(
+            back_underflow
+                .to_string()
+                .contains(error_codes::ERR_REPLAY_STEP_OVERFLOW),
+            "unexpected error: {back_underflow}"
+        );
+
+        let forward_1 = nav.step_forward().expect("step 0 -> 1");
+        assert_eq!(forward_1.seq, 1);
+        assert_ne!(forward_1.prefix_digest, initial.prefix_digest);
+
+        let forward_2 = nav.step_forward().expect("step 1 -> 2");
+        assert_eq!(forward_2.seq, 2);
+        assert_eq!(forward_2.input_preview, "hex:ff00fe");
+        assert_ne!(forward_2.prefix_digest, forward_1.prefix_digest);
+
+        let forward_overflow = nav
+            .step_forward()
+            .expect_err("step_forward past last step must fail");
+        assert!(
+            forward_overflow
+                .to_string()
+                .contains(error_codes::ERR_REPLAY_STEP_OVERFLOW),
+            "unexpected error: {forward_overflow}"
+        );
+
+        let back_1 = nav.step_backward().expect("step 2 -> 1");
+        assert_eq!(
+            back_1, forward_1,
+            "stepping backward to seq 1 must reconstruct the exact same view and prefix_digest"
+        );
+
+        let seek_err = nav
+            .step_to(3)
+            .expect_err("seeking out-of-bounds step must fail closed");
+        assert!(
+            seek_err
+                .to_string()
+                .contains(error_codes::ERR_REPLAY_STEP_OVERFLOW)
+        );
+        assert_eq!(nav.cursor(), 1, "failed step_to must preserve cursor");
+
+        let report = nav.build_report(replay.verdict, true);
+        assert_eq!(
+            report.invariant,
+            contract_invariants::INV_REPLAY_STEP_NAVIGATION
+        );
+        assert_eq!(report.total_steps, 3);
+        assert_eq!(report.cursor_seq, 1);
+        assert_eq!(report.steps.len(), 3);
     }
 }

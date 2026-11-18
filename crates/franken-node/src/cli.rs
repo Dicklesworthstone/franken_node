@@ -1911,6 +1911,34 @@ pub struct MigrateKitPlanArgs {
     #[arg(long)]
     pub transaction_id: Option<String>,
 
+    /// Optional pinned failure capsule path for source-fix inspection or minimization.
+    #[arg(long)]
+    pub capsule: Option<PathBuf>,
+
+    /// Independently verified 64-character lowercase SHA-256 content pin for `--capsule`.
+    #[arg(long)]
+    pub capsule_sha256: Option<String>,
+
+    /// Run failure-capsule source minimization against `--capsule`.
+    #[arg(long)]
+    pub minimize: bool,
+
+    /// Optional Bun runtime executable for three-runtime (`product::minimizer::minimize`) reduction.
+    #[arg(long)]
+    pub bun_bin: Option<PathBuf>,
+
+    /// Optional create-only (`0600`) destination path for the minimized capsule.
+    #[arg(long)]
+    pub minimized_output: Option<PathBuf>,
+
+    /// Maximum reducer oracle executions when `--minimize` is requested.
+    #[arg(long, default_value_t = 32)]
+    pub max_executions: usize,
+
+    /// Maximum wall-clock seconds when `--minimize` is requested.
+    #[arg(long, default_value_t = 60)]
+    pub max_seconds: u64,
+
     /// Connector identifier exercised through the deterministic activation pipeline.
     #[arg(long, default_value = "conn:migration-pilot")]
     pub connector_id: String,
@@ -4166,6 +4194,14 @@ pub struct IncidentReplayArgs {
     /// Stable trace ID for correlating replay events across commands.
     #[arg(long, default_value = "incident-replay")]
     pub trace_id: String,
+
+    /// Build a CAS-backed time-travel workflow trace and inspect step views + prefix digests.
+    #[arg(long)]
+    pub inspect_steps: bool,
+
+    /// Seek the time-travel step navigator to 0-based step `<SEQ>` (fails closed on overflow).
+    #[arg(long, value_name = "SEQ")]
+    pub step: Option<u64>,
 }
 
 #[derive(Debug, Parser)]

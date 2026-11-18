@@ -528,3 +528,139 @@ fn incident_list_help_shows_options() {
 
     assert!(stdout.contains("--json"), "Expected --json option");
 }
+
+#[test]
+fn incident_replay_time_travel_inspect_steps_and_step_navigation() {
+    let workspace = setup_test_workspace();
+    setup_test_config(workspace.path());
+    let bundle_path = create_test_bundle(workspace.path(), "test-incident-ttr-nav");
+    let anchor = setup_trust_anchor(workspace.path());
+
+    // 1. Default replay --json omits `time_travel` to preserve existing CLI JSON shape.
+    let baseline = incident_cmd()
+        .args([
+            "replay",
+            "--bundle",
+            &bundle_path,
+            "--trusted-public-key",
+            &anchor,
+            "--json",
+        ])
+        .current_dir(workspace.path())
+        .assert()
+        .success();
+    let baseline_json: Value =
+        serde_json::from_slice(&baseline.get_output().stdout).expect("valid baseline JSON");
+    assert!(
+        baseline_json.get("time_travel").is_none(),
+        "default incident replay --json must not inject time_travel unless requested"
+    );
+
+    // 2. `--inspect-steps` builds the CAS-backed WorkflowTrace, verifies replay from CAS,
+    // and emits the complete step window with monotonic sequence numbers and prefix digests.
+    let inspected = incident_cmd()
+        .args([
+            "replay",
+            "--bundle",
+            &bundle_path,
+            "--trusted-public-key",
+            &anchor,
+            "--inspect-steps",
+            "--json",
+        ])
+        .current_dir(workspace.path())
+        .assert()
+        .success();
+    let inspected_json: Value =
+        serde_json::from_slice(&inspected.get_output().stdout).expect("valid inspect-steps JSON");
+    let ttr = &inspected_json["time_travel"];
+    assert_eq!(ttr["schema_version"], "ttr-v1.1");
+    assert_eq!(ttr["invariant"], "INV-REPLAY-STEP-NAVIGATION");
+    assert_eq!(ttr["replay_verdict"], "identical");
+    assert_eq!(ttr["cursor_seq"], 0);
+    let total_steps = ttr["total_steps"].as_u64().expect("total_steps u64");
+    assert!(total_steps >= 2, "expected multi-step fixture bundle");
+    let steps = ttr["steps"].as_array().expect("steps array");
+    assert_eq!(steps.len() as u64, total_steps);
+    let step0_prefix = steps[0]["prefix_digest"]
+        .as_str()
+        .expect("step 0 prefix_digest");
+    let step1_prefix = steps[1]["prefix_digest"]
+        .as_str()
+        .expect("step 1 prefix_digest");
+    assert_eq!(step0_prefix.len(), 64);
+    assert_eq!(step1_prefix.len(), 64);
+    assert_ne!(step0_prefix, step1_prefix);
+    assert!(
+        steps[1]["pre_state_hashes"][0]
+            .as_str()
+            .unwrap_or("")
+            .starts_with("sha256:"),
+        "expected CAS sha256 pre_state_hash: {:?}",
+        steps[1]
+    );
+    assert_eq!(
+        steps[0]["post_state_hashes"][0], steps[1]["pre_state_hashes"][0],
+        "consecutive steps must chain post_state_hash -> pre_state_hash in CAS"
+    );
+
+    // 3. `--step 1` seeks directly to step 1 and reproduces the exact prefix_digest.
+    let seek = incident_cmd()
+        .args([
+            "replay",
+            "--bundle",
+            &bundle_path,
+            "--trusted-public-key",
+            &anchor,
+            "--step",
+            "1",
+            "--json",
+        ])
+        .current_dir(workspace.path())
+        .assert()
+        .success();
+    let seek_json: Value =
+        serde_json::from_slice(&seek.get_output().stdout).expect("valid seek JSON");
+    assert_eq!(seek_json["time_travel"]["cursor_seq"], 1);
+    assert_eq!(seek_json["time_travel"]["selected_step"]["seq"], 1);
+    assert_eq!(
+        seek_json["time_travel"]["selected_step"]["prefix_digest"],
+        step1_prefix
+    );
+    assert_eq!(
+        seek_json["time_travel"]["steps"]
+            .as_array()
+            .expect("single-step array")
+            .len(),
+        1
+    );
+
+    // 4. Out-of-bounds `--step 999` fails closed with ERR_REPLAY_STEP_OVERFLOW.
+    let overflow = incident_cmd()
+        .args([
+            "replay",
+            "--bundle",
+            &bundle_path,
+            "--trusted-public-key",
+            &anchor,
+            "--step",
+            "999",
+            "--json",
+        ])
+        .current_dir(workspace.path())
+        .assert()
+        .failure();
+    let overflow_json: Value =
+        serde_json::from_slice(&overflow.get_output().stdout).expect("valid overflow error JSON");
+    assert_eq!(
+        overflow_json["schema_version"],
+        "franken-node/incident-error-cli/v1"
+    );
+    assert_eq!(overflow_json["command"], "incident.replay");
+    assert_eq!(overflow_json["ok"], false);
+    let err_msg = overflow_json["error"].as_str().expect("error string");
+    assert!(
+        err_msg.contains("ERR_REPLAY_STEP_OVERFLOW"),
+        "expected ERR_REPLAY_STEP_OVERFLOW in error: {err_msg}"
+    );
+}

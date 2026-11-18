@@ -785,6 +785,74 @@ fn ops_dgis_fixture_suite_and_migrate_kit_plan_cli_e2e() {
         ],
     );
     assert_eq!(bad_kit["ok"], false);
+
+    // Capsule inspection and minimization fail-closed refusal controls:
+    let fake_capsule = dir.path().join("seed-capsule.json");
+    std::fs::write(&fake_capsule, b"{\"not\":\"a-valid-capsule\"}").expect("write fake capsule");
+    let candidate_dir = dir.path().join("candidate-proj");
+    std::fs::create_dir_all(&candidate_dir).expect("create candidate dir");
+
+    let missing_pin = json_err(
+        dir.path(),
+        &[
+            "migrate",
+            "kit-plan",
+            "--capsule",
+            fake_capsule.to_str().expect("utf8 path"),
+            "--project-path",
+            candidate_dir.to_str().expect("utf8 path"),
+            "--json",
+        ],
+    );
+    assert_eq!(missing_pin["ok"], false);
+    assert!(
+        missing_pin["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("--capsule-sha256"),
+        "expected missing --capsule-sha256 refusal: {missing_pin}"
+    );
+
+    let unpinned_inspect = json_err(
+        dir.path(),
+        &[
+            "migrate",
+            "kit-plan",
+            "--capsule",
+            fake_capsule.to_str().expect("utf8 path"),
+            "--capsule-sha256",
+            "not-a-hex-pin",
+            "--project-path",
+            candidate_dir.to_str().expect("utf8 path"),
+            "--json",
+        ],
+    );
+    assert_eq!(unpinned_inspect["ok"], false);
+    assert!(
+        unpinned_inspect["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("independently pinned"),
+        "expected source_fix::inspect pin format refusal: {unpinned_inspect}"
+    );
+
+    let fake_pin = "a".repeat(64);
+    let minimize_refusal = json_err(
+        dir.path(),
+        &[
+            "migrate",
+            "kit-plan",
+            "--capsule",
+            fake_capsule.to_str().expect("utf8 path"),
+            "--capsule-sha256",
+            &fake_pin,
+            "--minimize",
+            "--bun-bin",
+            "/bin/false",
+            "--json",
+        ],
+    );
+    assert_eq!(minimize_refusal["ok"], false);
 }
 
 #[test]

@@ -26488,7 +26488,12 @@ fn handle_incident_bundle_command(args: &cli::IncidentBundleArgs) -> Result<()> 
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct IncidentReplayCliSummary {
+    bundle_id: uuid::Uuid,
     incident_id: String,
+    bundle_created_at: String,
+    policy_version: String,
+    integrity_hash: String,
+    initial_state_snapshot: serde_json::Value,
     replay_kind: String,
     matched: bool,
     event_count: usize,
@@ -26663,7 +26668,12 @@ fn incident_replay_cli_summary(
     );
 
     Ok(IncidentReplayCliSummary {
+        bundle_id: bundle.bundle_id,
         incident_id: outcome.incident_id,
+        bundle_created_at: bundle.created_at,
+        policy_version: bundle.policy_version,
+        integrity_hash: bundle.integrity_hash,
+        initial_state_snapshot: bundle.initial_state_snapshot,
         replay_kind,
         matched,
         event_count: outcome.event_count,
@@ -26674,6 +26684,137 @@ fn incident_replay_cli_summary(
         run_origin,
         runtime_origin,
     })
+}
+
+fn sanitize_ttr_trace_identifier(raw: &str) -> String {
+    let mut sanitized = String::from("incident-");
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == ':' {
+            sanitized.push(ch);
+        } else {
+            sanitized.push('_');
+        }
+    }
+    sanitized
+}
+
+fn sanitize_ttr_env_value(raw: &str) -> String {
+    raw.chars()
+        .map(|ch| if ch.is_ascii_control() { '_' } else { ch })
+        .collect()
+}
+
+fn build_incident_time_travel_report(
+    summary: &IncidentReplayCliSummary,
+    inspect_steps: bool,
+    step: Option<u64>,
+) -> Result<frankenengine_node::replay::time_travel_engine::TimeTravelNavigationReport> {
+    use frankenengine_node::replay::time_travel_engine::{
+        EnvironmentSnapshot, ReplayEngine, SideEffect, TraceBuilder,
+    };
+    use frankenengine_node::storage::cas::ContentAddressedStore;
+
+    let ttr_trace_id = sanitize_ttr_trace_identifier(&summary.incident_id);
+    let clock_seed_ns = chrono::DateTime::parse_from_rfc3339(&summary.bundle_created_at)
+        .ok()
+        .and_then(|dt| dt.timestamp_nanos_opt())
+        .and_then(|ns| u64::try_from(ns).ok())
+        .unwrap_or(0);
+    let env_vars = std::collections::BTreeMap::from([
+        ("bundle_id".to_string(), summary.bundle_id.to_string()),
+        (
+            "integrity_hash".to_string(),
+            sanitize_ttr_env_value(&summary.integrity_hash),
+        ),
+        (
+            "policy_version".to_string(),
+            sanitize_ttr_env_value(&summary.policy_version),
+        ),
+        (
+            "replay_kind".to_string(),
+            sanitize_ttr_env_value(&summary.replay_kind),
+        ),
+    ]);
+    let platform = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
+    let env_snapshot = EnvironmentSnapshot::new(
+        clock_seed_ns,
+        env_vars,
+        &platform,
+        env!("CARGO_PKG_VERSION"),
+    );
+
+    let cas_dir = tempfile::tempdir().context("create ephemeral CAS directory for time-travel")?;
+    let cas = ContentAddressedStore::with_directory(cas_dir.path())
+        .map_err(|err| anyhow::anyhow!("open time-travel CAS: {err}"))?;
+
+    let mut builder = TraceBuilder::new(&ttr_trace_id, "incident-replay", env_snapshot);
+    let mut running_state = serde_json::to_vec(&summary.initial_state_snapshot)
+        .context("serialize initial_state_snapshot for time-travel CAS")?;
+    let capability_ref = format!("policy:{}", sanitize_ttr_env_value(&summary.policy_version));
+
+    for (idx, event) in summary.timeline.iter().enumerate() {
+        let step_input = serde_json::to_vec(&serde_json::json!({
+            "sequence_number": event.sequence_number,
+            "event_type": event.event_type,
+            "causal_parent": event.causal_parent,
+            "timestamp": event.timestamp,
+        }))
+        .context("serialize timeline step input")?;
+        let step_output =
+            serde_json::to_vec(&event.payload).context("serialize timeline step payload")?;
+        let pre_state_hash = cas
+            .put(&running_state)
+            .map_err(|err| anyhow::anyhow!("store pre_state in time-travel CAS: {err}"))?;
+        let result_hash = cas
+            .put(&step_output)
+            .map_err(|err| anyhow::anyhow!("store step result in time-travel CAS: {err}"))?;
+        running_state = serde_json::to_vec(&serde_json::json!({
+            "prev_state_hash": pre_state_hash.as_str(),
+            "sequence_number": event.sequence_number,
+            "event_type": event.event_type,
+            "result_hash": result_hash.as_str(),
+        }))
+        .context("serialize post-step state commitment")?;
+        let post_state_hash = cas
+            .put(&running_state)
+            .map_err(|err| anyhow::anyhow!("store post_state in time-travel CAS: {err}"))?;
+
+        let effect = SideEffect::recorded(
+            event.event_type.as_str(),
+            &capability_ref,
+            pre_state_hash,
+            result_hash,
+            post_state_hash,
+            step_output.clone(),
+        );
+        let fallback_ns = u64::try_from(idx).unwrap_or(u64::MAX).saturating_mul(1_000);
+        let timestamp_ns = chrono::DateTime::parse_from_rfc3339(&event.timestamp)
+            .ok()
+            .and_then(|dt| dt.timestamp_nanos_opt())
+            .and_then(|ns| u64::try_from(ns).ok())
+            .map_or(fallback_ns, |ns| ns.saturating_sub(clock_seed_ns));
+        builder.record_step(step_input, step_output, vec![effect], timestamp_ns);
+    }
+
+    let (trace, _builder_audit) = builder
+        .build()
+        .map_err(|err| anyhow::anyhow!("build time-travel workflow trace: {err}"))?;
+    let mut engine = ReplayEngine::new();
+    engine
+        .register_trace(trace)
+        .map_err(|err| anyhow::anyhow!("register time-travel workflow trace: {err}"))?;
+    let ttr_replay = engine
+        .verify_replay_from_cas(&ttr_trace_id, &cas)
+        .map_err(|err| anyhow::anyhow!("verify time-travel replay from CAS: {err}"))?;
+    let mut navigator = engine
+        .navigator(&ttr_trace_id)
+        .map_err(|err| anyhow::anyhow!("open time-travel step navigator: {err}"))?;
+    if let Some(target_seq) = step {
+        navigator
+            .step_to(target_seq)
+            .map_err(|err| anyhow::anyhow!("time-travel step navigation failed: {err}"))?;
+    }
+    Ok(navigator.build_report(ttr_replay.verdict, inspect_steps))
 }
 
 fn handle_incident_replay_command(args: &cli::IncidentReplayArgs) -> Result<()> {
@@ -26746,6 +26887,14 @@ fn handle_incident_replay_command(args: &cli::IncidentReplayArgs) -> Result<()> 
     ) {
         Ok(summary) => summary,
         Err(err) => return incident_fail("incident.replay", args.json, err),
+    };
+    let time_travel_report = if args.inspect_steps || args.step.is_some() {
+        match build_incident_time_travel_report(&summary, args.inspect_steps, args.step) {
+            Ok(report) => Some(report),
+            Err(err) => return incident_fail("incident.replay", args.json, err),
+        }
+    } else {
+        None
     };
     // bd-x8d9t: mirror the replay lifecycle into the registered TNR event
     // stream (docs/observability/tnr_event_metrics_registry.md) so one
@@ -26842,7 +26991,7 @@ fn handle_incident_replay_command(args: &cli::IncidentReplayArgs) -> Result<()> 
         );
     }
     if args.json {
-        let payload = serde_json::json!({
+        let mut payload = serde_json::json!({
             "command": "incident.replay",
             "schema_version": "incident-replay-cli-v1",
             "incident_id": &summary.incident_id,
@@ -26861,6 +27010,9 @@ fn handle_incident_replay_command(args: &cli::IncidentReplayArgs) -> Result<()> 
             "runtime_origin": &summary.runtime_origin,
             "authentication_scope": summary.authentication_scope(),
         });
+        if let Some(report) = &time_travel_report {
+            payload["time_travel"] = serde_json::to_value(report)?;
+        }
         println!("{}", serde_json::to_string_pretty(&payload)?);
         if !summary.matched {
             // The machine-parseable `incident replay result:` line is already
@@ -26876,6 +27028,16 @@ fn handle_incident_replay_command(args: &cli::IncidentReplayArgs) -> Result<()> 
             summary.timeline.len(),
             summary.event_count
         );
+        if let Some(report) = &time_travel_report {
+            println!(
+                "time-travel navigation: trace_id={} cursor_seq={}/{} prefix_digest={} verdict={}",
+                report.trace_id,
+                report.cursor_seq,
+                report.total_steps,
+                report.selected_step.prefix_digest,
+                report.replay_verdict
+            );
+        }
         if let Some(execution) = &summary.execution_result {
             println!(
                 "native execution comparison: {}",
@@ -43409,6 +43571,115 @@ fn handle_migrate_kit_plan(args: &MigrateKitPlanArgs) -> Result<()> {
         ),
     };
 
+    anyhow::ensure!(
+        args.capsule_sha256.is_none() || args.capsule.is_some(),
+        "--capsule-sha256 requires --capsule"
+    );
+    anyhow::ensure!(
+        args.capsule.is_none() || args.capsule_sha256.is_some(),
+        "--capsule requires an independent --capsule-sha256 content pin"
+    );
+    anyhow::ensure!(
+        !args.minimize || args.capsule.is_some(),
+        "--minimize requires --capsule and --capsule-sha256"
+    );
+    anyhow::ensure!(
+        args.minimized_output.is_none() || args.minimize,
+        "--minimized-output requires --minimize"
+    );
+    anyhow::ensure!(
+        args.bun_bin.is_none() || args.minimize,
+        "--bun-bin requires --minimize"
+    );
+    anyhow::ensure!(
+        args.capsule.is_none() || args.minimize || args.project_path.is_some(),
+        "--capsule without --minimize requires --project-path to inspect candidate source-fix changes"
+    );
+
+    #[cfg(not(target_os = "linux"))]
+    if args.capsule.is_some() || args.minimize {
+        anyhow::bail!("failure-capsule inspection and minimization require Linux");
+    }
+
+    #[cfg(target_os = "linux")]
+    let (source_fix_inspection, minimization_report, minimized_capsule) = {
+        let inspection = if let (Some(capsule_path), Some(capsule_pin), Some(project_path)) =
+            (&args.capsule, &args.capsule_sha256, &args.project_path)
+        {
+            let inspected = frankenengine_node::migration::validation_suite::native_replay::failure_capture::product::source_fix::inspect(
+                capsule_path,
+                capsule_pin,
+                project_path,
+            )?;
+            Some(serde_json::to_value(&inspected)?)
+        } else {
+            None
+        };
+
+        let (min_report, min_written) = if args.minimize {
+            let capsule_path = args
+                .capsule
+                .as_deref()
+                .context("--minimize requires --capsule")?;
+            let capsule_pin = args
+                .capsule_sha256
+                .as_deref()
+                .context("--minimize requires --capsule-sha256")?;
+            let current_exe =
+                std::env::current_exe().context("resolve current franken-node executable")?;
+            let reducer_options = frankenengine_node::migration::validation_suite::native_replay::failure_capture::product::minimizer::Options {
+                source_files: Vec::new(),
+                max_executions: args.max_executions,
+                seconds: args.max_seconds,
+                confirmations: 2,
+            };
+            if let Some(bun_bin) = args.bun_bin.as_deref() {
+                let minimized = frankenengine_node::migration::validation_suite::native_replay::failure_capture::product::minimizer::minimize(
+                    capsule_path,
+                    capsule_pin,
+                    &current_exe,
+                    bun_bin,
+                    &reducer_options,
+                )?;
+                let written = args
+                    .minimized_output
+                    .as_deref()
+                    .map(|out| minimized.write_capsule(out))
+                    .transpose()?
+                    .map(|summary| serde_json::to_value(&summary))
+                    .transpose()?;
+                (Some(serde_json::to_value(&minimized.report)?), written)
+            } else {
+                let minimized =
+                    frankenengine_node::migration::validation_suite::native_replay::minimizer::minimize(
+                        capsule_path,
+                        capsule_pin,
+                        &current_exe,
+                        &reducer_options,
+                    )?;
+                let written = args
+                    .minimized_output
+                    .as_deref()
+                    .map(|out| minimized.write_capsule(out))
+                    .transpose()?
+                    .map(|summary| serde_json::to_value(&summary))
+                    .transpose()?;
+                (Some(serde_json::to_value(&minimized.report)?), written)
+            }
+        } else {
+            (None, None)
+        };
+
+        (inspection, min_report, min_written)
+    };
+
+    #[cfg(not(target_os = "linux"))]
+    let (source_fix_inspection, minimization_report, minimized_capsule): (
+        Option<serde_json::Value>,
+        Option<serde_json::Value>,
+        Option<serde_json::Value>,
+    ) = (None, None, None);
+
     let mut mke = MigrationKitEcosystem::new(MkeConfig::default());
     let steps = MigrationPhase::all()
         .iter()
@@ -43480,7 +43751,7 @@ fn handle_migrate_kit_plan(args: &MigrateKitPlanArgs) -> Result<()> {
         && device_registry.count() == 1
         && cli_prefix_registered;
 
-    let payload = serde_json::json!({
+    let mut payload = serde_json::json!({
         "schema_version": "franken-node/migrate-kit-plan-cli/v1",
         "command": "migrate.kit-plan",
         "ok": ok,
@@ -43505,6 +43776,15 @@ fn handle_migrate_kit_plan(args: &MigrateKitPlanArgs) -> Result<()> {
         },
         "audit_records": mke.audit_log().len(),
     });
+    if let Some(inspection) = source_fix_inspection {
+        payload["source_fix_inspection"] = inspection;
+    }
+    if let Some(report) = minimization_report {
+        payload["minimization_report"] = report;
+    }
+    if let Some(written) = minimized_capsule {
+        payload["minimized_capsule"] = written;
+    }
 
     if args.json {
         println!("{}", serde_json::to_string_pretty(&payload)?);
