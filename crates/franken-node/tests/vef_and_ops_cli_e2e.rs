@@ -433,6 +433,11 @@ fn ops_swarm_scenario_and_fault_schedule_audit_execute_deterministically() {
     assert_eq!(audit["dpor_schedule_gate"]["passed"], true);
     assert_eq!(audit["dpor_schedule_gate"]["scenarios_explored"], 6);
     assert_eq!(audit["dpor_schedule_gate"]["total_violations"], 0);
+    assert_eq!(audit["replay_bundle_adversarial_audit"]["passed"], true);
+    assert_eq!(audit["replay_bundle_adversarial_audit"]["total_cases"], 9);
+    assert_eq!(audit["replay_bundle_adversarial_audit"]["matched_cases"], 9);
+    assert_eq!(audit["canonical_strategy_smoke"]["passed"], true);
+    assert_eq!(audit["canonical_strategy_smoke"]["samples_per_family"], 4);
 }
 
 #[test]
@@ -809,6 +814,7 @@ fn ops_dgis_fixture_suite_and_migrate_kit_plan_cli_e2e() {
         kit["singularity_pipeline"]["receipt_signature_verified"],
         true
     );
+    assert_eq!(kit["tree_transaction_audit"]["valid"], true);
     assert_eq!(kit["migration_artifact_contract"]["artifact_valid"], true);
     assert_eq!(
         kit["migration_artifact_contract"]["artifact_signatures_verified"],

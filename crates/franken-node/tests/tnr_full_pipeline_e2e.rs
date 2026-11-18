@@ -1733,3 +1733,906 @@ fn ltv_verify_as_of_json_fails_closed_when_evidence_flag_missing() {
         "--json must not append a human clap/Error line after the JSON report: {stderr}"
     );
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn composed_operator_acceptance_scenario_end_to_end() {
+    use chrono::Utc;
+    use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
+    use frankenengine_node::control_plane::fleet_http_server::{
+        FLEET_HTTP_LISTENING, FleetControlPlaneService, FleetHttpServerConfig,
+        FleetHttpServerControl, FleetNodeCredentials, serve_fleet_control_plane,
+    };
+    use frankenengine_node::control_plane::fleet_transport::{
+        FLEET_EPOCH_BARRIER_CERTIFIED_DRAIN_SCOPE, FleetAction, FleetActionRecord, FleetTargetKind,
+        FleetTransport, NATIVE_SESSION_DRAIN_ATTESTATION_SCHEMA, NativeSessionDrainAttestation,
+        NativeSessionDrainCheckpoint, NodeHealth, NodeStatus, SeqlockControlPage,
+        fleet_application_checkpoint,
+    };
+    use frankenengine_node::control_plane::fleet_transport_http::{
+        FleetHttpEpochBarrierRequest, HttpFleetTransport,
+    };
+    use frankenengine_verifier_sdk::incident_bundle::{
+        IncidentBundleError, verify_incident_bundle,
+    };
+    use sha2::{Digest, Sha256};
+    use std::sync::Arc;
+
+    let bin_bytes = std::fs::read(franken_node_bin()).expect("read franken-node binary bytes");
+    let binary_sha256 = format!("sha256:{}", hex::encode(Sha256::digest(&bin_bytes)));
+    let mut stage_unknowns: Vec<Value> = Vec::new();
+    let mut negative_controls: Vec<Value> = Vec::new();
+
+    // -------------------------------------------------------------------------
+    // Stage 1: Clean install/init + Ed25519 trust anchor setup
+    // -------------------------------------------------------------------------
+    let ws_dir = tempfile::TempDir::new().expect("workspace tempdir");
+    let state_home = tempfile::TempDir::new().expect("xdg state home");
+    let ws = ws_dir.path();
+
+    for git_args in [
+        &["init", "-b", "main"][..],
+        &["config", "user.email", "operator@acme.example"][..],
+        &["config", "user.name", "Composed Operator"][..],
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://example.com/acme/composed-operator.git",
+        ][..],
+    ] {
+        let st = Command::new("git")
+            .current_dir(ws)
+            .args(git_args)
+            .status()
+            .expect("git bootstrap");
+        assert!(st.success(), "git {:?} failed", git_args);
+    }
+
+    let init_out = run_cli(ws, &["init", "--profile", "balanced", "--out-dir", "."]);
+    assert!(
+        init_out.status.success(),
+        "Stage 1 init failed: {}",
+        String::from_utf8_lossy(&init_out.stderr)
+    );
+
+    let seed_bytes = [0x5a_u8; 32];
+    let signing_key = SigningKey::from_bytes(&seed_bytes);
+    let verifying_key: VerifyingKey = signing_key.verifying_key();
+    let public_key_hex = hex::encode(verifying_key.to_bytes());
+    std::fs::create_dir_all(ws.join(".franken-node/keys")).expect("mkdir .franken-node/keys");
+    let key_rel = ".franken-node/keys/receipt-signing.key";
+    let pub_rel = ".franken-node/keys/receipt-signing.pub";
+    std::fs::write(ws.join(key_rel), format!("{}\n", hex::encode(seed_bytes)))
+        .expect("write signing key");
+    std::fs::write(ws.join(pub_rel), format!("{public_key_hex}\n")).expect("write public key");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(ws.join(key_rel), std::fs::Permissions::from_mode(0o600))
+            .expect("chmod 0600 signing key");
+    }
+
+    let config_path = ws.join("franken_node.toml");
+    let mut cfg_toml = std::fs::read_to_string(&config_path).expect("read franken_node.toml");
+    let signing_line = format!("decision_receipt_signing_key_path = \"{key_rel}\"\n");
+    if let Some(pos) = cfg_toml.find("[security]\n") {
+        cfg_toml.insert_str(pos + "[security]\n".len(), &signing_line);
+    } else {
+        cfg_toml.push_str("\n[security]\n");
+        cfg_toml.push_str(&signing_line);
+    }
+    std::fs::write(&config_path, &cfg_toml).expect("patch franken_node.toml");
+    let config_sha256 = format!(
+        "sha256:{}",
+        hex::encode(Sha256::digest(cfg_toml.as_bytes()))
+    );
+    layer_pass("C1 INIT", &format!("binary={binary_sha256}"));
+
+    // -------------------------------------------------------------------------
+    // Stage 2: Real multi-file + node_modules package workload (--frozen-modules)
+    // -------------------------------------------------------------------------
+    std::fs::create_dir_all(ws.join("lib")).expect("mkdir lib");
+    std::fs::create_dir_all(ws.join("node_modules/@acme/banner")).expect("mkdir scoped pkg");
+    std::fs::write(
+        ws.join("package.json"),
+        r#"{"name":"composed-app","version":"1.0.0","main":"index.cjs","engines":{"node":">=18"},"scripts":{"start":"node index.cjs"}}"#,
+    )
+    .expect("write package.json");
+    std::fs::write(ws.join("lib/calc.cjs"), "exports.sum = (a, b) => a + b;\n")
+        .expect("write lib/calc.cjs");
+    std::fs::write(
+        ws.join("node_modules/@acme/banner/package.json"),
+        r#"{"name":"@acme/banner","version":"1.0.0","main":"index.cjs"}"#,
+    )
+    .expect("write @acme/banner/package.json");
+    std::fs::write(
+        ws.join("node_modules/@acme/banner/index.cjs"),
+        "exports.tag = (n) => 'composed:' + n;\n",
+    )
+    .expect("write @acme/banner/index.cjs");
+    std::fs::write(
+        ws.join("index.cjs"),
+        "const { sum } = require('./lib/calc.cjs');\nconst { tag } = require('@acme/banner');\nconsole.log(tag(sum(19, 23)));\n",
+    )
+    .expect("write index.cjs");
+
+    for git_args in [
+        &["add", "package.json", "index.cjs", "lib/calc.cjs"][..],
+        &["commit", "-m", "seed multi-file workload"][..],
+    ] {
+        let st = Command::new("git")
+            .current_dir(ws)
+            .args(git_args)
+            .status()
+            .expect("git commit workload");
+        assert!(st.success(), "git {:?} failed", git_args);
+    }
+
+    let run_out = Command::new(franken_node_bin())
+        .current_dir(ws)
+        .env("XDG_STATE_HOME", state_home.path())
+        .args([
+            "run",
+            "index.cjs",
+            "--policy",
+            "balanced",
+            "--runtime",
+            "franken-engine",
+            "--engine-bin",
+            franken_node_bin(),
+            "--frozen-modules",
+            "--capture-replay",
+            "--json",
+            "--trace-id",
+            "composed-operator-e2e-trace",
+        ])
+        .output()
+        .expect("run multi-file workload");
+    assert!(
+        run_out.status.success(),
+        "Stage 2 multi-file run failed: stdout={}\nstderr={}",
+        String::from_utf8_lossy(&run_out.stdout),
+        String::from_utf8_lossy(&run_out.stderr)
+    );
+    let run_json: Value =
+        serde_json::from_slice(&run_out.stdout).expect("parse Stage 2 run --json");
+    assert_eq!(
+        run_json["dispatch"]["captured_output"]["stdout"].as_str(),
+        Some("composed:42\n")
+    );
+    let receipt_id = run_json["receipt"]["receipt_id"]
+        .as_str()
+        .expect("Stage 2 receipt_id")
+        .to_string();
+    let attributed_pkgs = run_json["receipt"]["package_attribution"]["packages"]
+        .as_array()
+        .expect("package_attribution.packages");
+    assert!(
+        attributed_pkgs
+            .iter()
+            .any(|p| p["package_name"].as_str() == Some("@acme/banner")),
+        "expected @acme/banner in package_attribution: {attributed_pkgs:?}"
+    );
+    layer_pass("C2 MULTI-FILE RUN", &format!("receipt_id={receipt_id}"));
+
+    // -------------------------------------------------------------------------
+    // Stage 3: Migrate audit + rewrite with explicit rollback identity
+    // -------------------------------------------------------------------------
+    let neg_rewrite = run_cli(ws, &["migrate", "rewrite", "--json"]);
+    assert!(
+        !neg_rewrite.status.success(),
+        "missing path must fail closed"
+    );
+    negative_controls.push(json!({
+        "stage": "migrate_rewrite",
+        "control": "missing_project_path",
+        "rejected": true,
+    }));
+
+    let mig_dir = tempfile::TempDir::new().expect("migrate tempdir");
+    let mig_proj = mig_dir.path().join("legacy-proj");
+    std::fs::create_dir_all(&mig_proj).expect("mkdir legacy-proj");
+    std::fs::write(
+        mig_proj.join("package.json"),
+        r#"{"name":"legacy-proj","version":"1.0.0","engines":{"node":"16.x"},"scripts":{"start":"node index.js"}}"#,
+    )
+    .expect("write legacy package.json");
+    std::fs::write(mig_proj.join("index.js"), "console.log('migrated');\n")
+        .expect("write legacy index.js");
+
+    let audit_out = run_cli(
+        mig_dir.path(),
+        &["migrate", "audit", "legacy-proj", "--format", "json"],
+    );
+    assert!(
+        audit_out.status.success(),
+        "Stage 3 migrate audit failed: {}",
+        String::from_utf8_lossy(&audit_out.stderr)
+    );
+    let audit_json: Value = serde_json::from_slice(&audit_out.stdout).expect("parse audit json");
+
+    let rollback_path = mig_dir.path().join("rollback-plan.json");
+    let rewrite_out = run_cli(
+        mig_dir.path(),
+        &[
+            "migrate",
+            "rewrite",
+            "legacy-proj",
+            "--apply",
+            "--json",
+            "--emit-rollback",
+            "rollback-plan.json",
+        ],
+    );
+    assert!(
+        rewrite_out.status.success(),
+        "Stage 3 migrate rewrite failed: stdout={}\nstderr={}",
+        String::from_utf8_lossy(&rewrite_out.stdout),
+        String::from_utf8_lossy(&rewrite_out.stderr)
+    );
+    let rewrite_json: Value =
+        serde_json::from_slice(&rewrite_out.stdout).expect("parse rewrite json");
+    assert_eq!(rewrite_json["apply_mode"], true);
+    let rollback_bytes = std::fs::read(&rollback_path).expect("read rollback-plan.json");
+    let rollback_sha256 = format!("sha256:{}", hex::encode(Sha256::digest(&rollback_bytes)));
+    let rollback_json: Value = serde_json::from_slice(&rollback_bytes).expect("parse rollback");
+    assert!(
+        rollback_json["entry_count"].as_u64().unwrap_or(0) >= 1,
+        "rollback plan must record >=1 entry: {rollback_json}"
+    );
+    layer_pass(
+        "C3 MIGRATE+ROLLBACK",
+        &format!("rollback={rollback_sha256}"),
+    );
+
+    // -------------------------------------------------------------------------
+    // Stage 4: Genuine lockstep oracle (retaining intentional failure + denominators)
+    // -------------------------------------------------------------------------
+    let lockstep_dir = tempfile::TempDir::new().expect("lockstep tempdir");
+    let corpus_dir = lockstep_dir.path().join("corpus/os");
+    std::fs::create_dir_all(&corpus_dir).expect("mkdir corpus/os");
+    std::fs::write(
+        corpus_dir.join("0001_os_pass.js"),
+        "const os = require('os'); console.log(typeof os.platform());\n",
+    )
+    .expect("write 0001_os_pass.js");
+    std::fs::write(
+        corpus_dir.join("0002_ambient_refusal.js"),
+        "console.log(process.release.name);\n",
+    )
+    .expect("write 0002_ambient_refusal.js");
+    std::fs::write(
+        corpus_dir.join("manifest.json"),
+        serde_json::to_vec_pretty(&json!({
+            "schema_version": "compat-corpus-fixture-v1",
+            "api_family": "os",
+            "investigation_bead_id": "bd-test0",
+            "cases": [
+                {
+                    "id": "tc::os::0001",
+                    "file": "0001_os_pass.js",
+                    "api": "os.platform",
+                    "requirement": "typeof os.platform() is string",
+                    "divergence_axes": ["output", "exit"],
+                    "band": "core",
+                    "risk_band": "critical"
+                },
+                {
+                    "id": "tc::os::0002",
+                    "file": "0002_ambient_refusal.js",
+                    "api": "process.release",
+                    "requirement": "intentional ambient-authority refusal retained as failure",
+                    "divergence_axes": ["output", "exit"],
+                    "band": "edge",
+                    "risk_band": "low"
+                }
+            ]
+        }))
+        .unwrap(),
+    )
+    .expect("write mini corpus manifest");
+
+    let bun_ok = Command::new("bun")
+        .arg("--version")
+        .output()
+        .is_ok_and(|o| o.status.success());
+    let node_ok = Command::new("node")
+        .args(["-e", "process.exit(typeof Bun === 'undefined' ? 0 : 1)"])
+        .output()
+        .is_ok_and(|o| o.status.success());
+
+    let lockstep_summary = if bun_ok {
+        let mut ls_args = vec![
+            "ops",
+            "compat-corpus-run",
+            "--corpus-root",
+            "corpus",
+            "--out",
+            "results.json",
+            "--case-timeout-secs",
+            "15",
+            "--json",
+        ];
+        if node_ok {
+            ls_args.push("--require-node-reference");
+        } else {
+            stage_unknowns.push(json!({
+                "stage": "lockstep_oracle",
+                "unknown": "distinct node binary absent on worker PATH; executed dyad bun+franken-engine-native",
+            }));
+        }
+        let ls_out = Command::new(franken_node_bin())
+            .current_dir(lockstep_dir.path())
+            .args(&ls_args)
+            .output()
+            .expect("ops compat-corpus-run");
+        assert!(
+            ls_out.status.success(),
+            "Stage 4 compat-corpus-run failed: stdout={}\nstderr={}",
+            String::from_utf8_lossy(&ls_out.stdout),
+            String::from_utf8_lossy(&ls_out.stderr)
+        );
+        let results: Value = serde_json::from_slice(
+            &std::fs::read(lockstep_dir.path().join("results.json")).expect("read results.json"),
+        )
+        .expect("parse results.json");
+        assert_eq!(results["totals"]["total_test_cases"], 2);
+        assert_eq!(results["totals"]["passed_test_cases"], 1);
+        assert_eq!(results["totals"]["failed_test_cases"], 1);
+        assert_eq!(
+            results["failing_tests_tracking"].as_array().map(Vec::len),
+            Some(1)
+        );
+        negative_controls.push(json!({
+            "stage": "lockstep_oracle",
+            "control": "tc::os::0002_ambient_refusal_retained",
+            "rejected": true,
+        }));
+        json!({
+            "executed": true,
+            "topology": results["corpus"]["lockstep_topology"],
+            "reference_runtimes": results["corpus"]["reference_runtimes"],
+            "policy_mode": results["corpus"]["policy_mode"],
+            "total_cases": results["totals"]["total_test_cases"],
+            "passed_cases": results["totals"]["passed_test_cases"],
+            "failed_cases": results["totals"]["failed_test_cases"],
+            "result_digest": results["corpus"]["result_digest"],
+            "retained_failures": results["failing_tests_tracking"],
+        })
+    } else {
+        stage_unknowns.push(json!({
+            "stage": "lockstep_oracle",
+            "unknown": "bun binary not present on worker PATH; live lockstep leg skipped",
+        }));
+        json!({ "executed": false, "reason": "bun_missing_on_worker_path" })
+    };
+    layer_pass("C4 LOCKSTEP ORACLE", &format!("executed={bun_ok}"));
+
+    // -------------------------------------------------------------------------
+    // Stage 5: Signed trust signal/refusal (IFC declassification + registry)
+    // -------------------------------------------------------------------------
+    let wildcard_refusal = run_cli(
+        ws,
+        &[
+            "trust",
+            "sign-declassification",
+            "--sink",
+            "*.wildcard.example:443",
+            "--label",
+            "secret_file",
+            "--actor",
+            "ops@acme.example",
+            "--purpose",
+            "negative-control",
+            "--json",
+        ],
+    );
+    assert!(
+        !wildcard_refusal.status.success(),
+        "wildcard sink must fail closed"
+    );
+    negative_controls.push(json!({
+        "stage": "signed_trust",
+        "control": "wildcard_declassification_sink_refused",
+        "rejected": true,
+    }));
+
+    let signed_declass_out = run_cli(
+        ws,
+        &[
+            "trust",
+            "sign-declassification",
+            "--sink",
+            "127.0.0.1:8443",
+            "--label",
+            "secret_file",
+            "--actor",
+            "ops@acme.example",
+            "--purpose",
+            "composed-acceptance-audit",
+            "--ttl-secs",
+            "600",
+            "--json",
+        ],
+    );
+    assert!(
+        signed_declass_out.status.success(),
+        "trust sign-declassification failed: {}",
+        String::from_utf8_lossy(&signed_declass_out.stderr)
+    );
+    let signed_declass: Value =
+        serde_json::from_slice(&signed_declass_out.stdout).expect("parse declass json");
+
+    std::fs::create_dir_all(ws.join("dist")).expect("mkdir dist");
+    let dir_pub_refusal = run_cli(
+        ws,
+        &[
+            "registry",
+            "publish",
+            "./dist",
+            "--version",
+            "1.0.0",
+            "--signing-key",
+            key_rel,
+            "--json",
+        ],
+    );
+    assert!(
+        !dir_pub_refusal.status.success(),
+        "directory publish target must fail closed"
+    );
+    negative_controls.push(json!({
+        "stage": "signed_trust",
+        "control": "registry_publish_directory_refused",
+        "rejected": true,
+    }));
+
+    std::fs::write(
+        ws.join("dist/composed.tgz"),
+        b"composed-extension-archive-v1",
+    )
+    .expect("write dist/composed.tgz");
+    let reg_pub_out = run_cli(
+        ws,
+        &[
+            "registry",
+            "publish",
+            "./dist/composed.tgz",
+            "--version",
+            "1.0.0",
+            "--signing-key",
+            key_rel,
+            "--json",
+        ],
+    );
+    assert!(
+        reg_pub_out.status.success(),
+        "registry publish failed: stdout={}\nstderr={}",
+        String::from_utf8_lossy(&reg_pub_out.stdout),
+        String::from_utf8_lossy(&reg_pub_out.stderr)
+    );
+    let reg_pub: Value = serde_json::from_slice(&reg_pub_out.stdout).expect("parse reg publish");
+    let ext_id = reg_pub["extension_id"]
+        .as_str()
+        .expect("published extension_id");
+    let reg_ver_out = run_cli(ws, &["registry", "verify", ext_id, "--json"]);
+    assert!(reg_ver_out.status.success(), "registry verify failed");
+    let reg_ver: Value = serde_json::from_slice(&reg_ver_out.stdout).expect("parse reg verify");
+    assert_eq!(reg_ver["integrity"], "verified");
+    layer_pass("C5 TRUST+REGISTRY", &format!("extension_id={ext_id}"));
+
+    // -------------------------------------------------------------------------
+    // Stage 6: Real HTTP fleet quarantine + enrolled epoch-barrier quiescence
+    // -------------------------------------------------------------------------
+    let local_fleet_status = run_cli(ws, &["fleet", "status", "--json"]);
+    assert!(local_fleet_status.status.success());
+    let local_fleet_json: Value =
+        serde_json::from_slice(&local_fleet_status.stdout).expect("parse local fleet status");
+    assert!(
+        !local_fleet_json["fleet_quiescence_certified"]
+            .as_bool()
+            .unwrap_or(false),
+        "single-node local fleet status must never claim certified fleet quiescence"
+    );
+    negative_controls.push(json!({
+        "stage": "fleet_quiescence",
+        "control": "single_node_local_status_unverified",
+        "rejected": true,
+    }));
+
+    let fleet_dir = tempfile::TempDir::new().expect("fleet coordinator tempdir");
+    let coordinator_state = fleet_dir.path().join("coordinator-state");
+    let operator_token = "composed-op-token-0123456789abcdef01234567";
+    let node_a_token = "composed-node-a-token-0123456789abcdef0123";
+    let node_b_token = "composed-node-b-token-0123456789abcdef0123";
+    let sup_a = SigningKey::from_bytes(&[0x31; 32]);
+    let sup_b = SigningKey::from_bytes(&[0x42; 32]);
+
+    let creds_json = serde_json::to_vec(&json!({
+        "schema_version": "franken-node/fleet-node-credentials/v1",
+        "nodes": [
+            {
+                "zone_id": "prod-east",
+                "node_id": "node-a",
+                "token_sha256": hex::encode(Sha256::digest(node_a_token.as_bytes())),
+                "supervisor_public_key_hex": hex::encode(sup_a.verifying_key().as_bytes()),
+            },
+            {
+                "zone_id": "prod-east",
+                "node_id": "node-b",
+                "token_sha256": hex::encode(Sha256::digest(node_b_token.as_bytes())),
+                "supervisor_public_key_hex": hex::encode(sup_b.verifying_key().as_bytes()),
+            }
+        ]
+    }))
+    .expect("creds json");
+    let creds = FleetNodeCredentials::from_json(&creds_json).expect("enrolled node credentials");
+    let service = Arc::new(
+        FleetControlPlaneService::open(coordinator_state.clone(), operator_token)
+            .expect("open fleet service")
+            .with_node_credentials(creds)
+            .expect("attach enrolled credentials"),
+    );
+    let server_ctl = FleetHttpServerControl::new();
+    let server_ctl_bg = Arc::clone(&server_ctl);
+    let (addr_tx, addr_rx) = std::sync::mpsc::sync_channel(1);
+    let server_join = std::thread::spawn(move || {
+        serve_fleet_control_plane(
+            service,
+            &FleetHttpServerConfig {
+                bind: "127.0.0.1:0".to_string(),
+                max_requests: None,
+            },
+            server_ctl_bg,
+            Arc::new(move |ev| {
+                if ev.event_code == FLEET_HTTP_LISTENING
+                    && let Some(addr) = &ev.bound_addr
+                {
+                    let _ = addr_tx.send(addr.clone());
+                }
+            }),
+        )
+    });
+    let bound_addr = addr_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("fleet HTTP server listening");
+    let base_url = format!("http://{bound_addr}");
+
+    let mut operator_http =
+        HttpFleetTransport::new(&base_url, operator_token, Duration::from_secs(5))
+            .expect("operator http");
+    let mut agent_a_http = HttpFleetTransport::new(&base_url, node_a_token, Duration::from_secs(5))
+        .expect("agent a http");
+    let mut agent_b_http = HttpFleetTransport::new(&base_url, node_b_token, Duration::from_secs(5))
+        .expect("agent b http");
+    operator_http.initialize().expect("operator init");
+
+    let quarantine_rec = FleetActionRecord {
+        action_id: "composed-quarantine-1".to_string(),
+        emitted_at: Utc::now(),
+        action: FleetAction::Quarantine {
+            zone_id: "prod-east".to_string(),
+            incident_id: "inc-composed-1".to_string(),
+            target_id: format!("ext:{ext_id}"),
+            target_kind: FleetTargetKind::Extension,
+            quarantine_version: 1,
+            reason: "contain suspect extension for incident replay".to_string(),
+        },
+    };
+    operator_http
+        .publish_action(&quarantine_rec)
+        .expect("publish quarantine");
+    let hold_rec = FleetActionRecord {
+        action_id: "composed-hold-1".to_string(),
+        emitted_at: Utc::now(),
+        action: FleetAction::NativeSessionHold {
+            zone_id: "prod-east".to_string(),
+            reason: "fence admissions during epoch barrier".to_string(),
+        },
+    };
+    operator_http
+        .publish_action(&hold_rec)
+        .expect("publish hold");
+
+    let expected_cp =
+        fleet_application_checkpoint(&operator_http.list_actions().unwrap(), "prod-east")
+            .expect("checkpoint");
+    let make_hb = |node_id: &str, key: &SigningKey, generation: u64| {
+        let now = Utc::now();
+        let mut drain = NativeSessionDrainCheckpoint {
+            applied_actions: expected_cp.clone(),
+            session_set_sha256: format!("{generation:02x}").repeat(32),
+            admitted_sessions: 1,
+            terminal_sessions: 1,
+            pending_sessions: 0,
+            indeterminate_sessions: 0,
+            fence_held: true,
+            supervisor_attestation: None,
+        };
+        let mut att = NativeSessionDrainAttestation {
+            schema_version: NATIVE_SESSION_DRAIN_ATTESTATION_SCHEMA.to_string(),
+            node_id: node_id.to_string(),
+            zone_id: "prod-east".to_string(),
+            drain_id: uuid::Uuid::now_v7().to_string(),
+            generation,
+            project_root_sha256: hex::encode(Sha256::digest(node_id.as_bytes())),
+            observed_at: now,
+            product_root_key_id: format!("ed25519:{}", hex::encode(key.verifying_key().as_bytes())),
+            checkpoint_sha256: drain.observation_sha256().expect("checkpoint sha256"),
+            signature_hex: String::new(),
+        };
+        att.signature_hex = hex::encode(key.sign(&att.signing_payload().unwrap()).to_bytes());
+        drain.supervisor_attestation = Some(att);
+        NodeStatus {
+            zone_id: "prod-east".to_string(),
+            node_id: node_id.to_string(),
+            last_seen: now,
+            quarantine_version: 1,
+            health: NodeHealth::Maintenance,
+            applied_actions: Some(expected_cp.clone()),
+            native_session_drain: Some(drain),
+        }
+    };
+
+    agent_a_http
+        .upsert_node_status(&make_hb("node-a", &sup_a, 1))
+        .expect("node-a hb");
+    let missing_b_err = operator_http
+        .certify_epoch_barrier(&FleetHttpEpochBarrierRequest {
+            initiator: "composed-ops".to_string(),
+            reason: "quarantine-advance".to_string(),
+            trace_id: "composed-barrier-missing".to_string(),
+            stale_after: Duration::from_secs(30),
+        })
+        .expect_err("missing node-b must abort barrier")
+        .to_string();
+    assert!(missing_b_err.contains("HTTP 409"), "{missing_b_err}");
+    negative_controls.push(json!({
+        "stage": "fleet_quiescence",
+        "control": "missing_enrolled_node_aborts_epoch_barrier_http_409",
+        "rejected": true,
+    }));
+
+    agent_b_http
+        .upsert_node_status(&make_hb("node-b", &sup_b, 1))
+        .expect("node-b hb");
+    let certified = operator_http
+        .certify_epoch_barrier(&FleetHttpEpochBarrierRequest {
+            initiator: "composed-ops".to_string(),
+            reason: "quarantine-advance".to_string(),
+            trace_id: "composed-barrier-commit".to_string(),
+            stale_after: Duration::from_secs(30),
+        })
+        .expect("enrolled supervisors certify epoch barrier");
+    assert!(certified.evidence.fleet_quiescence_certified);
+    assert_eq!(
+        certified.evidence.scope,
+        FLEET_EPOCH_BARRIER_CERTIFIED_DRAIN_SCOPE
+    );
+    assert_eq!(certified.certificate.committed_epoch, 1);
+    let seqlock = SeqlockControlPage::read_shared_page(&coordinator_state.join("seqlock.page"))
+        .expect("read persisted seqlock page");
+    assert_eq!(seqlock.control_epoch, 1);
+    layer_pass("C6 FLEET QUIESCENCE", "epoch=0->1 certified=true");
+
+    // -------------------------------------------------------------------------
+    // Stage 7: Authenticated incident capture/bundle, offline native replay & SDK
+    // -------------------------------------------------------------------------
+    let cap_out = Command::new(franken_node_bin())
+        .current_dir(ws)
+        .env("XDG_STATE_HOME", state_home.path())
+        .args(["incident", "capture", "--from-run", &receipt_id, "--json"])
+        .output()
+        .expect("incident capture --from-run");
+    assert!(
+        cap_out.status.success(),
+        "Stage 7 incident capture failed: {}",
+        String::from_utf8_lossy(&cap_out.stderr)
+    );
+    let cap_json: Value = serde_json::from_slice(&cap_out.stdout).expect("parse capture json");
+    assert_eq!(cap_json["native_replay_available"], true);
+    let incident_id = cap_json["incident_id"]
+        .as_str()
+        .expect("captured incident_id")
+        .to_string();
+
+    let bundle_out = Command::new(franken_node_bin())
+        .current_dir(ws)
+        .env("XDG_STATE_HOME", state_home.path())
+        .args([
+            "incident",
+            "bundle",
+            "--id",
+            &incident_id,
+            "--verify",
+            "--json",
+        ])
+        .output()
+        .expect("incident bundle --verify");
+    assert!(
+        bundle_out.status.success(),
+        "Stage 7 incident bundle failed: {}",
+        String::from_utf8_lossy(&bundle_out.stderr)
+    );
+    let bundle_name = format!("{incident_id}.fnbundle");
+    let bundle_bytes = std::fs::read(ws.join(&bundle_name)).expect("read exported .fnbundle");
+    let bundle_sha256 = format!("sha256:{}", hex::encode(Sha256::digest(&bundle_bytes)));
+
+    // Move live workspace module files aside to prove offline multi-file native replay.
+    let retired_src = mig_dir.path().join("retired-live-sources");
+    std::fs::create_dir_all(&retired_src).expect("mkdir retired-live-sources");
+    std::fs::rename(ws.join("index.cjs"), retired_src.join("index.cjs")).expect("move index.cjs");
+    std::fs::rename(ws.join("lib"), retired_src.join("lib")).expect("move lib/");
+    std::fs::rename(ws.join("node_modules"), retired_src.join("node_modules"))
+        .expect("move node_modules/");
+
+    let replay_out = Command::new(franken_node_bin())
+        .current_dir(ws)
+        .env("XDG_STATE_HOME", state_home.path())
+        .args([
+            "incident",
+            "replay",
+            "--bundle",
+            &bundle_name,
+            "--execute",
+            "--trusted-public-key",
+            pub_rel,
+            "--json",
+        ])
+        .output()
+        .expect("incident replay --execute");
+    assert!(
+        replay_out.status.success(),
+        "Stage 7 offline native replay failed: stdout={}\nstderr={}",
+        String::from_utf8_lossy(&replay_out.stdout),
+        String::from_utf8_lossy(&replay_out.stderr)
+    );
+    let replay_json: Value = serde_json::from_slice(&replay_out.stdout).expect("parse replay json");
+    assert_eq!(replay_json["execution_result"]["matched"], true);
+    assert_eq!(replay_json["execution_result"]["console_match"], true);
+    assert_eq!(
+        replay_json["execution_result"]["verification_scope"],
+        "guest_execution"
+    );
+
+    // Independent Verifier SDK verification + foreign trust-anchor negative control.
+    let sdk_verified = verify_incident_bundle(&bundle_bytes, &verifying_key)
+        .expect("standalone Verifier SDK must verify CLI .fnbundle");
+    assert_eq!(sdk_verified.incident_id, incident_id);
+    assert_eq!(sdk_verified.signer_public_key_hex, public_key_hex);
+    let foreign_vk = SigningKey::from_bytes(&[0x99; 32]).verifying_key();
+    assert_eq!(
+        verify_incident_bundle(&bundle_bytes, &foreign_vk),
+        Err(IncidentBundleError::SignerNotTrusted)
+    );
+    negative_controls.push(json!({
+        "stage": "verifier_sdk",
+        "control": "foreign_trust_anchor_rejected_signer_not_trusted",
+        "rejected": true,
+    }));
+    layer_pass("C7 OFFLINE REPLAY+SDK", &format!("bundle={bundle_sha256}"));
+
+    // -------------------------------------------------------------------------
+    // Stage 8: Controlled release & recovery + complete acceptance report
+    // -------------------------------------------------------------------------
+    operator_http
+        .publish_action(&FleetActionRecord {
+            action_id: "composed-release-1".to_string(),
+            emitted_at: Utc::now(),
+            action: FleetAction::Release {
+                zone_id: "prod-east".to_string(),
+                incident_id: "inc-composed-1".to_string(),
+                reason: Some("offline replay and SDK audit passed".to_string()),
+            },
+        })
+        .expect("publish fleet release");
+    operator_http
+        .publish_action(&FleetActionRecord {
+            action_id: "composed-resume-1".to_string(),
+            emitted_at: Utc::now(),
+            action: FleetAction::NativeSessionResume {
+                zone_id: "prod-east".to_string(),
+                hold_action_id: hold_rec.action_id.clone(),
+                reason: Some("reopen native admissions after verified release".to_string()),
+            },
+        })
+        .expect("publish native session resume");
+    let final_actions = operator_http.list_actions().expect("final fleet actions");
+    assert_eq!(final_actions.len(), 4);
+
+    server_ctl.request_shutdown();
+    let _ = std::net::TcpStream::connect(&bound_addr);
+    server_join
+        .join()
+        .expect("join fleet server")
+        .expect("fleet server clean exit");
+
+    std::fs::rename(retired_src.join("index.cjs"), ws.join("index.cjs"))
+        .expect("restore index.cjs");
+    std::fs::rename(retired_src.join("lib"), ws.join("lib")).expect("restore lib/");
+    std::fs::rename(retired_src.join("node_modules"), ws.join("node_modules"))
+        .expect("restore node_modules/");
+
+    let rollout_status_out = run_cli(
+        ws,
+        &["migrate", "rollout", ".", "--action", "status", "--json"],
+    );
+    assert!(
+        rollout_status_out.status.success(),
+        "migrate rollout status failed: {}",
+        String::from_utf8_lossy(&rollout_status_out.stderr)
+    );
+    let rollout_status: Value =
+        serde_json::from_slice(&rollout_status_out.stdout).expect("parse rollout status");
+
+    let acceptance_report = json!({
+        "schema_version": "franken-node/composed-operator-acceptance-report/v1",
+        "bead_id": "bd-rjc2m.3",
+        "binary_path": franken_node_bin(),
+        "binary_sha256": binary_sha256,
+        "config_sha256": config_sha256,
+        "trust_anchors": {
+            "workspace_receipt_public_key_hex": public_key_hex,
+            "fleet_supervisor_node_a_public_key_hex": hex::encode(sup_a.verifying_key().as_bytes()),
+            "fleet_supervisor_node_b_public_key_hex": hex::encode(sup_b.verifying_key().as_bytes()),
+        },
+        "stages": {
+            "clean_init": { "ok": true, "profile": "balanced" },
+            "multi_file_package_workload": {
+                "ok": true,
+                "receipt_id": receipt_id,
+                "attributed_package_count": attributed_pkgs.len(),
+            },
+            "migrate_audit_rewrite_rollback": {
+                "ok": true,
+                "audit_files_scanned": audit_json["summary"]["files_scanned"],
+                "rewrites_applied": rewrite_json["rewrites_applied"],
+                "rollback_plan_sha256": rollback_sha256,
+                "rollback_entry_count": rollback_json["entry_count"],
+            },
+            "lockstep_oracle": lockstep_summary,
+            "signed_trust_and_registry": {
+                "ok": true,
+                "declassification_sink": signed_declass["rule"]["sink"],
+                "published_extension_id": ext_id,
+                "verified_integrity": reg_ver["integrity"],
+            },
+            "fleet_quarantine_and_quiescence": {
+                "ok": true,
+                "committed_epoch": certified.certificate.committed_epoch,
+                "fleet_quiescence_certified": certified.evidence.fleet_quiescence_certified,
+                "seqlock_control_epoch": seqlock.control_epoch,
+            },
+            "incident_bundle_offline_replay_and_sdk": {
+                "ok": true,
+                "incident_id": incident_id,
+                "bundle_sha256": bundle_sha256,
+                "offline_replay_matched": replay_json["execution_result"]["matched"],
+                "verification_scope": replay_json["execution_result"]["verification_scope"],
+                "sdk_verified_signer": sdk_verified.signer_public_key_hex,
+            },
+            "controlled_release_and_recovery": {
+                "ok": true,
+                "fleet_actions_recorded": final_actions.len(),
+                "rollout_stage": rollout_status["stage"],
+            },
+        },
+        "negative_controls": negative_controls,
+        "stage_specific_unknowns": stage_unknowns,
+    });
+    let report_bytes = serde_json::to_vec_pretty(&acceptance_report).expect("serialize report");
+    std::fs::write(
+        ws.join("composed_operator_acceptance_report.json"),
+        &report_bytes,
+    )
+    .expect("write workspace acceptance report");
+    if let Some(out_path) = std::env::var_os("FRANKEN_COMPOSED_ACCEPTANCE_REPORT_PATH") {
+        let out_path = std::path::PathBuf::from(out_path);
+        if let Some(parent) = out_path.parent() {
+            std::fs::create_dir_all(parent).expect("mkdir report parent");
+        }
+        std::fs::write(&out_path, &report_bytes).expect("write explicit acceptance report");
+    }
+    layer_pass("C8 RELEASE+REPORT", "all 8 composed stages verified");
+}

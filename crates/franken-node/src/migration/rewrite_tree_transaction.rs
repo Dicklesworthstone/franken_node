@@ -222,6 +222,76 @@ impl RewriteTransaction {
     }
 }
 
+/// Execute an isolated directory-tree transaction + pinned rollback round-trip
+/// in a disposable workspace and return a structured audit summary.
+pub fn verify_tree_transaction_roundtrip() -> Result<serde_json::Value> {
+    let workspace = tempfile::tempdir().context("create disposable tree-transaction workspace")?;
+    let root = workspace.path();
+    std::fs::write(root.join("app.cjs"), b"before")
+        .context("seed pre-migration entrypoint in disposable workspace")?;
+
+    let edits = [Edit {
+        path: "app.cjs",
+        before: b"before",
+        after: b"after",
+    }];
+    let creations = [CreateFile {
+        path: "helper.cjs",
+        after: b"module.exports = 'helper';",
+        mode: 0o640,
+    }];
+    let tree_entries = [
+        trees::Entry {
+            path: "deep",
+            contents: None,
+            mode: 0o750,
+        },
+        trees::Entry {
+            path: "deep/answer.cjs",
+            contents: Some(b"module.exports = 42;"),
+            mode: 0o640,
+        },
+    ];
+    let tree_plans = [CreateTree {
+        path: "src",
+        mode: 0o750,
+        entries: &tree_entries,
+    }];
+
+    let receipt = RewriteTransaction::open(root)
+        .context("open RewriteTransaction on disposable workspace")?
+        .apply_with_trees_receipt(&edits, &creations, &tree_plans)
+        .context("apply mixed edit + file + directory-tree plan")?
+        .context("mixed tree plan must produce an AppliedRewrite receipt")?;
+
+    let installed_ok = root.join("src/deep/answer.cjs").is_file()
+        && root.join("helper.cjs").is_file()
+        && std::fs::read(root.join("app.cjs")).context("read rewritten app.cjs")? == b"after";
+
+    let preview = rollback::run_pinned(
+        root,
+        &receipt.transaction_id,
+        &receipt.journal_sha256,
+        false,
+    );
+    let rolled_back =
+        rollback::run_pinned(root, &receipt.transaction_id, &receipt.journal_sha256, true);
+    let restored_ok = preview.status == rollback::RollbackStatus::Ready
+        && rolled_back.status == rollback::RollbackStatus::RolledBack
+        && !root.join("src").exists()
+        && !root.join("helper.cjs").exists()
+        && std::fs::read(root.join("app.cjs")).context("read rolled-back app.cjs")? == b"before";
+
+    Ok(serde_json::json!({
+        "journal_schema_version": TREE_JOURNAL_VERSION,
+        "records_applied": receipt.files,
+        "installed_verified": installed_ok,
+        "rollback_preview_ready": preview.status == rollback::RollbackStatus::Ready,
+        "rollback_restored_verified": restored_ok,
+        "valid": installed_ok && restored_ok,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::{DURABILITY_LOG, STORE, digest};

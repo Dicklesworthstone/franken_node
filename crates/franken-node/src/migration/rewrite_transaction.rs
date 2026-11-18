@@ -55,7 +55,7 @@ pub mod trees;
 pub use trees::CreateTree;
 
 #[path = "rewrite_tree_transaction.rs"]
-mod tree_transaction;
+pub mod rewrite_tree_transaction;
 
 pub const MAX_EDITS: usize = 1_000;
 pub const MAX_PLAN_BYTES: usize = 256 * 1024 * 1024;

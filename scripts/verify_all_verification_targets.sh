@@ -210,11 +210,29 @@ steps = [
     },
     {
         "id": "verifier_sdk",
-        "label": "verifier SDK tests",
+        "label": "verifier SDK tests (all features)",
         "heavy": True,
         "rch_required": True,
-        "command": with_rch("cargo test -p frankenengine-verifier-sdk --locked"),
+        "command": with_rch("cargo test -p frankenengine-verifier-sdk --locked --all-features"),
         "log_path": f"{out}/sdk_test.log",
+        "report_json": None,
+    },
+    {
+        "id": "verifier_sdk_independence",
+        "label": "verifier SDK sparse-checkout independence gate",
+        "heavy": False,
+        "rch_required": False,
+        "command": 'python3 "$SCRIPT_DIR/check_verifier_sdk_independence.py" --json',
+        "log_path": f"{out}/sdk_independence.log",
+        "report_json": None,
+    },
+    {
+        "id": "composed_operator_acceptance",
+        "label": "composed 8-stage operator acceptance scenario",
+        "heavy": True,
+        "rch_required": True,
+        "command": with_rch("cargo test -p frankenengine-node --locked --test tnr_full_pipeline_e2e -- composed_operator_acceptance_scenario_end_to_end"),
+        "log_path": f"{out}/composed_operator_acceptance.log",
         "report_json": None,
     },
     {
@@ -310,6 +328,8 @@ required = {
     "full_conformance",
     "fuzz_smokes",
     "verifier_sdk",
+    "verifier_sdk_independence",
+    "composed_operator_acceptance",
     "cargo_deny",
     "cargo_fmt",
     "cargo_clippy",
@@ -401,14 +421,29 @@ FUZZ_LOOP_END_MS="$(millis_now)"
 FUZZ_COMMAND="$RCH cargo +nightly fuzz run <target> -- -max_total_time=30 -rss_limit_mb=4096"
 emit_command_receipt "fuzz_smokes" "fuzz smokes (bounded 30s each)" "$FUZZ_COMMAND" "$FUZZ_LOOP_RC" "$((FUZZ_LOOP_END_MS - FUZZ_LOOP_START_MS))" "$OUT/fuzz_<target>.log" "$(parsed_status_since "$FUZZ_BEFORE" "$FUZZ_LOOP_RC")"
 
-# 3) verifier SDK
-log "step 3: verifier SDK tests"
+# 3) verifier SDK (all features + sparse-checkout independence) + composed operator acceptance
+log "step 3: verifier SDK tests (all features)"
 SDK_BEFORE="$(jsonl_count "$JSONL")"
-SDK_COMMAND="$RCH cargo test -p frankenengine-verifier-sdk --locked"
-run_timed_to_log "$OUT/sdk_test.log" $RCH cargo test -p frankenengine-verifier-sdk --locked
+SDK_COMMAND="$RCH cargo test -p frankenengine-verifier-sdk --locked --all-features"
+run_timed_to_log "$OUT/sdk_test.log" $RCH cargo test -p frankenengine-verifier-sdk --locked --all-features
 SDK_RC=$?
 python3 "$SCRIPT_DIR/parse_cargo_test_results.py" "$OUT/sdk_test.log" "$TS" sdk >> "$JSONL"
-emit_command_receipt "verifier_sdk" "verifier SDK tests" "$SDK_COMMAND" "$SDK_RC" "$LAST_DURATION_MS" "$OUT/sdk_test.log" "$(parsed_status_since "$SDK_BEFORE" "$SDK_RC")"
+emit_command_receipt "verifier_sdk" "verifier SDK tests (all features)" "$SDK_COMMAND" "$SDK_RC" "$LAST_DURATION_MS" "$OUT/sdk_test.log" "$(parsed_status_since "$SDK_BEFORE" "$SDK_RC")"
+
+log "step 3b: verifier SDK sparse-checkout independence gate"
+SDK_IND_COMMAND='python3 "$SCRIPT_DIR/check_verifier_sdk_independence.py" --json'
+run_timed_to_log "$OUT/sdk_independence.log" python3 "$SCRIPT_DIR/check_verifier_sdk_independence.py" --json
+SDK_IND_RC=$?
+[ "$SDK_IND_RC" -ne 0 ] && GATES_RC=1
+emit_command_receipt "verifier_sdk_independence" "verifier SDK sparse-checkout independence gate" "$SDK_IND_COMMAND" "$SDK_IND_RC" "$LAST_DURATION_MS" "$OUT/sdk_independence.log" "$(status_for_exit_only "$SDK_IND_RC")"
+
+log "step 3c: composed 8-stage operator acceptance scenario"
+COMP_BEFORE="$(jsonl_count "$JSONL")"
+COMP_COMMAND="$RCH cargo test -p frankenengine-node --locked --test tnr_full_pipeline_e2e -- composed_operator_acceptance_scenario_end_to_end"
+run_timed_to_log "$OUT/composed_operator_acceptance.log" $RCH cargo test -p frankenengine-node --locked --test tnr_full_pipeline_e2e -- composed_operator_acceptance_scenario_end_to_end
+COMP_RC=$?
+python3 "$SCRIPT_DIR/parse_cargo_test_results.py" "$OUT/composed_operator_acceptance.log" "$TS" e2e >> "$JSONL"
+emit_command_receipt "composed_operator_acceptance" "composed 8-stage operator acceptance scenario" "$COMP_COMMAND" "$COMP_RC" "$LAST_DURATION_MS" "$OUT/composed_operator_acceptance.log" "$(parsed_status_since "$COMP_BEFORE" "$COMP_RC")"
 
 # 4) supply-chain + fmt + clippy (recorded in the report tail)
 log "step 4: cargo deny / fmt / clippy"

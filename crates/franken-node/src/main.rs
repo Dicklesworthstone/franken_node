@@ -41994,7 +41994,57 @@ fn handle_ops_fault_schedule_audit(args: &OpsFaultScheduleAuditArgs) -> Result<(
         .run_full_gate()
         .map_err(|err| anyhow::anyhow!("{err}"))?;
 
-    let overall_passed = fault_verdict.passed && schedule_result.is_pass();
+    let adversarial_cases =
+        frankenengine_node::tools::replay_bundle_adversarial_fuzz::replay_bundle_adversarial_fuzz_corpus();
+    let mut adversarial_passed = 0usize;
+    for case in &adversarial_cases {
+        if let Err(err) = case.run()
+            && case.expected_error.matches_error(&err)
+        {
+            adversarial_passed = adversarial_passed.saturating_add(1);
+        }
+    }
+    let adversarial_all_matched =
+        !adversarial_cases.is_empty() && adversarial_passed == adversarial_cases.len();
+
+    let strategy_smoke_passed = {
+        use proptest::strategy::{Strategy, ValueTree};
+        use proptest::test_runner::{Config as ProptestConfig, RngAlgorithm, TestRng, TestRunner};
+        let mut runner = TestRunner::new_with_rng(
+            ProptestConfig::with_cases(4),
+            TestRng::deterministic_rng(RngAlgorithm::ChaCha),
+        );
+        let replay_strat = frankenengine_node::test_strategies::replay_bundle_entries();
+        let card_strat = frankenengine_node::test_strategies::trust_cards();
+        let ledger_strat = frankenengine_node::test_strategies::evidence_ledger_entries();
+        let mut generated = 0usize;
+        for _ in 0..4 {
+            let ev = replay_strat
+                .new_tree(&mut runner)
+                .map_err(|e| anyhow::anyhow!("replay_bundle_entries strategy failed: {e}"))?
+                .current();
+            let card = card_strat
+                .new_tree(&mut runner)
+                .map_err(|e| anyhow::anyhow!("trust_cards strategy failed: {e}"))?
+                .current();
+            let entry = ledger_strat
+                .new_tree(&mut runner)
+                .map_err(|e| anyhow::anyhow!("evidence_ledger_entries strategy failed: {e}"))?
+                .current();
+            if !ev.timestamp.is_empty()
+                && !card.schema_version.is_empty()
+                && !entry.decision_id.is_empty()
+            {
+                generated = generated.saturating_add(1);
+            }
+        }
+        generated == 4
+    };
+
+    let overall_passed = fault_verdict.passed
+        && schedule_result.is_pass()
+        && adversarial_all_matched
+        && strategy_smoke_passed;
     let payload = serde_json::json!({
         "schema_version": "franken-node/ops-fault-schedule-audit-cli/v1",
         "command": "ops.fault-schedule-audit",
@@ -42021,6 +42071,20 @@ fn handle_ops_fault_schedule_audit(args: &OpsFaultScheduleAuditArgs) -> Result<(
             "total_violations": schedule_result.total_violations,
             "registered_scenarios": ALL_SCENARIOS,
             "event_count": dsg.events().len(),
+        },
+        "replay_bundle_adversarial_audit": {
+            "passed": adversarial_all_matched,
+            "total_cases": adversarial_cases.len(),
+            "matched_cases": adversarial_passed,
+        },
+        "canonical_strategy_smoke": {
+            "passed": strategy_smoke_passed,
+            "samples_per_family": 4,
+            "families": [
+                "replay_bundle_entries",
+                "trust_cards",
+                "evidence_ledger_entries",
+            ],
         },
     });
     if args.json {
@@ -43951,13 +44015,32 @@ fn handle_migrate_kit_plan(args: &MigrateKitPlanArgs) -> Result<()> {
         && ref_bcc_validation.valid
         && ref_bcc_sig_ok;
 
+    #[cfg(target_os = "linux")]
+    let (tree_tx_audit, tree_tx_ok) = {
+        let report = frankenengine_node::migration::rewrite_transaction::rewrite_tree_transaction::verify_tree_transaction_roundtrip()?;
+        let ok_flag = report
+            .get("valid")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        (report, ok_flag)
+    };
+    #[cfg(not(target_os = "linux"))]
+    let (tree_tx_audit, tree_tx_ok) = (
+        serde_json::json!({
+            "supported": false,
+            "valid": true,
+        }),
+        true,
+    );
+
     let ok = default_executor_fails_closed
         && stage_order_valid
         && preview_transcript.completed
         && device_registry.count() == 1
         && cli_prefix_registered
         && pipeline_receipt_valid
-        && artifact_contract_ok;
+        && artifact_contract_ok
+        && tree_tx_ok;
 
     let mut payload = serde_json::json!({
         "schema_version": "franken-node/migrate-kit-plan-cli/v1",
@@ -43993,6 +44076,7 @@ fn handle_migrate_kit_plan(args: &MigrateKitPlanArgs) -> Result<()> {
             "behavioral_certificate_valid": ref_bcc_validation.valid,
             "behavioral_certificate_signature_verified": ref_bcc_sig_ok,
         },
+        "tree_transaction_audit": tree_tx_audit,
         "device_registry": {
             "registered_devices": device_registry.count(),
             "cli_error_prefix_registered": cli_prefix_registered,
