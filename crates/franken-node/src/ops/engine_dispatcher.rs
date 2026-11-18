@@ -8211,6 +8211,7 @@ impl ProcessSpawnProvider for AttributingProcessSpawnProvider {
 struct FrozenNativeModules {
     entry: frankenengine_engine::module_resolver::ResolutionOutcome,
     resolver: frankenengine_engine::module_resolver::ExecutionModuleResolver,
+    uses_closed_world_lowering_only_builtins: bool,
     summary: NativeModuleGraphSummary,
     replay_sources: Option<crate::ops::native_replay::CapturedModuleSources>,
     attribution_tracker: Arc<RuntimePackageAttributionTracker>,
@@ -8433,17 +8434,27 @@ fn prepare_native_frozen_modules(
                 )),
                 tracker: Arc::clone(&attribution_tracker),
             });
+        let admission_context = ResolutionContext::new(
+            "native-module-admission",
+            "native-module-admission",
+            &orchestrator_config.policy_id,
+        );
         let entry = resolver
             .resolve(
                 &resolver.entry_request(),
-                &ResolutionContext::new(
-                    "native-module-admission",
-                    "native-module-admission",
-                    &orchestrator_config.policy_id,
-                ),
+                &admission_context,
                 policy.as_ref(),
             )
             .map_err(|error| format!("Frozen entrypoint policy admission failed: {error}"))?;
+        let uses_closed_world_lowering_only_builtins = if publisher_approval.is_none() {
+            resolver
+                .authorize_closed_world_lowering_only_entry(&admission_context, policy.as_ref())
+                .map_err(|error| {
+                    format!("Frozen lowering-only builtin admission failed: {error}")
+                })?
+        } else {
+            false
+        };
         let summary = NativeModuleGraphSummary {
             graph_input_hash: resolver.summary().graph_input_hash.clone(),
             entrypoint: resolver.summary().entrypoint.clone(),
@@ -8458,6 +8469,7 @@ fn prepare_native_frozen_modules(
         Ok(FrozenNativeModules {
             entry,
             resolver,
+            uses_closed_world_lowering_only_builtins,
             summary,
             replay_sources,
             attribution_tracker,
@@ -13857,6 +13869,12 @@ impl EngineDispatcher {
             .entered();
 
             let result = match frozen_modules {
+                Some(modules) if modules.uses_closed_world_lowering_only_builtins => {
+                    let mut delivered = package.clone();
+                    delivered.source = modules.entry.module.record.source.clone();
+                    delivered.module_root = None;
+                    orchestrator.execute(&delivered)
+                }
                 Some(modules) => orchestrator.execute_resolved_entry_with_resolver(
                     &package,
                     &modules.entry,

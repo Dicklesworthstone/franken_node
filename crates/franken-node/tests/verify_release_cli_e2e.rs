@@ -1303,7 +1303,7 @@ fn verify_corpus_rejects_checked_in_red_compatibility_report() {
     let payload = assert_verify_corpus_failed_invariant(
         &report_path,
         Some("compatibility-report"),
-        "VCORPUS-REPORT-OVERALL-THRESHOLD",
+        "VCORPUS-REPORT-BAND-THRESHOLDS",
     );
     assert_eq!(payload["command"], "verify corpus");
     assert_eq!(payload["verdict"], "FAIL");

@@ -1436,7 +1436,7 @@ mod engine {
             &self,
             package: &ExtensionPackage,
             settings: &CapturedOrchestratorSettings,
-        ) -> Result<(ResolutionOutcome, ExecutionModuleResolver), String> {
+        ) -> Result<(ResolutionOutcome, ExecutionModuleResolver, bool), String> {
             if self.capsule_base64.len() > MAX_NATIVE_REPLAY_PAYLOAD_BYTES {
                 return Err("frozen replay module sources exceed the capture byte budget".into());
             }
@@ -1488,17 +1488,21 @@ mod engine {
                     .filter_map(|capability| RuntimeCapability::from_tag_str(capability))
                     .collect(),
             ));
+            let admission_context = ResolutionContext::new(
+                "native-module-admission",
+                "native-module-admission",
+                &settings.policy_id,
+            );
             let entry = resolver
                 .resolve(
                     &resolver.entry_request(),
-                    &ResolutionContext::new(
-                        "native-module-admission",
-                        "native-module-admission",
-                        &settings.policy_id,
-                    ),
+                    &admission_context,
                     policy.as_ref(),
                 )
                 .map_err(|_| "frozen replay entrypoint policy admission failed".to_string())?;
+            let uses_closed_world_lowering_only_builtins = resolver
+                .authorize_closed_world_lowering_only_entry(&admission_context, policy.as_ref())
+                .map_err(|_| "frozen replay lowering-only builtin admission failed".to_string())?;
             let commonjs = entry.module.record.syntax == ModuleSyntax::CommonJs;
             let goal = if commonjs {
                 ParseGoal::Script
@@ -1517,7 +1521,7 @@ mod engine {
             let runtime = resolver
                 .execution_resolver(root, policy)
                 .map_err(|_| "cannot restore frozen replay module resolver".to_string())?;
-            Ok((entry, runtime))
+            Ok((entry, runtime, uses_closed_world_lowering_only_builtins))
         }
     }
 
@@ -3229,7 +3233,13 @@ mod engine {
                     );
                 }
                 let result = match modules {
-                    Some((entry, resolver)) => orchestrator
+                    Some((entry, _resolver, true)) => {
+                        let mut delivered = package.clone();
+                        delivered.source = entry.module.record.source;
+                        delivered.module_root = None;
+                        orchestrator.execute(&delivered)
+                    }
+                    Some((entry, resolver, false)) => orchestrator
                         .execute_resolved_entry_with_resolver(&package, &entry, resolver),
                     None => orchestrator.execute(&package),
                 };
@@ -3448,7 +3458,8 @@ mod engine {
                 })?;
                 // The original resolver and parser are retained, but every
                 // resolution is authorized under the smaller capability set.
-                let (entry, resolver) = sources.restore(&package, &payload.orchestrator)?;
+                let (entry, resolver, uses_closed_world_lowering_only_builtins) =
+                    sources.restore(&package, &payload.orchestrator)?;
                 let authority = RuntimeEvidenceAuthority::generate_runtime_owned(
                     "franken-node.incident-counterfactual",
                     payload.orchestrator.epoch,
@@ -3473,9 +3484,15 @@ mod engine {
                     inputs.clone(),
                     Some(Arc::new(InMemoryHostIoTranscript::recording())),
                 );
-                let observed = match orchestrator
-                    .execute_resolved_entry_with_resolver(&package, &entry, resolver)
-                {
+                let exec_result = if uses_closed_world_lowering_only_builtins {
+                    let mut delivered = package.clone();
+                    delivered.source = entry.module.record.source.clone();
+                    delivered.module_root = None;
+                    orchestrator.execute(&delivered)
+                } else {
+                    orchestrator.execute_resolved_entry_with_resolver(&package, &entry, resolver)
+                };
+                let observed = match exec_result {
                     Ok(result) => CounterfactualObservation::completed(result)?,
                     Err(error) => CounterfactualObservation::failed(
                         observe_failure(&orchestrator, &error).map_err(|reason| {

@@ -202,6 +202,101 @@ impl CapturedEngineResolver {
         .with_compatibility_mode(CompatibilityMode::NodeCompat)
     }
 
+    /// Return `Ok(true)` iff the sealed graph consists solely of a single
+    /// CommonJS entrypoint plus `Require` edges to `ModuleKind::NativeBuiltin`
+    /// targets, at least one of those targets is a lowering-only core builtin
+    /// (`node:net`, `node:tls`, `node:cluster`), no file/URL metadata routes
+    /// are present, and every builtin dependency is authorized by `policy`.
+    ///
+    /// When `Ok(true)` is returned, `EngineDispatcher` can execute the
+    /// pre-captured entry source with `module_root = None` and
+    /// `module_resolver = None` so `lowering_pipeline` lowers `net`/`tls`/`cluster`
+    /// inline without exposing any live disk module loader.
+    pub fn authorize_closed_world_lowering_only_entry(
+        &self,
+        context: &ResolutionContext,
+        policy: &dyn ModulePolicyHook,
+    ) -> ResolutionResult<bool> {
+        let mut non_builtins = self
+            .registry
+            .modules()
+            .filter(|module| module.kind() != ModuleKind::NativeBuiltin);
+        let Some(entry_module) = non_builtins.next() else {
+            return Ok(false);
+        };
+        if non_builtins.next().is_some() || entry_module.kind() != ModuleKind::CommonJs {
+            return Ok(false);
+        }
+        if self
+            .registry
+            .resolutions()
+            .any(|target| target.kind() == ResolutionKind::File)
+            || self.registry.url_resolutions().next().is_some()
+        {
+            return Ok(false);
+        }
+        let builtins_by_id: BTreeMap<&str, &RegisteredModule> = self
+            .registry
+            .modules()
+            .filter(|module| module.kind() == ModuleKind::NativeBuiltin)
+            .map(|module| (module.id(), module))
+            .collect();
+        let mut has_lowering_only_builtin = false;
+        let mut edges = Vec::with_capacity(entry_module.dependencies().len());
+        for dep in entry_module.dependencies() {
+            if dep.style != RequestStyle::Require {
+                return Ok(false);
+            }
+            let RegisteredTarget::Module { id } = &dep.target else {
+                return Ok(false);
+            };
+            let Some(&target_module) = builtins_by_id.get(id.as_str()) else {
+                return Ok(false);
+            };
+            let origin_path = target_module.origin().path.as_str();
+            if NativeBuiltinModule::from_specifier(origin_path).is_none() {
+                if lowering_only_cjs_builtin_specifier(origin_path).is_some() {
+                    has_lowering_only_builtin = true;
+                } else {
+                    return Ok(false);
+                }
+            }
+            edges.push((dep, target_module));
+        }
+        if !has_lowering_only_builtin {
+            return Ok(false);
+        }
+        for (dep, target_module) in edges {
+            let mut request = ModuleRequest::new(&dep.specifier, ImportStyle::Require)
+                .with_import_attributes(engine_attributes(&dep.import_attributes))
+                .with_compatibility_mode(CompatibilityMode::NodeCompat);
+            request.referrer = Some(entry_module.id().to_owned());
+            let origin_path = target_module.origin().path.as_str();
+            let record = if let Some(builtin) = NativeBuiltinModule::from_specifier(origin_path) {
+                builtin.record(target_module.id())
+            } else {
+                let canonical = lowering_only_cjs_builtin_specifier(origin_path)
+                    .expect("validated lowering-only builtin above");
+                ModuleRecord {
+                    id: target_module.id().to_owned(),
+                    syntax: ModuleSyntax::CommonJs,
+                    source: String::new(),
+                    dependencies: Vec::new(),
+                    required_capabilities: BTreeSet::from([
+                        RuntimeCapability::ModuleLoad,
+                        RuntimeCapability::Builtin,
+                    ]),
+                    provenance: ModuleProvenance {
+                        kind: ModuleSourceKind::BuiltIn,
+                        origin: canonical.to_owned(),
+                    },
+                }
+            };
+            self.authorize(&request, &record, context, policy)?;
+        }
+        Ok(true)
+    }
+
     /// Install this immutable registry for native runtime loads. The absolute
     /// root supplies guest-visible origins; constructing metadata opens no files.
     /// Authorization remains a per-request decision, including cache hits.
@@ -7014,6 +7109,12 @@ import('node:buffer').then(
             let entry = resolver
                 .resolve(&resolver.entry_request(), &context(), &granted())
                 .unwrap();
+            assert!(
+                resolver
+                    .authorize_closed_world_lowering_only_entry(&context(), &granted())
+                    .unwrap(),
+                "{specifier} single-file CJS entry should qualify for closed-world lowering-only execution"
+            );
             let mut runtime_req = ModuleRequest::new(specifier, ImportStyle::Require)
                 .with_compatibility_mode(CompatibilityMode::NodeCompat);
             runtime_req.referrer = Some(entry.module.record.id);
@@ -7026,6 +7127,24 @@ import('node:buffer').then(
                 "{specifier}"
             );
         }
+
+        // A multi-file project combining a relative module with require('net')
+        // must NOT qualify for the single-module lowering-only fast path.
+        let multi_root = tempfile::tempdir().unwrap();
+        put(
+            multi_root.path(),
+            "app.cjs",
+            "const helper = require('./helper.cjs'); const net = require('net'); console.log(helper, net.isIP('127.0.0.1'));",
+        );
+        put(multi_root.path(), "helper.cjs", "module.exports = 1;");
+        let multi_graph = capture(multi_root.path(), "app.cjs", GraphOptions::default()).unwrap();
+        let multi_pin = multi_graph.report().input_hash.clone();
+        let multi_resolver = CapturedEngineResolver::new(multi_graph, &multi_pin).unwrap();
+        assert!(
+            !multi_resolver
+                .authorize_closed_world_lowering_only_entry(&context(), &granted())
+                .unwrap()
+        );
 
         for esm_source in [
             "import 'node:net';",
