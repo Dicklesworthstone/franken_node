@@ -628,6 +628,35 @@ class TestSyntheticReportGate(unittest.TestCase):
         )
         self.assertTrue(item["pass"])
 
+    def test_seeded_plus_one_ifc_refusal_fixture_fails_tripwire(self):
+        clean_result = self.run_report(passing_report())
+        self.assertTrue(clean_result["overall_pass"])
+        self.assertTrue(named_check(clean_result, "ifc: refusal census <= 0")["pass"])
+
+        seeded = passing_report()
+        seeded["failing_tests_tracking"].append(
+            {
+                "test_id": "tc::buffer::0005",
+                "api_family": "buffer",
+                "failure_class": "engine_crash",
+                "reason": "lowering: unauthorized flow detected at op 3: TopSecret -> Internal",
+                "investigation_bead_id": "bd-kx70h",
+                "investigation_status": "open",
+            }
+        )
+        seeded_result = self.run_report(seeded)
+        self.assertFalse(seeded_result["overall_pass"])
+        ifc_check = named_check(seeded_result, "ifc: refusal census <= 0")
+        self.assertFalse(ifc_check["pass"])
+        self.assertIn("ifc_refusals=1", ifc_check["detail"])
+
+    def test_committed_corpus_report_has_zero_ifc_refusals(self):
+        committed, _ = mod.load_report(mod.REPORT)
+        self.assertIsNotNone(committed)
+        ifc_checks = mod.check_ifc_regression(committed, max_allowed=0)
+        self.assertEqual(len(ifc_checks), 1)
+        self.assertTrue(ifc_checks[0]["pass"], ifc_checks[0]["detail"])
+
 
 class TestSelfTest(unittest.TestCase):
     def test_self_test_passes(self):

@@ -41,42 +41,26 @@ Each claim entry uses this structure:
   `artifacts/13/compatibility_corpus_results.json`)
 - **Verification command**:
   `python3 scripts/check_compatibility_corpus_pass_gate.py --json`
-- **Last verified**: 2026-08-30T01:35:01Z (bd-klpse sync; measured artifact
-  regenerated 2026-08-26T07:27:33Z, commit 10ae1ddcd)
-- **Status**: pending (measured RED: observed_pct=69.82, required=95.0; 391/560;
-  97 failures are engine IFC lowering refusals, bd-kx70h)
-- **Notes**: Live lockstep-oracle-run triad as of 2026-08-26. The L1
-  close-condition gate fails closed if this file is GREEN or pending while
-  the corpus is below 95% (bd-reality-20260820-w0fc6.1). Tracked by `bd-28sz`.
-  REPRODUCTION CAVEAT (2026-08-30, bd-kx70h triage): re-running
-  `ops compat-corpus-run --require-node-reference` (node v22.2.0, bun 1.4.0,
-  same corpus hash) on the current tree measured 60.36% (338/560) — the
-  committed 69.82% did NOT reproduce on this host. The artifact does not pin
-  host, engine build, node/bun versions, or fixture-tree revision, so
-  cross-host reproduction is currently unverifiable; treat headline deltas
-  as within-measurement-uncertainty until provenance is pinned (bd-kx70h).
-  PER-PROFILE MEASUREMENT (2026-09-25, bd-reality-20260923-26n9r.12): one
-  release binary (sha256 prefix 3516d452e6872f40; franken_node at or after
-  02dbe4168 with other agents' uncommitted edits; engine approximately
-  99426e910, not bound), node v22.2.0 + bun 1.4.2, same host, back to back
-  via `ops compat-corpus-run --require-node-reference --policy <p>`:
-  `balanced` (the default profile) 442/560 = 78.93%; `legacy-risky`
-  485/560 = 86.61%; `strict` 0/560 = 0.00% (even a one-line
-  `console.log('hello')` prints its output and then exits 92, the engine's
-  Sandbox containment verdict; engine bd-pgzo7). RE-MEASURED 2026-09-26 on
-  the same host and procedure: build10 (sha256 prefix 625f989b1434b211;
-  engine 92c65f951 removes the Conservative-matrix prior tax) gives strict
-  33/560 = 5.89%, and build11 (c0fefc2eaec51091; node 56cd964ce also grants
-  strict the pure `builtin` capability, without which JSON.stringify and
-  `new Error` aborted) gives strict 396/560 = 70.71%, which matches
-  balanced in every family except http (3/50: strict grants no network
-  egress). Balanced and legacy-risky stayed 442 and 485 on both builds.
-  Between balanced and legacy-risky, every family scores the same
-  except fs (2/50 vs 43/50: balanced grants no fs_write capability, so any
-  file write is refused) and os (28/30 vs 30/30: balanced lowers with a
-  deny-all ambient grant, so `process.platform` is refused). The artifact
-  of record above was NOT regenerated from this dirty, unbound build. The
-  headline for operators is the balanced figure.
+- **Last verified**: 2026-11-18T17:12:00Z (measured triad artifact regenerated
+  2026-11-18T17:10:22Z at commit 586f842e2, franken_engine 61685ec62)
+- **Status**: pending (measured RED on core band 98.03% < 99.00%: overall
+  observed_pct=97.32, required=95.0; 545/560; 16/16 families >= 80.0%;
+  ifc_refusals=0; child_process=30/30; tls=40/40)
+- **Notes**: Live triad `lockstep-oracle-run` regenerated 2026-11-18T17:10:22Z
+  on clean commit `586f842e2` (`franken_engine` `61685ec62`, `--release` binary
+  `sha256:84381b79c79bec8ea5a354e63e697eab81e47f9e5c1aa955967ab7f4deb0c556`,
+  `node v26.3.0`, `bun 1.4.4`, `result_digest`
+  `sha256:13d09f2a39ca3bd267db4485621e6086d7ef9754638f2f944a2d72bcc098b29b`):
+  545/560 (`97.32%`), 15 failed, 0 errored, 0 IFC lowering refusals (down from
+  97 in `bd-kx70h`). 11 of 16 API families score 100.00% (`buffer`,
+  `child_process`, `events`, `fs`, `http`, `os`, `path`, `querystring`,
+  `timers`, `tls`, `zlib`), and all 5 remaining families exceed the 80.00%
+  per-family floor (`stream` 98.46%, `net` 97.50%, `url` 96.00%, `cluster`
+  85.00%, `crypto` 80.00%). Bands measure `edge` 56/56 (`100.00% >= 90.0%`),
+  `high-value` 240/250 (`96.00% >= 95.0%`), and `core` 249/254 (`98.03% < 99.0%`).
+  `artifacts/compat/corpus_pass.json` remains `RED` and `CLAIM-001` remains
+  `pending` until `core` reaches >=99.0% (`bd-28sz`, `bd-bwa93`) and default
+  `balanced` profile capability gaps are closed (`bd-reality-20260923-26n9r.12`).
 
 ### CLAIM-002: ≥3× migration throughput vs. baseline
 

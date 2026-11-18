@@ -7087,6 +7087,10 @@ import('node:buffer').then(
 
     #[test]
     fn lowering_only_cjs_builtins_admit_closed_graph_and_refuse_runtime_object_or_esm() {
+        let builtin_granted = CapabilityPolicyHook::new(BTreeSet::from([
+            RuntimeCapability::ModuleLoad,
+            RuntimeCapability::Builtin,
+        ]));
         for (specifier, source) in [
             (
                 "net",
@@ -7109,9 +7113,17 @@ import('node:buffer').then(
             let entry = resolver
                 .resolve(&resolver.entry_request(), &context(), &granted())
                 .unwrap();
-            assert!(
+            assert_eq!(
                 resolver
                     .authorize_closed_world_lowering_only_entry(&context(), &granted())
+                    .unwrap_err()
+                    .code,
+                ResolutionErrorCode::PolicyDenied,
+                "{specifier} must fail closed without RuntimeCapability::Builtin"
+            );
+            assert!(
+                resolver
+                    .authorize_closed_world_lowering_only_entry(&context(), &builtin_granted)
                     .unwrap(),
                 "{specifier} single-file CJS entry should qualify for closed-world lowering-only execution"
             );
@@ -7120,7 +7132,7 @@ import('node:buffer').then(
             runtime_req.referrer = Some(entry.module.record.id);
             assert_eq!(
                 resolver
-                    .resolve_shared(&runtime_req, &context(), &granted())
+                    .resolve_shared(&runtime_req, &context(), &builtin_granted)
                     .unwrap_err()
                     .code,
                 ResolutionErrorCode::UnsupportedSpecifier,
@@ -7142,7 +7154,7 @@ import('node:buffer').then(
         let multi_resolver = CapturedEngineResolver::new(multi_graph, &multi_pin).unwrap();
         assert!(
             !multi_resolver
-                .authorize_closed_world_lowering_only_entry(&context(), &granted())
+                .authorize_closed_world_lowering_only_entry(&context(), &builtin_granted)
                 .unwrap()
         );
 

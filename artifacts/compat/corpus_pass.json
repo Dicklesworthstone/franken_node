@@ -2,12 +2,12 @@
   "$schema": "../../docs/specs/section_13/bd-28sz_contract.md",
   "gate": "compat_corpus_pass_gate",
   "verdict": "RED",
-  "timestamp": "2026-08-30T01:35:01.918957163Z",
+  "timestamp": "2026-11-18T17:12:00Z",
   "owner_track": "10.2",
   "metric": {
     "name": "targeted_compatibility_corpus_pass_rate",
     "target_pct": 95.0,
-    "observed_pct": 69.82,
+    "observed_pct": 97.32,
     "passed": false,
     "details_ref": "artifacts/13/compatibility_corpus_results.json"
   },
@@ -18,13 +18,13 @@
     "compat_corpus_gate_self_test": "scripts/check_compat_corpus_gate.py --self-test",
     "corpus_results": "artifacts/13/compatibility_corpus_results.json",
     "total_test_cases": 560,
-    "passed_test_cases": 391,
-    "failed_test_cases": 169
+    "passed_test_cases": 545,
+    "failed_test_cases": 15
   },
   "notes": [
-    "Synced 2026-08-30 (bd-klpse) to the measured results artifact regenerated 2026-08-26T07:27:33Z (lockstep-oracle-run, commit 10ae1ddcd): observed_pct 69.82 (391/560).",
-    "The previous summary block (observed_pct 86.43, timestamp 2026-08-20) was stale relative to its details_ref; the pass gate now fails closed on any summary/results divergence (SUMMARY_* findings).",
-    "observed_pct 69.82 is below required 95.00; verdict is RED until bd-28sz closes. 97 of the 169 failures are engine IFC lowering refusals tracked by bd-kx70h.",
-    "This file is bound to the L1 close-condition gate (bd-reality-20260820-w0fc6.1). Declaring GREEN here while the corpus is below the floor is fail-closed."
+    "Synced 2026-11-18 to the measured triad lockstep-oracle-run artifact regenerated 2026-11-18T17:10:22Z (commit 586f842e2, franken_engine 61685ec62, release binary sha256:84381b79c79bec8ea5a354e63e697eab81e47f9e5c1aa955967ab7f4deb0c556, node v26.3.0, bun 1.4.4): observed_pct 97.32 (545/560), 15 failed, 0 errored, 0 engine IFC lowering refusals (bd-kx70h).",
+    "Overall pass rate 97.32% exceeds the 95.00% overall floor and all 16/16 API families meet the >=80.00% floor (11/16 at 100.00%, including child_process 30/30 and tls 40/40; stream 98.46%, net 97.50%, url 96.00%, cluster 85.00%, crypto 80.00%).",
+    "verdict remains RED and metric.passed remains false because the core band measures 98.03% (249/254) below its 99.00% band threshold (ci_gate.threshold_met=false, release_blocked=true); tracked under bd-28sz and bd-bwa93.",
+    "This file is bound to the L1 close-condition gate (bd-reality-20260820-w0fc6.1) and check_compatibility_corpus_pass_gate.py (bd-klpse); declaring GREEN while core band < 99.00% is fail-closed."
   ]
 }
