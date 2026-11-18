@@ -16,11 +16,19 @@
 name: deregistered-test-census-gate
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/franken-node/tests/**'
+      - 'crates/franken-node/Cargo.toml'
+      - 'scripts/check_deregistered_test_targets.py'
+      - '.github/workflows/deregistered-test-census-gate.yml'
   pull_request:
     paths:
       - 'crates/franken-node/tests/**'
       - 'crates/franken-node/Cargo.toml'
       - 'scripts/check_deregistered_test_targets.py'
+      - '.github/workflows/deregistered-test-census-gate.yml'
   workflow_dispatch: {}
 
 env:

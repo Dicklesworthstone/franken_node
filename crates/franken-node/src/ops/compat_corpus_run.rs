@@ -1417,6 +1417,11 @@ fn corpus_process_authority(
             )
         })?
         .config;
+        // Staged corpus workspaces carry franken_node.toml inside the project
+        // root, so apply_operator_source_capture_defaults enforces
+        // frozen_modules = true before verifying the signed child_process
+        // policy subject. Bind the exact post-default configuration shape.
+        config.runtime.frozen_modules = Some(true);
         config.security.child_process_spawn = Some(ChildProcessSpawnConfig {
             token: CapabilityToken {
                 token_id: format!("compat-corpus-{}", uuid::Uuid::now_v7()),

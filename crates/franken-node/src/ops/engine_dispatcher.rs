@@ -7552,7 +7552,26 @@ fn prepare_native_frozen_modules(
                 &pin,
                 orchestrator_config.parser_options.clone(),
             )
-            .map_err(|error| format!("Frozen module source admission failed: {error}"))?,
+            .map_err(|error| {
+                if error.code == "ERR_MODULE_ENGINE_PARSE_LIMIT" {
+                    let budget = &orchestrator_config.parser_options.budget;
+                    format!(
+                        "Frozen module source admission failed: {error} (BudgetExceeded); \
+                         effective parser limits: runtime.max_parse_source_bytes={}, \
+                         runtime.max_parse_tokens={}, max_recursion_depth={}. \
+                         Configure the source/token limits in [runtime] or with \
+                         FRANKEN_NODE_RUNTIME_MAX_PARSE_SOURCE_BYTES / FRANKEN_NODE_RUNTIME_MAX_PARSE_TOKENS; \
+                         supported maxima are {} bytes and {} tokens; recursion remains profile-bounded",
+                        budget.max_source_bytes,
+                        budget.max_token_count,
+                        budget.max_recursion_depth,
+                        crate::config::MAX_PARSE_SOURCE_BYTES,
+                        crate::config::MAX_PARSE_TOKENS,
+                    )
+                } else {
+                    format!("Frozen module source admission failed: {error}")
+                }
+            })?,
         );
         let policy = Arc::new(CapabilityPolicyHook::new(
             capabilities

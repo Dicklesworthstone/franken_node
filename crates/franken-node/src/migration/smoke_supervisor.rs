@@ -24,7 +24,7 @@ const MAX_STREAM_BYTES: usize = 16 * 1024 * 1024;
 pub(super) const MAX_INPUT_BYTES: usize = 1024 * 1024;
 const POLL_INTERVAL: Duration = Duration::from_millis(5);
 const CONTROL_POLL_INTERVAL: Duration = Duration::from_millis(50);
-const REAP_TIMEOUT: Duration = Duration::from_secs(2);
+const REAP_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Explicit, one-way cancellation for a single trusted operator invocation.
 /// Clones share the request across joined case workers; unrelated invocations

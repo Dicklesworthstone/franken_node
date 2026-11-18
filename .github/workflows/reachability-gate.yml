@@ -23,11 +23,19 @@
 name: reachability-gate
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/franken-node/src/**'
+      - 'scripts/check_reachability.py'
+      - 'scripts/reachability_ceiling.json'
+      - '.github/workflows/reachability-gate.yml'
   pull_request:
     paths:
       - 'crates/franken-node/src/**'
       - 'scripts/check_reachability.py'
       - 'scripts/reachability_ceiling.json'
+      - '.github/workflows/reachability-gate.yml'
   workflow_dispatch: {}
 
 jobs:

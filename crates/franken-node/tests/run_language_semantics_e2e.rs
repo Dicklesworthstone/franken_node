@@ -96,6 +96,16 @@ const FIXED_PROBES: &[(&str, &str)] = &[
         "console.log(`t${1+1}` , typeof Symbol.iterator)",
         "t2 symbol\n",
     ),
+    // ES2022 class fields and private identifiers (previously miscompiled or
+    // parse-rejected; now supported end-to-end).
+    (
+        "class A { #x=1; get x(){return this.#x;} } console.log(\"class:\"+new A().x)",
+        "class:1\n",
+    ),
+    (
+        "class C { static s=5; m(){return C.s;} } console.log(new C().m())",
+        "5\n",
+    ),
 ];
 
 #[test]
@@ -116,10 +126,9 @@ fn fixed_language_semantics_match_node() {
 
 /// The reality-check's worst bug was a SILENT wrong answer: ES2022 class fields
 /// were accepted and `get x(){return this.#x}` returned the literal string
-/// "this.#x" at exit 0. The engine now rejects class fields at parse time
-/// (fail-closed), which is correct. This test pins the invariant: whatever the
-/// engine does with a not-yet-supported construct, it must MATCH Node or FAIL
-/// (non-zero exit) -- never a different answer at exit 0.
+/// "this.#x" at exit 0. This test pins the invariant across both ES2022 class
+/// fields and rejected syntax: whatever the engine does, it must MATCH Node or
+/// FAIL (non-zero exit) -- never a different answer at exit 0.
 #[test]
 fn no_silent_miscompile_on_supported_or_rejected_syntax() {
     // (snippet, the answer Node gives). The engine may match it, or fail closed;
@@ -133,6 +142,7 @@ fn no_silent_miscompile_on_supported_or_rejected_syntax() {
             "class C { static s=5; m(){return C.s;} } console.log(new C().m())",
             "5\n",
         ),
+        ("const broken = ;", ""),
     ];
     for (source, node_output) in MISCOMPILE_GUARD_PROBES {
         let (exit, stdout) = run_snippet(source);
@@ -148,13 +158,10 @@ fn no_silent_miscompile_on_supported_or_rejected_syntax() {
     }
 }
 
-/// Deliverable 4 -- known gaps, tracked in code. These globals are absent
-/// (`typeof` returns "undefined") or capability-gated in a way plain programs
-/// cannot satisfy. Node provides them as pure builtins. `#[ignore]`d so the
-/// suite is green; remove the ignore (and move the probe into FIXED_PROBES) once
-/// the engine lands them. Filed as engine work: franken_engine bd-3l74k.
+/// Deliverable 4 -- pure global Web/ES builtins (`globalThis`, `TextEncoder`,
+/// `TextDecoder`, `structuredClone`) provided without capability gating under
+/// the default `balanced` profile.
 #[test]
-#[ignore = "franken_engine bd-3l74k: globalThis is capability-gated and TextEncoder/structuredClone are unimplemented; un-ignore when they land as pure builtins"]
 fn pure_global_builtins_are_provided_like_node() {
     for (source, expected) in &[
         (
@@ -162,10 +169,15 @@ fn pure_global_builtins_are_provided_like_node() {
             "object true\n",
         ),
         ("console.log(typeof TextEncoder)", "function\n"),
+        ("console.log(typeof TextDecoder)", "function\n"),
         ("console.log(typeof structuredClone)", "function\n"),
         (
             "console.log(new TextEncoder().encode('AB').join(','))",
             "65,66\n",
+        ),
+        (
+            "console.log(new TextDecoder().decode(new Uint8Array([72, 105])))",
+            "Hi\n",
         ),
         (
             "const o={a:[1,2]}; const c=structuredClone(o); c.a.push(3); console.log(o.a.length, c.a.length)",
@@ -173,7 +185,7 @@ fn pure_global_builtins_are_provided_like_node() {
         ),
     ] {
         let (exit, stdout) = run_snippet(source);
-        assert_eq!(exit, Some(0), "{source:?} should run once implemented");
+        assert_eq!(exit, Some(0), "{source:?} should run under balanced");
         assert_eq!(stdout, *expected, "{source:?} should match Node");
     }
 }

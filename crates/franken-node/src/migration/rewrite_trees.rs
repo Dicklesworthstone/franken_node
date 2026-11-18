@@ -96,7 +96,7 @@ fn relative(path: &str) -> Result<()> {
 fn permissions(mode: u32, directory: bool) -> Result<()> {
     let required = if directory { 0o500 } else { 0o400 };
     ensure!(
-        mode <= 0o777 && mode & required == required,
+        mode <= 0o777 && (mode & required) == required,
         "tree entries require ordinary owner-readable permissions and searchable directories"
     );
     Ok(())

@@ -15,6 +15,19 @@
 name: claims-manifest-gate
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - 'README.md'
+      - 'docs/claims_manifest.json'
+      - 'docs/honesty_manifest.json'
+      - 'docs/honesty_manifest_evidence.json'
+      - 'fuzz/Cargo.toml'
+      - 'Cargo.toml'
+      - 'scripts/check_*.py'
+      - 'crates/franken-node/src/tools/replay_bundle.rs'
+      - 'sdk/verifier/src/honesty_manifest.rs'
+      - '.github/workflows/claims-manifest-gate.yml'
   pull_request:
     paths:
       - 'README.md'

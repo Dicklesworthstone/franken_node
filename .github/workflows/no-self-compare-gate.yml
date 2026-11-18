@@ -12,11 +12,19 @@
 name: no-self-compare-gate
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/**/*.rs'
+      - 'sdk/**/*.rs'
+      - 'scripts/check_no_self_compare.py'
+      - '.github/workflows/no-self-compare-gate.yml'
   pull_request:
     paths:
       - 'crates/**/*.rs'
       - 'sdk/**/*.rs'
       - 'scripts/check_no_self_compare.py'
+      - '.github/workflows/no-self-compare-gate.yml'
   workflow_dispatch: {}
 
 jobs:

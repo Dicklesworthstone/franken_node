@@ -350,6 +350,33 @@ def check_workflows(workflows_dir: Path) -> list[dict[str, Any]]:
         }
     )
 
+    pr_only_workflows: list[str] = []
+    for wf_path in sorted(workflows_dir.glob("*.yml")):
+        try:
+            parsed_wf = yaml.safe_load(wf_path.read_text(encoding="utf-8"))
+        except yaml.YAMLError:
+            continue
+        if not isinstance(parsed_wf, dict):
+            continue
+        # PyYAML parses bare `on:` as boolean True key in YAML 1.1.
+        triggers = parsed_wf.get("on") if "on" in parsed_wf else parsed_wf.get(True)
+        if isinstance(triggers, dict):
+            if (
+                "pull_request" in triggers
+                and "push" not in triggers
+                and "schedule" not in triggers
+            ):
+                pr_only_workflows.append(wf_path.name)
+    checks.append(
+        {
+            "check": "workflows_not_pr_only_on_main_repo",
+            "pass": not pr_only_workflows,
+            "detail": "all pull_request gates also trigger on push or schedule"
+            if not pr_only_workflows
+            else f"pr-only workflows: {', '.join(pr_only_workflows)}",
+        }
+    )
+
     return checks
 
 

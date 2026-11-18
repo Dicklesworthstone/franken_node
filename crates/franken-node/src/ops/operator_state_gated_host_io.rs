@@ -253,6 +253,7 @@ impl<P: HostIoProvider> OperatorStateGatedHostIo<P> {
                 return Err(denied("guest filesystem path exceeds inspection bounds"));
             }
             if part == OsStr::new("..") {
+                // lint:allow-self-compare: resolved mutates across path components in the loop; guards popping above self.root
                 if resolved == self.root || !resolved.pop() {
                     return Err(denied("symlink target escapes guest filesystem authority"));
                 }

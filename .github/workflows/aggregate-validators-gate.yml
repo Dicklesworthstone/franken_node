@@ -10,12 +10,21 @@
 name: aggregate-validators-gate
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/check_*.py'
+      - 'scripts/validators_manifest.json'
+      - 'scripts/aggregate_validators_gate.py'
+      - 'docs/specs/**'
+      - '.github/workflows/aggregate-validators-gate.yml'
   pull_request:
     paths:
       - 'scripts/check_*.py'
       - 'scripts/validators_manifest.json'
       - 'scripts/aggregate_validators_gate.py'
       - 'docs/specs/**'
+      - '.github/workflows/aggregate-validators-gate.yml'
   workflow_dispatch: {}
 
 jobs:

@@ -1,6 +1,23 @@
 name: tnr-ci-verification-gate
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/headline_claims.toml"
+      - "docs/observability/tnr_event_metrics_registry.json"
+      - "docs/observability/tnr_event_metrics_registry.md"
+      - "docs/reproduction_playbook.md"
+      - "scripts/check_tnr_observability_contract.py"
+      - "scripts/reproduce.py"
+      - "scripts/check_tnr_ci_verification_gate.py"
+      - "scripts/verify_all_verification_targets.sh"
+      - "scripts/**"
+      - "tests/test_reproduce.py"
+      - "tests/test_check_tnr_ci_verification_gate.py"
+      - "tests/test_check_tnr_observability_contract.py"
+      - "crates/franken-node/src/**"
+      - ".github/workflows/tnr-ci-verification-gate.yml"
   pull_request:
     paths:
       - "docs/headline_claims.toml"

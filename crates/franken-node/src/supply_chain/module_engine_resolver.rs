@@ -292,18 +292,31 @@ impl CapturedEngineResolver {
             .map_err(|error| registry_error(error, request, context))
     }
 
-    fn record(&self, module: &RegisteredModule) -> ModuleRecord {
+    fn record(
+        &self,
+        module: &RegisteredModule,
+        request: &ModuleRequest,
+        context: &ResolutionContext,
+    ) -> ResolutionResult<ModuleRecord> {
         let syntax = match module.kind() {
             ModuleKind::EsModule => ModuleSyntax::EsModule,
             ModuleKind::CommonJs => ModuleSyntax::CommonJs,
             ModuleKind::Json => ModuleSyntax::Json,
             ModuleKind::NativeBuiltin => {
                 return NativeBuiltinModule::from_specifier(&module.origin().path)
-                    .expect("native terminal was admitted by the engine provider inventory")
-                    .record(module.id());
+                    .map(|builtin| builtin.record(module.id()))
+                    .ok_or_else(|| {
+                        denied(
+                            ResolutionErrorCode::UnsupportedSpecifier,
+                            "lowering-only core module has no runtime module object",
+                            request,
+                            context,
+                            None,
+                        )
+                    });
             }
         };
-        ModuleRecord {
+        Ok(ModuleRecord {
             id: module.id().to_owned(),
             syntax,
             // The policy receives this candidate record, as required by the
@@ -327,7 +340,7 @@ impl CapturedEngineResolver {
                     self.registry.summary().graph_input_hash
                 ),
             },
-        }
+        })
     }
 
     fn authorize(
@@ -533,7 +546,9 @@ impl ModuleResolver for CapturedEngineResolver {
             return Ok(self.shared_outcome(request, Arc::clone(record), context));
         }
 
-        let candidate = Arc::new(SharedModuleRecord::new(self.record(module)));
+        let candidate = Arc::new(SharedModuleRecord::new(
+            self.record(module, request, context)?,
+        ));
         self.authorize(request, candidate.record(), context, policy)?;
         // Policy runs outside initialization: a denied request retains nothing,
         // and a reentrant policy may safely resolve the same candidate. Competing
@@ -566,7 +581,7 @@ impl ModuleResolver for CapturedEngineResolver {
     ) -> ResolutionResult<ResolutionOutcome> {
         self.validate_request(request, context)?;
         let module = self.lookup(request, context)?;
-        let record = self.record(module);
+        let record = self.record(module, request, context)?;
         self.authorize(request, &record, context, policy)?;
         Ok(self.outcome(request, record, context))
     }
@@ -623,7 +638,7 @@ impl ModuleResolver for CapturedEngineResolver {
                     Some(module.id()),
                 ));
             }
-            let record = self.record(module);
+            let record = self.record(module, &request, context)?;
             self.authorize(&request, &record, context, policy)?;
             positions.insert(module.id().to_owned(), outcomes.len());
             outcomes.push(self.outcome(&request, record, context));
@@ -631,6 +646,15 @@ impl ModuleResolver for CapturedEngineResolver {
         // Any error above drops all prepared outputs. This is traversal order,
         // not an ESM instantiation/evaluation order or a linkage certificate.
         Ok(outcomes)
+    }
+}
+
+fn lowering_only_cjs_builtin_specifier(specifier: &str) -> Option<&'static str> {
+    match specifier {
+        "cluster" | "node:cluster" => Some("node:cluster"),
+        "net" | "node:net" => Some("node:net"),
+        "tls" | "node:tls" => Some("node:tls"),
+        _ => None,
     }
 }
 
@@ -650,10 +674,15 @@ fn native_builtin_provider(
         }
         return Ok(None);
     }
-    Ok(
-        NativeBuiltinModule::from_specifier(specifier)
-            .map(NativeBuiltinModule::canonical_specifier),
-    )
+    if let Some(canonical) =
+        NativeBuiltinModule::from_specifier(specifier).map(NativeBuiltinModule::canonical_specifier)
+    {
+        return Ok(Some(canonical));
+    }
+    if style == RequestStyle::Require {
+        return Ok(lowering_only_cjs_builtin_specifier(specifier));
+    }
+    Ok(None)
 }
 
 fn engine_attributes(attributes: &super::ImportAttributes) -> EngineImportAttributes {
@@ -6903,6 +6932,60 @@ import('node:buffer').then(
                         .unwrap()
                         .to_string(),
                 ]
+            );
+        }
+    }
+
+    #[test]
+    fn lowering_only_cjs_builtins_admit_closed_graph_and_refuse_runtime_object_or_esm() {
+        for (specifier, source) in [
+            (
+                "net",
+                "const net = require('net'); console.log(net.isIP('127.0.0.1'));",
+            ),
+            (
+                "node:tls",
+                "const tls = require('node:tls'); console.log(Array.isArray(tls.rootCertificates));",
+            ),
+            (
+                "cluster",
+                "const cluster = require('cluster'); console.log(cluster.isPrimary);",
+            ),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            put(root.path(), "app.cjs", source);
+            let graph = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
+            let pin = graph.report().input_hash.clone();
+            let resolver = CapturedEngineResolver::new(graph, &pin).unwrap();
+            let entry = resolver
+                .resolve(&resolver.entry_request(), &context(), &granted())
+                .unwrap();
+            let mut runtime_req = ModuleRequest::new(specifier, ImportStyle::Require)
+                .with_compatibility_mode(CompatibilityMode::NodeCompat);
+            runtime_req.referrer = Some(entry.module.record.id);
+            assert_eq!(
+                resolver
+                    .resolve_shared(&runtime_req, &context(), &granted())
+                    .unwrap_err()
+                    .code,
+                ResolutionErrorCode::UnsupportedSpecifier,
+                "{specifier}"
+            );
+        }
+
+        for esm_source in [
+            "import 'node:net';",
+            "import 'node:tls';",
+            "import 'node:cluster';",
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            put(root.path(), "app.mjs", esm_source);
+            let graph = capture(root.path(), "app.mjs", GraphOptions::default()).unwrap();
+            let pin = graph.report().input_hash.clone();
+            assert_eq!(
+                CapturedEngineResolver::new(graph, &pin).err().unwrap().code,
+                "ERR_MODULE_REGISTRY_INCOMPLETE",
+                "{esm_source}"
             );
         }
     }
