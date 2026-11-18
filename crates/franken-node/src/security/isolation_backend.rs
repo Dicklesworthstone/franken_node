@@ -172,8 +172,114 @@ fn resolve_process_spawn_bubblewrap(
     which("bwrap").map_err(|_| ProcessSpawnContainmentError::BinaryNotFound)
 }
 
+/// Determine the VFS UID expected for host-root-owned read-only paths inside an
+/// active Bubblewrap containment namespace.
+///
+/// When `/proc/self/uid_map` maps namespace UID `0` (initial user namespace or
+/// root-invoked Bubblewrap), host-root-owned paths MUST report `uid == 0`.
+/// When `/proc/self/uid_map` leaves UID `0` unmapped (an unprivileged user
+/// namespace such as `1000 1000 1`), the Linux kernel VFS translates unmapped
+/// host UID `0` to `/proc/sys/kernel/overflowuid` (`65534`). That `overflowuid`
+/// is accepted iff `effective_uid != 0` and `overflowuid != effective_uid`.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn parse_expected_root_uid_for_active_userns(
+    uid_map: &str,
+    overflow_uid_raw: &str,
+    effective_uid: u32,
+) -> Result<u32, String> {
+    let mut parsed_any = false;
+    let mut zero_mapped = false;
+    for line in uid_map.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let mut parts = trimmed.split_whitespace();
+        let (Some(inside_raw), Some(_outside_raw), Some(count_raw), None) =
+            (parts.next(), parts.next(), parts.next(), parts.next())
+        else {
+            return Err(format!("malformed /proc/self/uid_map entry: {trimmed:?}"));
+        };
+        let inside_start = inside_raw
+            .parse::<u64>()
+            .map_err(|err| format!("invalid inside_uid in /proc/self/uid_map: {err}"))?;
+        let count = count_raw
+            .parse::<u64>()
+            .map_err(|err| format!("invalid count in /proc/self/uid_map: {err}"))?;
+        if count == 0 {
+            return Err("zero-length range in /proc/self/uid_map".to_string());
+        }
+        parsed_any = true;
+        if inside_start == 0 {
+            zero_mapped = true;
+        }
+    }
+    if !parsed_any {
+        return Err("/proc/self/uid_map contained no mappings".to_string());
+    }
+    if zero_mapped {
+        return Ok(0);
+    }
+    if effective_uid == 0 {
+        return Err(
+            "effective UID is 0 while /proc/self/uid_map leaves UID 0 unmapped".to_string(),
+        );
+    }
+    let overflow_uid = overflow_uid_raw
+        .trim()
+        .parse::<u32>()
+        .map_err(|err| format!("invalid /proc/sys/kernel/overflowuid: {err}"))?;
+    if overflow_uid == effective_uid {
+        return Err(format!(
+            "overflowuid ({overflow_uid}) collides with worker effective UID ({effective_uid})"
+        ));
+    }
+    Ok(overflow_uid)
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn expected_root_uid_in_active_containment() -> Result<u32, String> {
+    if std::process::id() != 2 {
+        return Err(format!(
+            "active containment root-UID resolution requires namespace PID 2, found {}",
+            std::process::id()
+        ));
+    }
+    let status = std::fs::read_to_string("/proc/self/status")
+        .map_err(|err| format!("failed reading /proc/self/status: {err}"))?;
+    let parent_pid = status
+        .lines()
+        .find_map(|line| line.strip_prefix("PPid:"))
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .ok_or_else(|| "/proc/self/status had no valid PPid".to_string())?;
+    if parent_pid != 1 {
+        return Err(format!(
+            "active containment root-UID resolution requires PPid 1, found {parent_pid}"
+        ));
+    }
+    let effective_uid = status
+        .lines()
+        .find_map(|line| line.strip_prefix("Uid:"))
+        .and_then(|value| value.split_whitespace().nth(1))
+        .and_then(|value| value.parse::<u32>().ok())
+        .ok_or_else(|| "/proc/self/status had no valid effective Uid".to_string())?;
+    let uid_map = std::fs::read_to_string("/proc/self/uid_map")
+        .map_err(|err| format!("failed reading /proc/self/uid_map: {err}"))?;
+    let overflow_uid_raw = std::fs::read_to_string("/proc/sys/kernel/overflowuid")
+        .map_err(|err| format!("failed reading /proc/sys/kernel/overflowuid: {err}"))?;
+    parse_expected_root_uid_for_active_userns(&uid_map, &overflow_uid_raw, effective_uid)
+}
+
 #[cfg(all(target_os = "linux", feature = "external-commands"))]
 fn validate_process_spawn_bubblewrap(path: &Path) -> Result<String, ProcessSpawnContainmentError> {
+    validate_process_spawn_bubblewrap_with_expected_owner(path, 0)
+}
+
+#[cfg(all(target_os = "linux", feature = "external-commands"))]
+fn validate_process_spawn_bubblewrap_with_expected_owner(
+    path: &Path,
+    expected_owner_uid: u32,
+) -> Result<String, ProcessSpawnContainmentError> {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
     if !path.is_absolute() {
@@ -209,11 +315,11 @@ fn validate_process_spawn_bubblewrap(path: &Path) -> Result<String, ProcessSpawn
             reason: "path must name a regular file, not a symlink".to_string(),
         });
     }
-    if metadata.uid() != 0 {
+    if metadata.uid() != expected_owner_uid {
         return Err(ProcessSpawnContainmentError::InsecureBinary {
             path: path.to_path_buf(),
             reason: format!(
-                "binary must be owned by root (uid 0), found uid {}",
+                "binary must be owned by root (expected uid {expected_owner_uid}), found uid {}",
                 metadata.uid()
             ),
         });
@@ -246,7 +352,7 @@ fn validate_process_spawn_bubblewrap(path: &Path) -> Result<String, ProcessSpawn
         })?;
         if !ancestor_metadata.is_dir()
             || ancestor_metadata.file_type().is_symlink()
-            || ancestor_metadata.uid() != 0
+            || ancestor_metadata.uid() != expected_owner_uid
             || ancestor_metadata.permissions().mode() & 0o022 != 0
         {
             return Err(ProcessSpawnContainmentError::InsecureBinary {
@@ -429,7 +535,6 @@ pub fn verify_active_process_spawn_containment(
     #[cfg(all(target_os = "linux", feature = "external-commands"))]
     {
         let binary_path = resolve_process_spawn_bubblewrap(configured_path)?;
-        let binary_sha256 = validate_process_spawn_bubblewrap(&binary_path)?;
         let active_error = |reason: String| ProcessSpawnContainmentError::ActiveContainmentFailed {
             path: binary_path.clone(),
             reason,
@@ -476,6 +581,12 @@ pub fn verify_active_process_spawn_containment(
                 init_executable.display()
             )));
         }
+
+        let expected_owner_uid = expected_root_uid_in_active_containment().map_err(active_error)?;
+        let binary_sha256 = validate_process_spawn_bubblewrap_with_expected_owner(
+            &binary_path,
+            expected_owner_uid,
+        )?;
 
         Ok(ProcessSpawnContainmentReadiness {
             backend: "bubblewrap".to_string(),
@@ -1845,6 +1956,34 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn active_userns_root_uid_requires_zero_when_mapped_and_overflowuid_when_unmapped() {
+        assert_eq!(
+            parse_expected_root_uid_for_active_userns("0 0 4294967295\n", "65534\n", 1000).unwrap(),
+            0
+        );
+        assert_eq!(
+            parse_expected_root_uid_for_active_userns("0 0 1\n", "65534\n", 0).unwrap(),
+            0
+        );
+        assert_eq!(
+            parse_expected_root_uid_for_active_userns(
+                "      1000          0          1\n",
+                "65534\n",
+                1000
+            )
+            .unwrap(),
+            65534
+        );
+
+        let collision =
+            parse_expected_root_uid_for_active_userns("65534 65534 1\n", "65534\n", 65534)
+                .expect_err("colliding overflowuid and effective_uid must fail closed");
+        assert!(collision.contains("collides"));
+        assert!(parse_expected_root_uid_for_active_userns("", "65534\n", 1000).is_err());
+        assert!(parse_expected_root_uid_for_active_userns("1000 1000\n", "65534\n", 1000).is_err());
     }
 
     // FIXME(bd-yom8c): Every adversarial/negative test below was written against a

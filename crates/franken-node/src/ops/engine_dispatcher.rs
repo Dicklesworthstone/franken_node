@@ -374,6 +374,7 @@ pub struct InternalCorpusProcessAuthorityServer {
 struct AdmissionBoundProcessSpawn {
     inner: NativeProcessSpawn,
     expires_at_ms: u64,
+    default_working_dir: Option<PathBuf>,
 }
 
 #[cfg(feature = "engine")]
@@ -389,6 +390,63 @@ impl std::fmt::Debug for AdmissionBoundProcessSpawn {
 
 #[cfg(feature = "engine")]
 impl AdmissionBoundProcessSpawn {
+    fn new(inner: NativeProcessSpawn, expires_at_ms: u64, project_root: Option<&Path>) -> Self {
+        let jail_root = Path::new(&inner.policy().jailed_cwd_root);
+        let default_working_dir = project_root
+            .and_then(|root| root.canonicalize().ok())
+            .filter(|canonical| canonical.starts_with(jail_root) && canonical != jail_root);
+        Self {
+            inner,
+            expires_at_ms,
+            default_working_dir,
+        }
+    }
+
+    fn normalize_request_working_dir<'a>(
+        &self,
+        request: &'a ProcessSpawnRequest,
+    ) -> std::borrow::Cow<'a, ProcessSpawnRequest> {
+        let Some(base_dir) = self.default_working_dir.as_deref() else {
+            return std::borrow::Cow::Borrowed(request);
+        };
+        let resolve_cwd = |cwd: Option<&str>| -> Option<String> {
+            match cwd {
+                None => base_dir.to_str().map(str::to_owned),
+                Some(raw) if !raw.contains('\0') && !Path::new(raw).is_absolute() => {
+                    base_dir.join(raw).to_str().map(str::to_owned)
+                }
+                _ => None,
+            }
+        };
+        match request {
+            ProcessSpawnRequest::Run {
+                launch,
+                stdin,
+                timeout_millis,
+            } => match resolve_cwd(launch.cwd.as_deref()) {
+                Some(resolved) => {
+                    let mut updated = launch.clone();
+                    updated.cwd = Some(resolved);
+                    std::borrow::Cow::Owned(ProcessSpawnRequest::Run {
+                        launch: updated,
+                        stdin: stdin.clone(),
+                        timeout_millis: *timeout_millis,
+                    })
+                }
+                None => std::borrow::Cow::Borrowed(request),
+            },
+            ProcessSpawnRequest::Spawn { launch } => match resolve_cwd(launch.cwd.as_deref()) {
+                Some(resolved) => {
+                    let mut updated = launch.clone();
+                    updated.cwd = Some(resolved);
+                    std::borrow::Cow::Owned(ProcessSpawnRequest::Spawn { launch: updated })
+                }
+                None => std::borrow::Cow::Borrowed(request),
+            },
+            _ => std::borrow::Cow::Borrowed(request),
+        }
+    }
+
     fn ensure_current(&self) -> std::result::Result<(), String> {
         let elapsed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -428,7 +486,9 @@ impl ProcessSpawnProvider for AdmissionBoundProcessSpawn {
         &self,
         request: &ProcessSpawnRequest,
     ) -> std::result::Result<ProcessSpawnRequest, ProcessSpawnError> {
-        self.inner.prepare_request(request)
+        self.inner.preflight_request(request)?;
+        let normalized = self.normalize_request_working_dir(request);
+        self.inner.prepare_request(normalized.as_ref())
     }
 
     fn perform(
@@ -438,7 +498,8 @@ impl ProcessSpawnProvider for AdmissionBoundProcessSpawn {
     ) -> ProcessSpawnOutcome {
         self.ensure_current()
             .map_err(|reason| ProcessSpawnError::Denied { reason })?;
-        self.inner.perform(request, granted)
+        let normalized = self.normalize_request_working_dir(request);
+        self.inner.perform(normalized.as_ref(), granted)
     }
 
     fn perform_controlled(
@@ -449,7 +510,9 @@ impl ProcessSpawnProvider for AdmissionBoundProcessSpawn {
     ) -> ProcessSpawnOutcome {
         self.ensure_current()
             .map_err(|reason| ProcessSpawnError::Denied { reason })?;
-        self.inner.perform_controlled(request, granted, control)
+        let normalized = self.normalize_request_working_dir(request);
+        self.inner
+            .perform_controlled(normalized.as_ref(), granted, control)
     }
 
     fn cleanup_handle(&self, handle: &str) -> ProcessSpawnOutcome {
@@ -12738,7 +12801,10 @@ impl EngineDispatcher {
                 max_output_bytes: source.limits.max_output_bytes,
                 max_runtime_millis: source.limits.max_runtime_millis,
             },
-            allowed_signals: std::collections::BTreeSet::from([ProcessSignal::Kill]),
+            allowed_signals: std::collections::BTreeSet::from([
+                ProcessSignal::Kill,
+                ProcessSignal::Terminate,
+            ]),
             allowed_stdio: std::collections::BTreeSet::from([
                 ProcessStdioMode::Pipe,
                 ProcessStdioMode::Null,
@@ -13573,10 +13639,11 @@ impl EngineDispatcher {
                     &mut telemetry_guard,
                 )
             })?;
-            let provider = AdmissionBoundProcessSpawn {
-                inner: provider,
-                expires_at_ms: admission.expires_at_ms(),
-            };
+            let provider = AdmissionBoundProcessSpawn::new(
+                provider,
+                admission.expires_at_ms(),
+                Some(project_paths.project_root()),
+            );
             let provider: Arc<dyn ProcessSpawnProvider> = match attribution_tracker.as_ref() {
                 Some(tracker) => Arc::new(AttributingProcessSpawnProvider {
                     inner: Arc::new(provider),
@@ -20015,10 +20082,7 @@ exec "$2" pinned-worker-image"#,
             "must-not-appear-in-debug".to_string(),
         );
         let provider = NativeProcessSpawn::new(policy).expect("construct native process provider");
-        let provider = AdmissionBoundProcessSpawn {
-            inner: provider,
-            expires_at_ms: 0,
-        };
+        let provider = AdmissionBoundProcessSpawn::new(provider, 0, None);
         let request = ProcessSpawnRequest::Spawn {
             launch: ProcessLaunch {
                 executable: "not-reached".to_string(),
@@ -20052,13 +20116,23 @@ exec "$2" pinned-worker-image"#,
         assert!(!debug.contains("must-not-appear-in-debug"));
         assert!(!debug.contains("SECRET_TOKEN"));
 
-        let live_provider = AdmissionBoundProcessSpawn {
-            inner: NativeProcessSpawn::new(
-                ProcessSpawnPolicy::jailed(jail.path())
-                    .expect("construct live forwarding-test policy"),
-            )
-            .expect("construct live forwarding-test provider"),
-            expires_at_ms: u64::try_from(
+        let subproject = jail.path().join("franken");
+        std::fs::create_dir_all(subproject.join("batch_e_subdir"))
+            .expect("create subproject child directory");
+        let mut subproject_policy =
+            ProcessSpawnPolicy::jailed(jail.path()).expect("construct subproject jailed policy");
+        let echo_bin = ["/bin/echo", "/usr/bin/echo"]
+            .into_iter()
+            .map(Path::new)
+            .find(|candidate| candidate.is_file())
+            .expect("find echo binary");
+        subproject_policy
+            .authorize_alias("echo", echo_bin)
+            .expect("authorize echo alias");
+        let live_provider = AdmissionBoundProcessSpawn::new(
+            NativeProcessSpawn::new(subproject_policy)
+                .expect("construct live forwarding-test provider"),
+            u64::try_from(
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .expect("test clock must be after Unix epoch")
@@ -20066,7 +20140,44 @@ exec "$2" pinned-worker-image"#,
             )
             .expect("test clock must fit u64 milliseconds")
             .saturating_add(60_000),
+            Some(&subproject),
+        );
+        let rel_cwd_req = ProcessSpawnRequest::Spawn {
+            launch: ProcessLaunch {
+                executable: "echo".to_string(),
+                argv: vec!["ok".to_string()],
+                env: std::collections::BTreeMap::new(),
+                cwd: Some("batch_e_subdir".to_string()),
+                shell: false,
+                stdio: ProcessStdio::default(),
+            },
         };
+        let prepared = live_provider
+            .prepare_request(&rel_cwd_req)
+            .expect("prepare relative cwd inside subproject");
+        let ProcessSpawnRequest::Spawn {
+            launch: prepared_launch,
+        } = &prepared
+        else {
+            panic!("expected prepared Spawn request");
+        };
+        assert_eq!(
+            prepared_launch.cwd.as_deref(),
+            Some(
+                subproject
+                    .canonicalize()
+                    .expect("canonical subproject")
+                    .join("batch_e_subdir")
+                    .to_str()
+                    .expect("utf8 path")
+            )
+        );
+        assert_eq!(
+            live_provider
+                .prepare_request(&prepared)
+                .expect("prepare_request must be idempotent"),
+            prepared
+        );
         assert!(matches!(
             live_provider.perform_controlled(
                 &request,

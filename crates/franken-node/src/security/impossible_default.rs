@@ -387,38 +387,114 @@ fn load_process_spawn_trust_anchor_at(
     }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
-        if metadata.uid() != 0 || metadata.permissions().mode() & 0o022 != 0 {
+        validate_trust_anchor_unix_ownership(path, &metadata, 0)?;
+    }
+    std::fs::read_to_string(path)
+        .map(|value| value.trim().to_string())
+        .map_err(|error| ChildProcessSpawnAdmissionError::InvalidTrustRoot {
+            reason: format!(
+                "failed reading operator trust anchor {}: {error}",
+                path.display()
+            ),
+        })
+}
+
+#[cfg(unix)]
+fn validate_trust_anchor_unix_ownership(
+    path: &Path,
+    metadata: &std::fs::Metadata,
+    expected_owner_uid: u32,
+) -> Result<(), ChildProcessSpawnAdmissionError> {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+    if metadata.uid() != expected_owner_uid || metadata.permissions().mode() & 0o022 != 0 {
+        return Err(ChildProcessSpawnAdmissionError::InvalidTrustRoot {
+            reason: format!(
+                "operator trust anchor {} must be root-owned (expected uid {expected_owner_uid}) and not group/other writable",
+                path.display()
+            ),
+        });
+    }
+    for ancestor in path.ancestors().skip(1) {
+        let ancestor_metadata = std::fs::symlink_metadata(ancestor).map_err(|error| {
+            ChildProcessSpawnAdmissionError::InvalidTrustRoot {
+                reason: format!(
+                    "operator trust-anchor ancestor {} is unavailable: {error}",
+                    ancestor.display()
+                ),
+            }
+        })?;
+        if !ancestor_metadata.is_dir()
+            || ancestor_metadata.file_type().is_symlink()
+            || ancestor_metadata.uid() != expected_owner_uid
+            || ancestor_metadata.permissions().mode() & 0o022 != 0
+        {
             return Err(ChildProcessSpawnAdmissionError::InvalidTrustRoot {
                 reason: format!(
-                    "operator trust anchor {} must be root-owned and not group/other writable",
-                    path.display()
+                    "operator trust-anchor ancestor {} must be a root-owned, non-writable, non-symlink directory",
+                    ancestor.display()
                 ),
             });
         }
-        for ancestor in path.ancestors().skip(1) {
-            let ancestor_metadata = std::fs::symlink_metadata(ancestor).map_err(|error| {
-                ChildProcessSpawnAdmissionError::InvalidTrustRoot {
-                    reason: format!(
-                        "operator trust-anchor ancestor {} is unavailable: {error}",
-                        ancestor.display()
-                    ),
-                }
-            })?;
-            if !ancestor_metadata.is_dir()
-                || ancestor_metadata.file_type().is_symlink()
-                || ancestor_metadata.uid() != 0
-                || ancestor_metadata.permissions().mode() & 0o022 != 0
-            {
-                return Err(ChildProcessSpawnAdmissionError::InvalidTrustRoot {
-                    reason: format!(
-                        "operator trust-anchor ancestor {} must be a root-owned, non-writable, non-symlink directory",
-                        ancestor.display()
-                    ),
-                });
-            }
-        }
     }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn load_process_spawn_trust_anchor_in_active_containment_at(
+    path: &Path,
+) -> Result<String, ChildProcessSpawnAdmissionError> {
+    if !path.is_absolute() {
+        return Err(ChildProcessSpawnAdmissionError::InvalidTrustRoot {
+            reason: format!(
+                "operator trust anchor {} must be an absolute path",
+                path.display()
+            ),
+        });
+    }
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+        ChildProcessSpawnAdmissionError::InvalidTrustRoot {
+            reason: format!(
+                "operator trust anchor {} is unavailable: {error}",
+                path.display()
+            ),
+        }
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(ChildProcessSpawnAdmissionError::InvalidTrustRoot {
+            reason: format!(
+                "operator trust anchor {} must be a regular non-symlink file",
+                path.display()
+            ),
+        });
+    }
+    let canonical =
+        path.canonicalize()
+            .map_err(|error| ChildProcessSpawnAdmissionError::InvalidTrustRoot {
+                reason: format!(
+                    "operator trust anchor {} cannot be canonicalized: {error}",
+                    path.display()
+                ),
+            })?;
+    if canonical != path {
+        return Err(ChildProcessSpawnAdmissionError::InvalidTrustRoot {
+            reason: format!(
+                "operator trust anchor {} must have no symlinked path components",
+                path.display()
+            ),
+        });
+    }
+    if metadata.len() > MAX_PROCESS_SPAWN_TRUST_ANCHOR_BYTES {
+        return Err(ChildProcessSpawnAdmissionError::InvalidTrustRoot {
+            reason: format!(
+                "operator trust anchor {} exceeds {} bytes",
+                path.display(),
+                MAX_PROCESS_SPAWN_TRUST_ANCHOR_BYTES
+            ),
+        });
+    }
+    let expected_owner_uid = super::isolation_backend::expected_root_uid_in_active_containment()
+        .map_err(|reason| ChildProcessSpawnAdmissionError::InvalidTrustRoot { reason })?;
+    validate_trust_anchor_unix_ownership(path, &metadata, expected_owner_uid)?;
     std::fs::read_to_string(path)
         .map(|value| value.trim().to_string())
         .map_err(|error| ChildProcessSpawnAdmissionError::InvalidTrustRoot {
@@ -566,6 +642,10 @@ pub fn configured_child_process_spawn_admission_in_active_containment(
         return Ok(None);
     }
     let trust_anchor_path = Path::new(PROCESS_SPAWN_TRUST_ANCHOR_PATH);
+    #[cfg(target_os = "linux")]
+    let trusted_public_key_hex =
+        load_process_spawn_trust_anchor_in_active_containment_at(trust_anchor_path)?;
+    #[cfg(not(target_os = "linux"))]
     let trusted_public_key_hex = load_process_spawn_trust_anchor_at(trust_anchor_path)?;
     configured_child_process_spawn_admission_with(
         config,
