@@ -553,6 +553,30 @@ Each claim entry uses this structure:
   `pending` until two real independent external replication campaigns publish
   non-placeholder signed evidence URIs and pass the gate.
 
+### CLAIM-023: API latency within 10% of Node.js (HC-003) and cold-start budgets
+
+- **Category**: performance
+- **Source**: docs/headline_claims.toml `HC-003`; docs/plans/PLAN_TO_CREATE_FRANKEN_NODE.md L187-189, L1062; perf/budgets.toml
+- **Claim**: franken_node API latency is within 10% of Node.js for equivalent
+  workloads (`HC-003`, `ratio_ci95[1] <= 1.10`) and meets `perf/budgets.toml`
+  cold-start budgets (`ci_dev <= 200 ms`).
+- **Evidence artifact**: `artifacts/perf/runtime_vs_node.json` (Ed25519-signed
+  30-run + 5-warmup randomized interleaved triad report); `perf/budgets.toml`
+- **Verification command**:
+  `python3 scripts/bench_runtime_vs_node.py --bin target/release/franken-node --require-bun --runs 30 --warmup 5 --json`
+- **Last verified**: 2026-11-18T10:54:47Z (release binary `sha256:e27676b859fc13ccb66562dc1014c13f07b56df03a42c57eebd7e1cb113fb8c6`, `franken_node` `de5420dce`, `franken_engine` `61685ec62`, `node v26.3.0`, `bun 1.4.4`)
+- **Status**: pending (measured RED on HC-003: `verdict=FAIL`, `ratio_ceiling=1.10` untouched; `ci_dev <= 200.0 ms` cold-start budget `PASS` at `hello` `p50=179.063 ms`, `p99=221.428 ms`, `rss_p50=57402 KiB`)
+- **Notes**: Measured in a single randomized interleaved invocation across all
+  6 workloads (`hello`, `json_roundtrip`, `compute_loop`, `fs_read`,
+  `require_pkg`, `loopback_http`, all 6 passing byte-identical stdout equality
+  across `node`, `bun`, and `franken-node`): `hello` 4.71× node (`179.1 ms` vs
+  `38.0 ms`, `bun` `27.5 ms`), `loopback_http` 3.51× (`214.0 ms` vs `60.9 ms`),
+  `require_pkg` 4.95× (`227.6 ms` vs `45.9 ms`), `compute_loop` 12.56×
+  (`702.7 ms` vs `56.0 ms`), `json_roundtrip` 14.09× (`1125.3 ms` vs `79.9 ms`),
+  `fs_read` 16.98× (`806.2 ms` vs `47.5 ms`), with exact binomial
+  order-statistic 95% CIs on `p50`/`p95`/`p99` and `os.wait4` `ru_maxrss` KiB.
+  Tracked by `bd-reality-20260923-26n9r.10` / `.36` / `.37`.
+
 ## Update Cadence
 
 - Every README "Why use franken-node" or "Comparison" claim added should land
