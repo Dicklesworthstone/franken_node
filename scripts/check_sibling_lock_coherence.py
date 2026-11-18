@@ -444,7 +444,12 @@ def check_engine_pin_coherence(
         )
 
     if canonical_ref and check_local_git:
-        engine_dir = action_yml.parent.parent.parent.parent.parent / "franken_engine"
+        candidate_dir = action_yml.parent.parent.parent.parent.parent / "franken_engine"
+        engine_dir = (
+            candidate_dir
+            if (candidate_dir / ".git").exists()
+            else ROOT.parent / "franken_engine"
+        )
         if (engine_dir / ".git").exists():
             proc = subprocess.run(
                 ["git", "-C", str(engine_dir), "cat-file", "-t", canonical_ref],
@@ -461,6 +466,37 @@ def check_engine_pin_coherence(
                     "detail": f"{canonical_ref} ({proc.stdout.strip() or proc.stderr.strip()})",
                 }
             )
+            dispatcher_rs = ROOT / "crates" / "franken-node" / "src" / "ops" / "engine_dispatcher.rs"
+            if is_commit and dispatcher_rs.is_file() and ".set_clock_epoch_ms(" in dispatcher_rs.read_text(encoding="utf-8"):
+                api_proc = subprocess.run(
+                    [
+                        "git",
+                        "-C",
+                        str(engine_dir),
+                        "grep",
+                        "-q",
+                        "pub fn set_clock_epoch_ms",
+                        canonical_ref,
+                        "--",
+                        "crates/franken-engine/src/execution_orchestrator.rs",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    check=False,
+                )
+                provides_api = api_proc.returncode == 0
+                checks.append(
+                    {
+                        "check": "engine_pin:provides_set_clock_epoch_ms",
+                        "pass": provides_api,
+                        "detail": (
+                            f"{canonical_ref} provides ExecutionOrchestrator::set_clock_epoch_ms"
+                            if provides_api
+                            else f"{canonical_ref} missing ExecutionOrchestrator::set_clock_epoch_ms required by engine_dispatcher.rs"
+                        ),
+                    }
+                )
 
     return checks, canonical_ref
 

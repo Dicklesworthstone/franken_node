@@ -263,17 +263,20 @@ Each claim entry uses this structure:
   `crates/franken-node/src/extensions/artifact_contract.rs`,
   `crates/franken-node/tests/registry_cli_wire_conformance.rs`
 - **Verification command**:
-  `franken-node registry publish ./dist --version 1.0.0 --signing-key <k> --json && franken-node registry verify npm:@example/plugin`
-- **Last verified**: 2026-05-20T22:00:00Z (CLI panic fixed in bridge plan;
-  `registry publish --help` now functional)
+  `cargo test -p frankenengine-node --test registry_cli_wire_conformance`
+  (manual CLI recipe: `franken-node registry publish ./dist/plugin.tgz --version 1.2.3 --signing-key .franken-node/keys/publisher.ed25519 --json > publish.json && franken-node registry verify "$(python3 -c 'import json; print(json.load(open("publish.json"))["extension_id"])')" --json`)
+- **Last verified**: 2026-11-18T18:33:07Z (end-to-end README recipe + directory
+  and PKCS#8 PEM refusal controls verified against `--release` `franken-node`
+  and `tests/registry_cli_wire_conformance.rs`)
 - **Status**: verified
-- **Notes**: Pre-bridge-plan, `registry publish` panicked with
-  `clap` argument-name collision (`version` conflicted with auto `--version`).
-  Fixed via `#[command(disable_version_flag = true)]` in `cli.rs:1588`. A new
-  integration test
-  (`tests/cli_arg_validation.rs::cli_structure_passes_clap_debug_assertions`)
-  exercises `Cli::command().debug_assert()` and would have caught this
-  regression.
+- **Notes**: `registry publish` requires a regular archive/file path (not a
+  `./dist` directory), a 32-byte raw or 64-hex Ed25519 seed (OpenSSL PKCS#8 PEM
+  is refused fail-closed), and a Git checkout with a committed source revision
+  and `origin` remote; `registry verify` consumes the emitted `extension_id`.
+  `tests/cli_arg_validation.rs::cli_structure_passes_clap_debug_assertions`
+  guards `#[command(disable_version_flag = true)]` (`cli.rs:4459`), and
+  `crates/franken-node/tests/registry_cli_wire_conformance.rs` exercises both
+  positive publish/verify/search/gc flows and directory/PEM negative controls.
 
 ### CLAIM-010: Threshold k-of-n Ed25519 verification with cached keys
 

@@ -181,9 +181,11 @@ dependencies = ["asupersync 0.6.2"]
             for wf in mod.REQUIRED_MAIN_PUSH_WORKFLOWS:
                 shutil.copy2(ROOT / ".github" / "workflows" / wf, wf_dir / wf)
             mutants_path = wf_dir / "mutants-gate.yml"
+            live_refs = mod._extract_engine_refs(mutants_path)
+            self.assertTrue(live_refs, "mutants-gate.yml must contain an engine ref")
             mutants_path.write_text(
                 mutants_path.read_text(encoding="utf-8").replace(
-                    "bbc96b724d68cb9cb0cb3de25b1c494a490eb71d",
+                    live_refs[0],
                     "1" * 40,
                 ),
                 encoding="utf-8",
@@ -200,6 +202,44 @@ dependencies = ["asupersync 0.6.2"]
         self.assertIn("cargo_lock:generation_bound:fastapi-core", failed)
         self.assertIn("cargo_lock:generation_bound:fsqlite-error", failed)
         self.assertIn("engine_pin:workflow_matches_action:mutants-gate.yml", failed)
+
+    def test_stale_pre_clock_epoch_engine_pin_fails_closed(self) -> None:
+        engine_git = ROOT.parent / "franken_engine" / ".git"
+        if not engine_git.exists():
+            self.skipTest("local sibling franken_engine checkout not present")
+        stale_sha = "4566c5890b0434a206430d7bd1d3a62b37b02961"
+        probe = subprocess.run(
+            ["git", "-C", str(ROOT.parent / "franken_engine"), "cat-file", "-t", stale_sha],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        if probe.returncode != 0 or probe.stdout.strip() != "commit":
+            self.skipTest(f"stale reference commit {stale_sha} not present locally")
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            wf_dir = tmp_path / "workflows"
+            wf_dir.mkdir()
+            for src in (ROOT / ".github" / "workflows").glob("*.yml"):
+                txt = src.read_text(encoding="utf-8")
+                for ref in set(mod._extract_engine_refs(src)):
+                    if ref != "6d204d13c710cb6e8d279f93b629ba6588add106":
+                        txt = txt.replace(ref, stale_sha)
+                (wf_dir / src.name).write_text(txt, encoding="utf-8")
+            action_path = tmp_path / "action.yml"
+            action_txt = (ROOT / ".github" / "actions" / "franken-siblings" / "action.yml").read_text(encoding="utf-8")
+            for ref in set(mod._extract_engine_refs(ROOT / ".github" / "actions" / "franken-siblings" / "action.yml")):
+                action_txt = action_txt.replace(ref, stale_sha)
+            action_path.write_text(action_txt, encoding="utf-8")
+            report = mod.run_checks(
+                workflows_dir=wf_dir,
+                action_yml=action_path,
+                check_local_git=True,
+            )
+        self.assertFalse(report["overall_pass"])
+        failed = {c["check"] for c in report["checks"] if not c["pass"]}
+        self.assertIn("engine_pin:provides_set_clock_epoch_ms", failed)
 
     def test_cli_json_and_self_test(self) -> None:
         proc = subprocess.run(

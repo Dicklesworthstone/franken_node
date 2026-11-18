@@ -1,10 +1,10 @@
 //! Registry CLI wire conformance harness.
 //!
 //! This is a spec-derived, process-based harness for the operator-facing
-//! `franken-node registry ...` command surface. The registry CLI currently
-//! emits stable human/key-value wire output rather than `--json`; this harness
-//! treats that wire format as the contract and anchors each assertion to
-//! `docs/specs/section_10_0/bd-2ac_contract.md`.
+//! `franken-node registry ...` command surface, covering both the stable
+//! human/key-value wire output and the schema-versioned `--json` contract
+//! anchored to `docs/specs/section_10_0/bd-2ac_contract.md` and the README
+//! extension-publishing recipe (`bd-reality-20260923-26n9r.16`).
 
 use assert_cmd::Command;
 use frankenengine_node::supply_chain::artifact_signing::KeyId;
@@ -240,6 +240,223 @@ fn registry_publish_search_verify_gc_wire_conforms_to_contract() -> Result<(), S
         archived_verify.required("manifest_path")?,
         ".franken-node/state/registry/archive/",
     )?;
+
+    Ok(())
+}
+
+#[test]
+fn readme_extension_publishing_recipe_succeeds_and_retains_directory_and_pem_refusal_controls()
+-> Result<(), String> {
+    let dir = tempfile::tempdir().map_err(|err| format!("tempdir: {err}"))?;
+    let ws = dir.path();
+    fs::write(
+        ws.join("package.json"),
+        r#"{"name":"@acme/plugin","version":"1.2.3","main":"index.js"}"#,
+    )
+    .map_err(|err| format!("write package.json: {err}"))?;
+    fs::write(ws.join("index.js"), "module.exports = { ok: true };\n")
+        .map_err(|err| format!("write index.js: {err}"))?;
+    run_git(ws, &["init", "-b", "main"])?;
+    run_git(ws, &["config", "user.email", "publisher@example.com"])?;
+    run_git(ws, &["config", "user.name", "Extension Publisher"])?;
+    run_git(
+        ws,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://example.com/acme/plugin.git",
+        ],
+    )?;
+    run_git(ws, &["add", "package.json", "index.js"])?;
+    run_git(ws, &["commit", "-m", "initial extension"])?;
+
+    let dist_dir = ws.join("dist");
+    fs::create_dir_all(&dist_dir).map_err(|err| format!("mkdir dist: {err}"))?;
+    let archive_path = dist_dir.join("plugin.tgz");
+    let tar_ok = std::process::Command::new("tar")
+        .current_dir(ws)
+        .args(["-czf", "dist/plugin.tgz", "package.json", "index.js"])
+        .status()
+        .is_ok_and(|status| status.success());
+    if !tar_ok {
+        fs::write(
+            &archive_path,
+            b"package.json\0index.js\0module.exports = { ok: true };\n",
+        )
+        .map_err(|err| format!("write fallback plugin.tgz: {err}"))?;
+    }
+
+    let keys_dir = ws.join(".franken-node/keys");
+    fs::create_dir_all(&keys_dir).map_err(|err| format!("mkdir keys: {err}"))?;
+    let seed_key_rel = ".franken-node/keys/publisher.ed25519";
+    let seed_key_path = ws.join(seed_key_rel);
+    fs::write(
+        &seed_key_path,
+        format!("{}\n", hex::encode(REGISTRY_PUBLISH_KEY_BYTES)),
+    )
+    .map_err(|err| format!("write seed key: {err}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&seed_key_path, fs::Permissions::from_mode(0o600))
+            .map_err(|err| format!("chmod 0600 seed key: {err}"))?;
+    }
+
+    // Exact PKCS#8 Ed25519 PEM encoding emitted by `openssl genpkey -algorithm ED25519`
+    // for seed `[42_u8; 32]` — must remain fail-closed.
+    let pem_key_rel = ".franken-node/keys/publisher.pem";
+    fs::write(
+        ws.join(pem_key_rel),
+        "-----BEGIN PRIVATE KEY-----\n\
+         MC4CAQAwBQYDK2VwBCIEICoqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioq\n\
+         -----END PRIVATE KEY-----\n",
+    )
+    .map_err(|err| format!("write pem key: {err}"))?;
+
+    // Negative control 1: directory target `./dist` must fail closed.
+    let dir_refusal = registry_cmd(
+        &dir,
+        &[
+            "publish",
+            "./dist",
+            "--version",
+            "1.2.3",
+            "--signing-key",
+            seed_key_rel,
+            "--json",
+        ],
+    )?
+    .assert()
+    .failure()
+    .get_output()
+    .stdout
+    .clone();
+    let dir_err: Value = serde_json::from_slice(&dir_refusal)
+        .map_err(|err| format!("parse directory refusal json: {err}"))?;
+    assert_eq!(
+        dir_err["schema_version"].as_str(),
+        Some("franken-node/registry-publish-error/v1")
+    );
+    assert_eq!(dir_err["ok"].as_bool(), Some(false));
+    assert!(
+        dir_err["error"]
+            .as_str()
+            .is_some_and(|msg| msg.contains("registry publish target must be a file")),
+        "unexpected directory refusal payload: {dir_err}"
+    );
+
+    // Negative control 2: OpenSSL Ed25519 PEM key must fail closed.
+    let pem_refusal = registry_cmd(
+        &dir,
+        &[
+            "publish",
+            "./dist/plugin.tgz",
+            "--version",
+            "1.2.3",
+            "--signing-key",
+            pem_key_rel,
+            "--json",
+        ],
+    )?
+    .assert()
+    .failure()
+    .get_output()
+    .stdout
+    .clone();
+    let pem_err: Value = serde_json::from_slice(&pem_refusal)
+        .map_err(|err| format!("parse PEM refusal json: {err}"))?;
+    assert_eq!(
+        pem_err["schema_version"].as_str(),
+        Some("franken-node/registry-publish-error/v1")
+    );
+    assert_eq!(pem_err["ok"].as_bool(), Some(false));
+    assert!(
+        pem_err["error"]
+            .as_str()
+            .is_some_and(|msg| msg.contains("failed decoding Ed25519 registry publish signing key")),
+        "unexpected PEM refusal payload: {pem_err}"
+    );
+
+    // Positive README recipe: publish -> verify -> search --min-assurance 2 -> gc --keep 5.
+    let expected_key_id = KeyId::from_verifying_key(
+        &ed25519_dalek::SigningKey::from_bytes(&REGISTRY_PUBLISH_KEY_BYTES).verifying_key(),
+    )
+    .to_string();
+    let publish_stdout = registry_cmd(
+        &dir,
+        &[
+            "publish",
+            "./dist/plugin.tgz",
+            "--version",
+            "1.2.3",
+            "--signing-key",
+            seed_key_rel,
+            "--json",
+        ],
+    )?
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let publish_json: Value = serde_json::from_slice(&publish_stdout)
+        .map_err(|err| format!("parse publish json: {err}"))?;
+    assert_eq!(
+        publish_json["schema_version"].as_str(),
+        Some("franken-node/registry-publish-cli/v1")
+    );
+    assert_eq!(publish_json["status"].as_str(), Some("active"));
+    assert_eq!(publish_json["integrity"].as_str(), Some("verified"));
+    assert_eq!(
+        publish_json["publisher_key_id"].as_str(),
+        Some(expected_key_id.as_str())
+    );
+    let extension_id = expect_non_empty_string(&publish_json, "extension_id")?;
+
+    let verify_stdout = registry_cmd(&dir, &["verify", extension_id, "--json"])?
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let verify_json: Value = serde_json::from_slice(&verify_stdout)
+        .map_err(|err| format!("parse verify json: {err}"))?;
+    assert_eq!(
+        verify_json["schema_version"].as_str(),
+        Some("franken-node/registry-verify-cli/v1")
+    );
+    assert_eq!(verify_json["extension_id"].as_str(), Some(extension_id));
+    assert_eq!(verify_json["integrity"].as_str(), Some("verified"));
+    assert_eq!(verify_json["archived"].as_bool(), Some(false));
+
+    let search_stdout = registry_cmd(&dir, &["search", "plugin", "--min-assurance", "2"])?
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let search_text = String::from_utf8_lossy(&search_stdout);
+    assert!(
+        search_text.contains(extension_id) && search_text.contains("verified"),
+        "expected published extension in min-assurance=2 search output:\n{search_text}"
+    );
+
+    let gc_stdout = registry_cmd(&dir, &["gc", "--keep", "5", "--json"])?
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let gc_json: Value =
+        serde_json::from_slice(&gc_stdout).map_err(|err| format!("parse gc json: {err}"))?;
+    assert_eq!(
+        gc_json["schema_version"].as_str(),
+        Some("franken-node/registry-gc-cli/v1")
+    );
+    assert_eq!(gc_json["keep"].as_u64(), Some(5));
+    assert_eq!(gc_json["active"].as_u64(), Some(1));
+    assert_eq!(gc_json["archived"].as_u64(), Some(0));
 
     Ok(())
 }
