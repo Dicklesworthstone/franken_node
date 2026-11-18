@@ -7,6 +7,7 @@
 
 use super::proof_scheduler::{ProofJob, ProofWindow, WorkloadTier};
 use super::receipt_chain::{ReceiptChainEntry, ReceiptCheckpoint};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -63,6 +64,13 @@ fn is_sha256_prefixed(value: &str) -> bool {
     hex.len() == 64 && hex.chars().all(|ch| ch.is_ascii_hexdigit())
 }
 
+fn is_ed25519_sig_prefixed(value: &str) -> bool {
+    let Some(hex) = value.strip_prefix("ed25519_sig:") else {
+        return false;
+    };
+    hex.len() == 128 && hex.chars().all(|ch| ch.is_ascii_hexdigit())
+}
+
 fn sha256_json<T: Serialize>(value: &T) -> Result<String, ProofServiceError> {
     let bytes = serde_json::to_vec(value).map_err(|err| {
         ProofServiceError::input_error(format!("unable to serialize canonical material: {err}"))
@@ -83,6 +91,7 @@ fn sha256_json<T: Serialize>(value: &T) -> Result<String, ProofServiceError> {
 pub enum ProofBackendId {
     HashAttestationV1,
     DoubleHashAttestationV1,
+    Ed25519MerkleTransparencyV1,
 }
 
 impl ProofBackendId {
@@ -90,6 +99,7 @@ impl ProofBackendId {
         match self {
             ProofBackendId::HashAttestationV1 => "hash_attestation_v1",
             ProofBackendId::DoubleHashAttestationV1 => "double_hash_attestation_v1",
+            ProofBackendId::Ed25519MerkleTransparencyV1 => "ed25519_merkle_transparency_v1",
         }
     }
 }
@@ -627,11 +637,22 @@ impl ProofOutputEnvelope {
                 "proof_id/backend_version/trace_id must be non-empty",
             ));
         }
-        if !is_sha256_prefixed(&self.input_commitment_hash)
-            || !is_sha256_prefixed(&self.proof_material)
-        {
+        if !is_sha256_prefixed(&self.input_commitment_hash) {
             return Err(ProofServiceError::malformed_output(
-                "input_commitment_hash/proof_material must be sha256:<64hex>",
+                "input_commitment_hash must be sha256:<64hex>",
+            ));
+        }
+        let material_valid = match self.backend_id {
+            ProofBackendId::HashAttestationV1 | ProofBackendId::DoubleHashAttestationV1 => {
+                is_sha256_prefixed(&self.proof_material)
+            }
+            ProofBackendId::Ed25519MerkleTransparencyV1 => {
+                is_ed25519_sig_prefixed(&self.proof_material)
+            }
+        };
+        if !material_valid {
+            return Err(ProofServiceError::malformed_output(
+                "proof_material format invalid for selected VEF backend",
             ));
         }
 
@@ -849,6 +870,400 @@ impl ProofBackend for DoubleHashAttestationBackend {
     }
 }
 
+/// One step in a binary Merkle inclusion proof over VEF receipt hashes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MerkleProofStep {
+    pub sibling_hash: String,
+    pub is_left_sibling: bool,
+}
+
+/// Verifiable Merkle transparency inclusion proof for a single receipt leaf.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MerkleInclusionProof {
+    pub leaf_index: usize,
+    pub leaf_hash: String,
+    pub steps: Vec<MerkleProofStep>,
+    pub root_hash: String,
+}
+
+fn merkle_leaf_hash(receipt_hash: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"vef_merkle_leaf_v1:");
+    hasher.update((u64::try_from(receipt_hash.len()).unwrap_or(u64::MAX)).to_le_bytes());
+    hasher.update(receipt_hash.as_bytes());
+    format!("sha256:{}", hex::encode(hasher.finalize()))
+}
+
+fn merkle_parent_hash(left: &str, right: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"vef_merkle_node_v1:");
+    hasher.update((u64::try_from(left.len()).unwrap_or(u64::MAX)).to_le_bytes());
+    hasher.update(left.as_bytes());
+    hasher.update((u64::try_from(right.len()).unwrap_or(u64::MAX)).to_le_bytes());
+    hasher.update(right.as_bytes());
+    format!("sha256:{}", hex::encode(hasher.finalize()))
+}
+
+/// Build a domain-separated binary Merkle tree and per-leaf inclusion proofs
+/// over a non-empty slice of `sha256:<64hex>` receipt hashes.
+pub fn build_receipt_merkle_tree(
+    receipt_hashes: &[String],
+) -> Result<(String, Vec<MerkleInclusionProof>), ProofServiceError> {
+    if receipt_hashes.is_empty() {
+        return Err(ProofServiceError::input_error(
+            "cannot build Merkle tree over empty receipt_hashes",
+        ));
+    }
+    if !receipt_hashes.iter().all(|h| is_sha256_prefixed(h)) {
+        return Err(ProofServiceError::input_error(
+            "all receipt_hashes must be sha256:<64hex> for Merkle tree construction",
+        ));
+    }
+
+    let leaves: Vec<String> = receipt_hashes.iter().map(|h| merkle_leaf_hash(h)).collect();
+    let mut levels: Vec<Vec<String>> = vec![leaves.clone()];
+    while let Some(current) = levels.last() {
+        if current.len() <= 1 {
+            break;
+        }
+        let mut next = Vec::with_capacity(current.len().div_ceil(2));
+        for pair in current.chunks(2) {
+            let left = &pair[0];
+            let right = if pair.len() == 2 { &pair[1] } else { &pair[0] };
+            next.push(merkle_parent_hash(left, right));
+        }
+        levels.push(next);
+    }
+
+    let root_hash = levels
+        .last()
+        .and_then(|lvl| lvl.first())
+        .cloned()
+        .ok_or_else(|| ProofServiceError::malformed_output("empty Merkle root"))?;
+
+    let mut proofs = Vec::with_capacity(leaves.len());
+    for (leaf_idx, leaf_hash) in leaves.into_iter().enumerate() {
+        let mut idx = leaf_idx;
+        let mut steps = Vec::new();
+        for level in levels.iter().take(levels.len().saturating_sub(1)) {
+            let is_right_node = idx % 2 == 1;
+            let sibling_idx = if is_right_node {
+                idx - 1
+            } else if idx + 1 < level.len() {
+                idx + 1
+            } else {
+                idx
+            };
+            steps.push(MerkleProofStep {
+                sibling_hash: level[sibling_idx].clone(),
+                is_left_sibling: is_right_node,
+            });
+            idx /= 2;
+        }
+        proofs.push(MerkleInclusionProof {
+            leaf_index: leaf_idx,
+            leaf_hash,
+            steps,
+            root_hash: root_hash.clone(),
+        });
+    }
+
+    Ok((root_hash, proofs))
+}
+
+/// Verify that `receipt_hash` is committed under `expected_root` via `proof`.
+pub fn verify_merkle_inclusion_proof(
+    receipt_hash: &str,
+    proof: &MerkleInclusionProof,
+    expected_root: &str,
+) -> Result<(), ProofServiceError> {
+    if !is_sha256_prefixed(receipt_hash) || !is_sha256_prefixed(expected_root) {
+        return Err(ProofServiceError::verify_error(
+            "Merkle inclusion verification requires sha256:<64hex> receipt and root hashes",
+        ));
+    }
+    let derived_leaf = merkle_leaf_hash(receipt_hash);
+    if !ct_eq_inline(&derived_leaf, &proof.leaf_hash) {
+        return Err(ProofServiceError::verify_error(format!(
+            "Merkle leaf hash mismatch at index {}",
+            proof.leaf_index
+        )));
+    }
+    if !ct_eq_inline(&proof.root_hash, expected_root) {
+        return Err(ProofServiceError::verify_error(
+            "Merkle inclusion proof root_hash does not match expected_root",
+        ));
+    }
+    let mut current = derived_leaf;
+    for step in &proof.steps {
+        if !is_sha256_prefixed(&step.sibling_hash) {
+            return Err(ProofServiceError::verify_error(
+                "Merkle proof sibling_hash is malformed",
+            ));
+        }
+        current = if step.is_left_sibling {
+            merkle_parent_hash(&step.sibling_hash, &current)
+        } else {
+            merkle_parent_hash(&current, &step.sibling_hash)
+        };
+    }
+    if !ct_eq_inline(&current, expected_root) {
+        return Err(ProofServiceError::verify_error(format!(
+            "Merkle inclusion path failed at leaf {}",
+            proof.leaf_index
+        )));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Default, Clone)]
+struct Ed25519MerkleTransparencyBackend;
+
+impl Ed25519MerkleTransparencyBackend {
+    pub const PARAM_SIGNING_KEY_HEX: &'static str = "signing_key_hex";
+    pub const PARAM_TRUSTED_VERIFYING_KEY_HEX: &'static str = "trusted_verifying_key_hex";
+
+    fn signing_preimage(
+        proof_id: &str,
+        input_commitment_hash: &str,
+        merkle_root: &str,
+        input: &ProofInputEnvelope,
+        generated_at_millis: u64,
+    ) -> Vec<u8> {
+        let mut preimage = Vec::new();
+        preimage.extend_from_slice(b"vef_ed25519_merkle_transparency_v1:");
+        for field in [
+            PROOF_SERVICE_SCHEMA_VERSION,
+            proof_id,
+            input_commitment_hash,
+            merkle_root,
+            input.policy_hash.as_str(),
+            input.chain_head_hash.as_str(),
+            input.trace_id.as_str(),
+        ] {
+            let len = u64::try_from(field.len()).unwrap_or(u64::MAX);
+            preimage.extend_from_slice(&len.to_le_bytes());
+            preimage.extend_from_slice(field.as_bytes());
+        }
+        preimage.extend_from_slice(&generated_at_millis.to_le_bytes());
+        preimage
+    }
+
+    fn decode_signing_key(hex_str: &str) -> Result<SigningKey, ProofServiceError> {
+        let mut key_bytes = [0_u8; 32];
+        hex::decode_to_slice(hex_str.trim(), &mut key_bytes).map_err(|err| {
+            ProofServiceError::input_error(format!("invalid Ed25519 signing_key_hex: {err}"))
+        })?;
+        Ok(SigningKey::from_bytes(&key_bytes))
+    }
+
+    fn resolve_trusted_verifying_key(
+        parameters: &BTreeMap<String, String>,
+    ) -> Result<VerifyingKey, ProofServiceError> {
+        if let Some(vk_hex) = parameters.get(Self::PARAM_TRUSTED_VERIFYING_KEY_HEX) {
+            let mut key_bytes = [0_u8; 32];
+            hex::decode_to_slice(vk_hex.trim(), &mut key_bytes).map_err(|err| {
+                ProofServiceError::verify_error(format!(
+                    "invalid Ed25519 trusted_verifying_key_hex: {err}"
+                ))
+            })?;
+            return VerifyingKey::from_bytes(&key_bytes).map_err(|err| {
+                ProofServiceError::verify_error(format!("invalid Ed25519 verifying key: {err}"))
+            });
+        }
+        if let Some(sk_hex) = parameters.get(Self::PARAM_SIGNING_KEY_HEX) {
+            return Ok(Self::decode_signing_key(sk_hex)?.verifying_key());
+        }
+        Err(ProofServiceError::verify_error(
+            "Ed25519MerkleTransparencyV1 refuses unanchored verification without trusted_verifying_key_hex",
+        ))
+    }
+}
+
+impl ProofBackend for Ed25519MerkleTransparencyBackend {
+    fn backend_id(&self) -> ProofBackendId {
+        ProofBackendId::Ed25519MerkleTransparencyV1
+    }
+
+    fn backend_version(&self) -> &'static str {
+        "ed25519-merkle-transparency-v1"
+    }
+
+    fn generate(
+        &self,
+        input: &ProofInputEnvelope,
+        generated_at_millis: u64,
+        parameters: &BTreeMap<String, String>,
+    ) -> Result<ProofOutputEnvelope, ProofServiceError> {
+        let sk_hex = parameters.get(Self::PARAM_SIGNING_KEY_HEX).ok_or_else(|| {
+            ProofServiceError::backend_unavailable(
+                "Ed25519MerkleTransparencyV1 requires signing_key_hex parameter",
+            )
+        })?;
+        let signing_key = Self::decode_signing_key(sk_hex)?;
+        let verifying_key = signing_key.verifying_key();
+
+        let input_commitment_hash = input.commitment_hash()?;
+        let (merkle_root, inclusion_proofs) = build_receipt_merkle_tree(&input.receipt_hashes)?;
+        let suffix = input_commitment_hash
+            .strip_prefix("sha256:")
+            .unwrap_or(input_commitment_hash.as_str())
+            .chars()
+            .take(16)
+            .collect::<String>();
+        let proof_id = format!("proof-{}-{suffix}", self.backend_id().as_str());
+
+        let preimage = Self::signing_preimage(
+            &proof_id,
+            &input_commitment_hash,
+            &merkle_root,
+            input,
+            generated_at_millis,
+        );
+        let signature = signing_key.sign(&preimage);
+        let proof_material = format!("ed25519_sig:{}", hex::encode(signature.to_bytes()));
+
+        let proofs_json = serde_json::to_string(&inclusion_proofs).map_err(|err| {
+            ProofServiceError::malformed_output(format!(
+                "failed serializing Merkle inclusion proofs: {err}"
+            ))
+        })?;
+
+        let mut verification_metadata = BTreeMap::new();
+        verification_metadata.insert(
+            "algorithm".to_string(),
+            "ed25519-merkle-transparency-v1".to_string(),
+        );
+        verification_metadata.insert(
+            "proof_backend".to_string(),
+            self.backend_id().as_str().to_string(),
+        );
+        verification_metadata.insert("merkle_root".to_string(), merkle_root);
+        verification_metadata.insert(
+            "merkle_leaf_count".to_string(),
+            input.receipt_hashes.len().to_string(),
+        );
+        verification_metadata.insert("merkle_inclusion_proofs_json".to_string(), proofs_json);
+        verification_metadata.insert(
+            "signer_public_key_hex".to_string(),
+            hex::encode(verifying_key.to_bytes()),
+        );
+
+        Ok(ProofOutputEnvelope {
+            schema_version: PROOF_SERVICE_SCHEMA_VERSION.to_string(),
+            proof_id,
+            backend_id: self.backend_id(),
+            backend_version: self.backend_version().to_string(),
+            input_commitment_hash,
+            proof_material,
+            generated_at_millis,
+            verification_metadata,
+            trace_id: input.trace_id.clone(),
+        })
+    }
+
+    fn verify(
+        &self,
+        input: &ProofInputEnvelope,
+        proof: &ProofOutputEnvelope,
+        parameters: &BTreeMap<String, String>,
+    ) -> Result<(), ProofServiceError> {
+        if proof.backend_id != self.backend_id() {
+            return Err(ProofServiceError::verify_error(format!(
+                "backend mismatch expected={} got={}",
+                self.backend_id().as_str(),
+                proof.backend_id.as_str()
+            )));
+        }
+        let trusted_vk = Self::resolve_trusted_verifying_key(parameters)?;
+        let trusted_vk_hex = hex::encode(trusted_vk.to_bytes());
+        let claimed_vk_hex = proof
+            .verification_metadata
+            .get("signer_public_key_hex")
+            .ok_or_else(|| {
+                ProofServiceError::verify_error("missing signer_public_key_hex in proof metadata")
+            })?;
+        if !ct_eq_inline(&trusted_vk_hex, claimed_vk_hex) {
+            return Err(ProofServiceError::verify_error(
+                "signer_public_key_hex does not match trusted Ed25519 verifying key",
+            ));
+        }
+
+        let merkle_root = proof
+            .verification_metadata
+            .get("merkle_root")
+            .ok_or_else(|| {
+                ProofServiceError::verify_error("missing merkle_root in proof metadata")
+            })?;
+        let proofs_json = proof
+            .verification_metadata
+            .get("merkle_inclusion_proofs_json")
+            .ok_or_else(|| {
+                ProofServiceError::verify_error(
+                    "missing merkle_inclusion_proofs_json in proof metadata",
+                )
+            })?;
+        let inclusion_proofs: Vec<MerkleInclusionProof> = serde_json::from_str(proofs_json)
+            .map_err(|err| {
+                ProofServiceError::verify_error(format!(
+                    "malformed merkle_inclusion_proofs_json: {err}"
+                ))
+            })?;
+        if inclusion_proofs.len() != input.receipt_hashes.len() {
+            return Err(ProofServiceError::verify_error(format!(
+                "Merkle inclusion proof count {} != receipt count {}",
+                inclusion_proofs.len(),
+                input.receipt_hashes.len()
+            )));
+        }
+        for (idx, (receipt_hash, inclusion)) in input
+            .receipt_hashes
+            .iter()
+            .zip(inclusion_proofs.iter())
+            .enumerate()
+        {
+            if inclusion.leaf_index != idx {
+                return Err(ProofServiceError::verify_error(format!(
+                    "Merkle proof leaf_index {} != expected {idx}",
+                    inclusion.leaf_index
+                )));
+            }
+            verify_merkle_inclusion_proof(receipt_hash, inclusion, merkle_root)?;
+        }
+        let (recomputed_root, _) = build_receipt_merkle_tree(&input.receipt_hashes)?;
+        if !ct_eq_inline(&recomputed_root, merkle_root) {
+            return Err(ProofServiceError::verify_error(
+                "recomputed receipt Merkle root does not match proof metadata merkle_root",
+            ));
+        }
+
+        let sig_hex = proof
+            .proof_material
+            .strip_prefix("ed25519_sig:")
+            .ok_or_else(|| {
+                ProofServiceError::verify_error("proof_material missing ed25519_sig: prefix")
+            })?;
+        let mut sig_bytes = [0_u8; 64];
+        hex::decode_to_slice(sig_hex, &mut sig_bytes).map_err(|err| {
+            ProofServiceError::verify_error(format!("malformed Ed25519 signature hex: {err}"))
+        })?;
+        let signature = Signature::from_bytes(&sig_bytes);
+        let preimage = Self::signing_preimage(
+            &proof.proof_id,
+            &proof.input_commitment_hash,
+            merkle_root,
+            input,
+            proof.generated_at_millis,
+        );
+        trusted_vk.verify(&preimage, &signature).map_err(|err| {
+            ProofServiceError::verify_error(format!(
+                "Ed25519 Merkle-transparency signature verification failed: {err}"
+            ))
+        })?;
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProofServiceConfig {
     pub default_backend: ProofBackendId,
@@ -869,6 +1284,45 @@ impl ProofServiceConfig {
         Self {
             default_backend: ProofBackendId::HashAttestationV1,
             enabled_backends,
+            backend_parameters,
+        }
+    }
+
+    /// Production Ed25519 + Merkle-transparency signing configuration.
+    #[must_use]
+    pub fn ed25519_merkle_signing(signing_key: &SigningKey) -> Self {
+        let mut params = BTreeMap::new();
+        params.insert(
+            Ed25519MerkleTransparencyBackend::PARAM_SIGNING_KEY_HEX.to_string(),
+            hex::encode(signing_key.to_bytes()),
+        );
+        params.insert(
+            Ed25519MerkleTransparencyBackend::PARAM_TRUSTED_VERIFYING_KEY_HEX.to_string(),
+            hex::encode(signing_key.verifying_key().to_bytes()),
+        );
+        let mut backend_parameters = BTreeMap::new();
+        backend_parameters.insert(ProofBackendId::Ed25519MerkleTransparencyV1, params);
+        Self {
+            default_backend: ProofBackendId::Ed25519MerkleTransparencyV1,
+            enabled_backends: BTreeSet::from([ProofBackendId::Ed25519MerkleTransparencyV1]),
+            backend_parameters,
+        }
+    }
+
+    /// Production Ed25519 + Merkle-transparency verification configuration bound
+    /// to an independently trusted Ed25519 public key.
+    #[must_use]
+    pub fn ed25519_merkle_verifying(trusted_verifying_key: &VerifyingKey) -> Self {
+        let mut params = BTreeMap::new();
+        params.insert(
+            Ed25519MerkleTransparencyBackend::PARAM_TRUSTED_VERIFYING_KEY_HEX.to_string(),
+            hex::encode(trusted_verifying_key.to_bytes()),
+        );
+        let mut backend_parameters = BTreeMap::new();
+        backend_parameters.insert(ProofBackendId::Ed25519MerkleTransparencyV1, params);
+        Self {
+            default_backend: ProofBackendId::Ed25519MerkleTransparencyV1,
+            enabled_backends: BTreeSet::from([ProofBackendId::Ed25519MerkleTransparencyV1]),
             backend_parameters,
         }
     }
@@ -1054,6 +1508,9 @@ impl VefProofService {
             ProofBackendId::DoubleHashAttestationV1 => {
                 DoubleHashAttestationBackend.generate(input, now_millis, parameters)
             }
+            ProofBackendId::Ed25519MerkleTransparencyV1 => {
+                Ed25519MerkleTransparencyBackend.generate(input, now_millis, parameters)
+            }
         }
     }
 
@@ -1070,6 +1527,9 @@ impl VefProofService {
             }
             ProofBackendId::DoubleHashAttestationV1 => {
                 DoubleHashAttestationBackend.verify(input, proof, parameters)
+            }
+            ProofBackendId::Ed25519MerkleTransparencyV1 => {
+                Ed25519MerkleTransparencyBackend.verify(input, proof, parameters)
             }
         }
     }
@@ -2261,5 +2721,76 @@ mod tests {
             hash_c1, hash_c2,
             "Same input should produce same hash (deterministic)"
         );
+    }
+
+    #[test]
+    fn ed25519_merkle_transparency_backend_verifies_inclusion_proofs_and_rejects_tamper_or_wrong_key()
+     {
+        let (input, _window, _job) = sample_request();
+        let signing_key = SigningKey::from_bytes(&[0x5a_u8; 32]);
+        let wrong_key = SigningKey::from_bytes(&[0xa5_u8; 32]).verifying_key();
+
+        let mut signer_service =
+            VefProofService::new(ProofServiceConfig::ed25519_merkle_signing(&signing_key));
+        let proof = signer_service
+            .generate_proof(&input, None, 1_705_000_010_000)
+            .expect("generate Ed25519 Merkle transparency proof");
+        assert_eq!(
+            proof.backend_id,
+            ProofBackendId::Ed25519MerkleTransparencyV1
+        );
+        assert!(proof.proof_material.starts_with("ed25519_sig:"));
+        assert!(
+            !proof.verification_metadata.contains_key("signing_key_hex"),
+            "secret signing key must never leak into proof metadata"
+        );
+
+        let verifier_service = VefProofService::new(ProofServiceConfig::ed25519_merkle_verifying(
+            &signing_key.verifying_key(),
+        ));
+        verifier_service
+            .verify_proof(&input, &proof)
+            .expect("verify Ed25519 + Merkle inclusion proofs");
+
+        // Wrong trusted key fails closed.
+        let wrong_verifier =
+            VefProofService::new(ProofServiceConfig::ed25519_merkle_verifying(&wrong_key));
+        let wrong_err = wrong_verifier
+            .verify_proof(&input, &proof)
+            .expect_err("wrong key must fail verification");
+        assert_eq!(wrong_err.code, error_codes::ERR_VEF_PROOF_VERIFY);
+
+        // Unanchored config (no trusted_verifying_key_hex) refuses self-asserted key.
+        let unanchored_cfg = ProofServiceConfig {
+            default_backend: ProofBackendId::Ed25519MerkleTransparencyV1,
+            enabled_backends: BTreeSet::from([ProofBackendId::Ed25519MerkleTransparencyV1]),
+            backend_parameters: BTreeMap::from([(
+                ProofBackendId::Ed25519MerkleTransparencyV1,
+                BTreeMap::new(),
+            )]),
+        };
+        let unanchored_err = VefProofService::new(unanchored_cfg)
+            .verify_proof(&input, &proof)
+            .expect_err("unanchored config must refuse self-asserted signer key");
+        assert!(unanchored_err.message.contains("unanchored"));
+
+        // Tampering a Merkle inclusion step fails closed.
+        let mut tampered_proof = proof.clone();
+        let mut inclusions: Vec<MerkleInclusionProof> = serde_json::from_str(
+            tampered_proof
+                .verification_metadata
+                .get("merkle_inclusion_proofs_json")
+                .expect("inclusion proofs json"),
+        )
+        .expect("parse inclusions");
+        inclusions[0].steps[0].sibling_hash = format!("sha256:{}", "f".repeat(64));
+        tampered_proof.verification_metadata.insert(
+            "merkle_inclusion_proofs_json".to_string(),
+            serde_json::to_string(&inclusions).expect("serialize tampered inclusions"),
+        );
+        let tamper_err = verifier_service
+            .verify_proof(&input, &tampered_proof)
+            .expect_err("tampered Merkle inclusion path must fail");
+        assert_eq!(tamper_err.code, error_codes::ERR_VEF_PROOF_VERIFY);
     }
 }

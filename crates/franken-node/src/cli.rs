@@ -2668,6 +2668,10 @@ pub struct TrustCalibrateConformalArgs {
     #[arg(long)]
     pub builtin_benign_corpus: bool,
 
+    /// Also compute and verify the signed BPET/DGIS calibration benchmark and corpus exchangeability transfer report.
+    #[arg(long)]
+    pub include_bpet_benchmark: bool,
+
     /// Target miscoverage rate `alpha` in basis points (`1..=9999`, default `500` = `5.00%`).
     #[arg(long, default_value_t = 500)]
     pub alpha_bp: u16,

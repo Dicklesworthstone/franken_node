@@ -433,6 +433,109 @@ pub struct KnobState {
     pub locked: bool,
 }
 
+/// Fixed-point unit (`1.0`) for anytime-valid Ville-martingale e-values (`1_000_000` ppm).
+pub const VILLE_E_VALUE_UNIT_PPM: u64 = 1_000_000;
+
+/// Saturation ceiling for fixed-point e-values (`10^6 x` initial evidence).
+pub const VILLE_MAX_E_VALUE_PPM: u64 = 1_000_000_000_000;
+
+/// Default false-alarm significance level `alpha = 500 bp` (`5.00%`, `1/alpha = 20.0`).
+pub const DEFAULT_VILLE_ALPHA_BP: u16 = 500;
+
+/// Anytime-valid Ville-martingale e-process monitor (`P_0(exists t: M_t >= 1/alpha) <= alpha`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VilleMartingaleMonitor {
+    /// Target significance level `alpha` in basis points (`1..=9999`).
+    pub alpha_bp: u16,
+    /// Current nonnegative test supermartingale value `M_t` in parts per million (`1_000_000 = 1.0`).
+    pub e_value_ppm: u64,
+    /// Running supremum `max_{s <= t} M_s` in parts per million.
+    pub max_observed_e_value_ppm: u64,
+    /// Total sequential observations incorporated into `M_t`.
+    pub observations: u64,
+}
+
+impl Default for VilleMartingaleMonitor {
+    fn default() -> Self {
+        Self::new(DEFAULT_VILLE_ALPHA_BP)
+    }
+}
+
+impl VilleMartingaleMonitor {
+    /// Initialize `M_0 = 1.0` (`1_000_000` ppm) at significance level `alpha_bp` (`1..=9999`).
+    #[must_use]
+    pub fn new(alpha_bp: u16) -> Self {
+        let clamped_alpha = alpha_bp.clamp(1, 9_999);
+        Self {
+            alpha_bp: clamped_alpha,
+            e_value_ppm: VILLE_E_VALUE_UNIT_PPM,
+            max_observed_e_value_ppm: VILLE_E_VALUE_UNIT_PPM,
+            observations: 0,
+        }
+    }
+
+    /// Ville stopping boundary `1 / alpha` in parts per million.
+    #[must_use]
+    pub fn threshold_ppm(&self) -> u64 {
+        let alpha = u128::from(self.alpha_bp.max(1));
+        let raw = u128::from(VILLE_E_VALUE_UNIT_PPM)
+            .saturating_mul(10_000)
+            .div_ceil(alpha);
+        u64::try_from(raw).unwrap_or(VILLE_MAX_E_VALUE_PPM)
+    }
+
+    /// True iff `M_t >= 1 / alpha` (anytime-valid Ville rejection boundary).
+    #[must_use]
+    pub fn crossed_ville_boundary(&self) -> bool {
+        self.e_value_ppm >= self.threshold_ppm()
+    }
+
+    /// Multiply `M_{t-1}` by a nonnegative betting factor `likelihood_ratio_ppm` (`1_000_000 = 1.0`).
+    pub fn observe_likelihood_ratio_ppm(&mut self, likelihood_ratio_ppm: u64) -> u64 {
+        let product = u128::from(self.e_value_ppm).saturating_mul(u128::from(likelihood_ratio_ppm))
+            / u128::from(VILLE_E_VALUE_UNIT_PPM);
+        let next = u64::try_from(product)
+            .unwrap_or(VILLE_MAX_E_VALUE_PPM)
+            .clamp(1, VILLE_MAX_E_VALUE_PPM);
+        self.e_value_ppm = next;
+        self.max_observed_e_value_ppm = self.max_observed_e_value_ppm.max(next);
+        self.observations = self.observations.saturating_add(1);
+        self.e_value_ppm
+    }
+
+    /// Update `M_t` from observed `PredictedMetrics` relative to `SafetyEnvelope`.
+    ///
+    /// Safe interior samples shrink `M_t` (`0.85x`, supermartingale drift `E_0[L_t] <= 1`),
+    /// near-ceiling pressure (`> 80%` of latency/memory/error cap) accumulates `1.60x`
+    /// evidence, and hard envelope violations multiply by `25.0x`.
+    pub fn observe_metrics_against_envelope(
+        &mut self,
+        envelope: &SafetyEnvelope,
+        metrics: &PredictedMetrics,
+    ) -> u64 {
+        let lr_ppm = if !envelope.contains(metrics) {
+            25_000_000
+        } else {
+            let near_latency =
+                metrics.latency_ms.saturating_mul(10) > envelope.max_latency_ms.saturating_mul(8);
+            let near_memory =
+                metrics.memory_mb.saturating_mul(10) > envelope.max_memory_mb.saturating_mul(8);
+            let near_error = metrics.error_rate_pct > envelope.max_error_rate_pct * 0.80;
+            if near_latency || near_memory || near_error {
+                1_600_000
+            } else {
+                850_000
+            }
+        };
+        self.observe_likelihood_ratio_ppm(lr_ppm)
+    }
+
+    /// Reset `M_t` back to `1.0` after explicit operator remediation/revert.
+    pub fn reset(&mut self) {
+        self.e_value_ppm = VILLE_E_VALUE_UNIT_PPM;
+    }
+}
+
 /// The self-evolving optimization governor.
 ///
 /// Maintains a [`SafetyEnvelope`], current knob states, a decision log, and
@@ -452,6 +555,9 @@ pub struct OptimizationGovernor {
     next_seq: u64,
     /// Schema version.
     schema_version: String,
+    /// Anytime-valid Ville-martingale safety monitor (`M_t >= 1/alpha`).
+    #[serde(default)]
+    ville_monitor: VilleMartingaleMonitor,
 }
 
 /// Tracks an applied proposal so we can auto-revert it.
@@ -475,7 +581,19 @@ impl OptimizationGovernor {
             applied: BTreeMap::new(),
             next_seq: 1,
             schema_version: SCHEMA_VERSION.to_string(),
+            ville_monitor: VilleMartingaleMonitor::default(),
         }
+    }
+
+    /// Borrow the governor's anytime-valid Ville-martingale safety monitor.
+    #[must_use]
+    pub fn ville_monitor(&self) -> &VilleMartingaleMonitor {
+        &self.ville_monitor
+    }
+
+    /// Reset the Ville-martingale e-value back to `1.0` (`1_000_000` ppm) after remediation.
+    pub fn reset_ville_martingale(&mut self) {
+        self.ville_monitor.reset();
     }
 
     /// Create a governor with default envelope and default knob states.
@@ -665,6 +783,24 @@ impl OptimizationGovernor {
             return decision;
         }
 
+        // 3b. Block new knob mutations while anytime-valid Ville-martingale boundary is breached.
+        if self.ville_monitor.crossed_ville_boundary() {
+            let reason = RejectionReason::EnvelopeViolation(vec![format!(
+                "ville_martingale_boundary_crossed: e_value_ppm={} >= threshold_ppm={}",
+                self.ville_monitor.e_value_ppm,
+                self.ville_monitor.threshold_ppm()
+            )]);
+            let decision = GovernorDecision::Rejected(reason);
+            self.record(
+                &proposal.proposal_id,
+                proposal.knob,
+                &decision,
+                event_codes::GOV_004,
+                &proposal.trace_id,
+            );
+            return decision;
+        }
+
         // 4. Shadow evaluate (INV-GOV-SHADOW-BEFORE-APPLY)
         let shadow = self.shadow_evaluate(&proposal);
 
@@ -771,6 +907,51 @@ impl OptimizationGovernor {
             self.applied.remove(id);
         }
 
+        reverted_ids
+    }
+
+    /// Update the anytime-valid [`VilleMartingaleMonitor`] from `live_metrics` and
+    /// auto-revert all applied proposals if either the hard [`SafetyEnvelope`] is
+    /// breached OR `M_t >= 1 / alpha` (sustained near-boundary drift).
+    pub fn live_check_with_ville_martingale(
+        &mut self,
+        live_metrics: &PredictedMetrics,
+    ) -> Vec<String> {
+        let e_value_ppm = self
+            .ville_monitor
+            .observe_metrics_against_envelope(&self.envelope, live_metrics);
+        let threshold_ppm = self.ville_monitor.threshold_ppm();
+        if self.envelope.contains(live_metrics) && !self.ville_monitor.crossed_ville_boundary() {
+            return Vec::new();
+        }
+
+        let mut to_revert: Vec<AppliedProposal> = self.applied.values().cloned().collect();
+        to_revert.sort_by_key(|ap| std::cmp::Reverse(ap.seq));
+        let mut reverted_ids = Vec::new();
+        for ap in &to_revert {
+            if let Some(state) = self.knob_states.get_mut(&ap.knob) {
+                state.value = ap.old_value;
+            }
+            let decision = GovernorDecision::Reverted(format!(
+                "Ville-martingale/envelope breach (e_value_ppm={e_value_ppm}, threshold_ppm={threshold_ppm}); reverted {} from {} to {}",
+                ap.knob, ap.new_value, ap.old_value
+            ));
+            self.record(
+                &ap.proposal_id,
+                ap.knob,
+                &decision,
+                event_codes::GOV_005,
+                &ap.trace_id,
+            );
+            push_bounded(
+                &mut reverted_ids,
+                ap.proposal_id.clone(),
+                MAX_DECISION_LOG_ENTRIES,
+            );
+        }
+        for id in &reverted_ids {
+            self.applied.remove(id);
+        }
         reverted_ids
     }
 
@@ -2072,5 +2253,62 @@ mod tests {
         assert!(evidence.is_object());
         assert_eq!(evidence["schema_version"], SCHEMA_VERSION);
         assert_eq!(evidence["bead_id"], "bd-21fo");
+    }
+
+    #[test]
+    fn ville_martingale_monitor_accumulates_borderline_drift_and_auto_reverts_at_one_over_alpha() {
+        let mut gov = OptimizationGovernor::with_defaults();
+        assert_eq!(gov.ville_monitor().e_value_ppm, VILLE_E_VALUE_UNIT_PPM);
+        assert_eq!(gov.ville_monitor().threshold_ppm(), 20_000_000);
+
+        let approved = gov.submit(OptimizationProposal {
+            proposal_id: "prop-ville-1".to_string(),
+            knob: RuntimeKnob::ConcurrencyLimit,
+            old_value: 64,
+            new_value: 96,
+            predicted: safe_metrics(),
+            rationale: "increase concurrency within envelope".to_string(),
+            trace_id: "trace-ville-1".to_string(),
+        });
+        assert_eq!(approved, GovernorDecision::Approved);
+        assert_eq!(gov.knob_value(&RuntimeKnob::ConcurrencyLimit), Some(96));
+
+        // Near-ceiling metrics (450ms <= 500ms cap, so hard envelope still passes,
+        // but > 80% of cap so L_t = 1.60x accumulates evidence until M_t >= 20.0).
+        let borderline = PredictedMetrics {
+            latency_ms: 450,
+            throughput_rps: 200,
+            error_rate_pct: 0.2,
+            memory_mb: 2048,
+        };
+        let mut reverted = Vec::new();
+        for _ in 0..8 {
+            let r = gov.live_check_with_ville_martingale(&borderline);
+            if !r.is_empty() {
+                reverted = r;
+                break;
+            }
+        }
+        assert_eq!(reverted, vec!["prop-ville-1".to_string()]);
+        assert!(gov.ville_monitor().crossed_ville_boundary());
+        assert_eq!(gov.knob_value(&RuntimeKnob::ConcurrencyLimit), Some(64));
+
+        // New proposals are blocked while Ville boundary remains crossed.
+        let blocked = gov.submit(OptimizationProposal {
+            proposal_id: "prop-ville-2".to_string(),
+            knob: RuntimeKnob::BatchSize,
+            old_value: 128,
+            new_value: 256,
+            predicted: safe_metrics(),
+            rationale: "attempt mutation while Ville boundary crossed".to_string(),
+            trace_id: "trace-ville-2".to_string(),
+        });
+        assert!(matches!(
+            blocked,
+            GovernorDecision::Rejected(RejectionReason::EnvelopeViolation(_))
+        ));
+
+        gov.reset_ville_martingale();
+        assert!(!gov.ville_monitor().crossed_ville_boundary());
     }
 }

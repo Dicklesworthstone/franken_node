@@ -10140,11 +10140,30 @@ fn handle_doctor_expected_loss_actions(
     };
 
     if json {
+        let mut ville =
+            frankenengine_node::runtime::optimization_governor::VilleMartingaleMonitor::default();
+        let status_lr_ppm: u64 = match report.status.as_str() {
+            "critical" | "error" => 25_000_000,
+            "warning" | "degraded" => 4_000_000,
+            _ => 850_000,
+        };
+        let _ = ville.observe_likelihood_ratio_ppm(status_lr_ppm);
+        for _ in 0..report.recommended_actions.len().min(8) {
+            let _ = ville.observe_likelihood_ratio_ppm(1_500_000);
+        }
         let mut envelope = serde_json::json!({
             "schema_version": DOCTOR_EXPECTED_LOSS_ACTIONS_SCHEMA_VERSION,
             "source": if args.from_report.is_some() { "report" } else { "live" },
             "doctor_status": report.status.as_str(),
             "response": response,
+            "ville_martingale_gate": {
+                "alpha_bp": ville.alpha_bp,
+                "e_value_ppm": ville.e_value_ppm,
+                "max_observed_e_value_ppm": ville.max_observed_e_value_ppm,
+                "threshold_ppm": ville.threshold_ppm(),
+                "observations": ville.observations,
+                "crossed_ville_boundary": ville.crossed_ville_boundary(),
+            },
         });
         if let Some(telemetry) = workspace_telemetry
             && let Some(obj) = envelope.as_object_mut()
@@ -40817,7 +40836,7 @@ fn handle_trust_vef_prove(args: &TrustVefProveArgs) -> Result<()> {
     .map_err(|err| anyhow::anyhow!("proof service input envelope failed: {err}"))?;
 
     let mut service = vef::proof_service::VefProofService::new(
-        vef::proof_service::ProofServiceConfig::reference_attestation_defaults(),
+        vef::proof_service::ProofServiceConfig::ed25519_merkle_signing(&signing_key),
     );
     let service_output = service
         .generate_proof(&service_input, None, now_millis)
@@ -41158,8 +41177,14 @@ fn handle_verify_vef_proof(args: &VerifyVefProofArgs) -> Result<()> {
     )
     .map_err(|err| anyhow::anyhow!("VEF receipt chain verification failed: {err}"))?;
 
+    anyhow::ensure!(
+        bundle.service_output.backend_id
+            == vef::proof_service::ProofBackendId::Ed25519MerkleTransparencyV1,
+        "unauthenticated VEF proof service backend `{}` refused: expected `ed25519_merkle_transparency_v1`",
+        bundle.service_output.backend_id.as_str()
+    );
     let service = vef::proof_service::VefProofService::new(
-        vef::proof_service::ProofServiceConfig::reference_attestation_defaults(),
+        vef::proof_service::ProofServiceConfig::ed25519_merkle_verifying(&trusted_vk),
     );
     service
         .verify_proof(&bundle.service_input, &bundle.service_output)
@@ -42738,11 +42763,99 @@ fn handle_runtime_supervision_audit(args: &RuntimeSupervisionAuditArgs) -> Resul
         .check_capability(&args.subsystem, "cap:process:spawn", "2026-11-17T00:00:01Z")
         .is_err();
 
+    let spec_executor =
+        frankenengine_node::runtime::speculation::proof_executor::ProofExecutor::new(
+            frankenengine_node::runtime::speculation::proof_executor::GuardConfig::new(1_200)
+                .with_interface("franken_engine::supervision_hotpath")
+                .with_signer("operator:local"),
+        );
+    let valid_spec_receipt = frankenengine_node::runtime::speculation::proof_executor::make_receipt(
+        "spec-rcpt-001",
+        frankenengine_node::runtime::speculation::proof_executor::SpeculationTransform::CacheWarmup,
+        "franken_engine::supervision_hotpath",
+        "operator:local",
+        5_000,
+        &args.trace_id,
+    );
+    let active_spec = spec_executor.execute_with_fallback(
+        frankenengine_node::runtime::speculation::proof_executor::SpeculationTransform::CacheWarmup,
+        "franken_engine::supervision_hotpath",
+        Some(&valid_spec_receipt),
+        true,
+        compiled_policy.policy_snapshot_hash.as_bytes(),
+    );
+    let degraded_spec = spec_executor.execute_with_fallback(
+        frankenengine_node::runtime::speculation::proof_executor::SpeculationTransform::CacheWarmup,
+        "franken_engine::unapproved_hotpath",
+        Some(&valid_spec_receipt),
+        true,
+        compiled_policy.policy_snapshot_hash.as_bytes(),
+    );
+    let speculation_activated = matches!(
+        active_spec.decision,
+        frankenengine_node::runtime::speculation::proof_executor::ActivationDecision::Activated { .. }
+    );
+    let speculation_negative_control_degraded = matches!(
+        degraded_spec.decision,
+        frankenengine_node::runtime::speculation::proof_executor::ActivationDecision::Degraded { .. }
+    );
+
+    let mut opt_gov =
+        frankenengine_node::runtime::optimization_governor::OptimizationGovernor::with_defaults();
+    let gov_submit = opt_gov.submit(
+        frankenengine_node::runtime::optimization_governor::OptimizationProposal {
+            proposal_id: format!("gov-{}", args.trace_id),
+            knob: frankenengine_node::runtime::optimization_governor::RuntimeKnob::ConcurrencyLimit,
+            old_value: 64,
+            new_value: 96,
+            predicted: frankenengine_node::runtime::optimization_governor::PredictedMetrics {
+                latency_ms: 200,
+                throughput_rps: 500,
+                error_rate_pct: 0.1,
+                memory_mb: 2048,
+            },
+            rationale: "supervision concurrency probe".to_string(),
+            trace_id: args.trace_id.clone(),
+        },
+    );
+    let gov_approved = matches!(
+        gov_submit,
+        frankenengine_node::runtime::optimization_governor::GovernorDecision::Approved
+    );
+    let drift_metrics = frankenengine_node::runtime::optimization_governor::PredictedMetrics {
+        latency_ms: 460,
+        throughput_rps: 200,
+        error_rate_pct: 0.2,
+        memory_mb: 2048,
+    };
+    let mut ville_reverted = Vec::new();
+    for _ in 0..8 {
+        let reverted = opt_gov.live_check_with_ville_martingale(&drift_metrics);
+        if !reverted.is_empty() {
+            ville_reverted = reverted;
+            break;
+        }
+    }
+    let ville_auto_reverted = gov_approved
+        && !ville_reverted.is_empty()
+        && opt_gov.ville_monitor().crossed_ville_boundary();
+
+    let hash_provider = frankenengine_node::security::blake3_adapter::Sha2HmacProvider;
+    let keyed_digest = frankenengine_node::security::blake3_adapter::HashProvider::keyed_hash(
+        &hash_provider,
+        b"supervision-audit-domain-key",
+        compiled_policy.policy_snapshot_hash.as_bytes(),
+    );
+    let keyed_digest_hex = hex::encode(keyed_digest);
+
     let ok = !budget_exhausted
         && finalize_record.obligation_closure_proof.all_closed
         && obligation_ledger.query_outstanding().is_empty()
         && verified_chain_len == 1
-        && undeclared_spawn_denied;
+        && undeclared_spawn_denied
+        && speculation_activated
+        && speculation_negative_control_degraded
+        && ville_auto_reverted;
 
     let payload = serde_json::json!({
         "schema_version": "franken-node/runtime-supervision-audit-cli/v1",
@@ -42778,6 +42891,22 @@ fn handle_runtime_supervision_audit(args: &RuntimeSupervisionAuditArgs) -> Resul
             "subsystem": args.subsystem,
             "undeclared_spawn_denied": undeclared_spawn_denied,
             "audit_entries": cap_guard.audit_trail.len(),
+        },
+        "speculation_guard": {
+            "activated_on_valid_proof": speculation_activated,
+            "degraded_on_unapproved_interface": speculation_negative_control_degraded,
+            "baseline_digest": degraded_spec.output_digest,
+        },
+        "optimization_governor_ville": {
+            "shadow_approved": gov_approved,
+            "ville_auto_reverted": ville_auto_reverted,
+            "e_value_ppm": opt_gov.ville_monitor().e_value_ppm,
+            "threshold_ppm": opt_gov.ville_monitor().threshold_ppm(),
+            "reverted_proposals": ville_reverted,
+        },
+        "hash_provider": {
+            "provider": frankenengine_node::security::blake3_adapter::HashProvider::name(&hash_provider),
+            "policy_keyed_digest_hex": keyed_digest_hex,
         },
     });
     if args.json {
@@ -43745,11 +43874,90 @@ fn handle_migrate_kit_plan(args: &MigrateKitPlanArgs) -> Result<()> {
         .map_err(|err| anyhow::anyhow!("{}", err.code()))?;
     let cli_prefix_registered = is_registered_product_prefix(ProductSurface::Migration.prefix());
 
+    let cohort_def = frankenengine_node::connector::migration_pipeline::CohortDefinition {
+        cohort_id: format!("cohort-{}-{}", archetype.label(), args.trace_id),
+        selection_criteria: format!("pilot-{}", archetype.label()),
+        extensions: vec![
+            frankenengine_node::connector::migration_pipeline::ExtensionSpec {
+                name: format!("{}-app", archetype.label()),
+                source_version: "1.0.0".to_string(),
+                target_version: "1.1.0".to_string(),
+                dependency_complexity: 2,
+                risk_tier: 1,
+                evidence: frankenengine_node::connector::migration_pipeline::ExtensionEvidence {
+                    api_inventory: vec!["console".to_string(), "http".to_string()],
+                    dependency_edges: Vec::new(),
+                    runtime_targets: vec![
+                        "node".to_string(),
+                        "bun".to_string(),
+                        "franken-node".to_string(),
+                    ],
+                    compatibility_bands: std::collections::BTreeMap::from([
+                        ("node".to_string(), "compatible".to_string()),
+                        ("bun".to_string(), "compatible".to_string()),
+                        ("franken-node".to_string(), "compatible".to_string()),
+                    ]),
+                    known_divergences: Vec::new(),
+                    corpus_coverage_bps: 9_650,
+                    required_capabilities: Vec::new(),
+                    lockstep_samples: 24,
+                    lockstep_failures: 0,
+                    validation_samples: 24,
+                    validation_failures: 0,
+                    evidence_sources: std::collections::BTreeMap::from([
+                        ("scanner".to_string(), true),
+                        ("lockstep".to_string(), true),
+                        ("validation".to_string(), true),
+                        ("corpus".to_string(), true),
+                    ]),
+                    collected_at: chrono::Utc::now().to_rfc3339(),
+                },
+            },
+        ],
+    };
+    let pipeline_state = frankenengine_node::connector::migration_pipeline::run_full_pipeline(
+        &cohort_def,
+    )
+    .map_err(|err| {
+        anyhow::anyhow!(
+            "migration singularity pipeline failed: {}: {}",
+            err.code,
+            err.message
+        )
+    })?;
+    let cohort_summary =
+        frankenengine_node::connector::migration_pipeline::compute_cohort_summary(&pipeline_state);
+    let pipeline_receipt_valid = pipeline_state
+        .migration_receipt
+        .as_ref()
+        .is_some_and(frankenengine_node::connector::migration_pipeline::verify_receipt_signature);
+
+    let ref_artifact =
+        frankenengine_node::connector::migration_artifact::generate_reference_artifact();
+    let ref_artifact_validation =
+        frankenengine_node::connector::migration_artifact::validate_artifact(&ref_artifact);
+    let ref_artifact_sig_ok =
+        frankenengine_node::connector::migration_artifact::verify_artifact_signatures(
+            &ref_artifact,
+        );
+    let ref_bcc =
+        frankenengine_node::connector::migration_artifact::generate_reference_behavioral_conformance_certificate();
+    let ref_bcc_validation =
+        frankenengine_node::connector::migration_artifact::validate_behavioral_conformance_certificate(&ref_bcc);
+    let ref_bcc_sig_ok =
+        frankenengine_node::connector::migration_artifact::verify_behavioral_conformance_certificate_signature(&ref_bcc);
+    let artifact_contract_ok = ref_artifact_validation.valid
+        && ref_artifact_sig_ok
+        && ref_bcc_validation.valid
+        && ref_bcc_sig_ok;
+
     let ok = default_executor_fails_closed
         && stage_order_valid
         && preview_transcript.completed
         && device_registry.count() == 1
-        && cli_prefix_registered;
+        && cli_prefix_registered
+        && pipeline_receipt_valid
+        && artifact_contract_ok;
 
     let mut payload = serde_json::json!({
         "schema_version": "franken-node/migrate-kit-plan-cli/v1",
@@ -43769,6 +43977,21 @@ fn handle_migrate_kit_plan(args: &MigrateKitPlanArgs) -> Result<()> {
             "completed": preview_transcript.completed,
             "stage_order_valid": stage_order_valid,
             "stage_count": preview_transcript.stages.len(),
+        },
+        "singularity_pipeline": {
+            "cohort_id": pipeline_state.cohort_id,
+            "stage": pipeline_state.current_stage.label(),
+            "stage_transitions": pipeline_state.stage_history.len(),
+            "receipt_signature_verified": pipeline_receipt_valid,
+            "success_rate": cohort_summary.success_rate,
+        },
+        "migration_artifact_contract": {
+            "artifact_schema_version": ref_artifact.schema_version,
+            "artifact_valid": ref_artifact_validation.valid,
+            "artifact_signatures_verified": ref_artifact_sig_ok,
+            "behavioral_certificate_schema_version": ref_bcc.schema_version,
+            "behavioral_certificate_valid": ref_bcc_validation.valid,
+            "behavioral_certificate_signature_verified": ref_bcc_sig_ok,
         },
         "device_registry": {
             "registered_devices": device_registry.count(),
@@ -44745,7 +44968,36 @@ fn handle_trust_calibrate_conformal(args: &cli::TrustCalibrateConformalArgs) -> 
             .map_err(|err| anyhow::anyhow!("{err}"))?;
     }
 
-    let rendered = serde_json::to_string_pretty(&receipt)?;
+    let rendered = if args.include_bpet_benchmark {
+        use frankenengine_node::security::bpet::calibration_benchmark::{
+            generate_corpus_exchangeability_transfer_report, generate_signed_calibration_artifact,
+            verify_signed_calibration_artifact,
+        };
+        let bpet_artifact = generate_signed_calibration_artifact()
+            .map_err(|err| anyhow::anyhow!("BPET calibration benchmark failed: {err}"))?;
+        let bpet_verified = verify_signed_calibration_artifact(&bpet_artifact)
+            .map_err(|err| anyhow::anyhow!("BPET calibration verification error: {err}"))?;
+        anyhow::ensure!(
+            bpet_verified,
+            "BPET calibration benchmark signature verification failed"
+        );
+        let transfer_report = generate_corpus_exchangeability_transfer_report()
+            .map_err(|err| anyhow::anyhow!("BPET exchangeability transfer report failed: {err}"))?;
+        let mut combined = serde_json::to_value(&receipt)?;
+        if let Some(obj) = combined.as_object_mut() {
+            obj.insert(
+                "bpet_calibration_benchmark".to_string(),
+                serde_json::to_value(&bpet_artifact)?,
+            );
+            obj.insert(
+                "bpet_exchangeability_transfer".to_string(),
+                serde_json::to_value(&transfer_report)?,
+            );
+        }
+        serde_json::to_string_pretty(&combined)?
+    } else {
+        serde_json::to_string_pretty(&receipt)?
+    };
     if let Some(out_path) = args.out.as_deref() {
         if let Some(parent) = out_path.parent()
             && !parent.as_os_str().is_empty()

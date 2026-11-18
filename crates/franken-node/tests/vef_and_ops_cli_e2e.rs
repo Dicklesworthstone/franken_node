@@ -108,6 +108,20 @@ fn vef_prove_and_verify_ed25519_roundtrip_and_tamper_refusals() {
     assert_eq!(proved["receipt_entries"].as_array().unwrap().len(), 6);
     assert_eq!(proved["control_transition_allowed"], true);
     assert_eq!(proved["verification_state_allowed"], true);
+    assert_eq!(
+        proved["service_output"]["backend_id"],
+        "ed25519_merkle_transparency_v1"
+    );
+    assert!(
+        proved["service_output"]["proof_material"]
+            .as_str()
+            .unwrap_or("")
+            .starts_with("ed25519_sig:")
+    );
+    assert_eq!(
+        proved["service_output"]["verification_metadata"]["merkle_leaf_count"],
+        "6"
+    );
 
     // 1. Valid verification with explicit trusted public key succeeds.
     let verified = json_ok(
@@ -610,6 +624,23 @@ fn runtime_supervision_audit_verifies_lifecycle_and_fails_on_budget_exhaustion()
     assert_eq!(ok["obligation_channel"]["outstanding_count"], 0);
     assert_eq!(ok["policy_checkpoint"]["verified_chain_len"], 1);
     assert_eq!(ok["capability_guard"]["undeclared_spawn_denied"], true);
+    assert_eq!(ok["speculation_guard"]["activated_on_valid_proof"], true);
+    assert_eq!(
+        ok["speculation_guard"]["degraded_on_unapproved_interface"],
+        true
+    );
+    assert_eq!(ok["optimization_governor_ville"]["shadow_approved"], true);
+    assert_eq!(
+        ok["optimization_governor_ville"]["ville_auto_reverted"],
+        true
+    );
+    assert_eq!(
+        ok["hash_provider"]["policy_keyed_digest_hex"]
+            .as_str()
+            .unwrap_or("")
+            .len(),
+        64
+    );
 
     let exhausted = json_err(
         dir.path(),
@@ -773,6 +804,46 @@ fn ops_dgis_fixture_suite_and_migrate_kit_plan_cli_e2e() {
     );
     assert_eq!(kit["activation_preview"]["completed"], true);
     assert_eq!(kit["activation_preview"]["stage_order_valid"], true);
+    assert_eq!(kit["singularity_pipeline"]["stage"], "COMPLETE");
+    assert_eq!(
+        kit["singularity_pipeline"]["receipt_signature_verified"],
+        true
+    );
+    assert_eq!(kit["migration_artifact_contract"]["artifact_valid"], true);
+    assert_eq!(
+        kit["migration_artifact_contract"]["artifact_signatures_verified"],
+        true
+    );
+    assert_eq!(
+        kit["migration_artifact_contract"]["behavioral_certificate_valid"],
+        true
+    );
+    assert_eq!(
+        kit["migration_artifact_contract"]["behavioral_certificate_signature_verified"],
+        true
+    );
+
+    let bpet_cal = json_ok(
+        dir.path(),
+        &[
+            "trust",
+            "calibrate-conformal",
+            "--builtin-benign-corpus",
+            "--include-bpet-benchmark",
+            "--json",
+        ],
+    );
+    assert_eq!(
+        bpet_cal["bpet_calibration_benchmark"]["schema_version"],
+        "bpet.calibration_artifact.v1"
+    );
+    assert_eq!(
+        bpet_cal["bpet_exchangeability_transfer"]["schema_version"],
+        "bpet.corpus_exchangeability_transfer.v1"
+    );
+
+    let doc_el = json_ok(dir.path(), &["doctor", "expected-loss-actions", "--json"]);
+    assert_eq!(doc_el["ville_martingale_gate"]["threshold_ppm"], 20_000_000);
 
     let bad_kit = json_err(
         dir.path(),
