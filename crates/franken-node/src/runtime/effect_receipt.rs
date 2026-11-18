@@ -58,7 +58,7 @@ pub const DEFAULT_MAX_CHAIN_ENTRIES: usize = 1_000_000;
 
 /// The class of host effect a receipt describes. Each carries a fixed 1-byte
 /// tag committed into the canonical preimage so the encoding is stable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EffectKind {
     FsRead,

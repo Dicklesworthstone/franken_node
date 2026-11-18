@@ -670,6 +670,8 @@ struct TrustScanReport {
     deep: bool,
     audit: bool,
     refresh: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    metadata_source: Option<String>,
     warnings: Vec<String>,
     items: Vec<TrustScanItem>,
 }
@@ -942,6 +944,10 @@ struct RunExecutionReceiptCore {
     /// and retained in the signed run-record snapshot; no capability grant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     native_module_graph: Option<ops::engine_dispatcher::NativeModuleGraphSummary>,
+    /// Per-package source and runtime host-effect attribution across the root
+    /// application and its resolved npm dependencies (`bd-reality-20260923-26n9r.15`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    package_attribution: Option<ops::engine_dispatcher::PackageAttributionReport>,
     preflight_verdict: PreFlightVerdict,
     telemetry_summary: Option<RunExecutionTelemetrySummary>,
     ssrf_violations: Vec<String>,
@@ -11584,6 +11590,10 @@ fn build_run_execution_receipt(
             .engine_decision
             .as_ref()
             .and_then(|decision| decision.frozen_modules.clone()),
+        package_attribution: dispatch
+            .engine_decision
+            .as_ref()
+            .and_then(|decision| decision.package_attribution.clone()),
         preflight_verdict: preflight.verdict.clone(),
         telemetry_summary: summarize_run_telemetry(dispatch.telemetry.as_ref()),
         ssrf_violations,
@@ -24614,12 +24624,93 @@ fn render_trust_scan_human(report: &TrustScanReport) -> String {
     lines.join("\n")
 }
 
+fn load_offline_trust_scan_npm_metadata(
+    offline_dir: &Path,
+    dependency_name: &str,
+    preferred_version: Option<&str>,
+) -> Result<TrustScanDeepMetadata> {
+    const MAX_OFFLINE_PACKUMENT_BYTES: u64 = 16 * 1024 * 1024;
+
+    validate_package_name(dependency_name)
+        .with_context(|| format!("Invalid package name: {dependency_name}"))?;
+    let file_stem = if dependency_name.starts_with('@') {
+        dependency_name.replacen('/', "__", 1)
+    } else {
+        dependency_name.to_string()
+    };
+    let fixture_path = offline_dir.join(format!("{file_stem}.json"));
+    let canonical_file = fixture_path.canonicalize().with_context(|| {
+        format!(
+            "offline npm packument fixture missing for {dependency_name} at {}",
+            fixture_path.display()
+        )
+    })?;
+    anyhow::ensure!(
+        canonical_file.starts_with(offline_dir),
+        "offline npm packument fixture {} escapes {}",
+        canonical_file.display(),
+        offline_dir.display()
+    );
+    let raw_bytes =
+        crate::bounded_read(&canonical_file, MAX_OFFLINE_PACKUMENT_BYTES).map_err(|err| {
+            anyhow::anyhow!(
+                "failed reading offline packument {}: {err}",
+                canonical_file.display()
+            )
+        })?;
+    let payload = serde_json::from_slice::<serde_json::Value>(&raw_bytes).with_context(|| {
+        format!(
+            "invalid offline npm registry JSON for {dependency_name} in {}",
+            canonical_file.display()
+        )
+    })?;
+    let mut metadata = parse_trust_scan_npm_metadata(&payload, dependency_name, preferred_version);
+    if let Some(expected_version) = preferred_version
+        && metadata.resolved_version.as_deref() != Some(expected_version)
+    {
+        anyhow::bail!(
+            "offline npm registry metadata for {dependency_name} does not contain captured version {expected_version}; refusing to use another version's provenance"
+        );
+    }
+    metadata.dependent_count = payload
+        .get("_hermetic_dependent_count")
+        .and_then(serde_json::Value::as_u64);
+    Ok(metadata)
+}
+
 fn run_trust_scan(
     project_root: &Path,
     deep: bool,
     audit: bool,
     refresh: bool,
 ) -> Result<TrustScanReport> {
+    run_trust_scan_with_offline_registry(project_root, deep, audit, refresh, None)
+}
+
+fn run_trust_scan_with_offline_registry(
+    project_root: &Path,
+    deep: bool,
+    audit: bool,
+    refresh: bool,
+    offline_registry_dir: Option<&Path>,
+) -> Result<TrustScanReport> {
+    if offline_registry_dir.is_some() && !deep {
+        anyhow::bail!("--offline-registry-dir requires --deep");
+    }
+    let canonical_offline_dir = match offline_registry_dir {
+        Some(dir) => {
+            let resolved = dir.canonicalize().with_context(|| {
+                format!("failed resolving --offline-registry-dir {}", dir.display())
+            })?;
+            anyhow::ensure!(
+                resolved.is_dir(),
+                "--offline-registry-dir {} is not a directory",
+                resolved.display()
+            );
+            Some(resolved)
+        }
+        None => None,
+    };
     let project_root = project_root.canonicalize().with_context(|| {
         format!(
             "failed resolving trust scan project {}",
@@ -24635,7 +24726,7 @@ fn run_trust_scan(
     let mut created_cards = 0usize;
     let mut refreshed_cards = 0usize;
     let mut skipped_existing = 0usize;
-    let mut remote_cap_context = if deep || audit {
+    let mut remote_cap_context = if (deep && canonical_offline_dir.is_none()) || audit {
         Some(trust_scan_remote_cap_context(&project_root, now_secs)?)
     } else {
         None
@@ -24675,28 +24766,45 @@ fn run_trust_scan(
         let mut deep_fetched = false;
         let mut audit_fetched = false;
         if deep && !ambiguous_versions {
-            let remote_cap = remote_cap_context
-                .as_mut()
-                .expect("trust scan RemoteCap context initialized for deep scan");
-            match fetch_trust_scan_npm_metadata(
-                &dependency.dependency_name,
-                lockfile_entry.and_then(TrustScanLockfileMetadata::resolved_version),
-                remote_cap,
-            ) {
-                Ok(metadata) => {
-                    deep_metadata = metadata;
-                    deep_fetched = true;
-                }
-                Err(err) if is_remote_cap_denial(&err) => {
-                    return Err(err.context(format!(
-                        "RemoteCap denied trust scan deep metadata for {}",
+            if let Some(offline_dir) = canonical_offline_dir.as_deref() {
+                match load_offline_trust_scan_npm_metadata(
+                    offline_dir,
+                    &dependency.dependency_name,
+                    lockfile_entry.and_then(TrustScanLockfileMetadata::resolved_version),
+                ) {
+                    Ok(metadata) => {
+                        deep_metadata = metadata;
+                        deep_fetched = true;
+                    }
+                    Err(err) => warnings.push(format!(
+                        "offline deep metadata unavailable for {}: {err}",
                         dependency.dependency_name
-                    )));
+                    )),
                 }
-                Err(err) => warnings.push(format!(
-                    "deep metadata unavailable for {}: {err}",
-                    dependency.dependency_name
-                )),
+            } else {
+                let remote_cap = remote_cap_context
+                    .as_mut()
+                    .expect("trust scan RemoteCap context initialized for deep scan");
+                match fetch_trust_scan_npm_metadata(
+                    &dependency.dependency_name,
+                    lockfile_entry.and_then(TrustScanLockfileMetadata::resolved_version),
+                    remote_cap,
+                ) {
+                    Ok(metadata) => {
+                        deep_metadata = metadata;
+                        deep_fetched = true;
+                    }
+                    Err(err) if is_remote_cap_denial(&err) => {
+                        return Err(err.context(format!(
+                            "RemoteCap denied trust scan deep metadata for {}",
+                            dependency.dependency_name
+                        )));
+                    }
+                    Err(err) => warnings.push(format!(
+                        "deep metadata unavailable for {}: {err}",
+                        dependency.dependency_name
+                    )),
+                }
             }
         }
 
@@ -24968,6 +25076,13 @@ fn run_trust_scan(
         deep,
         audit,
         refresh,
+        metadata_source: if !deep {
+            None
+        } else if canonical_offline_dir.is_some() {
+            Some("hermetic_fixture".to_string())
+        } else {
+            Some("live_registry".to_string())
+        },
         warnings,
         items,
     })
@@ -46012,8 +46127,13 @@ fn main() -> Result<()> {
                     .project_path
                     .as_deref()
                     .unwrap_or_else(|| Path::new("."));
-                let report = match run_trust_scan(project_root, args.deep, args.audit, args.refresh)
-                {
+                let report = match run_trust_scan_with_offline_registry(
+                    project_root,
+                    args.deep,
+                    args.audit,
+                    args.refresh,
+                    args.offline_registry_dir.as_deref(),
+                ) {
                     Ok(report) => report,
                     Err(err) => return trust_fail("trust.scan", args.json, err),
                 };
@@ -48158,6 +48278,7 @@ mod run_trust_gate_tests {
             execution_limits: None,
             native_replay_payload_sha256: None,
             native_module_graph: None,
+            package_attribution: None,
             preflight_verdict: PreFlightVerdict::Passed {
                 checked: 0,
                 warnings: Vec::new(),
@@ -49385,6 +49506,7 @@ mod run_trust_gate_tests {
                 deep: true,
                 audit: true,
                 refresh: true,
+                metadata_source: None,
                 warnings: vec![
                     "Warning 1".to_string(),
                     "🦀".repeat(1000),

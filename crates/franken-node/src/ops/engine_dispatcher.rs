@@ -5349,6 +5349,75 @@ pub struct EngineContainmentDecision {
     /// virtual epoch `1767225600000`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clock_epoch_ms: Option<i64>,
+    /// Per-package source and runtime host-effect attribution across the root
+    /// application and its resolved npm dependencies (`bd-reality-20260923-26n9r.15`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package_attribution: Option<PackageAttributionReport>,
+}
+
+/// Basis explaining how a recorded host effect was attributed across loaded packages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EffectAttributionBasis {
+    /// Only one package had been loaded at the moment the effect crossed the host boundary.
+    ExactSingleLoadedPackage,
+    /// Multiple packages were loaded, and exactly one held the capability family for this effect.
+    ExactRuntimeCapabilityHolder,
+    /// Multiple capable packages were loaded, and the filesystem target path lies inside one package's directory.
+    ExactTargetWithinPackage,
+    /// Multiple loaded packages held the capability family when the effect fired; all candidates are reported without guessing.
+    CandidateRuntimeCapabilityHolders,
+    /// Multiple packages were loaded without an isolated capability holder; all loaded packages are reported as candidates.
+    CandidateLoadedPackages,
+}
+
+/// Source identity of one evaluated module within a package's attribution entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PackageModuleEntry {
+    pub module_id: String,
+    pub origin_path: String,
+    pub source_sha256: String,
+}
+
+/// Aggregated source and host-effect attribution summary for one package (`app:*` or `npm:*`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PackageAttributionEntry {
+    pub package_id: String,
+    pub package_name: String,
+    pub package_version: String,
+    pub is_root_application: bool,
+    pub loaded_modules: Vec<PackageModuleEntry>,
+    pub declared_effect_kinds: Vec<crate::runtime::effect_receipt::EffectKind>,
+    pub exact_effect_seqs: Vec<u64>,
+    pub candidate_effect_seqs: Vec<u64>,
+    pub allowed_effects: usize,
+    pub denied_effects: usize,
+    pub failed_effects: usize,
+}
+
+/// Per-effect attribution binding an [`EffectReceiptChainEntry`](crate::runtime::effect_receipt::EffectReceiptChainEntry)
+/// (`seq`, `receipt_hash`) to its originating package or candidate package set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EffectAttributionEntry {
+    pub seq: u64,
+    pub receipt_hash: String,
+    pub effect_kind: crate::runtime::effect_receipt::EffectKind,
+    pub outcome: String,
+    pub attribution_basis: EffectAttributionBasis,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attributed_package: Option<String>,
+    pub candidate_packages: Vec<String>,
+}
+
+/// Complete per-package module provenance and runtime host-effect attribution report
+/// (`bd-reality-20260923-26n9r.15`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PackageAttributionReport {
+    pub schema_version: String,
+    pub graph_input_hash: String,
+    pub root_package_id: String,
+    pub packages: Vec<PackageAttributionEntry>,
+    pub effects: Vec<EffectAttributionEntry>,
 }
 
 /// Source-free identity of the immutable graph supplied to native execution.
@@ -7375,11 +7444,683 @@ fn validate_native_frozen_modules(config: &Config) -> Result<(), ActionableError
 }
 
 #[cfg(feature = "engine")]
+#[derive(Debug, Clone)]
+struct ModulePackageDescriptor {
+    module_id: String,
+    origin_path: String,
+    source_sha256: String,
+    package_id: String,
+    package_name: String,
+    package_version: String,
+    is_root_application: bool,
+    package_rel_dir: Option<String>,
+    static_effect_kinds: std::collections::BTreeSet<crate::runtime::effect_receipt::EffectKind>,
+}
+
+#[cfg(feature = "engine")]
+#[derive(Debug, Clone)]
+struct ObservedRuntimeEffectSnapshot {
+    loaded_modules: std::collections::BTreeSet<String>,
+    runtime_builtin_grants: std::collections::BTreeMap<
+        String,
+        std::collections::BTreeSet<crate::runtime::effect_receipt::EffectKind>,
+    >,
+    target_package_hint: Option<String>,
+}
+
+#[cfg(feature = "engine")]
+#[derive(Debug, Default)]
+struct RuntimeAttributionState {
+    observed_module_authorizations: bool,
+    loaded_modules: std::collections::BTreeSet<String>,
+    runtime_builtin_grants: std::collections::BTreeMap<
+        String,
+        std::collections::BTreeSet<crate::runtime::effect_receipt::EffectKind>,
+    >,
+    effect_snapshots: Vec<ObservedRuntimeEffectSnapshot>,
+}
+
+/// Tracks runtime module resolutions alongside host-effect crossings to produce
+/// per-package behavioral and source attribution (`bd-reality-20260923-26n9r.15`).
+#[cfg(feature = "engine")]
+#[derive(Debug)]
+struct RuntimePackageAttributionTracker {
+    project_root: PathBuf,
+    graph_input_hash: String,
+    entrypoint_origin: Option<String>,
+    root_package_id: String,
+    root_package_name: String,
+    root_package_version: String,
+    modules: std::collections::BTreeMap<String, ModulePackageDescriptor>,
+    state: Mutex<RuntimeAttributionState>,
+}
+
+#[cfg(feature = "engine")]
+impl RuntimePackageAttributionTracker {
+    const SCHEMA_VERSION: &'static str = "franken-node/package-attribution-report/v1";
+    const MANIFEST_MAX_BYTES: u64 = 256 * 1024;
+
+    fn read_package_manifest_identity(
+        manifest_path: &Path,
+        fallback_name: &str,
+        fallback_version: &str,
+    ) -> (String, String) {
+        let Ok(bytes) = crate::bounded_read(manifest_path, Self::MANIFEST_MAX_BYTES) else {
+            return (fallback_name.to_owned(), fallback_version.to_owned());
+        };
+        let Ok(json) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+            return (fallback_name.to_owned(), fallback_version.to_owned());
+        };
+        let name = json
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(fallback_name)
+            .to_owned();
+        let version = json
+            .get("version")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(fallback_version)
+            .to_owned();
+        (name, version)
+    }
+
+    fn classify_node_modules_origin(origin_path: &str) -> Option<(String, String)> {
+        let normalized = origin_path.trim_start_matches("./");
+        let (prefix_end, rest) = if let Some(idx) = normalized.rfind("/node_modules/") {
+            let start = idx + "/node_modules/".len();
+            (start, &normalized[start..])
+        } else {
+            let rest = normalized.strip_prefix("node_modules/")?;
+            ("node_modules/".len(), rest)
+        };
+        let mut segments = rest.split('/').filter(|segment| !segment.is_empty());
+        let first = segments.next()?;
+        let pkg_dir_name = if first.starts_with('@') {
+            let second = segments.next()?;
+            format!("{first}/{second}")
+        } else {
+            first.to_owned()
+        };
+        let pkg_rel_dir = format!("{}{pkg_dir_name}", &normalized[..prefix_end]);
+        Some((pkg_rel_dir, pkg_dir_name))
+    }
+
+    fn effect_kinds_for_builtin_specifier(
+        specifier: &str,
+    ) -> &'static [crate::runtime::effect_receipt::EffectKind] {
+        use crate::runtime::effect_receipt::EffectKind;
+        let bare = specifier.strip_prefix("node:").unwrap_or(specifier);
+        match bare {
+            "fs" | "fs/promises" => &[EffectKind::FsRead, EffectKind::FsWrite],
+            "http" | "https" | "http2" | "net" | "tls" | "dns" | "dns/promises" => {
+                &[EffectKind::HttpRequest, EffectKind::NetConnect]
+            }
+            "child_process" => &[EffectKind::Spawn],
+            "crypto" => &[EffectKind::RandomRead],
+            _ => &[],
+        }
+    }
+
+    fn from_captured_resolver(
+        project_root: &Path,
+        graph_input_hash: &str,
+        specs: &[crate::supply_chain::module_resolution_graph::file_resolution::source_graph::engine_resolver::CapturedModuleAttributionSpec],
+    ) -> Self {
+        use crate::runtime::effect_receipt::EffectKind;
+
+        let default_app_name = project_root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .unwrap_or("application");
+        let (root_package_name, root_package_version) = Self::read_package_manifest_identity(
+            &project_root.join("package.json"),
+            default_app_name,
+            "0.0.0",
+        );
+        let root_package_id = format!("app:{root_package_name}@{root_package_version}");
+
+        let mut manifest_cache: std::collections::BTreeMap<String, (String, String)> =
+            std::collections::BTreeMap::new();
+        let mut modules = std::collections::BTreeMap::new();
+
+        for spec in specs {
+            let mut static_effect_kinds = std::collections::BTreeSet::new();
+            for builtin in &spec.builtin_specifiers {
+                static_effect_kinds.extend(
+                    Self::effect_kinds_for_builtin_specifier(builtin)
+                        .iter()
+                        .copied(),
+                );
+            }
+            if spec.uses_global_fetch {
+                static_effect_kinds.insert(EffectKind::HttpRequest);
+                static_effect_kinds.insert(EffectKind::NetConnect);
+            }
+            if spec.uses_process_env {
+                static_effect_kinds.insert(EffectKind::EnvRead);
+            }
+            if spec.uses_global_crypto {
+                static_effect_kinds.insert(EffectKind::RandomRead);
+            }
+
+            let (package_id, package_name, package_version, is_root_application, package_rel_dir) =
+                if let Some((pkg_rel_dir, fallback_pkg_name)) =
+                    Self::classify_node_modules_origin(&spec.origin_path)
+                {
+                    let (name, version) = manifest_cache
+                        .entry(pkg_rel_dir.clone())
+                        .or_insert_with(|| {
+                            Self::read_package_manifest_identity(
+                                &project_root.join(&pkg_rel_dir).join("package.json"),
+                                &fallback_pkg_name,
+                                "0.0.0",
+                            )
+                        })
+                        .clone();
+                    (
+                        format!("npm:{name}@{version}"),
+                        name,
+                        version,
+                        false,
+                        Some(pkg_rel_dir),
+                    )
+                } else {
+                    (
+                        root_package_id.clone(),
+                        root_package_name.clone(),
+                        root_package_version.clone(),
+                        true,
+                        None,
+                    )
+                };
+
+            modules.insert(
+                spec.id.clone(),
+                ModulePackageDescriptor {
+                    module_id: spec.id.clone(),
+                    origin_path: spec.origin_path.clone(),
+                    source_sha256: spec.source_sha256.clone(),
+                    package_id,
+                    package_name,
+                    package_version,
+                    is_root_application,
+                    package_rel_dir,
+                    static_effect_kinds,
+                },
+            );
+        }
+
+        Self {
+            project_root: project_root.to_path_buf(),
+            graph_input_hash: graph_input_hash.to_owned(),
+            entrypoint_origin: specs.first().map(|spec| spec.origin_path.clone()),
+            root_package_id,
+            root_package_name,
+            root_package_version,
+            modules,
+            state: Mutex::new(RuntimeAttributionState::default()),
+        }
+    }
+
+    fn with_entrypoint_origin(mut self, entrypoint_origin: impl Into<String>) -> Self {
+        self.entrypoint_origin = Some(entrypoint_origin.into());
+        self
+    }
+
+    fn extension_package_metadata(&self) -> std::collections::BTreeMap<String, String> {
+        let mut dependency_packages = std::collections::BTreeSet::new();
+        for descriptor in self.modules.values() {
+            if !descriptor.is_root_application {
+                dependency_packages.insert(descriptor.package_id.clone());
+            }
+        }
+        let mut metadata = std::collections::BTreeMap::new();
+        metadata.insert("root_package_id".to_owned(), self.root_package_id.clone());
+        metadata.insert("graph_input_hash".to_owned(), self.graph_input_hash.clone());
+        metadata.insert(
+            "dependency_package_count".to_owned(),
+            dependency_packages.len().to_string(),
+        );
+        if !dependency_packages.is_empty() {
+            metadata.insert(
+                "dependency_packages".to_owned(),
+                dependency_packages
+                    .into_iter()
+                    .collect::<Vec<_>>()
+                    .join(","),
+            );
+        }
+        metadata
+    }
+
+    fn observe_module_authorization(
+        &self,
+        request: &frankenengine_engine::module_resolver::ModuleRequest,
+        resolved: &frankenengine_engine::module_resolver::ModuleRecord,
+    ) {
+        use frankenengine_engine::module_resolver::ModuleSourceKind;
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        state.observed_module_authorizations = true;
+        if resolved.provenance.kind == ModuleSourceKind::BuiltIn {
+            let referrer_pkg = request
+                .referrer
+                .as_deref()
+                .and_then(|referrer| self.modules.get(referrer))
+                .map(|desc| desc.package_id.clone())
+                .unwrap_or_else(|| self.root_package_id.clone());
+            let effects = Self::effect_kinds_for_builtin_specifier(&resolved.id);
+            if !effects.is_empty() {
+                state
+                    .runtime_builtin_grants
+                    .entry(referrer_pkg)
+                    .or_default()
+                    .extend(effects.iter().copied());
+            }
+        } else if self.modules.contains_key(&resolved.id) {
+            state.loaded_modules.insert(resolved.id.clone());
+        }
+    }
+
+    fn resolve_target_package_hint(&self, raw_path: &str) -> Option<String> {
+        let candidate = Path::new(raw_path);
+        let rel = if candidate.is_absolute() {
+            candidate
+                .strip_prefix(&self.project_root)
+                .ok()?
+                .to_str()?
+                .to_owned()
+        } else {
+            raw_path.trim_start_matches("./").to_owned()
+        };
+        let (pkg_rel_dir, _) = Self::classify_node_modules_origin(&rel)?;
+        self.modules
+            .values()
+            .find(|desc| desc.package_rel_dir.as_deref() == Some(pkg_rel_dir.as_str()))
+            .map(|desc| desc.package_id.clone())
+    }
+
+    fn observe_host_io(&self, request: &HostIoRequest) {
+        let target_package_hint = match request {
+            HostIoRequest::FsRead { path }
+            | HostIoRequest::FsWrite { path, .. }
+            | HostIoRequest::FsMeta { path, .. } => self.resolve_target_package_hint(path),
+            HostIoRequest::NetworkSend { .. }
+            | HostIoRequest::NetworkRecv { .. }
+            | HostIoRequest::NetworkRequest { .. }
+            | HostIoRequest::RandomRead { .. }
+            | HostIoRequest::EnvRead { .. } => None,
+        };
+        if let Ok(mut state) = self.state.lock() {
+            let snapshot = ObservedRuntimeEffectSnapshot {
+                loaded_modules: state.loaded_modules.clone(),
+                runtime_builtin_grants: state.runtime_builtin_grants.clone(),
+                target_package_hint,
+            };
+            state.effect_snapshots.push(snapshot);
+        }
+    }
+
+    fn observe_process_spawn(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            let snapshot = ObservedRuntimeEffectSnapshot {
+                loaded_modules: state.loaded_modules.clone(),
+                runtime_builtin_grants: state.runtime_builtin_grants.clone(),
+                target_package_hint: None,
+            };
+            state.effect_snapshots.push(snapshot);
+        }
+    }
+
+    fn finalize(
+        &self,
+        imported_module_hashes: &std::collections::BTreeMap<String, String>,
+        ledger: &HostEffectLedger,
+    ) -> PackageAttributionReport {
+        use crate::runtime::effect_receipt::PolicyOutcome;
+
+        let (observed_module_authorizations, final_loaded_modules, final_runtime_grants, snapshots) =
+            match self.state.lock() {
+                Ok(guard) => (
+                    guard.observed_module_authorizations,
+                    guard.loaded_modules.clone(),
+                    guard.runtime_builtin_grants.clone(),
+                    guard.effect_snapshots.clone(),
+                ),
+                Err(poisoned) => {
+                    let guard = poisoned.into_inner();
+                    (
+                        guard.observed_module_authorizations,
+                        guard.loaded_modules.clone(),
+                        guard.runtime_builtin_grants.clone(),
+                        guard.effect_snapshots.clone(),
+                    )
+                }
+            };
+
+        let mut all_evaluated_modules = final_loaded_modules;
+        if let Some(entrypoint_origin) = self.entrypoint_origin.as_deref() {
+            for desc in self.modules.values() {
+                if desc.origin_path == entrypoint_origin || desc.module_id == entrypoint_origin {
+                    all_evaluated_modules.insert(desc.module_id.clone());
+                }
+            }
+        }
+        for rel_path in imported_module_hashes.keys() {
+            let rel_norm = rel_path.trim_start_matches("./");
+            for desc in self.modules.values() {
+                let desc_origin = desc.origin_path.trim_start_matches("./");
+                if desc_origin == rel_norm || desc.module_id == rel_norm {
+                    all_evaluated_modules.insert(desc.module_id.clone());
+                }
+            }
+        }
+
+        let mut package_map: std::collections::BTreeMap<String, PackageAttributionEntry> =
+            std::collections::BTreeMap::new();
+        package_map.insert(
+            self.root_package_id.clone(),
+            PackageAttributionEntry {
+                package_id: self.root_package_id.clone(),
+                package_name: self.root_package_name.clone(),
+                package_version: self.root_package_version.clone(),
+                is_root_application: true,
+                loaded_modules: Vec::new(),
+                declared_effect_kinds: Vec::new(),
+                exact_effect_seqs: Vec::new(),
+                candidate_effect_seqs: Vec::new(),
+                allowed_effects: 0,
+                denied_effects: 0,
+                failed_effects: 0,
+            },
+        );
+
+        let mut package_declared_effects: std::collections::BTreeMap<
+            String,
+            std::collections::BTreeSet<crate::runtime::effect_receipt::EffectKind>,
+        > = std::collections::BTreeMap::new();
+
+        for module_id in &all_evaluated_modules {
+            let Some(desc) = self.modules.get(module_id) else {
+                continue;
+            };
+            let entry = package_map
+                .entry(desc.package_id.clone())
+                .or_insert_with(|| PackageAttributionEntry {
+                    package_id: desc.package_id.clone(),
+                    package_name: desc.package_name.clone(),
+                    package_version: desc.package_version.clone(),
+                    is_root_application: desc.is_root_application,
+                    loaded_modules: Vec::new(),
+                    declared_effect_kinds: Vec::new(),
+                    exact_effect_seqs: Vec::new(),
+                    candidate_effect_seqs: Vec::new(),
+                    allowed_effects: 0,
+                    denied_effects: 0,
+                    failed_effects: 0,
+                });
+            entry.loaded_modules.push(PackageModuleEntry {
+                module_id: desc.module_id.clone(),
+                origin_path: desc.origin_path.clone(),
+                source_sha256: desc.source_sha256.clone(),
+            });
+            package_declared_effects
+                .entry(desc.package_id.clone())
+                .or_default()
+                .extend(desc.static_effect_kinds.iter().copied());
+        }
+        for (pkg_id, grants) in &final_runtime_grants {
+            package_declared_effects
+                .entry(pkg_id.clone())
+                .or_default()
+                .extend(grants.iter().copied());
+        }
+        for (pkg_id, entry) in &mut package_map {
+            if let Some(effects) = package_declared_effects.get(pkg_id) {
+                entry.declared_effect_kinds = effects.iter().copied().collect();
+            }
+        }
+
+        let mut effects = Vec::with_capacity(ledger.entries.len());
+        for (index, chain_entry) in ledger.entries.iter().enumerate() {
+            let receipt = &chain_entry.receipt;
+            let snapshot = snapshots.get(index);
+            let loaded_modules_at_effect = if observed_module_authorizations {
+                snapshot.map_or(&all_evaluated_modules, |snap| &snap.loaded_modules)
+            } else {
+                &all_evaluated_modules
+            };
+            let runtime_grants_at_effect = if observed_module_authorizations {
+                snapshot.map_or(&final_runtime_grants, |snap| &snap.runtime_builtin_grants)
+            } else {
+                &final_runtime_grants
+            };
+
+            let mut loaded_packages = std::collections::BTreeSet::new();
+            loaded_packages.insert(self.root_package_id.clone());
+            let mut capable_packages = std::collections::BTreeSet::new();
+
+            for module_id in loaded_modules_at_effect {
+                if let Some(desc) = self.modules.get(module_id) {
+                    loaded_packages.insert(desc.package_id.clone());
+                    if desc.static_effect_kinds.contains(&receipt.effect_kind) {
+                        capable_packages.insert(desc.package_id.clone());
+                    }
+                }
+            }
+            for (pkg_id, grants) in runtime_grants_at_effect {
+                if loaded_packages.contains(pkg_id) && grants.contains(&receipt.effect_kind) {
+                    capable_packages.insert(pkg_id.clone());
+                }
+            }
+
+            let target_hint = snapshot.and_then(|snap| snap.target_package_hint.clone());
+            let (basis, attributed_package, candidate_packages) = if loaded_packages.len() == 1 {
+                let pkg = loaded_packages.iter().next().cloned();
+                (
+                    EffectAttributionBasis::ExactSingleLoadedPackage,
+                    pkg,
+                    loaded_packages.into_iter().collect::<Vec<_>>(),
+                )
+            } else if capable_packages.len() == 1 {
+                let pkg = capable_packages.iter().next().cloned();
+                (
+                    EffectAttributionBasis::ExactRuntimeCapabilityHolder,
+                    pkg,
+                    capable_packages.into_iter().collect::<Vec<_>>(),
+                )
+            } else if capable_packages.len() > 1 {
+                if let Some(hint) = target_hint.filter(|hint| capable_packages.contains(hint)) {
+                    (
+                        EffectAttributionBasis::ExactTargetWithinPackage,
+                        Some(hint),
+                        capable_packages.into_iter().collect::<Vec<_>>(),
+                    )
+                } else {
+                    (
+                        EffectAttributionBasis::CandidateRuntimeCapabilityHolders,
+                        None,
+                        capable_packages.into_iter().collect::<Vec<_>>(),
+                    )
+                }
+            } else {
+                (
+                    EffectAttributionBasis::CandidateLoadedPackages,
+                    None,
+                    loaded_packages.into_iter().collect::<Vec<_>>(),
+                )
+            };
+
+            if let Some(pkg_id) = &attributed_package {
+                if let Some(pkg_entry) = package_map.get_mut(pkg_id) {
+                    pkg_entry.exact_effect_seqs.push(receipt.seq);
+                    match &receipt.policy_outcome {
+                        PolicyOutcome::Allowed { .. } => {
+                            pkg_entry.allowed_effects = pkg_entry.allowed_effects.saturating_add(1);
+                        }
+                        PolicyOutcome::Denied { .. } => {
+                            pkg_entry.denied_effects = pkg_entry.denied_effects.saturating_add(1);
+                        }
+                        PolicyOutcome::Failed { .. } => {
+                            pkg_entry.failed_effects = pkg_entry.failed_effects.saturating_add(1);
+                        }
+                    }
+                }
+            } else {
+                for candidate in &candidate_packages {
+                    if let Some(pkg_entry) = package_map.get_mut(candidate) {
+                        pkg_entry.candidate_effect_seqs.push(receipt.seq);
+                    }
+                }
+            }
+
+            effects.push(EffectAttributionEntry {
+                seq: receipt.seq,
+                receipt_hash: chain_entry.receipt_hash.clone(),
+                effect_kind: receipt.effect_kind,
+                outcome: receipt.policy_outcome.label().to_owned(),
+                attribution_basis: basis,
+                attributed_package,
+                candidate_packages,
+            });
+        }
+
+        PackageAttributionReport {
+            schema_version: Self::SCHEMA_VERSION.to_owned(),
+            graph_input_hash: self.graph_input_hash.clone(),
+            root_package_id: self.root_package_id.clone(),
+            packages: package_map.into_values().collect(),
+            effects,
+        }
+    }
+}
+
+#[cfg(feature = "engine")]
+struct AttributingModulePolicyHook {
+    inner: Arc<dyn frankenengine_engine::module_resolver::ModulePolicyHook + Send + Sync>,
+    tracker: Arc<RuntimePackageAttributionTracker>,
+}
+
+#[cfg(feature = "engine")]
+impl frankenengine_engine::module_resolver::ModulePolicyHook for AttributingModulePolicyHook {
+    fn authorize(
+        &self,
+        request: &frankenengine_engine::module_resolver::ModuleRequest,
+        resolved: &frankenengine_engine::module_resolver::ModuleRecord,
+        context: &frankenengine_engine::module_resolver::ResolutionContext,
+    ) -> frankenengine_engine::module_resolver::ResolutionResult<()> {
+        self.inner.authorize(request, resolved, context)?;
+        self.tracker.observe_module_authorization(request, resolved);
+        Ok(())
+    }
+
+    fn authorize_metadata(
+        &self,
+        request: &frankenengine_engine::module_resolver::ModuleRequest,
+        metadata: &frankenengine_engine::module_resolver::ModuleMetadata,
+        context: &frankenengine_engine::module_resolver::ResolutionContext,
+    ) -> frankenengine_engine::module_resolver::ResolutionResult<()> {
+        self.inner.authorize_metadata(request, metadata, context)
+    }
+}
+
+#[cfg(feature = "engine")]
+#[derive(Debug)]
+struct AttributingHostIoProvider {
+    inner: Arc<dyn HostIoProvider>,
+    tracker: Arc<RuntimePackageAttributionTracker>,
+}
+
+#[cfg(feature = "engine")]
+impl HostIoProvider for AttributingHostIoProvider {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    fn filesystem_exception_provenance(&self) -> HostIoExceptionProvenance {
+        self.inner.filesystem_exception_provenance()
+    }
+
+    fn perform(&self, request: &HostIoRequest, granted: &[HostIoCapability]) -> HostIoOutcome {
+        self.tracker.observe_host_io(request);
+        self.inner.perform(request, granted)
+    }
+
+    fn perform_controlled(
+        &self,
+        request: &HostIoRequest,
+        granted: &[HostIoCapability],
+        control: Arc<dyn frankenengine_extension_host::host_io::HostIoControl>,
+    ) -> HostIoOutcome {
+        self.tracker.observe_host_io(request);
+        self.inner.perform_controlled(request, granted, control)
+    }
+}
+
+#[cfg(feature = "engine")]
+#[derive(Debug)]
+struct AttributingProcessSpawnProvider {
+    inner: Arc<dyn ProcessSpawnProvider>,
+    tracker: Arc<RuntimePackageAttributionTracker>,
+}
+
+#[cfg(feature = "engine")]
+impl ProcessSpawnProvider for AttributingProcessSpawnProvider {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    fn preflight_request(
+        &self,
+        request: &ProcessSpawnRequest,
+    ) -> std::result::Result<(), ProcessSpawnError> {
+        self.inner.preflight_request(request)
+    }
+
+    fn prepare_request(
+        &self,
+        request: &ProcessSpawnRequest,
+    ) -> std::result::Result<ProcessSpawnRequest, ProcessSpawnError> {
+        self.inner.prepare_request(request)
+    }
+
+    fn perform(
+        &self,
+        request: &ProcessSpawnRequest,
+        granted: &[ProcessSpawnCapability],
+    ) -> ProcessSpawnOutcome {
+        self.tracker.observe_process_spawn();
+        self.inner.perform(request, granted)
+    }
+
+    fn perform_controlled(
+        &self,
+        request: &ProcessSpawnRequest,
+        granted: &[ProcessSpawnCapability],
+        control: Arc<dyn ProcessSpawnControl>,
+    ) -> ProcessSpawnOutcome {
+        self.tracker.observe_process_spawn();
+        self.inner.perform_controlled(request, granted, control)
+    }
+
+    fn cleanup_handle(&self, handle: &str) -> ProcessSpawnOutcome {
+        self.inner.cleanup_handle(handle)
+    }
+}
+
+#[cfg(feature = "engine")]
 struct FrozenNativeModules {
     entry: frankenengine_engine::module_resolver::ResolutionOutcome,
     resolver: frankenengine_engine::module_resolver::ExecutionModuleResolver,
     summary: NativeModuleGraphSummary,
     replay_sources: Option<crate::ops::native_replay::CapturedModuleSources>,
+    attribution_tracker: Arc<RuntimePackageAttributionTracker>,
 }
 
 /// Apply an authenticated publisher ceiling to the exact inputs used by both
@@ -7581,12 +8322,24 @@ fn prepare_native_frozen_modules(
                 }
             })?,
         );
-        let policy = Arc::new(CapabilityPolicyHook::new(
-            capabilities
-                .iter()
-                .filter_map(|capability| RuntimeCapability::from_tag_str(capability))
-                .collect(),
-        ));
+        let attribution_tracker = Arc::new(
+            RuntimePackageAttributionTracker::from_captured_resolver(
+                root,
+                &resolver.summary().graph_input_hash,
+                &resolver.module_attribution_specs(),
+            )
+            .with_entrypoint_origin(resolver.summary().entrypoint.clone()),
+        );
+        let policy: Arc<dyn frankenengine_engine::module_resolver::ModulePolicyHook + Send + Sync> =
+            Arc::new(AttributingModulePolicyHook {
+                inner: Arc::new(CapabilityPolicyHook::new(
+                    capabilities
+                        .iter()
+                        .filter_map(|capability| RuntimeCapability::from_tag_str(capability))
+                        .collect(),
+                )),
+                tracker: Arc::clone(&attribution_tracker),
+            });
         let entry = resolver
             .resolve(
                 &resolver.entry_request(),
@@ -7614,7 +8367,63 @@ fn prepare_native_frozen_modules(
             resolver,
             summary,
             replay_sources,
+            attribution_tracker,
         })
+    }
+}
+
+/// Best-effort static module-graph capture for non-frozen runs (`balanced` / `legacy-risky`)
+/// so per-package behavioral and host-effect attribution is emitted automatically without
+/// requiring `--frozen-modules`. Never grants authority or aborts ordinary dynamic runs.
+#[cfg(feature = "engine")]
+fn prepare_best_effort_package_attribution_tracker(
+    project_paths: &RunProjectPaths,
+    orchestrator_config: &OrchestratorConfig,
+    contained_symlinks: bool,
+) -> Option<Arc<RuntimePackageAttributionTracker>> {
+    #[cfg(not(unix))]
+    {
+        let _ = (project_paths, orchestrator_config, contained_symlinks);
+        None
+    }
+    #[cfg(unix)]
+    {
+        use crate::supply_chain::module_resolution_graph::file_resolution::SymlinkPolicy;
+        use crate::supply_chain::module_resolution_graph::file_resolution::source_graph::{
+            GraphOptions, capture, engine_resolver::CapturedEngineResolver,
+        };
+
+        let root = project_paths.project_root();
+        let entrypoint = project_paths
+            .entrypoint()
+            .strip_prefix(root)
+            .ok()?
+            .to_str()?;
+        let options = GraphOptions {
+            symlink_policy: if contained_symlinks {
+                SymlinkPolicy::Contained
+            } else {
+                SymlinkPolicy::Reject
+            },
+            additional_conditions: orchestrator_config.module_conditions.clone(),
+            ..GraphOptions::default()
+        };
+        let graph = capture(root, entrypoint, options).ok()?;
+        let pin = graph.report().input_hash.clone();
+        let resolver = CapturedEngineResolver::new_with_parser_options(
+            graph,
+            &pin,
+            orchestrator_config.parser_options.clone(),
+        )
+        .ok()?;
+        Some(Arc::new(
+            RuntimePackageAttributionTracker::from_captured_resolver(
+                root,
+                &resolver.summary().graph_input_hash,
+                &resolver.module_attribution_specs(),
+            )
+            .with_entrypoint_origin(resolver.summary().entrypoint.clone()),
+        ))
     }
 }
 
@@ -7740,6 +8549,7 @@ fn engine_containment_decision(
         execution_limits: Some(execution_limits.with_selected_lane(result.lane)),
         frozen_modules: None,
         clock_epoch_ms: None,
+        package_attribution: None,
     }
 }
 
@@ -12410,6 +13220,14 @@ impl EngineDispatcher {
         let frozen_module_summary = frozen_modules
             .as_ref()
             .map(|modules| modules.summary.clone());
+        let attribution_tracker = match frozen_modules.as_ref() {
+            Some(modules) => Some(Arc::clone(&modules.attribution_tracker)),
+            None => prepare_best_effort_package_attribution_tracker(
+                &project_paths,
+                &orchestrator_config,
+                config.runtime.frozen_module_symlinks == Some(true),
+            ),
+        };
         let replay_module_sources = frozen_modules
             .as_ref()
             .and_then(|modules| modules.replay_sources.clone());
@@ -12451,7 +13269,11 @@ impl EngineDispatcher {
             module_root: Some(module_root),
             capabilities,
             version: env!("CARGO_PKG_VERSION").to_string(), // Extract from package metadata
-            metadata: std::collections::BTreeMap::new(),
+            metadata: attribution_tracker
+                .as_ref()
+                .map_or_else(std::collections::BTreeMap::new, |tracker| {
+                    tracker.extension_package_metadata()
+                }),
         };
 
         // bd-656a2: capture a stable trace label for the SSRF gate's audit records
@@ -12542,21 +13364,22 @@ impl EngineDispatcher {
                 inner: provider,
                 expires_at_ms: admission.expires_at_ms(),
             };
+            let provider: Arc<dyn ProcessSpawnProvider> = match attribution_tracker.as_ref() {
+                Some(tracker) => Arc::new(AttributingProcessSpawnProvider {
+                    inner: Arc::new(provider),
+                    tracker: Arc::clone(tracker),
+                }),
+                None => Arc::new(provider),
+            };
             let journal = Arc::new(InMemoryHostEffectJournal::recording());
             if capture_replay {
                 let provider = Arc::new(
-                    crate::ops::native_replay::CapturingProcessSpawnProvider::new(Arc::new(
-                        provider,
-                    )),
+                    crate::ops::native_replay::CapturingProcessSpawnProvider::new(provider),
                 );
                 orchestrator.set_process_spawn(provider.clone(), journal, process_spawn_authority);
                 replay_process_provider = Some(provider);
             } else {
-                orchestrator.set_process_spawn(
-                    Arc::new(provider),
-                    journal,
-                    process_spawn_authority,
-                );
+                orchestrator.set_process_spawn(provider, journal, process_spawn_authority);
             }
             tracing::info!(
                 execution_mode = "native",
@@ -12685,6 +13508,13 @@ impl EngineDispatcher {
                         &mut telemetry_guard,
                     )
                 })?;
+                let host_io: Arc<dyn HostIoProvider> = match attribution_tracker.as_ref() {
+                    Some(tracker) => Arc::new(AttributingHostIoProvider {
+                        inner: host_io,
+                        tracker: Arc::clone(tracker),
+                    }),
+                    None => host_io,
+                };
                 orchestrator.set_host_io(host_io, Some(recorder));
                 tracing::info!(
                     execution_mode = "native",
@@ -12993,6 +13823,12 @@ impl EngineDispatcher {
         );
         engine_decision.frozen_modules = frozen_module_summary;
         engine_decision.clock_epoch_ms = resolved_clock_epoch_ms;
+        engine_decision.package_attribution = attribution_tracker.as_ref().map(|tracker| {
+            tracker.finalize(
+                &execution_result.imported_module_hashes,
+                &host_effect_ledger,
+            )
+        });
 
         // Stop telemetry and return
         let telemetry_guard = telemetry_guard.take().ok_or_else(|| {
@@ -15999,6 +16835,7 @@ mod tests {
             }),
             frozen_modules: None,
             clock_epoch_ms: None,
+            package_attribution: None,
         }
     }
 

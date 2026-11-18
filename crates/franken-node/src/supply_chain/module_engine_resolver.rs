@@ -14,8 +14,8 @@ pub use preparation::detect_kind_with_options;
 use preparation::{PreparedSources, SourcePreparer};
 
 use super::registry::{
-    ModuleKind, PinnedModuleRegistry, RegisteredModule, RegistrySummary, RequestStyle,
-    ResolutionKind,
+    ModuleKind, PinnedModuleRegistry, RegisteredModule, RegisteredTarget, RegistrySummary,
+    RequestStyle, ResolutionKind,
 };
 use super::{CapturedModuleGraph, ResolutionError as CaptureError, ResolutionUrl};
 use frankenengine_engine::capability::RuntimeCapability;
@@ -40,6 +40,20 @@ use std::sync::{Arc, OnceLock};
 const MAX_CHAIN_SOURCE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_SHARED_RECORD_SOURCE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_CONTEXT_BYTES: usize = 1024;
+
+/// Source-free per-module provenance and capability-import summary extracted
+/// from a sealed [`CapturedEngineResolver`] for per-package runtime attribution
+/// (`bd-reality-20260923-26n9r.15`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapturedModuleAttributionSpec {
+    pub id: String,
+    pub origin_path: String,
+    pub source_sha256: String,
+    pub builtin_specifiers: BTreeSet<String>,
+    pub uses_global_fetch: bool,
+    pub uses_process_env: bool,
+    pub uses_global_crypto: bool,
+}
 
 /// An embedding resolver, not an evaluator or a policy grant. It can be passed
 /// directly as &dyn FrankenEngine ModuleResolver. Syntax detection and source
@@ -132,6 +146,46 @@ impl CapturedEngineResolver {
 
     pub fn summary(&self) -> &RegistrySummary {
         self.registry.summary()
+    }
+
+    /// Return per-module source identity and resolved builtin-import edges for
+    /// every workspace module in the sealed registry (excluding synthetic
+    /// terminal `NativeBuiltin` descriptors).
+    pub fn module_attribution_specs(&self) -> Vec<CapturedModuleAttributionSpec> {
+        let builtin_paths: BTreeMap<&str, &str> = self
+            .registry
+            .modules()
+            .filter(|module| module.kind() == ModuleKind::NativeBuiltin)
+            .map(|module| (module.id(), module.origin().path.as_str()))
+            .collect();
+        self.registry
+            .modules()
+            .filter(|module| module.kind() != ModuleKind::NativeBuiltin)
+            .map(|module| {
+                let mut builtin_specifiers = BTreeSet::new();
+                for dep in module.dependencies() {
+                    if let RegisteredTarget::Module { id } = &dep.target
+                        && let Some(builtin) = builtin_paths.get(id.as_str())
+                    {
+                        builtin_specifiers.insert((*builtin).to_owned());
+                    } else if let Some(builtin) = node_builtin_specifier(&dep.specifier)
+                        .or_else(|| lowering_only_cjs_builtin_specifier(&dep.specifier))
+                    {
+                        builtin_specifiers.insert(builtin.to_owned());
+                    }
+                }
+                let prepared = self.prepared_sources.source(module);
+                CapturedModuleAttributionSpec {
+                    id: module.id().to_owned(),
+                    origin_path: module.origin().path.clone(),
+                    source_sha256: module.source_sha256().to_owned(),
+                    builtin_specifiers,
+                    uses_global_fetch: prepared.contains("fetch("),
+                    uses_process_env: prepared.contains("process.env"),
+                    uses_global_crypto: prepared.contains("crypto."),
+                }
+            })
+            .collect()
     }
 
     /// Source-free evidence for files needing engine preparation. Explicit

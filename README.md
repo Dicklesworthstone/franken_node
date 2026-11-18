@@ -84,7 +84,12 @@ Every gate above is a runtime default, not an external scanner. Each `run`
 (including a preflight refusal) and each `trust revoke`/`quarantine`/`release`
 and `fleet release` decision appends a signed, hash-chained entry to the
 evidence ledger; other decisions (a trust-scan risk raise, for example) are
-recorded on the trust card, not in the ledger.
+recorded on the trust card, not in the ledger. Every multi-dependency `run`
+also attaches `receipt.package_attribution`, binding each allowed or denied
+host effect (`seq`, `receipt_hash`, `effect_kind`) to its originating package
+or candidate capability-holder set. You can replay the entire scenario offline
+against hermetic packuments (`trust scan --deep --offline-registry-dir`) via
+`bash scripts/demo_readme_scenario.sh`.
 
 <div align="center">
   <img src="docs/assets/operator_workflow_terminal.svg" alt="franken-node operator workflow: audit, trust scan, lockstep, quarantine, incident bundle, counterfactual">

@@ -2778,6 +2778,12 @@ pub struct TrustScanArgs {
     #[arg(long)]
     pub refresh: bool,
 
+    /// Read `--deep` npm packument snapshots (`<package>.json`, or `@scope__<pkg>.json`)
+    /// from a pinned local fixture directory instead of live network endpoints.
+    /// Reports `metadata_source = "hermetic_fixture"` and never authenticates risk lowering.
+    #[arg(long, value_name = "DIR")]
+    pub offline_registry_dir: Option<PathBuf>,
+
     /// Emit structured JSON output.
     #[arg(long)]
     pub json: bool,

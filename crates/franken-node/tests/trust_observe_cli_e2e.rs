@@ -303,3 +303,524 @@ fn trust_observe_routes_real_detector_findings_into_persistent_card_risk() {
         "a heuristic must not silently quarantine"
     );
 }
+
+#[test]
+fn complete_readme_trust_scenario_and_multi_dependency_effect_attribution() {
+    let dir = tempfile::tempdir().expect("readme scenario workspace");
+    let root = dir.path();
+
+    let hash_b64 = |seed: &[u8]| -> (String, String) {
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest(seed);
+        (
+            format!(
+                "sha256-{}",
+                base64::engine::general_purpose::STANDARD.encode(digest)
+            ),
+            format!("sha256:{}", hex::encode(digest)),
+        )
+    };
+    let (cfg_sri, _) = hash_b64(b"config-loader@1.0.0");
+    let (exp_sri, _) = hash_b64(b"expresss@4.0.0");
+    let (tel_sri, tel_sha256) = hash_b64(b"telemetry-drift@0.0.5");
+
+    std::fs::write(
+        root.join("package.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "name": "readme-scenario-app",
+            "version": "1.0.0",
+            "dependencies": {
+                "config-loader": "1.0.0",
+                "expresss": "4.0.0",
+                "telemetry-drift": "0.0.5"
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("package-lock.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "name": "readme-scenario-app",
+            "version": "1.0.0",
+            "lockfileVersion": 3,
+            "requires": true,
+            "packages": {
+                "": {
+                    "name": "readme-scenario-app",
+                    "version": "1.0.0",
+                    "dependencies": {
+                        "config-loader": "1.0.0",
+                        "expresss": "4.0.0",
+                        "telemetry-drift": "0.0.5"
+                    }
+                },
+                "node_modules/config-loader": {
+                    "version": "1.0.0",
+                    "integrity": cfg_sri
+                },
+                "node_modules/expresss": {
+                    "version": "4.0.0",
+                    "integrity": exp_sri
+                },
+                "node_modules/telemetry-drift": {
+                    "version": "0.0.5",
+                    "integrity": tel_sri
+                }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    std::fs::write(root.join("app-config.json"), br#"{"env":"prod"}"#).unwrap();
+
+    let write_pkg = |name: &str, version: &str, code: &str| {
+        let pkg_dir = root.join("node_modules").join(name);
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        std::fs::write(
+            pkg_dir.join("package.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "name": name,
+                "version": version,
+                "main": "index.js"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(pkg_dir.join("index.js"), code).unwrap();
+    };
+    write_pkg(
+        "config-loader",
+        "1.0.0",
+        "const fs = require('fs');\nexports.loadConfig = () => JSON.parse(fs.readFileSync('app-config.json', 'utf8'));\n",
+    );
+    write_pkg(
+        "expresss",
+        "4.0.0",
+        "exports.banner = (env) => 'route:' + env;\n",
+    );
+    write_pkg(
+        "telemetry-drift",
+        "0.0.5",
+        "const http = require('http');\nexports.ping = () => {\n  const req = http.get('http://169.254.169.254/latest/meta-data/', () => {});\n  req.on('error', () => console.log('telemetry-egress-refused'));\n};\n",
+    );
+    std::fs::write(
+        root.join("app.js"),
+        "const cfg = require('config-loader').loadConfig();\nconst banner = require('expresss').banner(cfg.env);\nrequire('telemetry-drift').ping();\nconsole.log(banner);\n",
+    )
+    .unwrap();
+
+    let offline_dir = root.join("offline-registry");
+    std::fs::create_dir_all(&offline_dir).unwrap();
+    let fourteen_days_ago = (chrono::Utc::now() - chrono::Duration::days(14)).to_rfc3339();
+    let two_years_ago = (chrono::Utc::now() - chrono::Duration::days(730)).to_rfc3339();
+
+    std::fs::write(
+        offline_dir.join("config-loader.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "_fixture": "Hermetic offline npm packument: fresh package (14d old) + sole maintainer.",
+            "_hermetic_dependent_count": 3,
+            "name": "config-loader",
+            "maintainers": [{"name": "newpub", "email": "newpub@example.test"}],
+            "time": {
+                "created": fourteen_days_ago,
+                "1.0.0": fourteen_days_ago
+            },
+            "versions": {
+                "1.0.0": {
+                    "dist": {"integrity": cfg_sri}
+                }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        offline_dir.join("expresss.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "_fixture": "Hermetic offline npm packument: distance-1 typosquat of express.",
+            "_hermetic_dependent_count": 0,
+            "name": "expresss",
+            "maintainers": [{"name": "squatter", "email": "squatter@example.test"}],
+            "time": {
+                "created": fourteen_days_ago,
+                "4.0.0": fourteen_days_ago
+            },
+            "versions": {
+                "4.0.0": {
+                    "dist": {"integrity": exp_sri}
+                }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        offline_dir.join("telemetry-drift.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "_fixture": "Hermetic offline npm packument: 6-release window introducing postinstall + bin drift.",
+            "_hermetic_dependent_count": 42,
+            "name": "telemetry-drift",
+            "maintainers": [{"name": "driftmaint", "email": "drift@example.test"}],
+            "time": {
+                "created": two_years_ago,
+                "0.0.0": "2024-01-01T00:00:00.000Z",
+                "0.0.1": "2024-02-01T00:00:00.000Z",
+                "0.0.2": "2024-03-01T00:00:00.000Z",
+                "0.0.3": "2024-04-01T00:00:00.000Z",
+                "0.0.4": "2024-05-01T00:00:00.000Z",
+                "0.0.5": "2024-06-01T00:00:00.000Z"
+            },
+            "versions": {
+                "0.0.0": {},
+                "0.0.1": {"dependencies": {"helper-a": "1.0.0"}},
+                "0.0.2": {"dependencies": {"helper-a": "1.0.1"}},
+                "0.0.3": {"scripts": {"postinstall": "node install.js"}},
+                "0.0.4": {"scripts": {"postinstall": "node install.js"}, "bin": {"td": "bin/td.js"}},
+                "0.0.5": {
+                    "scripts": {"postinstall": "node install.js"},
+                    "bin": {"td": "bin/td.js"},
+                    "dist": {"integrity": tel_sri}
+                }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    // 1. Initialize workspace under balanced profile
+    let init_out = run(
+        root,
+        &["init", "--profile", "balanced", "--out-dir", ".", "--json"],
+    );
+    assert!(
+        init_out.status.success(),
+        "init failed: {}",
+        String::from_utf8_lossy(&init_out.stderr)
+    );
+
+    // 2. Run hermetic deep scan and verify typosquat + fresh-package + camouflage drift signals
+    let scan_out = run(
+        root,
+        &[
+            "trust",
+            "scan",
+            ".",
+            "--deep",
+            "--offline-registry-dir",
+            "offline-registry",
+            "--json",
+        ],
+    );
+    let scan_json = json(&scan_out);
+    assert!(scan_out.status.success(), "{scan_json}");
+    assert_eq!(scan_json["metadata_source"], "hermetic_fixture");
+
+    let cfg_card = json(&run(
+        root,
+        &["trust", "card", "npm:config-loader", "--json"],
+    ));
+    assert_eq!(
+        cfg_card["user_facing_risk_assessment"]["level"], "medium",
+        "{cfg_card}"
+    );
+    assert!(
+        cfg_card["user_facing_risk_assessment"]["summary"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("new package: first published"),
+        "{cfg_card}"
+    );
+
+    let exp_card = json(&run(root, &["trust", "card", "npm:expresss", "--json"]));
+    assert_eq!(
+        exp_card["user_facing_risk_assessment"]["level"], "high",
+        "{exp_card}"
+    );
+    assert!(
+        exp_card["user_facing_risk_assessment"]["summary"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("typosquat"),
+        "{exp_card}"
+    );
+
+    let tel_card = json(&run(
+        root,
+        &["trust", "card", "npm:telemetry-drift", "--json"],
+    ));
+    assert_eq!(
+        tel_card["user_facing_risk_assessment"]["level"], "critical",
+        "{tel_card}"
+    );
+    assert!(
+        !tel_card["camouflage_hints"]
+            .as_array()
+            .expect("camouflage_hints")
+            .is_empty(),
+        "6-release install-hook drift must land camouflage_hints on card: {tel_card}"
+    );
+
+    // 3. Submit 4 chained collector-attested behavioral observations on telemetry-drift
+    //    demonstrating monotonic capability creep (`GradualCreep`) on real behavioral telemetry
+    let collector = SigningKey::from_bytes(&[73; 32]);
+    std::fs::write(
+        root.join("collector.pub"),
+        hex::encode(collector.verifying_key().to_bytes()),
+    )
+    .unwrap();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let mut prev_obs_id: Option<String> = None;
+    let mut final_obs_json = serde_json::Value::Null;
+    for seq in 0_u64..4 {
+        let obs = SignedBehavioralObservation::sign(
+            BehavioralObservation {
+                extension_id: "npm:telemetry-drift".to_string(),
+                package_version: "0.0.5".to_string(),
+                artifact_hash: tel_sha256.clone(),
+                workload_id: "readme-scenario-collector-v1".to_string(),
+                measurement_scope: "isolated_package".to_string(),
+                sequence: seq,
+                observed_at_epoch_secs: now.saturating_sub(60 - seq * 10),
+                window_duration_ms: 1_000,
+                workload_iterations: 1,
+                previous_observation_id: prev_obs_id.take(),
+                observed_capabilities: BTreeMap::from([(
+                    "network.requests".to_string(),
+                    100 + seq * 5,
+                )]),
+                declared_capabilities: BTreeMap::from([("network.requests".to_string(), 100)]),
+            },
+            &collector,
+        )
+        .unwrap();
+        prev_obs_id = Some(obs.observation_id().unwrap());
+        let obs_out = submit(root, &obs);
+        let obs_json = json(&obs_out);
+        assert!(obs_out.status.success(), "{obs_json}");
+        assert_eq!(obs_json["status"], "accepted");
+        final_obs_json = obs_json;
+    }
+    assert!(
+        final_obs_json["hints"]
+            .as_array()
+            .expect("hints")
+            .iter()
+            .any(|hint| hint["kind"].as_str() == Some("gradual_creep")),
+        "monotonic behavioral drift must trigger gradual_creep: {final_obs_json}"
+    );
+
+    // 4a. Execute multi-dependency app under default balanced (non-frozen) and verify
+    //     automatic per-package runtime effect attribution without requiring --frozen-modules.
+    let plain_out = run(root, &["run", "app.js", "--policy", "balanced", "--json"]);
+    let plain_json = json(&plain_out);
+    assert!(
+        plain_out.status.success(),
+        "plain balanced run failed: stdout={plain_json} stderr={}",
+        String::from_utf8_lossy(&plain_out.stderr)
+    );
+    assert_eq!(
+        plain_json["receipt"]["package_attribution"]["effects"][0]["attributed_package"],
+        "npm:config-loader@1.0.0"
+    );
+    assert_eq!(
+        plain_json["receipt"]["package_attribution"]["effects"][1]["attributed_package"],
+        "npm:telemetry-drift@0.0.5"
+    );
+
+    // 4b. Execute multi-dependency app under balanced with --frozen-modules --capture-replay
+    //     and verify exact per-package runtime effect attribution + hermetic replay capture.
+    let run_out = run(
+        root,
+        &[
+            "run",
+            "app.js",
+            "--policy",
+            "balanced",
+            "--frozen-modules",
+            "--capture-replay",
+            "--json",
+        ],
+    );
+    let run_json = json(&run_out);
+    assert!(
+        run_out.status.success(),
+        "balanced run failed: stdout={run_json} stderr={}",
+        String::from_utf8_lossy(&run_out.stderr)
+    );
+    assert_eq!(
+        run_json["dispatch"]["captured_output"]["stdout"],
+        "route:prod\ntelemetry-egress-refused\n"
+    );
+    let attribution = &run_json["receipt"]["package_attribution"];
+    assert_eq!(
+        attribution["schema_version"],
+        "franken-node/package-attribution-report/v1"
+    );
+    assert_eq!(
+        attribution["root_package_id"],
+        "app:readme-scenario-app@1.0.0"
+    );
+    assert_eq!(
+        attribution,
+        &run_json["dispatch"]["engine_decision"]["package_attribution"]
+    );
+    let effects = attribution["effects"]
+        .as_array()
+        .expect("attributed effects");
+    assert_eq!(effects.len(), 2, "{attribution}");
+    assert_eq!(effects[0]["effect_kind"], "fs_read");
+    assert_eq!(effects[0]["outcome"], "allowed");
+    assert_eq!(
+        effects[0]["attribution_basis"],
+        "exact_runtime_capability_holder"
+    );
+    assert_eq!(effects[0]["attributed_package"], "npm:config-loader@1.0.0");
+    assert_eq!(effects[1]["effect_kind"], "http_request");
+    assert_eq!(effects[1]["outcome"], "denied");
+    assert_eq!(
+        effects[1]["attribution_basis"],
+        "exact_runtime_capability_holder"
+    );
+    assert_eq!(
+        effects[1]["attributed_package"],
+        "npm:telemetry-drift@0.0.5"
+    );
+
+    let packages = attribution["packages"]
+        .as_array()
+        .expect("attributed packages");
+    let pkg_for = |id: &str| {
+        packages
+            .iter()
+            .find(|entry| entry["package_id"].as_str() == Some(id))
+            .unwrap_or_else(|| panic!("missing package {id} in {packages:?}"))
+    };
+    assert_eq!(pkg_for("npm:config-loader@1.0.0")["allowed_effects"], 1);
+    assert_eq!(pkg_for("npm:config-loader@1.0.0")["denied_effects"], 0);
+    assert_eq!(pkg_for("npm:telemetry-drift@0.0.5")["allowed_effects"], 0);
+    assert_eq!(pkg_for("npm:telemetry-drift@0.0.5")["denied_effects"], 1);
+    assert_eq!(pkg_for("npm:expresss@4.0.0")["allowed_effects"], 0);
+    assert_eq!(pkg_for("npm:expresss@4.0.0")["denied_effects"], 0);
+
+    // 5. Strict profile refuses high-risk dependencies at preflight before guest execution
+    let strict_out = run(root, &["run", "app.js", "--policy", "strict", "--json"]);
+    assert!(
+        !strict_out.status.success(),
+        "strict must refuse high-risk card"
+    );
+    let strict_json = json(&strict_out);
+    assert_eq!(strict_json["verdict"]["status"], "blocked", "{strict_json}");
+    assert_eq!(
+        strict_json["receipt"]["decision"], "denied",
+        "{strict_json}"
+    );
+
+    // 6. Revoke telemetry-drift and verify even balanced refuses at preflight
+    let revoke_out = run(root, &["trust", "revoke", "npm:telemetry-drift", "--json"]);
+    assert!(
+        revoke_out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&revoke_out.stderr)
+    );
+    let revoked_run = run(root, &["run", "app.js", "--policy", "balanced", "--json"]);
+    assert!(
+        !revoked_run.status.success(),
+        "revoked package must block balanced run"
+    );
+
+    // 7. Verify durable signed hash-chained evidence ledger across all decisions
+    let ledger_out = run(
+        root,
+        &[
+            "verify",
+            "transparency-log",
+            ".franken-node/state/evidence-ledger.db",
+            "--public-key",
+            ".franken-node/keys/receipt-signing.pub",
+            "--json",
+        ],
+    );
+    let ledger_json = json(&ledger_out);
+    assert!(ledger_out.status.success(), "{ledger_json}");
+    assert_eq!(ledger_json["status"], "valid");
+    assert_eq!(ledger_json["signatures_verified"], true);
+    assert!(
+        ledger_json["total_entries"].as_u64().unwrap_or(0) >= 4,
+        "expected >=4 chained ledger entries (run + strict denial + revoke + balanced denial): {ledger_json}"
+    );
+
+    // 8. Export incident bundle from recorded run, execute native replay, and score strict counterfactual
+    let receipt_id = run_json["receipt"]["receipt_id"]
+        .as_str()
+        .expect("receipt_id");
+    let cap_out = run(
+        root,
+        &["incident", "capture", "--from-run", receipt_id, "--json"],
+    );
+    let cap_json = json(&cap_out);
+    assert!(cap_out.status.success(), "{cap_json}");
+    let incident_id = cap_json["incident_id"].as_str().expect("incident_id");
+    let bundle_out = run(
+        root,
+        &[
+            "incident",
+            "bundle",
+            "--id",
+            incident_id,
+            "--verify",
+            "--json",
+        ],
+    );
+    assert!(
+        bundle_out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&bundle_out.stderr)
+    );
+    let bundle_name = format!("{incident_id}.fnbundle");
+
+    let replay_out = run(
+        root,
+        &[
+            "incident",
+            "replay",
+            "--bundle",
+            &bundle_name,
+            "--execute",
+            "--trusted-public-key",
+            ".franken-node/keys/receipt-signing.pub",
+            "--json",
+        ],
+    );
+    let replay_json = json(&replay_out);
+    assert!(replay_out.status.success(), "{replay_json}");
+    assert_eq!(replay_json["replay_result"]["matched"], true);
+    assert_eq!(replay_json["execution_result"]["matched"], true);
+    assert_eq!(
+        replay_json["execution_result"]["verification_scope"],
+        "guest_execution"
+    );
+
+    let cf_out = run(
+        root,
+        &[
+            "incident",
+            "counterfactual",
+            "--bundle",
+            &bundle_name,
+            "--trusted-public-key",
+            ".franken-node/keys/receipt-signing.pub",
+            "--policy",
+            "strict",
+        ],
+    );
+    assert!(
+        cf_out.status.success(),
+        "counterfactual failed: {}",
+        String::from_utf8_lossy(&cf_out.stderr)
+    );
+}
