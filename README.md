@@ -794,6 +794,8 @@ fixed. Completed native run receipts and engine decisions include
 `execution_limits` with the effective limits for both lanes and `selected_lane`
 identifying the lane actually used.
 
+Guest wall-clock seeding defaults to deterministic `virtual` mode (`runtime.wall_clock_mode = "virtual"`), starting at `1767225600000` (`2026-01-01T00:00:00Z`) and advancing monotonically across timer delays and guest instructions. Set `runtime.wall_clock_mode = "real"` (or `FRANKEN_NODE_RUNTIME_WALL_CLOCK_MODE=real`) to seed `Date.now()` from host wall-clock time at run start, or `runtime.clock_epoch_ms` (`FRANKEN_NODE_RUNTIME_CLOCK_EPOCH_MS`) to choose an explicit Unix-millisecond epoch; any non-default seed is recorded in `engine_decision.clock_epoch_ms` and replayed deterministically by `incident replay`.
+
 Function-frame capacity can be increased without selecting a different trust
 profile. Set `runtime.max_registers` to a value in **1–65,536** to replace the
 register window on both native lanes, or `runtime.max_call_depth` in

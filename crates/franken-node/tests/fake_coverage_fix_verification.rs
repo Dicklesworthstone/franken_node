@@ -145,6 +145,11 @@ mod manifest_verification {
             }
         }
         // If we reach here, the clean field passed validation
-        assert!(true, "Clean manifest field should pass security checks");
+        assert!(
+            !dangerous_patterns
+                .iter()
+                .any(|p| clean_manifest_field.contains(p)),
+            "Clean manifest field should pass security checks"
+        );
     }
 }

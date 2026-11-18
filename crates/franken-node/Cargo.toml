@@ -2138,3 +2138,44 @@ required-features = ["engine"]
 [[test]]
 name = "operator_state_execution"
 path = "tests/operator_state_execution.rs"
+
+[[test]]
+name = "epoch_key_derivation"
+path = "tests/epoch_key_derivation.rs"
+
+[[test]]
+name = "degraded_mode_audit_events"
+path = "tests/degraded_mode_audit_events.rs"
+
+[[test]]
+name = "dgis_migration_gate"
+path = "tests/dgis_migration_gate.rs"
+required-features = ["admin-tools"]
+
+[[test]]
+name = "vef_adversarial_suite"
+path = "tests/vef_adversarial_suite.rs"
+
+[[test]]
+name = "adversarial_remote_cap_replay"
+path = "tests/adversarial_remote_cap_replay.rs"
+
+[[test]]
+name = "doctor_structured_logs_jsonl"
+path = "tests/doctor_structured_logs_jsonl.rs"
+
+[[test]]
+name = "fake_coverage_fix_verification"
+path = "tests/fake_coverage_fix_verification.rs"
+
+[[test]]
+name = "migration_pipeline_hash_length_regression"
+path = "tests/migration_pipeline_hash_length_regression.rs"
+
+[[test]]
+name = "test_chrono_fallback"
+path = "tests/test_chrono_fallback.rs"
+
+[[test]]
+name = "test_chrono_max"
+path = "tests/test_chrono_max.rs"

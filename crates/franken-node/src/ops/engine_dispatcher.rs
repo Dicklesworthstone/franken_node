@@ -4939,6 +4939,9 @@ fn native_run_policy_changed(admitted: &Config, current: &Config) -> bool {
                 .effective_instruction_budget(current.profile)
         || admitted.runtime.effective_parse_budget(admitted.profile)
             != current.runtime.effective_parse_budget(current.profile)
+        || admitted.runtime.effective_wall_clock_mode()
+            != current.runtime.effective_wall_clock_mode()
+        || admitted.runtime.clock_epoch_ms != current.runtime.clock_epoch_ms
         || admitted.security.network_policy != current.security.network_policy
 }
 
@@ -5341,6 +5344,11 @@ pub struct EngineContainmentDecision {
     /// admitted source/routes, not how many modules the program evaluated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frozen_modules: Option<NativeModuleGraphSummary>,
+    /// Starting wall-clock epoch seed in Unix milliseconds when `wall_clock_mode = "real"`
+    /// or `clock_epoch_ms` was explicitly configured (`None` for the default fixed
+    /// virtual epoch `1767225600000`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clock_epoch_ms: Option<i64>,
 }
 
 /// Source-free identity of the immutable graph supplied to native execution.
@@ -7731,6 +7739,7 @@ fn engine_containment_decision(
         ),
         execution_limits: Some(execution_limits.with_selected_lane(result.lane)),
         frozen_modules: None,
+        clock_epoch_ms: None,
     }
 }
 
@@ -12454,6 +12463,30 @@ impl EngineDispatcher {
         let expected_evidence_identity = evidence_authority.verification_identity();
         let host_effect_ledger_authority = evidence_authority.clone();
         let host_effect_ledger_epoch = security_epoch_for_profile(config.profile);
+        let resolved_clock_epoch_ms = if let Some(epoch_ms) = config.runtime.clock_epoch_ms {
+            Some(epoch_ms)
+        } else if config.runtime.effective_wall_clock_mode()
+            == crate::config::RuntimeWallClockMode::Real
+        {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|error| {
+                    native_engine_spawn_error_with_telemetry_cleanup(
+                        format!("Failed reading host wall clock for wall_clock_mode=real: {error}"),
+                        &mut telemetry_guard,
+                    )
+                })?
+                .as_millis();
+            let now_ms = i64::try_from(now_ms).map_err(|_| {
+                native_engine_spawn_error_with_telemetry_cleanup(
+                    "Host wall clock milliseconds overflowed i64".to_string(),
+                    &mut telemetry_guard,
+                )
+            })?;
+            Some(now_ms)
+        } else {
+            None
+        };
         let replay_configs =
             capture_replay.then(|| (orchestrator_config.clone(), runtime_config.clone()));
         let mut orchestrator = ExecutionOrchestrator::try_new_with_runtime_config_and_authority(
@@ -12469,6 +12502,7 @@ impl EngineDispatcher {
             )
         })?;
         orchestrator.set_cancellation_token(cancellation.token().clone());
+        orchestrator.set_clock_epoch_ms(resolved_clock_epoch_ms);
         // `process.argv` as Node reports it: the runtime, the script's absolute
         // path, then the program's own arguments (bd-my9hk). Whether the
         // program may read it follows the resolved, explicit ambient grant.
@@ -12792,12 +12826,13 @@ impl EngineDispatcher {
                         render_console_streams(&orchestrator.last_failed_console_output());
                     let native_replay = match (replay_configs.as_ref(), replay_argv.as_ref()) {
                         (Some((orchestrator_config, runtime_config)), Some(process_argv)) => {
-                            match crate::ops::native_replay::NativeReplayCapture::from_failed_execution(
+                            match crate::ops::native_replay::NativeReplayCapture::from_failed_execution_with_clock_epoch(
                                 &package,
                                 orchestrator_config,
                                 runtime_config,
                                 ambient_authority_grant,
                                 process_argv,
+                                resolved_clock_epoch_ms,
                                 replay_process_provider.as_deref(),
                                 replay_module_sources.as_ref(),
                                 &orchestrator,
@@ -12896,12 +12931,13 @@ impl EngineDispatcher {
 
         let native_replay = match (replay_configs, replay_argv) {
             (Some((orchestrator_config, runtime_config)), Some(process_argv)) => {
-                match crate::ops::native_replay::NativeReplayCapture::from_execution(
+                match crate::ops::native_replay::NativeReplayCapture::from_execution_with_clock_epoch(
                     &package,
                     &orchestrator_config,
                     &runtime_config,
                     ambient_authority_grant,
                     &process_argv,
+                    resolved_clock_epoch_ms,
                     replay_process_provider.as_deref(),
                     replay_module_sources.as_ref(),
                     &execution_result,
@@ -12956,6 +12992,7 @@ impl EngineDispatcher {
             ambient_authority_grant,
         );
         engine_decision.frozen_modules = frozen_module_summary;
+        engine_decision.clock_epoch_ms = resolved_clock_epoch_ms;
 
         // Stop telemetry and return
         let telemetry_guard = telemetry_guard.take().ok_or_else(|| {
@@ -15961,6 +15998,7 @@ mod tests {
                 ..settings.execution_limits
             }),
             frozen_modules: None,
+            clock_epoch_ms: None,
         }
     }
 

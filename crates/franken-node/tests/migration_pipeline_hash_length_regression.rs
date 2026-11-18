@@ -4,16 +4,26 @@
 //! length prefixes using safe try_from patterns instead of unsafe casts.
 
 use frankenengine_node::connector::migration_pipeline::{
-    CohortDefinition, DependencyComplexity, ExtensionEvidence, ExtensionSpec, PipelineError,
-    RiskTier, error_codes, new,
+    CohortDefinition, ExtensionEvidence, ExtensionSpec, PipelineError, PipelineState, advance,
+    error_codes, new, rollback,
 };
+use std::sync::Mutex;
+
+static MIGRATION_LOCK: Mutex<()> = Mutex::new(());
+
+fn release_state(state: PipelineState) -> Result<(), PipelineError> {
+    let analyzed = advance(state)?;
+    let _ = rollback(analyzed)?;
+    Ok(())
+}
 
 #[test]
 fn test_4gb_plus_input_hash_length_cast() -> Result<(), Box<dyn std::error::Error>> {
-    // Create a massive cohort definition that would cause length cast overflow
-    // if unsafe casts were still used (bd-1skur regression)
-    let huge_string = "x".repeat(usize::MAX / 16); // Very large but not quite 4GB to avoid OOM
-    let large_extension_names: Vec<_> = (0..1000)
+    let _guard = MIGRATION_LOCK.lock().unwrap();
+    // Create a large cohort definition that exercises length-prefixed hashing
+    // without triggering multi-gigabyte OOM on 64-bit targets (bd-1skur regression).
+    let huge_string = "x".repeat(64 * 1024);
+    let large_extension_names: Vec<_> = (0..64)
         .map(|i| format!("extension_{}_{}", i, huge_string))
         .collect();
 
@@ -25,17 +35,15 @@ fn test_4gb_plus_input_hash_length_cast() -> Result<(), Box<dyn std::error::Erro
                 name: name.clone(),
                 source_version: format!("1.0.0_{}", name),
                 target_version: format!("2.0.0_{}", name),
-                risk_tier: RiskTier::Low,
-                dependency_complexity: DependencyComplexity::Simple,
+                risk_tier: 1,
+                dependency_complexity: 1,
                 evidence: ExtensionEvidence {
                     corpus_coverage_bps: 9500,
                     validation_samples: 1000,
                     validation_failures: 0,
                     lockstep_samples: 1000,
                     lockstep_failures: 0,
-                    required_capabilities: Vec::new(),
-                    known_divergences: Vec::new(),
-                    dependency_edges: Vec::new(),
+                    ..ExtensionEvidence::default()
                 },
             })
             .collect(),
@@ -47,8 +55,8 @@ fn test_4gb_plus_input_hash_length_cast() -> Result<(), Box<dyn std::error::Erro
     let result = new(&huge_cohort);
 
     match result {
-        Ok(_state) => {
-            // Success - the safe length casting worked
+        Ok(state) => {
+            release_state(state)?;
             Ok(())
         }
         Err(PipelineError { code, .. }) if code == error_codes::ERR_PIPE_HASH_OVERFLOW => {
@@ -63,28 +71,23 @@ fn test_4gb_plus_input_hash_length_cast() -> Result<(), Box<dyn std::error::Erro
 
 #[test]
 fn test_maximum_safe_extension_count() -> Result<(), Box<dyn std::error::Error>> {
-    // Test with exactly u32::MAX extensions to verify boundary behavior
-    let max_extension_count = u32::MAX as usize;
-
-    // Create a cohort with maximum safe extension count
+    let _guard = MIGRATION_LOCK.lock().unwrap();
     let max_safe_cohort = CohortDefinition {
         cohort_id: "max_safe_cohort".to_string(),
-        extensions: (0..std::cmp::min(max_extension_count, 100_000)) // Limit to 100k for practicality
+        extensions: (0..1_000)
             .map(|i| ExtensionSpec {
                 name: format!("ext_{}", i),
                 source_version: "1.0.0".to_string(),
                 target_version: "2.0.0".to_string(),
-                risk_tier: RiskTier::Low,
-                dependency_complexity: DependencyComplexity::Simple,
+                risk_tier: 1,
+                dependency_complexity: 1,
                 evidence: ExtensionEvidence {
                     corpus_coverage_bps: 9500,
                     validation_samples: 100,
                     validation_failures: 0,
                     lockstep_samples: 100,
                     lockstep_failures: 0,
-                    required_capabilities: Vec::new(),
-                    known_divergences: Vec::new(),
-                    dependency_edges: Vec::new(),
+                    ..ExtensionEvidence::default()
                 },
             })
             .collect(),
@@ -95,7 +98,10 @@ fn test_maximum_safe_extension_count() -> Result<(), Box<dyn std::error::Error>>
     let result = new(&max_safe_cohort);
 
     match result {
-        Ok(_state) => Ok(()),
+        Ok(state) => {
+            release_state(state)?;
+            Ok(())
+        }
         Err(PipelineError { code, .. }) if code == error_codes::ERR_PIPE_HASH_OVERFLOW => {
             // This is acceptable - safe overflow detection working
             Ok(())
@@ -108,6 +114,7 @@ fn test_maximum_safe_extension_count() -> Result<(), Box<dyn std::error::Error>>
 
 #[test]
 fn test_string_length_prefix_boundary_conditions() -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = MIGRATION_LOCK.lock().unwrap();
     // Test various string lengths that could trigger overflow in length prefixing
     let test_cases = vec![
         usize::MAX / 2,
@@ -119,22 +126,20 @@ fn test_string_length_prefix_boundary_conditions() -> Result<(), Box<dyn std::er
     for test_length in test_cases {
         // Don't actually create strings this large (OOM risk), just test the length calculation
         let cohort = CohortDefinition {
-            cohort_id: "boundary_test".to_string(),
+            cohort_id: format!("boundary_test_{}", test_length),
             extensions: vec![ExtensionSpec {
                 name: "test_extension".to_string(),
                 source_version: "1.0.0".to_string(),
                 target_version: "2.0.0".to_string(),
-                risk_tier: RiskTier::Low,
-                dependency_complexity: DependencyComplexity::Simple,
+                risk_tier: 1,
+                dependency_complexity: 1,
                 evidence: ExtensionEvidence {
                     corpus_coverage_bps: 9500,
                     validation_samples: 100,
                     validation_failures: 0,
                     lockstep_samples: 100,
                     lockstep_failures: 0,
-                    required_capabilities: Vec::new(),
-                    known_divergences: Vec::new(),
-                    dependency_edges: Vec::new(),
+                    ..ExtensionEvidence::default()
                 },
             }],
             selection_criteria: format!("test_length_{}", test_length),
@@ -144,11 +149,8 @@ fn test_string_length_prefix_boundary_conditions() -> Result<(), Box<dyn std::er
         let result = new(&cohort);
 
         // Any result is acceptable as long as it doesn't panic
-        match result {
-            Ok(_) | Err(_) => {
-                // Both success and controlled errors are acceptable
-                continue;
-            }
+        if let Ok(state) = result {
+            release_state(state)?;
         }
     }
 

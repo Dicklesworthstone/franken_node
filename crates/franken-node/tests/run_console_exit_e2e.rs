@@ -5827,3 +5827,170 @@ fn revoke_and_preflight_denial_append_to_the_evidence_ledger() {
     assert_eq!(report["status"], "valid", "{report}");
     assert_eq!(verify.status.code(), Some(0));
 }
+
+#[test]
+fn wall_clock_mode_real_and_clock_epoch_override_record_and_replay_deterministically() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let init = Command::new(franken_node_bin())
+        .args(["init", "--profile", "balanced", "--out-dir", "."])
+        .current_dir(dir.path())
+        .output()
+        .expect("init");
+    assert!(init.status.success());
+
+    std::fs::write(
+        dir.path().join("clock.js"),
+        "const s = Date.now();\nsetTimeout(() => console.log(s, Date.now() - s >= 20), 20);\n",
+    )
+    .expect("write clock.js");
+
+    // 1. Default virtual mode starts at 1767225600000 and advances across timers.
+    let virt = Command::new(franken_node_bin())
+        .args(["run", "clock.js", "--policy", "balanced", "--console-only"])
+        .current_dir(dir.path())
+        .output()
+        .expect("virtual run");
+    assert_eq!(virt.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8_lossy(&virt.stdout),
+        "1767225600000 true\n"
+    );
+
+    // 2. Real wall-clock mode seeds Date.now() from host time, records clock_epoch_ms
+    //    in engine_decision, and replays deterministically offline.
+    let before_ms = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("unix time")
+            .as_millis(),
+    )
+    .expect("i64 ms");
+    let real_run = Command::new(franken_node_bin())
+        .args([
+            "run",
+            "clock.js",
+            "--policy",
+            "balanced",
+            "--capture-replay",
+            "--json",
+        ])
+        .env("FRANKEN_NODE_RUNTIME_WALL_CLOCK_MODE", "real")
+        .current_dir(dir.path())
+        .output()
+        .expect("real-mode run");
+    let after_ms = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("unix time")
+            .as_millis(),
+    )
+    .expect("i64 ms");
+    assert_eq!(
+        real_run.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&real_run.stderr)
+    );
+    let real_json: Value = serde_json::from_slice(&real_run.stdout).expect("real run json");
+    let recorded_epoch = real_json["dispatch"]["engine_decision"]["clock_epoch_ms"]
+        .as_i64()
+        .expect("clock_epoch_ms recorded");
+    assert!(
+        recorded_epoch >= before_ms - 1_000 && recorded_epoch <= after_ms + 1_000,
+        "recorded_epoch={recorded_epoch} not in [{before_ms}, {after_ms}]"
+    );
+    assert_eq!(
+        real_json["dispatch"]["captured_output"]["stdout"].as_str(),
+        Some(format!("{recorded_epoch} true\n").as_str())
+    );
+
+    // Export incident bundle and verify offline native replay (--execute) reproduces
+    // the exact real-mode Date.now() timestamp.
+    let receipt_id = real_json["receipt"]["receipt_id"]
+        .as_str()
+        .expect("receipt_id");
+    let capture_out = Command::new(franken_node_bin())
+        .args(["incident", "capture", "--from-run", receipt_id, "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("incident capture");
+    assert!(
+        capture_out.status.success(),
+        "capture failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&capture_out.stdout),
+        String::from_utf8_lossy(&capture_out.stderr)
+    );
+    let capture_json: Value = serde_json::from_slice(&capture_out.stdout).expect("capture json");
+    assert_eq!(capture_json["native_replay_available"], Value::Bool(true));
+    let incident_id = capture_json["incident_id"].as_str().expect("incident_id");
+    let bundle_out = Command::new(franken_node_bin())
+        .args([
+            "incident",
+            "bundle",
+            "--id",
+            incident_id,
+            "--verify",
+            "--json",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .expect("incident bundle");
+    assert!(
+        bundle_out.status.success(),
+        "bundle failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&bundle_out.stdout),
+        String::from_utf8_lossy(&bundle_out.stderr)
+    );
+    let bundle_name = format!("{incident_id}.fnbundle");
+    let replay_out = Command::new(franken_node_bin())
+        .args([
+            "incident",
+            "replay",
+            "--bundle",
+            &bundle_name,
+            "--execute",
+            "--trusted-public-key",
+            ".franken-node/keys/receipt-signing.pub",
+            "--json",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .expect("incident replay");
+    assert!(
+        replay_out.status.success(),
+        "replay failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&replay_out.stdout),
+        String::from_utf8_lossy(&replay_out.stderr)
+    );
+    let replay_json: Value = serde_json::from_slice(&replay_out.stdout).expect("replay json");
+    assert_eq!(
+        replay_json["replay_result"]["matched"],
+        Value::Bool(true),
+        "{replay_json}"
+    );
+    assert_eq!(
+        replay_json["execution_result"]["matched"],
+        Value::Bool(true),
+        "{replay_json}"
+    );
+    assert_eq!(
+        replay_json["execution_result"]["console_match"],
+        Value::Bool(true),
+        "{replay_json}"
+    );
+
+    // 3. Combining wall_clock_mode = "real" with clock_epoch_ms fails closed.
+    let invalid = Command::new(franken_node_bin())
+        .args(["run", "clock.js", "--policy", "balanced", "--console-only"])
+        .env("FRANKEN_NODE_RUNTIME_WALL_CLOCK_MODE", "real")
+        .env("FRANKEN_NODE_RUNTIME_CLOCK_EPOCH_MS", "1700000000000")
+        .current_dir(dir.path())
+        .output()
+        .expect("invalid clock config");
+    assert!(!invalid.status.success());
+    assert!(
+        String::from_utf8_lossy(&invalid.stderr).contains("runtime.clock_epoch_ms"),
+        "stderr={}",
+        String::from_utf8_lossy(&invalid.stderr)
+    );
+}

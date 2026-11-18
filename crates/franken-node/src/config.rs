@@ -1600,6 +1600,22 @@ impl Config {
                     MAX_MERGE_DECISIONS,
                 );
             }
+            if let Some(value) = section.wall_clock_mode {
+                self.runtime.wall_clock_mode = Some(value);
+                push_bounded(
+                    decisions,
+                    MergeDecision::new(stage.clone(), "runtime.wall_clock_mode", value),
+                    MAX_MERGE_DECISIONS,
+                );
+            }
+            if let Some(value) = section.clock_epoch_ms {
+                self.runtime.clock_epoch_ms = Some(value);
+                push_bounded(
+                    decisions,
+                    MergeDecision::new(stage.clone(), "runtime.clock_epoch_ms", value),
+                    MAX_MERGE_DECISIONS,
+                );
+            }
         }
 
         if let Some(section) = &overrides.thresholds {
@@ -2298,6 +2314,31 @@ impl Config {
                 MAX_MERGE_DECISIONS,
             );
         }
+        if let Some(raw) = env_lookup("FRANKEN_NODE_RUNTIME_WALL_CLOCK_MODE") {
+            let parsed = raw
+                .trim()
+                .parse::<RuntimeWallClockMode>()
+                .map_err(|reason| ConfigError::EnvParseFailed {
+                    key: "FRANKEN_NODE_RUNTIME_WALL_CLOCK_MODE".to_string(),
+                    value: raw.clone(),
+                    reason,
+                })?;
+            self.runtime.wall_clock_mode = Some(parsed);
+            push_bounded(
+                decisions,
+                MergeDecision::new(MergeStage::Env, "runtime.wall_clock_mode", parsed),
+                MAX_MERGE_DECISIONS,
+            );
+        }
+        if let Some(raw) = env_lookup("FRANKEN_NODE_RUNTIME_CLOCK_EPOCH_MS") {
+            let parsed = parse_env_i64("FRANKEN_NODE_RUNTIME_CLOCK_EPOCH_MS", &raw)?;
+            self.runtime.clock_epoch_ms = Some(parsed);
+            push_bounded(
+                decisions,
+                MergeDecision::new(MergeStage::Env, "runtime.clock_epoch_ms", parsed),
+                MAX_MERGE_DECISIONS,
+            );
+        }
 
         apply_env_field_opt_f64(
             "FRANKEN_NODE_THRESHOLDS_MAX_FAILURE_RATE",
@@ -2659,6 +2700,16 @@ fn parse_env_u64(key: &str, raw: &str) -> Result<u64, ConfigError> {
             key: key.to_string(),
             value: raw.to_string(),
             reason: "expected unsigned integer".to_string(),
+        })
+}
+
+fn parse_env_i64(key: &str, raw: &str) -> Result<i64, ConfigError> {
+    raw.trim()
+        .parse::<i64>()
+        .map_err(|_| ConfigError::EnvParseFailed {
+            key: key.to_string(),
+            value: raw.to_string(),
+            reason: "expected signed 64-bit integer".to_string(),
         })
 }
 
@@ -3440,6 +3491,8 @@ struct RuntimeOverrides {
     pub max_console_entries: Option<usize>,
     pub max_parse_source_bytes: Option<u64>,
     pub max_parse_tokens: Option<u64>,
+    pub wall_clock_mode: Option<RuntimeWallClockMode>,
+    pub clock_epoch_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -4263,6 +4316,49 @@ pub struct RuntimeConfig {
     /// `1..=MAX_PARSE_TOKENS`. Source-byte and recursion budgets still apply.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_parse_tokens: Option<u64>,
+    /// Starting wall-clock source for native execution (`virtual` or `real`).
+    /// `None` preserves deterministic `virtual` mode (`1767225600000` epoch,
+    /// advancing monotonically across timers and guest instructions). `real`
+    /// seeds the starting epoch from host wall-clock time and records that
+    /// seed in run decisions and replay captures.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wall_clock_mode: Option<RuntimeWallClockMode>,
+    /// Explicit starting virtual wall-clock epoch in Unix milliseconds.
+    /// Cannot be combined with `wall_clock_mode = "real"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clock_epoch_ms: Option<i64>,
+}
+
+/// Guest wall-clock seeding mode for native execution (`bd-reality-20260923-26n9r.5`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum RuntimeWallClockMode {
+    #[default]
+    Virtual,
+    Real,
+}
+
+impl std::fmt::Display for RuntimeWallClockMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Virtual => f.write_str("virtual"),
+            Self::Real => f.write_str("real"),
+        }
+    }
+}
+
+impl std::str::FromStr for RuntimeWallClockMode {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "virtual" => Ok(Self::Virtual),
+            "real" => Ok(Self::Real),
+            other => Err(format!(
+                "expected 'virtual' or 'real' for wall_clock_mode, got {other:?}"
+            )),
+        }
+    }
 }
 
 /// Effective native parser limits shared by execution and its receipts.
@@ -4421,7 +4517,21 @@ impl RuntimeConfig {
                  (FRANKEN_NODE_RUNTIME_MAX_CALL_DEPTH); got {value}"
             )));
         }
+        if self.wall_clock_mode == Some(RuntimeWallClockMode::Real) && self.clock_epoch_ms.is_some()
+        {
+            return Err(ConfigError::ValidationFailed(
+                "runtime.clock_epoch_ms cannot be combined with runtime.wall_clock_mode = \"real\" \
+                 (FRANKEN_NODE_RUNTIME_CLOCK_EPOCH_MS / FRANKEN_NODE_RUNTIME_WALL_CLOCK_MODE)"
+                    .to_string(),
+            ));
+        }
         Ok(())
+    }
+
+    /// Return the effective native wall-clock mode (`virtual` by default).
+    #[must_use]
+    pub fn effective_wall_clock_mode(&self) -> RuntimeWallClockMode {
+        self.wall_clock_mode.unwrap_or_default()
     }
 
     /// Reject invalid explicit parser limits before native engine admission.
@@ -4530,6 +4640,8 @@ impl RuntimeConfig {
             max_console_entries: None,
             max_parse_source_bytes: None,
             max_parse_tokens: None,
+            wall_clock_mode: None,
+            clock_epoch_ms: None,
         }
     }
 
@@ -4571,6 +4683,8 @@ impl RuntimeConfig {
             max_console_entries: None,
             max_parse_source_bytes: None,
             max_parse_tokens: None,
+            wall_clock_mode: None,
+            clock_epoch_ms: None,
         }
     }
 
@@ -4612,6 +4726,8 @@ impl RuntimeConfig {
             max_console_entries: None,
             max_parse_source_bytes: None,
             max_parse_tokens: None,
+            wall_clock_mode: None,
+            clock_epoch_ms: None,
         }
     }
 }

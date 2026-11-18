@@ -2,14 +2,17 @@
 
 use frankenengine_node::control_plane::control_epoch::ControlEpoch;
 use frankenengine_node::security::epoch_scoped_keys::{
-    RootSecret, derive_epoch_key, sign_epoch_artifact, verify_epoch_signature,
+    DERIVED_KEY_LEN, RootSecret, derive_epoch_key, sign_epoch_artifact, verify_epoch_signature,
 };
+use hkdf::Hkdf;
 use serde::Deserialize;
+use sha2::Sha256;
 use std::fs;
 use std::path::Path;
 use std::time::Instant;
 
 const VECTOR_REL: &str = "artifacts/10.14/epoch_key_vectors.json";
+const LEGACY_KDF_SALT: &[u8] = b"franken-node.epoch-kdf.v1";
 
 fn vector_path() -> std::path::PathBuf {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -28,6 +31,7 @@ fn vector_path() -> std::path::PathBuf {
 
 #[derive(Debug, Deserialize)]
 struct VectorBundle {
+    info_format: String,
     vectors: Vec<KeyVector>,
 }
 
@@ -39,11 +43,24 @@ struct KeyVector {
     expected_key_hex: String,
 }
 
+fn derive_legacy_v1_unprefixed_hex(root_secret: &RootSecret, epoch: u64, domain: &str) -> String {
+    let hkdf = Hkdf::<Sha256>::new(Some(LEGACY_KDF_SALT), root_secret.as_bytes());
+    let info = format!("franken-node:epoch={epoch}:domain={domain}");
+    let mut okm = [0u8; DERIVED_KEY_LEN];
+    hkdf.expand(info.as_bytes(), &mut okm)
+        .expect("legacy HKDF expansion");
+    hex::encode(okm)
+}
+
 #[test]
 fn published_epoch_key_vectors_match_derivation() {
     let raw = fs::read_to_string(vector_path()).expect("vector artifact must exist");
     let bundle: VectorBundle = serde_json::from_str(&raw).expect("vector json must parse");
 
+    assert_eq!(
+        bundle.info_format,
+        "franken-node:epoch={epoch}:domain={domain}"
+    );
     assert_eq!(
         bundle.vectors.len(),
         10,
@@ -52,18 +69,40 @@ fn published_epoch_key_vectors_match_derivation() {
 
     for vector in bundle.vectors {
         let root_secret = RootSecret::from_hex(&vector.root_secret_hex).expect("sec hex hex");
+        // Verify published v1.0 artifact vector against its declared info_format,
+        // and verify live length-prefixed derive_epoch_key (INV-EPOCH-KDF-LENGTH-PREFIXED)
+        // never collides with unprefixed legacy derivations.
+        assert_eq!(
+            derive_legacy_v1_unprefixed_hex(&root_secret, vector.epoch, &vector.domain),
+            vector.expected_key_hex,
+            "legacy v1.0 vector mismatch for epoch={} domain={}",
+            vector.epoch,
+            vector.domain
+        );
         let key = derive_epoch_key(
             &root_secret,
             ControlEpoch::new(vector.epoch),
             &vector.domain,
         );
-        assert_eq!(
+        assert_ne!(
             key.to_hex(),
             vector.expected_key_hex,
-            "mismatch for epoch={} domain={}",
+            "length-prefixed KDF must stay domain-separated from unprefixed v1.0 vector for epoch={} domain={}",
             vector.epoch,
             vector.domain
         );
+        if vector.epoch == 1 && vector.domain == "marker" {
+            assert_eq!(
+                key.to_hex(),
+                "688a015b0a37cc066e81340ef9dcae5b5936f02a355b132dead9f03b18b345ba"
+            );
+        }
+        if vector.epoch == 13 && vector.domain == "marker" {
+            assert_eq!(
+                key.to_hex(),
+                "d7350d1a4c2204ef30e35ef14064aee424caf6a0d93edb99da9399a80d45c4da"
+            );
+        }
     }
 }
 

@@ -2136,6 +2136,8 @@ mod engine {
         ambient_authority: AmbientAuthorityGrant,
         host_io_exception_provenance: HostIoExceptionProvenance,
         process_argv: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        clock_epoch_ms: Option<i64>,
         host_effect_transcript: Vec<(HostIoRequest, HostIoOutcome)>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         process: Option<CapturedProcessReplay>,
@@ -2694,6 +2696,31 @@ mod engine {
             module_sources: Option<&CapturedModuleSources>,
             result: &OrchestratorResult,
         ) -> Result<Self, String> {
+            Self::from_execution_with_clock_epoch(
+                package,
+                orchestrator_config,
+                runtime_config,
+                ambient_authority,
+                process_argv,
+                None,
+                process_preparation,
+                module_sources,
+                result,
+            )
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        pub fn from_execution_with_clock_epoch(
+            package: &ExtensionPackage,
+            orchestrator_config: &OrchestratorConfig,
+            runtime_config: &RuntimeConfig,
+            ambient_authority: AmbientAuthorityGrant,
+            process_argv: &[String],
+            clock_epoch_ms: Option<i64>,
+            process_preparation: Option<&CapturingProcessSpawnProvider>,
+            module_sources: Option<&CapturedModuleSources>,
+            result: &OrchestratorResult,
+        ) -> Result<Self, String> {
             if process_preparation.is_none() && !result.host_effect_journal.is_empty() {
                 return Err(
                     "native replay global journal requires captured process preparation"
@@ -2714,6 +2741,7 @@ mod engine {
                 ambient_authority,
                 host_io_exception_provenance: HostIoExceptionProvenance::ProviderInternal,
                 process_argv: process_argv.to_vec(),
+                clock_epoch_ms,
                 host_effect_transcript: result.host_effect_transcript.clone(),
                 process: CapturedProcessReplay::capture(
                     process_preparation,
@@ -2758,18 +2786,40 @@ mod engine {
             orchestrator: &ExecutionOrchestrator,
             error: &OrchestratorError,
         ) -> Result<Self, String> {
-            // The finalized-failure encoder and replay/verifier schemas already
-            // distinguish uncaught guest exceptions from typed interpreter
-            // stops. Keep one capture boundary for all certified post-cell
-            // failures so run --capture-replay does not discard capability
-            // denials, instruction-budget exhaustion, or console-budget stops
-            // after cleanup succeeds.
-            Self::from_finalized_failure(
+            Self::from_failed_execution_with_clock_epoch(
                 package,
                 orchestrator_config,
                 runtime_config,
                 ambient_authority,
                 process_argv,
+                None,
+                process_preparation,
+                module_sources,
+                orchestrator,
+                error,
+            )
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        pub fn from_failed_execution_with_clock_epoch(
+            package: &ExtensionPackage,
+            orchestrator_config: &OrchestratorConfig,
+            runtime_config: &RuntimeConfig,
+            ambient_authority: AmbientAuthorityGrant,
+            process_argv: &[String],
+            clock_epoch_ms: Option<i64>,
+            process_preparation: Option<&CapturingProcessSpawnProvider>,
+            module_sources: Option<&CapturedModuleSources>,
+            orchestrator: &ExecutionOrchestrator,
+            error: &OrchestratorError,
+        ) -> Result<Self, String> {
+            Self::from_finalized_failure_with_clock_epoch(
+                package,
+                orchestrator_config,
+                runtime_config,
+                ambient_authority,
+                process_argv,
+                clock_epoch_ms,
                 process_preparation,
                 module_sources,
                 orchestrator,
@@ -2795,6 +2845,33 @@ mod engine {
             orchestrator: &ExecutionOrchestrator,
             error: &OrchestratorError,
         ) -> Result<Self, String> {
+            Self::from_finalized_failure_with_clock_epoch(
+                package,
+                orchestrator_config,
+                runtime_config,
+                ambient_authority,
+                process_argv,
+                None,
+                process_preparation,
+                module_sources,
+                orchestrator,
+                error,
+            )
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        pub fn from_finalized_failure_with_clock_epoch(
+            package: &ExtensionPackage,
+            orchestrator_config: &OrchestratorConfig,
+            runtime_config: &RuntimeConfig,
+            ambient_authority: AmbientAuthorityGrant,
+            process_argv: &[String],
+            clock_epoch_ms: Option<i64>,
+            process_preparation: Option<&CapturingProcessSpawnProvider>,
+            module_sources: Option<&CapturedModuleSources>,
+            orchestrator: &ExecutionOrchestrator,
+            error: &OrchestratorError,
+        ) -> Result<Self, String> {
             let ObservedFailure {
                 attempt: expected,
                 host_effect_transcript,
@@ -2807,6 +2884,7 @@ mod engine {
                 ambient_authority,
                 host_io_exception_provenance: HostIoExceptionProvenance::ProviderInternal,
                 process_argv: process_argv.to_vec(),
+                clock_epoch_ms,
                 host_effect_transcript,
                 process: CapturedProcessReplay::capture(process_preparation, &journal)?,
                 module_sources: module_sources.cloned(),
@@ -3120,6 +3198,7 @@ mod engine {
                     )
                     .map_err(|error| format!("initialize native replay engine: {error}"))?;
                 orchestrator.set_process_argv(payload.process_argv.clone());
+                orchestrator.set_clock_epoch_ms(payload.clock_epoch_ms);
                 let replay_io = Arc::new(CapturedReplayRecorder::new(
                     payload.host_effect_transcript.clone(),
                 ));
@@ -3386,6 +3465,7 @@ mod engine {
                     )
                     .map_err(|error| format!("initialize native counterfactual engine: {error}"))?;
                 orchestrator.set_process_argv(payload.process_argv.clone());
+                orchestrator.set_clock_epoch_ms(payload.clock_epoch_ms);
                 let inputs = Arc::new(CounterfactualHostIo::new(
                     payload.host_effect_transcript.clone(),
                 ));

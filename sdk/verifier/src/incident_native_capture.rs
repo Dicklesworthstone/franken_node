@@ -503,8 +503,16 @@ pub(super) fn verify(initial: &Value) -> Result<Option<VerifiedNativeCaptureMeta
         &payload,
         ".payload",
         PAYLOAD_FIELDS,
-        &["process", "module_sources"],
+        &["process", "module_sources", "clock_epoch_ms"],
     )?;
+    if let Some(clock_epoch_ms) = payload.get("clock_epoch_ms")
+        && clock_epoch_ms.as_i64().is_none()
+    {
+        return Err(invalid(
+            ".payload.clock_epoch_ms",
+            "expected signed integer clock epoch milliseconds",
+        ));
+    }
     if let Some(sources) = payload.get("module_sources") {
         module_capsule::verify(sources)?;
     }
@@ -1189,6 +1197,26 @@ pub(in crate::incident_bundle) mod tests {
             assert!(
                 matches!(verify_incident_bundle(&resign(&mut value), &signing_key().verifying_key()),
                 Err(IncidentBundleError::Structure { path, .. }) if path == "$.timeline")
+            );
+        }
+    }
+
+    #[test]
+    fn clock_epoch_ms_accepts_signed_integer_and_rejects_non_integer() {
+        let mut ok_payload = payload("completed");
+        ok_payload["clock_epoch_ms"] = json!(1_795_000_000_123_i64);
+        assert!(verify(&captured(&ok_payload)).unwrap().is_some());
+
+        for bad in [Value::Null, json!("1795000000123"), json!(1.5), json!({})] {
+            let mut bad_payload = payload("completed");
+            bad_payload["clock_epoch_ms"] = bad;
+            assert!(
+                matches!(
+                    verify(&captured(&bad_payload)),
+                    Err(IncidentBundleError::Structure { ref path, .. })
+                        if path == "$.initial_state_snapshot.native_replay.payload.clock_epoch_ms"
+                ),
+                "non-i64 clock_epoch_ms must fail closed"
             );
         }
     }

@@ -5,10 +5,7 @@
 //! - progression re-check semantics,
 //! - auto-replan generation with lower-risk alternatives.
 
-#[path = "../../crates/franken-node/src/migration/dgis_migration_gate.rs"]
-mod gate_impl;
-
-use gate_impl::{
+use frankenengine_node::migration::dgis_migration_gate::{
     GateVerdict, GraphHealthSnapshot, MigrationGateThresholds, MigrationPathCandidate,
     build_migration_health_report, evaluate_admission, evaluate_progression_phase,
 };

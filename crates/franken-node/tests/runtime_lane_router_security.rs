@@ -52,6 +52,8 @@ fn runtime_config() -> RuntimeConfig {
         max_console_entries: None,
         max_parse_source_bytes: None,
         max_parse_tokens: None,
+        wall_clock_mode: None,
+        clock_epoch_ms: None,
     }
 }
 
