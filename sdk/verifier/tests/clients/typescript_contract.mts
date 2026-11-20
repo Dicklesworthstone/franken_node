@@ -72,7 +72,10 @@ export async function auditPublisherSource(
     return `${verified.facts.artifact_sha256}:${absent}`;
   }
   const instructionCeiling: string = verified.facts.runtime_authority.max_instructions;
-  return `${verified.facts.artifact_sha256}:${instructionCeiling}`;
+  const host = verified.facts.runtime_authority.host_io;
+  const endpoints: string[] | undefined = host?.host_ports;
+  const networkCalls: string | undefined = host?.max_calls_per_epoch.network_egress;
+  return `${verified.facts.artifact_sha256}:${instructionCeiling}:${endpoints?.join(",")}:${networkCalls}`;
 }
 
 export async function auditResolution(data: Uint8Array, anchor: string, executable: string): Promise<string | null> {

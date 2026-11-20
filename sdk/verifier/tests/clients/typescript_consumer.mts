@@ -72,6 +72,28 @@ for (const name of ["publisher_source_v1_fixture_2", "publisher_source_v2_fixtur
     throw new Error("TypeScript publisher ceilings lost precision");
   }
 }
+for (const name of ["publisher_source_scoped_host_authority", "publisher_source_explicit_empty_host_scopes",
+  "publisher_source_unspecified_host_scopes"]) {
+  const source = cases.find((item) => item.name === name)!;
+  const verified = await verifyArtifact(Buffer.from(source.input_hex, "hex"), source.anchor,
+    { verifier: resolve("verifier"), format: "publisher-source", signatureHex: source.signature_hex });
+  if (verified.format !== "publisher-source"
+      || verified.facts.registration_schema !== "franken-node/extension-registration-manifest/v2") {
+    throw new Error("TypeScript scoped publisher source required");
+  }
+  const host = verified.facts.runtime_authority.host_io;
+  if (host === undefined) throw new Error("TypeScript publisher host restrictions lost");
+  if (name === "publisher_source_scoped_host_authority") {
+    const maximum: string | undefined = host.max_calls_per_epoch.network_egress;
+    assert.equal(maximum, "18446744073709551615");
+    assert.equal(host.max_calls_per_epoch.fs_read, "0");
+    assert.deepEqual(host.host_ports, ["[2001:db8::1]:443", "api.example.test:443"]);
+  } else if (name === "publisher_source_explicit_empty_host_scopes") {
+    assert.deepEqual(host, { host_ports: [], env_keys: [], max_calls_per_epoch: {} });
+  } else {
+    assert.deepEqual(host, { max_calls_per_epoch: { fs_read: "0" } });
+  }
+}
 const cfSweep = cases.find((item) => item.name === "counterfactual_signed_sweep")!;
 const cfVerified = await verifyArtifact(Buffer.from(cfSweep.input_hex, "hex"), cfSweep.anchor,
   { verifier: resolve("verifier"), format: "counterfactual-receipt", signatureHex: cfSweep.signature_hex });

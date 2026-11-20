@@ -337,6 +337,18 @@ function sourceFacts(manifest, manifestBytes, capsuleBytes) {
   const runtimeAuthority = manifest.runtime_authority === undefined ? null
     : Object.fromEntries(Object.entries(manifest.runtime_authority).map(([name, value]) =>
       [name, name.startsWith("max_") ? String(value) : value]));
+  if (runtimeAuthority !== null && Object.hasOwn(runtimeAuthority, "host_io")) {
+    if (runtimeAuthority.host_io === null) delete runtimeAuthority.host_io;
+    else {
+      const host = runtimeAuthority.host_io;
+      runtimeAuthority.host_io = {
+        ...(host.host_ports == null ? {} : { host_ports: [...new Set(host.host_ports)].sort() }),
+        ...(host.env_keys == null ? {} : { env_keys: [...new Set(host.env_keys)].sort() }),
+        max_calls_per_epoch: Object.fromEntries(Object.entries(host.max_calls_per_epoch ?? {})
+          .map(([capability, limit]) => [capability, String(limit)])),
+      };
+    }
+  }
   return {
     registration_schema: manifest.schema_version, package_name: manifest.name, publisher_id: manifest.publisher_id,
     version: manifest.initial_version.version, manifest_sha256: `sha256:${hash(manifestBytes)}`,
@@ -379,6 +391,39 @@ const registrationBytes = Buffer.from(ordered(registration));
 const sourceWire = sourceInput(registrationBytes, sourceBytes);
 const sourceSignature = sign(null, registrationBytes, key).toString("hex");
 assert(registrationBytes.includes(Buffer.from('"max_instructions":18446744073709551615')));
+const hostRegistration = clone(registration);
+hostRegistration.runtime_authority.allowed_capabilities = [
+  "console", "env_read", "fs_read", "heap_allocate", "network_egress", "vm_dispatch",
+];
+hostRegistration.runtime_authority.host_io = {
+  host_ports: ["[2001:db8::1]:443", "api.example.test:443"], env_keys: ["PUBLIC_NAME"],
+  max_calls_per_epoch: { env_read: 1, fs_read: 0, network_egress: 18_446_744_073_709_551_615n },
+};
+addSource("publisher_source_scoped_host_authority", sourceBytes, hostRegistration);
+const emptyHostRegistration = clone(hostRegistration);
+emptyHostRegistration.runtime_authority.host_io = { host_ports: [], env_keys: [] };
+addSource("publisher_source_explicit_empty_host_scopes", sourceBytes, emptyHostRegistration);
+const unspecifiedHostRegistration = clone(hostRegistration);
+unspecifiedHostRegistration.runtime_authority.host_io = { max_calls_per_epoch: { fs_read: 0 } };
+addSource("publisher_source_unspecified_host_scopes", sourceBytes, unspecifiedHostRegistration);
+for (const [name, scope] of [
+  ["wildcard", { host_ports: ["*.example.test:443"] }],
+  ["invalid_port", { host_ports: ["api.example.test:65536"] }],
+  ["invalid_ipv6", { host_ports: ["[fe80::1%eth0]:443"] }],
+  ["undeclared_quota", { max_calls_per_epoch: { fs_write: 1 } }],
+  ["numeric_string_quota", { max_calls_per_epoch: { fs_read: "0" } }],
+  ["unknown_scope", { path_prefixes: ["/private"] }],
+]) {
+  const changed = clone(hostRegistration);
+  changed.runtime_authority.host_io = scope;
+  addSource(`publisher_source_invalid_host_${name}`, sourceBytes, changed, "EVIDENCE_INVALID");
+}
+const tamperedHost = clone(hostRegistration);
+tamperedHost.runtime_authority.host_io.env_keys = ["OTHER_NAME"];
+add("publisher_source_changed_signed_host_scope", "publisher-source",
+  sourceInput(Buffer.from(ordered(tamperedHost)), sourceBytes), "SIGNATURE_INVALID", {
+    signature_hex: sign(null, Buffer.from(ordered(hostRegistration)), key).toString("hex"),
+  });
 const formattedRegistration = sourceManifest(sourceBytes, 1);
 const formattedBytes = Buffer.from(JSON.stringify(formattedRegistration, null, 2) + "\n");
 add("publisher_source_exact_formatted_manifest", "publisher-source", sourceInput(formattedBytes, sourceBytes), "verified", {
@@ -505,6 +550,7 @@ function addSourceTrust(name, expected = "verified", options = {}) {
 }
 addSourceTrust("publisher_trust_fresh_revocation_without_provenance", "verified", { provenance: null });
 addSourceTrust("publisher_trust_independent_revocation_and_provenance");
+addSourceTrust("publisher_trust_scoped_host_authority", "verified", { manifest: hostRegistration });
 const formattedProvenance = sourceProvenance(formattedRegistration, formattedBytes);
 addSourceTrust("publisher_trust_exact_formatted_signed_bytes", "verified", {
   manifest: formattedRegistration, manifestBytes: formattedBytes,

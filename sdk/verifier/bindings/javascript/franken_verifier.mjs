@@ -1,6 +1,7 @@
 /** Offline verifier API backed by the separately trusted independent Rust SDK. */
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
+import { isIP } from "node:net";
 
 export const PROTOCOL = "franken-verifier-cli/v1";
 export const MAX_INPUT_BYTES = 64 * 1024 * 1024;
@@ -120,8 +121,48 @@ const PUBLISHER_LIMITS = Object.freeze({
   max_parse_source_bytes: 2_097_152n, max_parse_tokens: 131_072n, max_parse_recursion_depth: 384n,
 });
 
+function publisherEndpointValid(value) {
+  if (typeof value !== "string" || value.length === 0 || value.length > 256
+      || /[^\u0021-\u007e]/u.test(value) || /[*?#@/]/u.test(value)) return false;
+  let host;
+  let port;
+  if (value.startsWith("[")) {
+    const end = value.indexOf("]");
+    const address = value.slice(1, end);
+    if (end < 0 || address.includes("%") || isIP(address) !== 6 || value[end + 1] !== ":") return false;
+    host = `[${address.toLowerCase()}]`;
+    port = value.slice(end + 2);
+  } else {
+    const separator = value.lastIndexOf(":");
+    host = value.slice(0, separator).toLowerCase();
+    port = value.slice(separator + 1);
+    if (separator < 1 || host.includes(":")) return false;
+  }
+  return /^[1-9][0-9]{0,4}$/u.test(port) && Number(port) <= 65535 && value === `${host}:${port}`;
+}
+
+function publisherHostAuthorityValid(host, capabilities, maxInstructions) {
+  if (!object(host) || !keys(host, ["max_calls_per_epoch",
+    ...["host_ports", "env_keys"].filter((name) => Object.hasOwn(host, name))])) return false;
+  for (const [name, capability, valid] of [["host_ports", "network_egress", publisherEndpointValid],
+    ["env_keys", "env_read", (value) => typeof value === "string" && value === value.trim()
+      && /^[A-Za-z0-9_]{1,128}$/u.test(value)]]) {
+    if (Object.hasOwn(host, name) && (!capabilities.includes(capability)
+        || !Array.isArray(host[name]) || host[name].length > 128
+        || !host[name].every((value, index, values) => valid(value) && (index === 0 || values[index - 1] < value)))) return false;
+  }
+  const quotas = host.max_calls_per_epoch;
+  return object(quotas) && Object.keys(quotas).length <= 5
+    && Object.entries(quotas).every(([capability, limit]) =>
+      ["fs_read", "fs_write", "network_egress", "random_read", "env_read"].includes(capability)
+      && capabilities.includes(capability) && typeof limit === "string" && limit === limit.trim()
+      && /^(0|[1-9][0-9]{0,19})$/u.test(limit) && BigInt(limit) <= BigInt(maxInstructions));
+}
+
 function publisherAuthorityValid(authority) {
-  return keys(authority, ["schema_version", "policy_revision", "allowed_capabilities", "allow_process_shape", ...Object.keys(PUBLISHER_LIMITS)])
+  return object(authority)
+    && keys(authority, ["schema_version", "policy_revision", "allowed_capabilities", "allow_process_shape", ...Object.keys(PUBLISHER_LIMITS),
+      ...(Object.hasOwn(authority, "host_io") ? ["host_io"] : [])])
     && authority.schema_version === "franken-node/artifact-runtime-authority/v1"
     && publisherText(authority.policy_revision, 128)
     && typeof authority.allow_process_shape === "boolean"
@@ -130,7 +171,9 @@ function publisherAuthorityValid(authority) {
     && new Set(authority.allowed_capabilities).size === authority.allowed_capabilities.length
     && authority.allowed_capabilities.every((value) => PUBLISHER_CAPABILITIES.includes(value))
     && ["console", "heap_allocate", "vm_dispatch"].every((value) => authority.allowed_capabilities.includes(value))
-    && Object.entries(PUBLISHER_LIMITS).every(([name, limit]) => decimalLimit(authority[name], limit));
+    && Object.entries(PUBLISHER_LIMITS).every(([name, limit]) => decimalLimit(authority[name], limit))
+    && (!Object.hasOwn(authority, "host_io")
+      || publisherHostAuthorityValid(authority.host_io, authority.allowed_capabilities, authority.max_instructions));
 }
 
 function publisherSourceValid(facts, anchor) {

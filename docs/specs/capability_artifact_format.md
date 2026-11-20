@@ -105,12 +105,85 @@ a received envelope as its checkpoint source. Approval `validate()` checks
 structure and does not replace publisher authentication.
 
 This requirement changes the Rust verification API while preserving the v1
-envelope wire format. It establishes the required policy prefix; path, host,
-environment, and module predicates still require enforcement at the actual
-native host-effect boundaries. The existing capability-ID/scope/quota engine
-and separately enforced native publisher authority do not establish that
-broader integration by themselves. That work remains part of
-`bd-reality-20260923-26n9r.28` and `.29`.
+envelope wire format. It establishes the required policy prefix. The native
+publisher-approved execution path now applies the supported host, environment,
+capability, and invocation predicates at the host-effect boundary as described
+below. Filesystem path caveats and nonempty module-scope caveats cannot be
+enforced by that provider and are rejected before execution. They must not be
+treated as effective restrictions merely because envelope verification succeeds.
+
+## Publisher-signed native host restrictions
+
+A v2 publisher-approved source capsule may include an optional `host_io` object
+inside its existing `runtime_authority`. The complete object participates in
+the authority commitment and publisher signature. For example, an authority
+that already declares `network_egress`, `env_read`, and `fs_read` can narrow them
+with:
+
+```json
+{
+  "host_io": {
+    "host_ports": ["api.example.com:443", "[::1]:8443"],
+    "env_keys": ["APP_REGION", "NODE_ENV"],
+    "max_calls_per_epoch": {
+      "network_egress": 8,
+      "env_read": 4,
+      "fs_read": 32
+    }
+  }
+}
+```
+
+This is a fragment of `runtime_authority`, not a complete registration manifest.
+The publisher signs it with the rest of the authority and source capsule.
+Changing or removing it after signing invalidates approval. Omitting `host_io`
+preserves the canonical signed representation of existing authorities.
+
+The restrictions have these meanings:
+
+- `host_ports` is an optional set of exact, canonical lowercase endpoints with
+  explicit ports. IPv6 addresses use brackets. Wildcards, URL paths, userinfo,
+  and implicit ports are not accepted. At most 128 endpoints are supported.
+- `env_keys` is an optional set of at most 128 exact ASCII names, each 1–128
+  bytes using letters, digits, or underscore. It is intersected with the
+  operator's `runtime.environment_allowlist`; publisher approval never exposes
+  an otherwise unapproved host variable. Publisher execution refuses operator
+  environment scopes that the bounded envelope cannot represent.
+- `max_calls_per_epoch` accepts only declared host capabilities: `fs_read`,
+  `fs_write`, `network_egress`, `random_read`, and `env_read`. A limit cannot
+  exceed the authority's instruction ceiling. These counters cover one native
+  execution, reset for a new run, and are not distributed fleet quotas.
+- An omitted scope leaves that dimension unrestricted by the publisher. An
+  explicit empty endpoint/key set denies the corresponding effect family;
+  a zero invocation budget denies every invocation of that capability.
+
+Every request is checked before accessing the environment snapshot, reaching
+the host-I/O WAL, or invoking the real provider. Scope violations do not spend
+quota. Authorized attempts reserve their invocation budget before calling the
+provider, including attempts whose provider subsequently returns an error:
+an error does not establish that no side effect occurred. Quota reservation
+is synchronized across calls to the same execution provider. Denied requests
+remain in the engine's I/O transcript. Refusal incidents can replay when the
+engine finalizes a supported completed or typed-failure capture. Some filesystem
+provider denials currently become engine internal errors rather than supported
+typed failures; those incidents remain uncapturable and cannot establish replay
+equivalence.
+
+These restrictions only narrow authority. The runtime profile, sandbox,
+current containment state, IFC rules, SSRF protection, and separately signed
+process-spawn admission still apply. In particular,
+`security.network_policy.allowlist` remains an SSRF exception list; it is not
+repurposed as an exclusive egress destination scope. Process spawning and
+filesystem path restrictions are not granted or specified by `host_io`.
+
+Native replay captures the effective ceiling used by publisher-approved
+execution. Replay validates the recorded request sequence against a fresh
+instance of the same authority evaluator before consuming recorded outcomes;
+it does not perform live host effects. A publisher-scope denial must match the
+recorded denial, and missing or inconsistent scope context cannot establish
+policy-equivalent replay. This bounded integration contributes to
+`bd-reality-20260923-26n9r.29`; it does not close the broader module-authority or
+independent qualification work.
 
 ## Enforcement Rules
 

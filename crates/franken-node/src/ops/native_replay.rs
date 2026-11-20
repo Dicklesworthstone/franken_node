@@ -26,6 +26,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub const NATIVE_REPLAY_CAPTURE_SCHEMA: &str = "franken-node/native-replay-capture/v3";
+/// Captures the publisher's attenuated provider policy as well as guest inputs.
+/// The ceiling is historical signed context, never an independent trust anchor.
+pub const NATIVE_REPLAY_SCOPED_CAPTURE_SCHEMA: &str = "franken-node/native-replay-capture/v4";
 pub const NATIVE_REPLAY_OUTCOME_SCHEMA: &str = "franken-node/native-replay-outcome/v2";
 pub const MAX_NATIVE_REPLAY_PAYLOAD_BYTES: usize = 4 * 1024 * 1024;
 pub const NATIVE_COUNTERFACTUAL_OUTCOME_SCHEMA: &str =
@@ -230,7 +233,10 @@ impl NativeReplayCapture {
     /// This does not authenticate the producer: the containing record must
     /// already have passed signature verification against an independent key.
     pub fn validate(&self) -> Result<(), String> {
-        if self.schema_version != NATIVE_REPLAY_CAPTURE_SCHEMA {
+        if !matches!(
+            self.schema_version.as_str(),
+            NATIVE_REPLAY_CAPTURE_SCHEMA | NATIVE_REPLAY_SCOPED_CAPTURE_SCHEMA
+        ) {
             return Err(format!(
                 "unsupported native replay capture schema {}",
                 self.schema_version
@@ -1357,6 +1363,8 @@ mod engine {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
 
+    use crate::extensions::artifact_contract::EffectiveCapabilityCeiling;
+    use crate::ops::engine_dispatcher::PublisherHostAuthority;
     use crate::supply_chain::module_resolution_graph::file_resolution::source_graph::{
         CapturedModuleGraph, capsule, engine_resolver::CapturedEngineResolver,
     };
@@ -2147,7 +2155,59 @@ mod engine {
         process: Option<CapturedProcessReplay>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         module_sources: Option<CapturedModuleSources>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        capability_ceiling: Option<EffectiveCapabilityCeiling>,
         expected: CapturedAttempt,
+    }
+
+    /// Re-derive publisher scope and quota decisions before using the tape.
+    /// Every replay consumes this exact sequence; a counterfactual may consume
+    /// only its exact prefix. A fresh gate makes invocation budgets independent
+    /// of earlier verification attempts and preserves admitted failed attempts.
+    fn validate_scoped_transcript(
+        ceiling: &EffectiveCapabilityCeiling,
+        entries: &[(HostIoRequest, HostIoOutcome)],
+        capabilities: &[String],
+    ) -> Result<(), String> {
+        let authority = PublisherHostAuthority::new(ceiling.clone())
+            .map_err(|_| "captured publisher host authority is not enforceable".to_string())?;
+        let capabilities: BTreeSet<_> = capabilities
+            .iter()
+            .filter_map(|tag| RuntimeCapability::from_tag_str(tag))
+            .collect();
+        for (request, outcome) in entries {
+            // Derive the required grant from the typed request, never from a
+            // captured list that could omit the capability being checked.
+            let required = request.required_capability();
+            let runtime_capability = match required {
+                HostIoCapability::FsRead => RuntimeCapability::FsRead,
+                HostIoCapability::FsWrite => RuntimeCapability::FsWrite,
+                HostIoCapability::NetworkSend | HostIoCapability::NetworkRecv => {
+                    RuntimeCapability::NetworkEgress
+                }
+                HostIoCapability::RandomRead => RuntimeCapability::RandomRead,
+                HostIoCapability::EnvRead => RuntimeCapability::EnvRead,
+            };
+            let grants = [required];
+            let granted = if capabilities.contains(&runtime_capability) {
+                grants.as_slice()
+            } else {
+                &[]
+            };
+            let agrees = match authority.authorize(request, granted) {
+                Err(denial) => outcome.as_ref().err() == Some(&denial),
+                Ok(()) => !matches!(outcome,
+                    Err(HostIoError::Denied { reason })
+                        if reason.starts_with("publisher_authority:")),
+            };
+            if !agrees {
+                return Err(
+                    "captured host outcome contradicts publisher scope or invocation policy"
+                        .to_string(),
+                );
+            }
+        }
+        Ok(())
     }
 
     /// Admit only typed, bounded environment outcomes from the authenticated
@@ -2259,6 +2319,13 @@ mod engine {
                 &self.host_effect_transcript,
                 &self.package.capabilities,
             )?;
+            if let Some(ceiling) = &self.capability_ceiling {
+                validate_scoped_transcript(
+                    ceiling,
+                    &self.host_effect_transcript,
+                    &self.package.capabilities,
+                )?;
+            }
             let has_process_authority = self.package.capabilities.iter().any(|capability| {
                 RuntimeCapability::from_tag_str(capability) == Some(RuntimeCapability::ProcessSpawn)
             });
@@ -2549,10 +2616,30 @@ mod engine {
         let payload_json = String::from_utf8(writer.0)
             .map_err(|error| format!("native replay capture was not UTF-8: {error}"))?;
         Ok(NativeReplayCapture {
-            schema_version: NATIVE_REPLAY_CAPTURE_SCHEMA.to_string(),
+            schema_version: if payload.capability_ceiling.is_some() {
+                NATIVE_REPLAY_SCOPED_CAPTURE_SCHEMA
+            } else {
+                NATIVE_REPLAY_CAPTURE_SCHEMA
+            }
+            .to_string(),
             payload_json,
             payload_sha256,
         })
+    }
+
+    fn decode_capture(capture: &NativeReplayCapture) -> Result<NativeReplayPayload, String> {
+        capture.validate()?;
+        let payload: NativeReplayPayload = serde_json::from_str(&capture.payload_json)
+            .map_err(|error| format!("invalid native replay payload: {error}"))?;
+        // Reject schema downgrades, absent v4 authority, duplicate keys, ignored
+        // fields, and omitted settings before captured code can reach execution.
+        let canonical = encode_capture(&payload)?;
+        if canonical.schema_version != capture.schema_version
+            || canonical.payload_json != capture.payload_json
+        {
+            return Err("native replay payload is not the complete canonical capture".to_string());
+        }
+        Ok(payload)
     }
 
     struct ObservedFailure {
@@ -2680,6 +2767,22 @@ mod engine {
     }
 
     impl NativeReplayCapture {
+        /// Bind the exact verified publisher ceiling used by the live provider.
+        /// Called before the enclosing run statement is signed. Neither this
+        /// method nor the ceiling authenticates an otherwise unsigned capture.
+        pub(crate) fn with_capability_ceiling(
+            self,
+            ceiling: &EffectiveCapabilityCeiling,
+        ) -> Result<Self, String> {
+            let mut payload = decode_capture(&self)?;
+            if payload.capability_ceiling.is_some() {
+                return Err("native replay publisher authority is already bound".to_string());
+            }
+            payload.capability_ceiling = Some(ceiling.clone());
+            payload.validate()?;
+            encode_capture(&payload)
+        }
+
         /// Capture the source actually passed to the native engine and its
         /// finalized response, before either can be discarded or reread.
         /// The product caller supplies the same ambient grant and argv it gave
@@ -2752,6 +2855,7 @@ mod engine {
                     &result.host_effect_journal,
                 )?,
                 module_sources: module_sources.cloned(),
+                capability_ceiling: None,
                 expected: CapturedAttempt::Completed(Box::new(CapturedExecution {
                     trace_id: result.trace_id.clone(),
                     ir4_witness: result.ir4_witness.clone(),
@@ -2892,6 +2996,7 @@ mod engine {
                 host_effect_transcript,
                 process: CapturedProcessReplay::capture(process_preparation, &journal)?,
                 module_sources: module_sources.cloned(),
+                capability_ceiling: None,
                 expected,
             };
             payload.validate()?;
@@ -3154,16 +3259,7 @@ mod engine {
     }
 
     pub(super) fn reexecute(capture: &NativeReplayCapture) -> Result<NativeReplayOutcome, String> {
-        capture.validate()?;
-        let payload: NativeReplayPayload = serde_json::from_str(&capture.payload_json)
-            .map_err(|error| format!("invalid native replay payload: {error}"))?;
-        // Exact reserialization rejects duplicate keys, ignored unknown fields,
-        // omitted settings that would inherit today's defaults, and alternate
-        // encodings before any captured source reaches execution.
-        let canonical = encode_capture(&payload)?;
-        if canonical.payload_json != capture.payload_json {
-            return Err("native replay payload is not the complete canonical capture".to_string());
-        }
+        let payload = decode_capture(capture)?;
         std::thread::Builder::new()
             .name("native-incident-replay".to_string())
             .stack_size(REPLAY_STACK_BYTES)
@@ -3171,6 +3267,19 @@ mod engine {
                 // Source preparation may use the original admitted parser
                 // depth. Keep it on the same large stack as native evaluation.
                 payload.validate()?;
+                if payload.capability_ceiling.is_none()
+                    && payload.host_effect_transcript.iter().any(|(_, outcome)| {
+                        matches!(outcome, Err(HostIoError::Denied { reason })
+                            if reason.starts_with("publisher_authority:"))
+                    })
+                {
+                    // A producer may construct an intermediate capture before
+                    // binding its ceiling, but that draft is never replayable.
+                    return Err(
+                        "publisher-scoped host outcomes require the captured publisher ceiling"
+                            .to_string(),
+                    );
+                }
                 let modules = payload
                     .module_sources
                     .as_ref()
@@ -3410,14 +3519,7 @@ mod engine {
         capture: &NativeReplayCapture,
         denied_capabilities: &[String],
     ) -> Result<NativeCounterfactualOutcome, String> {
-        capture.validate()?;
-        let payload: NativeReplayPayload = serde_json::from_str(&capture.payload_json)
-            .map_err(|error| format!("invalid native counterfactual payload: {error}"))?;
-        if encode_capture(&payload)?.payload_json != capture.payload_json {
-            return Err(
-                "native counterfactual requires the complete canonical capture".to_string(),
-            );
-        }
+        let payload = decode_capture(capture)?;
         if payload.module_sources.is_none()
             || !matches!(&payload.expected, CapturedAttempt::Completed(_))
         {
@@ -3581,6 +3683,153 @@ mod engine {
                 .expect("start native test")
                 .join()
                 .expect("native test completed");
+        }
+
+        fn scoped_ceiling() -> EffectiveCapabilityCeiling {
+            EffectiveCapabilityCeiling {
+                contract_id: "publisher-replay-regression".into(),
+                allowed_capabilities: ["env_read", "fs_read", "fs_write", "network_egress"]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
+                max_calls_per_epoch: BTreeMap::from([
+                    ("env_read".into(), 1),
+                    ("fs_read".into(), 1),
+                    ("fs_write".into(), 1),
+                    ("network_egress".into(), 1),
+                ]),
+                capability_scopes: BTreeMap::from([
+                    ("env_read".into(), "env:read".into()),
+                    ("fs_read".into(), "filesystem:read".into()),
+                    ("fs_write".into(), "filesystem:write".into()),
+                    ("network_egress".into(), "network:egress".into()),
+                ]),
+                path_prefixes: None,
+                host_ports: Some(BTreeSet::from(["api.example.test:443".into()])),
+                env_keys: Some(BTreeSet::from(["PUBLIC_NAME".into()])),
+                module_scope_prefix: None,
+            }
+        }
+
+        #[test]
+        fn scoped_transcripts_rederive_denials_and_charge_failed_attempts_without_refunds() {
+            let ceiling = scoped_ceiling();
+            let request = HostIoRequest::EnvRead {
+                name: "PUBLIC_NAME".into(),
+            };
+            let budget_denial = HostIoError::Denied {
+                reason:
+                    "publisher_authority: host invocation exceeds the admitted scope or call budget"
+                        .into(),
+            };
+            let scope_denial = HostIoError::Denied {
+                reason: "publisher_authority: host request is outside the admitted scope".into(),
+            };
+            let tape = vec![
+                (
+                    request.clone(),
+                    Err(HostIoError::Io {
+                        detail: "provider failed".into(),
+                    }),
+                ),
+                (request.clone(), Err(budget_denial.clone())),
+                (
+                    HostIoRequest::EnvRead {
+                        name: "PRIVATE_NAME".into(),
+                    },
+                    Err(scope_denial.clone()),
+                ),
+            ];
+            let capabilities = vec!["env_read".into()];
+            for _ in 0..2 {
+                validate_scoped_transcript(&ceiling, &tape, &capabilities).unwrap();
+            }
+            let mut changed = tape.clone();
+            changed[1].1 = Ok(HostIoResponse::EnvRead {
+                value: Some("ungranted".into()),
+            });
+            assert!(validate_scoped_transcript(&ceiling, &changed, &capabilities).is_err());
+            let mut widened = ceiling.clone();
+            widened.max_calls_per_epoch.insert("env_read".into(), 2);
+            assert!(validate_scoped_transcript(&widened, &tape, &capabilities).is_err());
+            assert!(validate_scoped_transcript(&ceiling, &tape, &[]).is_err());
+            assert!(
+                validate_scoped_transcript(
+                    &ceiling,
+                    &[(request, Err(scope_denial))],
+                    &capabilities,
+                )
+                .is_err(),
+                "an allowed request cannot retain an invented scope refusal"
+            );
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn scoped_native_replay_is_offline_and_rejects_weakened_or_downgraded_capture_policy() {
+            on_native_stack(|| {
+                let workspace = tempfile::tempdir().unwrap();
+                let original = workspace.path().join("original");
+                std::fs::create_dir(&original).unwrap();
+                std::fs::write(original.join("input.txt"), "original-source-value").unwrap();
+                let legacy = record_frozen_counterfactual(
+                    &original,
+                    "const fs = require('fs'); const value = fs.readFileSync('input.txt', 'utf8'); fs.writeFileSync('output.txt', value); console.log(value);",
+                );
+                assert_eq!(legacy.schema_version, NATIVE_REPLAY_CAPTURE_SCHEMA);
+                let scoped = legacy
+                    .clone()
+                    .with_capability_ceiling(&scoped_ceiling())
+                    .unwrap();
+                assert_eq!(scoped.schema_version, NATIVE_REPLAY_SCOPED_CAPTURE_SCHEMA);
+                assert!(
+                    scoped
+                        .clone()
+                        .with_capability_ceiling(&scoped_ceiling())
+                        .is_err()
+                );
+                let archived = workspace.path().join("archived");
+                std::fs::rename(&original, &archived).unwrap();
+                assert!(reexecute(&scoped).unwrap().satisfies_policy_equivalence());
+                assert!(
+                    counterfactual(&scoped, &["fs_write".into()])
+                        .unwrap()
+                        .baseline
+                        .satisfies_policy_equivalence()
+                );
+                assert!(!original.exists());
+                assert_eq!(
+                    std::fs::read_to_string(archived.join("output.txt")).unwrap(),
+                    "original-source-value"
+                );
+
+                let mut payload = decode_capture(&scoped).unwrap();
+                payload
+                    .capability_ceiling
+                    .as_mut()
+                    .unwrap()
+                    .max_calls_per_epoch
+                    .insert("fs_write".into(), 0);
+                assert!(
+                    reexecute(&encode_capture(&payload).unwrap())
+                        .unwrap_err()
+                        .contains("contradicts publisher")
+                );
+                let mut downgraded = scoped;
+                downgraded.schema_version = NATIVE_REPLAY_CAPTURE_SCHEMA.into();
+                assert!(
+                    reexecute(&downgraded)
+                        .unwrap_err()
+                        .contains("canonical capture")
+                );
+                let mut missing = legacy;
+                missing.schema_version = NATIVE_REPLAY_SCOPED_CAPTURE_SCHEMA.into();
+                assert!(
+                    reexecute(&missing)
+                        .unwrap_err()
+                        .contains("canonical capture")
+                );
+            });
         }
 
         #[test]

@@ -163,6 +163,17 @@ export interface PublisherRuntimeAuthority {
   max_parse_source_bytes: string;
   max_parse_tokens: string;
   max_parse_recursion_depth: string;
+  /** Optional signed host restrictions. Omission preserves legacy authority. */
+  host_io?: PublisherHostIoAuthority;
+}
+/** Exact publisher restrictions, not proof of execution or a grant of authority. */
+export interface PublisherHostIoAuthority {
+  /** Exact lowercase socket endpoints; [] denies every network endpoint. */
+  host_ports?: string[];
+  /** Exact environment names; [] denies every environment read. */
+  env_keys?: string[];
+  /** Exact nonnegative decimal strings; "0" denies every call in the native run. */
+  max_calls_per_epoch: Partial<Record<"fs_read" | "fs_write" | "network_egress" | "random_read" | "env_read", string>>;
 }
 /** Authenticated capsule content metadata; paths and source bytes are not returned. */
 export interface PublisherSourceCapsule {

@@ -381,6 +381,63 @@ elif mode == "publisher_invalid_capability":
     response["facts"]["runtime_authority"]["allowed_capabilities"].append("unrestricted")
 elif mode == "publisher_authority_extra":
     response["facts"]["runtime_authority"]["execution_authorized"] = True
+elif mode.startswith("publisher_host_"):
+    authority = response["facts"]["runtime_authority"]
+    authority["allowed_capabilities"] += ["env_read", "fs_read", "network_egress"]
+    host = {
+        "host_ports": ["[2001:db8::1]:443", "api.example.test:443"],
+        "env_keys": ["PUBLIC_NAME"],
+        "max_calls_per_epoch": {"env_read": "1", "fs_read": "0", "network_egress": str(2**64 - 1)},
+    }
+    authority["host_io"] = host
+    if mode == "publisher_host_empty":
+        authority["host_io"] = {"host_ports": [], "env_keys": [], "max_calls_per_epoch": {}}
+    elif mode == "publisher_host_unspecified":
+        authority["host_io"] = {"max_calls_per_epoch": {"fs_read": "0"}}
+    elif mode == "publisher_host_null":
+        authority["host_io"] = None
+    elif mode == "publisher_host_unknown_field":
+        host["execution_authorized"] = True
+    elif mode == "publisher_host_missing_quotas":
+        del host["max_calls_per_epoch"]
+    elif mode == "publisher_host_numeric_quota":
+        host["max_calls_per_epoch"]["fs_read"] = 0
+    elif mode == "publisher_host_overflow_quota":
+        host["max_calls_per_epoch"]["network_egress"] = str(2**64)
+    elif mode == "publisher_host_beyond_instruction_quota":
+        authority["max_instructions"] = "1"
+        host["max_calls_per_epoch"]["network_egress"] = "2"
+    elif mode == "publisher_host_undeclared_quota":
+        host["max_calls_per_epoch"]["fs_write"] = "1"
+    elif mode == "publisher_host_noncanonical_quota":
+        host["max_calls_per_epoch"]["fs_read"] = "00"
+    elif mode == "publisher_host_quota_newline":
+        host["max_calls_per_epoch"]["fs_read"] = "0\n"
+    elif mode == "publisher_host_wildcard":
+        host["host_ports"] = ["*.example.test:443"]
+    elif mode == "publisher_host_url":
+        host["host_ports"] = ["https://api.example.test:443/"]
+    elif mode == "publisher_host_invalid_port":
+        host["host_ports"] = ["api.example.test:65536"]
+    elif mode == "publisher_host_uppercase":
+        host["host_ports"] = ["API.example.test:443"]
+    elif mode == "publisher_host_invalid_ipv6":
+        host["host_ports"] = ["[fe80::1%eth0]:443"]
+    elif mode == "publisher_host_duplicate_scope":
+        host["host_ports"] = ["api.example.test:443", "api.example.test:443"]
+    elif mode == "publisher_host_unsorted_scope":
+        host["host_ports"].reverse()
+    elif mode == "publisher_host_null_scope":
+        host["host_ports"] = None
+    elif mode == "publisher_host_undeclared_scope":
+        authority["allowed_capabilities"].remove("network_egress")
+        host["max_calls_per_epoch"].pop("network_egress")
+    elif mode == "publisher_host_invalid_env":
+        host["env_keys"] = ["NAME=VALUE"]
+    elif mode == "publisher_host_env_newline":
+        host["env_keys"] = ["NAME\n"]
+    elif mode == "publisher_host_excessive_scope":
+        host["env_keys"] = sorted(f"KEY_{index}" for index in range(129))
 elif mode == "publisher_count_inconsistent":
     response["facts"]["capsule"]["metadata_file_count"] = 1
 elif mode == "publisher_unsafe_count":

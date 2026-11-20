@@ -8,6 +8,7 @@ execute a captured guest. Only Python's standard library is required.
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import math
 import os
@@ -289,8 +290,54 @@ def _publisher_source_trust_valid(
     )
 
 
+def _publisher_endpoint_valid(value: Any) -> bool:
+    if (not isinstance(value, str) or not 1 <= len(value) <= 256
+            or not value.isascii() or any(ord(char) < 33 or ord(char) == 127 or char in "*?#@/" for char in value)):
+        return False
+    if value.startswith("["):
+        address, separator, rest = value[1:].partition("]")
+        if not separator or not rest.startswith(":") or "%" in address:
+            return False
+        try:
+            ipaddress.IPv6Address(address)
+        except ValueError:
+            return False
+        host, port = f"[{address.lower()}]", rest[1:]
+    else:
+        host, separator, port = value.rpartition(":")
+        if not separator or not host or ":" in host:
+            return False
+        host = host.lower()
+    return (re.fullmatch(r"[1-9][0-9]{0,4}", port) is not None
+            and int(port) <= 65535 and value == f"{host}:{port}")
+
+
+def _publisher_host_authority_valid(host: Any, capabilities: list[str], max_instructions: str) -> bool:
+    if (not isinstance(host, dict) or "max_calls_per_epoch" not in host
+            or set(host) - {"host_ports", "env_keys", "max_calls_per_epoch"}):
+        return False
+    for name, capability, valid in (
+        ("host_ports", "network_egress", _publisher_endpoint_valid),
+        ("env_keys", "env_read", lambda value: isinstance(value, str)
+         and re.fullmatch(r"[A-Za-z0-9_]{1,128}", value) is not None),
+    ):
+        if name in host:
+            values = host[name]
+            if (capability not in capabilities or not isinstance(values, list) or len(values) > 128
+                    or not all(valid(value) for value in values)
+                    or any(left >= right for left, right in zip(values, values[1:]))):
+                return False
+    quotas = host["max_calls_per_epoch"]
+    return (isinstance(quotas, dict) and len(quotas) <= 5
+            and all(capability in {"fs_read", "fs_write", "network_egress", "random_read", "env_read"}
+                    and capability in capabilities and isinstance(limit, str)
+                    and re.fullmatch(r"0|[1-9][0-9]{0,19}", limit) is not None
+                    and int(limit) <= int(max_instructions)
+                    for capability, limit in quotas.items()))
+
+
 def _publisher_authority_valid(authority: Any) -> bool:
-    if not isinstance(authority, dict) or set(authority) != {
+    if not isinstance(authority, dict) or set(authority) - {"host_io"} != {
         "schema_version", "policy_revision", "allowed_capabilities", "allow_process_shape",
         *_PUBLISHER_LIMITS,
     }:
@@ -305,6 +352,8 @@ def _publisher_authority_valid(authority: Any) -> bool:
         and len(set(capabilities)) == len(capabilities)
         and {"console", "heap_allocate", "vm_dispatch"}.issubset(capabilities)
         and all(_decimal_limit(authority[name], limit) for name, limit in _PUBLISHER_LIMITS.items())
+        and ("host_io" not in authority or _publisher_host_authority_valid(
+            authority["host_io"], capabilities, authority["max_instructions"]))
     )
 
 

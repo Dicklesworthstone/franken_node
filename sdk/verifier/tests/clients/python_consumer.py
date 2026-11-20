@@ -265,7 +265,14 @@ publisher_controls = ["publisher_wrong_scope", "publisher_wrong_signer", "publis
                       "publisher_unknown_field", "publisher_authority_missing", "publisher_v1_authority",
                       "publisher_rounded_ceiling", "publisher_overflow_ceiling", "publisher_zero_ceiling",
                       "publisher_invalid_capability", "publisher_authority_extra", "publisher_count_inconsistent",
-                      "publisher_unsafe_count", "publisher_bad_digest", "publisher_capsule_not_object"]
+                      "publisher_unsafe_count", "publisher_bad_digest", "publisher_capsule_not_object",
+                      "publisher_host_null", "publisher_host_unknown_field", "publisher_host_missing_quotas",
+                      "publisher_host_numeric_quota", "publisher_host_overflow_quota", "publisher_host_beyond_instruction_quota",
+                      "publisher_host_undeclared_quota", "publisher_host_noncanonical_quota", "publisher_host_quota_newline",
+                      "publisher_host_wildcard", "publisher_host_url", "publisher_host_invalid_port", "publisher_host_uppercase",
+                      "publisher_host_invalid_ipv6", "publisher_host_duplicate_scope", "publisher_host_unsorted_scope",
+                      "publisher_host_null_scope", "publisher_host_undeclared_scope", "publisher_host_invalid_env",
+                      "publisher_host_env_newline", "publisher_host_excessive_scope"]
 for mode in publisher_controls:
     try:
         verify_artifact(json.dumps({"protocol_control": mode}).encode(), cases[0]["anchor"],
@@ -275,6 +282,20 @@ for mode in publisher_controls:
         print(json.dumps({"case": f"protocol_{mode}", "result": error.code}), flush=True)
     else:
         raise AssertionError(f"protocol_{mode}")
+publisher_host_positives = ["publisher_host_valid", "publisher_host_empty", "publisher_host_unspecified"]
+for mode in publisher_host_positives:
+    verified = verify_artifact(json.dumps({"protocol_control": mode}).encode(), cases[0]["anchor"],
+                               verifier=str(root / "fake_verifier"), format="publisher-source", signature_hex="00" * 64)
+    host = verified["facts"]["runtime_authority"]["host_io"]
+    if mode == "publisher_host_valid":
+        assert host["max_calls_per_epoch"]["network_egress"] == "18446744073709551615"
+        assert host["max_calls_per_epoch"]["fs_read"] == "0"
+        assert host["host_ports"] == ["[2001:db8::1]:443", "api.example.test:443"]
+    elif mode == "publisher_host_empty":
+        assert host == {"host_ports": [], "env_keys": [], "max_calls_per_epoch": {}}
+    else:
+        assert host == {"max_calls_per_epoch": {"fs_read": "0"}}
+    print(json.dumps({"case": f"protocol_{mode}", "result": "verified"}), flush=True)
 publisher_trust_options = {
     "format": "publisher-source-trust", "signature_hex": "00" * 64,
     "trusted_revocation_public_key_hex": "11" * 32,
@@ -376,7 +397,7 @@ for mode in ltv_controls:
 print(json.dumps({"consumer": "python", "matrix_cases": len(cases),
                   "client_cases": len(client_controls) + len(publisher_trust_inputs),
                   "protocol_cases": len(controls) + len(run_controls) + len(runtime_controls)
-                  + len(resolution_controls) + len(publisher_controls)
+                  + len(resolution_controls) + len(publisher_controls) + len(publisher_host_positives)
                   + len(publisher_trust_controls) + len(publisher_trust_positives)
                   + len(counterfactual_controls) + len(ltv_controls)
                   + len(native_controls) + len(native_positives) + 1, "passed": True}), flush=True)

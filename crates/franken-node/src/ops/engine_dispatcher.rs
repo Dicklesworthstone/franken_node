@@ -3373,7 +3373,170 @@ impl CancellationGatedHostIo {
     }
 }
 
-/// Install product cancellation and flow observation outside every host source.
+/// Verified publisher restrictions enforced before each real host-I/O attempt.
+///
+/// Constructing an envelope at preflight does not enforce its predicates. This
+/// guard owns the run's invocation counters and is also used when validating a
+/// retained native transcript. It only narrows the engine's supplied grants.
+/// Attempts consume budget before delegation, including attempts whose provider
+/// later fails after a partial effect; no outcome can refund consumed authority.
+#[cfg(feature = "engine")]
+pub(crate) struct PublisherHostAuthority {
+    ceiling: crate::extensions::artifact_contract::EffectiveCapabilityCeiling,
+    enforcement: Mutex<crate::extensions::artifact_contract::EnforcementEngine>,
+}
+
+#[cfg(feature = "engine")]
+impl std::fmt::Debug for PublisherHostAuthority {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PublisherHostAuthority")
+            .field("contract_id", &self.ceiling.contract_id)
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(feature = "engine")]
+impl PublisherHostAuthority {
+    pub(crate) fn new(
+        ceiling: crate::extensions::artifact_contract::EffectiveCapabilityCeiling,
+    ) -> std::result::Result<Self, HostIoError> {
+        // Raw path prefixes cannot safely authorize descriptors, symlink races,
+        // or operations with two paths. An empty set is enforceable (deny every
+        // filesystem operation); nonempty restrictions need the engine's
+        // resolved filesystem identity and must never be silently ignored.
+        if ceiling
+            .path_prefixes
+            .as_ref()
+            .is_some_and(|paths| !paths.is_empty())
+        {
+            return Err(Self::denied(
+                "nonempty filesystem path caveats require resolved-path enforcement",
+            ));
+        }
+        // The shared provider has no caller-module identity. Applying a child
+        // module's ceiling to it would either weaken the child or restrict its
+        // siblings; fail admission until module attribution supplies that scope.
+        if ceiling
+            .module_scope_prefix
+            .as_ref()
+            .is_some_and(|prefix| !prefix.is_empty())
+        {
+            return Err(Self::denied(
+                "nonempty module caveats require per-module enforcement",
+            ));
+        }
+        let enforcement =
+            crate::extensions::artifact_contract::EnforcementEngine::from_ceiling(&ceiling);
+        Ok(Self {
+            ceiling,
+            enforcement: Mutex::new(enforcement),
+        })
+    }
+
+    fn denied(reason: &str) -> HostIoError {
+        HostIoError::Denied {
+            reason: format!("publisher_authority: {reason}"),
+        }
+    }
+
+    pub(crate) fn authorize(
+        &self,
+        request: &HostIoRequest,
+        granted: &[HostIoCapability],
+    ) -> std::result::Result<(), HostIoError> {
+        use crate::extensions::artifact_contract::InvocationDecision;
+
+        let capability = request.required_capability();
+        if !granted.contains(&capability) {
+            return Err(HostIoError::CapabilityMissing { capability });
+        }
+        let capability_id = match capability {
+            HostIoCapability::FsRead => "fs_read",
+            HostIoCapability::FsWrite => "fs_write",
+            HostIoCapability::NetworkSend | HostIoCapability::NetworkRecv => "network_egress",
+            HostIoCapability::RandomRead => "random_read",
+            HostIoCapability::EnvRead => "env_read",
+        };
+        if !self.ceiling.permits_capability(capability_id) {
+            return Err(Self::denied(
+                "host capability is outside the admitted ceiling",
+            ));
+        }
+        let scope_permitted = match request {
+            HostIoRequest::NetworkSend { endpoint, .. }
+            | HostIoRequest::NetworkRecv { endpoint, .. }
+            | HostIoRequest::NetworkRequest { endpoint, .. } => {
+                self.ceiling.permits_host_port(endpoint)
+            }
+            HostIoRequest::EnvRead { name } => self.ceiling.permits_env_key(name),
+            HostIoRequest::FsRead { .. }
+            | HostIoRequest::FsWrite { .. }
+            | HostIoRequest::FsMeta { .. } => self.ceiling.path_prefixes.is_none(),
+            HostIoRequest::RandomRead { .. } => true,
+        };
+        if !scope_permitted {
+            return Err(Self::denied("host request is outside the admitted scope"));
+        }
+        let mut enforcement = self
+            .enforcement
+            .lock()
+            .map_err(|_| Self::denied("invocation accounting is unavailable"))?;
+        match enforcement.permit_invocation(
+            capability_id,
+            ArtifactRuntimeAuthority::canonical_capability_scope(capability_id),
+        ) {
+            InvocationDecision::Permitted { .. } => Ok(()),
+            InvocationDecision::Denied { .. } => Err(Self::denied(
+                "host invocation exceeds the admitted scope or call budget",
+            )),
+        }
+    }
+}
+
+/// Applies the retained ceiling to both plain and supervised provider entrypoints.
+#[cfg(feature = "engine")]
+struct PublisherAuthorityHostIo {
+    inner: Arc<dyn HostIoProvider>,
+    authority: PublisherHostAuthority,
+}
+
+#[cfg(feature = "engine")]
+impl std::fmt::Debug for PublisherAuthorityHostIo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PublisherAuthorityHostIo")
+            .field("authority", &self.authority)
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(feature = "engine")]
+impl HostIoProvider for PublisherAuthorityHostIo {
+    fn name(&self) -> &str {
+        "publisher-authority-host-io"
+    }
+
+    fn filesystem_exception_provenance(&self) -> HostIoExceptionProvenance {
+        self.inner.filesystem_exception_provenance()
+    }
+
+    fn perform(&self, request: &HostIoRequest, granted: &[HostIoCapability]) -> HostIoOutcome {
+        self.authority.authorize(request, granted)?;
+        self.inner.perform(request, granted)
+    }
+
+    fn perform_controlled(
+        &self,
+        request: &HostIoRequest,
+        granted: &[HostIoCapability],
+        control: Arc<dyn frankenengine_extension_host::host_io::HostIoControl>,
+    ) -> HostIoOutcome {
+        control.checkpoint()?;
+        self.authority.authorize(request, granted)?;
+        self.inner.perform_controlled(request, granted, control)
+    }
+}
+
+/// Install product cancellation and authority/flow observation outside every host source.
 ///
 /// EnvironmentSnapshotHostIo serves EnvRead directly, so it must be inside the
 /// flow gate that records successful environment values as sensitive samples.
@@ -3395,6 +3558,7 @@ fn compose_native_host_io<P: HostIoProvider + 'static>(
         trace_id,
         cancellation,
         None,
+        None,
     )
 }
 
@@ -3405,6 +3569,7 @@ fn compose_native_host_io_with_declassifications<P: HostIoProvider + 'static>(
     trace_id: impl Into<String>,
     cancellation: NativeEngineCancellation,
     declassifications: Option<Arc<crate::ops::flow_gated_host_io::FlowDeclassificationTracker>>,
+    publisher_ceiling: Option<crate::extensions::artifact_contract::EffectiveCapabilityCeiling>,
 ) -> std::result::Result<Arc<dyn HostIoProvider>, HostIoError> {
     use crate::ops::flow_gated_host_io::FlowGatedHostIo;
 
@@ -3423,8 +3588,15 @@ fn compose_native_host_io_with_declassifications<P: HostIoProvider + 'static>(
             declassifications,
         )),
     };
+    let authority_gated: Arc<dyn HostIoProvider> = match publisher_ceiling {
+        Some(ceiling) => Arc::new(PublisherAuthorityHostIo {
+            inner: flow_gated,
+            authority: PublisherHostAuthority::new(ceiling)?,
+        }),
+        None => flow_gated,
+    };
     Ok(Arc::new(CancellationGatedHostIo::new(
-        flow_gated,
+        authority_gated,
         cancellation,
     )))
 }
@@ -13483,6 +13655,26 @@ impl EngineDispatcher {
                 &mut telemetry_guard,
             )
         })?;
+        let publisher_host_ceiling = trust_requirements
+            .registry_artifact_approval
+            .as_ref()
+            .map(|approval| approval.enforce_attenuated_capability_envelope(config))
+            .transpose()
+            .map_err(|error| {
+                native_engine_spawn_error_with_telemetry_cleanup(
+                    format!("Publisher host authority admission failed: {error:#}"),
+                    &mut telemetry_guard,
+                )
+            })?
+            .flatten();
+        if let Some(ceiling) = &publisher_host_ceiling {
+            PublisherHostAuthority::new(ceiling.clone()).map_err(|error| {
+                native_engine_spawn_error_with_telemetry_cleanup(
+                    format!("Publisher host authority is not enforceable: {error}"),
+                    &mut telemetry_guard,
+                )
+            })?;
+        }
         let parser_budget = RuntimeParseBudget {
             max_source_bytes: orchestrator_config.parser_options.budget.max_source_bytes,
             max_token_count: orchestrator_config.parser_options.budget.max_token_count,
@@ -13812,6 +14004,7 @@ impl EngineDispatcher {
                     run_egress_trace,
                     cancellation.clone(),
                     declassification_tracker.clone(),
+                    publisher_host_ceiling.clone(),
                 )
                 .map_err(|error| {
                     native_engine_spawn_error_with_telemetry_cleanup(
@@ -13985,7 +14178,10 @@ impl EngineDispatcher {
                                 replay_module_sources.as_ref(),
                                 &orchestrator,
                                 &error,
-                            ) {
+                            ).and_then(|capture| match publisher_host_ceiling.as_ref() {
+                                Some(ceiling) => capture.with_capability_ceiling(ceiling),
+                                None => Ok(capture),
+                            }) {
                                 Ok(capture) => Some(capture),
                                 Err(capture_error) => {
                                     // Only a certified guest exception has a
@@ -14091,7 +14287,10 @@ impl EngineDispatcher {
                     replay_process_provider.as_deref(),
                     replay_module_sources.as_ref(),
                     &execution_result,
-                ) {
+                ).and_then(|capture| match publisher_host_ceiling.as_ref() {
+                    Some(ceiling) => capture.with_capability_ceiling(ceiling),
+                    None => Ok(capture),
+                }) {
                     Ok(capture) => Some(capture),
                     Err(error) => {
                         // Capture is an explicitly requested run outcome. Keep
@@ -15491,7 +15690,7 @@ mod tests {
         use frankenengine_extension_host::host_io::{
             ENVIRONMENT_VALUE_MAX_BYTES, HostIoControl, HostIoResponse, UnrestrictedHostIoControl,
         };
-        use std::collections::BTreeMap;
+        use std::collections::{BTreeMap, BTreeSet};
         use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
         #[derive(Debug, Default)]
@@ -15607,6 +15806,237 @@ mod tests {
                 Err(HostIoError::NotImplemented { what })
                     if what == "in-memory boundary; no effect executed"
             ));
+        }
+
+        fn publisher_ceiling(
+            capabilities: &[&str],
+            budget: u64,
+        ) -> crate::extensions::artifact_contract::EffectiveCapabilityCeiling {
+            crate::extensions::artifact_contract::EffectiveCapabilityCeiling {
+                contract_id: "publisher-boundary-test".into(),
+                allowed_capabilities: capabilities.iter().map(|cap| (*cap).to_owned()).collect(),
+                max_calls_per_epoch: capabilities
+                    .iter()
+                    .map(|cap| ((*cap).to_owned(), budget))
+                    .collect(),
+                capability_scopes: capabilities
+                    .iter()
+                    .map(|cap| {
+                        (
+                            (*cap).to_owned(),
+                            ArtifactRuntimeAuthority::canonical_capability_scope(cap).to_owned(),
+                        )
+                    })
+                    .collect(),
+                path_prefixes: None,
+                host_ports: None,
+                env_keys: None,
+                module_scope_prefix: Some(String::new()),
+            }
+        }
+
+        #[test]
+        fn publisher_scopes_and_shared_network_quota_precede_provider_calls() {
+            for controlled in [false, true] {
+                let boundary = Arc::new(BoundaryState::default());
+                let mut ceiling = publisher_ceiling(&["network_egress"], 2);
+                ceiling.host_ports = Some(BTreeSet::from(["example.invalid:443".into()]));
+                let provider = PublisherAuthorityHostIo {
+                    inner: Arc::new(CountingBoundary(Arc::clone(&boundary))),
+                    authority: PublisherHostAuthority::new(ceiling).unwrap(),
+                };
+                assert!(matches!(
+                    invoke(&provider, &outbound(b"public"), &[], controlled),
+                    Err(HostIoError::CapabilityMissing { .. })
+                ));
+                assert!(matches!(
+                    invoke(
+                        &provider,
+                        &HostIoRequest::NetworkRecv {
+                            endpoint: "other.invalid:443".into(),
+                            max_len: 16,
+                        },
+                        &[HostIoCapability::NetworkRecv],
+                        controlled,
+                    ),
+                    Err(HostIoError::Denied { reason }) if reason ==
+                        "publisher_authority: host request is outside the admitted scope"
+                ));
+                assert_eq!(boundary.calls(), 0);
+                assert_boundary_reached(invoke(
+                    &provider,
+                    &outbound(b"public"),
+                    &[HostIoCapability::NetworkSend],
+                    controlled,
+                ));
+                assert_boundary_reached(invoke(
+                    &provider,
+                    &HostIoRequest::NetworkRecv {
+                        endpoint: "example.invalid:443".into(),
+                        max_len: 16,
+                    },
+                    &[HostIoCapability::NetworkRecv],
+                    controlled,
+                ));
+                assert!(matches!(
+                    invoke(&provider, &HostIoRequest::NetworkRequest {
+                        endpoint: "example.invalid:443".into(),
+                        payload: b"public".to_vec(),
+                        max_len: 16,
+                        use_tls: true,
+                    }, &[HostIoCapability::NetworkSend], controlled),
+                    Err(HostIoError::Denied { reason }) if reason ==
+                        "publisher_authority: host invocation exceeds the admitted scope or call budget"
+                ));
+                assert!(matches!(
+                    invoke(
+                        &provider,
+                        &HostIoRequest::RandomRead { byte_len: 4 },
+                        &[HostIoCapability::RandomRead],
+                        controlled,
+                    ),
+                    Err(HostIoError::Denied { .. })
+                ));
+                assert_eq!(
+                    boundary.calls(),
+                    2,
+                    "denials do not reach the provider; failures do not refund quota"
+                );
+            }
+        }
+
+        #[test]
+        fn publisher_environment_scope_covers_snapshot_reads_and_cancellation() {
+            for controlled in [false, true] {
+                let boundary = Arc::new(BoundaryState::default());
+                let mut ceiling = publisher_ceiling(&["env_read"], 1);
+                ceiling.env_keys = Some(BTreeSet::from(["ALLOWED".into()]));
+                let provider = compose_native_host_io_with_declassifications(
+                    CountingBoundary(Arc::clone(&boundary)),
+                    Some(BTreeMap::from([
+                        ("ALLOWED".into(), "visible-to-approved-guest".into()),
+                        ("DENIED".into(), "must-never-be-returned".into()),
+                    ])),
+                    "publisher-snapshot",
+                    NativeEngineCancellation::new(),
+                    None,
+                    Some(ceiling),
+                )
+                .unwrap();
+                assert!(matches!(
+                    invoke(
+                        provider.as_ref(),
+                        &HostIoRequest::EnvRead {
+                            name: "DENIED".into()
+                        },
+                        &[HostIoCapability::EnvRead],
+                        controlled,
+                    ),
+                    Err(HostIoError::Denied { .. })
+                ));
+                if controlled {
+                    let signal = Arc::new(OperationSignal::default());
+                    signal.refused.store(true, Ordering::Release);
+                    assert!(matches!(
+                        provider.perform_controlled(
+                            &HostIoRequest::EnvRead {
+                                name: "ALLOWED".into()
+                            },
+                            &[HostIoCapability::EnvRead],
+                            signal,
+                        ),
+                        Err(HostIoError::Denied { .. })
+                    ));
+                }
+                assert_eq!(
+                    invoke(
+                        provider.as_ref(),
+                        &HostIoRequest::EnvRead {
+                            name: "ALLOWED".into()
+                        },
+                        &[HostIoCapability::EnvRead],
+                        controlled,
+                    ),
+                    Ok(HostIoResponse::EnvRead {
+                        value: Some("visible-to-approved-guest".into())
+                    })
+                );
+                assert!(matches!(
+                    invoke(
+                        provider.as_ref(),
+                        &HostIoRequest::EnvRead {
+                            name: "ALLOWED".into()
+                        },
+                        &[HostIoCapability::EnvRead],
+                        controlled,
+                    ),
+                    Err(HostIoError::Denied { .. })
+                ));
+                assert_eq!(
+                    boundary.calls(),
+                    0,
+                    "snapshot reads remain internal but still consume authority"
+                );
+            }
+        }
+
+        #[test]
+        fn publisher_host_authority_rejects_unenforceable_scopes_and_allows_explicit_deny() {
+            let mut ceiling = publisher_ceiling(&["fs_read"], 1);
+            ceiling.path_prefixes = Some(BTreeSet::from(["data".into()]));
+            assert!(PublisherHostAuthority::new(ceiling.clone()).is_err());
+            ceiling.path_prefixes = None;
+            ceiling.module_scope_prefix = Some("node_modules/dep".into());
+            assert!(PublisherHostAuthority::new(ceiling.clone()).is_err());
+            ceiling.module_scope_prefix = Some(String::new());
+            ceiling.path_prefixes = Some(BTreeSet::new());
+            let authority = PublisherHostAuthority::new(ceiling).unwrap();
+            assert!(matches!(
+                authority.authorize(
+                    &HostIoRequest::FsRead {
+                        path: "data/allowed-by-engine.txt".into()
+                    },
+                    &[HostIoCapability::FsRead],
+                ),
+                Err(HostIoError::Denied { .. })
+            ));
+            let zero = PublisherHostAuthority::new(publisher_ceiling(&["random_read"], 0)).unwrap();
+            assert!(matches!(
+                zero.authorize(
+                    &HostIoRequest::RandomRead { byte_len: 1 },
+                    &[HostIoCapability::RandomRead]
+                ),
+                Err(HostIoError::Denied { .. })
+            ));
+        }
+
+        #[test]
+        fn publisher_invocation_budget_is_shared_across_concurrent_calls() {
+            let boundary = Arc::new(BoundaryState::default());
+            let provider = PublisherAuthorityHostIo {
+                inner: Arc::new(CountingBoundary(Arc::clone(&boundary))),
+                authority: PublisherHostAuthority::new(publisher_ceiling(&["random_read"], 7))
+                    .unwrap(),
+            };
+            std::thread::scope(|scope| {
+                let calls = (0..32)
+                    .map(|_| {
+                        scope.spawn(|| {
+                            provider.perform(
+                                &HostIoRequest::RandomRead { byte_len: 1 },
+                                &[HostIoCapability::RandomRead],
+                            )
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                let admitted = calls
+                    .into_iter()
+                    .map(|call| call.join().unwrap())
+                    .filter(|outcome| matches!(outcome, Err(HostIoError::NotImplemented { .. })))
+                    .count();
+                assert_eq!(admitted, 7);
+            });
+            assert_eq!(boundary.calls(), 7);
         }
 
         #[test]
@@ -15901,6 +16331,7 @@ mod tests {
             max_parse_source_bytes: 64 * 1024,
             max_parse_tokens: 8192,
             max_parse_recursion_depth: 64,
+            host_io: None,
         }
     }
 

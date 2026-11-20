@@ -233,12 +233,34 @@ for (const mode of resolutionControls) {
 const publisherControls = ["publisher_wrong_scope", "publisher_wrong_signer", "publisher_graph_recomputed",
   "publisher_unknown_field", "publisher_authority_missing", "publisher_v1_authority", "publisher_rounded_ceiling",
   "publisher_overflow_ceiling", "publisher_zero_ceiling", "publisher_invalid_capability", "publisher_authority_extra",
-  "publisher_count_inconsistent", "publisher_unsafe_count", "publisher_bad_digest", "publisher_capsule_not_object"];
+  "publisher_count_inconsistent", "publisher_unsafe_count", "publisher_bad_digest", "publisher_capsule_not_object",
+  "publisher_host_null", "publisher_host_unknown_field", "publisher_host_missing_quotas", "publisher_host_numeric_quota",
+  "publisher_host_overflow_quota", "publisher_host_beyond_instruction_quota", "publisher_host_undeclared_quota",
+  "publisher_host_noncanonical_quota", "publisher_host_quota_newline", "publisher_host_wildcard", "publisher_host_url",
+  "publisher_host_invalid_port", "publisher_host_uppercase", "publisher_host_invalid_ipv6", "publisher_host_duplicate_scope",
+  "publisher_host_unsorted_scope", "publisher_host_null_scope", "publisher_host_undeclared_scope", "publisher_host_invalid_env",
+  "publisher_host_env_newline", "publisher_host_excessive_scope"];
 for (const mode of publisherControls) {
   await assert.rejects(verifyArtifact(Buffer.from(JSON.stringify({ protocol_control: mode })), cases[0].anchor,
     { verifier: resolve("fake_verifier"), format: "publisher-source", signatureHex: "00".repeat(64) }),
   (error) => error instanceof VerifierError && error.code === "PROTOCOL_INVALID", `protocol_${mode}`);
   console.log(JSON.stringify({ case: `protocol_${mode}`, result: "PROTOCOL_INVALID" }));
+}
+const publisherHostPositives = ["publisher_host_valid", "publisher_host_empty", "publisher_host_unspecified"];
+for (const mode of publisherHostPositives) {
+  const verified = await verifyArtifact(Buffer.from(JSON.stringify({ protocol_control: mode })), cases[0].anchor,
+    { verifier: resolve("fake_verifier"), format: "publisher-source", signatureHex: "00".repeat(64) });
+  const host = verified.facts.runtime_authority.host_io;
+  if (mode === "publisher_host_valid") {
+    assert.equal(host.max_calls_per_epoch.network_egress, "18446744073709551615");
+    assert.equal(host.max_calls_per_epoch.fs_read, "0");
+    assert.deepEqual(host.host_ports, ["[2001:db8::1]:443", "api.example.test:443"]);
+  } else if (mode === "publisher_host_empty") {
+    assert.deepEqual(host, { host_ports: [], env_keys: [], max_calls_per_epoch: {} });
+  } else {
+    assert.deepEqual(host, { max_calls_per_epoch: { fs_read: "0" } });
+  }
+  console.log(JSON.stringify({ case: `protocol_${mode}`, result: "verified" }));
 }
 const publisherTrustOptions = {
   format: "publisher-source-trust", signatureHex: "00".repeat(64),
@@ -325,5 +347,5 @@ for (const mode of ltvControls) {
 console.log(JSON.stringify({ consumer: "javascript", matrix_cases: cases.length,
   client_cases: clientControls.length + publisherTrustInputs.length,
   protocol_cases: controls.length + runControls.length + runtimeControls.length + resolutionControls.length
-    + publisherControls.length + publisherTrustControls.length + publisherTrustPositives.length
+    + publisherControls.length + publisherHostPositives.length + publisherTrustControls.length + publisherTrustPositives.length
     + counterfactualControls.length + ltvControls.length + nativeControls.length + nativePositives.length + 1, passed: true }));

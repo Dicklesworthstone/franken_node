@@ -18,6 +18,7 @@ use ed25519_dalek::{Signature, VerifyingKey};
 use serde::{Deserialize, Serialize, Serializer};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet};
 use subtle::ConstantTimeEq;
 
 use crate::incident_bundle::{decode_evidence_json, native_capture::module_capsule};
@@ -165,6 +166,34 @@ pub struct PublisherRuntimeAuthority {
     pub max_parse_tokens: u64,
     #[serde(serialize_with = "serialize_decimal")]
     pub max_parse_recursion_depth: u64,
+    /// Authenticated restrictions on provider effects. No scope grants a
+    /// capability or proves that a producer enforced it during an execution.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host_io: Option<PublisherHostIoAuthority>,
+}
+
+/// Portable publisher host restrictions. Quotas serialize as decimal strings
+/// so CLI, JavaScript and Python consumers preserve the entire u64 range.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PublisherHostIoAuthority {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host_ports: Option<BTreeSet<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub env_keys: Option<BTreeSet<String>>,
+    #[serde(serialize_with = "serialize_host_quotas")]
+    pub max_calls_per_epoch: BTreeMap<String, u64>,
+}
+
+fn serialize_host_quotas<S: Serializer>(
+    limits: &BTreeMap<String, u64>,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    use serde::ser::SerializeMap;
+    let mut map = serializer.serialize_map(Some(limits.len()))?;
+    for (capability, limit) in limits {
+        map.serialize_entry(capability, &limit.to_string())?;
+    }
+    map.end()
 }
 
 /// Source-free claims authenticated under the caller's publisher anchor.
@@ -282,6 +311,124 @@ fn valid_digest(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+/// Independent mirror of the published exact endpoint normalization contract.
+/// This is a syntax check and never resolves DNS or opens a socket.
+fn canonical_host_port(value: &str) -> bool {
+    if value.is_empty()
+        || value.len() > 256
+        || !value.is_ascii()
+        || value.bytes().any(|byte| {
+            byte.is_ascii_whitespace()
+                || byte.is_ascii_control()
+                || matches!(byte, b'*' | b'?' | b'#' | b'@' | b'/')
+        })
+    {
+        return false;
+    }
+    let (host, port) = if let Some(after_bracket) = value.strip_prefix('[') {
+        let Some((host, rest)) = after_bracket.split_once(']') else {
+            return false;
+        };
+        if host.parse::<std::net::Ipv6Addr>().is_err() {
+            return false;
+        }
+        let Some(port) = rest.strip_prefix(':') else {
+            return false;
+        };
+        (format!("[{}]", host.to_ascii_lowercase()), port)
+    } else {
+        let Some((host, port)) = value.rsplit_once(':') else {
+            return false;
+        };
+        if host.is_empty() || host.contains(':') {
+            return false;
+        }
+        (host.to_ascii_lowercase(), port)
+    };
+    port.parse::<u16>()
+        .ok()
+        .filter(|port| *port > 0)
+        .is_some_and(|port| value == format!("{host}:{port}"))
+}
+
+fn parse_host_authority(
+    value: &Value,
+    capabilities: &[String],
+    max_instructions: u64,
+) -> Result<PublisherHostIoAuthority> {
+    use PublisherSourceError::RuntimeAuthorityInvalid as Invalid;
+    const HOST_CAPABILITIES: &[&str] = &[
+        "fs_read",
+        "fs_write",
+        "network_egress",
+        "random_read",
+        "env_read",
+    ];
+    let fields = value.as_object().ok_or(Invalid)?;
+    if fields
+        .keys()
+        .any(|key| !["host_ports", "env_keys", "max_calls_per_epoch"].contains(&key.as_str()))
+    {
+        return Err(Invalid);
+    }
+    let declares = |capability: &str| capabilities.iter().any(|value| value == capability);
+    let scope = |name: &str| -> Result<Option<BTreeSet<String>>> {
+        fields
+            .get(name)
+            .filter(|value| !value.is_null())
+            .map(|value| {
+                let values: BTreeSet<_> = value
+                    .as_array()
+                    .ok_or(Invalid)?
+                    .iter()
+                    .map(|value| value.as_str().map(str::to_owned).ok_or(Invalid))
+                    .collect::<Result<_>>()?;
+                if values.len() > 128 {
+                    return Err(Invalid);
+                }
+                Ok(values)
+            })
+            .transpose()
+    };
+    let host_ports = scope("host_ports")?;
+    if host_ports.as_ref().is_some_and(|hosts| {
+        !declares("network_egress") || hosts.iter().any(|host| !canonical_host_port(host))
+    }) {
+        return Err(Invalid);
+    }
+    let env_keys = scope("env_keys")?;
+    if env_keys.as_ref().is_some_and(|keys| {
+        !declares("env_read")
+            || keys.iter().any(|key| {
+                key.is_empty()
+                    || key.len() > 128
+                    || !key
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+            })
+    }) {
+        return Err(Invalid);
+    }
+    let mut max_calls_per_epoch = BTreeMap::new();
+    if let Some(quotas) = fields.get("max_calls_per_epoch") {
+        for (capability, value) in quotas.as_object().ok_or(Invalid)? {
+            let limit = value.as_u64().ok_or(Invalid)?;
+            if !HOST_CAPABILITIES.contains(&capability.as_str())
+                || !declares(capability)
+                || limit > max_instructions
+            {
+                return Err(Invalid);
+            }
+            max_calls_per_epoch.insert(capability.clone(), limit);
+        }
+    }
+    Ok(PublisherHostIoAuthority {
+        host_ports,
+        env_keys,
+        max_calls_per_epoch,
+    })
+}
+
 fn parse_authority(value: &Value) -> Result<PublisherRuntimeAuthority> {
     use PublisherSourceError::RuntimeAuthorityInvalid as Invalid;
     const FIELDS: &[&str] = &[
@@ -300,7 +447,11 @@ fn parse_authority(value: &Value) -> Result<PublisherRuntimeAuthority> {
         "max_parse_recursion_depth",
     ];
     let fields = value.as_object().ok_or(Invalid)?;
-    if fields.len() != FIELDS.len() || fields.keys().any(|key| !FIELDS.contains(&key.as_str())) {
+    if FIELDS.iter().any(|key| !fields.contains_key(*key))
+        || fields
+            .keys()
+            .any(|key| !FIELDS.contains(&key.as_str()) && key != "host_io")
+    {
         return Err(Invalid);
     }
     let string = |field: &str| fields[field].as_str().ok_or(Invalid).map(str::to_owned);
@@ -326,12 +477,18 @@ fn parse_authority(value: &Value) -> Result<PublisherRuntimeAuthority> {
     {
         return Err(Invalid);
     }
+    let max_instructions = integer("max_instructions")?;
+    let host_io = fields
+        .get("host_io")
+        .filter(|value| !value.is_null())
+        .map(|value| parse_host_authority(value, &allowed_capabilities, max_instructions))
+        .transpose()?;
     let authority = PublisherRuntimeAuthority {
         schema_version: string("schema_version")?,
         policy_revision: string("policy_revision")?,
         allowed_capabilities,
         allow_process_shape: fields["allow_process_shape"].as_bool().ok_or(Invalid)?,
-        max_instructions: integer("max_instructions")?,
+        max_instructions,
         max_registers: narrow("max_registers")?,
         max_call_depth: narrow("max_call_depth")?,
         max_heap_objects: narrow("max_heap_objects")?,
@@ -340,6 +497,7 @@ fn parse_authority(value: &Value) -> Result<PublisherRuntimeAuthority> {
         max_parse_source_bytes: integer("max_parse_source_bytes")?,
         max_parse_tokens: integer("max_parse_tokens")?,
         max_parse_recursion_depth: integer("max_parse_recursion_depth")?,
+        host_io,
     };
     // Match the published native authority envelope, not a consumer's defaults.
     if authority.schema_version != RUNTIME_AUTHORITY_SCHEMA
@@ -1254,6 +1412,142 @@ mod tests {
             verify_signed(&compact, &altered),
             Err(PublisherSourceError::ArtifactHashMismatch)
         );
+    }
+
+    #[test]
+    fn publisher_host_authority_is_authenticated_and_preserves_exact_quota_integers() {
+        let capsule = capsule();
+        let mut value = manifest(&capsule, true);
+        value["runtime_authority"]["allowed_capabilities"] = json!([
+            "builtin",
+            "console",
+            "env_read",
+            "fs_read",
+            "heap_allocate",
+            "module_load",
+            "network_egress",
+            "vm_dispatch"
+        ]);
+        value["runtime_authority"]["host_io"] = json!({
+            "host_ports":["[2001:db8::1]:443", "api.example.test:443"],
+            "env_keys":["PUBLIC_NAME"],
+            "max_calls_per_epoch":{"env_read":1, "fs_read":0, "network_egress":u64::MAX}
+        });
+        let verified = verify_value(&value, &capsule).unwrap();
+        let host = verified
+            .runtime_authority
+            .as_ref()
+            .unwrap()
+            .host_io
+            .as_ref()
+            .unwrap();
+        assert_eq!(host.max_calls_per_epoch["network_egress"], u64::MAX);
+        assert_eq!(host.max_calls_per_epoch["fs_read"], 0);
+        assert_eq!(
+            host.env_keys.as_ref().unwrap(),
+            &BTreeSet::from(["PUBLIC_NAME".into()])
+        );
+        let json = serde_json::to_value(&verified).unwrap();
+        assert_eq!(
+            json["runtime_authority"]["host_io"]["max_calls_per_epoch"]["network_egress"],
+            "18446744073709551615"
+        );
+
+        let original = serde_json::to_vec(&value).unwrap();
+        let signature = key().sign(&original).to_bytes();
+        value["runtime_authority"]["host_io"]["env_keys"] = json!(["PRIVATE_NAME"]);
+        assert_eq!(
+            verify_publisher_source(
+                &serde_json::to_vec(&value).unwrap(),
+                &signature,
+                &capsule,
+                &key().verifying_key(),
+            ),
+            Err(PublisherSourceError::SignatureInvalid)
+        );
+
+        value["runtime_authority"]["host_io"] = json!({"host_ports":[], "env_keys":[]});
+        let verified = verify_value(&value, &capsule).unwrap();
+        let host = verified.runtime_authority.unwrap().host_io.unwrap();
+        assert_eq!(host.host_ports, Some(BTreeSet::new()));
+        assert_eq!(host.env_keys, Some(BTreeSet::new()));
+        let historical = verify_value(&manifest(&capsule, true), &capsule).unwrap();
+        assert!(
+            historical
+                .runtime_authority
+                .as_ref()
+                .unwrap()
+                .host_io
+                .is_none()
+        );
+        assert!(
+            serde_json::to_value(historical).unwrap()["runtime_authority"]
+                .get("host_io")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn publisher_host_authority_rejects_unbounded_or_undeclared_signed_restrictions() {
+        let capsule = capsule();
+        let mut value = manifest(&capsule, true);
+        value["runtime_authority"]["allowed_capabilities"] = json!([
+            "builtin",
+            "console",
+            "env_read",
+            "heap_allocate",
+            "network_egress",
+            "vm_dispatch"
+        ]);
+        value["runtime_authority"]["max_instructions"] = json!(100);
+        for host_io in [
+            json!(false),
+            json!({"unknown":true}),
+            json!({"host_ports":["https://api.example.test:443/"]}),
+            json!({"host_ports":["API.example.test:443"]}),
+            json!({"host_ports":["*.example.test:443"]}),
+            json!({"host_ports":["api.example.test:0"]}),
+            json!({"host_ports":["api.example.test:0443"]}),
+            json!({"host_ports":["[fe80::1%eth0]:443"]}),
+            json!({"host_ports":["api.example.test:443/path"]}),
+            json!({"env_keys":["PRIVATE=VALUE"]}),
+            json!({"env_keys":["WITH SPACE"]}),
+            json!({"env_keys":[""]}),
+            json!({"env_keys":["x".repeat(129)]}),
+            json!({"max_calls_per_epoch":{"env_read":101}}),
+            json!({"max_calls_per_epoch":{"env_read":-1}}),
+            json!({"max_calls_per_epoch":{"env_read":"1"}}),
+            json!({"max_calls_per_epoch":{"process_spawn":1}}),
+            json!({"max_calls_per_epoch":{"fs_read":1}}),
+            json!({"max_calls_per_epoch":null}),
+            json!({"env_keys":(0..129).map(|index| format!("KEY_{index}")).collect::<Vec<_>>()}),
+        ] {
+            value["runtime_authority"]["host_io"] = host_io;
+            assert_eq!(
+                verify_value(&value, &capsule),
+                Err(PublisherSourceError::RuntimeAuthorityInvalid)
+            );
+        }
+        for host_io in [json!({"host_ports":[]}), json!({"env_keys":[]})] {
+            let mut undeclared = manifest(&capsule, true);
+            undeclared["runtime_authority"]["host_io"] = host_io;
+            assert_eq!(
+                verify_value(&undeclared, &capsule),
+                Err(PublisherSourceError::RuntimeAuthorityInvalid)
+            );
+        }
+        value["runtime_authority"]["host_io"] = json!({"max_calls_per_epoch":{"env_read":1}});
+        let raw = serde_json::to_string(&value).unwrap();
+        for duplicate in [
+            "\"env_read\":1,\"env_read\":1",
+            "\"env_read\":0,\"env_read\":1",
+        ] {
+            let duplicated = raw.replacen("\"env_read\":1", duplicate, 1);
+            assert_eq!(
+                verify_signed(duplicated.as_bytes(), &capsule),
+                Err(PublisherSourceError::ManifestInvalid)
+            );
+        }
     }
 
     #[test]

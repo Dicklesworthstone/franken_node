@@ -19,6 +19,7 @@ use super::{IncidentBundleError, UnambiguousJson, ct_str_eq};
 pub(crate) mod module_capsule;
 
 const CAPTURE_SCHEMA: &str = "franken-node/native-replay-capture/v3";
+const SCOPED_CAPTURE_SCHEMA: &str = "franken-node/native-replay-capture/v4";
 const MAX_PAYLOAD_BYTES: usize = 4 * 1024 * 1024;
 // Engine-independent v3 wire contract. Product integration tests exercise these
 // values against actual native captures; inspection never executes the guest.
@@ -145,6 +146,110 @@ fn nonblank<'a>(value: &'a Value, field: &str) -> Result<&'a str> {
         return Err(invalid(field, "empty native capture identity"));
     }
     Ok(value)
+}
+
+fn canonical_scope_strings(value: &Value, max_len: usize) -> Result<Vec<&str>> {
+    const FIELD: &str = ".payload.capability_ceiling";
+    let values = array(value, FIELD)?;
+    if values.len() > 1024 {
+        return Err(invalid(FIELD, "publisher scope exceeds its entry bound"));
+    }
+    let mut strings = Vec::with_capacity(values.len());
+    for value in values {
+        let value = text(value, FIELD)?;
+        if value.is_empty()
+            || value.len() > max_len
+            || value.chars().any(char::is_control)
+            || strings.last().is_some_and(|previous| *previous >= value)
+        {
+            return Err(invalid(
+                FIELD,
+                "publisher scope must be bounded, unique and sorted",
+            ));
+        }
+        strings.push(value);
+    }
+    Ok(strings)
+}
+
+/// Inspect the historical ceiling authenticated by the containing statement.
+/// This does not grant authority or claim that its predicates were enforced;
+/// native replay re-derives the provider decisions against the exact I/O tape.
+fn capability_ceiling(value: &Value) -> Result<()> {
+    const FIELD: &str = ".payload.capability_ceiling";
+    const CAPABILITIES: &[&str] = &[
+        "builtin",
+        "console",
+        "env_read",
+        "fs_read",
+        "fs_write",
+        "heap_allocate",
+        "module_load",
+        "network_egress",
+        "process_spawn",
+        "random_read",
+        "timer",
+        "vm_dispatch",
+    ];
+    let ceiling = exact(
+        value,
+        FIELD,
+        &[
+            "contract_id",
+            "allowed_capabilities",
+            "max_calls_per_epoch",
+            "capability_scopes",
+            "path_prefixes",
+            "host_ports",
+            "env_keys",
+            "module_scope_prefix",
+        ],
+        &[],
+    )?;
+    if nonblank(&ceiling["contract_id"], FIELD)?.len() > 4096 {
+        return Err(invalid(
+            FIELD,
+            "publisher contract identity exceeds its bound",
+        ));
+    }
+    let capabilities = canonical_scope_strings(&ceiling["allowed_capabilities"], 64)?;
+    if capabilities
+        .iter()
+        .any(|capability| !CAPABILITIES.contains(capability))
+    {
+        return Err(invalid(FIELD, "unsupported publisher capability"));
+    }
+    for (capability, quota) in object(&ceiling["max_calls_per_epoch"], FIELD)? {
+        if !capabilities.contains(&capability.as_str()) || quota.as_u64().is_none() {
+            return Err(invalid(
+                FIELD,
+                "publisher quota is not bound to a declared capability",
+            ));
+        }
+    }
+    for (capability, scope) in object(&ceiling["capability_scopes"], FIELD)? {
+        if !capabilities.contains(&capability.as_str()) || nonblank(scope, FIELD)?.len() > 4096 {
+            return Err(invalid(
+                FIELD,
+                "publisher scope is not bound to a declared capability",
+            ));
+        }
+    }
+    for (name, maximum) in [
+        ("path_prefixes", 4096),
+        ("host_ports", 256),
+        ("env_keys", 128),
+    ] {
+        if !ceiling[name].is_null() {
+            canonical_scope_strings(&ceiling[name], maximum)?;
+        }
+    }
+    if !ceiling["module_scope_prefix"].is_null()
+        && text(&ceiling["module_scope_prefix"], FIELD)?.len() > 4096
+    {
+        return Err(invalid(FIELD, "publisher module scope exceeds its bound"));
+    }
+    Ok(())
 }
 
 fn console_budget_reason(payload: &Value, reason: &Value) -> Result<()> {
@@ -472,7 +577,8 @@ pub(super) fn verify(initial: &Value) -> Result<Option<VerifiedNativeCaptureMeta
         return Ok(None);
     };
     let envelope = exact(capture, "", ENVELOPE_FIELDS, &[])?;
-    if text(&envelope["schema_version"], ".schema_version")? != CAPTURE_SCHEMA {
+    let schema = text(&envelope["schema_version"], ".schema_version")?;
+    if !matches!(schema, CAPTURE_SCHEMA | SCOPED_CAPTURE_SCHEMA) {
         return Err(invalid(
             ".schema_version",
             "unsupported native capture schema",
@@ -503,8 +609,23 @@ pub(super) fn verify(initial: &Value) -> Result<Option<VerifiedNativeCaptureMeta
         &payload,
         ".payload",
         PAYLOAD_FIELDS,
-        &["process", "module_sources", "clock_epoch_ms"],
+        &[
+            "process",
+            "module_sources",
+            "clock_epoch_ms",
+            "capability_ceiling",
+        ],
     )?;
+    match (schema, payload.get("capability_ceiling")) {
+        (SCOPED_CAPTURE_SCHEMA, Some(ceiling)) => capability_ceiling(ceiling)?,
+        (CAPTURE_SCHEMA, None) => {}
+        _ => {
+            return Err(invalid(
+                ".payload.capability_ceiling",
+                "publisher ceiling must be present only in the scoped native capture schema",
+            ));
+        }
+    }
     if let Some(clock_epoch_ms) = payload.get("clock_epoch_ms")
         && clock_epoch_ms.as_i64().is_none()
     {
@@ -646,6 +767,73 @@ pub(in crate::incident_bundle) mod tests {
                 capture["native_replay"]["payload_sha256"]
             );
             assert_eq!(metadata.host_io_exchange_count, 0);
+        }
+    }
+
+    #[test]
+    fn scoped_capture_binds_its_complete_ceiling_and_refuses_schema_downgrades() {
+        use super::super::verify_incident_bundle;
+
+        let mut value = payload("completed");
+        value["capability_ceiling"] = json!({
+            "contract_id":"publisher-test",
+            "allowed_capabilities":["env_read", "network_egress"],
+            "max_calls_per_epoch":{"env_read":1, "network_egress":u64::MAX},
+            "capability_scopes":{"env_read":"env:read", "network_egress":"network:egress"},
+            "path_prefixes":null,
+            "host_ports":["api.example.test:443"],
+            "env_keys":["PUBLIC_NAME"],
+            "module_scope_prefix":null
+        });
+        let legacy = captured(&value);
+        assert!(verify(&legacy).is_err(), "v3 cannot smuggle v4 authority");
+        let scoped = |payload: &Value| {
+            let mut initial = captured(payload);
+            initial["native_replay"]["schema_version"] = json!(SCOPED_CAPTURE_SCHEMA);
+            initial
+        };
+        assert!(verify(&scoped(&value)).is_ok());
+        let mut initial = with_run_context("completed");
+        initial["native_replay"] = scoped(&value)["native_replay"].clone();
+        let bytes = signed_bundle(initial);
+        let verified = verify_incident_bundle(&bytes, &signing_key().verifying_key()).unwrap();
+        assert!(verified.native_capture.is_some());
+        let stranger = ed25519_dalek::SigningKey::from_bytes(&[0x13; 32]);
+        assert!(verify_incident_bundle(&bytes, &stranger.verifying_key()).is_err());
+
+        let mut missing = value.clone();
+        missing
+            .as_object_mut()
+            .unwrap()
+            .remove("capability_ceiling");
+        assert!(verify(&scoped(&missing)).is_err());
+        for invalid_ceiling in [
+            Value::Null,
+            json!({}),
+            {
+                let mut changed = value["capability_ceiling"].clone();
+                changed["allowed_capabilities"] = json!(["env_read", "env_read"]);
+                changed
+            },
+            {
+                let mut changed = value["capability_ceiling"].clone();
+                changed["max_calls_per_epoch"]["env_read"] = json!("1");
+                changed
+            },
+            {
+                let mut changed = value["capability_ceiling"].clone();
+                changed["max_calls_per_epoch"]["process_spawn"] = json!(1);
+                changed
+            },
+            {
+                let mut changed = value["capability_ceiling"].clone();
+                changed["unknown"] = json!(true);
+                changed
+            },
+        ] {
+            let mut changed = value.clone();
+            changed["capability_ceiling"] = invalid_ceiling;
+            assert!(verify(&scoped(&changed)).is_err());
         }
     }
 

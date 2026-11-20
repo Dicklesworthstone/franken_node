@@ -13,6 +13,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use ed25519_dalek::VerifyingKey;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 
 use super::artifact_signing::{KeyId, verify_signature};
@@ -30,7 +31,7 @@ pub const ARTIFACT_RUNTIME_AUTHORITY_SCHEMA: &str = "franken-node/artifact-runti
 
 /// Publisher-signed upper bounds for one complete source capsule execution.
 ///
-/// All fields are mandatory. These are ceilings, never grants: execution also
+/// All base fields are mandatory. These are ceilings, never grants: execution also
 /// requires the operator profile, current fleet policy, and any separate signed
 /// process-spawn admission. Parser limits apply independently to every module;
 /// instruction, allocation, memory and output limits apply to the native run.
@@ -41,7 +42,9 @@ pub const ARTIFACT_RUNTIME_AUTHORITY_SCHEMA: &str = "franken-node/artifact-runti
 /// output. Their canonical capability names must therefore appear explicitly;
 /// a publisher cannot request an unenforceable denial. Console output can be
 /// narrowed using its entry ceiling; the engine's separate byte cap still
-/// applies. This schema does not claim per-hostcall quotas or path scopes.
+/// applies. Optional `host_io` restrictions additionally bind exact network
+/// destinations, environment keys, and host invocation quotas. Filesystem path
+/// scopes and per-module capability scopes are not part of this schema.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ArtifactRuntimeAuthority {
@@ -58,6 +61,128 @@ pub struct ArtifactRuntimeAuthority {
     pub max_parse_source_bytes: u64,
     pub max_parse_tokens: u64,
     pub max_parse_recursion_depth: u64,
+    /// Signed restrictions on actual native host effects. Omitting this field
+    /// preserves the canonical bytes of existing publisher-signed authorities.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_io: Option<ArtifactHostIoAuthority>,
+}
+
+/// Publisher ceilings enforced at the host-effect boundary, in addition to
+/// the operator's independent policy. `None` leaves a scope unrestricted by the
+/// publisher; `Some(empty)` denies that entire effect family. A zero call budget
+/// denies every invocation of that capability. No field grants new authority.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactHostIoAuthority {
+    /// Exact lowercase socket endpoints (`host:port` or `[ipv6]:port`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_ports: Option<BTreeSet<String>>,
+    /// Exact environment keys, intersected with `runtime.environment_allowlist`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env_keys: Option<BTreeSet<String>>,
+    /// Per-run invocation ceilings for the five canonical host capability IDs.
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        deserialize_with = "ArtifactHostIoAuthority::deserialize_call_quotas"
+    )]
+    pub max_calls_per_epoch: BTreeMap<String, u64>,
+}
+
+impl ArtifactHostIoAuthority {
+    // Signed quota objects must not acquire last-value-wins semantics that the
+    // independent verifier rejects as an ambiguous publisher statement.
+    fn deserialize_call_quotas<'de, D>(
+        deserializer: D,
+    ) -> std::result::Result<BTreeMap<String, u64>, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct CallQuotaVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for CallQuotaVisitor {
+            type Value = BTreeMap<String, u64>;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a host capability quota map without duplicate keys")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> std::result::Result<Self::Value, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                let mut quotas = BTreeMap::new();
+                while let Some((capability, limit)) = map.next_entry::<String, u64>()? {
+                    if quotas.insert(capability, limit).is_some() {
+                        return Err(serde::de::Error::custom("duplicate host capability quota"));
+                    }
+                }
+                Ok(quotas)
+            }
+        }
+
+        deserializer.deserialize_map(CallQuotaVisitor)
+    }
+
+    fn validate(&self, capabilities: &[String], max_instructions: u64) -> Result<()> {
+        const MAX_SCOPE_ENTRIES: usize = 128;
+        const HOST_CAPABILITIES: &[&str] = &[
+            "fs_read",
+            "fs_write",
+            "network_egress",
+            "random_read",
+            "env_read",
+        ];
+        let declares = |capability: &str| capabilities.iter().any(|value| value == capability);
+        if let Some(hosts) = &self.host_ports {
+            anyhow::ensure!(
+                declares("network_egress") && hosts.len() <= MAX_SCOPE_ENTRIES,
+                "publisher host_io.host_ports requires network_egress and at most 128 endpoints"
+            );
+            for endpoint in hosts {
+                anyhow::ensure!(
+                    endpoint.len() <= 256 && endpoint.is_ascii(),
+                    "publisher host_io endpoint must be bounded ASCII"
+                );
+                let canonical =
+                    crate::config::IfcDeclassifyRuleConfig::normalize_network_sink(endpoint)
+                        .map_err(|_| anyhow::anyhow!("publisher host_io endpoint is invalid"))?;
+                anyhow::ensure!(
+                    &canonical == endpoint,
+                    "publisher host_io endpoints must be canonical lowercase host:port values"
+                );
+            }
+        }
+        if let Some(keys) = &self.env_keys {
+            anyhow::ensure!(
+                declares("env_read") && keys.len() <= MAX_SCOPE_ENTRIES,
+                "publisher host_io.env_keys requires env_read and at most 128 names"
+            );
+            anyhow::ensure!(
+                keys.iter().all(|key| !key.is_empty()
+                    && key.len() <= 128
+                    && key
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')),
+                "publisher host_io environment names must be bounded ASCII identifiers"
+            );
+        }
+        anyhow::ensure!(
+            self.max_calls_per_epoch.len() <= HOST_CAPABILITIES.len(),
+            "publisher host_io contains too many capability quotas"
+        );
+        for (capability, limit) in &self.max_calls_per_epoch {
+            anyhow::ensure!(
+                HOST_CAPABILITIES.contains(&capability.as_str()) && declares(capability),
+                "publisher host_io quota must name a declared host capability"
+            );
+            anyhow::ensure!(
+                *limit <= max_instructions,
+                "publisher host_io quota exceeds its instruction ceiling"
+            );
+        }
+        Ok(())
+    }
 }
 
 impl ArtifactRuntimeAuthority {
@@ -134,6 +259,9 @@ impl ArtifactRuntimeAuthority {
                 && (1..=384).contains(&self.max_parse_recursion_depth),
             "artifact runtime authority parser ceilings are outside the native envelope"
         );
+        if let Some(host_io) = &self.host_io {
+            host_io.validate(&self.allowed_capabilities, self.max_instructions)?;
+        }
         Ok(())
     }
 
@@ -962,6 +1090,38 @@ impl PublisherSourceGraphApproval {
         )
         .map_err(|err| anyhow::anyhow!(err.to_string()))?;
 
+        // These restrictions are inside the publisher-signed authority
+        // commitment, unlike an operator's SSRF exception allowlist.
+        if let Some(host_io) = &authority.host_io {
+            if let Some(hosts) = &host_io.host_ports {
+                envelope = envelope
+                    .attenuate(
+                        AttenuationLayer::PublisherRoot,
+                        CapabilityCaveat::HostPorts(hosts.clone()),
+                    )
+                    .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+            }
+            if let Some(keys) = &host_io.env_keys {
+                envelope = envelope
+                    .attenuate(
+                        AttenuationLayer::PublisherRoot,
+                        CapabilityCaveat::EnvKeys(keys.clone()),
+                    )
+                    .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+            }
+            for (capability_id, max_calls) in &host_io.max_calls_per_epoch {
+                envelope = envelope
+                    .attenuate(
+                        AttenuationLayer::PublisherRoot,
+                        CapabilityCaveat::MaxCallsPerEpoch {
+                            capability_id: capability_id.clone(),
+                            max_calls: *max_calls,
+                        },
+                    )
+                    .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+            }
+        }
+
         // Layer 1 (RegistryAdmission): pin root closure module scope and deny env keys if env_read absent.
         envelope = envelope
             .attenuate(
@@ -995,27 +1155,30 @@ impl PublisherSourceGraphApproval {
             )
             .map_err(|err| anyhow::anyhow!(err.to_string()))?;
 
-        if narrowed_caps.contains("network_egress")
-            && !config.security.network_policy.allowlist.is_empty()
-        {
-            let mut host_ports = BTreeSet::new();
-            for entry in &config.security.network_policy.allowlist {
-                let token = match entry.port {
-                    Some(port) => format!("{}:{port}", entry.host.trim()),
-                    None => entry.host.trim().to_string(),
-                };
-                if !token.is_empty() {
-                    host_ports.insert(token);
-                }
-            }
-            if !host_ports.is_empty() {
-                envelope = envelope
-                    .attenuate(
-                        AttenuationLayer::DeployReleasePolicy,
-                        CapabilityCaveat::HostPorts(host_ports),
-                    )
-                    .map_err(|err| anyhow::anyhow!(err.to_string()))?;
-            }
+        // SSRF allowlist entries bypass selected SSRF restrictions; they are
+        // not an exclusive destination policy. Only the signed host_io field
+        // above creates a host ceiling. Environment allowlisting, by contrast,
+        // is exclusive and must be intersected with the publisher's key scope.
+        if narrowed_caps.contains("env_read") {
+            let keys = match authority
+                .host_io
+                .as_ref()
+                .and_then(|host_io| host_io.env_keys.as_ref())
+            {
+                Some(publisher_keys) => config
+                    .runtime
+                    .environment_allowlist
+                    .intersection(publisher_keys)
+                    .cloned()
+                    .collect(),
+                None => config.runtime.environment_allowlist.clone(),
+            };
+            envelope = envelope
+                .attenuate(
+                    AttenuationLayer::DeployReleasePolicy,
+                    CapabilityCaveat::EnvKeys(keys),
+                )
+                .map_err(|err| anyhow::anyhow!(err.to_string()))?;
         }
 
         if let Some(limit) = config.runtime.max_console_entries
@@ -1055,12 +1218,18 @@ impl PublisherSourceGraphApproval {
         {
             for cap_id in &narrowed_caps {
                 if !matches!(cap_id.as_str(), "console" | "heap_allocate") {
+                    let publisher_limit = authority
+                        .host_io
+                        .as_ref()
+                        .and_then(|host_io| host_io.max_calls_per_epoch.get(cap_id))
+                        .copied()
+                        .unwrap_or(authority.max_instructions);
                     envelope = envelope
                         .attenuate(
                             AttenuationLayer::DeployReleasePolicy,
                             CapabilityCaveat::MaxCallsPerEpoch {
                                 capability_id: cap_id.clone(),
-                                max_calls: limit,
+                                max_calls: limit.min(publisher_limit),
                             },
                         )
                         .map_err(|err| anyhow::anyhow!(err.to_string()))?;
@@ -1105,8 +1274,9 @@ impl PublisherSourceGraphApproval {
         Ok(Some(envelope))
     }
 
-    /// Synthesize and verify the required capability-envelope prefix and check
-    /// capability-set drift at execution/deploy admission.
+    /// Synthesize and verify the required capability-envelope prefix for
+    /// execution/deploy admission. Native consumers must retain the returned
+    /// ceiling and enforce its predicates on each actual invocation.
     ///
     /// The caller must already have authenticated and revalidated this approval's
     /// publisher signatures and source closure. `validate()` alone checks structure.
@@ -1115,9 +1285,7 @@ impl PublisherSourceGraphApproval {
         &self,
         config: &crate::config::Config,
     ) -> Result<Option<crate::extensions::artifact_contract::EffectiveCapabilityCeiling>> {
-        use crate::extensions::artifact_contract::{
-            CapabilityEnvelopeCheckpoint, DriftCheckResult, EnforcementEngine,
-        };
+        use crate::extensions::artifact_contract::CapabilityEnvelopeCheckpoint;
 
         let Some(envelope) = self.attenuated_capability_envelope(config)? else {
             return Ok(None);
@@ -1130,19 +1298,10 @@ impl PublisherSourceGraphApproval {
             envelope.tail_tag_hex(),
         )
         .map_err(|err| anyhow::anyhow!(err.to_string()))?;
-        let ceiling = envelope
+        envelope
             .verify(Some(&publisher_key), &checkpoint)
-            .map_err(|err| anyhow::anyhow!(err.to_string()))?;
-        let engine = EnforcementEngine::from_ceiling(&ceiling);
-        let active: Vec<String> = ceiling.allowed_capabilities.iter().cloned().collect();
-        match engine.check_drift(&active) {
-            DriftCheckResult::NoDrift { .. } => Ok(Some(ceiling)),
-            DriftCheckResult::DriftDetected { missing, extra, .. } => {
-                anyhow::bail!(
-                    "attenuated capability envelope drift detected (missing={missing:?}, extra={extra:?})"
-                );
-            }
-        }
+            .map(Some)
+            .map_err(|err| anyhow::anyhow!(err.to_string()))
     }
 }
 
@@ -1228,6 +1387,7 @@ mod tests {
             max_parse_source_bytes: 64 * 1024,
             max_parse_tokens: 8192,
             max_parse_recursion_depth: 64,
+            host_io: None,
         }
     }
 
@@ -1908,6 +2068,179 @@ mod tests {
     }
 
     #[test]
+    fn publisher_host_io_rejects_ambiguous_unbounded_or_undeclared_authority() {
+        let mut authority = runtime_authority();
+        let legacy_encoding = serde_json::to_value(&authority).unwrap();
+        assert!(legacy_encoding.get("host_io").is_none());
+        let roundtrip: ArtifactRuntimeAuthority = serde_json::from_value(legacy_encoding).unwrap();
+        assert_eq!(
+            roundtrip.commitment().unwrap(),
+            authority.commitment().unwrap()
+        );
+        authority
+            .allowed_capabilities
+            .extend(["network_egress".into(), "env_read".into()]);
+        let valid = ArtifactHostIoAuthority {
+            host_ports: Some(BTreeSet::from([
+                "api.example:443".into(),
+                "[::1]:8443".into(),
+            ])),
+            env_keys: Some(BTreeSet::from(["API_TOKEN".into()])),
+            max_calls_per_epoch: BTreeMap::from([
+                ("network_egress".into(), 0),
+                ("env_read".into(), 2),
+            ]),
+        };
+        authority.host_io = Some(valid.clone());
+        authority.validate().unwrap();
+        let roundtrip: ArtifactRuntimeAuthority =
+            serde_json::from_slice(&serde_json::to_vec(&authority).unwrap()).unwrap();
+        assert_eq!(roundtrip, authority);
+        for raw in [
+            r#"{"max_calls_per_epoch":{"env_read":1,"env_read":1}}"#,
+            r#"{"max_calls_per_epoch":{"env_read":0,"env_read":1}}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<ArtifactHostIoAuthority>(raw).is_err(),
+                "duplicate signed quota keys must not use the last value"
+            );
+        }
+        for endpoint in [
+            "https://api.example",
+            "API.example:443",
+            "*.example:443",
+            "api.example:0",
+            "api.example",
+            "api.example:0443",
+            "api.example:443/path",
+        ] {
+            let mut invalid = authority.clone();
+            invalid.host_io.as_mut().unwrap().host_ports = Some(BTreeSet::from([endpoint.into()]));
+            assert!(invalid.validate().is_err(), "invalid endpoint {endpoint}");
+        }
+        for (capability, limit) in [
+            ("console", 1),
+            ("process_spawn", 1),
+            ("random_read", 1),
+            ("network_egress", authority.max_instructions + 1),
+        ] {
+            let mut invalid = authority.clone();
+            invalid
+                .host_io
+                .as_mut()
+                .unwrap()
+                .max_calls_per_epoch
+                .insert(capability.into(), limit);
+            assert!(
+                invalid.validate().is_err(),
+                "invalid quota {capability}={limit}"
+            );
+        }
+        for name in ["", "MY TOKEN", "KEY=VALUE"] {
+            let mut invalid = authority.clone();
+            invalid.host_io.as_mut().unwrap().env_keys = Some(BTreeSet::from([name.into()]));
+            assert!(invalid.validate().is_err());
+        }
+        let mut overlarge = authority.clone();
+        overlarge.host_io.as_mut().unwrap().env_keys =
+            Some((0..129).map(|i| format!("KEY_{i}")).collect());
+        assert!(overlarge.validate().is_err());
+        let mut absent = runtime_authority();
+        absent.host_io = Some(valid);
+        assert!(
+            absent.validate().is_err(),
+            "host scopes never implicitly grant missing capabilities"
+        );
+        assert!(
+            serde_json::from_value::<ArtifactHostIoAuthority>(serde_json::json!({
+                "path_prefixes": ["data"]
+            }))
+            .is_err(),
+            "unsupported filesystem scopes must not be silently accepted"
+        );
+    }
+
+    #[test]
+    fn publisher_host_io_scopes_and_quotas_survive_operator_intersection() {
+        use crate::config::{Config, NetworkAllowlistEntry, Profile};
+
+        let mut authority = runtime_authority();
+        authority
+            .allowed_capabilities
+            .extend(["network_egress".into(), "env_read".into()]);
+        authority.host_io = Some(ArtifactHostIoAuthority {
+            host_ports: Some(BTreeSet::from(["telemetry.example:443".into()])),
+            env_keys: Some(BTreeSet::from([
+                "APP_TOKEN".into(),
+                "PUBLISHER_ONLY".into(),
+            ])),
+            max_calls_per_epoch: BTreeMap::from([
+                ("network_egress".into(), 2),
+                ("env_read".into(), 0),
+            ]),
+        });
+        let fixture = Fixture::new("console.log(42);\n").with_runtime_authority(&authority);
+        let approval = fixture.approval();
+        let mut config = Config::for_profile(Profile::Balanced);
+        config.runtime.max_instructions = Some(20_000);
+        config.runtime.environment_allowlist =
+            BTreeSet::from(["APP_TOKEN".into(), "OPERATOR_ONLY".into()]);
+        config.security.network_policy.allowlist = vec![NetworkAllowlistEntry {
+            host: "different.internal".into(),
+            port: Some(8443),
+            reason: "SSRF exception, not a publisher grant".into(),
+        }];
+        let ceiling = approval
+            .enforce_attenuated_capability_envelope(&config)
+            .unwrap()
+            .unwrap();
+        assert!(ceiling.permits_host_port("telemetry.example:443"));
+        assert!(!ceiling.permits_host_port("telemetry.example:80"));
+        assert!(!ceiling.permits_host_port("different.internal:8443"));
+        assert!(ceiling.permits_env_key("APP_TOKEN"));
+        assert!(!ceiling.permits_env_key("PUBLISHER_ONLY"));
+        assert!(!ceiling.permits_env_key("OPERATOR_ONLY"));
+        assert_eq!(ceiling.call_budget_for("network_egress"), Some(2));
+        assert_eq!(ceiling.call_budget_for("env_read"), Some(0));
+        let mut narrowed = config.clone();
+        narrowed.runtime.max_instructions = Some(1);
+        assert_eq!(
+            approval
+                .enforce_attenuated_capability_envelope(&narrowed)
+                .unwrap()
+                .unwrap()
+                .call_budget_for("network_egress"),
+            Some(1)
+        );
+
+        let mut stripped = authority.clone();
+        stripped.host_io = None;
+        assert_ne!(
+            stripped.commitment().unwrap(),
+            authority.commitment().unwrap()
+        );
+        let mut forged: serde_json::Value = serde_json::from_slice(
+            &STANDARD
+                .decode(&fixture.manifest.manifest_bytes_b64)
+                .unwrap(),
+        )
+        .unwrap();
+        forged["runtime_authority"]["host_io"]["host_ports"] =
+            serde_json::json!(["attacker.example:443"]);
+        let mut manifest = fixture.manifest.clone();
+        manifest.manifest_bytes_b64 = STANDARD.encode(serde_json::to_vec(&forged).unwrap());
+        std::fs::write(
+            &fixture.manifest_path,
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            approval.revalidate().is_err(),
+            "changing the host scope invalidates publisher admission"
+        );
+    }
+
+    #[test]
     fn publisher_runtime_authority_is_bound_to_signature_and_retained_approval() {
         let authority = runtime_authority();
         let fixture = Fixture::new("console.log(require('./side.cjs'));\n")
@@ -2558,7 +2891,11 @@ mod tests {
         assert!(ceiling.permits_capability("network_egress"));
         assert_eq!(ceiling.call_budget_for("console"), Some(16));
         assert!(ceiling.permits_host_port("api.internal.example:8443"));
-        assert!(!ceiling.permits_host_port("api.internal.example:443"));
+        assert!(ceiling.permits_host_port("api.internal.example:443"));
+        assert!(
+            ceiling.permits_host_port("public.example:443"),
+            "an SSRF exception must not become an exclusive network ceiling"
+        );
         assert!(!ceiling.permits_env_key("HOME"));
 
         // Attenuate across a `ModuleImportEdge` into `node_modules/dep/index.js`:
