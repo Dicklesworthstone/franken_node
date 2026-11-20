@@ -420,7 +420,10 @@ fn sign_artifact(payload: CompromiseReductionArtifact) -> SignedCompromiseReduct
     }
 }
 
-fn write_signed_summary(outcomes: &[AdversarialCaseOutcome]) -> SignedCompromiseReductionArtifact {
+fn write_signed_summary(
+    outcomes: &[AdversarialCaseOutcome],
+    output_root: &Path,
+) -> SignedCompromiseReductionArtifact {
     let blocked = outcomes
         .iter()
         .filter(|outcome| outcome.outcome == "blocked")
@@ -443,16 +446,29 @@ fn write_signed_summary(outcomes: &[AdversarialCaseOutcome]) -> SignedCompromise
         cases: outcomes.to_vec(),
     };
     let signed = sign_artifact(payload);
-    let artifact_path = repo_root().join(ARTIFACT_RELATIVE_PATH);
+    let artifact_path = output_root.join(ARTIFACT_RELATIVE_PATH);
+    if let Some(parent) = artifact_path.parent() {
+        fs::create_dir_all(parent).expect("create artifact parent directory");
+    }
     let bytes = serde_json::to_vec_pretty(&signed).expect("serialize signed artifact");
-    fs::write(artifact_path, [bytes, b"\n".to_vec()].concat()).expect("write signed artifact");
+    fs::write(&artifact_path, [bytes, b"\n".to_vec()].concat()).expect("write signed artifact");
     signed
 }
 
 #[test]
 fn adversarial_extension_fixtures_are_blocked_by_strict_policy() {
+    assert!(
+        repo_root().join(ARTIFACT_RELATIVE_PATH).is_file(),
+        "checked-in compromise_reduction_v1.json artifact must exist"
+    );
     let outcomes = FIXTURES.iter().map(run_fixture).collect::<Vec<_>>();
-    let signed_artifact = write_signed_summary(&outcomes);
+    let temp_out = tempfile::tempdir().expect("create temp artifact output dir");
+    let output_root = if std::env::var_os("FRANKEN_WRITE_REPO_ARTIFACTS").is_some() {
+        repo_root()
+    } else {
+        temp_out.path().to_path_buf()
+    };
+    let signed_artifact = write_signed_summary(&outcomes, &output_root);
 
     assert_eq!(outcomes.len(), 10);
     assert_eq!(signed_artifact.payload.totals.cases, outcomes.len());

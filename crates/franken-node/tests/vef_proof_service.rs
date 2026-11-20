@@ -9,21 +9,8 @@ use tempfile::TempDir;
 use tracing::{Level, debug, info, span, warn};
 use tracing_subscriber::{EnvFilter, fmt};
 
-#[path = "../src/connector/vef_execution_receipt.rs"]
-pub mod vef_execution_receipt;
-
-mod connector {
-    pub use super::vef_execution_receipt;
-}
-
-#[path = "../src/vef/receipt_chain.rs"]
-mod receipt_chain;
-
-#[path = "../src/vef/proof_scheduler.rs"]
-mod proof_scheduler;
-
-#[path = "../src/vef/proof_service.rs"]
-mod proof_service;
+use frankenengine_node::connector::vef_execution_receipt;
+use frankenengine_node::vef::{proof_scheduler, proof_service, receipt_chain};
 
 #[cfg(test)]
 mod tests {
@@ -114,7 +101,7 @@ mod tests {
                 timestamp_millis,
                 sequence_number: sequence,
                 witness_references: vec!["w-a".to_string(), "w-b".to_string()],
-                trace_id: format!("trace-{}", uuid::Uuid::new_v4()),
+                trace_id: format!("trace-{}", uuid::Uuid::now_v7()),
             };
 
             // Save to filesystem for persistence
@@ -144,7 +131,7 @@ mod tests {
 
         let now = Utc::now();
         let base_timestamp = now.timestamp_millis() as u64;
-        let trace_id = format!("trace-{}", uuid::Uuid::new_v4());
+        let trace_id = format!("trace-{}", uuid::Uuid::now_v7());
 
         // Create real receipts with filesystem persistence
         for (idx, action) in [

@@ -8355,3 +8355,351 @@ fn fleet_http_epoch_barrier_certifies_quiescence_across_enrolled_supervisors_and
     control.request_shutdown();
     assert!(server.join().expect("server thread").expect("server exit") > 0);
 }
+
+#[test]
+fn fleet_http_epoch_barrier_survives_coordinator_restart_and_refuses_stale_or_indeterminate_drains()
+{
+    use std::sync::Arc;
+
+    use ed25519_dalek::{Signer, SigningKey};
+    use frankenengine_node::control_plane::fleet_http_server::{
+        FLEET_HTTP_LISTENING, FleetControlPlaneService, FleetHttpServerConfig,
+        FleetHttpServerControl, FleetNodeCredentials, serve_fleet_control_plane,
+    };
+    use frankenengine_node::control_plane::fleet_transport::{
+        FLEET_EPOCH_BARRIER_CERTIFIED_DRAIN_SCOPE, NATIVE_SESSION_DRAIN_ATTESTATION_SCHEMA,
+        NativeSessionDrainAttestation, NativeSessionDrainCheckpoint, SeqlockControlPage,
+        fleet_application_checkpoint, fleet_quarantine_state,
+    };
+    use frankenengine_node::control_plane::fleet_transport_http::{
+        FleetHttpEpochBarrierRequest, HttpFleetTransport,
+    };
+    use sha2::{Digest, Sha256};
+
+    let dir = tempdir().expect("tempdir");
+    let state_dir = dir.path().join("coordinator-restart-state");
+    let operator_token = "op-restart-token-0123456789abcdef0123456789";
+    let node_a_token = "node-a-restart-token-0123456789abcdef012345";
+    let node_b_token = "node-b-restart-token-0123456789abcdef012345";
+    let sup_a = SigningKey::from_bytes(&[0x51; 32]);
+    let sup_b = SigningKey::from_bytes(&[0x62; 32]);
+
+    let make_creds = || {
+        let creds_json = serde_json::to_vec(&serde_json::json!({
+            "schema_version": "franken-node/fleet-node-credentials/v1",
+            "nodes": [
+                {
+                    "zone_id": "east",
+                    "node_id": "node-a",
+                    "token_sha256": hex::encode(Sha256::digest(node_a_token.as_bytes())),
+                    "supervisor_public_key_hex": hex::encode(sup_a.verifying_key().as_bytes()),
+                },
+                {
+                    "zone_id": "east",
+                    "node_id": "node-b",
+                    "token_sha256": hex::encode(Sha256::digest(node_b_token.as_bytes())),
+                    "supervisor_public_key_hex": hex::encode(sup_b.verifying_key().as_bytes()),
+                }
+            ]
+        }))
+        .expect("credentials json");
+        FleetNodeCredentials::from_json(&creds_json).expect("valid enrolled credentials")
+    };
+
+    let spawn_coordinator = |state_dir: PathBuf| {
+        let service = Arc::new(
+            FleetControlPlaneService::open(state_dir, operator_token)
+                .expect("open service")
+                .with_node_credentials(make_creds())
+                .expect("attach enrolled node credentials"),
+        );
+        let service_for_server = Arc::clone(&service);
+        let control = FleetHttpServerControl::new();
+        let server_control = Arc::clone(&control);
+        let (addr_tx, addr_rx) = std::sync::mpsc::sync_channel(1);
+        let server = std::thread::spawn(move || {
+            serve_fleet_control_plane(
+                service_for_server,
+                &FleetHttpServerConfig {
+                    bind: "127.0.0.1:0".to_string(),
+                    max_requests: None,
+                },
+                server_control,
+                Arc::new(move |ev| {
+                    if ev.event_code == FLEET_HTTP_LISTENING
+                        && let Some(addr) = &ev.bound_addr
+                    {
+                        let _ = addr_tx.send(addr.clone());
+                    }
+                }),
+            )
+        });
+        let bound = addr_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("server listening");
+        (service, control, server, format!("http://{bound}"))
+    };
+
+    let make_heartbeat = |node_id: &str,
+                          key: &SigningKey,
+                          expected: &frankenengine_node::control_plane::fleet_transport::FleetApplicationCheckpoint,
+                          generation: u64,
+                          admitted_sessions: u64,
+                          indeterminate_sessions: u64,
+                          quarantine_version: u64| {
+        let now = Utc::now();
+        let terminal_sessions = admitted_sessions.saturating_sub(indeterminate_sessions);
+        let mut drain = NativeSessionDrainCheckpoint {
+            applied_actions: expected.clone(),
+            session_set_sha256: hex::encode(Sha256::digest(
+                format!("{node_id}:{generation}:{admitted_sessions}:{indeterminate_sessions}")
+                    .as_bytes(),
+            )),
+            admitted_sessions,
+            terminal_sessions,
+            pending_sessions: 0,
+            indeterminate_sessions,
+            fence_held: true,
+            supervisor_attestation: None,
+        };
+        let mut attestation = NativeSessionDrainAttestation {
+            schema_version: NATIVE_SESSION_DRAIN_ATTESTATION_SCHEMA.to_string(),
+            node_id: node_id.to_string(),
+            zone_id: "east".to_string(),
+            drain_id: uuid::Uuid::now_v7().to_string(),
+            generation,
+            project_root_sha256: hex::encode(Sha256::digest(node_id.as_bytes())),
+            observed_at: now,
+            product_root_key_id: format!("ed25519:{}", hex::encode(key.verifying_key().as_bytes())),
+            checkpoint_sha256: drain.observation_sha256().expect("checkpoint sha256"),
+            signature_hex: String::new(),
+        };
+        attestation.signature_hex = hex::encode(
+            key.sign(&attestation.signing_payload().expect("payload"))
+                .to_bytes(),
+        );
+        drain.supervisor_attestation = Some(attestation);
+        NodeStatus {
+            zone_id: "east".to_string(),
+            node_id: node_id.to_string(),
+            last_seen: now,
+            quarantine_version,
+            health: if indeterminate_sessions > 0 {
+                NodeHealth::Degraded
+            } else {
+                NodeHealth::Maintenance
+            },
+            applied_actions: Some(expected.clone()),
+            native_session_drain: Some(drain),
+        }
+    };
+
+    // --- Coordinator Incarnation 1: commit epoch 0 -> 1 ---
+    let (service_1, control_1, server_1, base_url_1) = spawn_coordinator(state_dir.clone());
+    assert_eq!(service_1.seqlock_page().read_safepoint().control_epoch, 0);
+
+    let mut operator_1 =
+        HttpFleetTransport::new(&base_url_1, operator_token, Duration::from_secs(5))
+            .expect("operator 1");
+    let mut agent_a_1 =
+        HttpFleetTransport::new(&base_url_1, node_a_token, Duration::from_secs(5))
+            .expect("agent a 1");
+    let mut agent_b_1 =
+        HttpFleetTransport::new(&base_url_1, node_b_token, Duration::from_secs(5))
+            .expect("agent b 1");
+    operator_1.initialize().expect("operator init");
+
+    operator_1
+        .publish_action(&FleetActionRecord {
+            action_id: "quarantine-owner-1".to_string(),
+            emitted_at: Utc::now(),
+            action: FleetAction::Quarantine {
+                zone_id: "east".to_string(),
+                incident_id: "inc-restart-1".to_string(),
+                target_id: "npm:@acme/compromised".to_string(),
+                target_kind: FleetTargetKind::Extension,
+                quarantine_version: 7,
+                reason: "primary quarantine owner".to_string(),
+            },
+        })
+        .expect("publish quarantine 1");
+    operator_1
+        .publish_action(&FleetActionRecord {
+            action_id: "quarantine-owner-2".to_string(),
+            emitted_at: Utc::now(),
+            action: FleetAction::Quarantine {
+                zone_id: "east".to_string(),
+                incident_id: "inc-restart-2".to_string(),
+                target_id: "npm:@acme/compromised".to_string(),
+                target_kind: FleetTargetKind::Extension,
+                quarantine_version: 8,
+                reason: "secondary quarantine owner".to_string(),
+            },
+        })
+        .expect("publish quarantine 2");
+    operator_1
+        .publish_action(&FleetActionRecord {
+            action_id: "hold-restart-1".to_string(),
+            emitted_at: Utc::now(),
+            action: FleetAction::NativeSessionHold {
+                zone_id: "east".to_string(),
+                reason: "fence admissions during epoch 1 transition".to_string(),
+            },
+        })
+        .expect("publish hold 1");
+
+    let expected_1 =
+        fleet_application_checkpoint(&operator_1.list_actions().expect("actions 1"), "east")
+            .expect("checkpoint 1");
+    agent_a_1
+        .upsert_node_status(&make_heartbeat("node-a", &sup_a, &expected_1, 1, 2, 0, 8))
+        .expect("node-a heartbeat 1");
+    agent_b_1
+        .upsert_node_status(&make_heartbeat("node-b", &sup_b, &expected_1, 1, 4, 0, 8))
+        .expect("node-b heartbeat 1");
+
+    let cert_1 = operator_1
+        .certify_epoch_barrier(&FleetHttpEpochBarrierRequest {
+            initiator: "ops-root".to_string(),
+            reason: "epoch-1-commit".to_string(),
+            trace_id: "trace-restart-epoch-1".to_string(),
+            stale_after: Duration::from_secs(30),
+        })
+        .expect("commit epoch 1");
+    assert_eq!(cert_1.certificate.pre_epoch, 0);
+    assert_eq!(cert_1.certificate.committed_epoch, 1);
+    assert_eq!(service_1.seqlock_page().read_safepoint().control_epoch, 1);
+
+    // Shut down Coordinator Incarnation 1 and delete the derived seqlock cache file
+    // to prove Incarnation 2 rehydrates authority strictly from durable SQLite.
+    control_1.request_shutdown();
+    assert!(server_1.join().expect("server 1").expect("server 1 exit") > 0);
+    drop(service_1);
+    std::fs::write(state_dir.join("seqlock.page"), b"corrupt-cache")
+        .expect("corrupt derived seqlock file before restart");
+
+    // --- Coordinator Incarnation 2: restart over durable SQLite state ---
+    let (service_2, control_2, server_2, base_url_2) = spawn_coordinator(state_dir.clone());
+    let recovered_safepoint = service_2.seqlock_page().read_safepoint();
+    assert_eq!(
+        recovered_safepoint.control_epoch, 1,
+        "restarted coordinator must rehydrate control_epoch=1 from durable SQLite"
+    );
+    assert_eq!(recovered_safepoint.quarantine_version, 8);
+    assert_eq!(recovered_safepoint.active_hold_count, 1);
+    assert_eq!(recovered_safepoint.action_count, 3);
+    assert_eq!(
+        SeqlockControlPage::read_shared_page(&state_dir.join("seqlock.page"))
+            .expect("rewritten shared seqlock page on restart")
+            .control_epoch,
+        1
+    );
+
+    let mut operator_2 =
+        HttpFleetTransport::new(&base_url_2, operator_token, Duration::from_secs(5))
+            .expect("operator 2");
+    let mut agent_a_2 =
+        HttpFleetTransport::new(&base_url_2, node_a_token, Duration::from_secs(5))
+            .expect("agent a 2");
+    let mut agent_b_2 =
+        HttpFleetTransport::new(&base_url_2, node_b_token, Duration::from_secs(5))
+            .expect("agent b 2");
+
+    // Fault cut A: retained pre-restart heartbeats MUST NOT certify epoch 1 -> 2
+    // before enrolled agents re-authenticate to the new coordinator incarnation.
+    let unauthenticated_restart_err = operator_2
+        .certify_epoch_barrier(&FleetHttpEpochBarrierRequest {
+            initiator: "ops-root".to_string(),
+            reason: "reject-pre-restart-retained-heartbeats".to_string(),
+            trace_id: "trace-restart-unauth".to_string(),
+            stale_after: Duration::from_secs(30),
+        })
+        .expect_err("retained pre-restart heartbeats must not certify a post-restart barrier")
+        .to_string();
+    assert!(
+        unauthenticated_restart_err.contains("HTTP 409"),
+        "{unauthenticated_restart_err}"
+    );
+
+    // Fault cut B: releasing incident 1 must NOT discard incident 2's quarantine on the same target.
+    operator_2
+        .publish_action(&FleetActionRecord {
+            action_id: "release-owner-1".to_string(),
+            emitted_at: Utc::now(),
+            action: FleetAction::Release {
+                zone_id: "east".to_string(),
+                incident_id: "inc-restart-1".to_string(),
+                reason: Some("resolved primary incident only".to_string()),
+            },
+        })
+        .expect("release incident 1");
+    let actions_after_partial_release = operator_2.list_actions().expect("actions 2");
+    let active_quarantines = fleet_quarantine_state(&actions_after_partial_release);
+    assert!(
+        active_quarantines.iter().any(|entry| {
+            entry.zone_id == "east"
+                && entry.incident_id == "inc-restart-2"
+                && entry.target_id == "npm:@acme/compromised"
+        }),
+        "releasing one quarantine incident must preserve overlapping second quarantine owner"
+    );
+
+    // Fault cut C: unknown pre-crash obligation (`indeterminate_sessions > 0`) on node-a
+    // prevents certified quiescence and keeps committed epoch at 1.
+    let expected_2 =
+        fleet_application_checkpoint(&actions_after_partial_release, "east").expect("checkpoint 2");
+    agent_a_2
+        .upsert_node_status(&make_heartbeat("node-a", &sup_a, &expected_2, 2, 3, 1, 8))
+        .expect("node-a indeterminate heartbeat");
+    agent_b_2
+        .upsert_node_status(&make_heartbeat("node-b", &sup_b, &expected_2, 2, 4, 0, 8))
+        .expect("node-b clean heartbeat");
+    let indeterminate_err = operator_2
+        .certify_epoch_barrier(&FleetHttpEpochBarrierRequest {
+            initiator: "ops-root".to_string(),
+            reason: "reject-indeterminate-obligation".to_string(),
+            trace_id: "trace-restart-indeterminate".to_string(),
+            stale_after: Duration::from_secs(30),
+        })
+        .expect_err("unknown pre-crash obligation must block certified quiescence")
+        .to_string();
+    assert!(
+        indeterminate_err.contains("HTTP 409"),
+        "{indeterminate_err}"
+    );
+    assert_eq!(service_2.seqlock_page().read_safepoint().control_epoch, 1);
+
+    // Once node-a resolves its obligation under the held fence and signs generation 3,
+    // Coordinator Incarnation 2 advances monotonically from recovered epoch 1 -> 2.
+    agent_a_2
+        .upsert_node_status(&make_heartbeat("node-a", &sup_a, &expected_2, 3, 3, 0, 8))
+        .expect("node-a resolved heartbeat");
+    let cert_2 = operator_2
+        .certify_epoch_barrier(&FleetHttpEpochBarrierRequest {
+            initiator: "ops-root".to_string(),
+            reason: "post-restart-epoch-2-commit".to_string(),
+            trace_id: "trace-restart-epoch-2".to_string(),
+            stale_after: Duration::from_secs(30),
+        })
+        .expect("commit epoch 2 after restart and obligation resolution");
+    assert!(cert_2.evidence.fleet_quiescence_certified);
+    assert_eq!(
+        cert_2.evidence.scope,
+        FLEET_EPOCH_BARRIER_CERTIFIED_DRAIN_SCOPE
+    );
+    assert_eq!(
+        cert_2.certificate.pre_epoch, 1,
+        "coordinator restart must continue from durable epoch 1 rather than resetting to 0"
+    );
+    assert_eq!(cert_2.certificate.committed_epoch, 2);
+    assert_eq!(service_2.seqlock_page().read_safepoint().control_epoch, 2);
+    assert_eq!(
+        SeqlockControlPage::read_shared_page(&state_dir.join("seqlock.page"))
+            .expect("epoch 2 shared seqlock page")
+            .control_epoch,
+        2
+    );
+
+    control_2.request_shutdown();
+    assert!(server_2.join().expect("server 2").expect("server 2 exit") > 0);
+}

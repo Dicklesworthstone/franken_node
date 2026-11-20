@@ -394,17 +394,35 @@ fn sign_artifact(payload: DetectionLatencyArtifact) -> SignedDetectionLatencyArt
     }
 }
 
-fn write_signed_summary(signed: &SignedDetectionLatencyArtifact) {
-    let artifact_path = repo_root().join(ARTIFACT_RELATIVE_PATH);
+fn write_signed_summary(signed: &SignedDetectionLatencyArtifact, output_root: &Path) -> PathBuf {
+    let artifact_path = output_root.join(ARTIFACT_RELATIVE_PATH);
+    if let Some(parent) = artifact_path.parent() {
+        fs::create_dir_all(parent).expect("create artifact parent directory");
+    }
     let bytes = serde_json::to_vec_pretty(signed).expect("serialize signed artifact");
-    fs::write(artifact_path, [bytes, b"\n".to_vec()].concat()).expect("write signed artifact");
+    fs::write(&artifact_path, [bytes, b"\n".to_vec()].concat()).expect("write signed artifact");
+    artifact_path
 }
 
 #[test]
 fn adversarial_detection_latency_p95_stays_within_budget() {
+    assert!(
+        repo_root().join(ARTIFACT_RELATIVE_PATH).is_file(),
+        "checked-in detection_latency_v1.json artifact must exist"
+    );
+    // Warm the OS binary image cache once before measuring spawn-to-block latency.
+    let _ = measure_fixture(&FIXTURES[0]);
+
     let cases = FIXTURES.iter().map(measure_fixture).collect::<Vec<_>>();
     let signed = sign_artifact(build_payload(cases));
-    write_signed_summary(&signed);
+    let temp_out = tempfile::tempdir().expect("create temp artifact output dir");
+    let output_root = if std::env::var_os("FRANKEN_WRITE_REPO_ARTIFACTS").is_some() {
+        repo_root()
+    } else {
+        temp_out.path().to_path_buf()
+    };
+    let written_path = write_signed_summary(&signed, &output_root);
+    assert!(written_path.is_file());
 
     assert_eq!(signed.payload.sample_count, FIXTURES.len());
     assert!(

@@ -5,7 +5,73 @@
 //! cryptographic secrets and authentication tokens.
 
 use frankenengine_node::security::constant_time::{ct_eq, ct_eq_bytes};
+use std::hint::black_box;
 use std::time::{Duration, Instant};
+
+const MEDIAN_ROUNDS: usize = 7;
+
+fn median_duration(mut samples: [Duration; MEDIAN_ROUNDS]) -> Duration {
+    samples.sort_unstable();
+    samples[MEDIAN_ROUNDS / 2]
+}
+
+fn measure_str_batch(left: &str, right: &str, expected: bool, trials: usize) -> Duration {
+    let start = Instant::now();
+    for _ in 0..trials {
+        assert_eq!(ct_eq(black_box(left), black_box(right)), expected);
+    }
+    start.elapsed()
+}
+
+fn measure_bytes_batch(left: &[u8], right: &[u8], expected: bool, trials: usize) -> Duration {
+    let start = Instant::now();
+    for _ in 0..trials {
+        assert_eq!(ct_eq_bytes(black_box(left), black_box(right)), expected);
+    }
+    start.elapsed()
+}
+
+fn alternating_str_medians<const N: usize>(
+    base: &str,
+    candidates: [(&str, bool); N],
+    trials: usize,
+) -> [Duration; N] {
+    for _ in 0..1000 {
+        for (candidate, _) in candidates {
+            let _ = black_box(ct_eq(black_box(base), black_box(candidate)));
+        }
+    }
+    let mut rounds = [[Duration::ZERO; MEDIAN_ROUNDS]; N];
+    for round in 0..MEDIAN_ROUNDS {
+        for step in 0..N {
+            let idx = (step + round) % N;
+            let (candidate, expected) = candidates[idx];
+            rounds[idx][round] = measure_str_batch(base, candidate, expected, trials);
+        }
+    }
+    std::array::from_fn(|idx| median_duration(rounds[idx]))
+}
+
+fn alternating_bytes_medians<const N: usize>(
+    base: &[u8],
+    candidates: [(&[u8], bool); N],
+    trials: usize,
+) -> [Duration; N] {
+    for _ in 0..1000 {
+        for (candidate, _) in candidates {
+            let _ = black_box(ct_eq_bytes(black_box(base), black_box(candidate)));
+        }
+    }
+    let mut rounds = [[Duration::ZERO; MEDIAN_ROUNDS]; N];
+    for round in 0..MEDIAN_ROUNDS {
+        for step in 0..N {
+            let idx = (step + round) % N;
+            let (candidate, expected) = candidates[idx];
+            rounds[idx][round] = measure_bytes_batch(base, candidate, expected, trials);
+        }
+    }
+    std::array::from_fn(|idx| median_duration(rounds[idx]))
+}
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Constant-Time Comparison Tests
@@ -13,42 +79,24 @@ use std::time::{Duration, Instant};
 
 #[test]
 fn test_ct_eq_timing_independence() {
-    // Test that comparison time doesn't depend on input content
     let secret = "supersecret_authentication_token_1234567890";
     let correct = "supersecret_authentication_token_1234567890";
-    let incorrect_early = "different_authentication_token_1234567890"; // Differs at start
-    let incorrect_late = "supersecret_authentication_token_9876543210"; // Differs at end
+    let incorrect_early = "different_authentication_token_1234567890";
+    let incorrect_late = "supersecret_authentication_token_9876543210";
 
-    // Warm up CPU to get consistent timing
-    for _ in 0..1000 {
-        let _ = ct_eq(secret, correct);
-    }
+    let [correct_time, early_time, late_time] = alternating_str_medians(
+        secret,
+        [
+            (correct, true),
+            (incorrect_early, false),
+            (incorrect_late, false),
+        ],
+        10_000,
+    );
 
-    // Measure timing for correct match
-    let start = Instant::now();
-    for _ in 0..10000 {
-        assert!(ct_eq(secret, correct));
-    }
-    let correct_time = start.elapsed();
-
-    // Measure timing for early mismatch
-    let start = Instant::now();
-    for _ in 0..10000 {
-        assert!(!ct_eq(secret, incorrect_early));
-    }
-    let early_time = start.elapsed();
-
-    // Measure timing for late mismatch
-    let start = Instant::now();
-    for _ in 0..10000 {
-        assert!(!ct_eq(secret, incorrect_late));
-    }
-    let late_time = start.elapsed();
-
-    // All timings should be similar (within 50% variance due to system noise)
     let max_time = correct_time.max(early_time).max(late_time);
     let min_time = correct_time.min(early_time).min(late_time);
-    let variance_ratio = max_time.as_nanos() as f64 / min_time.as_nanos() as f64;
+    let variance_ratio = max_time.as_nanos() as f64 / min_time.as_nanos().max(1) as f64;
 
     assert!(
         variance_ratio < 1.5,
@@ -58,41 +106,24 @@ fn test_ct_eq_timing_independence() {
 
 #[test]
 fn test_ct_eq_bytes_timing_independence() {
-    // Test byte slice comparison timing independence
-    let secret_hash = b"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"; // SHA256 hex
+    let secret_hash = b"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
     let correct_hash = b"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-    let incorrect_start = b"f3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"; // First byte differs
-    let incorrect_end = b"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b856"; // Last byte differs
+    let incorrect_start = b"f3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    let incorrect_end = b"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b856";
 
-    // Warm up
-    for _ in 0..1000 {
-        let _ = ct_eq_bytes(secret_hash, correct_hash);
-    }
+    let [correct_time, start_time, end_time] = alternating_bytes_medians(
+        secret_hash,
+        [
+            (correct_hash, true),
+            (incorrect_start, false),
+            (incorrect_end, false),
+        ],
+        10_000,
+    );
 
-    let trials = 10000;
-
-    let start = Instant::now();
-    for _ in 0..trials {
-        assert!(ct_eq_bytes(secret_hash, correct_hash));
-    }
-    let correct_time = start.elapsed();
-
-    let start = Instant::now();
-    for _ in 0..trials {
-        assert!(!ct_eq_bytes(secret_hash, incorrect_start));
-    }
-    let start_time = start.elapsed();
-
-    let start = Instant::now();
-    for _ in 0..trials {
-        assert!(!ct_eq_bytes(secret_hash, incorrect_end));
-    }
-    let end_time = start.elapsed();
-
-    // Verify timing independence
     let max_time = correct_time.max(start_time).max(end_time);
     let min_time = correct_time.min(start_time).min(end_time);
-    let variance_ratio = max_time.as_nanos() as f64 / min_time.as_nanos() as f64;
+    let variance_ratio = max_time.as_nanos() as f64 / min_time.as_nanos().max(1) as f64;
 
     assert!(
         variance_ratio < 1.5,
@@ -102,39 +133,41 @@ fn test_ct_eq_bytes_timing_independence() {
 
 #[test]
 fn test_ct_eq_different_lengths() {
-    // Different length strings should fail fast but still be constant time
-    // relative to the shorter length
     let short = "short";
     let long = "this_is_a_much_longer_string";
 
-    // Should return false immediately but in constant time
-    let start = Instant::now();
-    for _ in 0..10000 {
-        assert!(!ct_eq(short, long));
-        assert!(!ct_eq(long, short));
+    let mut samples = [Duration::ZERO; MEDIAN_ROUNDS];
+    for sample in &mut samples {
+        let start = Instant::now();
+        for _ in 0..10_000 {
+            assert!(!ct_eq(black_box(short), black_box(long)));
+            assert!(!ct_eq(black_box(long), black_box(short)));
+        }
+        *sample = start.elapsed();
     }
-    let duration = start.elapsed();
+    let duration = median_duration(samples);
 
-    // Should complete quickly since length check is O(1)
     assert!(duration < Duration::from_millis(10));
 }
 
 #[test]
 fn test_ct_eq_empty_strings() {
-    // Empty string comparisons should be constant time
     let empty1 = "";
     let empty2 = "";
     let non_empty = "not empty";
 
-    let start = Instant::now();
-    for _ in 0..10000 {
-        assert!(ct_eq(empty1, empty2));
-        assert!(!ct_eq(empty1, non_empty));
-        assert!(!ct_eq(non_empty, empty1));
+    let mut samples = [Duration::ZERO; MEDIAN_ROUNDS];
+    for sample in &mut samples {
+        let start = Instant::now();
+        for _ in 0..10_000 {
+            assert!(ct_eq(black_box(empty1), black_box(empty2)));
+            assert!(!ct_eq(black_box(empty1), black_box(non_empty)));
+            assert!(!ct_eq(black_box(non_empty), black_box(empty1)));
+        }
+        *sample = start.elapsed();
     }
-    let duration = start.elapsed();
+    let duration = median_duration(samples);
 
-    // Should be very fast for empty comparisons
     assert!(duration < Duration::from_millis(5));
 }
 
@@ -144,11 +177,9 @@ fn test_ct_eq_empty_strings() {
 
 #[test]
 fn test_no_early_termination_on_mismatch() {
-    // Verify that mismatches at different positions take similar time
     let base = "authentication_token_base_value_1234567890abcdef";
     let mut variants = Vec::new();
 
-    // Create variants with single bit flips at different positions
     for pos in [
         0,
         base.len() / 4,
@@ -157,24 +188,25 @@ fn test_no_early_termination_on_mismatch() {
         base.len() - 1,
     ] {
         let mut bytes = base.as_bytes().to_vec();
-        bytes[pos] ^= 1; // Flip one bit
-        variants.push(String::from_utf8(bytes).unwrap());
+        bytes[pos] ^= 1;
+        variants.push(String::from_utf8(bytes).expect("valid ascii variant"));
     }
 
-    let mut timings = Vec::new();
+    let timings = alternating_str_medians(
+        base,
+        [
+            (&variants[0], false),
+            (&variants[1], false),
+            (&variants[2], false),
+            (&variants[3], false),
+            (&variants[4], false),
+        ],
+        5_000,
+    );
 
-    for variant in &variants {
-        let start = Instant::now();
-        for _ in 0..5000 {
-            assert!(!ct_eq(base, variant));
-        }
-        timings.push(start.elapsed());
-    }
-
-    // All timings should be similar regardless of mismatch position
-    let max_time = timings.iter().max().unwrap();
-    let min_time = timings.iter().min().unwrap();
-    let variance = max_time.as_nanos() as f64 / min_time.as_nanos() as f64;
+    let max_time = timings.iter().max().expect("max timing");
+    let min_time = timings.iter().min().expect("min timing");
+    let variance = max_time.as_nanos() as f64 / min_time.as_nanos().max(1) as f64;
 
     assert!(
         variance < 2.0,
@@ -184,37 +216,26 @@ fn test_no_early_termination_on_mismatch() {
 
 #[test]
 fn test_consistent_timing_under_load() {
-    // Test that constant-time behavior holds under system load
     let secret = "critical_security_token_must_be_constant_time";
     let candidate1 = "critical_security_token_must_be_constant_time";
     let candidate2 = "different_security_token_must_be_constant_time";
 
-    // Simulate some system load with background computation
-    std::thread::spawn(|| {
-        for _ in 0..100000 {
-            let _ = format!(
-                "{}",
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            );
+    let load_thread = std::thread::spawn(|| {
+        let mut acc = 0_u64;
+        for idx in 0..100_000_u64 {
+            acc = acc.wrapping_add(black_box(idx).rotate_left(7));
         }
+        black_box(acc)
     });
 
-    let start = Instant::now();
-    for _ in 0..5000 {
-        assert!(ct_eq(secret, candidate1));
-    }
-    let match_time = start.elapsed();
+    let [match_time, mismatch_time] = alternating_str_medians(
+        secret,
+        [(candidate1, true), (candidate2, false)],
+        5_000,
+    );
+    let _ = load_thread.join();
 
-    let start = Instant::now();
-    for _ in 0..5000 {
-        assert!(!ct_eq(secret, candidate2));
-    }
-    let mismatch_time = start.elapsed();
-
-    let ratio = match_time.as_nanos() as f64 / mismatch_time.as_nanos() as f64;
+    let ratio = match_time.as_nanos() as f64 / mismatch_time.as_nanos().max(1) as f64;
     assert!(
         ratio > 0.5 && ratio < 2.0,
         "Timing not consistent under load: match={match_time:?}, mismatch={mismatch_time:?}, ratio={ratio:.2}"
@@ -223,40 +244,17 @@ fn test_consistent_timing_under_load() {
 
 #[test]
 fn test_cache_timing_resistance() {
-    // Test that repeated comparisons don't show cache-based timing differences
     let secret = "sensitive_data_should_not_leak_via_cache_timing";
     let correct = "sensitive_data_should_not_leak_via_cache_timing";
     let incorrect = "different_data_should_not_leak_via_cache_timing";
 
-    // First run (cold cache)
-    let start = Instant::now();
-    for _ in 0..1000 {
-        assert!(ct_eq(secret, correct));
-    }
-    let cold_correct = start.elapsed();
+    let [cold_correct, cold_incorrect] =
+        alternating_str_medians(secret, [(correct, true), (incorrect, false)], 1_000);
+    let [warm_correct, warm_incorrect] =
+        alternating_str_medians(secret, [(correct, true), (incorrect, false)], 1_000);
 
-    let start = Instant::now();
-    for _ in 0..1000 {
-        assert!(!ct_eq(secret, incorrect));
-    }
-    let cold_incorrect = start.elapsed();
-
-    // Second run (warm cache)
-    let start = Instant::now();
-    for _ in 0..1000 {
-        assert!(ct_eq(secret, correct));
-    }
-    let warm_correct = start.elapsed();
-
-    let start = Instant::now();
-    for _ in 0..1000 {
-        assert!(!ct_eq(secret, incorrect));
-    }
-    let warm_incorrect = start.elapsed();
-
-    // Cache effects should not create significant timing differences
-    let cold_ratio = cold_correct.as_nanos() as f64 / cold_incorrect.as_nanos() as f64;
-    let warm_ratio = warm_correct.as_nanos() as f64 / warm_incorrect.as_nanos() as f64;
+    let cold_ratio = cold_correct.as_nanos() as f64 / cold_incorrect.as_nanos().max(1) as f64;
+    let warm_ratio = warm_correct.as_nanos() as f64 / warm_incorrect.as_nanos().max(1) as f64;
 
     assert!(
         (cold_ratio - warm_ratio).abs() < 0.5,
@@ -266,34 +264,79 @@ fn test_cache_timing_resistance() {
 
 #[test]
 fn test_memory_access_pattern_independence() {
-    // Test that the memory access pattern doesn't depend on input data
-    // This is a basic test - real side-channel analysis would require more sophisticated tools
-
-    let patterns = vec![
-        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", // All same chars
-        "abababababababababababababababababababab", // Alternating
-        "abcdefghijklmnopqrstuvwxyz1234567890abcdef", // Sequential
-        "zyxwvutsrqponmlkjihgfedcba0987654321fedcba", // Reverse sequential
+    let patterns = [
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaxxxx",
+        "ababababababababababababababababababababxxxx",
+        "abcdefghijklmnopqrstuvwxyz1234567890abcdefxx",
+        "zyxwvutsrqponmlkjihgfedcba0987654321fedcbaxx",
     ];
-
     let target = "this_is_the_target_string_to_compare_against";
-
-    let mut timings = Vec::new();
-    for pattern in &patterns {
-        let start = Instant::now();
-        for _ in 0..2000 {
-            let _ = ct_eq(target, pattern);
-        }
-        timings.push(start.elapsed());
+    for pattern in patterns {
+        assert_eq!(pattern.len(), target.len());
     }
 
-    // All patterns should take similar time regardless of their structure
-    let max_time = timings.iter().max().unwrap();
-    let min_time = timings.iter().min().unwrap();
-    let variance = max_time.as_nanos() as f64 / min_time.as_nanos() as f64;
+    let timings = alternating_str_medians(
+        target,
+        [
+            (patterns[0], false),
+            (patterns[1], false),
+            (patterns[2], false),
+            (patterns[3], false),
+        ],
+        2_000,
+    );
+
+    let max_time = timings.iter().max().expect("max timing");
+    let min_time = timings.iter().min().expect("min timing");
+    let variance = max_time.as_nanos() as f64 / min_time.as_nanos().max(1) as f64;
 
     assert!(
         variance < 1.8,
         "Memory access pattern timing detected: variance {variance:.2}, timings: {timings:?}"
+    );
+}
+
+#[test]
+fn test_harness_exposes_planted_early_exit_leak() {
+    fn early_exit_fault(left: &[u8], right: &[u8]) -> bool {
+        if left.len() != right.len() {
+            return false;
+        }
+        for (&a, &b) in left.iter().zip(right) {
+            if black_box(a) != black_box(b) {
+                return false;
+            }
+        }
+        true
+    }
+
+    let secret = vec![0x5A_u8; 4096];
+    let same = secret.clone();
+    let mut first_byte_mismatch = secret.clone();
+    first_byte_mismatch[0] ^= 1;
+
+    let mut same_samples = [Duration::ZERO; MEDIAN_ROUNDS];
+    let mut diff_samples = [Duration::ZERO; MEDIAN_ROUNDS];
+    for round in 0..MEDIAN_ROUNDS {
+        let start = Instant::now();
+        for _ in 0..1_000 {
+            assert!(early_exit_fault(black_box(&secret), black_box(&same)));
+        }
+        same_samples[round] = start.elapsed();
+
+        let start = Instant::now();
+        for _ in 0..1_000 {
+            assert!(!early_exit_fault(
+                black_box(&secret),
+                black_box(&first_byte_mismatch)
+            ));
+        }
+        diff_samples[round] = start.elapsed();
+    }
+    let ratio =
+        median_duration(same_samples).as_nanos() / median_duration(diff_samples).as_nanos().max(1);
+    assert!(
+        ratio >= 10,
+        "timing harness must detect planted early-exit leak (ratio={ratio})"
     );
 }

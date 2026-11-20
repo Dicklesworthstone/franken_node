@@ -106,13 +106,30 @@ fn write_verification_artifacts(
 #[test]
 fn cx_first_policy_gate_has_no_non_excepted_violations() {
     let root = repo_root();
+    assert!(
+        root.join("artifacts/10.15/cx_first_compliance.csv")
+            .is_file(),
+        "checked-in cx_first_compliance.csv artifact must exist"
+    );
+    assert!(
+        root.join("artifacts/section_10_15/bd-2g6r/verification_evidence.json")
+            .is_file(),
+        "checked-in bd-2g6r verification_evidence.json artifact must exist"
+    );
+
     let config = cx_first_policy::PolicyConfig::for_repo(&root);
     let report = cx_first_policy::run_policy(&config, Utc::now().date_naive())
         .expect("cx-first policy should execute");
 
-    let csv_path = root.join("artifacts/10.15/cx_first_compliance.csv");
+    let temp_out = tempfile::tempdir().expect("temp artifact dir");
+    let output_root = if std::env::var_os("FRANKEN_WRITE_REPO_ARTIFACTS").is_some() {
+        root.as_path()
+    } else {
+        temp_out.path()
+    };
+    let csv_path = output_root.join("artifacts/10.15/cx_first_compliance.csv");
     cx_first_policy::write_compliance_csv(&report, &csv_path).expect("compliance csv should write");
-    write_verification_artifacts(&report, &root).expect("verification artifacts should write");
+    write_verification_artifacts(&report, output_root).expect("verification artifacts should write");
 
     let csv_text = std::fs::read_to_string(csv_path).expect("csv should exist");
     assert!(
