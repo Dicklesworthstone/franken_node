@@ -3119,6 +3119,85 @@ fn fleet_describe_json_fails_closed_when_node_missing() {
 }
 
 #[test]
+fn fleet_certify_quiescence_json_refuses_invalid_requests_and_local_transport() {
+    let workspace = tempdir().expect("certification CLI workspace");
+    let fleet_state_dir = workspace.path().join("must-not-create-local-store");
+    let transport_error = if cfg!(feature = "http-client") {
+        "requires a configured HTTP coordinator"
+    } else {
+        "requires the `http-client` feature"
+    };
+    let cases = [
+        (vec![], "requires nonempty --initiator and --reason"),
+        (
+            vec!["--initiator", "operator"],
+            "requires nonempty --initiator and --reason",
+        ),
+        (
+            vec!["--initiator", "operator", "--reason", "  "],
+            "requires nonempty --initiator and --reason",
+        ),
+        (
+            vec![
+                "--initiator",
+                "operator",
+                "--reason",
+                "maintenance",
+                "--trace-id",
+                " ",
+            ],
+            "requires a nonempty --trace-id",
+        ),
+        (
+            vec![
+                "--initiator",
+                "operator",
+                "--reason",
+                "maintenance",
+                "--stale-after-secs",
+                "0",
+            ],
+            "requires a positive --stale-after-secs",
+        ),
+        (
+            vec!["--initiator", "operator", "--reason", "maintenance"],
+            transport_error,
+        ),
+    ];
+    for (arguments, expected_error) in cases {
+        let output = franken_node_command()
+            .current_dir(workspace.path())
+            .args(["fleet", "certify-quiescence", "--json"])
+            .args(arguments)
+            .env("FRANKEN_NODE_FLEET_STATE_DIR", &fleet_state_dir)
+            .env_remove("FRANKEN_NODE_PROFILE")
+            .env_remove("FRANKEN_NODE_FLEET_CONTROL_PLANE_URL")
+            .env_remove("FRANKEN_NODE_FLEET_CONTROL_PLANE_TOKEN_PATH")
+            .output()
+            .expect("certification CLI refusal");
+        assert!(
+            !output.status.success(),
+            "unsupported certification succeeded"
+        );
+        let report = json_stdout(&output, "certification refusal");
+        assert_eq!(report["schema_version"], "franken-node/fleet-error-cli/v1");
+        assert_eq!(report["command"], "fleet.certify-quiescence");
+        assert_eq!(report["ok"], false);
+        assert_eq!(report["transport"], "file");
+        assert_eq!(report["live_control_plane"], false);
+        assert!(
+            report["error"].as_str().unwrap().contains(expected_error),
+            "{report}"
+        );
+        assert!(report.get("certificate").is_none());
+        assert!(
+            !fleet_state_dir.exists(),
+            "certification must not create or fall back to a local fleet store"
+        );
+    }
+}
+
+#[test]
 fn fleet_describe_json_fails_closed_when_node_id_argument_missing() {
     let workspace = tempdir().expect("tempdir");
     write_fail_closed_cli_config(workspace.path());
@@ -8179,6 +8258,47 @@ fn fleet_http_epoch_barrier_certifies_quiescence_across_enrolled_supervisors_and
         .recv_timeout(Duration::from_secs(5))
         .expect("server listening");
     let base_url = format!("http://{bound}");
+    let operator_token_path = dir.path().join("operator.token");
+    let node_token_path = dir.path().join("node.token");
+    std::fs::write(&operator_token_path, operator_token).expect("operator token file");
+    std::fs::write(&node_token_path, node_a_token).expect("node token file");
+    let certify_cli = |token_path: &std::path::Path, trace_id: &str| {
+        franken_node_command()
+            .current_dir(dir.path())
+            .args([
+                "fleet",
+                "certify-quiescence",
+                "--initiator",
+                "cli-maintenance-operator",
+                "--reason",
+                "certify the held native population",
+                "--trace-id",
+                trace_id,
+                "--stale-after-secs",
+                "900",
+                "--json",
+            ])
+            .env("FRANKEN_NODE_FLEET_CONTROL_PLANE_URL", &base_url)
+            .env("FRANKEN_NODE_FLEET_CONTROL_PLANE_TOKEN_PATH", token_path)
+            .env_remove("FRANKEN_NODE_PROFILE")
+            .env_remove("FRANKEN_NODE_FLEET_STATE_DIR")
+            .output()
+            .expect("run operator certification CLI")
+    };
+    let assert_cli_refusal = |output: Output, expected: &str| {
+        assert!(!output.status.success());
+        let report = json_stdout(&output, "live certification CLI refusal");
+        assert_eq!(report["schema_version"], "franken-node/fleet-error-cli/v1");
+        assert_eq!(report["command"], "fleet.certify-quiescence");
+        assert_eq!(report["ok"], false);
+        assert_eq!(report["transport"], "http");
+        assert_eq!(report["live_control_plane"], false);
+        assert!(
+            report["error"].as_str().unwrap().contains(expected),
+            "{report}"
+        );
+        assert!(report.get("certificate").is_none());
+    };
 
     let mut operator = HttpFleetTransport::new(&base_url, operator_token, Duration::from_secs(5))
         .expect("operator");
@@ -8273,6 +8393,14 @@ fn fleet_http_epoch_barrier_certifies_quiescence_across_enrolled_supervisors_and
         .expect_err("missing node-b must abort epoch barrier")
         .to_string();
     assert!(missing_err.contains("HTTP 409"), "{missing_err}");
+    assert_cli_refusal(
+        certify_cli(&operator_token_path, "trace-cli-missing"),
+        "HTTP 409",
+    );
+    assert_cli_refusal(
+        certify_cli(&node_token_path, "trace-cli-node-authority"),
+        "HTTP 403",
+    );
 
     // A signed completed observation with admissions reopened cannot certify
     // the current population even while its action snapshot still contains the hold.
@@ -8289,6 +8417,10 @@ fn fleet_http_epoch_barrier_certifies_quiescence_across_enrolled_supervisors_and
         .expect_err("a released admission fence must not certify quiescence")
         .to_string();
     assert!(unfenced_err.contains("HTTP 409"), "{unfenced_err}");
+    assert_cli_refusal(
+        certify_cli(&operator_token_path, "trace-cli-unfenced"),
+        "HTTP 409",
+    );
 
     // Both supervisors now attest terminal populations under retained fences.
     agent_b
@@ -8315,9 +8447,59 @@ fn fleet_http_epoch_barrier_certifies_quiescence_across_enrolled_supervisors_and
         assert_eq!(participant.active_hold_ids, [hold.action_id.as_str()]);
     }
 
+    // The installed command must reach the authenticated mutation and retain
+    // the full validated certificate, rather than reporting a local hold as
+    // distributed quiescence. Every successful request advances one epoch.
+    let output = certify_cli(&operator_token_path, "trace-cli-certified");
+    assert!(
+        output.status.success(),
+        "certification CLI failed: {} {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let report = json_stdout(&output, "live certification CLI success");
+    assert_eq!(
+        report["schema_version"],
+        "franken-node/fleet-quiescence-cli/v1"
+    );
+    assert_eq!(report["command"], "fleet.certify-quiescence");
+    assert_eq!(report["ok"], true);
+    assert_eq!(report["transport"], "http");
+    assert_eq!(report["live_control_plane"], true);
+    assert_eq!(report["control_plane_url"], base_url);
+    assert_eq!(report["certificate"]["pre_epoch"], 1);
+    assert_eq!(report["certificate"]["committed_epoch"], 2);
+    assert_eq!(report["certificate"]["trace_id"], "trace-cli-certified");
+    assert_eq!(
+        report["certificate"]["initiator"],
+        "cli-maintenance-operator"
+    );
+    assert_eq!(
+        report["certificate"]["reason"],
+        "certify the held native population"
+    );
+    assert_eq!(report["certificate"]["fleet_quiescence_certified"], true);
+    assert_eq!(
+        report["certificate"]["participants"],
+        serde_json::to_value(&certified.certificate.participants).unwrap(),
+    );
+    assert_eq!(
+        report["evidence"]["scope"],
+        FLEET_EPOCH_BARRIER_CERTIFIED_DRAIN_SCOPE
+    );
+    assert_eq!(report["evidence"]["complete"], true);
+    assert_eq!(report["evidence"]["fleet_quiescence_certified"], true);
+    assert_eq!(report["evidence"]["stale_after"]["secs"], 300);
+    assert_eq!(report["evidence"]["nodes"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        operator.list_actions().unwrap(),
+        actions,
+        "certification must retain the holds"
+    );
+
     let seqlock = SeqlockControlPage::read_shared_page(&state_dir.join("seqlock.page"))
         .expect("seqlock page persisted on epoch commit");
-    assert_eq!(seqlock.control_epoch, 1);
+    assert_eq!(seqlock.control_epoch, 2);
     assert_eq!(seqlock.quarantine_version, 5);
     assert_eq!(seqlock.active_hold_count, 1);
     assert_eq!(seqlock.action_count, 2);
@@ -8345,11 +8527,15 @@ fn fleet_http_epoch_barrier_certifies_quiescence_across_enrolled_supervisors_and
         .expect_err("a resumed hold must invalidate the old held observation")
         .to_string();
     assert!(resumed_err.contains("HTTP 409"), "{resumed_err}");
+    assert_cli_refusal(
+        certify_cli(&operator_token_path, "trace-cli-resumed"),
+        "HTTP 409",
+    );
     assert_eq!(
         SeqlockControlPage::read_shared_page(&state_dir.join("seqlock.page"))
             .expect("last committed epoch page")
             .control_epoch,
-        1
+        2
     );
 
     control.request_shutdown();
@@ -8501,12 +8687,10 @@ fn fleet_http_epoch_barrier_survives_coordinator_restart_and_refuses_stale_or_in
     let mut operator_1 =
         HttpFleetTransport::new(&base_url_1, operator_token, Duration::from_secs(5))
             .expect("operator 1");
-    let mut agent_a_1 =
-        HttpFleetTransport::new(&base_url_1, node_a_token, Duration::from_secs(5))
-            .expect("agent a 1");
-    let mut agent_b_1 =
-        HttpFleetTransport::new(&base_url_1, node_b_token, Duration::from_secs(5))
-            .expect("agent b 1");
+    let mut agent_a_1 = HttpFleetTransport::new(&base_url_1, node_a_token, Duration::from_secs(5))
+        .expect("agent a 1");
+    let mut agent_b_1 = HttpFleetTransport::new(&base_url_1, node_b_token, Duration::from_secs(5))
+        .expect("agent b 1");
     operator_1.initialize().expect("operator init");
 
     operator_1
@@ -8598,12 +8782,10 @@ fn fleet_http_epoch_barrier_survives_coordinator_restart_and_refuses_stale_or_in
     let mut operator_2 =
         HttpFleetTransport::new(&base_url_2, operator_token, Duration::from_secs(5))
             .expect("operator 2");
-    let mut agent_a_2 =
-        HttpFleetTransport::new(&base_url_2, node_a_token, Duration::from_secs(5))
-            .expect("agent a 2");
-    let mut agent_b_2 =
-        HttpFleetTransport::new(&base_url_2, node_b_token, Duration::from_secs(5))
-            .expect("agent b 2");
+    let mut agent_a_2 = HttpFleetTransport::new(&base_url_2, node_a_token, Duration::from_secs(5))
+        .expect("agent a 2");
+    let mut agent_b_2 = HttpFleetTransport::new(&base_url_2, node_b_token, Duration::from_secs(5))
+        .expect("agent b 2");
 
     // Fault cut A: retained pre-restart heartbeats MUST NOT certify epoch 1 -> 2
     // before enrolled agents re-authenticate to the new coordinator incarnation.

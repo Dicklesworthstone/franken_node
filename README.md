@@ -1326,6 +1326,45 @@ distributed epoch. Use enrolled HTTP node credentials for authenticated remote
 observations, and upgrade coordinator and agents together before publishing the
 new action variants.
 
+To commit a distributed epoch for the enrolled native-session population, keep
+admission held across every enrolled zone and request certification from the
+configured HTTP coordinator:
+
+```bash
+franken-node fleet hold --zone all --id epoch-maintenance-2026-11-20 \
+  --reason "replace the admitted runtime across the fleet" --wait --json
+franken-node fleet certify-quiescence --initiator release-operator \
+  --reason "all enrolled native populations drained before replacement" \
+  --trace-id rollout-2026-11-20 --stale-after-secs 30 --json
+
+# Complete maintenance while the hold stays active, then reopen admission.
+franken-node fleet resume --hold epoch-maintenance-2026-11-20 --wait --json
+```
+
+`fleet certify-quiescence` requires the coordinator's operator token and node
+enrollment with a pinned `supervisor_public_key_hex` for every participant. It
+checks the full enrolled population, including missing nodes. A missing, stale,
+unfenced, pending, indeterminate, or invalidly signed drain refuses certification
+and leaves the last committed epoch unchanged. The command uses the configured
+convergence timeout when `--stale-after-secs` is omitted; the coordinator caps
+the effective freshness window at 300 seconds. Local file transport cannot
+provide this certification.
+
+Success emits `franken-node/fleet-quiescence-cli/v1` JSON containing the complete
+validated `evidence` and `certificate`, including participant identities, signed
+drain observations, retained hold IDs, the action-log commitment, and the old and
+new epoch. The coordinator commits that evidence with its authenticated durable
+epoch before returning it. Enrollment authority comes from the configured
+coordinator; this report is not a separate public-key attestation by an
+independent verifier. The certificate covers the recorded native-session
+population, not uncensused reference processes or remote effect completion.
+
+Certification leaves all holds active. Each successful request commits a new
+epoch; `--trace-id` is an audit correlation value, not an idempotency key. Keep the
+returned certificate with the maintenance record. If the response is lost,
+inspect the coordinator's durable `runtime epoch` state before deliberately
+requesting another transition.
+
 Use the hold as an atomic precondition when publishing an executable fleet policy:
 
 ```bash

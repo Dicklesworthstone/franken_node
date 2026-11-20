@@ -3272,6 +3272,10 @@ pub enum FleetCommand {
     /// Drain native sessions and retain a durable admission hold for maintenance.
     Hold(FleetHoldArgs),
 
+    /// Commit a coordinator epoch only after every enrolled supervisor certifies
+    /// a fresh terminal native-session population under retained admission holds.
+    CertifyQuiescence(FleetCertifyQuiescenceArgs),
+
     /// Resume one maintenance owner without clearing other owners' holds.
     Resume(FleetResumeArgs),
 
@@ -3447,6 +3451,33 @@ pub struct FleetResumeArgs {
     pub wait: bool,
 
     /// Emit the publication and signed maintenance observations as JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Parser)]
+pub struct FleetCertifyQuiescenceArgs {
+    /// Operator identity recorded in the committed epoch certificate.
+    /// Required by the handler so --json failures remain structured.
+    #[arg(long, default_value = "")]
+    pub initiator: String,
+
+    /// Explanation recorded in the committed epoch certificate.
+    #[arg(long, default_value = "")]
+    pub reason: String,
+
+    /// Audit correlation identifier; generated when omitted. Repeating this
+    /// value does not deduplicate a new epoch transition.
+    #[arg(long)]
+    pub trace_id: Option<String>,
+
+    /// Maximum heartbeat age in seconds. Defaults to the configured convergence
+    /// timeout; the coordinator caps the effective window at 300 seconds.
+    #[arg(long)]
+    pub stale_after_secs: Option<u64>,
+
+    /// Emit the verified coordinator certificate and complete drain evidence.
+    /// Requires the configured HTTP coordinator and its operator token.
     #[arg(long)]
     pub json: bool,
 }
@@ -6007,6 +6038,54 @@ mod parser_contract_extra_tests {
         };
         assert!(args.project.is_none());
         assert!(!args.json);
+        Ok(())
+    }
+
+    #[test]
+    fn fleet_certify_quiescence_parses_authority_and_freshness() -> Result<(), String> {
+        let cli = parse(&[
+            "franken-node",
+            "fleet",
+            "certify-quiescence",
+            "--initiator",
+            "release-operator",
+            "--reason",
+            "replace the admitted runtime",
+            "--trace-id",
+            "rollout-epoch-7",
+            "--stale-after-secs",
+            "45",
+            "--json",
+        ])
+        .map_err(|error| error.to_string())?;
+        let Command::Fleet(FleetCommand::CertifyQuiescence(args)) = cli.command else {
+            return Err("expected fleet quiescence certification".into());
+        };
+        assert_eq!(args.initiator, "release-operator");
+        assert_eq!(args.reason, "replace the admitted runtime");
+        assert_eq!(args.trace_id.as_deref(), Some("rollout-epoch-7"));
+        assert_eq!(args.stale_after_secs, Some(45));
+        assert!(args.json);
+
+        let cli = parse(&["franken-node", "fleet", "certify-quiescence", "--json"])
+            .map_err(|error| error.to_string())?;
+        let Command::Fleet(FleetCommand::CertifyQuiescence(args)) = cli.command else {
+            return Err("expected handler-validated fleet certification".into());
+        };
+        assert!(args.initiator.is_empty() && args.reason.is_empty());
+        assert!(args.trace_id.is_none() && args.stale_after_secs.is_none());
+        assert!(args.json);
+        assert!(
+            parse(&[
+                "franken-node",
+                "fleet",
+                "certify-quiescence",
+                "--zone",
+                "east",
+            ])
+            .is_err(),
+            "certification must cover the coordinator's complete enrolled population"
+        );
         Ok(())
     }
 

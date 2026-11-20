@@ -31270,6 +31270,112 @@ fn handle_fleet_sessions(args: &cli::FleetSessionsArgs) -> Result<()> {
     }
 }
 
+fn handle_fleet_certify_quiescence(args: &cli::FleetCertifyQuiescenceArgs) -> Result<()> {
+    if args.initiator.trim().is_empty() || args.reason.trim().is_empty() {
+        anyhow::bail!("`fleet certify-quiescence` requires nonempty --initiator and --reason");
+    }
+    if args
+        .trace_id
+        .as_ref()
+        .is_some_and(|trace| trace.trim().is_empty())
+    {
+        anyhow::bail!("`fleet certify-quiescence` requires a nonempty --trace-id when supplied");
+    }
+    if args.stale_after_secs == Some(0) {
+        anyhow::bail!("`fleet certify-quiescence` requires a positive --stale-after-secs");
+    }
+
+    #[cfg(not(feature = "http-client"))]
+    {
+        anyhow::bail!("`fleet certify-quiescence` requires the `http-client` feature");
+    }
+    #[cfg(feature = "http-client")]
+    {
+        // Certification needs the coordinator's complete enrolled population
+        // and pinned supervisor roots. Opening a local store would neither
+        // establish that authority nor be an acceptable transport fallback.
+        let resolved = config::Config::resolve_for_fleet(None, config::CliOverrides::default())
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        let url = resolved
+            .config
+            .fleet
+            .control_plane_url
+            .as_deref()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "`fleet certify-quiescence` requires a configured HTTP coordinator; set \
+                 [fleet] control_plane_url and control_plane_token_path to the coordinator's \
+                 operator token; local file transport cannot certify enrolled supervisors"
+                )
+            })?;
+        let FleetTransportHandle::Http(transport) =
+            open_http_fleet_transport(Path::new("."), &resolved, url)?
+        else {
+            anyhow::bail!("`fleet certify-quiescence` requires the live HTTP coordinator");
+        };
+        let request = control_plane::fleet_transport_http::FleetHttpEpochBarrierRequest {
+            initiator: args.initiator.clone(),
+            reason: args.reason.clone(),
+            trace_id: args
+                .trace_id
+                .clone()
+                .unwrap_or_else(|| fleet_operation_id("certify-quiescence")),
+            stale_after: Duration::from_secs(
+                args.stale_after_secs
+                    .unwrap_or(resolved.config.fleet.convergence_timeout_seconds),
+            ),
+        };
+        // The canonical client validates the request binding, every signed
+        // participant observation, and the complete epoch/evidence relationship
+        // before any successful operator-facing verdict is emitted.
+        let response = transport
+            .certify_epoch_barrier(&request)
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        if args.json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "schema_version": "franken-node/fleet-quiescence-cli/v1",
+                    "command": "fleet.certify-quiescence",
+                    "ok": true,
+                    "transport": FLEET_CLI_HTTP_TRANSPORT,
+                    "live_control_plane": true,
+                    "control_plane_url": transport.url().as_str(),
+                    "evidence": response.evidence,
+                    "certificate": response.certificate,
+                }))?
+            );
+        } else {
+            let certificate = &response.certificate;
+            println!(
+                "Certified enrolled native-session quiescence: epoch {} -> {}",
+                certificate.pre_epoch, certificate.committed_epoch,
+            );
+            println!("  coordinator={}", transport.url().as_str());
+            println!(
+                "  transition={} participants={} actions={} freshness_seconds={}",
+                certificate.transition_id,
+                certificate.participants.len(),
+                certificate.action_log_checkpoint.action_count,
+                response.evidence.stale_after.as_secs(),
+            );
+            println!("  trace_id={}", certificate.trace_id);
+            for participant in &certificate.participants {
+                println!(
+                    "  {}/{} terminal={}/{} holds={}",
+                    participant.zone_id,
+                    participant.node_id,
+                    participant.terminal_sessions,
+                    participant.admitted_sessions,
+                    participant.active_hold_ids.join(","),
+                );
+            }
+            println!("  Admission holds remain active; resume them explicitly after maintenance.");
+        }
+        Ok(())
+    }
+}
+
 fn fleet_maintenance_report(
     project_root: &Path,
     request: FleetMaintenanceRequest<'_>,
@@ -47381,6 +47487,11 @@ fn main() -> Result<()> {
                 };
                 if let Err(err) = handle_fleet_maintenance(request, args.wait, args.json) {
                     return fleet_fail("fleet.hold", args.json, err);
+                }
+            }
+            FleetCommand::CertifyQuiescence(args) => {
+                if let Err(error) = handle_fleet_certify_quiescence(&args) {
+                    return fleet_fail("fleet.certify-quiescence", args.json, error);
                 }
             }
             FleetCommand::Resume(args) => {
