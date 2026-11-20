@@ -35,10 +35,8 @@ struct StateTransitionLog {
     from_state: ConnectorState,
     to_state: ConnectorState,
     timestamp_ms: u64,
-    duration_ms: u64,
     concurrent_transitions: usize,
     success: bool,
-    error: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -93,16 +91,13 @@ impl ConnectorLifecycleStressHarness {
                 .duration_since(std::time::UNIX_EPOCH)
                 .expect("unix epoch")
                 .as_millis() as u64;
-            let duration = start.elapsed();
             let log = StateTransitionLog {
                 connector_id: connector_id.to_string(),
                 from_state: current_state,
                 to_state: target_state,
                 timestamp_ms: timestamp,
-                duration_ms: duration.as_millis() as u64,
                 concurrent_transitions: current_concurrent,
                 success: transition_result.is_ok(),
-                error: transition_result.as_ref().err().map(ToString::to_string),
             };
             self.transition_logs.lock().await.push(log);
             (current_state, transition_result, timestamp)

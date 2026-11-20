@@ -2199,6 +2199,7 @@ path = "tests/cx_first_api_gate.rs"
 [[test]]
 name = "integration_connector_lifecycle_stress"
 path = "tests/integration_connector_lifecycle_stress.rs"
+required-features = ["control-plane"]
 
 [[test]]
 name = "security_timing_attack_resistance"

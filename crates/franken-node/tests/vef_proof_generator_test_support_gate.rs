@@ -60,8 +60,7 @@ fn verify_test_proof_backend_source_gating(source: &str) -> Result<usize, String
                 gated_items += 1;
             }
             Item::Use(item_use) if matches!(item_use.vis, Visibility::Public(_)) => {
-                let text = quote_like_use_tokens(item_use);
-                if text.contains("TestProofBackend")
+                if use_tree_mentions_ident(&item_use.tree, "TestProofBackend")
                     && !has_test_support_only_cfg(&item_use.attrs)
                 {
                     return Err(
@@ -80,8 +79,19 @@ fn verify_test_proof_backend_source_gating(source: &str) -> Result<usize, String
     Ok(gated_items)
 }
 
-fn quote_like_use_tokens(item_use: &syn::ItemUse) -> String {
-    format!("{:?}", item_use.tree)
+fn use_tree_mentions_ident(tree: &syn::UseTree, target: &str) -> bool {
+    match tree {
+        syn::UseTree::Path(path) => {
+            path.ident == target || use_tree_mentions_ident(&path.tree, target)
+        }
+        syn::UseTree::Name(name) => name.ident == target,
+        syn::UseTree::Rename(rename) => rename.ident == target || rename.rename == target,
+        syn::UseTree::Glob(_) => false,
+        syn::UseTree::Group(group) => group
+            .items
+            .iter()
+            .any(|item| use_tree_mentions_ident(item, target)),
+    }
 }
 
 fn write_probe_crate(
@@ -166,7 +176,7 @@ fn test_proof_backend_requires_test_support_feature() {
     for item in &vef_mod_ast.items {
         if let Item::Use(item_use) = item
             && matches!(item_use.vis, Visibility::Public(_))
-            && quote_like_use_tokens(item_use).contains("TestProofBackend")
+            && use_tree_mentions_ident(&item_use.tree, "TestProofBackend")
         {
             assert!(
                 has_test_support_only_cfg(&item_use.attrs),

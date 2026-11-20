@@ -8532,6 +8532,7 @@ fn prepare_best_effort_package_attribution_tracker(
     }
 }
 
+#[cfg(any(test, feature = "engine"))]
 fn parse_ifc_operator_key_blob(
     raw: &[u8],
     expect_public: bool,
@@ -8567,6 +8568,7 @@ fn parse_ifc_operator_key_blob(
 
 /// Resolve the project's operator Ed25519 verifying key used to authenticate
 /// `[[security.ifc.declassify]]` rules (`bd-reality-20260923-26n9r.13`).
+#[cfg(any(test, feature = "engine"))]
 fn resolve_project_ifc_trust_verifying_key(
     project_root: &Path,
     config: &Config,

@@ -11,8 +11,7 @@
 #
 # This gate is PURE STATIC (no cargo/toolchain) and therefore cheap.
 #
-# MODE: starts WARN-ONLY so the in-flight re-registration backlog is not wedged.
-# FLIP to blocking by setting BLOCKING=1 once bd-rjc2m.E2E1 (full e2e) is green.
+# MODE: BLOCKING (all 40/40 flagged orphan test files registered and verified).
 name: deregistered-test-census-gate
 
 on:
@@ -32,7 +31,7 @@ on:
   workflow_dispatch: {}
 
 env:
-  BLOCKING: "0"   # set to "1" after bd-rjc2m.E2E1 is green to make this gate blocking
+  BLOCKING: "1"   # hard blocking gate: 0 flagged orphan test targets permitted
 
 jobs:
   orphan-census:

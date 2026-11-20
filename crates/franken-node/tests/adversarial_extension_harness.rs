@@ -1,4 +1,5 @@
 use ed25519_dalek::{Signer, SigningKey};
+use frankenengine_node::config::TrustConfig;
 use frankenengine_node::supply_chain::certification::{EvidenceType, VerifiedEvidenceRef};
 use frankenengine_node::supply_chain::trust_card::{
     BehavioralProfile, CapabilityDeclaration, CapabilityRisk, CertificationLevel,
@@ -16,6 +17,7 @@ use std::process::{Command, Output};
 const ARTIFACT_RELATIVE_PATH: &str = "artifacts/adversarial/compromise_reduction_v1.json";
 const TRUST_CARD_REGISTRY_RELATIVE_PATH: &str = ".franken-node/state/trust-card-registry.v1.json";
 const FIXTURE_SIGNING_KEY_BYTES: [u8; 32] = [0x42; 32];
+const FIXTURE_REGISTRY_SIGNING_KEY_B64: &str = "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI=";
 
 #[derive(Clone, Copy)]
 struct AdversarialExtensionFixture {
@@ -192,8 +194,12 @@ fn run_cli_in_workspace(workspace: &Path, args: &[String]) -> Output {
         "franken-node binary not found at {}",
         binary_path.display()
     );
+    let xdg_state = workspace.join(".xdg-state");
+    let xdg_config = workspace.join(".xdg-config");
     Command::new(&binary_path)
         .current_dir(workspace)
+        .env("XDG_STATE_HOME", &xdg_state)
+        .env("XDG_CONFIG_HOME", &xdg_config)
         .args(args)
         .output()
         .unwrap_or_else(|err| panic!("failed running `franken-node {}`: {err}", args.join(" ")))
@@ -201,8 +207,13 @@ fn run_cli_in_workspace(workspace: &Path, args: &[String]) -> Output {
 
 fn parse_json_stdout(output: &Output, context: &str) -> Value {
     let stdout = String::from_utf8_lossy(&output.stdout);
-    serde_json::from_str(&stdout)
-        .unwrap_or_else(|err| panic!("{context} should emit valid JSON: {err}\nstdout:\n{stdout}"))
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    serde_json::from_str(&stdout).unwrap_or_else(|err| {
+        panic!(
+            "{context} should emit valid JSON: {err}\nstatus: {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+            output.status
+        )
+    })
 }
 
 fn args(items: &[&str]) -> Vec<String> {
@@ -245,6 +256,13 @@ fn fixture_package_manifest(fixture: &AdversarialExtensionFixture) -> Value {
 }
 
 fn write_fixture_workspace(workspace: &Path, fixture: &AdversarialExtensionFixture) {
+    fs::write(
+        workspace.join("franken_node.toml"),
+        format!(
+            "profile = \"strict\"\n\n[trust]\nregistry_signing_key = \"{FIXTURE_REGISTRY_SIGNING_KEY_B64}\"\n\n[security]\nauthorized_api_keys = [\"fnode-adversarial-fixture-key\"]\n"
+        ),
+    )
+    .expect("write fail-closed franken_node.toml");
     let fixture_dir = workspace.join("fixtures").join(fixture.case_id);
     fs::create_dir_all(&fixture_dir).expect("create adversarial fixture directory");
     fs::write(
@@ -291,7 +309,12 @@ fn fixture_evidence_refs(fixture: &AdversarialExtensionFixture) -> Vec<VerifiedE
 }
 
 fn write_revoked_trust_registry(workspace: &Path, fixture: &AdversarialExtensionFixture) {
-    let mut registry = TrustCardRegistry::default();
+    let trust_config = TrustConfig {
+        registry_signing_key: Some(FIXTURE_REGISTRY_SIGNING_KEY_B64.to_string()),
+        ..TrustConfig::default()
+    };
+    let mut registry = TrustCardRegistry::from_config(&trust_config)
+        .expect("construct trust card registry from fixture signing key");
     let payload_hash = Sha256::digest(fixture.payload_body.as_bytes());
     let extension_id = format!("npm:{}", fixture.package_name);
 

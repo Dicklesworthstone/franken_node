@@ -14,6 +14,7 @@ use frankenengine_node::vef::{proof_scheduler, proof_service, receipt_chain};
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use super::proof_scheduler::{SchedulerPolicy, VefProofScheduler};
     use super::proof_service::{
         ProofBackendId, ProofInputEnvelope, ProofServiceConfig, VefProofService,
@@ -221,7 +222,7 @@ mod tests {
 
         info!(
             input_hash = chain_hash,
-            predicates = input.predicates.len(),
+            predicates = input.policy_predicates.len(),
             "Phase: input generation complete - Created proof input envelope"
         );
 
@@ -236,7 +237,6 @@ mod tests {
             .with_target(false)
             .with_thread_ids(true)
             .with_line_number(true)
-            .json()
             .finish();
         let _guard = tracing::subscriber::set_default(subscriber);
 
@@ -345,7 +345,6 @@ mod tests {
     fn proof_service_backend_swap_with_real_filesystem_persistence() {
         let subscriber = fmt::Subscriber::builder()
             .with_env_filter(EnvFilter::from_default_env().add_directive("debug".parse().unwrap()))
-            .json()
             .finish();
         let _guard = tracing::subscriber::set_default(subscriber);
 
@@ -454,7 +453,6 @@ mod tests {
     fn proof_service_handles_metadata_with_real_filesystem_logging() {
         let subscriber = fmt::Subscriber::builder()
             .with_env_filter(EnvFilter::from_default_env().add_directive("debug".parse().unwrap()))
-            .json()
             .finish();
         let _guard = tracing::subscriber::set_default(subscriber);
 
@@ -481,7 +479,7 @@ mod tests {
         // Persist the input with adversarial metadata to filesystem for audit trail
         let input_json = json!({
             "metadata": input.metadata,
-            "predicates": input.predicates,
+            "predicates": input.policy_predicates,
             "test_timestamp": Utc::now().to_rfc3339()
         });
         let input_path = harness.proofs_dir.join("adversarial_input.json");

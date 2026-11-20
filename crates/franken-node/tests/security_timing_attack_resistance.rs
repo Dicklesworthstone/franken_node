@@ -81,8 +81,11 @@ fn alternating_bytes_medians<const N: usize>(
 fn test_ct_eq_timing_independence() {
     let secret = "supersecret_authentication_token_1234567890";
     let correct = "supersecret_authentication_token_1234567890";
-    let incorrect_early = "different_authentication_token_1234567890";
+    let incorrect_early = "differently_authentication_token_1234567890";
     let incorrect_late = "supersecret_authentication_token_9876543210";
+    assert_eq!(secret.len(), correct.len());
+    assert_eq!(secret.len(), incorrect_early.len());
+    assert_eq!(secret.len(), incorrect_late.len());
 
     let [correct_time, early_time, late_time] = alternating_str_medians(
         secret,
@@ -218,7 +221,9 @@ fn test_no_early_termination_on_mismatch() {
 fn test_consistent_timing_under_load() {
     let secret = "critical_security_token_must_be_constant_time";
     let candidate1 = "critical_security_token_must_be_constant_time";
-    let candidate2 = "different_security_token_must_be_constant_time";
+    let candidate2 = "altered__security_token_must_be_constant_time";
+    assert_eq!(secret.len(), candidate1.len());
+    assert_eq!(secret.len(), candidate2.len());
 
     let load_thread = std::thread::spawn(|| {
         let mut acc = 0_u64;
