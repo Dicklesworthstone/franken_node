@@ -455,16 +455,61 @@ impl FleetControlPlaneService {
         let epoch_signing_key = Arc::new(epoch_signing_key);
         let store_epoch_key = Arc::clone(&epoch_signing_key);
         let seqlock_page = Arc::new(SeqlockControlPage::new());
+        let startup_seqlock_page = Arc::clone(&seqlock_page);
         let store_dir = state_dir.clone();
         let (jobs, inbox) = mpsc::channel::<StoreJob>();
         let (ready, opened) = mpsc::sync_channel::<Result<(), FleetTransportError>>(1);
         std::thread::Builder::new()
             .name("fleet-control-plane-store".to_string())
             .spawn(move || {
+                let seqlock_path = store_dir.join("seqlock.page");
                 let mut transport =
                     match DurableFleetTransport::new(store_dir).and_then(|mut transport| {
                         transport.initialize()?;
-                        transport.current_fleet_epoch(&store_epoch_key)?;
+                        let recovered_epoch = transport.current_fleet_epoch(&store_epoch_key)?;
+                        if recovered_epoch > 0 {
+                            let state = transport.read_shared_state()?;
+                            let checkpoint =
+                                super::fleet_transport::fleet_action_log_checkpoint(&state.actions)?;
+                            let active_hold_count =
+                                super::fleet_transport::fleet_native_session_holds(
+                                    &state.actions,
+                                    "all",
+                                )?
+                                .len() as u64;
+                            let max_action_qv = state
+                                .actions
+                                .iter()
+                                .filter_map(|record| match &record.action {
+                                    FleetAction::Quarantine {
+                                        quarantine_version, ..
+                                    } => Some(*quarantine_version),
+                                    _ => None,
+                                })
+                                .max()
+                                .unwrap_or(0);
+                            let max_node_qv = state
+                                .nodes
+                                .iter()
+                                .map(|node| node.quarantine_version)
+                                .max()
+                                .unwrap_or(0);
+                            let max_qv = max_action_qv.max(max_node_qv);
+                            let mut digest_prefix = [0_u8; 32];
+                            if let Ok(decoded) = hex::decode(&checkpoint.actions_sha256)
+                                && decoded.len() == 32
+                            {
+                                digest_prefix.copy_from_slice(&decoded);
+                            }
+                            startup_seqlock_page.publish(
+                                recovered_epoch,
+                                max_qv,
+                                active_hold_count,
+                                checkpoint.action_count,
+                                digest_prefix,
+                            );
+                            startup_seqlock_page.write_shared_page(&seqlock_path)?;
+                        }
                         Ok(transport)
                     }) {
                         Ok(transport) => {
@@ -527,6 +572,12 @@ impl FleetControlPlaneService {
         self.node_credentials
             .as_ref()
             .map_or(0, |credentials| credentials.nodes.len())
+    }
+
+    /// Lock-free seqlock control page reflecting the latest coordinator-authenticated epoch.
+    #[must_use]
+    pub fn seqlock_page(&self) -> &SeqlockControlPage {
+        &self.seqlock_page
     }
 
     fn authenticate(&self, authorization: Option<&str>) -> Option<FleetPrincipal> {
