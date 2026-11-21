@@ -6,6 +6,8 @@ on:
       - ".github/workflows/lockstep-runner-release-gate.yml"
       - "scripts/check_lockstep_runner.py"
       - "tests/test_check_lockstep_runner.py"
+      - "scripts/check_lockstep_validation.py"
+      - "tests/test_check_lockstep_validation.py"
       - "docs/L1_LOCKSTEP_RUNNER.md"
       - "schemas/lockstep_runner_config.schema.json"
       - "schemas/compatibility_fixture.schema.json"
@@ -21,6 +23,8 @@ on:
       - ".github/workflows/lockstep-runner-release-gate.yml"
       - "scripts/check_lockstep_runner.py"
       - "tests/test_check_lockstep_runner.py"
+      - "scripts/check_lockstep_validation.py"
+      - "tests/test_check_lockstep_validation.py"
       - "docs/L1_LOCKSTEP_RUNNER.md"
       - "schemas/lockstep_runner_config.schema.json"
       - "schemas/compatibility_fixture.schema.json"
@@ -44,6 +48,12 @@ jobs:
       - name: Run lockstep runner verifier tests
         run: |
           python3 -m pytest tests/test_check_lockstep_runner.py
+
+      - name: Run executable continuous lockstep validation gate and tests
+        run: |
+          python3 scripts/check_lockstep_validation.py --self-test
+          python3 -m pytest tests/test_check_lockstep_validation.py
+          python3 scripts/check_lockstep_validation.py --json > /tmp/lockstep_validation_gate.json
 
       - name: Upload lockstep runner gate evidence
         if: always()

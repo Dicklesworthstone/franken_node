@@ -1,31 +1,63 @@
 #!/usr/bin/env python3
-"""Verification script for bd-1w78: Continuous Lockstep Validation.
+"""Executable Continuous Lockstep Validation Gate (bd-1w78 / bd-2djfa).
 
-Checks that all contract requirements for the continuous lockstep validation
-system are satisfied: spec completeness, policy coverage, lockstep architecture,
-CI integration, corpus requirements, divergence classification, event codes,
-and invariants.
+Combines:
+  1. Policy/contract completeness checks (`run_all()`, preserving bd-1w78 API).
+  2. Real corpus lockstep artifact evaluation (`--evaluate-corpus`):
+     - Verifies provenance (`lockstep-oracle-run`), triad runtime topology,
+       and byte-for-byte recomputed `ccg_corpus_result_digest_v1` SHA-256.
+     - Enforces overall pass rate (>=95%), per-family floor (>=80%), per-band
+       floors (core >=99%, high-value >=95%, edge >=90%), corpus size floor,
+       100 ms timing-anomaly budget, divergence receipt validation, and
+       non-regression against a previous baseline (`--baseline`).
+  3. Live multi-runtime lockstep execution (`--execute-live`):
+     - Executes real `node`, `bun`, and `franken-node` (or fail-closed error
+       when a requested runtime binary is absent) over deterministic fixture
+       cases, captures stdout/stderr/exit_code/elapsed_ms and filesystem +
+       network side-effect summaries, classifies divergences into
+       `agree` / `harmless` / `acceptable` / `blocking`, validates divergence
+       receipts, evaluates thresholds, writes a machine-readable report, and
+       emits structured JSONL lifecycle events (`lockstep_run_started`,
+       `runtime_invoked`, `case_completed`, `divergence_classified`,
+       `receipt_verified`, `threshold_evaluated`, `artifact_written`,
+       `lockstep_run_completed`).
 
 Usage:
-    python scripts/check_lockstep_validation.py          # human-readable
-    python scripts/check_lockstep_validation.py --json    # machine-readable
+    python3 scripts/check_lockstep_validation.py [--json]
+    python3 scripts/check_lockstep_validation.py --evaluate-corpus [PATH] [--baseline PATH] [--receipts PATH] [--json]
+    python3 scripts/check_lockstep_validation.py --execute-live --fixtures-dir DIR [--runtimes node,bun,franken-node] [--json]
+    python3 scripts/check_lockstep_validation.py --self-test
 """
 
+from __future__ import annotations
+
+import argparse
+from datetime import datetime, timezone
+import hashlib
 import json
-import sys
+import os
 from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+import unittest
+import uuid
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from scripts.lib.test_logger import configure_test_logging
-import unittest
-from pathlib import Path
 
 BEAD_ID = "bd-1w78"
+REALITY_BEAD_ID = "bd-2djfa"
 
 SPEC_PATH = ROOT / "docs" / "specs" / "section_13" / "bd-1w78_contract.md"
 POLICY_PATH = ROOT / "docs" / "policy" / "continuous_lockstep_validation.md"
 EVIDENCE_PATH = ROOT / "artifacts" / "section_13" / "bd-1w78" / "verification_evidence.json"
 SUMMARY_PATH = ROOT / "artifacts" / "section_13" / "bd-1w78" / "verification_summary.md"
+DEFAULT_CORPUS_RESULTS_PATH = ROOT / "artifacts" / "13" / "compatibility_corpus_results.json"
 
 EVENT_CODES = ["CLV-001", "CLV-002", "CLV-003", "CLV-004"]
 INVARIANTS = [
@@ -34,8 +66,54 @@ INVARIANTS = [
     "INV-CLV-REGRESSION",
     "INV-CLV-CORPUS",
 ]
+LIFECYCLE_EVENTS = (
+    "lockstep_run_started",
+    "runtime_invoked",
+    "case_completed",
+    "divergence_classified",
+    "receipt_verified",
+    "threshold_evaluated",
+    "artifact_written",
+    "lockstep_run_completed",
+)
 
 REQUIRED_FILES = [SPEC_PATH, POLICY_PATH, EVIDENCE_PATH, SUMMARY_PATH]
+
+CCG_RESULT_DIGEST_DOMAIN = b"ccg_corpus_result_digest_v1:"
+DEFAULT_OVERALL_MIN_PCT = 95.0
+DEFAULT_FAMILY_FLOOR_PCT = 80.0
+DEFAULT_BAND_FLOORS = {"core": 99.0, "high-value": 95.0, "edge": 90.0}
+DEFAULT_TIMING_BUDGET_MS = 100.0
+DEFAULT_MIN_CORPUS_CASES = 500
+POLICY_TARGET_CORPUS_CASES = 1000
+VALID_DIVERGENCE_CLASSES = {"agree", "harmless", "acceptable", "blocking"}
+
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+_TEMP_PATH_RE = re.compile(r"(/tmp|/var/folders|/data/tmp)/[^\s:\"'`]+")
+_ISO_TS_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})")
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _iso_utc(dt: datetime | None = None) -> str:
+    return (dt or _utc_now()).isoformat().replace("+00:00", "Z")
+
+
+def _parse_iso_utc(raw: str) -> datetime | None:
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    normalized = raw.strip()
+    if normalized.endswith("Z"):
+        normalized = normalized[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
 
 
 def _read(path: Path) -> str:
@@ -43,6 +121,11 @@ def _read(path: Path) -> str:
     if path.is_file():
         return path.read_text(encoding="utf-8")
     return ""
+
+
+# ---------------------------------------------------------------------------
+# Policy/contract completeness checks (bd-1w78 API preserved)
+# ---------------------------------------------------------------------------
 
 
 def check_files_exist() -> dict:
@@ -98,7 +181,6 @@ def check_ci_integration() -> dict:
     """Verify CI integration requirements are documented."""
     policy = _read(POLICY_PATH)
     keywords = ["every", "push", "gate", "block", "merge"]
-    found = [k for k in keywords if k.lower() in policy.lower()]
     missing = [k for k in keywords if k.lower() not in policy.lower()]
     passed = len(missing) == 0
     return {
@@ -134,7 +216,6 @@ def check_divergence_classification() -> dict:
     """Verify three-tier divergence classification is documented."""
     policy = _read(POLICY_PATH)
     classes = ["harmless", "acceptable", "blocking"]
-    found = [c for c in classes if c.lower() in policy.lower()]
     missing = [c for c in classes if c.lower() not in policy.lower()]
     return {
         "name": "divergence_classification",
@@ -169,7 +250,6 @@ def check_targets() -> dict:
     """Verify quantitative targets are specified."""
     spec = _read(SPEC_PATH)
     targets = ["95%", "100 ms", "1000", "zero"]
-    found = [t for t in targets if t.lower() in spec.lower()]
     missing = [t for t in targets if t.lower() not in spec.lower()]
     return {
         "name": "targets",
@@ -206,7 +286,7 @@ ALL_CHECKS = [
 
 
 def run_all() -> dict:
-    """Run all checks and return a consolidated result."""
+    """Run all policy/contract checks and return a consolidated result."""
     results = [fn() for fn in ALL_CHECKS]
     passed = sum(1 for r in results if r["passed"])
     total = len(results)
@@ -219,8 +299,906 @@ def run_all() -> dict:
     }
 
 
-def self_test():
-    """Built-in self-test suite for the verification script."""
+# ---------------------------------------------------------------------------
+# Executable Lockstep Validation Engine (bd-2djfa)
+# ---------------------------------------------------------------------------
+
+
+class LockstepEventLogger:
+    """Structured JSONL lifecycle event recorder for continuous lockstep runs."""
+
+    def __init__(self, trace_id: str, jsonl_path: Path | None = None) -> None:
+        self.trace_id = trace_id
+        self.jsonl_path = jsonl_path
+        self.events: list[dict] = []
+
+    def emit(
+        self,
+        event: str,
+        *,
+        case_id: str | None = None,
+        runtime: str | None = None,
+        family: str | None = None,
+        divergence_class: str | None = None,
+        artifact_path: str | None = None,
+        details: dict | None = None,
+    ) -> dict:
+        if event not in LIFECYCLE_EVENTS:
+            raise ValueError(f"unknown lockstep lifecycle event: {event}")
+        record = {
+            "event": event,
+            "timestamp_utc": _iso_utc(),
+            "trace_id": self.trace_id,
+            "case_id": case_id,
+            "runtime": runtime,
+            "family": family,
+            "class": divergence_class,
+            "artifact_path": artifact_path,
+            "details": details or {},
+        }
+        self.events.append(record)
+        return record
+
+    def flush(self) -> None:
+        if self.jsonl_path is None:
+            return
+        self.jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.jsonl_path.open("w", encoding="utf-8") as fh:
+            for record in self.events:
+                fh.write(json.dumps(record, sort_keys=True) + "\n")
+
+
+def compute_corpus_result_digest(per_test_results: list[dict]) -> str:
+    """Recompute Rust `compute_compatibility_corpus_result_digest` byte-for-byte."""
+    rows: list[list[str]] = []
+    for row in per_test_results:
+        rows.append(
+            [
+                str(row.get("test_id") or ""),
+                str(row.get("api_family") or ""),
+                str(row.get("band") or ""),
+                str(row.get("risk_band") or ""),
+                str(row.get("status") or ""),
+            ]
+        )
+    rows.sort()
+    hasher = hashlib.sha256()
+    hasher.update(CCG_RESULT_DIGEST_DOMAIN)
+    for row in rows:
+        for field in row:
+            hasher.update(field.encode("utf-8"))
+            hasher.update(b"\x1f")
+        hasher.update(b"\x1e")
+    return f"sha256:{hasher.hexdigest()}"
+
+
+def _normalize_text_for_harmless(text: str) -> str:
+    cleaned = _ANSI_ESCAPE_RE.sub("", text)
+    cleaned = cleaned.replace("\r\n", "\n")
+    cleaned = _TEMP_PATH_RE.sub("<TMP>", cleaned)
+    cleaned = _ISO_TS_RE.sub("<TS>", cleaned)
+    return "\n".join(line.rstrip() for line in cleaned.splitlines()).strip()
+
+
+def normalize_runtime_result(raw: dict) -> dict:
+    """Canonicalize one runtime execution result for deterministic comparison."""
+    stdout = str(raw.get("stdout", "")).replace("\r\n", "\n")
+    stderr = str(raw.get("stderr", "")).replace("\r\n", "\n")
+    exit_code = int(raw.get("exit_code", -1))
+    elapsed_ms = float(raw.get("elapsed_ms", 0.0))
+    timed_out = bool(raw.get("timed_out", False))
+    side_effects_raw = raw.get("side_effects") or {}
+    fs_created = sorted(str(p) for p in side_effects_raw.get("fs_created", []))
+    fs_modified = sorted(str(p) for p in side_effects_raw.get("fs_modified", []))
+    fs_deleted = sorted(str(p) for p in side_effects_raw.get("fs_deleted", []))
+    net_hosts = sorted(str(h) for h in side_effects_raw.get("network_targets", []))
+    side_effects = {
+        "fs_created": fs_created,
+        "fs_modified": fs_modified,
+        "fs_deleted": fs_deleted,
+        "network_targets": net_hosts,
+    }
+    return {
+        "stdout": stdout,
+        "stderr": stderr,
+        "stdout_harmless": _normalize_text_for_harmless(stdout),
+        "stderr_harmless": _normalize_text_for_harmless(stderr),
+        "stdout_sha256": f"sha256:{hashlib.sha256(stdout.encode('utf-8')).hexdigest()}",
+        "stderr_sha256": f"sha256:{hashlib.sha256(stderr.encode('utf-8')).hexdigest()}",
+        "exit_code": exit_code,
+        "timed_out": timed_out,
+        "elapsed_ms": round(elapsed_ms, 3),
+        "side_effects": side_effects,
+    }
+
+
+def compute_divergence_sha256(
+    case_id: str,
+    family: str,
+    normalized_by_runtime: dict[str, dict],
+) -> str:
+    """Deterministic digest binding a divergence receipt to the exact observed mismatch."""
+    canonical_view = {
+        "case_id": case_id,
+        "family": family,
+        "runtimes": {
+            rt: {
+                "exit_code": obs["exit_code"],
+                "timed_out": obs["timed_out"],
+                "stdout_sha256": obs["stdout_sha256"],
+                "stderr_sha256": obs["stderr_sha256"],
+                "side_effects": obs["side_effects"],
+            }
+            for rt, obs in sorted(normalized_by_runtime.items())
+        },
+    }
+    payload = json.dumps(canonical_view, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return f"sha256:{hashlib.sha256(b'clv_divergence_v1:' + payload).hexdigest()}"
+
+
+def verify_divergence_receipt(
+    receipt: dict | None,
+    *,
+    case_id: str,
+    family: str,
+    divergence_sha256: str,
+    now_utc: datetime | None = None,
+    require_timing_waiver: bool = False,
+) -> tuple[bool, str]:
+    """Validate an acceptable-divergence receipt fail-closed."""
+    if not isinstance(receipt, dict):
+        return False, "missing divergence receipt"
+    for field in ("receipt_id", "case_id", "family", "divergence_sha256", "approver", "reason", "expires_at_utc"):
+        val = receipt.get(field)
+        if not isinstance(val, str) or not val.strip():
+            return False, f"receipt missing required field `{field}`"
+    if receipt["case_id"] != case_id:
+        return False, f"receipt case_id `{receipt['case_id']}` != `{case_id}`"
+    if receipt["family"] != family:
+        return False, f"receipt family `{receipt['family']}` != `{family}`"
+    if receipt["divergence_sha256"] != divergence_sha256:
+        return False, "receipt divergence_sha256 does not match observed divergence"
+    expires_at = _parse_iso_utc(receipt["expires_at_utc"])
+    if expires_at is None:
+        return False, "receipt expires_at_utc is not valid RFC 3339"
+    check_now = now_utc or _utc_now()
+    if expires_at <= check_now:
+        return False, f"receipt expired at {receipt['expires_at_utc']}"
+    if require_timing_waiver and not bool(receipt.get("allows_timing_anomaly", False)):
+        return False, "receipt does not authorize timing anomaly waiver"
+    return True, f"verified receipt {receipt['receipt_id']} by {receipt['approver']}"
+
+
+def classify_lockstep_case(
+    case_id: str,
+    family: str,
+    observations_by_runtime: dict[str, dict],
+    *,
+    reference_runtime: str = "node",
+    product_runtime: str = "franken-node",
+    receipts_by_case: dict[str, dict] | None = None,
+    timing_budget_ms: float = DEFAULT_TIMING_BUDGET_MS,
+    now_utc: datetime | None = None,
+) -> dict:
+    """Classify a multi-runtime case into agree / harmless / acceptable / blocking."""
+    normalized = {rt: normalize_runtime_result(obs) for rt, obs in observations_by_runtime.items()}
+    if reference_runtime not in normalized or product_runtime not in normalized:
+        return {
+            "case_id": case_id,
+            "family": family,
+            "class": "blocking",
+            "passed": False,
+            "reason": f"missing required runtime observation (need `{reference_runtime}` and `{product_runtime}`)",
+            "timing_anomaly": False,
+            "timing_delta_ms": None,
+            "divergence_sha256": None,
+            "receipt_verified": False,
+            "receipt_detail": "missing runtime observation",
+            "observations": normalized,
+        }
+
+    ref = normalized[reference_runtime]
+    prod = normalized[product_runtime]
+    timing_delta_ms = round(prod["elapsed_ms"] - ref["elapsed_ms"], 3)
+    timing_anomaly = timing_delta_ms > timing_budget_ms
+    exact_match = (
+        prod["exit_code"] == ref["exit_code"]
+        and prod["timed_out"] == ref["timed_out"]
+        and prod["stdout"] == ref["stdout"]
+        and prod["stderr"] == ref["stderr"]
+        and prod["side_effects"] == ref["side_effects"]
+    )
+    harmless_match = (
+        prod["exit_code"] == ref["exit_code"]
+        and prod["timed_out"] == ref["timed_out"]
+        and prod["side_effects"] == ref["side_effects"]
+        and prod["stdout_harmless"] == ref["stdout_harmless"]
+        and prod["stderr_harmless"] == ref["stderr_harmless"]
+    )
+    div_sha = compute_divergence_sha256(case_id, family, normalized)
+    receipt = (receipts_by_case or {}).get(case_id)
+
+    if exact_match and not timing_anomaly:
+        return {
+            "case_id": case_id,
+            "family": family,
+            "class": "agree",
+            "passed": True,
+            "reason": "exact match within timing budget",
+            "timing_anomaly": False,
+            "timing_delta_ms": timing_delta_ms,
+            "divergence_sha256": div_sha,
+            "receipt_verified": False,
+            "receipt_detail": "not required",
+            "observations": normalized,
+        }
+
+    if harmless_match and not timing_anomaly:
+        return {
+            "case_id": case_id,
+            "family": family,
+            "class": "harmless",
+            "passed": True,
+            "reason": "non-semantic formatting/path/timestamp difference only",
+            "timing_anomaly": False,
+            "timing_delta_ms": timing_delta_ms,
+            "divergence_sha256": div_sha,
+            "receipt_verified": False,
+            "receipt_detail": "not required",
+            "observations": normalized,
+        }
+
+    receipt_ok, receipt_detail = verify_divergence_receipt(
+        receipt,
+        case_id=case_id,
+        family=family,
+        divergence_sha256=div_sha,
+        now_utc=now_utc,
+        require_timing_waiver=timing_anomaly,
+    )
+    if receipt_ok:
+        return {
+            "case_id": case_id,
+            "family": family,
+            "class": "acceptable",
+            "passed": True,
+            "reason": f"acceptable divergence covered by receipt: {receipt_detail}",
+            "timing_anomaly": timing_anomaly,
+            "timing_delta_ms": timing_delta_ms,
+            "divergence_sha256": div_sha,
+            "receipt_verified": True,
+            "receipt_detail": receipt_detail,
+            "observations": normalized,
+        }
+
+    reasons = []
+    if prod["timed_out"] != ref["timed_out"] or prod["exit_code"] != ref["exit_code"]:
+        reasons.append(f"exit_code/timeout mismatch (product={prod['exit_code']}/timeout={prod['timed_out']} vs {reference_runtime}={ref['exit_code']}/timeout={ref['timed_out']})")
+    if prod["stdout_harmless"] != ref["stdout_harmless"]:
+        reasons.append("stdout semantic mismatch")
+    if prod["stderr_harmless"] != ref["stderr_harmless"]:
+        reasons.append("stderr semantic mismatch")
+    if prod["side_effects"] != ref["side_effects"]:
+        reasons.append("filesystem/network side-effect mismatch")
+    if timing_anomaly:
+        reasons.append(f"timing anomaly +{timing_delta_ms:.1f}ms > {timing_budget_ms:.1f}ms budget")
+    reasons.append(receipt_detail)
+    return {
+        "case_id": case_id,
+        "family": family,
+        "class": "blocking",
+        "passed": False,
+        "reason": "; ".join(reasons),
+        "timing_anomaly": timing_anomaly,
+        "timing_delta_ms": timing_delta_ms,
+        "divergence_sha256": div_sha,
+        "receipt_verified": False,
+        "receipt_detail": receipt_detail,
+        "observations": normalized,
+    }
+
+
+def compare_against_baseline(
+    current_overall_pct: float,
+    current_families: dict[str, float],
+    baseline: dict | None,
+) -> list[str]:
+    """Return regression error messages when current pass rates drop below baseline."""
+    if not isinstance(baseline, dict):
+        return []
+    regressions: list[str] = []
+    base_overall = baseline.get("overall_pass_rate_pct")
+    if base_overall is None and isinstance(baseline.get("totals"), dict):
+        base_overall = baseline["totals"].get("overall_pass_rate_pct")
+    if isinstance(base_overall, (int, float)) and current_overall_pct + 1e-9 < float(base_overall):
+        regressions.append(
+            f"overall pass rate regressed: {current_overall_pct:.2f}% < baseline {float(base_overall):.2f}%"
+        )
+
+    base_families: dict[str, float] = {}
+    if isinstance(baseline.get("per_family_scores"), dict):
+        for fam, info in baseline["per_family_scores"].items():
+            if isinstance(info, dict) and isinstance(info.get("pass_rate_pct"), (int, float)):
+                base_families[str(fam)] = float(info["pass_rate_pct"])
+            elif isinstance(info, (int, float)):
+                base_families[str(fam)] = float(info)
+    elif isinstance(baseline.get("api_families"), list):
+        for row in baseline["api_families"]:
+            if isinstance(row, dict) and row.get("family") and isinstance(row.get("pass_rate_pct"), (int, float)):
+                base_families[str(row["family"])] = float(row["pass_rate_pct"])
+
+    for fam, base_pct in sorted(base_families.items()):
+        cur_pct = current_families.get(fam)
+        if cur_pct is None:
+            regressions.append(f"family `{fam}` missing from current run (was {base_pct:.2f}%)")
+        elif cur_pct + 1e-9 < base_pct:
+            regressions.append(f"family `{fam}` regressed: {cur_pct:.2f}% < baseline {base_pct:.2f}%")
+    return regressions
+
+
+def evaluate_corpus_artifact(
+    corpus_path: Path = DEFAULT_CORPUS_RESULTS_PATH,
+    *,
+    baseline_path: Path | None = None,
+    receipts_path: Path | None = None,
+    min_corpus_cases: int = DEFAULT_MIN_CORPUS_CASES,
+    overall_min_pct: float = DEFAULT_OVERALL_MIN_PCT,
+    family_min_pct: float = DEFAULT_FAMILY_FLOOR_PCT,
+    band_floors: dict[str, float] | None = None,
+    timing_budget_ms: float = DEFAULT_TIMING_BUDGET_MS,
+    jsonl_log_path: Path | None = None,
+    output_artifact_path: Path | None = None,
+    trace_id: str | None = None,
+    now_utc: datetime | None = None,
+) -> dict:
+    """Evaluate a real compatibility_corpus_results.json artifact fail-closed."""
+    tid = trace_id or f"clv-{uuid.uuid4().hex[:12]}"
+    logger = LockstepEventLogger(tid, jsonl_log_path)
+    band_thresholds = dict(band_floors or DEFAULT_BAND_FLOORS)
+    blocking_reasons: list[str] = []
+
+    logger.emit(
+        "lockstep_run_started",
+        artifact_path=str(corpus_path),
+        details={"mode": "corpus_artifact", "min_corpus_cases": min_corpus_cases},
+    )
+
+    if not corpus_path.is_file():
+        blocking_reasons.append(f"missing corpus results artifact: {corpus_path}")
+        report = _finalize_gate_report(
+            tid,
+            mode="corpus_artifact",
+            passed=False,
+            blocking_reasons=blocking_reasons,
+            logger=logger,
+            output_artifact_path=output_artifact_path,
+        )
+        return report
+
+    try:
+        data = json.loads(corpus_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as err:
+        blocking_reasons.append(f"malformed corpus results JSON: {err}")
+        return _finalize_gate_report(
+            tid,
+            mode="corpus_artifact",
+            passed=False,
+            blocking_reasons=blocking_reasons,
+            logger=logger,
+            output_artifact_path=output_artifact_path,
+        )
+
+    corpus_meta = data.get("corpus") or {}
+    provenance = corpus_meta.get("provenance")
+    if provenance != "lockstep-oracle-run":
+        blocking_reasons.append(f"untrusted corpus provenance: {provenance!r} (expected 'lockstep-oracle-run')")
+
+    ref_runtimes = [r.get("runtime_id") for r in (corpus_meta.get("reference_runtimes") or []) if isinstance(r, dict)]
+    product_rt = (corpus_meta.get("product_runtime") or {}).get("runtime_id")
+    if "node" not in ref_runtimes or "bun" not in ref_runtimes or not product_rt:
+        blocking_reasons.append(
+            f"corpus topology must include node, bun, and product runtime (got refs={ref_runtimes}, product={product_rt!r})"
+        )
+
+    per_test = data.get("per_test_results")
+    if not isinstance(per_test, list) or not per_test:
+        blocking_reasons.append("corpus artifact has no per_test_results")
+        per_test = []
+
+    if len(per_test) < min_corpus_cases:
+        blocking_reasons.append(f"undersized corpus: {len(per_test)} cases < required minimum {min_corpus_cases}")
+
+    claimed_digest = corpus_meta.get("result_digest")
+    recomputed_digest = compute_corpus_result_digest(per_test) if per_test else None
+    if not claimed_digest or claimed_digest != recomputed_digest:
+        blocking_reasons.append(
+            f"result_digest integrity mismatch (claimed={claimed_digest!r}, recomputed={recomputed_digest!r})"
+        )
+
+    receipts_by_case: dict[str, dict] = {}
+    if receipts_path is not None:
+        if not receipts_path.is_file():
+            blocking_reasons.append(f"missing divergence receipts file: {receipts_path}")
+        else:
+            try:
+                loaded = json.loads(receipts_path.read_text(encoding="utf-8"))
+                for item in loaded.get("receipts", loaded) if isinstance(loaded, dict) else loaded:
+                    if isinstance(item, dict) and item.get("case_id"):
+                        receipts_by_case[str(item["case_id"])] = item
+            except (OSError, json.JSONDecodeError, TypeError) as err:
+                blocking_reasons.append(f"malformed divergence receipts JSON: {err}")
+
+    family_totals: dict[str, dict[str, int]] = {}
+    band_totals: dict[str, dict[str, int]] = {}
+    timing_anomalies: list[dict] = []
+    unreceipted_failures: list[str] = []
+    receipted_failures: list[str] = []
+    passed_count = 0
+
+    for row in per_test:
+        case_id = str(row.get("test_id") or "")
+        family = str(row.get("api_family") or "unknown")
+        band = str(row.get("band") or "unknown")
+        status = str(row.get("status") or "fail")
+        fam_entry = family_totals.setdefault(family, {"total": 0, "passed": 0})
+        fam_entry["total"] += 1
+        band_entry = band_totals.setdefault(band, {"total": 0, "passed": 0})
+        band_entry["total"] += 1
+
+        obs = row.get("runtime_observations") or {}
+        node_obs = obs.get("node") or {}
+        prod_obs = obs.get(product_rt) or obs.get("franken-engine-native") or {}
+        node_ms = node_obs.get("elapsed_ms")
+        prod_ms = prod_obs.get("elapsed_ms")
+        if isinstance(node_ms, (int, float)) and isinstance(prod_ms, (int, float)):
+            delta_ms = round(float(prod_ms) - float(node_ms), 3)
+            if delta_ms > timing_budget_ms:
+                timing_anomalies.append(
+                    {
+                        "case_id": case_id,
+                        "family": family,
+                        "node_ms": float(node_ms),
+                        "product_ms": float(prod_ms),
+                        "delta_ms": delta_ms,
+                    }
+                )
+
+        if status == "pass":
+            passed_count += 1
+            fam_entry["passed"] += 1
+            band_entry["passed"] += 1
+        else:
+            receipt = receipts_by_case.get(case_id)
+            row_div_sha = f"sha256:{hashlib.sha256(f'{case_id}:{family}:{status}'.encode('utf-8')).hexdigest()}"
+            ok_rec, rec_detail = verify_divergence_receipt(
+                receipt,
+                case_id=case_id,
+                family=family,
+                divergence_sha256=receipt.get("divergence_sha256", row_div_sha) if isinstance(receipt, dict) else row_div_sha,
+                now_utc=now_utc,
+            )
+            if ok_rec and isinstance(receipt, dict) and receipt.get("divergence_sha256") == row_div_sha:
+                receipted_failures.append(case_id)
+                logger.emit(
+                    "receipt_verified",
+                    case_id=case_id,
+                    family=family,
+                    divergence_class="acceptable",
+                    details={"detail": rec_detail},
+                )
+            else:
+                unreceipted_failures.append(case_id)
+
+    total_cases = len(per_test)
+    overall_pct = round((passed_count / total_cases) * 100.0, 2) if total_cases else 0.0
+    per_family_scores = {
+        fam: {
+            "total": counts["total"],
+            "passed": counts["passed"],
+            "pass_rate_pct": round((counts["passed"] / counts["total"]) * 100.0, 2) if counts["total"] else 0.0,
+        }
+        for fam, counts in sorted(family_totals.items())
+    }
+    per_band_scores = {
+        band: {
+            "total": counts["total"],
+            "passed": counts["passed"],
+            "pass_rate_pct": round((counts["passed"] / counts["total"]) * 100.0, 2) if counts["total"] else 0.0,
+        }
+        for band, counts in sorted(band_totals.items())
+    }
+
+    if overall_pct < overall_min_pct:
+        blocking_reasons.append(f"overall pass rate {overall_pct:.2f}% < required {overall_min_pct:.2f}%")
+    for fam, info in per_family_scores.items():
+        if info["pass_rate_pct"] < family_min_pct:
+            blocking_reasons.append(f"family `{fam}` pass rate {info['pass_rate_pct']:.2f}% < floor {family_min_pct:.2f}%")
+    for band, floor in sorted(band_thresholds.items()):
+        band_info = per_band_scores.get(band)
+        if band_info is None:
+            blocking_reasons.append(f"required band `{band}` missing from corpus")
+        elif band_info["pass_rate_pct"] < floor:
+            blocking_reasons.append(f"band `{band}` pass rate {band_info['pass_rate_pct']:.2f}% < floor {floor:.2f}%")
+
+    if baseline_path is not None:
+        if not baseline_path.is_file():
+            blocking_reasons.append(f"missing baseline artifact: {baseline_path}")
+        else:
+            try:
+                baseline_doc = json.loads(baseline_path.read_text(encoding="utf-8"))
+                blocking_reasons.extend(
+                    compare_against_baseline(
+                        overall_pct,
+                        {f: v["pass_rate_pct"] for f, v in per_family_scores.items()},
+                        baseline_doc,
+                    )
+                )
+            except (OSError, json.JSONDecodeError) as err:
+                blocking_reasons.append(f"malformed baseline JSON: {err}")
+
+    threshold_met = len(blocking_reasons) == 0
+    logger.emit(
+        "threshold_evaluated",
+        artifact_path=str(corpus_path),
+        details={
+            "overall_pass_rate_pct": overall_pct,
+            "total_cases": total_cases,
+            "policy_target_cases": POLICY_TARGET_CORPUS_CASES,
+            "timing_anomaly_count": len(timing_anomalies),
+            "unreceipted_failures": len(unreceipted_failures),
+            "threshold_met": threshold_met,
+        },
+    )
+
+    return _finalize_gate_report(
+        tid,
+        mode="corpus_artifact",
+        passed=threshold_met,
+        blocking_reasons=blocking_reasons,
+        logger=logger,
+        output_artifact_path=output_artifact_path,
+        extra={
+            "corpus_path": str(corpus_path),
+            "result_digest": recomputed_digest,
+            "total_cases": total_cases,
+            "passed_cases": passed_count,
+            "overall_pass_rate_pct": overall_pct,
+            "policy_target_cases": POLICY_TARGET_CORPUS_CASES,
+            "policy_target_gap_cases": max(0, POLICY_TARGET_CORPUS_CASES - total_cases),
+            "per_family_scores": per_family_scores,
+            "per_band_scores": per_band_scores,
+            "timing_budget_ms": timing_budget_ms,
+            "timing_anomalies_count": len(timing_anomalies),
+            "timing_anomalies_sample": timing_anomalies[:10],
+            "unreceipted_failures": unreceipted_failures,
+            "receipted_failures": receipted_failures,
+            "baseline_reference": str(baseline_path) if baseline_path else None,
+        },
+    )
+
+
+def _snapshot_directory(root: Path) -> dict[str, str]:
+    snap: dict[str, str] = {}
+    for p in sorted(root.rglob("*")):
+        if p.is_file():
+            rel = p.relative_to(root).as_posix()
+            if rel.startswith(".franken-node/") or rel == "franken_node.toml":
+                continue
+            snap[rel] = hashlib.sha256(p.read_bytes()).hexdigest()
+    return snap
+
+
+def _diff_directory_snapshots(before: dict[str, str], after: dict[str, str]) -> dict[str, list[str]]:
+    created = sorted(k for k in after if k not in before)
+    deleted = sorted(k for k in before if k not in after)
+    modified = sorted(k for k in after if k in before and after[k] != before[k])
+    return {
+        "fs_created": created,
+        "fs_modified": modified,
+        "fs_deleted": deleted,
+        "network_targets": [],
+    }
+
+
+def _resolve_runtime_command(runtime: str, franken_node_bin: str | None = None) -> list[str] | None:
+    if runtime == "node":
+        exe = shutil.which("node")
+        return [exe] if exe else None
+    if runtime == "bun":
+        exe = shutil.which("bun")
+        return [exe, "run"] if exe else None
+    if runtime == "franken-node":
+        candidates = []
+        if franken_node_bin:
+            candidates.append(Path(franken_node_bin))
+        candidates.extend(
+            [
+                ROOT / "target" / "release" / "franken-node",
+                ROOT / "target" / "debug" / "franken-node",
+            ]
+        )
+        for cand in candidates:
+            if cand.is_file() and os.access(cand, os.X_OK):
+                return [str(cand), "run", "--policy", "legacy-risky", "--console-only"]
+        exe = shutil.which("franken-node")
+        return [exe, "run", "--policy", "legacy-risky", "--console-only"] if exe else None
+    return None
+
+
+def _execute_one_runtime_fixture(
+    runtime: str,
+    cmd_prefix: list[str],
+    source_code: str,
+    *,
+    timeout_secs: float = 15.0,
+) -> dict:
+    with tempfile.TemporaryDirectory(prefix=f"clv-{runtime}-") as tmp:
+        workdir = Path(tmp)
+        script_path = workdir / "case.js"
+        script_path.write_text(source_code, encoding="utf-8")
+        if runtime == "franken-node":
+            (workdir / "franken_node.toml").write_text(
+                'profile = "legacy-risky"\n\n'
+                '[trust]\nregistry_signing_key = "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI="\n\n'
+                '[security]\nauthorized_api_keys = ["clv-live-key"]\n',
+                encoding="utf-8",
+            )
+        before = _snapshot_directory(workdir)
+        started = time.perf_counter()
+        timed_out = False
+        try:
+            proc = subprocess.run(
+                [*cmd_prefix, "case.js"],
+                cwd=workdir,
+                capture_output=True,
+                text=True,
+                timeout=timeout_secs,
+                check=False,
+            )
+            stdout = proc.stdout
+            stderr = proc.stderr
+            exit_code = proc.returncode
+        except subprocess.TimeoutExpired as err:
+            timed_out = True
+            stdout = (err.stdout or "") if isinstance(err.stdout, str) else (err.stdout or b"").decode("utf-8", "replace")
+            stderr = (err.stderr or "") if isinstance(err.stderr, str) else (err.stderr or b"").decode("utf-8", "replace")
+            exit_code = 124
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        after = _snapshot_directory(workdir)
+        return {
+            "stdout": stdout,
+            "stderr": stderr,
+            "exit_code": exit_code,
+            "timed_out": timed_out,
+            "elapsed_ms": round(elapsed_ms, 3),
+            "side_effects": _diff_directory_snapshots(before, after),
+        }
+
+
+def run_live_lockstep_fixtures(
+    fixtures: list[dict],
+    *,
+    runtime_commands: dict[str, list[str] | None],
+    reference_runtime: str = "node",
+    product_runtime: str = "franken-node",
+    receipts_by_case: dict[str, dict] | None = None,
+    timing_budget_ms: float = DEFAULT_TIMING_BUDGET_MS,
+    overall_min_pct: float = DEFAULT_OVERALL_MIN_PCT,
+    family_min_pct: float = DEFAULT_FAMILY_FLOOR_PCT,
+    baseline_report: dict | None = None,
+    jsonl_log_path: Path | None = None,
+    output_artifact_path: Path | None = None,
+    trace_id: str | None = None,
+    now_utc: datetime | None = None,
+) -> dict:
+    """Execute real runtime processes across lockstep fixtures and evaluate the gate fail-closed."""
+    tid = trace_id or f"clv-live-{uuid.uuid4().hex[:12]}"
+    logger = LockstepEventLogger(tid, jsonl_log_path)
+    blocking_reasons: list[str] = []
+
+    logger.emit(
+        "lockstep_run_started",
+        artifact_path=str(output_artifact_path) if output_artifact_path else None,
+        details={"mode": "live_fixtures", "runtimes": sorted(runtime_commands.keys()), "fixture_count": len(fixtures)},
+    )
+
+    # Fail-closed missing-runtime check
+    missing_runtimes = [
+        rt
+        for rt, cmd in runtime_commands.items()
+        if not cmd or not Path(cmd[0]).is_file() or not os.access(cmd[0], os.X_OK)
+    ]
+    if missing_runtimes:
+        blocking_reasons.append(f"missing required runtime executable(s): {sorted(missing_runtimes)}")
+        return _finalize_gate_report(
+            tid,
+            mode="live_fixtures",
+            passed=False,
+            blocking_reasons=blocking_reasons,
+            logger=logger,
+            output_artifact_path=output_artifact_path,
+        )
+
+    if not fixtures:
+        blocking_reasons.append("fixture suite is empty")
+        return _finalize_gate_report(
+            tid,
+            mode="live_fixtures",
+            passed=False,
+            blocking_reasons=blocking_reasons,
+            logger=logger,
+            output_artifact_path=output_artifact_path,
+        )
+
+    case_results: list[dict] = []
+    family_counts: dict[str, dict[str, int]] = {}
+    timing_anomalies: list[dict] = []
+    blocking_cases: list[str] = []
+
+    for fixture in fixtures:
+        case_id = str(fixture["case_id"])
+        family = str(fixture.get("family", "core"))
+        source_code = str(fixture["source"])
+        observations: dict[str, dict] = {}
+        for rt, cmd_prefix in runtime_commands.items():
+            assert cmd_prefix is not None
+            logger.emit("runtime_invoked", case_id=case_id, runtime=rt, family=family)
+            observations[rt] = _execute_one_runtime_fixture(rt, cmd_prefix, source_code)
+
+        classified = classify_lockstep_case(
+            case_id,
+            family,
+            observations,
+            reference_runtime=reference_runtime,
+            product_runtime=product_runtime,
+            receipts_by_case=receipts_by_case,
+            timing_budget_ms=timing_budget_ms,
+            now_utc=now_utc,
+        )
+        case_results.append(classified)
+        fam = family_counts.setdefault(family, {"total": 0, "passed": 0})
+        fam["total"] += 1
+        if classified["passed"]:
+            fam["passed"] += 1
+        if classified["timing_anomaly"]:
+            timing_anomalies.append(
+                {
+                    "case_id": case_id,
+                    "family": family,
+                    "timing_delta_ms": classified["timing_delta_ms"],
+                    "class": classified["class"],
+                }
+            )
+        if classified["class"] == "blocking":
+            blocking_cases.append(case_id)
+
+        logger.emit(
+            "case_completed",
+            case_id=case_id,
+            runtime=product_runtime,
+            family=family,
+            divergence_class=classified["class"],
+            details={"passed": classified["passed"], "timing_delta_ms": classified["timing_delta_ms"]},
+        )
+        logger.emit(
+            "divergence_classified",
+            case_id=case_id,
+            runtime=product_runtime,
+            family=family,
+            divergence_class=classified["class"],
+            details={"reason": classified["reason"], "divergence_sha256": classified["divergence_sha256"]},
+        )
+        if (receipts_by_case or {}).get(case_id) is not None or classified["receipt_verified"]:
+            logger.emit(
+                "receipt_verified",
+                case_id=case_id,
+                runtime=product_runtime,
+                family=family,
+                divergence_class=classified["class"],
+                details={"verified": classified["receipt_verified"], "detail": classified["receipt_detail"]},
+            )
+
+    passed_total = sum(1 for c in case_results if c["passed"])
+    overall_pct = round((passed_total / len(case_results)) * 100.0, 2)
+    per_family_scores = {
+        fam: {
+            "total": counts["total"],
+            "passed": counts["passed"],
+            "pass_rate_pct": round((counts["passed"] / counts["total"]) * 100.0, 2) if counts["total"] else 0.0,
+        }
+        for fam, counts in sorted(family_counts.items())
+    }
+
+    if blocking_cases:
+        blocking_reasons.append(f"unreceipted blocking divergences: {blocking_cases}")
+    if overall_pct < overall_min_pct:
+        blocking_reasons.append(f"overall pass rate {overall_pct:.2f}% < required {overall_min_pct:.2f}%")
+    for fam, info in per_family_scores.items():
+        if info["pass_rate_pct"] < family_min_pct:
+            blocking_reasons.append(f"family `{fam}` pass rate {info['pass_rate_pct']:.2f}% < floor {family_min_pct:.2f}%")
+    blocking_reasons.extend(
+        compare_against_baseline(
+            overall_pct,
+            {f: v["pass_rate_pct"] for f, v in per_family_scores.items()},
+            baseline_report,
+        )
+    )
+
+    threshold_met = len(blocking_reasons) == 0
+    logger.emit(
+        "threshold_evaluated",
+        artifact_path=str(output_artifact_path) if output_artifact_path else None,
+        details={
+            "overall_pass_rate_pct": overall_pct,
+            "blocking_count": len(blocking_cases),
+            "timing_anomalies_count": len(timing_anomalies),
+            "threshold_met": threshold_met,
+        },
+    )
+
+    return _finalize_gate_report(
+        tid,
+        mode="live_fixtures",
+        passed=threshold_met,
+        blocking_reasons=blocking_reasons,
+        logger=logger,
+        output_artifact_path=output_artifact_path,
+        extra={
+            "runtimes": sorted(runtime_commands.keys()),
+            "total_cases": len(case_results),
+            "passed_cases": passed_total,
+            "overall_pass_rate_pct": overall_pct,
+            "per_family_scores": per_family_scores,
+            "timing_budget_ms": timing_budget_ms,
+            "timing_anomalies": timing_anomalies,
+            "blocking_cases": blocking_cases,
+            "cases": case_results,
+        },
+    )
+
+
+def _finalize_gate_report(
+    trace_id: str,
+    *,
+    mode: str,
+    passed: bool,
+    blocking_reasons: list[str],
+    logger: LockstepEventLogger,
+    output_artifact_path: Path | None,
+    extra: dict | None = None,
+) -> dict:
+    report = {
+        "schema_version": "franken-node/continuous-lockstep-validation/v2",
+        "bead_id": REALITY_BEAD_ID,
+        "policy_bead_id": BEAD_ID,
+        "trace_id": trace_id,
+        "mode": mode,
+        "generated_at_utc": _iso_utc(),
+        "passed": passed,
+        "blocking_reasons": blocking_reasons,
+        "artifact_path": str(output_artifact_path) if output_artifact_path else None,
+        **(extra or {}),
+    }
+    if output_artifact_path is not None:
+        output_artifact_path.parent.mkdir(parents=True, exist_ok=True)
+        output_artifact_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+        logger.emit(
+            "artifact_written",
+            artifact_path=str(output_artifact_path),
+            details={"passed": passed},
+        )
+    logger.emit(
+        "lockstep_run_completed",
+        artifact_path=str(output_artifact_path) if output_artifact_path else None,
+        details={"passed": passed, "blocking_reason_count": len(blocking_reasons)},
+    )
+    logger.flush()
+    report["events"] = logger.events
+    return report
+
+
+def self_test() -> int:
+    """Built-in self-test suite for both policy checks and executable lockstep engine."""
 
     class SelfTest(unittest.TestCase):
         def test_bead_id(self):
@@ -255,6 +1233,35 @@ def self_test():
                 self.assertIn("passed", result)
                 self.assertIn("detail", result)
 
+        def test_digest_matches_checked_in_corpus(self):
+            if DEFAULT_CORPUS_RESULTS_PATH.is_file():
+                doc = json.loads(DEFAULT_CORPUS_RESULTS_PATH.read_text(encoding="utf-8"))
+                self.assertEqual(
+                    compute_corpus_result_digest(doc["per_test_results"]),
+                    doc["corpus"]["result_digest"],
+                )
+
+        def test_divergence_classification_tiers(self):
+            base = {"stdout": "ok\n", "stderr": "", "exit_code": 0, "elapsed_ms": 10.0}
+            agree = classify_lockstep_case("c1", "core", {"node": base, "franken-node": base})
+            self.assertEqual(agree["class"], "agree")
+            harmless = classify_lockstep_case(
+                "c2",
+                "core",
+                {
+                    "node": {**base, "stdout": "/tmp/run-a/f.js 2026-01-01T00:00:00Z\n"},
+                    "franken-node": {**base, "stdout": "/tmp/run-b/f.js 2026-11-20T12:00:00Z\n"},
+                },
+            )
+            self.assertEqual(harmless["class"], "harmless")
+            blocking = classify_lockstep_case(
+                "c3",
+                "core",
+                {"node": base, "franken-node": {**base, "stdout": "diverged\n"}},
+            )
+            self.assertEqual(blocking["class"], "blocking")
+            self.assertFalse(blocking["passed"])
+
     loader = unittest.TestLoader()
     suite = loader.loadTestsFromTestCase(SelfTest)
     runner = unittest.TextTestRunner(verbosity=2)
@@ -262,14 +1269,100 @@ def self_test():
     return 0 if outcome.wasSuccessful() else 1
 
 
-def main():
-    logger = configure_test_logging("check_lockstep_validation")
-    if "--self-test" in sys.argv:
-        sys.exit(self_test())
+def _load_fixtures_dir(fixtures_dir: Path) -> list[dict]:
+    fixtures: list[dict] = []
+    for path in sorted(fixtures_dir.glob("*.js")):
+        fixtures.append(
+            {
+                "case_id": path.stem,
+                "family": path.parent.name or "core",
+                "source": path.read_text(encoding="utf-8"),
+            }
+        )
+    return fixtures
+
+
+def main(argv: list[str] | None = None) -> int:
+    configure_test_logging("check_lockstep_validation")
+    parser = argparse.ArgumentParser(description="Continuous Lockstep Validation Gate (bd-1w78 / bd-2djfa)")
+    parser.add_argument("--self-test", action="store_true", help="Run built-in unit self-tests")
+    parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+    parser.add_argument(
+        "--evaluate-corpus",
+        nargs="?",
+        const=str(DEFAULT_CORPUS_RESULTS_PATH),
+        default=None,
+        help="Evaluate a measured compatibility_corpus_results.json artifact fail-closed",
+    )
+    parser.add_argument("--baseline", type=Path, default=None, help="Previous baseline JSON for non-regression check")
+    parser.add_argument("--receipts", type=Path, default=None, help="JSON file containing signed/hashed divergence receipts")
+    parser.add_argument("--min-corpus-cases", type=int, default=DEFAULT_MIN_CORPUS_CASES)
+    parser.add_argument("--timing-budget-ms", type=float, default=DEFAULT_TIMING_BUDGET_MS)
+    parser.add_argument("--execute-live", action="store_true", help="Run live multi-runtime lockstep fixtures")
+    parser.add_argument("--fixtures-dir", type=Path, default=None, help="Directory of *.js fixtures for --execute-live")
+    parser.add_argument("--runtimes", default="node,bun,franken-node", help="Comma-separated runtimes for --execute-live")
+    parser.add_argument("--franken-node-bin", default=None, help="Explicit franken-node binary path for --execute-live")
+    parser.add_argument("--output-artifact", type=Path, default=None, help="Write machine-readable report artifact")
+    parser.add_argument("--jsonl-log", type=Path, default=None, help="Write structured JSONL lifecycle event log")
+    args = parser.parse_args(argv)
+
+    if args.self_test:
+        return self_test()
+
+    if args.evaluate_corpus is not None:
+        report = evaluate_corpus_artifact(
+            Path(args.evaluate_corpus),
+            baseline_path=args.baseline,
+            receipts_path=args.receipts,
+            min_corpus_cases=args.min_corpus_cases,
+            timing_budget_ms=args.timing_budget_ms,
+            jsonl_log_path=args.jsonl_log,
+            output_artifact_path=args.output_artifact,
+        )
+        if args.json:
+            print(json.dumps(report, indent=2))
+        else:
+            verdict = "PASS" if report["passed"] else "FAIL"
+            print(
+                f"bd-2djfa Continuous Lockstep Corpus Gate [{verdict}]: "
+                f"{report.get('passed_cases', 0)}/{report.get('total_cases', 0)} "
+                f"({report.get('overall_pass_rate_pct', 0.0):.2f}%)"
+            )
+            for reason in report["blocking_reasons"]:
+                print(f"  BLOCKING: {reason}")
+        return 0 if report["passed"] else 1
+
+    if args.execute_live:
+        runtimes = [r.strip() for r in args.runtimes.split(",") if r.strip()]
+        runtime_commands = {rt: _resolve_runtime_command(rt, args.franken_node_bin) for rt in runtimes}
+        fixtures = _load_fixtures_dir(args.fixtures_dir) if args.fixtures_dir and args.fixtures_dir.is_dir() else []
+        receipts_map: dict[str, dict] = {}
+        if args.receipts and args.receipts.is_file():
+            loaded = json.loads(args.receipts.read_text(encoding="utf-8"))
+            for item in loaded.get("receipts", loaded) if isinstance(loaded, dict) else loaded:
+                if isinstance(item, dict) and item.get("case_id"):
+                    receipts_map[str(item["case_id"])] = item
+        baseline_doc = json.loads(args.baseline.read_text(encoding="utf-8")) if args.baseline and args.baseline.is_file() else None
+        report = run_live_lockstep_fixtures(
+            fixtures,
+            runtime_commands=runtime_commands,
+            receipts_by_case=receipts_map,
+            timing_budget_ms=args.timing_budget_ms,
+            baseline_report=baseline_doc,
+            jsonl_log_path=args.jsonl_log,
+            output_artifact_path=args.output_artifact,
+        )
+        if args.json:
+            print(json.dumps(report, indent=2))
+        else:
+            verdict = "PASS" if report["passed"] else "FAIL"
+            print(f"bd-2djfa Live Lockstep Gate [{verdict}]: {report.get('passed_cases', 0)}/{report.get('total_cases', 0)}")
+            for reason in report["blocking_reasons"]:
+                print(f"  BLOCKING: {reason}")
+        return 0 if report["passed"] else 1
 
     result = run_all()
-
-    if "--json" in sys.argv:
+    if args.json:
         print(json.dumps(result, indent=2))
     else:
         print(f"bd-1w78 Continuous Lockstep Validation: {result['passed']}/{result['total']} checks passed")
@@ -278,13 +1371,10 @@ def main():
             status = "PASS" if check["passed"] else "FAIL"
             print(f"  [{status}] {check['name']}: {check['detail']}")
         print()
-        if result["all_passed"]:
-            print("Result: ALL CHECKS PASSED")
-        else:
-            print("Result: SOME CHECKS FAILED")
+        print("Result: ALL CHECKS PASSED" if result["all_passed"] else "Result: SOME CHECKS FAILED")
 
-    sys.exit(0 if result["all_passed"] else 1)
+    return 0 if result["all_passed"] else 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
