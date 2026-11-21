@@ -8,6 +8,7 @@ const cases: Array<{ name: string; input_hex: string; anchor: string; format: Ev
   signature_hex?: string; run_anchor?: string; runtime_anchor?: string; event_count?: number;
   revocation_anchor?: string; provenance_anchor?: string | null; evaluation_time?: string;
   max_revocation_age_secs?: string; publisher_trust_facts?: PublisherSourceTrustFacts;
+  expected_manifest_sha256?: string; expected_source_artifact_sha256?: string; expected_graph_input_hash?: string;
   native_facts?: NativeSessionForensicsFacts;
   session_facts?: SignedSessionFacts;
   expected: string; artifact_sha256: string }> =
@@ -107,6 +108,30 @@ if (cfVerified.format !== "counterfactual-receipt"
     || cfVerified.facts.result_count !== 2) {
   throw new Error("TypeScript counterfactual receipt mismatch");
 }
+let identityPositive = 0;
+let identityNegative = 0;
+for (const source of cases.filter((item) => item.format === "publisher-source" && item.expected_manifest_sha256 !== undefined)) {
+  try {
+    const verified = await verifyArtifact(Buffer.from(source.input_hex, "hex"), source.anchor, {
+      verifier: resolve("verifier"), format: "publisher-source", signatureHex: source.signature_hex,
+      expectedManifestSha256: source.expected_manifest_sha256,
+      expectedSourceArtifactSha256: source.expected_source_artifact_sha256,
+      expectedGraphInputHash: source.expected_graph_input_hash,
+    });
+    if (source.expected !== "verified" || verified.format !== "publisher-source") {
+      throw new Error("TypeScript expected publisher release mismatch: " + source.name);
+    }
+    assert.equal(verified.facts.manifest_sha256, source.expected_manifest_sha256);
+    const reconstructed: false = verified.facts.capsule.graph_hash_recomputed;
+    assert.equal(reconstructed, false);
+    identityPositive += 1;
+  } catch (error: unknown) {
+    if (source.expected === "verified" || !(error instanceof VerifierError)
+        || error.code !== source.expected) throw error;
+    identityNegative += 1;
+  }
+}
+if (identityPositive === 0 || identityNegative === 0) throw new Error("publisher identity matrix is missing");
 let trustPositive = 0;
 let trustNegative = 0;
 for (const source of cases.filter((item) => item.format === "publisher-source-trust")) {
@@ -116,6 +141,9 @@ for (const source of cases.filter((item) => item.format === "publisher-source-tr
       trustedRevocationPublicKeyHex: source.revocation_anchor,
       trustedProvenancePublicKeyHex: source.provenance_anchor ?? undefined,
       evaluationTime: source.evaluation_time, maxRevocationAgeSecs: source.max_revocation_age_secs,
+      expectedManifestSha256: source.expected_manifest_sha256,
+      expectedSourceArtifactSha256: source.expected_source_artifact_sha256,
+      expectedGraphInputHash: source.expected_graph_input_hash,
     });
     if (source.expected !== "verified" || verified.format !== "publisher-source-trust"
         || verified.scope !== "authenticated_publisher_source_trust") {
@@ -196,7 +224,8 @@ for (const session of cases.filter((item) => item.format === "signed-session")) 
 }
 assert.deepEqual([...sessionVerdicts].sort(), ["fail", "inconclusive", "pass"]);
 if (sessionNegative === 0) throw new Error("signed-session negative matrix is missing");
-console.log(JSON.stringify({ consumer: "typescript", positive: 8 + trustPositive + nativePositive + sessionPositive,
-  negative: 2 + trustNegative + nativeNegative + sessionNegative, publisher_trust_cases: trustPositive + trustNegative,
+console.log(JSON.stringify({ consumer: "typescript", positive: 8 + trustPositive + nativePositive + sessionPositive + identityPositive,
+  negative: 2 + trustNegative + nativeNegative + sessionNegative + identityNegative, publisher_trust_cases: trustPositive + trustNegative,
+  publisher_identity_cases: identityPositive + identityNegative,
   native_session_cases: nativePositive + nativeNegative, signed_session_cases: sessionPositive + sessionNegative,
   passed: true }));

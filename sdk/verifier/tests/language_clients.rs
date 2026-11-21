@@ -139,6 +139,12 @@ fn external_python_and_javascript_consumers_verify_signed_evidence() {
             ("provenance_anchor", "--trusted-provenance-key-hex"),
             ("evaluation_time", "--evaluation-time"),
             ("max_revocation_age_secs", "--max-revocation-age-secs"),
+            ("expected_manifest_sha256", "--expected-manifest-sha256"),
+            (
+                "expected_source_artifact_sha256",
+                "--expected-source-artifact-sha256",
+            ),
+            ("expected_graph_input_hash", "--expected-graph-input-hash"),
         ] {
             if let Some(value) = case[field].as_str() {
                 verifier.args([option, value]);

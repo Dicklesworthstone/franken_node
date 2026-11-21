@@ -571,6 +571,57 @@ function addSourceTrust(name, expected = "verified", options = {}) {
     ...metadata, ...(facts === null ? {} : { publisher_trust_facts: facts }),
   });
 }
+// These retained expectations describe the approved release, not whichever
+// candidate is later signed. Signatures on substitutions remain genuine.
+const approvedSource = sourceFacts(registration, registrationBytes, sourceBytes);
+const approvedIdentity = {
+  expected_manifest_sha256: approvedSource.manifest_sha256,
+  expected_source_artifact_sha256: approvedSource.artifact_sha256,
+  expected_graph_input_hash: approvedSource.capsule.graph_input_hash,
+};
+addSource("publisher_identity_manifest_pin", sourceBytes, registration, "verified", {
+  expected_manifest_sha256: approvedIdentity.expected_manifest_sha256,
+});
+addSource("publisher_identity_all_pins", sourceBytes, registration, "verified", approvedIdentity);
+const substitutedVersion = clone(registration);
+substitutedVersion.initial_version.version = "8.9.10";
+const substitutedAuthority = clone(registration);
+substitutedAuthority.runtime_authority.policy_revision = "another-valid-policy";
+for (const [name, candidate] of [["version", substitutedVersion], ["authority", substitutedAuthority]]) {
+  addSource(`publisher_identity_signed_${name}_substitution`, sourceBytes, candidate,
+    "EXPECTED_IDENTITY_MISMATCH", approvedIdentity);
+  addSourceTrust(`publisher_trust_identity_signed_${name}_substitution`, "EXPECTED_IDENTITY_MISMATCH", {
+    manifest: candidate, metadata: approvedIdentity,
+  });
+}
+add("publisher_identity_signed_manifest_spelling_substitution", "publisher-source",
+  sourceInput(formattedBytes, sourceBytes), "EXPECTED_IDENTITY_MISMATCH", {
+    signature_hex: sign(null, formattedBytes, key).toString("hex"), ...approvedIdentity,
+  });
+const otherSourceBytes = Buffer.from(sourceFixtures.vectors[1].module_sources.capsule_base64, "base64");
+addSource("publisher_identity_signed_artifact_substitution", otherSourceBytes, sourceManifest(otherSourceBytes, 2),
+  "EXPECTED_IDENTITY_MISMATCH", approvedIdentity);
+for (const field of Object.keys(approvedIdentity)) {
+  const pins = { ...approvedIdentity, [field]: "sha256:" + "0".repeat(64) };
+  addSource(`publisher_identity_mismatch_${field}`, sourceBytes, registration, "EXPECTED_IDENTITY_MISMATCH", pins);
+  addSourceTrust(`publisher_trust_identity_mismatch_${field}`, "EXPECTED_IDENTITY_MISMATCH", { metadata: pins });
+}
+addSourceTrust("publisher_trust_identity_all_pins", "verified", { metadata: approvedIdentity });
+addSourceTrust("publisher_trust_identity_manifest_pin", "verified", {
+  provenance: null, metadata: { expected_manifest_sha256: approvedIdentity.expected_manifest_sha256 },
+});
+addSourceTrust("publisher_trust_identity_does_not_override_revocation", "PUBLISHER_REVOKED", {
+  metadata: approvedIdentity, revocations: { ...trustRevocations, revoked_publisher_ids: [registration.publisher_id] },
+});
+addSource("publisher_identity_does_not_override_signature", sourceBytes, registration, "SIGNATURE_INVALID", {
+  ...approvedIdentity, signature_hex: "00".repeat(64),
+});
+for (const [name, invalidPin] of [["missing_prefix", "a".repeat(64)], ["uppercase", "sha256:" + "A".repeat(64)],
+  ["newline", approvedIdentity.expected_manifest_sha256 + "\n"], ["empty", ""]]) {
+  const pins = { ...approvedIdentity, expected_manifest_sha256: invalidPin };
+  addSource(`publisher_identity_invalid_${name}`, sourceBytes, registration, "EXPECTED_IDENTITY_INVALID", pins);
+  addSourceTrust(`publisher_trust_identity_invalid_${name}`, "EXPECTED_IDENTITY_INVALID", { metadata: pins });
+}
 addSourceTrust("publisher_trust_fresh_revocation_without_provenance", "verified", { provenance: null });
 addSourceTrust("publisher_trust_independent_revocation_and_provenance");
 addSourceTrust("publisher_trust_scoped_host_authority", "verified", { manifest: hostRegistration });

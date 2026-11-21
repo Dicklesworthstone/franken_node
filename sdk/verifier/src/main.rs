@@ -24,7 +24,9 @@ use frankenengine_verifier_sdk::native_session::{
 };
 use frankenengine_verifier_sdk::publisher_source::{
     MAX_PUBLISHER_SOURCE_INPUT_BYTES, MAX_PUBLISHER_SOURCE_TRUST_INPUT_BYTES, PublisherSourceError,
-    PublisherTrustAnchors, verify_publisher_source_input, verify_publisher_source_trust_input,
+    PublisherSourceExpectedIdentity, PublisherSourceIdentityError, PublisherTrustAnchors,
+    verify_publisher_source_input, verify_publisher_source_input_with_expected_identity,
+    verify_publisher_source_trust_input, verify_publisher_source_trust_input_with_expected_identity,
 };
 use frankenengine_verifier_sdk::resolution::{
     ResolutionReceiptError, verify_signed_resolution_receipt,
@@ -44,7 +46,7 @@ const COUNTERFACTUAL_INPUT_SCHEMA: &str = "franken-verifier/counterfactual-recei
 const LTV_INPUT_SCHEMA: &str = "franken-verifier/ltv-evidence-input/v1";
 const LTV_WITNESS_ANCHOR_DOMAIN: &[u8] = b"franken-verifier/ltv-witness-anchor/v1:";
 const MAX_LTV_WITNESS_ANCHOR_BYTES: usize = 64 * 1024;
-const USAGE: &str = "franken-verifier verify --format incident-bundle|native-session-forensics|capsule|signed-bundle|signed-session|resolution-receipt|publisher-source|publisher-source-trust|counterfactual-receipt|ltv-evidence --trusted-key-hex HEX [--trusted-run-key-hex HEX [--trusted-runtime-key-hex HEX]] [--signature-hex HEX] [--trusted-revocation-key-hex HEX --evaluation-time RFC3339 --max-revocation-age-secs SECONDS [--trusted-provenance-key-hex HEX]] < artifact";
+const USAGE: &str = "franken-verifier verify --format incident-bundle|native-session-forensics|capsule|signed-bundle|signed-session|resolution-receipt|publisher-source|publisher-source-trust|counterfactual-receipt|ltv-evidence --trusted-key-hex HEX [--trusted-run-key-hex HEX [--trusted-runtime-key-hex HEX]] [--signature-hex HEX] [--trusted-revocation-key-hex HEX --evaluation-time RFC3339 --max-revocation-age-secs SECONDS [--trusted-provenance-key-hex HEX]] [--expected-manifest-sha256 sha256:HEX [--expected-source-artifact-sha256 sha256:HEX] [--expected-graph-input-hash sha256:HEX]] < artifact";
 
 #[derive(Debug)]
 struct PublisherTrustRequest {
@@ -62,6 +64,7 @@ struct Request {
     runtime_anchor: Option<VerifyingKey>,
     signature: Option<[u8; 64]>,
     publisher_trust: Option<PublisherTrustRequest>,
+    expected_publisher_identity: Option<PublisherSourceExpectedIdentity>,
 }
 
 #[derive(Debug)]
@@ -128,6 +131,7 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
         (None, None, None, None, None);
     let (mut revocation_anchor, mut provenance_anchor, mut evaluation_time, mut max_age) =
         (None, None, None, None);
+    let (mut expected_manifest, mut expected_source_artifact, mut expected_graph) = (None, None, None);
     let (options, remainder) = args[1..].as_chunks::<2>();
     for option in options {
         let slot = match option[0].as_str() {
@@ -140,6 +144,9 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
             "--trusted-provenance-key-hex" => &mut provenance_anchor,
             "--evaluation-time" => &mut evaluation_time,
             "--max-revocation-age-secs" => &mut max_age,
+            "--expected-manifest-sha256" => &mut expected_manifest,
+            "--expected-source-artifact-sha256" => &mut expected_source_artifact,
+            "--expected-graph-input-hash" => &mut expected_graph,
             _ => return Err(usage()),
         };
         if slot.replace(option[1].clone()).is_some() {
@@ -287,6 +294,33 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
         }
         None
     };
+    let expected_publisher_identity = if expected_manifest.is_some()
+        || expected_source_artifact.is_some()
+        || expected_graph.is_some()
+    {
+        if !matches!(format.as_str(), "publisher-source" | "publisher-source-trust") {
+            return Err(failure(
+                "EXPECTED_IDENTITY_INVALID",
+                "expected publisher identity applies only to publisher-source formats",
+            ));
+        }
+        let expected = PublisherSourceExpectedIdentity {
+            manifest_sha256: expected_manifest.ok_or_else(|| {
+                failure(
+                    "EXPECTED_IDENTITY_INVALID",
+                    "expected manifest SHA-256 is required for publisher identity pins",
+                )
+            })?,
+            source_artifact_sha256: expected_source_artifact,
+            graph_input_hash: expected_graph,
+        };
+        expected
+            .validate()
+            .map_err(|error| publisher_identity_failure(&error))?;
+        Some(expected)
+    } else {
+        None
+    };
     Ok(Request {
         format,
         anchor,
@@ -294,6 +328,7 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
         runtime_anchor,
         signature,
         publisher_trust,
+        expected_publisher_identity,
     })
 }
 
@@ -356,6 +391,20 @@ fn publisher_source_failure(error: &PublisherSourceError) -> Failure {
         _ => "EVIDENCE_INVALID",
     };
     failure(code, "publisher-signed source verification failed")
+}
+
+fn publisher_identity_failure(error: &PublisherSourceIdentityError) -> Failure {
+    match error {
+        PublisherSourceIdentityError::Source(error) => publisher_source_failure(error),
+        PublisherSourceIdentityError::ExpectedIdentityInvalid => failure(
+            "EXPECTED_IDENTITY_INVALID",
+            "expected publisher identity policy is invalid",
+        ),
+        PublisherSourceIdentityError::ExpectedIdentityMismatch => failure(
+            "EXPECTED_IDENTITY_MISMATCH",
+            "authenticated publisher source does not match the expected identity",
+        ),
+    }
 }
 
 fn native_session_failure(error: NativeSessionForensicError) -> Failure {
@@ -486,18 +535,26 @@ fn verify(request: &Request, bytes: &[u8]) -> Result<Value, Failure> {
                     "explicit publisher trust policy is required",
                 )
             })?;
-            let verified = verify_publisher_source_trust_input(
-                bytes,
-                signature,
-                &request.anchor,
-                &PublisherTrustAnchors {
-                    revocation_authority: &policy.revocation_authority,
-                    provenance_authority: policy.provenance_authority.as_ref(),
-                    evaluation_time: policy.evaluation_time,
-                    max_revocation_age_secs: policy.max_revocation_age_secs,
-                },
-            )
-            .map_err(|error| publisher_source_failure(&error))?;
+            let anchors = PublisherTrustAnchors {
+                revocation_authority: &policy.revocation_authority,
+                provenance_authority: policy.provenance_authority.as_ref(),
+                evaluation_time: policy.evaluation_time,
+                max_revocation_age_secs: policy.max_revocation_age_secs,
+            };
+            let verified = match request.expected_publisher_identity.as_ref() {
+                Some(expected) => verify_publisher_source_trust_input_with_expected_identity(
+                    bytes,
+                    signature,
+                    &request.anchor,
+                    &anchors,
+                    expected,
+                )
+                .map_err(|error| publisher_identity_failure(&error)),
+                None => {
+                    verify_publisher_source_trust_input(bytes, signature, &request.anchor, &anchors)
+                        .map_err(|error| publisher_source_failure(&error))
+                }
+            }?;
             Ok(json!({"scope": "authenticated_publisher_source_trust", "facts": verified}))
         }
         "publisher-source" => {
@@ -505,8 +562,17 @@ fn verify(request: &Request, bytes: &[u8]) -> Result<Value, Failure> {
                 .signature
                 .as_ref()
                 .ok_or_else(|| failure("SIGNATURE_MALFORMED", "detached signature is required"))?;
-            let verified = verify_publisher_source_input(bytes, signature, &request.anchor)
-                .map_err(|error| publisher_source_failure(&error))?;
+            let verified = match request.expected_publisher_identity.as_ref() {
+                Some(expected) => verify_publisher_source_input_with_expected_identity(
+                    bytes,
+                    signature,
+                    &request.anchor,
+                    expected,
+                )
+                .map_err(|error| publisher_identity_failure(&error)),
+                None => verify_publisher_source_input(bytes, signature, &request.anchor)
+                    .map_err(|error| publisher_source_failure(&error)),
+            }?;
             // These are authenticated publisher statements and captured bytes.
             // The independent reader does not reconstruct the native graph,
             // establish current revocation, or authorize workload execution.
@@ -1303,6 +1369,89 @@ mod tests {
             assert!(facts.get("entrypoint").is_none());
             assert!(facts.get("provenance").is_none());
         }
+    }
+
+    #[test]
+    fn publisher_identity_cli_enforces_release_pins_for_both_source_formats() {
+        let (source_args, source_bytes, _) = publisher_source_cli_fixture(true);
+        let (trust_args, trust_bytes) = publisher_trust_cli_fixture(true);
+        for (request, input) in [(source_args, source_bytes), (trust_args, trust_bytes)] {
+            let baseline = run(&request, &mut input.as_slice()).unwrap();
+            let facts = if baseline["format"] == "publisher-source-trust" {
+                &baseline["facts"]["source"]
+            } else {
+                &baseline["facts"]
+            };
+            let pins = [
+                (
+                    "--expected-manifest-sha256",
+                    facts["manifest_sha256"].as_str().unwrap(),
+                ),
+                (
+                    "--expected-source-artifact-sha256",
+                    facts["artifact_sha256"].as_str().unwrap(),
+                ),
+                (
+                    "--expected-graph-input-hash",
+                    facts["capsule"]["graph_input_hash"].as_str().unwrap(),
+                ),
+            ];
+            let mut pinned = request.clone();
+            for (option, value) in pins {
+                pinned.extend([option.into(), value.into()]);
+            }
+            assert_eq!(run(&pinned, &mut input.as_slice()).unwrap(), baseline);
+            for (option, _) in pins {
+                let mut mismatch = pinned.clone();
+                let index = mismatch.iter().position(|item| item == option).unwrap() + 1;
+                mismatch[index] = format!("sha256:{}", "0".repeat(64));
+                let error = run(&mismatch, &mut input.as_slice()).unwrap_err();
+                assert_eq!(error.code, "EXPECTED_IDENTITY_MISMATCH");
+                assert!(!error.message.contains("sha256:"));
+            }
+            let mut manifest_only = request;
+            manifest_only.extend([pins[0].0.into(), pins[0].1.into()]);
+            assert_eq!(run(&manifest_only, &mut input.as_slice()).unwrap(), baseline);
+        }
+    }
+
+    #[test]
+    fn publisher_identity_cli_rejects_malformed_or_incomplete_pins_before_input() {
+        struct Unreadable;
+        impl Read for Unreadable {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                panic!("invalid identity policy must precede input")
+            }
+        }
+        let (request, _, _) = publisher_source_cli_fixture(true);
+        let pin = format!("sha256:{}", "a".repeat(64));
+        for (option, value) in [
+            ("--expected-manifest-sha256", ""),
+            ("--expected-manifest-sha256", "sha256:123"),
+            ("--expected-source-artifact-sha256", pin.as_str()),
+            ("--expected-graph-input-hash", pin.as_str()),
+        ] {
+            let mut invalid = request.clone();
+            invalid.extend([option.into(), value.into()]);
+            assert_eq!(
+                run(&invalid, &mut Unreadable).unwrap_err().code,
+                "EXPECTED_IDENTITY_INVALID"
+            );
+        }
+        let mut wrong_format = args("incident-bundle", ANCHOR);
+        wrong_format.extend(["--expected-manifest-sha256".into(), pin.clone()]);
+        assert_eq!(
+            run(&wrong_format, &mut Unreadable).unwrap_err().code,
+            "EXPECTED_IDENTITY_INVALID"
+        );
+        let mut duplicate = request;
+        duplicate.extend([
+            "--expected-manifest-sha256".into(),
+            pin.clone(),
+            "--expected-manifest-sha256".into(),
+            pin,
+        ]);
+        assert_eq!(run(&duplicate, &mut Unreadable).unwrap_err().code, "USAGE");
     }
 
     #[test]

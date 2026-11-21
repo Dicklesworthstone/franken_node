@@ -23,7 +23,10 @@ for case in cases:
                                  trusted_revocation_public_key_hex=case.get("revocation_anchor"),
                                  trusted_provenance_public_key_hex=case.get("provenance_anchor"),
                                  evaluation_time=case.get("evaluation_time"),
-                                 max_revocation_age_secs=case.get("max_revocation_age_secs"))
+                                 max_revocation_age_secs=case.get("max_revocation_age_secs"),
+                                 expected_manifest_sha256=case.get("expected_manifest_sha256"),
+                                 expected_source_artifact_sha256=case.get("expected_source_artifact_sha256"),
+                                 expected_graph_input_hash=case.get("expected_graph_input_hash"))
     except VerifierError as error:
         assert error.code == case["expected"], (case["name"], error.code, case["expected"])
         if case["format"] in ("publisher-source", "publisher-source-trust", "native-session-forensics", "signed-session"):
@@ -327,6 +330,69 @@ publisher_trust_inputs = [
     ("trust_options_wrong_format", {"format": "publisher-source"}, "INPUT_INVALID"),
     ("trust_missing_source_signature", {"signature_hex": None}, "SIGNATURE_MALFORMED"),
 ]
+# BEGIN publisher identity protocol controls (no cryptographic proof claims).
+identity_pins = {
+    "expected_manifest_sha256": "sha256:" + "a" * 64,
+    "expected_source_artifact_sha256": "sha256:" + "b" * 64,
+    "expected_graph_input_hash": "sha256:" + "d" * 64,
+}
+identity_invalid_inputs = [
+    ("missing_manifest_for_artifact", {"expected_manifest_sha256": None}),
+    ("missing_manifest_for_graph", {"expected_manifest_sha256": None, "expected_source_artifact_sha256": None}),
+    ("empty_manifest", {"expected_manifest_sha256": ""}),
+    ("manifest_without_prefix", {"expected_manifest_sha256": "a" * 64}),
+    ("uppercase_manifest", {"expected_manifest_sha256": "sha256:" + "A" * 64}),
+    ("manifest_newline", {"expected_manifest_sha256": identity_pins["expected_manifest_sha256"] + "\n"}),
+    ("source_artifact_type", {"expected_source_artifact_sha256": []}),
+    ("graph_wrong_length", {"expected_graph_input_hash": "sha256:dd"}),
+]
+identity_client_cases = 0
+identity_protocol_cases = 0
+for trusted in (False, True):
+    prefix = "publisher_trust_identity" if trusted else "publisher_identity"
+    options = publisher_trust_options if trusted else {"format": "publisher-source", "signature_hex": "00" * 64}
+    for name, overrides in identity_invalid_inputs:
+        try:
+            verify_artifact(b"{}", cases[0]["anchor"], verifier=str(root / "does-not-exist"),
+                            **{**options, **identity_pins, **overrides})
+        except VerifierError as error:
+            assert error.code == "EXPECTED_IDENTITY_INVALID" and error.exit_code is None, (name, error.code)
+        else:
+            raise AssertionError(name)
+        identity_client_cases += 1
+        print(json.dumps({"case": f"{prefix}_{name}", "result": "EXPECTED_IDENTITY_INVALID"}), flush=True)
+    for mode, pins in (
+        (f"{prefix}_valid", {"expected_manifest_sha256": identity_pins["expected_manifest_sha256"]}),
+        (f"{prefix}_forwarded", identity_pins),
+    ):
+        verified = verify_artifact(json.dumps({"protocol_control": mode}).encode(), cases[0]["anchor"],
+                                   verifier=str(root / "fake_verifier"), **{**options, **pins})
+        source = verified["facts"]["source"] if trusted else verified["facts"]
+        assert source["manifest_sha256"] == identity_pins["expected_manifest_sha256"]
+        assert source["capsule"]["graph_hash_recomputed"] is False
+        identity_protocol_cases += 1
+        print(json.dumps({"case": mode, "result": "verified"}), flush=True)
+    # The child ignores the forwarded pins and reports an otherwise valid success.
+    for field in identity_pins:
+        try:
+            verify_artifact(json.dumps({"protocol_control": f"{prefix}_ignore_args"}).encode(), cases[0]["anchor"],
+                            verifier=str(root / "fake_verifier"),
+                            **{**options, **identity_pins, field: "sha256:" + "e" * 64})
+        except VerifierError as error:
+            assert error.code == "EXPECTED_IDENTITY_MISMATCH" and "sha256:" not in str(error), (field, error.code)
+        else:
+            raise AssertionError(field)
+        identity_protocol_cases += 1
+        print(json.dumps({"case": f"{prefix}_ignored_{field}", "result": "EXPECTED_IDENTITY_MISMATCH"}), flush=True)
+try:
+    verify_artifact(b"{}", cases[0]["anchor"], verifier=str(root / "does-not-exist"),
+                    format="incident-bundle", **identity_pins)
+except VerifierError as error:
+    assert error.code == "EXPECTED_IDENTITY_INVALID" and error.exit_code is None
+else:
+    raise AssertionError("publisher identity options accepted for incident")
+identity_client_cases += 1
+# END publisher identity protocol controls.
 for label, overrides, expected in publisher_trust_inputs:
     try:
         # Invalid trusted inputs must fail before attempting any child process.
@@ -401,9 +467,9 @@ for mode in ltv_controls:
     else:
         raise AssertionError(f"protocol_{mode}")
 print(json.dumps({"consumer": "python", "matrix_cases": len(cases),
-                  "client_cases": len(client_controls) + len(publisher_trust_inputs),
+                  "client_cases": len(client_controls) + len(publisher_trust_inputs) + identity_client_cases,
                   "protocol_cases": len(controls) + len(run_controls) + len(runtime_controls)
                   + len(resolution_controls) + len(publisher_controls) + len(publisher_host_positives)
-                  + len(publisher_trust_controls) + len(publisher_trust_positives)
+                  + len(publisher_trust_controls) + len(publisher_trust_positives) + identity_protocol_cases
                   + len(counterfactual_controls) + len(ltv_controls)
                   + len(native_controls) + len(native_positives) + 1, "passed": True}), flush=True)

@@ -679,6 +679,9 @@ def verify_artifact(
     trusted_provenance_public_key_hex: str | None = None,
     evaluation_time: str | None = None,
     max_revocation_age_secs: str | None = None,
+    expected_manifest_sha256: str | None = None,
+    expected_source_artifact_sha256: str | None = None,
+    expected_graph_input_hash: str | None = None,
     signature_hex: str | None = None,
     timeout: float = 10.0,
 ) -> Verification:
@@ -702,6 +705,11 @@ def verify_artifact(
     An optional independent provenance authority requires matching chain evidence.
     Times use four-digit years, non-leap seconds, and at most nine fractional
     digits; comparison preserves nanoseconds and the exact freshness boundary.
+    Publisher identity pins come from caller policy. An exact manifest SHA-256
+    pin is required when optional raw source-artifact or graph pins are supplied.
+    Pins use ``sha256:`` plus 64 lowercase hex digits. The source-artifact pin
+    names raw capsule bytes, not input transport bytes or the capsule domain
+    digest. A graph pin matches an authenticated claim without reconstructing it.
     The supplied executable is part of the caller's trusted verifier
     distribution. It is never inferred from an artifact or run through a shell.
     """
@@ -738,6 +746,13 @@ def verify_artifact(
             raise VerifierError("REVOCATION_FRESHNESS_POLICY_INVALID", "freshness must be a positive decimal u64 string")
     elif any(value is not None for value in publisher_trust_options):
         raise VerifierError("INPUT_INVALID", "publisher trust options require publisher-source-trust")
+    expected_identity = (expected_manifest_sha256, expected_source_artifact_sha256, expected_graph_input_hash)
+    if any(value is not None for value in expected_identity) and (
+        format not in ("publisher-source", "publisher-source-trust")
+        or not _digest(expected_manifest_sha256)
+        or any(value is not None and not _digest(value) for value in expected_identity)
+    ):
+        raise VerifierError("EXPECTED_IDENTITY_INVALID", "publisher identity pins require an exact manifest SHA-256 and canonical optional source commitments")
     if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not 0 < timeout <= 120 or not math.isfinite(timeout):
         raise VerifierError("TIMEOUT_INVALID", "timeout must be finite and in (0, 120] seconds")
     try:
@@ -763,6 +778,12 @@ def verify_artifact(
                      "--evaluation-time", evaluation_time, "--max-revocation-age-secs", max_revocation_age_secs])
     if provenance_anchor is not None:
         args.extend(["--trusted-provenance-key-hex", provenance_anchor])
+    if expected_manifest_sha256 is not None:
+        args.extend(["--expected-manifest-sha256", expected_manifest_sha256])
+    if expected_source_artifact_sha256 is not None:
+        args.extend(["--expected-source-artifact-sha256", expected_source_artifact_sha256])
+    if expected_graph_input_hash is not None:
+        args.extend(["--expected-graph-input-hash", expected_graph_input_hash])
     if format in ("signed-bundle", "publisher-source", "publisher-source-trust", "counterfactual-receipt"):
         if not _hex(signature_hex, 128):
             raise VerifierError("SIGNATURE_MALFORMED", "a detached 64-byte signature is required")
@@ -800,4 +821,10 @@ def verify_artifact(
             or not _facts_valid(result.get("facts"), format, anchor, run_anchor, runtime_anchor,
                                 revocation_anchor, provenance_anchor, evaluation_time, max_revocation_age_secs)):
         raise VerifierError("PROTOCOL_INVALID", "verification response does not match the request")
+    if expected_manifest_sha256 is not None:
+        source = result["facts"]["source"] if format == "publisher-source-trust" else result["facts"]
+        if (source["manifest_sha256"] != expected_manifest_sha256
+                or (expected_source_artifact_sha256 is not None and source["artifact_sha256"] != expected_source_artifact_sha256)
+                or (expected_graph_input_hash is not None and source["capsule"]["graph_input_hash"] != expected_graph_input_hash)):
+            raise VerifierError("EXPECTED_IDENTITY_MISMATCH", "authenticated publisher source does not match the expected identity")
     return result

@@ -16,7 +16,10 @@ for (const test of cases) {
       trustedRunPublicKeyHex: test.run_anchor, trustedRuntimePublicKeyHex: test.runtime_anchor,
       trustedRevocationPublicKeyHex: test.revocation_anchor,
       trustedProvenancePublicKeyHex: test.provenance_anchor ?? undefined,
-      evaluationTime: test.evaluation_time, maxRevocationAgeSecs: test.max_revocation_age_secs });
+      evaluationTime: test.evaluation_time, maxRevocationAgeSecs: test.max_revocation_age_secs,
+      expectedManifestSha256: test.expected_manifest_sha256,
+      expectedSourceArtifactSha256: test.expected_source_artifact_sha256,
+      expectedGraphInputHash: test.expected_graph_input_hash });
     assert.equal(test.expected, "verified", test.name);
     assert.equal(result.artifact_sha256, createHash("sha256").update(data).digest("hex"));
     if (test.format === "incident-bundle") {
@@ -290,6 +293,60 @@ const publisherTrustInputs = [
   ["trust_options_wrong_format", { format: "publisher-source" }, "INPUT_INVALID"],
   ["trust_missing_source_signature", { signatureHex: undefined }, "SIGNATURE_MALFORMED"],
 ];
+// BEGIN publisher identity protocol controls (no cryptographic proof claims).
+const identityPins = {
+  expectedManifestSha256: "sha256:" + "a".repeat(64),
+  expectedSourceArtifactSha256: "sha256:" + "b".repeat(64),
+  expectedGraphInputHash: "sha256:" + "d".repeat(64),
+};
+const identityInvalidInputs = [
+  ["missing_manifest_for_artifact", { expectedManifestSha256: undefined }],
+  ["missing_manifest_for_graph", { expectedManifestSha256: undefined, expectedSourceArtifactSha256: undefined }],
+  ["empty_manifest", { expectedManifestSha256: "" }],
+  ["manifest_without_prefix", { expectedManifestSha256: "a".repeat(64) }],
+  ["uppercase_manifest", { expectedManifestSha256: "sha256:" + "A".repeat(64) }],
+  ["manifest_newline", { expectedManifestSha256: identityPins.expectedManifestSha256 + "\n" }],
+  ["source_artifact_type", { expectedSourceArtifactSha256: [] }],
+  ["graph_wrong_length", { expectedGraphInputHash: "sha256:dd" }],
+];
+let identityClientCases = 0;
+let identityProtocolCases = 0;
+for (const trusted of [false, true]) {
+  const prefix = trusted ? "publisher_trust_identity" : "publisher_identity";
+  const options = trusted ? publisherTrustOptions : { format: "publisher-source", signatureHex: "00".repeat(64) };
+  for (const [name, overrides] of identityInvalidInputs) {
+    await assert.rejects(verifyArtifact(Buffer.from("{}"), cases[0].anchor,
+      { verifier: resolve("does-not-exist"), ...options, ...identityPins, ...overrides }),
+    (error) => error instanceof VerifierError && error.code === "EXPECTED_IDENTITY_INVALID" && error.exitCode === null);
+    identityClientCases += 1;
+    console.log(JSON.stringify({ case: `${prefix}_${name}`, result: "EXPECTED_IDENTITY_INVALID" }));
+  }
+  for (const [mode, pins] of [
+    [`${prefix}_valid`, { expectedManifestSha256: identityPins.expectedManifestSha256 }],
+    [`${prefix}_forwarded`, identityPins],
+  ]) {
+    const verified = await verifyArtifact(Buffer.from(JSON.stringify({ protocol_control: mode })), cases[0].anchor,
+      { verifier: resolve("fake_verifier"), ...options, ...pins });
+    const source = trusted ? verified.facts.source : verified.facts;
+    assert.equal(source.manifest_sha256, identityPins.expectedManifestSha256);
+    assert.equal(source.capsule.graph_hash_recomputed, false);
+    identityProtocolCases += 1;
+    console.log(JSON.stringify({ case: mode, result: "verified" }));
+  }
+  // This child ignores the forwarded pins and reports an otherwise valid success.
+  for (const field of Object.keys(identityPins)) {
+    await assert.rejects(verifyArtifact(Buffer.from(JSON.stringify({ protocol_control: `${prefix}_ignore_args` })), cases[0].anchor,
+      { verifier: resolve("fake_verifier"), ...options, ...identityPins, [field]: "sha256:" + "e".repeat(64) }),
+    (error) => error instanceof VerifierError && error.code === "EXPECTED_IDENTITY_MISMATCH" && !error.message.includes("sha256:"));
+    identityProtocolCases += 1;
+    console.log(JSON.stringify({ case: `${prefix}_ignored_${field}`, result: "EXPECTED_IDENTITY_MISMATCH" }));
+  }
+}
+await assert.rejects(verifyArtifact(Buffer.from("{}"), cases[0].anchor,
+  { verifier: resolve("does-not-exist"), format: "incident-bundle", ...identityPins }),
+(error) => error instanceof VerifierError && error.code === "EXPECTED_IDENTITY_INVALID" && error.exitCode === null);
+identityClientCases += 1;
+// END publisher identity protocol controls.
 for (const [name, overrides, expected] of publisherTrustInputs) {
   // A missing executable proves malformed trusted inputs fail before spawn.
   await assert.rejects(verifyArtifact(Buffer.from("{}"), cases[0].anchor,
@@ -350,7 +407,7 @@ for (const mode of ltvControls) {
   console.log(JSON.stringify({ case: `protocol_${mode}`, result: "PROTOCOL_INVALID" }));
 }
 console.log(JSON.stringify({ consumer: "javascript", matrix_cases: cases.length,
-  client_cases: clientControls.length + publisherTrustInputs.length,
+  client_cases: clientControls.length + publisherTrustInputs.length + identityClientCases,
   protocol_cases: controls.length + runControls.length + runtimeControls.length + resolutionControls.length
-    + publisherControls.length + publisherHostPositives.length + publisherTrustControls.length + publisherTrustPositives.length
+    + publisherControls.length + publisherHostPositives.length + publisherTrustControls.length + publisherTrustPositives.length + identityProtocolCases
     + counterfactualControls.length + ltvControls.length + nativeControls.length + nativePositives.length + 1, passed: true }));

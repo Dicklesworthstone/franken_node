@@ -79,6 +79,23 @@ export async function auditPublisherSource(
   return `${verified.facts.artifact_sha256}:${instructionCeiling}:${endpoints?.join(",")}:${networkCalls}:${processCalls}`;
 }
 
+/** Require a separately retained release identity, even for a trusted publisher. */
+export async function auditExpectedPublisherRelease(
+  data: Uint8Array, anchor: string, signature: string, executable: string,
+  manifestSha256: string, sourceArtifactSha256?: string, graphInputHash?: string,
+): Promise<string> {
+  const verified = await verifyArtifact(data, anchor, {
+    verifier: executable, format: "publisher-source", signatureHex: signature,
+    expectedManifestSha256: manifestSha256,
+    expectedSourceArtifactSha256: sourceArtifactSha256,
+    expectedGraphInputHash: graphInputHash,
+  });
+  if (verified.format !== "publisher-source") throw new Error("publisher source required");
+  const reconstructed: false = verified.facts.capsule.graph_hash_recomputed;
+  if (reconstructed) throw new Error("identity matching cannot reconstruct a graph");
+  return verified.facts.manifest_sha256;
+}
+
 export async function auditResolution(data: Uint8Array, anchor: string, executable: string): Promise<string | null> {
   const verified = await verifyArtifact(data, anchor, { verifier: executable, format: "resolution-receipt" });
   if (verified.format !== "resolution-receipt") throw new Error("resolution decision required");

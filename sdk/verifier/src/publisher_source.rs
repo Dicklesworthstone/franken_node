@@ -131,6 +131,46 @@ impl std::error::Error for PublisherSourceError {}
 
 type Result<T> = std::result::Result<T, PublisherSourceError>;
 
+/// Errors specific to explicitly pinned release verification. Existing source
+/// errors remain unchanged for callers that exhaustively match their variants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublisherSourceIdentityError {
+    ExpectedIdentityInvalid,
+    ExpectedIdentityMismatch,
+    Source(PublisherSourceError),
+}
+
+impl std::fmt::Display for PublisherSourceIdentityError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ExpectedIdentityInvalid => formatter.write_str(
+                "expected publisher identity requires canonical SHA-256 commitments",
+            ),
+            Self::ExpectedIdentityMismatch => formatter.write_str(
+                "authenticated publisher source does not match the expected identity",
+            ),
+            Self::Source(error) => std::fmt::Display::fmt(error, formatter),
+        }
+    }
+}
+
+impl std::error::Error for PublisherSourceIdentityError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Source(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+impl From<PublisherSourceError> for PublisherSourceIdentityError {
+    fn from(error: PublisherSourceError) -> Self {
+        Self::Source(error)
+    }
+}
+
+type IdentityResult<T> = std::result::Result<T, PublisherSourceIdentityError>;
+
 fn serialize_decimal<T: std::fmt::Display, S: Serializer>(
     value: &T,
     serializer: S,
@@ -218,6 +258,67 @@ pub struct VerifiedPublisherSource {
     pub signer_public_key_hex: String,
     pub runtime_authority: Option<PublisherRuntimeAuthority>,
     pub capsule: SourceCapsuleSummary,
+}
+
+/// Release identity selected from the caller's trusted configuration, never
+/// inferred from the candidate evidence. Every commitment is `sha256:` followed
+/// by exactly 64 lowercase hexadecimal digits.
+///
+/// The required manifest pin binds its exact signed bytes, including release
+/// version and runtime authority. Supplemental pins can additionally require
+/// the raw source-capsule hash and the publisher's recorded graph commitment.
+/// Matching the latter does not reconstruct the graph or certify execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublisherSourceExpectedIdentity {
+    pub manifest_sha256: String,
+    /// Raw SHA-256 of source-capsule bytes, not the transport hash or the
+    /// domain-separated `capsule_digest`.
+    pub source_artifact_sha256: Option<String>,
+    /// Authenticated graph commitment; `graph_hash_recomputed` remains false.
+    pub graph_input_hash: Option<String>,
+}
+
+impl PublisherSourceExpectedIdentity {
+    /// Reject malformed caller policy before parsing any candidate evidence.
+    pub fn validate(&self) -> IdentityResult<()> {
+        for expected in [
+            Some(self.manifest_sha256.as_str()),
+            self.source_artifact_sha256.as_deref(),
+            self.graph_input_hash.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if !expected.strip_prefix("sha256:").is_some_and(valid_digest) {
+                return Err(PublisherSourceIdentityError::ExpectedIdentityInvalid);
+            }
+        }
+        Ok(())
+    }
+
+    fn require_match(&self, source: &VerifiedPublisherSource) -> IdentityResult<()> {
+        for (expected, actual) in [
+            (
+                Some(self.manifest_sha256.as_str()),
+                source.manifest_sha256.as_str(),
+            ),
+            (
+                self.source_artifact_sha256.as_deref(),
+                source.artifact_sha256.as_str(),
+            ),
+            (
+                self.graph_input_hash.as_deref(),
+                source.capsule.graph_input_hash.as_str(),
+            ),
+        ] {
+            if expected
+                .is_some_and(|expected| !bool::from(expected.as_bytes().ct_eq(actual.as_bytes())))
+            {
+                return Err(PublisherSourceIdentityError::ExpectedIdentityMismatch);
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Deserialize)]
@@ -635,6 +736,22 @@ pub fn verify_publisher_source(
     })
 }
 
+/// Authenticate source bytes and require the exact caller-selected release.
+/// Invalid expected identities fail before candidate parsing; a valid signature
+/// over another release is rejected after ordinary source authentication.
+pub fn verify_publisher_source_with_expected_identity(
+    manifest_bytes: &[u8],
+    signature: &[u8; 64],
+    capsule_bytes: &[u8],
+    trusted_publisher: &VerifyingKey,
+    expected: &PublisherSourceExpectedIdentity,
+) -> IdentityResult<VerifiedPublisherSource> {
+    expected.validate()?;
+    let source = verify_publisher_source(manifest_bytes, signature, capsule_bytes, trusted_publisher)?;
+    expected.require_match(&source)?;
+    Ok(source)
+}
+
 fn decode_component(encoded: &str, maximum: usize) -> Result<Vec<u8>> {
     if encoded.len() > maximum.div_ceil(3) * 4 {
         return Err(PublisherSourceError::InputTooLarge);
@@ -683,6 +800,19 @@ pub fn verify_publisher_source_input(
         &capsule_bytes,
         trusted_publisher,
     )
+}
+
+/// Authenticate a portable source transport under an explicit release pin.
+pub fn verify_publisher_source_input_with_expected_identity(
+    input_bytes: &[u8],
+    signature: &[u8; 64],
+    trusted_publisher: &VerifyingKey,
+    expected: &PublisherSourceExpectedIdentity,
+) -> IdentityResult<VerifiedPublisherSource> {
+    expected.validate()?;
+    let source = verify_publisher_source_input(input_bytes, signature, trusted_publisher)?;
+    expected.require_match(&source)?;
+    Ok(source)
 }
 
 /// Offline Ed25519-authenticated revocation list for publisher source verification.
@@ -848,6 +978,22 @@ pub fn verify_publisher_source_trust_input(
             provenance,
         },
     )
+}
+
+/// Require the expected release as well as independently anchored revocation
+/// and provenance evidence. A fresh revocation list cannot substitute a release.
+pub fn verify_publisher_source_trust_input_with_expected_identity(
+    input_bytes: &[u8],
+    signature: &[u8; 64],
+    trusted_publisher: &VerifyingKey,
+    anchors: &PublisherTrustAnchors<'_>,
+    expected: &PublisherSourceExpectedIdentity,
+) -> IdentityResult<VerifiedPublisherSourceWithTrust> {
+    expected.validate()?;
+    let verified =
+        verify_publisher_source_trust_input(input_bytes, signature, trusted_publisher, anchors)?;
+    expected.require_match(&verified.source)?;
+    Ok(verified)
 }
 
 /// Compute the domain-separated signing payload for a [`PublisherRevocationList`].
@@ -1123,6 +1269,29 @@ pub fn verify_publisher_source_with_trust_policy(
     })
 }
 
+/// Authenticate source and trust-policy evidence, then require the caller's
+/// exact release identity. Signature, revocation and provenance checks retain
+/// their existing meaning; an identity match never grants execution authority.
+pub fn verify_publisher_source_with_trust_policy_and_expected_identity(
+    manifest_bytes: &[u8],
+    signature: &[u8; 64],
+    capsule_bytes: &[u8],
+    trusted_publisher: &VerifyingKey,
+    policy: &PublisherTrustPolicy<'_>,
+    expected: &PublisherSourceExpectedIdentity,
+) -> IdentityResult<VerifiedPublisherSourceWithTrust> {
+    expected.validate()?;
+    let verified = verify_publisher_source_with_trust_policy(
+        manifest_bytes,
+        signature,
+        capsule_bytes,
+        trusted_publisher,
+        policy,
+    )?;
+    expected.require_match(&verified.source)?;
+    Ok(verified)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1293,6 +1462,236 @@ mod tests {
         bytes.extend_from_slice(metadata.as_bytes());
         bytes.extend_from_slice(payload);
         bytes
+    }
+
+    fn expected_release(manifest_bytes: &[u8], capsule_bytes: &[u8]) -> PublisherSourceExpectedIdentity {
+        let metadata: Value = serde_json::from_str(header(capsule_bytes).0).unwrap();
+        PublisherSourceExpectedIdentity {
+            manifest_sha256: format!("sha256:{}", hex::encode(Sha256::digest(manifest_bytes))),
+            source_artifact_sha256: Some(format!(
+                "sha256:{}",
+                hex::encode(Sha256::digest(capsule_bytes))
+            )),
+            graph_input_hash: Some(metadata["graph_hash"].as_str().unwrap().into()),
+        }
+    }
+
+    #[test]
+    fn expected_identity_authenticates_exact_release_without_reconstructing_graph() {
+        let capsule_bytes = capsule();
+        for with_authority in [false, true] {
+            let raw = serde_json::to_vec(&manifest(&capsule_bytes, with_authority)).unwrap();
+            let signature = key().sign(&raw).to_bytes();
+            let expected = expected_release(&raw, &capsule_bytes);
+            let verified = verify_publisher_source_with_expected_identity(
+                &raw,
+                &signature,
+                &capsule_bytes,
+                &key().verifying_key(),
+                &expected,
+            )
+            .unwrap();
+            assert_eq!(verified, verify_signed(&raw, &capsule_bytes).unwrap());
+            assert!(!verified.capsule.graph_hash_recomputed);
+            assert_eq!(
+                verify_publisher_source_input_with_expected_identity(
+                    &transport(&raw, &capsule_bytes),
+                    &signature,
+                    &key().verifying_key(),
+                    &expected,
+                )
+                .unwrap(),
+                verified
+            );
+            let manifest_only = PublisherSourceExpectedIdentity {
+                source_artifact_sha256: None,
+                graph_input_hash: None,
+                ..expected
+            };
+            assert!(
+                verify_publisher_source_with_expected_identity(
+                    &raw,
+                    &signature,
+                    &capsule_bytes,
+                    &key().verifying_key(),
+                    &manifest_only,
+                )
+                .is_ok()
+            );
+        }
+    }
+
+    #[test]
+    fn expected_identity_refuses_validly_signed_version_authority_and_exact_byte_substitutions() {
+        let capsule_bytes = capsule();
+        let approved = manifest(&capsule_bytes, true);
+        let approved_bytes = serde_json::to_vec(&approved).unwrap();
+        let expected = expected_release(&approved_bytes, &capsule_bytes);
+        let mut other_version = approved.clone();
+        other_version["initial_version"]["version"] = json!("9.8.7");
+        let mut other_authority = approved.clone();
+        other_authority["runtime_authority"]["policy_revision"] = json!("another-approved-policy");
+        for raw in [
+            serde_json::to_vec(&other_version).unwrap(),
+            serde_json::to_vec(&other_authority).unwrap(),
+            serde_json::to_vec_pretty(&approved).unwrap(),
+        ] {
+            assert!(verify_signed(&raw, &capsule_bytes).is_ok());
+            assert_eq!(
+                verify_publisher_source_with_expected_identity(
+                    &raw,
+                    &key().sign(&raw).to_bytes(),
+                    &capsule_bytes,
+                    &key().verifying_key(),
+                    &expected,
+                ),
+                Err(PublisherSourceIdentityError::ExpectedIdentityMismatch)
+            );
+        }
+        for field in 0..3 {
+            let mut mismatch = expected.clone();
+            let wrong = format!("sha256:{}", "0".repeat(64));
+            match field {
+                0 => mismatch.manifest_sha256 = wrong,
+                1 => mismatch.source_artifact_sha256 = Some(wrong),
+                _ => mismatch.graph_input_hash = Some(wrong),
+            }
+            assert_eq!(
+                verify_publisher_source_input_with_expected_identity(
+                    &transport(&approved_bytes, &capsule_bytes),
+                    &key().sign(&approved_bytes).to_bytes(),
+                    &key().verifying_key(),
+                    &mismatch,
+                ),
+                Err(PublisherSourceIdentityError::ExpectedIdentityMismatch)
+            );
+        }
+        assert_eq!(
+            verify_publisher_source_with_expected_identity(
+                &approved_bytes,
+                &[0; 64],
+                &capsule_bytes,
+                &key().verifying_key(),
+                &expected,
+            ),
+            Err(PublisherSourceIdentityError::Source(
+                PublisherSourceError::SignatureInvalid
+            ))
+        );
+    }
+
+    #[test]
+    fn expected_identity_malformed_pins_fail_before_candidate_input() {
+        let valid = format!("sha256:{}", "a".repeat(64));
+        for invalid in [
+            String::new(),
+            "a".repeat(64),
+            format!("sha256:{}", "A".repeat(64)),
+            format!("{valid}\n"),
+            format!(" {valid}"),
+            format!("{valid}0"),
+        ] {
+            for field in 0..3 {
+                let mut expected = PublisherSourceExpectedIdentity {
+                    manifest_sha256: valid.clone(),
+                    source_artifact_sha256: None,
+                    graph_input_hash: None,
+                };
+                match field {
+                    0 => expected.manifest_sha256 = invalid.clone(),
+                    1 => expected.source_artifact_sha256 = Some(invalid.clone()),
+                    _ => expected.graph_input_hash = Some(invalid.clone()),
+                }
+                assert_eq!(
+                    verify_publisher_source_input_with_expected_identity(
+                        b"not JSON",
+                        &[0; 64],
+                        &key().verifying_key(),
+                        &expected,
+                    ),
+                    Err(PublisherSourceIdentityError::ExpectedIdentityInvalid)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn expected_identity_applies_to_fresh_trust_policy_and_portable_transport() {
+        let (mut envelope, _) = trust_transport();
+        envelope.as_object_mut().unwrap().remove("provenance");
+        let capsule_bytes = STANDARD
+            .decode(envelope["capsule_base64"].as_str().unwrap())
+            .unwrap();
+        let approved_raw = STANDARD
+            .decode(envelope["manifest_base64"].as_str().unwrap())
+            .unwrap();
+        let expected = expected_release(&approved_raw, &capsule_bytes);
+        let revocation_bytes = STANDARD
+            .decode(envelope["revocation_list_base64"].as_str().unwrap())
+            .unwrap();
+        let revocation_signature =
+            decode_signature(envelope["revocation_signature_hex"].as_str().unwrap()).unwrap();
+        let revocation_authority = SigningKey::from_bytes(&[0x71; 32]).verifying_key();
+        let anchors = PublisherTrustAnchors {
+            revocation_authority: &revocation_authority,
+            provenance_authority: None,
+            evaluation_time: evaluation_time(),
+            max_revocation_age_secs: 3600,
+        };
+        let policy = PublisherTrustPolicy {
+            revocation_authority: &revocation_authority,
+            revocation_list_bytes: &revocation_bytes,
+            revocation_signature: &revocation_signature,
+            evaluation_time: evaluation_time(),
+            max_revocation_age_secs: 3600,
+            provenance: None,
+        };
+        for substitute in [false, true] {
+            let mut candidate: Value = serde_json::from_slice(&approved_raw).unwrap();
+            if substitute {
+                candidate["initial_version"]["version"] = json!("9.8.7");
+            }
+            let raw = serde_json::to_vec(&candidate).unwrap();
+            let signature = key().sign(&raw).to_bytes();
+            envelope["manifest_base64"] = json!(STANDARD.encode(&raw));
+            let transport = serde_json::to_vec(&envelope).unwrap();
+            assert!(
+                verify_publisher_source_trust_input(
+                    &transport,
+                    &signature,
+                    &key().verifying_key(),
+                    &anchors
+                )
+                .is_ok()
+            );
+            let from_transport = verify_publisher_source_trust_input_with_expected_identity(
+                &transport,
+                &signature,
+                &key().verifying_key(),
+                &anchors,
+                &expected,
+            );
+            let from_parts = verify_publisher_source_with_trust_policy_and_expected_identity(
+                &raw,
+                &signature,
+                &capsule_bytes,
+                &key().verifying_key(),
+                &policy,
+                &expected,
+            );
+            if substitute {
+                assert_eq!(
+                    from_transport,
+                    Err(PublisherSourceIdentityError::ExpectedIdentityMismatch)
+                );
+                assert_eq!(
+                    from_parts,
+                    Err(PublisherSourceIdentityError::ExpectedIdentityMismatch)
+                );
+            } else {
+                assert_eq!(from_transport.unwrap(), from_parts.unwrap());
+            }
+        }
     }
 
     #[test]

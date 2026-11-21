@@ -401,10 +401,14 @@ function factsValid(facts, format, anchor, runAnchor, runtimeAnchor,
  * RFC3339 time (four-digit year, non-leap seconds, at most nine fraction digits),
  * and an exact positive decimal u64 freshness window. Optional provenance trust
  * requires a matching signed chain. Nanosecond comparisons never use Date.
+ * Publisher identity pins come from caller policy. The exact manifest pin is
+ * required when supplemental raw source-artifact or graph commitments are used;
+ * none is inferred from the candidate. A graph pin does not reconstruct a graph.
  */
 export async function verifyArtifact(data, trustedPublicKeyHex, options) {
   const { verifier, format = "incident-bundle", trustedRunPublicKeyHex, trustedRuntimePublicKeyHex,
     trustedRevocationPublicKeyHex, trustedProvenancePublicKeyHex, evaluationTime, maxRevocationAgeSecs,
+    expectedManifestSha256, expectedSourceArtifactSha256, expectedGraphInputHash,
     signatureHex, timeoutMs = 10_000 } = options ?? {};
   if (!(data instanceof Uint8Array)) throw new VerifierError("INPUT_INVALID", "data must contain the original bytes");
   if (data.byteLength > MAX_INPUT_BYTES) throw new VerifierError("INPUT_TOO_LARGE", "evidence exceeds 64 MiB");
@@ -428,6 +432,13 @@ export async function verifyArtifact(data, trustedPublicKeyHex, options) {
   } else if (publisherTrustOptions.some((value) => value !== undefined)) {
     throw new VerifierError("INPUT_INVALID", "publisher trust options require publisher-source-trust");
   }
+  const expectedIdentity = [expectedManifestSha256, expectedSourceArtifactSha256, expectedGraphInputHash];
+  if (expectedIdentity.some((value) => value !== undefined)
+      && (!["publisher-source", "publisher-source-trust"].includes(format)
+          || !digest(expectedManifestSha256)
+          || expectedIdentity.some((value) => value !== undefined && !digest(value)))) {
+    throw new VerifierError("EXPECTED_IDENTITY_INVALID", "publisher identity pins require an exact manifest SHA-256 and canonical optional source commitments");
+  }
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > 120_000) throw new VerifierError("TIMEOUT_INVALID", "timeoutMs must be finite and in (0, 120000]");
   if (typeof verifier !== "string" || verifier.length === 0 || verifier.includes("\0")) throw new VerifierError("EXECUTABLE_INVALID", "verifier must be a trusted executable path");
   const bytes = Buffer.from(data);
@@ -443,6 +454,9 @@ export async function verifyArtifact(data, trustedPublicKeyHex, options) {
   if (revocationAnchor !== undefined) args.push("--trusted-revocation-key-hex", revocationAnchor,
     "--evaluation-time", evaluationTime, "--max-revocation-age-secs", maxRevocationAgeSecs);
   if (provenanceAnchor !== undefined) args.push("--trusted-provenance-key-hex", provenanceAnchor);
+  if (expectedManifestSha256 !== undefined) args.push("--expected-manifest-sha256", expectedManifestSha256);
+  if (expectedSourceArtifactSha256 !== undefined) args.push("--expected-source-artifact-sha256", expectedSourceArtifactSha256);
+  if (expectedGraphInputHash !== undefined) args.push("--expected-graph-input-hash", expectedGraphInputHash);
   if (["signed-bundle", "publisher-source", "publisher-source-trust", "counterfactual-receipt"].includes(format)) {
     if (!hex(signatureHex, 128)) throw new VerifierError("SIGNATURE_MALFORMED", "a detached 64-byte signature is required");
     args.push("--signature-hex", signatureHex);
@@ -479,6 +493,14 @@ export async function verifyArtifact(data, trustedPublicKeyHex, options) {
           || !factsValid(result.facts, format, anchor, runAnchor, runtimeAnchor,
             revocationAnchor, provenanceAnchor, evaluationTime, maxRevocationAgeSecs)) {
         return reject(new VerifierError("PROTOCOL_INVALID", "verification response does not match the request"));
+      }
+      if (expectedManifestSha256 !== undefined) {
+        const source = format === "publisher-source-trust" ? result.facts.source : result.facts;
+        if (source.manifest_sha256 !== expectedManifestSha256
+            || (expectedSourceArtifactSha256 !== undefined && source.artifact_sha256 !== expectedSourceArtifactSha256)
+            || (expectedGraphInputHash !== undefined && source.capsule.graph_input_hash !== expectedGraphInputHash)) {
+          return reject(new VerifierError("EXPECTED_IDENTITY_MISMATCH", "authenticated publisher source does not match the expected identity"));
+        }
       }
       resolve(result);
     });

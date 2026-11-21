@@ -166,6 +166,17 @@ if mode.startswith("ltv_"):
         "signer_public_key_hex": anchor,
     }
 exit_code = 0
+if mode in ("publisher_identity_forwarded", "publisher_trust_identity_forwarded"):
+    for option, expected in (
+        ("--expected-manifest-sha256", "sha256:" + "a" * 64),
+        ("--expected-source-artifact-sha256", "sha256:" + "b" * 64),
+        ("--expected-graph-input-hash", "sha256:" + "d" * 64),
+    ):
+        if option not in sys.argv or sys.argv[sys.argv.index(option) + 1] != expected:
+            response = {"schema_version": "franken-verifier-cli/v1", "verdict": "rejected",
+                        "error": {"code": "PIN_ARGUMENT_MISSING", "message": "identity pin was not forwarded"}}
+            exit_code = 2
+            break
 if mode == "timeout":
     time.sleep(5)
 elif mode == "oversize":

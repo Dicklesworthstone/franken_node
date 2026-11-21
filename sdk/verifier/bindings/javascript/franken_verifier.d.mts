@@ -15,6 +15,12 @@ export interface VerifierOptions {
   evaluationTime?: string;
   /** Required freshness window: canonical positive decimal u64 string, never a rounded number. */
   maxRevocationAgeSecs?: string;
+  /** Caller-pinned exact signed manifest hash: sha256: plus 64 lowercase hex digits. Publisher-source formats only. */
+  expectedManifestSha256?: string;
+  /** Optional raw source-capsule SHA-256, not transport artifact_sha256 or capsule_digest. Requires expectedManifestSha256. */
+  expectedSourceArtifactSha256?: string;
+  /** Optional authenticated graph commitment. Requires expectedManifestSha256; does not reconstruct the graph. */
+  expectedGraphInputHash?: string;
   /** Required detached signature for signed-bundle, publisher-source formats, and counterfactual-receipt. */
   signatureHex?: string;
   timeoutMs?: number;
