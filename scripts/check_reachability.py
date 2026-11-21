@@ -141,6 +141,56 @@ def skip_to_item_end(text: str, start: int) -> int:
     return n
 
 
+def _find_next_cfg_test(text: str, start: int) -> int:
+    """Find the next real `#[cfg(test)]` attribute at or after `start`,
+    skipping line comments, block comments, and string literals so a doc
+    comment or string mentioning `#[cfg(test)]` cannot blank production code."""
+    marker = "#[cfg(test)]"
+    i, n = start, len(text)
+    while i < n:
+        ch = text[i]
+        if ch == "/" and i + 1 < n:
+            if text[i + 1] == "/":
+                nl = text.find("\n", i)
+                if nl == -1:
+                    return -1
+                i = nl + 1
+                continue
+            if text[i + 1] == "*":
+                end = text.find("*/", i + 2)
+                if end == -1:
+                    return -1
+                i = end + 2
+                continue
+        if ch == '"':
+            raw_hashes = 0
+            j = i - 1
+            while j >= 0 and text[j] == "#":
+                raw_hashes += 1
+                j -= 1
+            if j >= 0 and text[j] == "r":
+                closing = '"' + "#" * raw_hashes
+                end = text.find(closing, i + 1)
+                if end == -1:
+                    return -1
+                i = end + len(closing)
+                continue
+            i += 1
+            while i < n:
+                if text[i] == "\\":
+                    i += 2
+                    continue
+                if text[i] == '"':
+                    i += 1
+                    break
+                i += 1
+            continue
+        if ch == "#" and text.startswith(marker, i):
+            return i
+        i += 1
+    return -1
+
+
 def strip_test_regions(text: str) -> str:
     """Blank every `#[cfg(test)]` item to its own newlines, so later references
     found in production text are genuinely non-test and reported line numbers
@@ -149,7 +199,7 @@ def strip_test_regions(text: str) -> str:
     search_from = 0
     marker = "#[cfg(test)]"
     while True:
-        at = out.find(marker, search_from)
+        at = _find_next_cfg_test(out, search_from)
         if at == -1:
             return out
         end = skip_to_item_end(out, at + len(marker))

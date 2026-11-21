@@ -34,6 +34,25 @@ def test_strip_test_regions_blanks_cfg_test_item_only():
     assert len(out.splitlines()) == len(src.splitlines())
 
 
+def test_strip_test_regions_ignores_comments_and_strings():
+    src = (
+        "/// Doc comment mentioning `#[cfg(test)]` must not blank prod.\n"
+        "pub fn resolve() { product_cli::run(); }\n"
+        "pub fn lit() -> &'static str { \"#[cfg(test)]\" }\n"
+        "/* block comment #[cfg(test)] */\n"
+        "pub fn after_block() { real_mod::call(); }\n"
+        "#[cfg(test)]\n"
+        "mod tests {\n"
+        "    use crate::island::only_in_test;\n"
+        "}\n"
+    )
+    out = g.strip_test_regions(src)
+    assert "product_cli::run()" in out
+    assert "real_mod::call()" in out
+    assert "only_in_test" not in out
+    assert len(out.splitlines()) == len(src.splitlines())
+
+
 def test_non_test_line_count_excludes_blanks_and_tests():
     src = "a\n\n#[cfg(test)]\nmod t { fn x() {} }\nb\n"
     assert g.non_test_line_count(src) == 2  # 'a' and 'b'
