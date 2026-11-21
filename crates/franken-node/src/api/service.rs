@@ -412,6 +412,16 @@ impl ControlPlaneService {
     pub fn report(&self) -> EndpointReport {
         generate_endpoint_report(&self.config)
     }
+
+    /// Build the in-process MCP tool catalog derived from this service's route metadata.
+    pub fn mcp_surface(&self) -> super::mcp::McpControlSurface {
+        super::mcp::McpControlSurface::new()
+    }
+
+    /// Render the in-process MCP tool catalog as structured JSON.
+    pub fn mcp_catalog_json(&self) -> serde_json::Value {
+        self.mcp_surface().catalog_json()
+    }
 }
 
 impl Default for ControlPlaneService {
@@ -423,6 +433,46 @@ impl Default for ControlPlaneService {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mcp_surface_catalog_tracks_service_routes_and_guards_mutations() {
+        let service = ControlPlaneService::default();
+        let surface = service.mcp_surface();
+        assert_eq!(surface.tools().len(), service.catalog().len());
+        let catalog_json = service.mcp_catalog_json();
+        assert_eq!(
+            catalog_json["event_code"],
+            super::super::mcp::FN_MCP_CATALOG_BUILT
+        );
+        let read_tool = surface
+            .tools()
+            .values()
+            .find(|tool| !tool.requires_capability_token)
+            .expect("at least one read-only MCP tool");
+        let read_resp = surface
+            .dispatch_read(super::super::mcp::McpToolRequest {
+                tool_name: read_tool.name.clone(),
+                arguments: serde_json::json!({}),
+                trace_id: "trace-service-mcp-read".to_string(),
+                principal: "operator-test".to_string(),
+            })
+            .expect("read-only MCP tool dispatch should succeed");
+        assert!(read_resp.ok);
+        let mutating_tool = surface
+            .tools()
+            .values()
+            .find(|tool| tool.requires_capability_token)
+            .expect("at least one mutating MCP tool");
+        let err = surface
+            .dispatch_read(super::super::mcp::McpToolRequest {
+                tool_name: mutating_tool.name.clone(),
+                arguments: serde_json::json!({}),
+                trace_id: "trace-service-mcp-mut".to_string(),
+                principal: "operator-test".to_string(),
+            })
+            .expect_err("mutating MCP tool must reject unauthenticated read dispatch");
+        assert_eq!(err.code, "FN_MCP_CAPABILITY_REQUIRED");
+    }
 
     #[test]
     fn all_route_metadata_collects_all_groups() {
