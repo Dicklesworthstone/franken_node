@@ -46112,6 +46112,7 @@ fn main() -> Result<()> {
                                     "runtime_evidence_identity_capture_path": panic.evidence_capture_path(),
                                     "crash_loop": panic.crash_loop_observation(),
                                     "crash_loop_persistence_error": panic.crash_loop_persistence_error(),
+                                    "forensic_persistence_error": panic.forensic_persistence_error(),
                                 }))?
                             );
                             fail_closed_after_json();
