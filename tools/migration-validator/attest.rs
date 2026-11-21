@@ -10,6 +10,15 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 #[cfg(target_os = "linux")]
+#[path = "../../crates/franken-node/src/product_cli.rs"]
+mod product_cli;
+
+#[cfg(target_os = "linux")]
+fn resolve_product_cli_executable() -> std::io::Result<PathBuf> {
+    product_cli::resolve_for_current_executable(true)
+}
+
+#[cfg(target_os = "linux")]
 use franken_migration_schema as schema_versions;
 #[cfg(target_os = "linux")]
 use franken_migration_schema::runtime;

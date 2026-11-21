@@ -133,6 +133,8 @@ pub fn canonical_lock_key(lock_path: &std::path::Path) -> std::io::Result<std::p
     Ok(canonical_parent.join(std::path::Path::new(file_name)))
 }
 
+mod product_cli;
+
 /// Resolve the `franken-node` product CLI executable for subprocess-spawning
 /// library workflows (`migration`, `compat_corpus_run`).
 ///
@@ -142,39 +144,7 @@ pub fn canonical_lock_key(lock_path: &std::path::Path) -> std::io::Result<std::p
 /// we prefer `FRANKEN_NODE_TEST_BIN` / `CARGO_BIN_EXE_franken-node` or a sibling
 /// `franken-node` binary built into an ancestor Cargo profile directory.
 pub(crate) fn resolve_product_cli_executable() -> std::io::Result<std::path::PathBuf> {
-    #[cfg(not(test))]
-    {
-        std::env::current_exe()
-    }
-    #[cfg(test)]
-    {
-        for key in ["FRANKEN_NODE_TEST_BIN", "CARGO_BIN_EXE_franken-node"] {
-            if let Some(value) = std::env::var_os(key) {
-                let candidate = std::path::PathBuf::from(value);
-                if candidate.is_file() {
-                    return Ok(candidate);
-                }
-            }
-        }
-        let current = std::env::current_exe()?;
-        let is_lib_test_runner = current
-            .file_stem()
-            .and_then(std::ffi::OsStr::to_str)
-            .is_some_and(|stem| stem.starts_with("frankenengine_node-"));
-        if is_lib_test_runner {
-            for ancestor in current.ancestors().skip(1).take(6) {
-                let candidate = ancestor.join(if cfg!(windows) {
-                    "franken-node.exe"
-                } else {
-                    "franken-node"
-                });
-                if candidate.is_file() {
-                    return Ok(candidate);
-                }
-            }
-        }
-        Ok(current)
-    }
+    product_cli::resolve_for_current_executable(false)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

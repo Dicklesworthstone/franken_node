@@ -10,13 +10,16 @@
 use super::dependency_admission::{self, MetadataInput};
 use super::smoke_supervisor;
 use anyhow::{Context, Result, bail, ensure};
-use rustix::fs::{Mode, OFlags, open};
+use rustix::fs::{
+    AtFlags, Dir, FileType, Mode, OFlags, Stat, fstat, open, openat, readlinkat, statat,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs::{self, File, Metadata};
 use std::io::Read;
+use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Component, Path, PathBuf};
@@ -227,94 +230,174 @@ fn open_regular(path: &Path) -> Result<File> {
     Ok(file)
 }
 
-// Preserve relative link chains, including retargetable intermediate links.
-// Absolute internal links are made relative to the captured project root.
-fn captured_link(root: &Path, path: &Path) -> Result<PathBuf> {
-    let resolved = path.canonicalize()?;
-    let relative = resolved
-        .strip_prefix(root)
-        .context("external workspace symlink refused")?;
-    ensure!(
-        !relative.components().any(|part| part.as_os_str() == ".git"),
-        "link into excluded .git refused"
-    );
-    let raw = fs::read_link(path)?;
-    let parent = path.parent().context("symlink parent missing")?;
-    let mut lexical = PathBuf::new();
-    for part in parent.join(&raw).components() {
-        match part {
-            Component::ParentDir => {
-                ensure!(lexical.pop(), "symlink escapes filesystem root");
-            }
-            Component::CurDir => {}
-            _ => lexical.push(part.as_os_str()),
-        }
+// Open every physical component relative to an already held directory. A
+// NOFOLLOW open of the final file alone does not protect it from an ancestor
+// replaced with a symlink after discovery. Reopening from the captured root
+// keeps the number of live descriptors independent of the directory count.
+fn capture_directory(parent: &File, relative: &Path) -> Result<File> {
+    let mut directory = parent.try_clone()?;
+    for component in relative.components() {
+        let Component::Normal(name) = component else {
+            bail!("captured directory path is not project-relative");
+        };
+        directory = File::from(
+            openat(
+                &directory,
+                name,
+                OFlags::RDONLY
+                    | OFlags::DIRECTORY
+                    | OFlags::NOFOLLOW
+                    | OFlags::NONBLOCK
+                    | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .context("open captured directory without following links")?,
+        );
     }
-    let target = lexical
-        .strip_prefix(root)
-        .context("external lexical symlink refused")?;
+    Ok(directory)
+}
+
+fn capture_root(path: &Path) -> Result<File> {
+    let filesystem_root = File::from(open(
+        "/",
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?);
+    capture_directory(
+        &filesystem_root,
+        path.strip_prefix("/")
+            .context("captured project root must be absolute")?,
+    )
+}
+
+fn same_capture_stat(left: &Stat, right: &Stat) -> bool {
+    left.st_dev == right.st_dev
+        && left.st_ino == right.st_ino
+        && left.st_mode == right.st_mode
+        && left.st_nlink == right.st_nlink
+        && left.st_size == right.st_size
+        && left.st_mtime == right.st_mtime
+        && left.st_mtime_nsec == right.st_mtime_nsec
+        && left.st_ctime == right.st_ctime
+        && left.st_ctime_nsec == right.st_ctime_nsec
+}
+
+// Preserve relative link chains, including retargetable intermediate links.
+// Absolute internal links are rebased without collapsing `..` across a link:
+// target resolution happens against the complete captured tree, never through
+// ambient paths that can change while this capture is in progress.
+fn captured_link(root: &Path, relative: &Path, raw: PathBuf) -> Result<PathBuf> {
     ensure!(
-        !target.components().any(|part| part.as_os_str() == ".git"),
-        "link into excluded .git refused"
+        raw.as_os_str().as_encoded_bytes().len() <= MAX_PATH_BYTES,
+        "workspace symlink target too long"
     );
     if raw.is_relative() {
         return Ok(raw);
     }
+    let target = raw
+        .strip_prefix(root)
+        .context("external workspace symlink refused")?;
+    let parent = relative.parent().context("symlink parent missing")?;
     let mut rebased = PathBuf::new();
-    for _ in parent.strip_prefix(root)?.components() {
+    for _ in parent.components() {
         rebased.push("..");
     }
     rebased.push(target);
+    if rebased.as_os_str().is_empty() {
+        rebased.push(".");
+    }
     Ok(rebased)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CaptureDirectoryPhase {
+    BeforeOpen,
+    Opened,
 }
 
 impl Snapshot {
     fn capture(root: &Path, deadline: Instant) -> Result<Self> {
+        Self::capture_with_directory_observer(root, deadline, |_, _| {})
+    }
+
+    // The observer makes directory-replacement interleavings reproducible in
+    // tests. Production uses a no-op and cannot change the capture protocol.
+    fn capture_with_directory_observer(
+        root: &Path,
+        deadline: Instant,
+        mut observe_directory: impl FnMut(&Path, CaptureDirectoryPhase),
+    ) -> Result<Self> {
+        budget(deadline)?;
         let root = root.canonicalize()?;
-        ensure!(
-            root.is_dir(),
-            "native validation project must be a directory"
-        );
+        let anchor =
+            capture_root(&root).context("native validation project must be a directory")?;
+        let root_stat = fstat(&anchor)?;
         let mut entries = BTreeMap::new();
-        let mut pending = vec![root.clone()];
+        let mut pending = vec![(PathBuf::new(), root_stat)];
+        let mut directories = BTreeMap::new();
         let mut total_bytes = 0_usize;
-        while let Some(directory) = pending.pop() {
+        while let Some((relative_directory, expected)) = pending.pop() {
             budget(deadline)?;
-            for item in fs::read_dir(directory)? {
+            observe_directory(&relative_directory, CaptureDirectoryPhase::BeforeOpen);
+            let directory = capture_directory(&anchor, &relative_directory)?;
+            let before_directory = fstat(&directory)?;
+            ensure!(
+                same_capture_stat(&expected, &before_directory),
+                "workspace directory changed after discovery"
+            );
+            observe_directory(&relative_directory, CaptureDirectoryPhase::Opened);
+            for item in Dir::read_from(&directory)? {
                 budget(deadline)?;
-                let path = item?.path();
-                if path.file_name().is_some_and(|name| name == ".git") {
+                let item = item?;
+                let name = item.file_name();
+                if matches!(name.to_bytes(), b"." | b".." | b".git") {
                     continue;
                 }
                 ensure!(
                     entries.len() < MAX_ENTRIES,
                     "native validation entry limit exceeded"
                 );
-                let relative = path.strip_prefix(&root)?.to_path_buf();
+                let leaf = name.to_str().context("non-UTF-8 workspace path refused")?;
+                let relative = relative_directory.join(leaf);
                 let text = relative
                     .to_str()
                     .context("non-UTF-8 workspace path refused")?;
                 ensure!(text.len() <= MAX_PATH_BYTES, "workspace path too long");
-                let metadata = fs::symlink_metadata(&path)?;
-                let data = if metadata.is_symlink() {
-                    EntryData::Link(captured_link(&root, &path)?)
-                } else if metadata.is_dir() {
-                    pending.push(path.clone());
-                    EntryData::Directory
-                } else if metadata.is_file() {
+                let metadata = statat(&directory, name, AtFlags::SYMLINK_NOFOLLOW)?;
+                let kind = FileType::from_raw_mode(metadata.st_mode);
+                let data = if kind == FileType::Symlink {
+                    let raw = readlinkat(&directory, name, Vec::new())?;
+                    let raw = PathBuf::from(std::ffi::OsString::from_vec(raw.into_bytes()));
                     ensure!(
-                        metadata.nlink() == 1,
+                        same_capture_stat(
+                            &metadata,
+                            &statat(&directory, name, AtFlags::SYMLINK_NOFOLLOW)?,
+                        ),
+                        "workspace symlink changed during capture"
+                    );
+                    EntryData::Link(captured_link(&root, &relative, raw)?)
+                } else if kind == FileType::Directory {
+                    pending.push((relative.clone(), metadata));
+                    EntryData::Directory
+                } else if kind == FileType::RegularFile {
+                    ensure!(
+                        metadata.st_nlink == 1,
                         "hard-linked workspace files require explicit isolation"
                     );
-                    let mut file = open_regular(&path)?;
-                    let before = file.metadata()?;
+                    let mut file = File::from(openat(
+                        &directory,
+                        name,
+                        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+                        Mode::empty(),
+                    )?);
+                    let before = fstat(&file)?;
                     ensure!(
-                        same_file_version(&metadata, &before),
+                        same_capture_stat(&metadata, &before),
                         "input changed before capture"
                     );
                     let remaining = MAX_PROJECT_BYTES - total_bytes;
                     ensure!(
-                        before.len() <= remaining as u64,
+                        u64::try_from(before.st_size).is_ok_and(|bytes| bytes <= remaining as u64),
                         "native validation input byte limit exceeded"
                     );
                     let mut bytes = Vec::new();
@@ -335,7 +418,11 @@ impl Snapshot {
                         bytes.extend_from_slice(&chunk[..read]);
                     }
                     ensure!(
-                        same_file_version(&before, &file.metadata()?),
+                        same_capture_stat(&before, &fstat(&file)?)
+                            && same_capture_stat(
+                                &before,
+                                &statat(&directory, name, AtFlags::SYMLINK_NOFOLLOW)?,
+                            ),
                         "input changed during capture"
                     );
                     total_bytes += bytes.len();
@@ -343,13 +430,47 @@ impl Snapshot {
                 } else {
                     bail!("nonregular workspace input refused: {}", relative.display());
                 };
-                entries.insert(
-                    relative,
-                    Entry {
-                        mode: metadata.mode() & 0o777,
-                        data,
-                    },
+                ensure!(
+                    entries
+                        .insert(
+                            relative,
+                            Entry {
+                                // Unix mode_t is u16 on Apple platforms, u32 on Linux.
+                                #[allow(clippy::useless_conversion)]
+                                mode: u32::from(metadata.st_mode & 0o777),
+                                data,
+                            },
+                        )
+                        .is_none(),
+                    "workspace directory changed during enumeration"
                 );
+            }
+            ensure!(
+                same_capture_stat(&before_directory, &fstat(&directory)?),
+                "workspace directory changed during capture"
+            );
+            directories.insert(relative_directory, before_directory);
+        }
+        // Retargeted/renamed directories must fail even if their already-open
+        // handles still yielded the original bytes. No mixed live topology is
+        // admitted as a stable source snapshot, and no path is reopened through
+        // an attacker-controlled ancestor while checking that topology.
+        for (relative, expected) in directories {
+            budget(deadline)?;
+            let directory = capture_directory(&anchor, &relative)?;
+            ensure!(
+                same_capture_stat(&expected, &fstat(&directory)?),
+                "workspace directory changed before capture completed"
+            );
+        }
+        ensure!(
+            same_capture_stat(&root_stat, &fstat(capture_root(&root)?)?),
+            "workspace root changed during capture"
+        );
+        for (path, entry) in &entries {
+            if let EntryData::Link(target) = &entry.data {
+                native_replay::check_link(path, target, &entries, deadline)
+                    .context("external workspace symlink or invalid captured target refused")?;
             }
         }
         let mut snapshot = Self::from_entries(entries);
@@ -1869,6 +1990,183 @@ mod tests {
         assert!(
             Snapshot::capture(project.path(), Instant::now() + Duration::from_secs(5)).is_err()
         );
+    }
+
+    #[test]
+    fn capture_refuses_directory_retargeting_before_and_after_open() {
+        for phase in [
+            CaptureDirectoryPhase::BeforeOpen,
+            CaptureDirectoryPhase::Opened,
+        ] {
+            let project = fixture();
+            let outside = fixture();
+            let retained = fixture();
+            write(project.path(), "src/local.test.js", "console.log('local');");
+            write(
+                outside.path(),
+                "outside-only/escaped.test.js",
+                "throw new Error('external source must never be captured');",
+            );
+            let mut swapped = false;
+            let mut visited = Vec::new();
+            let captured = Snapshot::capture_with_directory_observer(
+                project.path(),
+                Instant::now() + Duration::from_secs(5),
+                |path, observed_phase| {
+                    visited.push(path.to_path_buf());
+                    if path == Path::new("src") && observed_phase == phase && !swapped {
+                        // Keep all original bytes. Replace exactly the directory
+                        // that capture already classified as ordinary, then let
+                        // the same production walker continue its next step.
+                        fs::rename(project.path().join("src"), retained.path().join("src"))
+                            .unwrap();
+                        symlink(outside.path(), project.path().join("src")).unwrap();
+                        swapped = true;
+                    }
+                },
+            );
+            assert!(swapped);
+            let error = captured
+                .err()
+                .expect("changed ancestry must refuse capture");
+            let message = format!("{error:#}");
+            assert!(
+                message.contains("directory") && !message.contains("outside-only"),
+                "{message}"
+            );
+            // In the after-open cut, the held descriptor may still inspect
+            // original bytes. It must never enumerate the replacement target.
+            assert!(
+                !visited
+                    .iter()
+                    .any(|path| path.starts_with("src/outside-only")),
+                "external replacement was traversed: {visited:?}"
+            );
+            assert_eq!(
+                fs::read_to_string(retained.path().join("src/local.test.js")).unwrap(),
+                "console.log('local');"
+            );
+            assert_eq!(
+                fs::read_to_string(outside.path().join("outside-only/escaped.test.js")).unwrap(),
+                "throw new Error('external source must never be captured');"
+            );
+        }
+    }
+
+    #[test]
+    fn capture_refuses_replacement_by_another_ordinary_directory() {
+        let project = fixture();
+        let retained = fixture();
+        write(
+            project.path(),
+            "src/case.test.js",
+            "console.log('original');",
+        );
+        let mut swapped = false;
+        let captured = Snapshot::capture_with_directory_observer(
+            project.path(),
+            Instant::now() + Duration::from_secs(5),
+            |path, phase| {
+                if path == Path::new("src") && phase == CaptureDirectoryPhase::BeforeOpen {
+                    fs::rename(project.path().join("src"), retained.path().join("src")).unwrap();
+                    write(
+                        project.path(),
+                        "src/case.test.js",
+                        "console.log('modified');",
+                    );
+                    swapped = true;
+                }
+            },
+        );
+        assert!(swapped);
+        assert!(
+            captured
+                .err()
+                .expect("changed directory identity must refuse capture")
+                .to_string()
+                .contains("workspace directory changed after discovery")
+        );
+    }
+
+    #[test]
+    fn capture_refuses_retargeted_project_ancestor_after_root_admission() {
+        let parent = fixture();
+        let outside = fixture();
+        let project = parent.path().join("parent/project");
+        write(&project, "local.test.js", "console.log('local');");
+        write(
+            outside.path(),
+            "project/external.test.js",
+            "throw new Error('external');",
+        );
+        let mut swapped = false;
+        let captured = Snapshot::capture_with_directory_observer(
+            &project,
+            Instant::now() + Duration::from_secs(5),
+            |path, phase| {
+                if path.as_os_str().is_empty() && phase == CaptureDirectoryPhase::Opened {
+                    fs::rename(parent.path().join("parent"), parent.path().join("retained"))
+                        .unwrap();
+                    symlink(outside.path(), parent.path().join("parent")).unwrap();
+                    swapped = true;
+                }
+            },
+        );
+        assert!(swapped);
+        let message = format!(
+            "{:#}",
+            captured.err().expect("retargeted root ancestry must fail")
+        );
+        assert!(message.contains("without following links"), "{message}");
+        assert_eq!(
+            fs::read_to_string(parent.path().join("retained/project/local.test.js")).unwrap(),
+            "console.log('local');"
+        );
+    }
+
+    #[test]
+    fn capture_preserves_absolute_link_parent_steps_after_intermediate_links() {
+        let project = fixture();
+        write(project.path(), "first/value", "wrong lexical target");
+        write(project.path(), "second/value", "actual resolved target");
+        fs::create_dir(project.path().join("second/nested")).unwrap();
+        symlink("../second/nested", project.path().join("first/link")).unwrap();
+        symlink(
+            project.path().join("first/link/../value"),
+            project.path().join("alias"),
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let snapshot = Snapshot::capture(project.path(), deadline).unwrap();
+        let EntryData::Link(target) = &snapshot.entries[Path::new("alias")].data else {
+            panic!("the captured alias must stay a link");
+        };
+        assert_eq!(target, Path::new("first/link/../value"));
+        let staged = fixture();
+        snapshot
+            .stage(&staged.path().join("project"), deadline)
+            .unwrap();
+        assert_eq!(
+            fs::read(staged.path().join("project/alias")).unwrap(),
+            fs::read(project.path().join("alias")).unwrap()
+        );
+        assert_eq!(
+            fs::read_to_string(staged.path().join("project/alias")).unwrap(),
+            "actual resolved target"
+        );
+    }
+
+    #[test]
+    fn capture_rejects_dangling_cyclic_and_file_traversing_links() {
+        for target in ["missing", "alias", "value/../value"] {
+            let project = fixture();
+            write(project.path(), "value", "ordinary file");
+            symlink(target, project.path().join("alias")).unwrap();
+            assert!(
+                Snapshot::capture(project.path(), Instant::now() + Duration::from_secs(5)).is_err(),
+                "invalid link target must refuse: {target}"
+            );
+        }
     }
 
     #[test]

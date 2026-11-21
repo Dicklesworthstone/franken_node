@@ -7,6 +7,15 @@ use clap::Parser;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+#[cfg(target_os = "linux")]
+#[path = "../../crates/franken-node/src/product_cli.rs"]
+mod product_cli;
+
+#[cfg(target_os = "linux")]
+fn resolve_product_cli_executable() -> std::io::Result<PathBuf> {
+    product_cli::resolve_for_current_executable(true)
+}
+
 // Dependency admission and workspace resolution share the product's canonical
 // graph implementation, including its schema identities and namespace paths.
 #[cfg(target_os = "linux")]

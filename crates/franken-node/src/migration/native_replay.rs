@@ -457,9 +457,9 @@ fn restore_snapshot(
     Ok(snapshot)
 }
 
-// Resolve against the imported tree, NOT the host filesystem. Handle links
-// before subsequent '..' components, as real path resolution does.
-fn check_link(
+// Resolve against the captured/imported tree, NOT the host filesystem. Handle
+// links before subsequent '..' components, as real path resolution does.
+pub(super) fn check_link(
     path: &Path,
     target: &Path,
     entries: &BTreeMap<PathBuf, Entry>,
