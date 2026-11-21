@@ -328,8 +328,8 @@ def _publisher_host_authority_valid(host: Any, capabilities: list[str], max_inst
                     or any(left >= right for left, right in zip(values, values[1:]))):
                 return False
     quotas = host["max_calls_per_epoch"]
-    return (isinstance(quotas, dict) and len(quotas) <= 5
-            and all(capability in {"fs_read", "fs_write", "network_egress", "random_read", "env_read"}
+    return (isinstance(quotas, dict) and len(quotas) <= 6
+            and all(capability in {"fs_read", "fs_write", "network_egress", "random_read", "env_read", "process_spawn"}
                     and capability in capabilities and isinstance(limit, str)
                     and re.fullmatch(r"0|[1-9][0-9]{0,19}", limit) is not None
                     and int(limit) <= int(max_instructions)

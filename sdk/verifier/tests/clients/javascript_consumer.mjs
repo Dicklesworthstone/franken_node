@@ -239,14 +239,16 @@ const publisherControls = ["publisher_wrong_scope", "publisher_wrong_signer", "p
   "publisher_host_noncanonical_quota", "publisher_host_quota_newline", "publisher_host_wildcard", "publisher_host_url",
   "publisher_host_invalid_port", "publisher_host_uppercase", "publisher_host_invalid_ipv6", "publisher_host_duplicate_scope",
   "publisher_host_unsorted_scope", "publisher_host_null_scope", "publisher_host_undeclared_scope", "publisher_host_invalid_env",
-  "publisher_host_env_newline", "publisher_host_excessive_scope"];
+  "publisher_host_env_newline", "publisher_host_excessive_scope", "publisher_host_process_undeclared",
+  "publisher_host_process_overflow", "publisher_host_process_beyond_instruction"];
 for (const mode of publisherControls) {
   await assert.rejects(verifyArtifact(Buffer.from(JSON.stringify({ protocol_control: mode })), cases[0].anchor,
     { verifier: resolve("fake_verifier"), format: "publisher-source", signatureHex: "00".repeat(64) }),
   (error) => error instanceof VerifierError && error.code === "PROTOCOL_INVALID", `protocol_${mode}`);
   console.log(JSON.stringify({ case: `protocol_${mode}`, result: "PROTOCOL_INVALID" }));
 }
-const publisherHostPositives = ["publisher_host_valid", "publisher_host_empty", "publisher_host_unspecified"];
+const publisherHostPositives = ["publisher_host_valid", "publisher_host_empty", "publisher_host_unspecified",
+  "publisher_host_process_maximum", "publisher_host_process_zero"];
 for (const mode of publisherHostPositives) {
   const verified = await verifyArtifact(Buffer.from(JSON.stringify({ protocol_control: mode })), cases[0].anchor,
     { verifier: resolve("fake_verifier"), format: "publisher-source", signatureHex: "00".repeat(64) });
@@ -257,8 +259,11 @@ for (const mode of publisherHostPositives) {
     assert.deepEqual(host.host_ports, ["[2001:db8::1]:443", "api.example.test:443"]);
   } else if (mode === "publisher_host_empty") {
     assert.deepEqual(host, { host_ports: [], env_keys: [], max_calls_per_epoch: {} });
-  } else {
+  } else if (mode === "publisher_host_unspecified") {
     assert.deepEqual(host, { max_calls_per_epoch: { fs_read: "0" } });
+  } else {
+    assert.equal(host.max_calls_per_epoch.process_spawn, mode.endsWith("_zero") ? "0" : "18446744073709551615");
+    assert.equal(Object.keys(host.max_calls_per_epoch).length, 6);
   }
   console.log(JSON.stringify({ case: `protocol_${mode}`, result: "verified" }));
 }

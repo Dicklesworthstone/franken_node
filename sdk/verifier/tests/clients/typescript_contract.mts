@@ -75,7 +75,8 @@ export async function auditPublisherSource(
   const host = verified.facts.runtime_authority.host_io;
   const endpoints: string[] | undefined = host?.host_ports;
   const networkCalls: string | undefined = host?.max_calls_per_epoch.network_egress;
-  return `${verified.facts.artifact_sha256}:${instructionCeiling}:${endpoints?.join(",")}:${networkCalls}`;
+  const processCalls: string | undefined = host?.max_calls_per_epoch.process_spawn;
+  return `${verified.facts.artifact_sha256}:${instructionCeiling}:${endpoints?.join(",")}:${networkCalls}:${processCalls}`;
 }
 
 export async function auditResolution(data: Uint8Array, anchor: string, executable: string): Promise<string | null> {
