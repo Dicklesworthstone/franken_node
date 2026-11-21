@@ -861,3 +861,71 @@ fn trust_calibrate_conformal_enforces_split_quantile_and_small_sample_strict_fal
     assert_eq!(evals[2]["decision"], "strict_fallback_refuse");
     assert_eq!(evals[2]["fallback_applied"], true);
 }
+
+/// bd-reality-20260923-26n9r.6: regression coverage for Node-compatible
+/// `util.inspect.custom` hooks, Promise settlement ordering, and no-silent-
+/// miscompile protection on modern ESM JSON module imports.
+#[test]
+fn modern_inspect_promise_and_json_esm_semantics_match_node_or_fail_closed() {
+    // Confirmed Node-identical semantics (`util.inspect` + `Promise` chaining).
+    for (source, expected) in &[
+        (
+            "const util = require('util'); const obj = { [Symbol.for('nodejs.util.inspect.custom')]() { return 'CustomToken<42>'; } }; console.log(util.inspect(obj));",
+            "CustomToken<42>\n",
+        ),
+        (
+            "Promise.resolve('settled-ok').then(v => console.log('p:' + v));",
+            "p:settled-ok\n",
+        ),
+    ] {
+        let (exit, stdout) = run_snippet(source);
+        if exit == Some(0) {
+            assert_eq!(
+                stdout, *expected,
+                "SILENT MISCOMPILE: franken exited 0 with output differing from Node for {source:?} (expected {expected:?}, got {stdout:?})"
+            );
+        }
+    }
+
+    // Typed local JSON ESM import: must either match Node exactly (`json:v1:3`)
+    // or fail closed (nonzero exit), never silently miscompile at exit 0.
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let init = Command::new(franken_node_bin())
+        .args(["init", "--profile", "balanced", "--out-dir", "."])
+        .current_dir(dir.path())
+        .output()
+        .expect("init");
+    assert!(init.status.success());
+    std::fs::write(
+        dir.path().join("config.json"),
+        "{\"tag\":\"v1\",\"count\":3}\n",
+    )
+    .expect("write config.json");
+    std::fs::write(
+        dir.path().join("app.mjs"),
+        "import cfg from './config.json' with { type: 'json' };\nconsole.log('json:' + cfg.tag + ':' + cfg.count);\n",
+    )
+    .expect("write app.mjs");
+    let output = Command::new(franken_node_bin())
+        .args([
+            "run",
+            "app.mjs",
+            "--policy",
+            "balanced",
+            "--runtime",
+            "franken-engine",
+            "--engine-bin",
+            franken_node_bin(),
+            "--console-only",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .expect("run app.mjs");
+    if output.status.success() {
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "json:v1:3\n",
+            "SILENT MISCOMPILE on JSON ESM import"
+        );
+    }
+}
