@@ -420,13 +420,36 @@ pub struct FleetControlPlaneService {
     /// not `Send`, so one dedicated thread owns it for the service's lifetime
     /// and every request is executed there, serialized; that is also the
     /// single-writer discipline the WAL store wants.
-    store: Mutex<mpsc::Sender<StoreJob>>,
+    store: Mutex<Option<mpsc::Sender<StoreJob>>>,
+    /// Join handle for the store thread so dropping the service synchronously
+    /// drains and closes `DurableFleetTransport` (releasing `fleet-state.db`
+    /// locks before any successor coordinator incarnation opens `state_dir`).
+    store_thread: Mutex<Option<std::thread::JoinHandle<()>>>,
     state_dir: PathBuf,
     token: String,
     node_credentials: Option<Arc<FleetNodeCredentials>>,
     epoch_signing_key: Arc<EpochSigningKey>,
     seqlock_page: Arc<SeqlockControlPage>,
     clock: fn() -> DateTime<Utc>,
+}
+
+impl Drop for FleetControlPlaneService {
+    fn drop(&mut self) {
+        let mut sender = match self.store.lock() {
+            Ok(sender) => sender,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let _ = sender.take();
+        drop(sender);
+
+        let mut handle = match self.store_thread.lock() {
+            Ok(handle) => handle,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Some(handle) = handle.take() {
+            let _ = handle.join();
+        }
+    }
 }
 
 type StoreJob = Box<dyn FnOnce(&mut DurableFleetTransport, &mut AuthenticatedNodes) + Send>;
@@ -459,7 +482,7 @@ impl FleetControlPlaneService {
         let store_dir = state_dir.clone();
         let (jobs, inbox) = mpsc::channel::<StoreJob>();
         let (ready, opened) = mpsc::sync_channel::<Result<(), FleetTransportError>>(1);
-        std::thread::Builder::new()
+        let store_thread = std::thread::Builder::new()
             .name("fleet-control-plane-store".to_string())
             .spawn(move || {
                 let seqlock_path = store_dir.join("seqlock.page");
@@ -469,8 +492,9 @@ impl FleetControlPlaneService {
                         let recovered_epoch = transport.current_fleet_epoch(&store_epoch_key)?;
                         if recovered_epoch > 0 {
                             let state = transport.read_shared_state()?;
-                            let checkpoint =
-                                super::fleet_transport::fleet_action_log_checkpoint(&state.actions)?;
+                            let checkpoint = super::fleet_transport::fleet_action_log_checkpoint(
+                                &state.actions,
+                            )?;
                             let active_hold_count =
                                 super::fleet_transport::fleet_native_session_holds(
                                     &state.actions,
@@ -528,11 +552,18 @@ impl FleetControlPlaneService {
                 }
             })
             .map_err(|err| FleetTransportError::io(format!("spawn fleet store thread: {err}")))?;
-        opened
+        let startup_result = opened
             .recv()
-            .map_err(|_| FleetTransportError::io("fleet store thread exited during startup"))??;
+            .map_err(|_| FleetTransportError::io("fleet store thread exited during startup"))
+            .and_then(|result| result);
+        if let Err(err) = startup_result {
+            drop(jobs);
+            let _ = store_thread.join();
+            return Err(err);
+        }
         Ok(Self {
-            store: Mutex::new(jobs),
+            store: Mutex::new(Some(jobs)),
+            store_thread: Mutex::new(Some(store_thread)),
             state_dir,
             token: token.to_string(),
             node_credentials: None,
@@ -987,7 +1018,10 @@ impl FleetControlPlaneService {
                 // lock is still safe to use.
                 Err(poisoned) => poisoned.into_inner(),
             };
-            sender.send(job)
+            sender
+                .as_ref()
+                .ok_or(())
+                .and_then(|tx| tx.send(job).map_err(|_| ()))
         };
         if sent.is_err() {
             return store_error(&FleetTransportError::io("fleet store thread has stopped"));

@@ -1,6 +1,6 @@
 use chrono::Utc;
 use ed25519_dalek::{Signer, SigningKey};
-use frankenengine_node::config::TrustConfig;
+use frankenengine_node::config::Config;
 use frankenengine_node::supply_chain::certification::{EvidenceType, VerifiedEvidenceRef};
 use frankenengine_node::supply_chain::trust_card::{
     BehavioralProfile, CapabilityDeclaration, CapabilityRisk, CertificationLevel,
@@ -249,10 +249,8 @@ fn fixture_evidence_refs(fixture: &AdversarialExtensionFixture) -> Vec<VerifiedE
 }
 
 fn write_revoked_trust_registry(workspace: &Path, fixture: &AdversarialExtensionFixture) {
-    let trust_config = TrustConfig {
-        registry_signing_key: Some(FIXTURE_REGISTRY_SIGNING_KEY_B64.to_string()),
-        ..TrustConfig::default()
-    };
+    let mut trust_config = Config::default().trust;
+    trust_config.registry_signing_key = Some(FIXTURE_REGISTRY_SIGNING_KEY_B64.to_string());
     let mut registry = TrustCardRegistry::from_config(&trust_config)
         .expect("construct trust card registry from fixture signing key");
     let payload_hash = Sha256::digest(fixture.payload_body.as_bytes());

@@ -1,6 +1,6 @@
 #![allow(clippy::duplicate_mod)]
 
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use serde_json::json;
 use std::fs;
 use std::hash::{Hash, Hasher};
@@ -14,7 +14,6 @@ use frankenengine_node::vef::{proof_scheduler, proof_service, receipt_chain};
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::proof_scheduler::{SchedulerPolicy, VefProofScheduler};
     use super::proof_service::{
         ProofBackendId, ProofInputEnvelope, ProofServiceConfig, VefProofService,
@@ -23,14 +22,14 @@ mod tests {
     use super::vef_execution_receipt::{
         ExecutionActionType, ExecutionReceipt, RECEIPT_SCHEMA_VERSION,
     };
+    use super::*;
     use std::collections::BTreeMap;
 
     /// Real test harness with filesystem persistence and structured logging
     struct VefProofTestHarness {
-        temp_dir: TempDir,
+        _temp_dir: TempDir,
         receipts_dir: PathBuf,
         proofs_dir: PathBuf,
-        test_start: DateTime<Utc>,
     }
 
     impl VefProofTestHarness {
@@ -48,10 +47,9 @@ mod tests {
             );
 
             Self {
-                temp_dir,
+                _temp_dir: temp_dir,
                 receipts_dir,
                 proofs_dir,
-                test_start: Utc::now(),
             }
         }
 
@@ -62,12 +60,6 @@ mod tests {
 
             debug!("Saved receipt to file: {}", receipt_path.display());
             receipt_path
-        }
-
-        fn load_receipt_from_file(&self, filename: &str) -> ExecutionReceipt {
-            let receipt_path = self.receipts_dir.join(filename);
-            let receipt_json = fs::read_to_string(&receipt_path).expect("read receipt file");
-            serde_json::from_str(&receipt_json).expect("deserialize receipt")
         }
 
         fn save_proof_to_file(&self, proof: &serde_json::Value, filename: &str) -> PathBuf {

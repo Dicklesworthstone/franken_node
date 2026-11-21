@@ -8555,8 +8555,9 @@ fn fleet_http_epoch_barrier_survives_coordinator_restart_and_refuses_stale_or_in
     use frankenengine_node::control_plane::fleet_transport::{
         FLEET_EPOCH_BARRIER_CERTIFIED_DRAIN_SCOPE, NATIVE_SESSION_DRAIN_ATTESTATION_SCHEMA,
         NativeSessionDrainAttestation, NativeSessionDrainCheckpoint, SeqlockControlPage,
-        fleet_application_checkpoint, fleet_quarantine_state,
+        fleet_application_checkpoint,
     };
+    use frankenengine_node::control_plane::fleet_transport_durable::count_active_quarantine_actions;
     use frankenengine_node::control_plane::fleet_transport_http::{
         FleetHttpEpochBarrierRequest, HttpFleetTransport,
     };
@@ -8675,7 +8676,7 @@ fn fleet_http_epoch_barrier_survives_coordinator_restart_and_refuses_stale_or_in
             } else {
                 NodeHealth::Maintenance
             },
-            applied_actions: Some(expected.clone()),
+            applied_actions: (indeterminate_sessions == 0).then(|| expected.clone()),
             native_session_drain: Some(drain),
         }
     };
@@ -8816,15 +8817,34 @@ fn fleet_http_epoch_barrier_survives_coordinator_restart_and_refuses_stale_or_in
         })
         .expect("release incident 1");
     let actions_after_partial_release = operator_2.list_actions().expect("actions 2");
-    let active_quarantines = fleet_quarantine_state(&actions_after_partial_release);
-    assert!(
-        active_quarantines.iter().any(|entry| {
-            entry.zone_id == "east"
-                && entry.incident_id == "inc-restart-2"
-                && entry.target_id == "npm:@acme/compromised"
-        }),
-        "releasing one quarantine incident must preserve overlapping second quarantine owner"
+    assert_eq!(
+        count_active_quarantine_actions(&state_dir).expect("durable active quarantine count"),
+        1,
+        "releasing one quarantine incident must preserve overlapping second quarantine owner in durable SQLite"
     );
+    let mut active_owners = std::collections::BTreeMap::<String, (String, String)>::new();
+    for record in &actions_after_partial_release {
+        match &record.action {
+            FleetAction::Quarantine {
+                zone_id,
+                incident_id,
+                target_id,
+                ..
+            } => {
+                active_owners.insert(incident_id.clone(), (zone_id.clone(), target_id.clone()));
+            }
+            FleetAction::Release { incident_id, .. } => {
+                active_owners.remove(incident_id);
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(
+        active_owners.get("inc-restart-2"),
+        Some(&("east".to_string(), "npm:@acme/compromised".to_string())),
+        "releasing inc-restart-1 must leave inc-restart-2 active on npm:@acme/compromised"
+    );
+    assert!(!active_owners.contains_key("inc-restart-1"));
 
     // Fault cut C: unknown pre-crash obligation (`indeterminate_sessions > 0`) on node-a
     // prevents certified quiescence and keeps committed epoch at 1.
