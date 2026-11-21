@@ -150,9 +150,17 @@ The restrictions have these meanings:
   an otherwise unapproved host variable. Publisher execution refuses operator
   environment scopes that the bounded envelope cannot represent.
 - `max_calls_per_epoch` accepts only declared host capabilities: `fs_read`,
-  `fs_write`, `network_egress`, `random_read`, and `env_read`. A limit cannot
+  `fs_write`, `network_egress`, `random_read`, `env_read`, and `process_spawn`. A limit cannot
   exceed the authority's instruction ceiling. These counters cover one native
   execution, reset for a new run, and are not distributed fleet quotas.
+- `process_spawn` counts each guest process-provider call: synchronous run,
+  spawn, stdin write/close, wait, and kill. It is a call budget, not a child
+  count. An asynchronous spawn and its scheduled wait consume separate calls.
+  An admitted attempt consumes budget even if cancellation or the
+  independently signed process policy later refuses it, or the native provider
+  fails. Supervisor-owned handle cleanup remains available after exhaustion;
+  a guest cannot use that cleanup path to escape its budget. Neither a quota
+  nor its absence grants process-spawn authority.
 - An omitted scope leaves that dimension unrestricted by the publisher. An
   explicit empty endpoint/key set denies the corresponding effect family;
   a zero invocation budget denies every invocation of that capability.
@@ -173,8 +181,9 @@ These restrictions only narrow authority. The runtime profile, sandbox,
 current containment state, IFC rules, SSRF protection, and separately signed
 process-spawn admission still apply. In particular,
 `security.network_policy.allowlist` remains an SSRF exception list; it is not
-repurposed as an exclusive egress destination scope. Process spawning and
-filesystem path restrictions are not granted or specified by `host_io`.
+repurposed as an exclusive egress destination scope. Filesystem path restrictions
+are not specified by `host_io`; process execution still requires the operator's
+separately signed admission and executable policy.
 
 Native replay captures the effective ceiling used by publisher-approved
 execution. Replay validates the recorded request sequence against a fresh

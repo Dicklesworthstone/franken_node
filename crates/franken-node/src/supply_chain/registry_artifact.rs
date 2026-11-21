@@ -80,7 +80,10 @@ pub struct ArtifactHostIoAuthority {
     /// Exact environment keys, intersected with `runtime.environment_allowlist`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env_keys: Option<BTreeSet<String>>,
-    /// Per-run invocation ceilings for the five canonical host capability IDs.
+    /// Per-run invocation ceilings for the six canonical host capability IDs.
+    /// `process_spawn` counts guest process-provider calls, including lifecycle
+    /// operations and failed admitted attempts. Engine-owned compensating
+    /// cleanup remains available after exhaustion and does not consume quota.
     #[serde(
         default,
         skip_serializing_if = "BTreeMap::is_empty",
@@ -130,6 +133,7 @@ impl ArtifactHostIoAuthority {
             "fs_read",
             "fs_write",
             "network_egress",
+            "process_spawn",
             "random_read",
             "env_read",
         ];
@@ -2157,6 +2161,56 @@ mod tests {
             }))
             .is_err(),
             "unsupported filesystem scopes must not be silently accepted"
+        );
+    }
+
+    #[test]
+    fn publisher_process_quota_is_signed_bounded_and_cannot_grant_operator_authority() {
+        let mut authority = runtime_authority();
+        authority.allowed_capabilities.push("process_spawn".into());
+        for budget in [0, 1, authority.max_instructions] {
+            authority.host_io = Some(ArtifactHostIoAuthority {
+                max_calls_per_epoch: BTreeMap::from([("process_spawn".into(), budget)]),
+                ..ArtifactHostIoAuthority::default()
+            });
+            authority.validate().unwrap();
+            let roundtrip: ArtifactRuntimeAuthority =
+                serde_json::from_slice(&serde_json::to_vec(&authority).unwrap()).unwrap();
+            assert_eq!(roundtrip, authority);
+            let fixture = Fixture::new("console.log(42);\n").with_runtime_authority(&authority);
+            let approval = fixture.approval();
+            assert_eq!(approval.runtime_authority(), Some(&authority));
+            let ceiling = approval
+                .enforce_attenuated_capability_envelope(&crate::config::Config::for_profile(
+                    crate::config::Profile::LegacyRisky,
+                ))
+                .unwrap()
+                .unwrap();
+            assert!(
+                !ceiling.permits_capability("process_spawn"),
+                "publisher quota is never a replacement for signed operator process admission"
+            );
+        }
+        let original = authority.commitment().unwrap();
+        authority
+            .host_io
+            .as_mut()
+            .unwrap()
+            .max_calls_per_epoch
+            .insert("process_spawn".into(), 1);
+        assert_ne!(authority.commitment().unwrap(), original);
+        authority
+            .host_io
+            .as_mut()
+            .unwrap()
+            .max_calls_per_epoch
+            .insert("process_spawn".into(), authority.max_instructions + 1);
+        assert!(authority.validate().is_err());
+        assert!(
+            serde_json::from_str::<ArtifactHostIoAuthority>(
+                r#"{"max_calls_per_epoch":{"process_spawn":0,"process_spawn":1}}"#
+            )
+            .is_err()
         );
     }
 

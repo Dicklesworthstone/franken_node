@@ -1397,7 +1397,7 @@ mod engine {
     };
     use frankenengine_extension_host::process_spawn::{
         ProcessSpawnCapability, ProcessSpawnControl, ProcessSpawnError, ProcessSpawnOutcome,
-        ProcessSpawnProvider, ProcessSpawnRequest,
+        ProcessSpawnProvider, ProcessSpawnRequest, ProcessSpawnResponse,
     };
 
     use super::*;
@@ -2210,6 +2210,130 @@ mod engine {
         Ok(())
     }
 
+    /// Process journals also contain pre-provider refusals and engine-owned
+    /// compensation. Preparation is a deterministic map, not a per-attempt
+    /// tape: conflicting results for one request are refused during capture.
+    /// Only actual guest provider attempts consume the signed per-run quota.
+    /// Ambiguous original/prepared aliases fail closed instead of making an
+    /// admitted failed attempt look like a free preparation refusal. A request
+    /// observed both at dynamic IFC refusal and provider preparation is also
+    /// ambiguous: the journal does not retain the original argument labels.
+    /// Replay rechecks dynamic IFC and consumes the exact global journal.
+    fn validate_scoped_process_transcript(
+        ceiling: &EffectiveCapabilityCeiling,
+        process: &CapturedProcessReplay,
+        capabilities: &[String],
+    ) -> Result<(), String> {
+        let authority = PublisherHostAuthority::new(ceiling.clone())
+            .map_err(|_| "captured publisher process authority is not enforceable".to_string())?;
+        let has_grant = capabilities.iter().any(|tag| {
+            RuntimeCapability::from_tag_str(tag) == Some(RuntimeCapability::ProcessSpawn)
+        });
+        let grants = [ProcessSpawnCapability::Spawn];
+        let granted = if has_grant { grants.as_slice() } else { &[] };
+        let publisher_denial = |outcome: &ProcessSpawnOutcome| {
+            matches!(outcome, Err(ProcessSpawnError::Denied { reason })
+                if reason.starts_with("publisher_authority:"))
+        };
+        let key = |request: &ProcessSpawnRequest| {
+            serde_json::to_vec(request)
+                .map_err(|_| "captured process request cannot be indexed".to_string())
+        };
+        let mut preflights = std::collections::BTreeMap::new();
+        let mut preparations = std::collections::BTreeMap::new();
+        for entry in &process.preparation {
+            let duplicate = match entry {
+                CapturedProcessPreparation::Preflight { request, outcome } => {
+                    preflights.insert(key(request)?, outcome).is_some()
+                }
+                CapturedProcessPreparation::Prepare { request, outcome } => {
+                    preparations.insert(key(request)?, outcome).is_some()
+                }
+            };
+            if duplicate {
+                return Err("captured process preparation repeats an admission key".into());
+            }
+        }
+        let mut prepared_requests = BTreeSet::new();
+        let mut preparation_failures: std::collections::BTreeMap<&[u8], &ProcessSpawnError> =
+            std::collections::BTreeMap::new();
+        for (original, outcome) in &preparations {
+            if !matches!(preflights.get(original), Some(Ok(()))) {
+                return Err("captured process preparation lacks its original preflight".into());
+            }
+            match outcome {
+                Err(failure) => {
+                    preparation_failures.insert(original.as_slice(), failure);
+                }
+                Ok(prepared) => {
+                    let prepared_key = key(prepared)?;
+                    match preflights.get(&prepared_key) {
+                        Some(Ok(())) => {
+                            prepared_requests.insert(prepared_key);
+                        }
+                        Some(Err(failure)) => {
+                            preparation_failures.insert(original.as_slice(), failure);
+                        }
+                        None => {
+                            return Err("captured prepared process request lacks preflight".into());
+                        }
+                    }
+                }
+            }
+        }
+        for entry in &process.journal {
+            let HostEffectJournalEntry::ProcessSpawn { request, outcome } = entry else {
+                continue;
+            };
+            if matches!(request, ProcessSpawnRequest::Cleanup { .. }) {
+                if publisher_denial(outcome)
+                    || outcome.as_ref().is_ok_and(|response| {
+                        !matches!(response, ProcessSpawnResponse::Cleaned { .. })
+                    })
+                {
+                    return Err("captured cleanup contradicts engine-owned compensation".into());
+                }
+                continue;
+            }
+            let request_key = key(request)?;
+            // A genuine IFC refusal precedes preparation. A public request
+            // could otherwise consume a fabricated FlowPolicyBlocked outcome
+            // from the replay journal without invoking the publisher guard.
+            // Refuse mixed identities rather than allowing that quota escape.
+            if matches!(outcome, Err(ProcessSpawnError::FlowPolicyBlocked)) {
+                if preparations.contains_key(&request_key)
+                    || prepared_requests.contains(&request_key)
+                {
+                    return Err("captured process request ambiguously aliases an IFC refusal and provider attempt".into());
+                }
+                continue;
+            }
+            if let Some(failure) = preparation_failures.get(request_key.as_slice()) {
+                if prepared_requests.contains(&request_key) {
+                    return Err("captured process request ambiguously aliases a preparation refusal and provider attempt".into());
+                }
+                if outcome.as_ref().err() != Some(*failure) || publisher_denial(outcome) {
+                    return Err("captured preparation invents publisher quota admission".into());
+                }
+                continue;
+            }
+            if !prepared_requests.contains(&request_key) {
+                return Err("captured process attempt lacks successful request preparation".into());
+            }
+            let agrees = match authority.authorize_process(request, granted) {
+                Err(denial) => outcome.as_ref().err() == Some(&denial),
+                Ok(()) => !publisher_denial(outcome),
+            };
+            if !agrees {
+                return Err(
+                    "captured process outcome contradicts publisher scope or invocation policy"
+                        .into(),
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// Admit only typed, bounded environment outcomes from the authenticated
     /// transcript. This never assembles a live environment or grants EnvRead.
     /// Keep validation diagnostics independent of private names and values.
@@ -2340,6 +2464,13 @@ mod engine {
             }
             if let Some(process) = &self.process {
                 process.validate(&self.host_effect_transcript)?;
+                if let Some(ceiling) = &self.capability_ceiling {
+                    validate_scoped_process_transcript(
+                        ceiling,
+                        process,
+                        &self.package.capabilities,
+                    )?;
+                }
             }
             match &self.expected {
                 CapturedAttempt::Completed(expected) => {
@@ -3267,18 +3398,31 @@ mod engine {
                 // Source preparation may use the original admitted parser
                 // depth. Keep it on the same large stack as native evaluation.
                 payload.validate()?;
-                if payload.capability_ceiling.is_none()
-                    && payload.host_effect_transcript.iter().any(|(_, outcome)| {
-                        matches!(outcome, Err(HostIoError::Denied { reason })
+                if payload.capability_ceiling.is_none() {
+                    let scoped_host_outcome =
+                        payload.host_effect_transcript.iter().any(|(_, outcome)| {
+                            matches!(outcome, Err(HostIoError::Denied { reason })
                             if reason.starts_with("publisher_authority:"))
-                    })
-                {
-                    // A producer may construct an intermediate capture before
-                    // binding its ceiling, but that draft is never replayable.
-                    return Err(
-                        "publisher-scoped host outcomes require the captured publisher ceiling"
-                            .to_string(),
-                    );
+                        });
+                    let scoped_process_outcome = payload.process.as_ref().is_some_and(|process| {
+                        process.journal.iter().any(|entry| {
+                            matches!(entry,
+                                HostEffectJournalEntry::ProcessSpawn {
+                                    outcome: Err(ProcessSpawnError::Denied { reason }), ..
+                                } if reason.starts_with("publisher_authority:")
+                            )
+                        })
+                    });
+                    if scoped_host_outcome || scoped_process_outcome {
+                        // A producer may construct an intermediate capture before
+                        // binding its ceiling, but that draft is never replayable.
+                        // Process denials live in the global journal, outside
+                        // the host-I/O projection, and must prevent downgrades too.
+                        return Err(
+                            "publisher-scoped outcomes require the captured publisher ceiling"
+                                .to_string(),
+                        );
+                    }
                 }
                 let modules = payload
                     .module_sources
@@ -3709,6 +3853,218 @@ mod engine {
                 env_keys: Some(BTreeSet::from(["PUBLIC_NAME".into()])),
                 module_scope_prefix: None,
             }
+        }
+
+        fn scoped_process_ceiling(budget: u64) -> EffectiveCapabilityCeiling {
+            let mut ceiling = scoped_ceiling();
+            ceiling.allowed_capabilities.insert("process_spawn".into());
+            ceiling
+                .max_calls_per_epoch
+                .insert("process_spawn".into(), budget);
+            ceiling
+                .capability_scopes
+                .insert("process_spawn".into(), "process:spawn".into());
+            ceiling
+        }
+
+        fn process_quota_denial() -> ProcessSpawnOutcome {
+            Err(ProcessSpawnError::Denied {
+                reason:
+                    "publisher_authority: process invocation exceeds the admitted scope or call budget"
+                        .into(),
+            })
+        }
+
+        fn prepared_process_request(
+            request: &ProcessSpawnRequest,
+        ) -> Vec<CapturedProcessPreparation> {
+            vec![
+                CapturedProcessPreparation::Preflight {
+                    request: request.clone(),
+                    outcome: Ok(()),
+                },
+                CapturedProcessPreparation::Prepare {
+                    request: request.clone(),
+                    outcome: Ok(request.clone()),
+                },
+            ]
+        }
+
+        #[test]
+        fn scoped_process_transcripts_rederive_failed_attempts_quota_and_cleanup() {
+            let request = ProcessSpawnRequest::CloseStdin {
+                handle: "retained-child".into(),
+            };
+            let failure = ProcessSpawnError::Io {
+                operation: "close stdin".into(),
+                detail: "provider failed after admission".into(),
+            };
+            let process = CapturedProcessReplay {
+                preparation: prepared_process_request(&request),
+                journal: vec![
+                    HostEffectJournalEntry::ProcessSpawn {
+                        request: request.clone(),
+                        outcome: Err(failure),
+                    },
+                    HostEffectJournalEntry::ProcessSpawn {
+                        request: request.clone(),
+                        outcome: Ok(ProcessSpawnResponse::StdinClosed),
+                    },
+                    HostEffectJournalEntry::ProcessSpawn {
+                        request: request.clone(),
+                        outcome: process_quota_denial(),
+                    },
+                    HostEffectJournalEntry::ProcessSpawn {
+                        request: ProcessSpawnRequest::Cleanup {
+                            handle: "retained-child".into(),
+                        },
+                        outcome: Ok(ProcessSpawnResponse::Cleaned { was_present: true }),
+                    },
+                ],
+            };
+            let ceiling = scoped_process_ceiling(2);
+            let capabilities = ["process_spawn".into()];
+            process.validate(&[]).unwrap();
+            for _ in 0..2 {
+                validate_scoped_process_transcript(&ceiling, &process, &capabilities).unwrap();
+            }
+            for index in [0, 2, 3] {
+                let mut forged = process.clone();
+                let HostEffectJournalEntry::ProcessSpawn { outcome, .. } =
+                    &mut forged.journal[index]
+                else {
+                    unreachable!()
+                };
+                *outcome = if index == 2 {
+                    Ok(ProcessSpawnResponse::StdinClosed)
+                } else {
+                    process_quota_denial()
+                };
+                assert!(
+                    validate_scoped_process_transcript(&ceiling, &forged, &capabilities).is_err()
+                );
+            }
+            assert!(
+                validate_scoped_process_transcript(
+                    &scoped_process_ceiling(3),
+                    &process,
+                    &capabilities,
+                )
+                .is_err(),
+                "widening quota cannot retain an invented exhaustion refusal"
+            );
+            assert!(validate_scoped_process_transcript(&ceiling, &process, &[]).is_err());
+        }
+
+        #[test]
+        fn scoped_process_transcripts_preserve_preparation_refusals_and_reject_alias_ambiguity() {
+            let refused = ProcessSpawnRequest::CloseStdin {
+                handle: "refused-before-provider".into(),
+            };
+            let allowed = ProcessSpawnRequest::CloseStdin {
+                handle: "prepared-child".into(),
+            };
+            let failure = ProcessSpawnError::PolicyViolation {
+                code: "fixture_preparation".into(),
+                detail: "request preparation refused before provider entry".into(),
+            };
+            let mut preparation = prepared_process_request(&allowed);
+            preparation.extend([
+                CapturedProcessPreparation::Preflight {
+                    request: refused.clone(),
+                    outcome: Ok(()),
+                },
+                CapturedProcessPreparation::Prepare {
+                    request: refused.clone(),
+                    outcome: Err(failure.clone()),
+                },
+            ]);
+            let process = CapturedProcessReplay {
+                preparation,
+                journal: vec![
+                    HostEffectJournalEntry::ProcessSpawn {
+                        request: refused.clone(),
+                        outcome: Err(failure.clone()),
+                    },
+                    HostEffectJournalEntry::ProcessSpawn {
+                        request: ProcessSpawnRequest::CloseStdin {
+                            handle: "refused-by-flow-before-preparation".into(),
+                        },
+                        outcome: Err(ProcessSpawnError::FlowPolicyBlocked),
+                    },
+                    HostEffectJournalEntry::ProcessSpawn {
+                        request: allowed.clone(),
+                        outcome: Ok(ProcessSpawnResponse::StdinClosed),
+                    },
+                    HostEffectJournalEntry::ProcessSpawn {
+                        request: allowed,
+                        outcome: process_quota_denial(),
+                    },
+                ],
+            };
+            let ceiling = scoped_process_ceiling(1);
+            let capabilities = ["process_spawn".into()];
+            validate_scoped_process_transcript(&ceiling, &process, &capabilities).unwrap();
+
+            let mut forged_flow = process.clone();
+            let HostEffectJournalEntry::ProcessSpawn { request, .. } = &mut forged_flow.journal[1]
+            else {
+                unreachable!()
+            };
+            *request = process.preparation[0].request().clone();
+            assert!(
+                validate_scoped_process_transcript(&ceiling, &forged_flow, &capabilities)
+                    .unwrap_err()
+                    .contains("ambiguously aliases an IFC refusal")
+            );
+
+            // An unrelated alias can prepare to the same request whose own
+            // preparation fails. Its identical provider error must not become
+            // a free refusal merely because it matches that failure's text.
+            let alias = ProcessSpawnRequest::CloseStdin {
+                handle: "foreign-alias".into(),
+            };
+            let mut ambiguous = process.clone();
+            ambiguous.preparation.extend([
+                CapturedProcessPreparation::Preflight {
+                    request: alias.clone(),
+                    outcome: Ok(()),
+                },
+                CapturedProcessPreparation::Prepare {
+                    request: alias,
+                    outcome: Ok(refused.clone()),
+                },
+            ]);
+            ambiguous.journal.insert(
+                1,
+                HostEffectJournalEntry::ProcessSpawn {
+                    request: refused,
+                    outcome: Err(failure),
+                },
+            );
+            assert!(
+                validate_scoped_process_transcript(&ceiling, &ambiguous, &capabilities)
+                    .unwrap_err()
+                    .contains("ambiguously aliases")
+            );
+            let mut duplicate = process.clone();
+            duplicate.preparation.push(process.preparation[0].clone());
+            assert!(
+                validate_scoped_process_transcript(&ceiling, &duplicate, &capabilities).is_err()
+            );
+            let mut forged = process;
+            let CapturedProcessPreparation::Prepare { outcome, .. } =
+                forged.preparation.last_mut().unwrap()
+            else {
+                unreachable!()
+            };
+            *outcome = process_quota_denial().map(|_| unreachable!());
+            let HostEffectJournalEntry::ProcessSpawn { outcome, .. } = &mut forged.journal[0]
+            else {
+                unreachable!()
+            };
+            *outcome = process_quota_denial();
+            assert!(validate_scoped_process_transcript(&ceiling, &forged, &capabilities).is_err());
         }
 
         #[test]
@@ -5341,7 +5697,10 @@ mod engine {
         }
 
         #[cfg(unix)]
-        fn process_provider(root: &Path) -> Arc<CapturingProcessSpawnProvider> {
+        fn process_provider(
+            root: &Path,
+            ceiling: Option<&EffectiveCapabilityCeiling>,
+        ) -> Arc<CapturingProcessSpawnProvider> {
             let mut policy =
                 ProcessSpawnPolicy::jailed(root).expect("jailed native process policy");
             for (alias, candidates) in [
@@ -5360,13 +5719,32 @@ mod engine {
             }
             policy.allow_shell = true;
             policy.shell_executable_alias = Some("shell".to_string());
-            Arc::new(CapturingProcessSpawnProvider::new(Arc::new(
-                NativeProcessSpawn::new(policy).expect("native process provider"),
-            )))
+            let provider: Arc<dyn ProcessSpawnProvider> =
+                Arc::new(NativeProcessSpawn::new(policy).expect("native process provider"));
+            let provider = match ceiling {
+                Some(ceiling) => Arc::new(
+                    crate::ops::engine_dispatcher::PublisherAuthorityProcessSpawn::new(
+                        provider,
+                        ceiling.clone(),
+                    )
+                    .expect("enforceable publisher process ceiling"),
+                ) as Arc<dyn ProcessSpawnProvider>,
+                None => provider,
+            };
+            Arc::new(CapturingProcessSpawnProvider::new(provider))
         }
 
         #[cfg(unix)]
         fn record_process(root: &Path, source: &str) -> NativeReplayCapture {
+            record_process_under_ceiling(root, source, None)
+        }
+
+        #[cfg(unix)]
+        fn record_process_under_ceiling(
+            root: &Path,
+            source: &str,
+            ceiling: Option<&EffectiveCapabilityCeiling>,
+        ) -> NativeReplayCapture {
             let config = OrchestratorConfig {
                 commonjs_entry: false,
                 ..OrchestratorConfig::default()
@@ -5412,7 +5790,7 @@ mod engine {
                 Arc::new(SandboxedHostIo::with_root(root).expect("live bounded host I/O")),
                 Some(Arc::new(InMemoryHostIoTranscript::recording())),
             );
-            let provider = process_provider(root);
+            let provider = process_provider(root, ceiling);
             let expires_at = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .expect("test clock")
@@ -5425,7 +5803,7 @@ mod engine {
                 Arc::new(InMemoryHostEffectJournal::recording()),
                 ProcessSpawnAttemptAuthority::expiring_at_unix_ms(expires_at),
             );
-            match orchestrator.execute(&package) {
+            let capture = match orchestrator.execute(&package) {
                 Ok(result) => NativeReplayCapture::from_execution(
                     &package,
                     &config,
@@ -5453,7 +5831,99 @@ mod engine {
                     )
                 }),
             }
-            .expect("capture real process execution")
+            .expect("capture real process execution");
+            match ceiling {
+                Some(ceiling) => capture
+                    .with_capability_ceiling(ceiling)
+                    .expect("bind the exact enforced publisher process ceiling"),
+                None => capture,
+            }
+        }
+
+        #[test]
+        #[cfg(unix)]
+        fn scoped_process_reexecution_preserves_quota_without_repeating_live_effects() {
+            on_native_stack(|| {
+                let root = tempfile::tempdir().unwrap();
+                let admitted = root.path().join("admitted-child-marker");
+                let denied = root.path().join("denied-child-marker");
+                let admitted_json = serde_json::to_string(&admitted.display().to_string()).unwrap();
+                let denied_json = serde_json::to_string(&denied.display().to_string()).unwrap();
+                let source = format!(
+                    "const cp = require('child_process'); cp.execFileSync('mark', [{admitted_json}]); try {{ cp.execFileSync('mark', [{denied_json}]); console.log('quota-bypassed'); }} catch (error) {{ console.log('quota-enforced'); }}",
+                );
+                let ceiling = scoped_process_ceiling(1);
+                let capture = record_process_under_ceiling(root.path(), &source, Some(&ceiling));
+                assert!(
+                    admitted.is_file(),
+                    "an admitted child performs its real effect"
+                );
+                assert!(
+                    !denied.exists(),
+                    "exhaustion prevents a second child effect"
+                );
+                let payload: NativeReplayPayload =
+                    serde_json::from_str(&capture.payload_json).unwrap();
+                let process = payload.process.as_ref().unwrap();
+                assert!(process.journal.iter().any(|entry| matches!(entry,
+                    HostEffectJournalEntry::ProcessSpawn { outcome, .. }
+                        if *outcome == process_quota_denial()
+                )));
+                std::fs::rename(&admitted, root.path().join("saved-admitted-marker")).unwrap();
+                std::fs::rename(
+                    root.path().join("process.cjs"),
+                    root.path().join("saved-process.cjs"),
+                )
+                .unwrap();
+                for _ in 0..2 {
+                    let outcome = reexecute(&capture).expect("offline scoped process replay");
+                    assert!(outcome.satisfies_policy_equivalence(), "{outcome:?}");
+                    assert!(!admitted.exists());
+                    assert!(!denied.exists());
+                }
+                let mut weakened = payload.clone();
+                weakened
+                    .capability_ceiling
+                    .as_mut()
+                    .unwrap()
+                    .max_calls_per_epoch
+                    .insert("process_spawn".into(), 2);
+                let error = reexecute(&encode_capture(&weakened).unwrap()).unwrap_err();
+                assert!(error.contains("invocation policy"), "{error}");
+                let mut stripped = payload.clone();
+                stripped.capability_ceiling = None;
+                let stripped_capture = encode_capture(&stripped).unwrap();
+                assert_eq!(
+                    stripped_capture.schema_version,
+                    NATIVE_REPLAY_CAPTURE_SCHEMA
+                );
+                let error = reexecute(&stripped_capture)
+                    .expect_err("process-only denials cannot downgrade publisher authority");
+                assert!(
+                    error.contains("require the captured publisher ceiling"),
+                    "{error}"
+                );
+                for replacement in [
+                    ProcessSpawnError::Io {
+                        operation: "fixture".into(),
+                        detail: "provider failure cannot replace an exhausted refusal".into(),
+                    },
+                    ProcessSpawnError::FlowPolicyBlocked,
+                ] {
+                    let mut forged = payload.clone();
+                    for entry in &mut forged.process.as_mut().unwrap().journal {
+                        if let HostEffectJournalEntry::ProcessSpawn { outcome, .. } = entry
+                            && *outcome == process_quota_denial()
+                        {
+                            *outcome = Err(replacement.clone());
+                        }
+                    }
+                    reexecute(&encode_capture(&forged).unwrap())
+                        .expect_err("typed provider/IFC errors cannot evade the publisher quota");
+                }
+                assert!(!admitted.exists());
+                assert!(!denied.exists());
+            });
         }
 
         #[test]
@@ -5779,7 +6249,7 @@ mod engine {
                     panic!("execFileSync request")
                 };
                 launch.argv = vec!["x".repeat(MAX_PROCESS_PREPARATION_BYTES + 1)];
-                let provider = process_provider(root.path());
+                let provider = process_provider(root.path(), None);
                 assert!(provider.preflight_request(&request).is_err());
                 let preparation = provider
                     .snapshot()

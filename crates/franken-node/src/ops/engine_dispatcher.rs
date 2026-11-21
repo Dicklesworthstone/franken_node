@@ -3491,6 +3491,45 @@ impl PublisherHostAuthority {
             )),
         }
     }
+
+    /// Charge one guest process-provider invocation before delegation. Process
+    /// preparation is side-effect-free and remains governed by the operator's
+    /// signed executable policy. The engine's separate cleanup_handle entry
+    /// point must never use this guest admission path.
+    pub(crate) fn authorize_process(
+        &self,
+        request: &ProcessSpawnRequest,
+        granted: &[ProcessSpawnCapability],
+    ) -> std::result::Result<(), ProcessSpawnError> {
+        use crate::extensions::artifact_contract::InvocationDecision;
+
+        let denied = |reason: &str| ProcessSpawnError::Denied {
+            reason: format!("publisher_authority: {reason}"),
+        };
+        if matches!(request, ProcessSpawnRequest::Cleanup { .. }) {
+            return Err(denied("process cleanup is reserved for engine teardown"));
+        }
+        let capability = request.required_capability();
+        if !granted.contains(&capability) {
+            return Err(ProcessSpawnError::CapabilityMissing { capability });
+        }
+        if !self.ceiling.permits_capability("process_spawn") {
+            return Err(denied("process capability is outside the admitted ceiling"));
+        }
+        let mut enforcement = self
+            .enforcement
+            .lock()
+            .map_err(|_| denied("process invocation accounting is unavailable"))?;
+        match enforcement.permit_invocation(
+            "process_spawn",
+            ArtifactRuntimeAuthority::canonical_capability_scope("process_spawn"),
+        ) {
+            InvocationDecision::Permitted { .. } => Ok(()),
+            InvocationDecision::Denied { .. } => Err(denied(
+                "process invocation exceeds the admitted scope or call budget",
+            )),
+        }
+    }
 }
 
 /// Applies the retained ceiling to both plain and supervised provider entrypoints.
@@ -3533,6 +3572,77 @@ impl HostIoProvider for PublisherAuthorityHostIo {
         control.checkpoint()?;
         self.authority.authorize(request, granted)?;
         self.inner.perform_controlled(request, granted, control)
+    }
+}
+
+/// Publisher ceilings narrow the independently signed process policy; they
+/// never create process authority. All guest operations share one run-local
+/// counter across ordinary and controlled calls. A provider error or cancelled
+/// admitted call cannot refund a potentially partially completed operation.
+#[cfg(feature = "engine")]
+#[derive(Debug)]
+pub(crate) struct PublisherAuthorityProcessSpawn {
+    inner: Arc<dyn ProcessSpawnProvider>,
+    authority: PublisherHostAuthority,
+}
+
+#[cfg(feature = "engine")]
+impl PublisherAuthorityProcessSpawn {
+    pub(crate) fn new(
+        inner: Arc<dyn ProcessSpawnProvider>,
+        ceiling: crate::extensions::artifact_contract::EffectiveCapabilityCeiling,
+    ) -> std::result::Result<Self, HostIoError> {
+        Ok(Self {
+            inner,
+            authority: PublisherHostAuthority::new(ceiling)?,
+        })
+    }
+}
+
+#[cfg(feature = "engine")]
+impl ProcessSpawnProvider for PublisherAuthorityProcessSpawn {
+    fn name(&self) -> &str {
+        "publisher-authority-process-spawn"
+    }
+
+    fn preflight_request(
+        &self,
+        request: &ProcessSpawnRequest,
+    ) -> std::result::Result<(), ProcessSpawnError> {
+        self.inner.preflight_request(request)
+    }
+
+    fn prepare_request(
+        &self,
+        request: &ProcessSpawnRequest,
+    ) -> std::result::Result<ProcessSpawnRequest, ProcessSpawnError> {
+        self.inner.prepare_request(request)
+    }
+
+    fn perform(
+        &self,
+        request: &ProcessSpawnRequest,
+        granted: &[ProcessSpawnCapability],
+    ) -> ProcessSpawnOutcome {
+        self.authority.authorize_process(request, granted)?;
+        self.inner.perform(request, granted)
+    }
+
+    fn perform_controlled(
+        &self,
+        request: &ProcessSpawnRequest,
+        granted: &[ProcessSpawnCapability],
+        control: Arc<dyn ProcessSpawnControl>,
+    ) -> ProcessSpawnOutcome {
+        self.authority.authorize_process(request, granted)?;
+        control.checkpoint()?;
+        self.inner.perform_controlled(request, granted, control)
+    }
+
+    fn cleanup_handle(&self, handle: &str) -> ProcessSpawnOutcome {
+        // Compensation creates no guest authority. Quota exhaustion, expiry,
+        // and cancellation must never strand an already admitted child.
+        self.inner.cleanup_handle(handle)
     }
 }
 
@@ -13857,6 +13967,19 @@ impl EngineDispatcher {
                 }),
                 None => Arc::new(provider),
             };
+            let provider: Arc<dyn ProcessSpawnProvider> = match &publisher_host_ceiling {
+                Some(ceiling) => Arc::new(
+                    PublisherAuthorityProcessSpawn::new(provider, ceiling.clone()).map_err(
+                        |error| {
+                            native_engine_spawn_error_with_telemetry_cleanup(
+                                format!("Publisher process authority is not enforceable: {error}"),
+                                &mut telemetry_guard,
+                            )
+                        },
+                    )?,
+                ),
+                None => provider,
+            };
             let journal = Arc::new(InMemoryHostEffectJournal::recording());
             if capture_replay {
                 let provider = Arc::new(
@@ -15832,6 +15955,283 @@ mod tests {
                 host_ports: None,
                 env_keys: None,
                 module_scope_prefix: Some(String::new()),
+            }
+        }
+
+        #[derive(Debug, Default)]
+        struct ProcessBoundaryState {
+            calls: AtomicUsize,
+            cleanups: AtomicUsize,
+        }
+
+        #[derive(Debug)]
+        struct CountingProcessBoundary(Arc<ProcessBoundaryState>);
+
+        impl ProcessSpawnProvider for CountingProcessBoundary {
+            fn name(&self) -> &str {
+                "in-memory-process-policy-boundary"
+            }
+
+            fn perform(
+                &self,
+                _: &ProcessSpawnRequest,
+                _: &[ProcessSpawnCapability],
+            ) -> ProcessSpawnOutcome {
+                self.0.calls.fetch_add(1, Ordering::AcqRel);
+                Err(ProcessSpawnError::NotImplemented {
+                    what: "observed provider attempt without starting a child".into(),
+                })
+            }
+
+            fn cleanup_handle(&self, _: &str) -> ProcessSpawnOutcome {
+                self.0.cleanups.fetch_add(1, Ordering::AcqRel);
+                Ok(
+                    frankenengine_extension_host::process_spawn::ProcessSpawnResponse::Cleaned {
+                        was_present: false,
+                    },
+                )
+            }
+        }
+
+        fn process_requests() -> Vec<ProcessSpawnRequest> {
+            use frankenengine_extension_host::process_spawn::ProcessLaunch;
+
+            let launch = ProcessLaunch {
+                executable: "signed-fixture-alias".into(),
+                argv: Vec::new(),
+                env: BTreeMap::new(),
+                cwd: None,
+                shell: false,
+                stdio: Default::default(),
+            };
+            vec![
+                ProcessSpawnRequest::Run {
+                    launch: launch.clone(),
+                    stdin: Vec::new(),
+                    timeout_millis: None,
+                },
+                ProcessSpawnRequest::Spawn { launch },
+                ProcessSpawnRequest::WriteStdin {
+                    handle: "child".into(),
+                    data: b"input".to_vec(),
+                },
+                ProcessSpawnRequest::CloseStdin {
+                    handle: "child".into(),
+                },
+                ProcessSpawnRequest::Wait {
+                    handle: "child".into(),
+                    timeout_millis: None,
+                },
+                ProcessSpawnRequest::Kill {
+                    handle: "child".into(),
+                    signal: ProcessSignal::Kill,
+                },
+            ]
+        }
+
+        fn process_budget_denied(outcome: ProcessSpawnOutcome) {
+            assert!(matches!(outcome, Err(ProcessSpawnError::Denied { reason })
+                if reason == "publisher_authority: process invocation exceeds the admitted scope or call budget"));
+        }
+
+        #[test]
+        fn publisher_process_quota_counts_every_guest_operation_and_never_refunds_failures() {
+            use frankenengine_extension_host::process_spawn::UnrestrictedProcessSpawnControl;
+
+            for request in process_requests() {
+                for controlled in [false, true] {
+                    let state = Arc::new(ProcessBoundaryState::default());
+                    let provider = PublisherAuthorityProcessSpawn::new(
+                        Arc::new(CountingProcessBoundary(Arc::clone(&state))),
+                        publisher_ceiling(&["process_spawn"], 1),
+                    )
+                    .unwrap();
+                    assert!(matches!(
+                        provider.perform(&request, &[]),
+                        Err(ProcessSpawnError::CapabilityMissing { .. })
+                    ));
+                    for _ in 0..2 {
+                        provider.preflight_request(&request).unwrap();
+                        assert_eq!(provider.prepare_request(&request).unwrap(), request);
+                    }
+                    let call = || {
+                        if controlled {
+                            provider.perform_controlled(
+                                &request,
+                                &[ProcessSpawnCapability::Spawn],
+                                Arc::new(UnrestrictedProcessSpawnControl),
+                            )
+                        } else {
+                            provider.perform(&request, &[ProcessSpawnCapability::Spawn])
+                        }
+                    };
+                    assert!(matches!(
+                        call(),
+                        Err(ProcessSpawnError::NotImplemented { .. })
+                    ));
+                    process_budget_denied(call());
+                    assert_eq!(state.calls.load(Ordering::Acquire), 1);
+                    assert!(matches!(
+                        provider.perform(
+                            &ProcessSpawnRequest::Cleanup {
+                                handle: "child".into(),
+                            },
+                            &[ProcessSpawnCapability::Spawn],
+                        ),
+                        Err(ProcessSpawnError::Denied { reason })
+                            if reason == "publisher_authority: process cleanup is reserved for engine teardown"
+                    ));
+                    assert!(provider.cleanup_handle("child").is_ok());
+                    assert_eq!(state.cleanups.load(Ordering::Acquire), 1);
+                }
+            }
+        }
+
+        #[test]
+        fn publisher_process_quota_retains_cancelled_attempt_and_allows_cleanup() {
+            let state = Arc::new(ProcessBoundaryState::default());
+            let provider = PublisherAuthorityProcessSpawn::new(
+                Arc::new(CountingProcessBoundary(Arc::clone(&state))),
+                publisher_ceiling(&["process_spawn"], 1),
+            )
+            .unwrap();
+            let request = &process_requests()[0];
+            assert!(matches!(
+                provider.perform_controlled(
+                    request,
+                    &[ProcessSpawnCapability::Spawn],
+                    Arc::new(RejectingProcessSpawnControl),
+                ),
+                Err(ProcessSpawnError::Denied { reason })
+                    if reason == "TEST_PROCESS_CONTROL_REACHED_NATIVE_PROVIDER"
+            ));
+            process_budget_denied(provider.perform(request, &[ProcessSpawnCapability::Spawn]));
+            assert_eq!(state.calls.load(Ordering::Acquire), 0);
+            assert!(provider.cleanup_handle("already-admitted-child").is_ok());
+            assert_eq!(state.cleanups.load(Ordering::Acquire), 1);
+            let no_authority = PublisherAuthorityProcessSpawn::new(
+                Arc::new(CountingProcessBoundary(Arc::clone(&state))),
+                publisher_ceiling(&[], 1),
+            )
+            .unwrap();
+            assert!(matches!(
+                no_authority.perform(request, &[ProcessSpawnCapability::Spawn]),
+                Err(ProcessSpawnError::Denied { reason })
+                    if reason == "publisher_authority: process capability is outside the admitted ceiling"
+            ));
+            let zero = PublisherAuthorityProcessSpawn::new(
+                Arc::new(CountingProcessBoundary(Arc::clone(&state))),
+                publisher_ceiling(&["process_spawn"], 0),
+            )
+            .unwrap();
+            process_budget_denied(zero.perform(request, &[ProcessSpawnCapability::Spawn]));
+            assert_eq!(state.calls.load(Ordering::Acquire), 0);
+        }
+
+        #[test]
+        fn publisher_process_quota_is_atomic_across_concurrent_provider_calls() {
+            let state = Arc::new(ProcessBoundaryState::default());
+            let provider = PublisherAuthorityProcessSpawn::new(
+                Arc::new(CountingProcessBoundary(Arc::clone(&state))),
+                publisher_ceiling(&["process_spawn"], 7),
+            )
+            .unwrap();
+            let request = &process_requests()[0];
+            std::thread::scope(|scope| {
+                let calls = (0..32)
+                    .map(|_| {
+                        scope.spawn(|| provider.perform(request, &[ProcessSpawnCapability::Spawn]))
+                    })
+                    .collect::<Vec<_>>();
+                let admitted = calls
+                    .into_iter()
+                    .map(|call| call.join().unwrap())
+                    .filter(|outcome| {
+                        matches!(outcome, Err(ProcessSpawnError::NotImplemented { .. }))
+                    })
+                    .count();
+                assert_eq!(admitted, 7);
+            });
+            assert_eq!(state.calls.load(Ordering::Acquire), 7);
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn publisher_process_quota_permits_real_child_and_reaps_after_exhaustion() {
+            use frankenengine_extension_host::process_spawn::{
+                ProcessLaunch, ProcessSpawnResponse, UnrestrictedProcessSpawnControl,
+            };
+
+            let root = tempfile::tempdir().unwrap();
+            let executable = ["/usr/bin/cat", "/bin/cat"]
+                .into_iter()
+                .map(Path::new)
+                .find(|path| path.is_file())
+                .expect("standard Unix cat executable");
+            for controlled in [false, true] {
+                let mut policy = ProcessSpawnPolicy::jailed(root.path()).unwrap();
+                policy.authorize_alias("echo-input", executable).unwrap();
+                let provider = PublisherAuthorityProcessSpawn::new(
+                    Arc::new(NativeProcessSpawn::new(policy).unwrap()),
+                    publisher_ceiling(&["process_spawn"], 1),
+                )
+                .unwrap();
+                let launch = ProcessLaunch {
+                    executable: "echo-input".into(),
+                    argv: Vec::new(),
+                    env: BTreeMap::new(),
+                    cwd: None,
+                    shell: false,
+                    stdio: Default::default(),
+                };
+                let request = if controlled {
+                    ProcessSpawnRequest::Spawn { launch }
+                } else {
+                    ProcessSpawnRequest::Run {
+                        launch,
+                        stdin: b"publisher-authorized-child\n".to_vec(),
+                        timeout_millis: Some(5_000),
+                    }
+                };
+                let prepared = provider.prepare_request(&request).unwrap();
+                let outcome = if controlled {
+                    provider.perform_controlled(
+                        &prepared,
+                        &[ProcessSpawnCapability::Spawn],
+                        Arc::new(UnrestrictedProcessSpawnControl),
+                    )
+                } else {
+                    provider.perform(&prepared, &[ProcessSpawnCapability::Spawn])
+                }
+                .unwrap();
+                process_budget_denied(
+                    provider.perform(&prepared, &[ProcessSpawnCapability::Spawn]),
+                );
+                match outcome {
+                    ProcessSpawnResponse::Run {
+                        exit,
+                        stdout,
+                        stderr,
+                    } => {
+                        assert!(exit.success);
+                        assert_eq!(stdout, b"publisher-authorized-child\n");
+                        assert!(stderr.is_empty());
+                    }
+                    ProcessSpawnResponse::Spawned { handle } => {
+                        process_budget_denied(provider.perform(
+                            &ProcessSpawnRequest::Wait {
+                                handle: handle.clone(),
+                                timeout_millis: Some(5_000),
+                            },
+                            &[ProcessSpawnCapability::Spawn],
+                        ));
+                        assert!(matches!(
+                            provider.cleanup_handle(&handle).unwrap(),
+                            ProcessSpawnResponse::Cleaned { was_present: true }
+                        ));
+                    }
+                    other => panic!("unexpected process outcome: {other:?}"),
+                }
             }
         }
 
