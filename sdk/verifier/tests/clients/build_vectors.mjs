@@ -168,9 +168,20 @@ add("runtime_origin_invalid_session_signature", "incident-bundle", runtimeIncide
 add("runtime_origin_wrong_session_epoch", "incident-bundle", runtimeIncident(({ record }) => { record.host_effect_ledger.signature.signed_epoch = 6; }), "RUNTIME_ORIGIN_INVALID", runtimeOptions);
 add("runtime_origin_wrong_session_identity", "incident-bundle", runtimeIncident(({ record }) => { record.host_effect_ledger.signature.producer_id = "PRIVATE-substitute"; }), "RUNTIME_ORIGIN_INVALID", runtimeOptions);
 
+function nondeterminismTrace() {
+  return {
+    session_id: "PRIVATE-TRACE-SENTINEL",
+    events: [
+      { sequence: 0, source: "TimerRead", value: [0, 255], virtual_ts: 10, component: "clock" },
+      { sequence: 1, source: "LaneSelectionRandom", value: [], virtual_ts: 12, component: "interpreter" },
+    ],
+    next_sequence: 2, capture_started_vts: 10, capture_ended_vts: 12,
+    deterministic_witness: { event_count: 0, digest: 0xcbf29ce484222325n },
+  };
+}
 function captured(state) {
   const expected = { terminal_state: state, trace_id: "trace-vector-1", console_output: [] };
-  if (state === "completed") Object.assign(expected, { ir4_witness: {}, execution_value: "42", instructions_executed: 7, nondeterminism_trace: {}, lane: "deterministic", exit_code: null, decisions: null });
+  if (state === "completed") Object.assign(expected, { ir4_witness: {}, execution_value: "42", instructions_executed: 7, nondeterminism_trace: nondeterminismTrace(), lane: "deterministic", exit_code: null, decisions: null });
   if (state === "uncaught_exception") expected.exception_value = "";
   if (state === "engine_failure") Object.assign(expected, { reason: { kind: "instruction_budget_exhausted", budget: 100 }, diagnostic: "PRIVATE-DIAGNOSTIC-SENTINEL" });
   return { package: { extension_id: "test", source: "PRIVATE-SOURCE-SENTINEL", capabilities: ["builtin"] }, orchestrator: {}, runtime: { execution: { deterministic_budget: 100, throughput_budget: 200 } }, ambient_authority: "deny_all", host_io_exception_provenance: "provider_internal", process_argv: ["PRIVATE-ARGV-SENTINEL"], host_effect_transcript: [], expected };
@@ -181,6 +192,34 @@ function withCapture(raw, changes = {}) {
   return resealIncident(value);
 }
 for (const state of ["completed", "uncaught_exception", "engine_failure"]) add(`capture_metadata_${state}`, "incident-bundle", withCapture(canonical(captured(state))));
+// Signed transcript structure is independently inspectable even though these
+// synthetic captures make no native execution, event-value or IR claim.
+for (const state of ["completed", "uncaught_exception", "engine_failure"]) {
+  const candidate = captured(state);
+  const expected = state === "completed" ? candidate.expected : (candidate.expected.failure_context = {
+    ir3_hash: "a".repeat(64), instructions_executed: 7, dropped_console_entries: 0,
+    randomness_transcript: nondeterminismTrace(), imported_module_hashes: {},
+  });
+  const field = state === "completed" ? "nondeterminism_trace" : "randomness_transcript";
+  add(`capture_trace_${state}`, "incident-bundle", withCapture(canonical(candidate)));
+  for (const [name, mutate] of [
+    ["missing_fields", () => ({})],
+    ["unfinished", (trace) => { trace.capture_ended_vts = null; return trace; }],
+    ["backwards_window", (trace) => { trace.capture_ended_vts = 9; return trace; }],
+    ["counter_mismatch", (trace) => { trace.next_sequence = 3; return trace; }],
+    ["duplicate_sequence", (trace) => { trace.events[1].sequence = 0; return trace; }],
+    ["gapped_sequence", (trace) => { trace.events[1].sequence = 2; return trace; }],
+    ["timestamp_regression", (trace) => { trace.events[0].virtual_ts = 12; trace.events[1].virtual_ts = 11; return trace; }],
+    ["outside_capture_window", (trace) => { trace.events[1].virtual_ts = 13; return trace; }],
+    ["unknown_source", (trace) => { trace.events[0].source = "PRIVATE-UNKNOWN"; return trace; }],
+    ["invalid_bytes", (trace) => { trace.events[0].value = [256]; return trace; }],
+    ["boolean_sequence", (trace) => { trace.events[0].sequence = false; return trace; }],
+    ["empty_witness_digest", (trace) => { trace.deterministic_witness.digest = 0; return trace; }],
+  ]) {
+    expected[field] = mutate(nondeterminismTrace());
+    add(`capture_trace_${state}_${name}`, "incident-bundle", withCapture(canonical(candidate)), "EVIDENCE_INVALID");
+  }
+}
 const rawCapture = canonical(captured("completed"));
 add("unsupported_signed_capture", "incident-bundle", withCapture(rawCapture, { schema_version: "franken-node/native-replay-capture/v99" }), "EVIDENCE_INVALID");
 add("wrong_signed_capture_digest", "incident-bundle", withCapture(rawCapture, { payload_sha256: "0".repeat(64) }), "EVIDENCE_INVALID");

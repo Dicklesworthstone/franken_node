@@ -4,8 +4,9 @@
 //! Ed25519 anchor and replay-structure checks. Raw JSON is signed as a string:
 //! outer duplicate-key checks cannot see duplicate members inside that string.
 //! This module checks its own envelope/digest, embedded source-capsule byte
-//! integrity and terminal declaration, not graph resolution, IR correctness,
-//! provider outcomes, cleanup certification or replayability.
+//! integrity, terminal declaration and nondeterminism transcript structure, not
+//! graph resolution, IR correctness, event values, provider outcomes, cleanup
+//! certification or replayability.
 //! Run references and terminal events must agree with the capture when present.
 //! These are consistency checks on signed assertions, not independent signature
 //! verification of an original run receipt that the bundle does not contain.
@@ -69,6 +70,7 @@ const FAILURE_CONTEXT_FIELDS: &[&str] = &[
 ];
 const MAX_IMPORTED_MODULE_HASHES: usize = 1024;
 const MAX_IMPORTED_MODULE_PATH_BYTES: usize = 4096;
+const EMPTY_DETERMINISTIC_WITNESS_DIGEST: u64 = 0xcbf2_9ce4_8422_2325;
 
 type Result<T> = std::result::Result<T, IncidentBundleError>;
 
@@ -316,6 +318,100 @@ fn is_lower_hex_sha256(value: &str) -> bool {
             .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
+/// Inspect the public NondeterminismTrace wire contract independently of the
+/// engine. A valid signature authenticates a recorded stream; it cannot make a
+/// missing finalization, impossible sequence or malformed byte payload valid.
+/// Nonempty deterministic witnesses are opaque commitments: their digest and
+/// every recorded event value still require actual execution to reproduce.
+fn validate_nondeterminism_trace(value: &Value, field: &str) -> Result<()> {
+    let trace = exact(
+        value,
+        field,
+        &[
+            "session_id",
+            "events",
+            "next_sequence",
+            "capture_started_vts",
+            "capture_ended_vts",
+        ],
+        &["deterministic_witness"],
+    )?;
+    text(&trace["session_id"], field)?;
+    let unsigned = |value: &Value| {
+        value
+            .as_u64()
+            .ok_or_else(|| invalid(field, "trace counters must be unsigned integers"))
+    };
+    let events = array(&trace["events"], field)?;
+    let next_sequence = unsigned(&trace["next_sequence"])?;
+    let start = unsigned(&trace["capture_started_vts"])?;
+    // A missing or null finalization is an unfinished recording, including for
+    // an interpreter failure prefix. It must not pass finalized trace checks.
+    let end = unsigned(&trace["capture_ended_vts"])?;
+    if end < start || next_sequence != events.len() as u64 {
+        return Err(invalid(
+            field,
+            "trace finalization bounds or event counter are inconsistent",
+        ));
+    }
+    // The witness was added after the original trace format. Its absence means
+    // the initial empty witness, while a present object must be fully typed.
+    if let Some(witness) = trace.get("deterministic_witness") {
+        let witness = exact(witness, field, &["event_count", "digest"], &[])?;
+        let count = unsigned(&witness["event_count"])?;
+        let digest = unsigned(&witness["digest"])?;
+        if count == 0 && digest != EMPTY_DETERMINISTIC_WITNESS_DIGEST {
+            return Err(invalid(
+                field,
+                "empty deterministic witness does not have its initial digest",
+            ));
+        }
+    }
+    let mut previous_timestamp = start;
+    for (position, event) in events.iter().enumerate() {
+        let event = exact(
+            event,
+            field,
+            &["sequence", "source", "value", "virtual_ts", "component"],
+            &[],
+        )?;
+        let sequence = unsigned(&event["sequence"])?;
+        let timestamp = unsigned(&event["virtual_ts"])?;
+        if sequence != position as u64 || timestamp < previous_timestamp || timestamp > end {
+            return Err(invalid(
+                field,
+                "trace events must be contiguous and timestamp-ordered within the capture window",
+            ));
+        }
+        previous_timestamp = timestamp;
+        // Serde's public enum encoding uses variant names, not the lowercase
+        // diagnostic labels returned by the engine's as_str helper.
+        if !matches!(
+            text(&event["source"], field)?,
+            "LaneSelectionRandom"
+                | "TimerRead"
+                | "ExternalApiResponse"
+                | "ThreadSchedule"
+                | "ResourceCheck"
+                | "UserInteractionTiming"
+                | "FloatingPointResult"
+                | "ArrayCacheInvalidation"
+                | "SecurityViolation"
+                | "PropertyResolution"
+                | "StackLimitEnforcement"
+        ) {
+            return Err(invalid(field, "unsupported nondeterminism source"));
+        }
+        text(&event["component"], field)?;
+        for byte in array(&event["value"], field)? {
+            if !byte.as_u64().is_some_and(|byte| byte <= u8::MAX.into()) {
+                return Err(invalid(field, "trace event payload must contain bytes"));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_failure_context(value: &Value) -> Result<()> {
     const FIELD: &str = ".payload.expected.failure_context";
     let context = exact(value, FIELD, FAILURE_CONTEXT_FIELDS, &[])?;
@@ -341,7 +437,7 @@ fn validate_failure_context(value: &Value) -> Result<()> {
             "expected unsigned integer",
         ));
     }
-    object(
+    validate_nondeterminism_trace(
         &context["randomness_transcript"],
         ".payload.expected.failure_context.randomness_transcript",
     )?;
@@ -394,7 +490,7 @@ fn terminal(payload: &Value) -> Result<CapturedNativeTerminalState> {
                 &["exit_code"],
             )?;
             object(&expected["ir4_witness"], ".payload.expected.ir4_witness")?;
-            object(
+            validate_nondeterminism_trace(
                 &expected["nondeterminism_trace"],
                 ".payload.expected.nondeterminism_trace",
             )?;
@@ -801,6 +897,31 @@ pub(in crate::incident_bundle) mod tests {
     use super::*;
     use serde_json::json;
 
+    // Public wire shape written by the engine's NondeterminismTrace. These
+    // fixtures describe recorded data, not an execution or an event oracle.
+    fn empty_nondeterminism_trace() -> Value {
+        json!({
+            "session_id": "PRIVATE-TRACE-SENTINEL",
+            "events": [],
+            "next_sequence": 0,
+            "capture_started_vts": 10,
+            "capture_ended_vts": 12,
+            "deterministic_witness": {"event_count": 0, "digest": 0xcbf2_9ce4_8422_2325_u64},
+        })
+    }
+
+    fn nondeterminism_trace() -> Value {
+        let mut trace = empty_nondeterminism_trace();
+        trace["next_sequence"] = json!(2);
+        trace["events"] = json!([
+            {"sequence": 0, "source": "TimerRead", "value": [0, 255],
+             "virtual_ts": 10, "component": "PRIVATE-COMPONENT-SENTINEL"},
+            {"sequence": 1, "source": "LaneSelectionRandom", "value": [],
+             "virtual_ts": 12, "component": "interpreter"},
+        ]);
+        trace
+    }
+
     // Minimal metadata fixtures, not claims of valid engine IR or actual guest
     // execution. Engine settings, IR and transcript semantics still require
     // the product's native replay validator and re-execution.
@@ -811,7 +932,7 @@ pub(in crate::incident_bundle) mod tests {
                 expected["ir4_witness"] = json!({});
                 expected["execution_value"] = json!("42");
                 expected["instructions_executed"] = json!(7);
-                expected["nondeterminism_trace"] = json!({});
+                expected["nondeterminism_trace"] = empty_nondeterminism_trace();
                 expected["lane"] = json!("deterministic");
                 expected["exit_code"] = Value::Null;
                 expected["decisions"] = Value::Null;
@@ -840,6 +961,168 @@ pub(in crate::incident_bundle) mod tests {
 
     fn captured(payload: &Value) -> Value {
         captured_raw(serde_json::to_string(payload).unwrap())
+    }
+
+    fn payload_with_trace(state: &str, trace: Value) -> Value {
+        let mut value = payload(state);
+        if state == "completed" {
+            value["expected"]["nondeterminism_trace"] = trace;
+        } else {
+            value["expected"]["failure_context"] = json!({
+                "ir3_hash": "a".repeat(64),
+                "instructions_executed": 42,
+                "dropped_console_entries": 0,
+                "randomness_transcript": trace,
+                "imported_module_hashes": {},
+            });
+        }
+        value
+    }
+
+    #[test]
+    fn native_traces_accept_finalized_streams_and_historical_witness_omission() {
+        let mut historical = nondeterminism_trace();
+        historical
+            .as_object_mut()
+            .unwrap()
+            .remove("deterministic_witness");
+        let mut equal_timestamps = nondeterminism_trace();
+        equal_timestamps["events"][1]["virtual_ts"] = json!(10);
+        let mut nonempty_witness = nondeterminism_trace();
+        nonempty_witness["deterministic_witness"] = json!({"event_count": u64::MAX, "digest": 0});
+        let mut final_tick = empty_nondeterminism_trace();
+        final_tick["capture_started_vts"] = json!(u64::MAX);
+        final_tick["capture_ended_vts"] = json!(u64::MAX);
+        for state in ["completed", "uncaught_exception", "engine_failure"] {
+            for trace in [
+                empty_nondeterminism_trace(),
+                nondeterminism_trace(),
+                historical.clone(),
+                equal_timestamps.clone(),
+                nonempty_witness.clone(),
+                final_tick.clone(),
+            ] {
+                let metadata = verify(&captured(&payload_with_trace(state, trace)))
+                    .unwrap()
+                    .unwrap();
+                assert!(!format!("{metadata:?}").contains("PRIVATE-"));
+            }
+        }
+    }
+
+    fn invalid_nondeterminism_traces() -> Vec<(String, Value)> {
+        let original = nondeterminism_trace();
+        let mut cases = vec![("empty object".into(), json!({}))];
+        for field in [
+            "session_id",
+            "events",
+            "next_sequence",
+            "capture_started_vts",
+            "capture_ended_vts",
+        ] {
+            let mut trace = original.clone();
+            trace.as_object_mut().unwrap().remove(field);
+            cases.push((format!("missing {field}"), trace));
+        }
+        for (field, invalid) in [
+            ("session_id", Value::Null),
+            ("events", json!({})),
+            ("next_sequence", json!(1)),
+            ("next_sequence", json!("2")),
+            ("next_sequence", json!(2.0)),
+            ("capture_started_vts", json!(-1)),
+            ("capture_started_vts", json!(13)),
+            ("capture_ended_vts", Value::Null),
+            ("capture_ended_vts", json!("12")),
+            ("capture_ended_vts", json!(true)),
+            ("deterministic_witness", json!([])),
+            ("deterministic_witness", json!({})),
+            (
+                "deterministic_witness",
+                json!({"event_count": 0, "digest": 0}),
+            ),
+            (
+                "deterministic_witness",
+                json!({"event_count": -1, "digest": 0}),
+            ),
+            (
+                "deterministic_witness",
+                json!({"event_count": 1, "digest": "0"}),
+            ),
+        ] {
+            let mut trace = original.clone();
+            trace[field] = invalid;
+            cases.push((format!("invalid {field}"), trace));
+        }
+        for field in ["sequence", "source", "value", "virtual_ts", "component"] {
+            let mut trace = original.clone();
+            trace["events"][0].as_object_mut().unwrap().remove(field);
+            cases.push((format!("missing event {field}"), trace));
+        }
+        for (position, field, invalid) in [
+            (1, "sequence", json!(0)),
+            (1, "sequence", json!(2)),
+            (0, "sequence", json!(-1)),
+            (0, "source", json!("PRIVATE-UNKNOWN-SOURCE")),
+            (0, "source", json!("timer_read")),
+            (0, "value", json!([256])),
+            (0, "value", json!([-1])),
+            (0, "value", json!([1.0])),
+            (0, "value", json!([true])),
+            (0, "value", json!("PRIVATE-NOT-BYTES")),
+            (0, "virtual_ts", json!(9)),
+            (1, "virtual_ts", json!(13)),
+            (0, "virtual_ts", json!("10")),
+            (0, "component", Value::Null),
+        ] {
+            let mut trace = original.clone();
+            trace["events"][position][field] = invalid;
+            cases.push((format!("invalid event {position} {field}"), trace));
+        }
+        let mut regressed = original.clone();
+        regressed["events"][0]["virtual_ts"] = json!(12);
+        regressed["events"][1]["virtual_ts"] = json!(11);
+        cases.push(("timestamp regression".into(), regressed));
+        for pointer in ["", "/events/0", "/deterministic_witness"] {
+            let mut trace = original.clone();
+            trace.pointer_mut(pointer).unwrap()["unknown"] = json!("PRIVATE-EXTENSION");
+            cases.push((format!("unknown trace field {pointer}"), trace));
+        }
+        cases
+    }
+
+    #[test]
+    fn signed_native_captures_reject_malformed_nondeterminism_streams() {
+        use super::super::verify_incident_bundle;
+
+        for state in ["completed", "uncaught_exception", "engine_failure"] {
+            for (case, trace) in invalid_nondeterminism_traces() {
+                let mut initial = with_run_context(state);
+                initial["native_replay"] =
+                    captured(&payload_with_trace(state, trace))["native_replay"].clone();
+                // Re-sign the exact malformed payload and refresh every outer
+                // digest. Only independent transcript inspection can refuse it.
+                let raw = signed_bundle(initial);
+                let error = match verify_incident_bundle(&raw, &signing_key().verifying_key()) {
+                    Err(error) => error,
+                    Ok(_) => panic!("{state}: {case}"),
+                };
+                let field = if state == "completed" {
+                    ".payload.expected.nondeterminism_trace"
+                } else {
+                    ".payload.expected.failure_context.randomness_transcript"
+                };
+                assert!(
+                    matches!(&error, IncidentBundleError::Structure { path, .. }
+                    if path == &format!("$.initial_state_snapshot.native_replay{field}")),
+                    "{state}: {case}: {error:?}"
+                );
+                assert!(
+                    !format!("{error:?}").contains("PRIVATE-"),
+                    "{state}: {case}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -1069,7 +1352,7 @@ pub(in crate::incident_bundle) mod tests {
             "ir3_hash": valid_hash,
             "instructions_executed": 42,
             "dropped_console_entries": 0,
-            "randomness_transcript": {"trace_id": "t-1", "events": []},
+            "randomness_transcript": nondeterminism_trace(),
             "imported_module_hashes": {"dep.cjs": "b".repeat(64)},
         });
         for state in ["uncaught_exception", "engine_failure"] {
@@ -1085,7 +1368,7 @@ pub(in crate::incident_bundle) mod tests {
                         "ir3_hash": "A".repeat(64),
                         "instructions_executed": 42,
                         "dropped_console_entries": 0,
-                        "randomness_transcript": {},
+                        "randomness_transcript": nondeterminism_trace(),
                         "imported_module_hashes": {},
                     }),
                 ),
@@ -1095,7 +1378,7 @@ pub(in crate::incident_bundle) mod tests {
                         "ir3_hash": "a".repeat(64),
                         "instructions_executed": -1,
                         "dropped_console_entries": 0,
-                        "randomness_transcript": {},
+                        "randomness_transcript": nondeterminism_trace(),
                         "imported_module_hashes": {},
                     }),
                 ),
@@ -1115,7 +1398,7 @@ pub(in crate::incident_bundle) mod tests {
                         "ir3_hash": "a".repeat(64),
                         "instructions_executed": 42,
                         "dropped_console_entries": 0,
-                        "randomness_transcript": {},
+                        "randomness_transcript": nondeterminism_trace(),
                         "imported_module_hashes": {"dep.cjs": "not-hex"},
                     }),
                 ),
@@ -1125,7 +1408,7 @@ pub(in crate::incident_bundle) mod tests {
                         "ir3_hash": "a".repeat(64),
                         "instructions_executed": 42,
                         "dropped_console_entries": 0,
-                        "randomness_transcript": {},
+                        "randomness_transcript": nondeterminism_trace(),
                         "imported_module_hashes": {},
                         "ir4_witness": {},
                     }),
