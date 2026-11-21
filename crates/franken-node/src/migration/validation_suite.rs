@@ -679,6 +679,76 @@ fn node_on_path() -> Result<PathBuf> {
     )
 }
 
+fn admit_bun_executable(
+    candidate: &Path,
+    project: &Path,
+    native: &Path,
+    current: &Path,
+) -> Result<PathBuf> {
+    ensure!(
+        candidate.is_absolute(),
+        "Bun executable must be an absolute path"
+    );
+    let executable = candidate.canonicalize().context("resolve Bun executable")?;
+    ensure!(
+        !executable.starts_with(project),
+        "Bun reference must be outside the measured project"
+    );
+    let metadata = fs::metadata(&executable)?;
+    ensure!(
+        metadata.is_file() && metadata.permissions().mode() & 0o111 != 0,
+        "Bun reference must be an executable regular file"
+    );
+    for excluded in [native, current] {
+        let other = fs::metadata(excluded)?;
+        ensure!(
+            metadata.dev() != other.dev() || metadata.ino() != other.ino(),
+            "Bun reference cannot alias the native runtime or validation host"
+        );
+    }
+    Ok(executable)
+}
+
+fn bun_for_required_validation(
+    project: &Path,
+    native: &Path,
+    selected: Option<&Path>,
+) -> Result<PathBuf> {
+    let project = project.canonicalize()?;
+    let current = std::env::current_exe()?;
+    if let Some(selected) = selected {
+        // An invalid explicit selection must not silently fall back to PATH.
+        return admit_bun_executable(selected, &project, native, &current);
+    }
+    bun_on_path(
+        &std::env::var_os("PATH").unwrap_or_default(),
+        &project,
+        native,
+        &current,
+    )
+}
+
+fn bun_on_path(
+    search_path: &std::ffi::OsStr,
+    project: &Path,
+    native: &Path,
+    current: &Path,
+) -> Result<PathBuf> {
+    for directory in std::env::split_paths(search_path) {
+        // PATH may include project-owned bin directories, relative entries or
+        // a renamed copy of this host. None may select the Bun reference.
+        if directory.is_absolute()
+            && let Ok(executable) =
+                admit_bun_executable(&directory.join("bun"), project, native, current)
+        {
+            return Ok(executable);
+        }
+    }
+    bail!(
+        "required lockstep needs a trusted Bun executable on an absolute PATH entry outside the project; supply --bun-bin"
+    )
+}
+
 fn observe(output: &Output) -> RunObservation {
     let stream = |bytes: &[u8]| StreamObservation {
         bytes: bytes.len(),
@@ -946,6 +1016,54 @@ pub fn run_if_present_with_dependency_inputs(
         || Ok(crate::resolve_product_cli_executable()?),
         || FailureArchive::from_environment([project, project]),
     )
+}
+
+/// Honor the operator's required-lockstep migration policy using the existing
+/// three-runtime oracle over one admitted immutable capture. Missing tests or
+/// Bun, disagreement and execution errors never become a pair or smoke PASS.
+pub fn run_product_if_present_with_dependency_inputs(
+    project: &Path,
+    expected: &[MetadataInput],
+    bun_executable: Option<&Path>,
+) -> Result<Option<product_oracle::ProductReport>> {
+    run_product_if_present_with_bound_inputs(
+        project,
+        expected,
+        || Ok(crate::resolve_product_cli_executable()?),
+        |native| bun_for_required_validation(project, native, bun_executable),
+        || FailureArchive::from_environment([project, project]),
+    )
+}
+
+fn run_product_if_present_with_bound_inputs(
+    project: &Path,
+    expected: &[MetadataInput],
+    native: impl FnOnce() -> Result<PathBuf>,
+    bun: impl FnOnce(&Path) -> Result<PathBuf>,
+    archive: impl FnOnce() -> Result<Option<FailureArchive>>,
+) -> Result<Option<product_oracle::ProductReport>> {
+    let deadline = Instant::now() + TOTAL_TIMEOUT;
+    let snapshot = Snapshot::capture(project, deadline)?;
+    ExecutionControl::admit(&[&snapshot])?;
+    snapshot.with_dependency_inputs(expected, deadline, |_| Ok(()))?;
+    if snapshot.tests()?.is_empty() {
+        return Ok(None);
+    }
+    let archive = archive()?;
+    let native = native()?;
+    let bun = bun(&native)?;
+    let mut report = product_oracle::run_captured(
+        [project, project],
+        [&snapshot, &snapshot],
+        &native,
+        &bun,
+        deadline,
+        true,
+    )?;
+    if let Some(archive) = archive {
+        report.failure_capture = archive.finish_product(&report, &snapshot, &snapshot, deadline);
+    }
+    Ok(Some(report))
 }
 
 /// Run a caller's bounded smoke operation against private captured inputs whose
@@ -1324,6 +1442,265 @@ mod tests {
     }
 
     #[test]
+    fn required_lockstep_empty_inventory_and_changed_inputs_never_resolve_runtimes() {
+        let project = fixture();
+        write(project.path(), "package.json", r#"{"name":"checked"}"#);
+        let expected = admitted_dependency_inputs(project.path());
+        assert!(
+            run_product_if_present_with_bound_inputs(
+                project.path(),
+                &expected,
+                || panic!("empty inventory must not resolve native"),
+                |_| panic!("empty inventory must not resolve Bun"),
+                || panic!("empty inventory must not allocate an archive"),
+            )
+            .unwrap()
+            .is_none()
+        );
+        write(
+            project.path(),
+            "case.test.js",
+            "throw new Error('must not execute');",
+        );
+        write(project.path(), "package.json", r#"{"name":"changed"}"#);
+        let error = run_product_if_present_with_bound_inputs(
+            project.path(),
+            &expected,
+            || panic!("metadata admission must precede native resolution"),
+            |_| panic!("metadata admission must precede Bun resolution"),
+            || panic!("metadata admission must precede archive allocation"),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("dependency metadata changed after audit"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn required_lockstep_missing_bun_does_not_run_a_pair_or_smoke() {
+        let project = fixture();
+        write(project.path(), "package.json", r#"{"name":"checked"}"#);
+        write(
+            project.path(),
+            "case.test.js",
+            "throw new Error('must not execute');",
+        );
+        let expected = admitted_dependency_inputs(project.path());
+        let error = run_product_if_present_with_bound_inputs(
+            project.path(),
+            &expected,
+            || Ok("/missing-native-must-never-execute".into()),
+            |_| bail!("independently selected Bun is unavailable"),
+            || Ok(None),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "independently selected Bun is unavailable"
+        );
+    }
+
+    fn runtime_fixture(root: &Path, path: &str, source: &str) -> PathBuf {
+        write(root, path, source);
+        let path = root.join(path);
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        path
+    }
+
+    #[test]
+    fn required_lockstep_bun_discovery_excludes_project_relative_and_host_aliases() {
+        let root = fixture();
+        let project = root.path().join("project");
+        fs::create_dir(&project).unwrap();
+        let host = runtime_fixture(root.path(), "host", "validation host");
+        let native = runtime_fixture(root.path(), "native", "native runtime");
+        let project_bun = runtime_fixture(&project, "bin/bun", "project-owned executable");
+        let trusted = runtime_fixture(root.path(), "trusted/bun", "trusted reference");
+        fs::create_dir(root.path().join("alias")).unwrap();
+        fs::hard_link(&host, root.path().join("alias/bun")).unwrap();
+        let path = std::env::join_paths([
+            Path::new("relative"),
+            Path::new(""),
+            project_bun.parent().unwrap(),
+            root.path().join("alias").as_path(),
+            trusted.parent().unwrap(),
+        ])
+        .unwrap();
+        assert_eq!(
+            bun_on_path(&path, &project, &native, &host).unwrap(),
+            trusted
+        );
+        assert!(admit_bun_executable(&project_bun, &project, &native, &host).is_err());
+        assert!(admit_bun_executable(Path::new("relative/bun"), &project, &native, &host).is_err());
+        let alias = root.path().join("native-symlink");
+        symlink(&native, &alias).unwrap();
+        assert!(admit_bun_executable(&alias, &project, &native, &host).is_err());
+        let hardlink = root.path().join("native-hardlink");
+        fs::hard_link(&native, &hardlink).unwrap();
+        assert!(admit_bun_executable(&hardlink, &project, &native, &host).is_err());
+        assert!(bun_for_required_validation(&project, &native, Some(&project_bun)).is_err());
+    }
+
+    // These Node-backed executable fixtures verify dispatch and evidence
+    // plumbing, not Bun/native language compatibility. The production runner
+    // still executes three distinct selected files, captures each identity and
+    // requires the canonical three-runtime oracle's real observations.
+    fn lockstep_runtime_fixtures(
+        root: &Path,
+        native_role: &str,
+        bun_role: &str,
+    ) -> (PathBuf, PathBuf) {
+        let node = node_on_path().unwrap();
+        let quoted_node = format!("'{}'", node.to_string_lossy().replace('\'', "'\\''"));
+        let native = runtime_fixture(
+            root,
+            "native",
+            &format!(
+                "#!/bin/sh\n[ \"$1\" = run ] || exit 97\nshift\nentry=$1\nshift\n[ \"$1\" = --runtime ] && [ \"$2\" = franken-engine ] && [ \"$3\" = --engine-bin ] && [ \"$5\" = --console-only ] && [ \"$6\" = -- ] || exit 98\nshift 6\nexec {quoted_node} \"$entry\" {native_role} \"$@\"\n"
+            ),
+        );
+        let bun = runtime_fixture(
+            root,
+            "bun",
+            &format!(
+                "#!/bin/sh\nentry=$1\nshift\nexec {quoted_node} \"$entry\" {bun_role} \"$@\"\n"
+            ),
+        );
+        (native, bun)
+    }
+
+    #[test]
+    fn required_lockstep_orchestration_uses_one_capture_and_all_three_real_process_legs() {
+        let project = fixture();
+        let runtimes = fixture();
+        write(project.path(), "package.json", r#"{"name":"checked"}"#);
+        write(project.path(), "leaf.cjs", "module.exports = 42;");
+        write(
+            project.path(),
+            "case.test.cjs",
+            "require('fs').writeFileSync('result.txt', String(require('./leaf.cjs'))); console.log(require('./leaf.cjs'));",
+        );
+        let expected = admitted_dependency_inputs(project.path());
+        let (native, bun) = lockstep_runtime_fixtures(runtimes.path(), "", "");
+        let report = run_product_if_present_with_bound_inputs(
+            project.path(),
+            &expected,
+            || {
+                // Mutation after admission must not replace measured sources.
+                write(project.path(), "leaf.cjs", "module.exports = 999;");
+                Ok(native)
+            },
+            |_| Ok(bun),
+            || Ok(None),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(report.verdict, "PASS", "{report:#?}");
+        assert_eq!(
+            (
+                report.total_tests,
+                report.passed,
+                report.failed,
+                report.errored,
+                report.skipped
+            ),
+            (1, 1, 0, 0, 0)
+        );
+        assert!(report.filesystem_comparison);
+        assert!(!report.release_certification);
+        assert_eq!(report.cases[0].test, "case.test.cjs");
+        let expected_stdout = hex::encode(Sha256::digest(b"42\n"));
+        for leg in [
+            &report.cases[0].node,
+            &report.cases[0].bun,
+            &report.cases[0].native,
+        ] {
+            let leg = leg.as_ref().unwrap();
+            assert_eq!(leg.stdout.sha256, expected_stdout);
+            assert_eq!(leg.exit_code, Some(0));
+            assert!(leg.workspace_delta.is_some());
+        }
+        assert!(!project.path().join("result.txt").exists());
+        assert_eq!(
+            fs::read_to_string(project.path().join("leaf.cjs")).unwrap(),
+            "module.exports = 999;"
+        );
+    }
+
+    #[test]
+    fn required_lockstep_keeps_native_and_reference_divergence_verdicts() {
+        for (native_role, bun_role, verdict) in
+            [("native", "", "FAIL"), ("", "bun", "INCONCLUSIVE")]
+        {
+            let project = fixture();
+            let runtimes = fixture();
+            write(project.path(), "package.json", r#"{"name":"checked"}"#);
+            write(
+                project.path(),
+                "case.test.js",
+                "console.log(process.argv[2] || 'shared');",
+            );
+            let expected = admitted_dependency_inputs(project.path());
+            let (native, bun) = lockstep_runtime_fixtures(runtimes.path(), native_role, bun_role);
+            let report = run_product_if_present_with_bound_inputs(
+                project.path(),
+                &expected,
+                || Ok(native),
+                |_| Ok(bun),
+                || Ok(None),
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(report.verdict, verdict, "{report:#?}");
+            assert_eq!(report.total_tests, 1);
+            assert_eq!(report.passed, 0);
+            assert!(
+                report.cases[0].node.is_some()
+                    && report.cases[0].bun.is_some()
+                    && report.cases[0].native.is_some()
+            );
+        }
+    }
+
+    #[test]
+    fn required_lockstep_refuses_native_reference_aliases_before_guest_effects() {
+        let project = fixture();
+        let runtimes = fixture();
+        let sentinel = runtimes.path().join("guest-effect");
+        write(project.path(), "package.json", r#"{"name":"checked"}"#);
+        write(
+            project.path(),
+            "case.test.js",
+            &format!(
+                "require('fs').writeFileSync({}, 'must not execute');",
+                serde_json::to_string(&sentinel).unwrap(),
+            ),
+        );
+        let expected = admitted_dependency_inputs(project.path());
+        let (_, bun) = lockstep_runtime_fixtures(runtimes.path(), "", "");
+        for native in [node_on_path().unwrap(), bun.clone()] {
+            let error = run_product_if_present_with_bound_inputs(
+                project.path(),
+                &expected,
+                || Ok(native),
+                |_| Ok(bun.clone()),
+                || Ok(None),
+            )
+            .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("native runtime must have different executable bytes"),
+                "{error:#}"
+            );
+            assert!(!sentinel.exists());
+        }
+    }
+
+    #[test]
     fn audited_dependency_installed_failures_block_suite_and_smoke_before_dispatch() {
         for (installed_manifest, code) in [
             (
@@ -1404,6 +1781,18 @@ mod tests {
                         .to_string()
                         .contains("no runtime was resolved or executed"),
                     "{error:#}",
+                );
+                let required_error = run_product_if_present_with_bound_inputs(
+                    project.path(),
+                    &expected,
+                    || panic!("installed admission must precede native resolution"),
+                    |_| panic!("installed admission must precede Bun resolution"),
+                    || panic!("installed admission must precede archive allocation"),
+                )
+                .unwrap_err();
+                assert!(
+                    required_error.to_string().contains(code),
+                    "{required_error:#}"
                 );
                 if let Some(installed_manifest) = installed_manifest {
                     assert_eq!(
@@ -2696,8 +3085,14 @@ mod tests {
         write(project.path(), "case.test.js", "process.exit(99);");
         // /bin/false is an explicitly failing role, never an independent
         // reference brand or successful native implementation claim.
+        let runtimes = fixture();
+        let native = runtime_fixture(
+            runtimes.path(),
+            "native-failure",
+            "#!/bin/sh\nexec /bin/false\n",
+        );
         let report = approved
-            .run_product(Path::new("/bin/false"), Path::new("/bin/false"), false)
+            .run_product(&native, Path::new("/bin/false"), false)
             .unwrap();
         assert_eq!(report.verdict, "INCONCLUSIVE", "{report:#?}");
         assert_eq!(report.input_sha256, pin);
@@ -2954,8 +3349,14 @@ mod tests {
             // No-op process roles prove storage lifecycle only. They do not
             // stand in for genuine Bun/Franken semantic implementations.
             if product {
+                let runtimes = fixture();
+                let native = runtime_fixture(
+                    runtimes.path(),
+                    "native-noop",
+                    "#!/bin/sh\nexec /bin/true\n",
+                );
                 let report = approved
-                    .run_product(Path::new("/bin/true"), Path::new("/bin/true"), false)
+                    .run_product(&native, Path::new("/bin/true"), false)
                     .unwrap();
                 assert_eq!(report.verdict, "PASS");
                 assert!(report.failure_capture.is_none());
@@ -2972,6 +3373,14 @@ mod tests {
     fn approved_product_retention_keeps_all_three_roles_and_reference_failure() {
         let project = fixture();
         let output = fixture();
+        // Distinct explicitly failing role files exercise archive/replay
+        // identity binding, not native/Bun compatibility.
+        let runtimes = fixture();
+        let native = runtime_fixture(
+            runtimes.path(),
+            "native-failure",
+            "#!/bin/sh\nexec /bin/false\n",
+        );
         write(
             project.path(),
             "case.test.js",
@@ -2983,7 +3392,7 @@ mod tests {
             .retain_failures(output.path())
             .unwrap();
         let report = approved
-            .run_product(Path::new("/bin/false"), Path::new("/bin/false"), false)
+            .run_product(&native, Path::new("/bin/false"), false)
             .unwrap();
         assert_eq!(report.verdict, "INCONCLUSIVE");
         let FailureCapture::Saved {
@@ -3000,7 +3409,7 @@ mod tests {
         let replayed = native_replay::failure_capture::product::replay(
             capsule_path,
             content_sha256,
-            Path::new("/bin/false"),
+            &native,
             Path::new("/bin/false"),
             false,
         )

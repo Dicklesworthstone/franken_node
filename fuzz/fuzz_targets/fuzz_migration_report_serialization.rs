@@ -2,11 +2,11 @@
 
 use arbitrary::Arbitrary;
 use frankenengine_node::migration::{
-    build_rollback_plan, render_audit_report, render_rewrite_report, render_validate_report,
     AuditOutputFormat, MigrationAuditFinding, MigrationAuditReport, MigrationAuditSummary,
     MigrationCategory, MigrationRewriteAction, MigrationRewriteEntry, MigrationRewriteReport,
     MigrationRollbackEntry, MigrationRollbackPlan, MigrationSeverity, MigrationValidateReport,
-    MigrationValidateStatus, MigrationValidationCheck, ValidateOutputFormat,
+    MigrationValidateStatus, MigrationValidationCheck, ValidateOutputFormat, build_rollback_plan,
+    render_audit_report, render_rewrite_report, render_validate_report,
 };
 use libfuzzer_sys::fuzz_target;
 
@@ -161,6 +161,9 @@ fn validate_report(input: &FuzzInput) -> MigrationValidateReport {
         project_path: format!("/tmp/fuzz/{}", bounded_text(&input.project)),
         generated_at_utc: "2026-04-21T00:00:00Z".to_string(),
         status,
+        validation_scope: "static".into(),
+        lockstep_required: false,
+        lockstep_performed: false,
         checks: input
             .entries
             .iter()
@@ -181,6 +184,8 @@ fn validate_report(input: &FuzzInput) -> MigrationValidateReport {
         dependency_admission_error: None,
         #[cfg(target_os = "linux")]
         test_suite: None,
+        #[cfg(target_os = "linux")]
+        lockstep_suite: None,
     }
 }
 

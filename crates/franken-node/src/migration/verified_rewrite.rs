@@ -12,8 +12,8 @@ use super::rewrite_transaction::{AppliedRewrite, Edit, RewriteTransaction};
 use super::validation_suite::rewrite_candidate::{Replacement, RewriteCandidate};
 use super::validation_suite::{SuiteReport, product_oracle::ProductReport};
 use super::{
-    MigrationRewriteAction, MigrationRewriteReport, MigrationValidateReport, run_rewrite,
-    run_validate,
+    MigrationRewriteAction, MigrationRewriteReport, MigrationValidateReport,
+    MigrationValidationOptions, run_rewrite, run_validate,
 };
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
@@ -269,7 +269,13 @@ fn execute_with_evidence(
             .tempdir()?;
         let staged = temporary.path().join("project");
         candidate.stage_original(&staged)?;
-        let mut prerequisites = run_validate(&staged, true)?;
+        let mut prerequisites = run_validate(
+            &staged,
+            MigrationValidationOptions {
+                static_only: true,
+                ..Default::default()
+            },
+        )?;
         prerequisites.project_path.clone_from(&report.project_path);
         let prerequisites_passed = prerequisites.is_pass();
         let dependency_error = prerequisites.dependency_admission_error.clone();
@@ -1050,7 +1056,14 @@ mod tests {
             assert_eq!(input.bytes, bytes.len());
             assert_eq!(input.sha256, hex::encode(Sha256::digest(bytes)));
         }
-        let validation = run_validate(root.path(), true).unwrap();
+        let validation = run_validate(
+            root.path(),
+            MigrationValidationOptions {
+                static_only: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert!(validation.is_pass(), "{validation:#?}");
         assert_eq!(validation.dependency_admission.as_ref(), Some(admission));
         assert!(validation.test_suite.is_none());
@@ -1116,7 +1129,14 @@ mod tests {
                     && finding.message.contains(code)
             }));
             for static_only in [true, false] {
-                let validation = run_validate(root.path(), static_only).unwrap();
+                let validation = run_validate(
+                    root.path(),
+                    MigrationValidationOptions {
+                        static_only,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
                 assert!(!validation.is_pass(), "{code}: {validation:#?}");
                 assert!(validation.test_suite.is_none());
                 assert!(
@@ -1162,7 +1182,8 @@ mod tests {
                     && finding.severity == MigrationSeverity::High
                     && finding.message.contains("metadata could not be assessed")
             }));
-            let validation = run_validate(root.path(), false).unwrap();
+            let validation =
+                run_validate(root.path(), MigrationValidationOptions::default()).unwrap();
             assert!(!validation.is_pass());
             assert_eq!(
                 validation.dependency_admission_error,
@@ -1205,7 +1226,17 @@ mod tests {
                 .iter()
                 .any(|finding| finding.code == "unresolved_declaration")
         );
-        assert!(!run_validate(root.path(), true).unwrap().is_pass());
+        assert!(
+            !run_validate(
+                root.path(),
+                MigrationValidationOptions {
+                    static_only: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .is_pass()
+        );
         assert_eq!(
             fs::read_to_string(root.path().join("yarn.lock")).unwrap(),
             "# yarn lockfile v1\n"
@@ -1255,7 +1286,17 @@ mod tests {
                 "app/package.json"
             ]
         );
-        assert!(run_validate(root.path(), true).unwrap().is_pass());
+        assert!(
+            run_validate(
+                root.path(),
+                MigrationValidationOptions {
+                    static_only: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .is_pass()
+        );
 
         fs::create_dir(root.path().join("other")).unwrap();
         fs::write(
@@ -1271,7 +1312,7 @@ mod tests {
                 .as_deref()
                 .is_some_and(|error| error.contains("multiple independent package roots"))
         );
-        let validation = run_validate(root.path(), false).unwrap();
+        let validation = run_validate(root.path(), MigrationValidationOptions::default()).unwrap();
         assert!(!validation.is_pass());
         assert!(validation.test_suite.is_none());
         assert!(validation.checks.iter().any(|check| {
@@ -1388,7 +1429,8 @@ mod tests {
                     .unwrap()
                     .contains("native_addon"))
         );
-        let report = run_one_command_report(root.path()).unwrap();
+        let report =
+            run_one_command_report(root.path(), MigrationValidationOptions::default()).unwrap();
         assert_eq!(report.executive_summary.go_no_go, "no_go");
         assert_eq!(
             report.audit.dependency_admission,

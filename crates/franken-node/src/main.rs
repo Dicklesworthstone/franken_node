@@ -9595,15 +9595,28 @@ fn handle_migrate_report(args: &MigrateReportArgs) -> Result<()> {
         Ok(format) => format,
         Err(err) => return migrate_fail("migrate.report", args.json, err),
     };
-    let report = match migration::run_one_command_report(&args.project_path).with_context(|| {
-        format!(
-            "failed building migration report for {}",
-            args.project_path.display()
-        )
-    }) {
-        Ok(report) => report,
+    let resolved = match config::Config::resolve_for_migration(None, CliOverrides::default())
+        .context("failed resolving migration validation policy")
+    {
+        Ok(resolved) => resolved,
         Err(err) => return migrate_fail("migrate.report", args.json, err),
     };
+    let options = migration::MigrationValidationOptions {
+        static_only: args.static_only,
+        require_lockstep_validation: resolved.config.migration.require_lockstep_validation
+            || args.bun_bin.is_some(),
+        bun_executable: args.bun_bin.as_deref(),
+    };
+    let report =
+        match migration::run_one_command_report(&args.project_path, options).with_context(|| {
+            format!(
+                "failed building migration report for {}",
+                args.project_path.display()
+            )
+        }) {
+            Ok(report) => report,
+            Err(err) => return migrate_fail("migrate.report", args.json, err),
+        };
     let rendered = match migration::render_one_command_report(&report, format) {
         Ok(rendered) => rendered,
         Err(err) => return migrate_fail("migrate.report", args.json, err),
@@ -46757,7 +46770,27 @@ fn main() -> Result<()> {
                         return Ok(());
                     }
                 }
-                let report = match migration::run_validate(&args.project_path, args.static_only)
+                let resolved =
+                    match config::Config::resolve_for_migration(None, CliOverrides::default()) {
+                        Ok(resolved) => resolved,
+                        Err(error) => {
+                            return migrate_fail(
+                                "migrate.validate",
+                                matches!(format, migration::ValidateOutputFormat::Json),
+                                format!("failed resolving migration validation policy: {error}"),
+                            );
+                        }
+                    };
+                let options = migration::MigrationValidationOptions {
+                    static_only: args.static_only,
+                    require_lockstep_validation: resolved
+                        .config
+                        .migration
+                        .require_lockstep_validation
+                        || args.bun_bin.is_some(),
+                    bun_executable: args.bun_bin.as_deref(),
+                };
+                let report = match migration::run_validate(&args.project_path, options)
                     .with_context(|| {
                         format!(
                             "failed running migration validate for {}",
@@ -46765,7 +46798,13 @@ fn main() -> Result<()> {
                         )
                     }) {
                     Ok(report) => report,
-                    Err(err) => return migrate_fail("migrate.validate", args.json, err),
+                    Err(err) => {
+                        return migrate_fail(
+                            "migrate.validate",
+                            matches!(format, migration::ValidateOutputFormat::Json),
+                            err,
+                        );
+                    }
                 };
                 match format {
                     migration::ValidateOutputFormat::Json => {
