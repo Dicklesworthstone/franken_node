@@ -272,7 +272,9 @@ publisher_controls = ["publisher_wrong_scope", "publisher_wrong_signer", "publis
                       "publisher_host_wildcard", "publisher_host_url", "publisher_host_invalid_port", "publisher_host_uppercase",
                       "publisher_host_invalid_ipv6", "publisher_host_duplicate_scope", "publisher_host_unsorted_scope",
                       "publisher_host_null_scope", "publisher_host_undeclared_scope", "publisher_host_invalid_env",
-                      "publisher_host_env_newline", "publisher_host_excessive_scope"]
+                      "publisher_host_env_newline", "publisher_host_excessive_scope",
+                      "publisher_host_process_undeclared", "publisher_host_process_overflow",
+                      "publisher_host_process_beyond_instruction"]
 for mode in publisher_controls:
     try:
         verify_artifact(json.dumps({"protocol_control": mode}).encode(), cases[0]["anchor"],
@@ -282,7 +284,8 @@ for mode in publisher_controls:
         print(json.dumps({"case": f"protocol_{mode}", "result": error.code}), flush=True)
     else:
         raise AssertionError(f"protocol_{mode}")
-publisher_host_positives = ["publisher_host_valid", "publisher_host_empty", "publisher_host_unspecified"]
+publisher_host_positives = ["publisher_host_valid", "publisher_host_empty", "publisher_host_unspecified",
+                           "publisher_host_process_maximum", "publisher_host_process_zero"]
 for mode in publisher_host_positives:
     verified = verify_artifact(json.dumps({"protocol_control": mode}).encode(), cases[0]["anchor"],
                                verifier=str(root / "fake_verifier"), format="publisher-source", signature_hex="00" * 64)
@@ -293,8 +296,11 @@ for mode in publisher_host_positives:
         assert host["host_ports"] == ["[2001:db8::1]:443", "api.example.test:443"]
     elif mode == "publisher_host_empty":
         assert host == {"host_ports": [], "env_keys": [], "max_calls_per_epoch": {}}
-    else:
+    elif mode == "publisher_host_unspecified":
         assert host == {"max_calls_per_epoch": {"fs_read": "0"}}
+    else:
+        assert host["max_calls_per_epoch"]["process_spawn"] == ("0" if mode.endswith("_zero") else "18446744073709551615")
+        assert len(host["max_calls_per_epoch"]) == 6
     print(json.dumps({"case": f"protocol_{mode}", "result": "verified"}), flush=True)
 publisher_trust_options = {
     "format": "publisher-source-trust", "signature_hex": "00" * 64,

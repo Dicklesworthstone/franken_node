@@ -172,8 +172,10 @@ export interface PublisherHostIoAuthority {
   host_ports?: string[];
   /** Exact environment names; [] denies every environment read. */
   env_keys?: string[];
-  /** Exact nonnegative decimal strings; "0" denies every call in the native run. */
-  max_calls_per_epoch: Partial<Record<"fs_read" | "fs_write" | "network_egress" | "random_read" | "env_read", string>>;
+  /** Exact nonnegative decimal strings; "0" denies every guest provider call
+   * in the native run. process_spawn counts launches and process control calls;
+   * supervisor-owned cleanup does not consume this budget. */
+  max_calls_per_epoch: Partial<Record<"fs_read" | "fs_write" | "network_egress" | "random_read" | "env_read" | "process_spawn", string>>;
 }
 /** Authenticated capsule content metadata; paths and source bytes are not returned. */
 export interface PublisherSourceCapsule {

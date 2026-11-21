@@ -152,9 +152,9 @@ function publisherHostAuthorityValid(host, capabilities, maxInstructions) {
         || !host[name].every((value, index, values) => valid(value) && (index === 0 || values[index - 1] < value)))) return false;
   }
   const quotas = host.max_calls_per_epoch;
-  return object(quotas) && Object.keys(quotas).length <= 5
+  return object(quotas) && Object.keys(quotas).length <= 6
     && Object.entries(quotas).every(([capability, limit]) =>
-      ["fs_read", "fs_write", "network_egress", "random_read", "env_read"].includes(capability)
+      ["fs_read", "fs_write", "network_egress", "random_read", "env_read", "process_spawn"].includes(capability)
       && capabilities.includes(capability) && typeof limit === "string" && limit === limit.trim()
       && /^(0|[1-9][0-9]{0,19})$/u.test(limit) && BigInt(limit) <= BigInt(maxInstructions));
 }

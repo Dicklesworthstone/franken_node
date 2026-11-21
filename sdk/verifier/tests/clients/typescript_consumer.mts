@@ -73,7 +73,7 @@ for (const name of ["publisher_source_v1_fixture_2", "publisher_source_v2_fixtur
   }
 }
 for (const name of ["publisher_source_scoped_host_authority", "publisher_source_explicit_empty_host_scopes",
-  "publisher_source_unspecified_host_scopes"]) {
+  "publisher_source_unspecified_host_scopes", "publisher_source_process_quota_maximum", "publisher_source_process_quota_zero"]) {
   const source = cases.find((item) => item.name === name)!;
   const verified = await verifyArtifact(Buffer.from(source.input_hex, "hex"), source.anchor,
     { verifier: resolve("verifier"), format: "publisher-source", signatureHex: source.signature_hex });
@@ -90,8 +90,12 @@ for (const name of ["publisher_source_scoped_host_authority", "publisher_source_
     assert.deepEqual(host.host_ports, ["[2001:db8::1]:443", "api.example.test:443"]);
   } else if (name === "publisher_source_explicit_empty_host_scopes") {
     assert.deepEqual(host, { host_ports: [], env_keys: [], max_calls_per_epoch: {} });
-  } else {
+  } else if (name === "publisher_source_unspecified_host_scopes") {
     assert.deepEqual(host, { max_calls_per_epoch: { fs_read: "0" } });
+  } else {
+    const processCalls: string | undefined = host.max_calls_per_epoch.process_spawn;
+    assert.equal(processCalls, name.endsWith("_zero") ? "0" : "18446744073709551615");
+    assert.equal(Object.keys(host.max_calls_per_epoch).length, 6);
   }
 }
 const cfSweep = cases.find((item) => item.name === "counterfactual_signed_sweep")!;

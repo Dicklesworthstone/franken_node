@@ -180,6 +180,10 @@ pub struct PublisherHostIoAuthority {
     pub host_ports: Option<BTreeSet<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub env_keys: Option<BTreeSet<String>>,
+    /// Per-native-run guest provider invocation ceilings. `process_spawn`
+    /// includes process control calls as well as launches; supervisor-owned
+    /// cleanup remains available after exhaustion. These authenticated limits
+    /// neither grant process authority nor establish runtime enforcement.
     #[serde(serialize_with = "serialize_host_quotas")]
     pub max_calls_per_epoch: BTreeMap<String, u64>,
 }
@@ -363,6 +367,7 @@ fn parse_host_authority(
         "network_egress",
         "random_read",
         "env_read",
+        "process_spawn",
     ];
     let fields = value.as_object().ok_or(Invalid)?;
     if fields
@@ -1548,6 +1553,82 @@ mod tests {
                 Err(PublisherSourceError::ManifestInvalid)
             );
         }
+    }
+
+    #[test]
+    fn publisher_process_quota_is_signed_bounded_and_requires_declared_authority() {
+        let capsule = capsule();
+        let mut value = manifest(&capsule, true);
+        value["runtime_authority"]["allowed_capabilities"] = json!([
+            "console",
+            "env_read",
+            "fs_read",
+            "fs_write",
+            "heap_allocate",
+            "network_egress",
+            "process_spawn",
+            "random_read",
+            "vm_dispatch"
+        ]);
+        value["runtime_authority"]["host_io"] = json!({
+            "max_calls_per_epoch": {
+                "env_read": 1,
+                "fs_read": 1,
+                "fs_write": 1,
+                "network_egress": 1,
+                "process_spawn": u64::MAX,
+                "random_read": 1
+            }
+        });
+        let verified = verify_value(&value, &capsule).unwrap();
+        let serialized = serde_json::to_value(verified).unwrap();
+        assert_eq!(
+            serialized["runtime_authority"]["host_io"]["max_calls_per_epoch"]["process_spawn"],
+            "18446744073709551615"
+        );
+
+        value["runtime_authority"]["host_io"]["max_calls_per_epoch"]["process_spawn"] = json!(0);
+        let original = serde_json::to_vec(&value).unwrap();
+        let signature = key().sign(&original).to_bytes();
+        assert_eq!(
+            verify_value(&value, &capsule)
+                .unwrap()
+                .runtime_authority
+                .unwrap()
+                .host_io
+                .unwrap()
+                .max_calls_per_epoch["process_spawn"],
+            0
+        );
+        value["runtime_authority"]["host_io"]["max_calls_per_epoch"]["process_spawn"] = json!(1);
+        assert_eq!(
+            verify_publisher_source(
+                &serde_json::to_vec(&value).unwrap(),
+                &signature,
+                &capsule,
+                &key().verifying_key(),
+            ),
+            Err(PublisherSourceError::SignatureInvalid)
+        );
+
+        value["runtime_authority"]["max_instructions"] = json!(1);
+        for invalid_limit in [json!(2), json!(-1), json!("1"), json!(1.0), json!(null)] {
+            value["runtime_authority"]["host_io"]["max_calls_per_epoch"]["process_spawn"] =
+                invalid_limit;
+            assert_eq!(
+                verify_value(&value, &capsule),
+                Err(PublisherSourceError::RuntimeAuthorityInvalid)
+            );
+        }
+        value["runtime_authority"]["host_io"]["max_calls_per_epoch"]["process_spawn"] = json!(1);
+        value["runtime_authority"]["allowed_capabilities"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|capability| capability != "process_spawn");
+        assert_eq!(
+            verify_value(&value, &capsule),
+            Err(PublisherSourceError::RuntimeAuthorityInvalid)
+        );
     }
 
     #[test]

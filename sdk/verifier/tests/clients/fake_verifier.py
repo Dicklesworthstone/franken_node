@@ -394,6 +394,22 @@ elif mode.startswith("publisher_host_"):
         authority["host_io"] = {"host_ports": [], "env_keys": [], "max_calls_per_epoch": {}}
     elif mode == "publisher_host_unspecified":
         authority["host_io"] = {"max_calls_per_epoch": {"fs_read": "0"}}
+    elif mode in {"publisher_host_process_maximum", "publisher_host_process_zero"}:
+        authority["allowed_capabilities"] += ["fs_write", "random_read", "process_spawn"]
+        host["max_calls_per_epoch"].update({
+            "fs_write": "1", "random_read": "1",
+            "process_spawn": "0" if mode.endswith("_zero") else str(2**64 - 1),
+        })
+    elif mode == "publisher_host_process_undeclared":
+        host["max_calls_per_epoch"]["process_spawn"] = "1"
+    elif mode == "publisher_host_process_overflow":
+        authority["allowed_capabilities"].append("process_spawn")
+        host["max_calls_per_epoch"]["process_spawn"] = str(2**64)
+    elif mode == "publisher_host_process_beyond_instruction":
+        authority["allowed_capabilities"].append("process_spawn")
+        authority["max_instructions"] = "1"
+        host["max_calls_per_epoch"]["network_egress"] = "1"
+        host["max_calls_per_epoch"]["process_spawn"] = "2"
     elif mode == "publisher_host_null":
         authority["host_io"] = None
     elif mode == "publisher_host_unknown_field":

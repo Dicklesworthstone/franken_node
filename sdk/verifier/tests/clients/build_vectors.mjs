@@ -406,6 +406,29 @@ addSource("publisher_source_explicit_empty_host_scopes", sourceBytes, emptyHostR
 const unspecifiedHostRegistration = clone(hostRegistration);
 unspecifiedHostRegistration.runtime_authority.host_io = { max_calls_per_epoch: { fs_read: 0 } };
 addSource("publisher_source_unspecified_host_scopes", sourceBytes, unspecifiedHostRegistration);
+const processRegistration = clone(hostRegistration);
+processRegistration.runtime_authority.allowed_capabilities.push("fs_write", "process_spawn", "random_read");
+processRegistration.runtime_authority.host_io.max_calls_per_epoch = {
+  env_read: 1, fs_read: 0, fs_write: 1, network_egress: 1, random_read: 1,
+  process_spawn: 18_446_744_073_709_551_615n,
+};
+addSource("publisher_source_process_quota_maximum", sourceBytes, processRegistration);
+const zeroProcessRegistration = clone(processRegistration);
+zeroProcessRegistration.runtime_authority.host_io.max_calls_per_epoch.process_spawn = 0;
+addSource("publisher_source_process_quota_zero", sourceBytes, zeroProcessRegistration);
+const undeclaredProcessRegistration = clone(processRegistration);
+undeclaredProcessRegistration.runtime_authority.allowed_capabilities =
+  undeclaredProcessRegistration.runtime_authority.allowed_capabilities.filter((cap) => cap !== "process_spawn");
+addSource("publisher_source_undeclared_process_quota", sourceBytes, undeclaredProcessRegistration, "EVIDENCE_INVALID");
+const excessiveProcessRegistration = clone(processRegistration);
+excessiveProcessRegistration.runtime_authority.max_instructions = 1;
+addSource("publisher_source_excessive_process_quota", sourceBytes, excessiveProcessRegistration, "EVIDENCE_INVALID");
+const changedProcessRegistration = clone(zeroProcessRegistration);
+changedProcessRegistration.runtime_authority.host_io.max_calls_per_epoch.process_spawn = 1;
+add("publisher_source_changed_signed_process_quota", "publisher-source",
+  sourceInput(Buffer.from(ordered(changedProcessRegistration)), sourceBytes), "SIGNATURE_INVALID", {
+    signature_hex: sign(null, Buffer.from(ordered(zeroProcessRegistration)), key).toString("hex"),
+  });
 for (const [name, scope] of [
   ["wildcard", { host_ports: ["*.example.test:443"] }],
   ["invalid_port", { host_ports: ["api.example.test:65536"] }],
