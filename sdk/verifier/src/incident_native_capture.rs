@@ -60,6 +60,15 @@ const ENGINE_FAILURE_FIELDS: &[&str] = &[
     "diagnostic",
     "console_output",
 ];
+const FAILURE_CONTEXT_FIELDS: &[&str] = &[
+    "ir3_hash",
+    "instructions_executed",
+    "dropped_console_entries",
+    "randomness_transcript",
+    "imported_module_hashes",
+];
+const MAX_IMPORTED_MODULE_HASHES: usize = 1024;
+const MAX_IMPORTED_MODULE_PATH_BYTES: usize = 4096;
 
 type Result<T> = std::result::Result<T, IncidentBundleError>;
 
@@ -300,6 +309,76 @@ fn console_budget_reason(payload: &Value, reason: &Value) -> Result<()> {
     Ok(())
 }
 
+fn is_lower_hex_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+fn validate_failure_context(value: &Value) -> Result<()> {
+    const FIELD: &str = ".payload.expected.failure_context";
+    let context = exact(value, FIELD, FAILURE_CONTEXT_FIELDS, &[])?;
+    let ir3_hash = text(
+        &context["ir3_hash"],
+        ".payload.expected.failure_context.ir3_hash",
+    )?;
+    if !is_lower_hex_sha256(ir3_hash) {
+        return Err(invalid(
+            ".payload.expected.failure_context.ir3_hash",
+            "expected 64-character lowercase hex digest",
+        ));
+    }
+    if context["instructions_executed"].as_u64().is_none() {
+        return Err(invalid(
+            ".payload.expected.failure_context.instructions_executed",
+            "expected unsigned integer",
+        ));
+    }
+    if context["dropped_console_entries"].as_u64().is_none() {
+        return Err(invalid(
+            ".payload.expected.failure_context.dropped_console_entries",
+            "expected unsigned integer",
+        ));
+    }
+    object(
+        &context["randomness_transcript"],
+        ".payload.expected.failure_context.randomness_transcript",
+    )?;
+    let imported = object(
+        &context["imported_module_hashes"],
+        ".payload.expected.failure_context.imported_module_hashes",
+    )?;
+    if imported.len() > MAX_IMPORTED_MODULE_HASHES {
+        return Err(invalid(
+            ".payload.expected.failure_context.imported_module_hashes",
+            "imported module hash table exceeds its entry bound",
+        ));
+    }
+    for (path, digest) in imported {
+        if path.is_empty()
+            || path.len() > MAX_IMPORTED_MODULE_PATH_BYTES
+            || path.chars().any(char::is_control)
+        {
+            return Err(invalid(
+                ".payload.expected.failure_context.imported_module_hashes",
+                "imported module path must be non-empty, bounded, and control-free",
+            ));
+        }
+        let digest = text(
+            digest,
+            ".payload.expected.failure_context.imported_module_hashes",
+        )?;
+        if !is_lower_hex_sha256(digest) {
+            return Err(invalid(
+                ".payload.expected.failure_context.imported_module_hashes",
+                "imported module digest must be 64-character lowercase hex",
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn terminal(payload: &Value) -> Result<CapturedNativeTerminalState> {
     let expected = &payload["expected"];
     object(expected, ".payload.expected")?;
@@ -344,22 +423,38 @@ fn terminal(payload: &Value) -> Result<CapturedNativeTerminalState> {
             CapturedNativeTerminalState::Completed
         }
         "uncaught_exception" => {
-            exact(expected, ".payload.expected", EXCEPTION_FIELDS, &[])?;
+            exact(
+                expected,
+                ".payload.expected",
+                EXCEPTION_FIELDS,
+                &["failure_context"],
+            )?;
             // Throwing an empty string is a legitimate guest exception.
             text(
                 &expected["exception_value"],
                 ".payload.expected.exception_value",
             )?;
+            if let Some(context) = expected.get("failure_context") {
+                validate_failure_context(context)?;
+            }
             CapturedNativeTerminalState::UncaughtException
         }
         "engine_failure" => {
-            exact(expected, ".payload.expected", ENGINE_FAILURE_FIELDS, &[])?;
+            exact(
+                expected,
+                ".payload.expected",
+                ENGINE_FAILURE_FIELDS,
+                &["failure_context"],
+            )?;
             let diagnostic = text(&expected["diagnostic"], ".payload.expected.diagnostic")?;
             if diagnostic.is_empty() || diagnostic.len() > 4096 {
                 return Err(invalid(
                     ".payload.expected.diagnostic",
                     "expected bounded native diagnostic",
                 ));
+            }
+            if let Some(context) = expected.get("failure_context") {
+                validate_failure_context(context)?;
             }
             let reason = &expected["reason"];
             object(reason, ".payload.expected.reason")?;
@@ -965,6 +1060,85 @@ pub(in crate::incident_bundle) mod tests {
         for state in ["cancelled", "panicked", "timeout", "unknown"] {
             assert!(verify(&captured(&payload(state))).is_err());
         }
+    }
+
+    #[test]
+    fn failure_context_validates_prefix_fields_and_rejects_tampering() {
+        let valid_hash = "a".repeat(64);
+        let valid_context = json!({
+            "ir3_hash": valid_hash,
+            "instructions_executed": 42,
+            "dropped_console_entries": 0,
+            "randomness_transcript": {"trace_id": "t-1", "events": []},
+            "imported_module_hashes": {"dep.cjs": "b".repeat(64)},
+        });
+        for state in ["uncaught_exception", "engine_failure"] {
+            let mut value = payload(state);
+            value["expected"]["failure_context"] = valid_context.clone();
+            assert!(verify(&captured(&value)).is_ok(), "{state} valid context");
+
+            for (label, tampered) in [
+                ("null_context", Value::Null),
+                (
+                    "uppercase_ir3_hash",
+                    json!({
+                        "ir3_hash": "A".repeat(64),
+                        "instructions_executed": 42,
+                        "dropped_console_entries": 0,
+                        "randomness_transcript": {},
+                        "imported_module_hashes": {},
+                    }),
+                ),
+                (
+                    "negative_instructions",
+                    json!({
+                        "ir3_hash": "a".repeat(64),
+                        "instructions_executed": -1,
+                        "dropped_console_entries": 0,
+                        "randomness_transcript": {},
+                        "imported_module_hashes": {},
+                    }),
+                ),
+                (
+                    "non_object_randomness",
+                    json!({
+                        "ir3_hash": "a".repeat(64),
+                        "instructions_executed": 42,
+                        "dropped_console_entries": 0,
+                        "randomness_transcript": [],
+                        "imported_module_hashes": {},
+                    }),
+                ),
+                (
+                    "bad_imported_module_digest",
+                    json!({
+                        "ir3_hash": "a".repeat(64),
+                        "instructions_executed": 42,
+                        "dropped_console_entries": 0,
+                        "randomness_transcript": {},
+                        "imported_module_hashes": {"dep.cjs": "not-hex"},
+                    }),
+                ),
+                (
+                    "extra_completed_witness_field",
+                    json!({
+                        "ir3_hash": "a".repeat(64),
+                        "instructions_executed": 42,
+                        "dropped_console_entries": 0,
+                        "randomness_transcript": {},
+                        "imported_module_hashes": {},
+                        "ir4_witness": {},
+                    }),
+                ),
+            ] {
+                let mut bad = payload(state);
+                bad["expected"]["failure_context"] = tampered;
+                assert!(verify(&captured(&bad)).is_err(), "{state}:{label}");
+            }
+        }
+        let mut completed = payload("completed");
+        completed["expected"]["failure_context"] = valid_context;
+        assert!(verify(&captured(&completed)).is_err());
     }
 
     #[test]

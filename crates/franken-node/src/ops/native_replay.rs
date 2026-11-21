@@ -1358,7 +1358,7 @@ pub use engine::{CapturedModuleSources, CapturingProcessSpawnProvider};
 #[cfg(feature = "engine")]
 mod engine {
     use base64::Engine as _;
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::io::Write;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
@@ -1989,12 +1989,78 @@ mod engine {
         decisions: serde_json::Value,
     }
 
+    const MAX_FAILURE_CONTEXT_MODULES: usize = 1024;
+    const MAX_FAILURE_CONTEXT_MODULE_PATH_BYTES: usize = 4096;
+
+    fn is_lower_hex_sha256(value: &str) -> bool {
+        value.len() == 64
+            && value
+                .bytes()
+                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    }
+
+    /// Exact interpreter failure prefix authenticated by `franken_engine`
+    /// (`ExecutionOrchestrator::last_failed_execution_replay_context`).
+    /// Distinct from a completed execution: never carries an IR4 completion
+    /// witness or finalized policy decision.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct CapturedFailureContext {
+        ir3_hash: String,
+        instructions_executed: u64,
+        dropped_console_entries: u64,
+        randomness_transcript: NondeterminismTrace,
+        imported_module_hashes: BTreeMap<String, String>,
+    }
+
+    impl CapturedFailureContext {
+        fn validate(&self) -> Result<(), String> {
+            if !is_lower_hex_sha256(&self.ir3_hash) {
+                return Err(
+                    "native failure replay context ir3_hash must be 64-character lowercase hex"
+                        .to_string(),
+                );
+            }
+            self.randomness_transcript
+                .validate_for_replay()
+                .map_err(|error| {
+                    format!("invalid captured failure randomness transcript: {error}")
+                })?;
+            if self.imported_module_hashes.len() > MAX_FAILURE_CONTEXT_MODULES {
+                return Err(
+                    "native failure replay context imported_module_hashes exceeds its entry bound"
+                        .to_string(),
+                );
+            }
+            for (path, digest) in &self.imported_module_hashes {
+                if path.is_empty()
+                    || path.len() > MAX_FAILURE_CONTEXT_MODULE_PATH_BYTES
+                    || path.chars().any(char::is_control)
+                {
+                    return Err(
+                        "native failure replay context module path must be non-empty, bounded, and control-free"
+                            .to_string(),
+                    );
+                }
+                if !is_lower_hex_sha256(digest) {
+                    return Err(
+                        "native failure replay context module digest must be 64-character lowercase hex"
+                            .to_string(),
+                    );
+                }
+            }
+            Ok(())
+        }
+    }
+
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
     struct CapturedGuestException {
         trace_id: String,
         exception_value: String,
         console_output: Vec<ConsoleEntry>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        failure_context: Option<CapturedFailureContext>,
     }
 
     /// Only engine-owned, reproducible stopping conditions. Do not classify
@@ -2052,6 +2118,8 @@ mod engine {
         /// not a completed IR4 witness or a finalized nondeterminism trace.
         diagnostic: String,
         console_output: Vec<ConsoleEntry>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        failure_context: Option<CapturedFailureContext>,
     }
 
     impl CapturedEngineFailure {
@@ -2114,6 +2182,9 @@ mod engine {
                         );
                     }
                 }
+            }
+            if let Some(context) = &self.failure_context {
+                context.validate()?;
             }
             Ok(())
         }
@@ -2518,6 +2589,9 @@ mod engine {
                             "native failure replay requires a captured execution trace".to_string()
                         );
                     }
+                    if let Some(context) = &expected.failure_context {
+                        context.validate()?;
+                    }
                     // The thrown value may legitimately be the empty string.
                     // Only the authenticated recorder boundary, not its length,
                     // establishes that this is a real failed guest attempt.
@@ -2862,7 +2936,7 @@ mod engine {
                     .to_string(),
             );
         }
-        let host_effect_transcript = entries
+        let host_effect_transcript: Vec<(HostIoRequest, HostIoOutcome)> = entries
             .iter()
             .filter_map(|entry| match entry {
                 HostEffectJournalEntry::HostIo { request, outcome } => {
@@ -2871,12 +2945,36 @@ mod engine {
                 HostEffectJournalEntry::ProcessSpawn { .. } => None,
             })
             .collect();
+        let console_output = orchestrator.last_failed_console_output();
+        let failure_context = match orchestrator.last_failed_execution_replay_context() {
+            Some(ctx) => {
+                if ctx.console_output != console_output
+                    || ctx.host_effect_transcript != host_effect_transcript
+                {
+                    return Err(
+                        "native failure replay context disagrees with finalized console or host-effect sinks"
+                            .to_string(),
+                    );
+                }
+                let captured = CapturedFailureContext {
+                    ir3_hash: ctx.ir3_hash.to_hex(),
+                    instructions_executed: ctx.instructions_executed,
+                    dropped_console_entries: ctx.dropped_console_entries,
+                    randomness_transcript: ctx.randomness_transcript.clone(),
+                    imported_module_hashes: ctx.imported_module_hashes.clone(),
+                };
+                captured.validate()?;
+                Some(captured)
+            }
+            None => None,
+        };
         let attempt = match primary {
             OrchestratorError::Interpreter(InterpreterError::UncaughtException { value }) => {
                 CapturedAttempt::UncaughtException(CapturedGuestException {
                     trace_id: trace_id.to_string(),
                     exception_value: value.clone(),
-                    console_output: orchestrator.last_failed_console_output(),
+                    console_output,
+                    failure_context,
                 })
             }
             OrchestratorError::Interpreter(error) => {
@@ -2885,7 +2983,8 @@ mod engine {
                     reason: engine_failure_reason(error)
                         .ok_or_else(|| "unsupported native failure reason".to_string())?,
                     diagnostic: error.to_string(),
-                    console_output: orchestrator.last_failed_console_output(),
+                    console_output,
+                    failure_context,
                 })
             }
             _ => return Err("unsupported native failure boundary".to_string()),
@@ -3235,6 +3334,7 @@ mod engine {
         exception_value: Option<String>,
         engine_failure: Option<(EngineFailureReason, String)>,
         console_output: Vec<ConsoleEntry>,
+        failure_context: Option<CapturedFailureContext>,
         host_effect_transcript: Vec<(HostIoRequest, HostIoOutcome)>,
         host_effect_journal: Vec<HostEffectJournalEntry>,
     }
@@ -3247,40 +3347,48 @@ mod engine {
                 exception_value: None,
                 engine_failure: None,
                 console_output: result.console_output,
+                failure_context: None,
                 host_effect_transcript: result.host_effect_transcript,
                 host_effect_journal: result.host_effect_journal,
             }
         }
 
         fn failed(observed: ObservedFailure) -> Result<Self, String> {
-            let (terminal_state, trace_id, exception_value, engine_failure, console_output) =
-                match observed.attempt {
-                    CapturedAttempt::UncaughtException(failure) => (
-                        NativeReplayTerminalState::UncaughtException,
-                        failure.trace_id,
-                        Some(failure.exception_value),
-                        None,
-                        failure.console_output,
-                    ),
-                    CapturedAttempt::EngineFailure(failure) => (
-                        NativeReplayTerminalState::EngineFailure,
-                        failure.trace_id,
-                        None,
-                        Some((failure.reason, failure.diagnostic)),
-                        failure.console_output,
-                    ),
-                    CapturedAttempt::Completed(_) => {
-                        return Err(
-                            "failure observation cannot contain completed evidence".to_string()
-                        );
-                    }
-                };
+            let (
+                terminal_state,
+                trace_id,
+                exception_value,
+                engine_failure,
+                console_output,
+                failure_context,
+            ) = match observed.attempt {
+                CapturedAttempt::UncaughtException(failure) => (
+                    NativeReplayTerminalState::UncaughtException,
+                    failure.trace_id,
+                    Some(failure.exception_value),
+                    None,
+                    failure.console_output,
+                    failure.failure_context,
+                ),
+                CapturedAttempt::EngineFailure(failure) => (
+                    NativeReplayTerminalState::EngineFailure,
+                    failure.trace_id,
+                    None,
+                    Some((failure.reason, failure.diagnostic)),
+                    failure.console_output,
+                    failure.failure_context,
+                ),
+                CapturedAttempt::Completed(_) => {
+                    return Err("failure observation cannot contain completed evidence".to_string());
+                }
+            };
             Ok(Self {
                 terminal_state,
                 trace_id,
                 exception_value,
                 engine_failure,
                 console_output,
+                failure_context,
                 host_effect_transcript: observed.host_effect_transcript,
                 host_effect_journal: observed.host_effect_journal,
             })
@@ -3294,24 +3402,62 @@ mod engine {
         frozen_modules: bool,
         replayed: &TerminalObservation,
     ) -> Result<NativeReplayOutcome, String> {
-        let (trace_id, console_output, terminal_state, scope, note) = match expected {
-            CapturedAttempt::UncaughtException(failure) => (
-                &failure.trace_id,
-                &failure.console_output,
-                NativeReplayTerminalState::UncaughtException,
-                "guest_failure_prefix",
-                "This verdict verifies an uncaught guest exception, captured console, and finalized host-effect prefix. The failed run has no completed IR4 witness, finalized nondeterminism trace, total instruction count, or completed runtime decision to compare.",
-            ),
-            CapturedAttempt::EngineFailure(failure) => (
-                &failure.trace_id,
-                &failure.console_output,
-                NativeReplayTerminalState::EngineFailure,
-                "engine_failure_prefix",
-                "This verdict verifies the typed interpreter stopping reason, exact native diagnostic, captured console, and finalized host-effect prefix. It does not replay a supervisor timeout, cancellation, or panic, and does not manufacture a completed IR4 witness, finalized nondeterminism trace, or total instruction count.",
-            ),
-            CapturedAttempt::Completed(_) => {
-                return Err("failure comparison requires a captured failed attempt".to_string());
+        let (trace_id, console_output, expected_failure_context, terminal_state, scope, note) =
+            match expected {
+                CapturedAttempt::UncaughtException(failure) => (
+                    &failure.trace_id,
+                    &failure.console_output,
+                    failure.failure_context.as_ref(),
+                    NativeReplayTerminalState::UncaughtException,
+                    "guest_failure_prefix",
+                    if failure.failure_context.is_some() {
+                        "This verdict verifies an uncaught guest exception, executed IR3 hash, failure-prefix instruction count, randomness transcript, captured/dropped console output, consumed module hashes, and finalized host-effect prefix. The failed run has no completed IR4 witness or completed runtime decision to compare."
+                    } else {
+                        "This verdict verifies an uncaught guest exception, captured console, and finalized host-effect prefix. The failed run has no completed IR4 witness, finalized nondeterminism trace, total instruction count, or completed runtime decision to compare."
+                    },
+                ),
+                CapturedAttempt::EngineFailure(failure) => (
+                    &failure.trace_id,
+                    &failure.console_output,
+                    failure.failure_context.as_ref(),
+                    NativeReplayTerminalState::EngineFailure,
+                    "engine_failure_prefix",
+                    if failure.failure_context.is_some() {
+                        "This verdict verifies the typed interpreter stopping reason, exact native diagnostic, executed IR3 hash, failure-prefix instruction count, randomness transcript, captured/dropped console output, consumed module hashes, and finalized host-effect prefix. It does not replay a supervisor timeout, cancellation, or panic, and does not manufacture a completed IR4 witness or completed runtime decision."
+                    } else {
+                        "This verdict verifies the typed interpreter stopping reason, exact native diagnostic, captured console, and finalized host-effect prefix. It does not replay a supervisor timeout, cancellation, or panic, and does not manufacture a completed IR4 witness, finalized nondeterminism trace, or total instruction count."
+                    },
+                ),
+                CapturedAttempt::Completed(_) => {
+                    return Err("failure comparison requires a captured failed attempt".to_string());
+                }
+            };
+        let (
+            ir3_hash_match,
+            instruction_count_match,
+            nondeterminism_trace_match,
+            dropped_console_match,
+            imported_module_hashes_match,
+        ) = match expected_failure_context {
+            Some(expected_ctx) => {
+                let replayed_ctx = replayed.failure_context.as_ref();
+                (
+                    Some(replayed_ctx.is_some_and(|ctx| ctx.ir3_hash == expected_ctx.ir3_hash)),
+                    Some(replayed_ctx.is_some_and(|ctx| {
+                        ctx.instructions_executed == expected_ctx.instructions_executed
+                    })),
+                    Some(replayed_ctx.is_some_and(|ctx| {
+                        ctx.randomness_transcript == expected_ctx.randomness_transcript
+                    })),
+                    replayed_ctx.is_some_and(|ctx| {
+                        ctx.dropped_console_entries == expected_ctx.dropped_console_entries
+                    }),
+                    replayed_ctx.is_some_and(|ctx| {
+                        ctx.imported_module_hashes == expected_ctx.imported_module_hashes
+                    }),
+                )
             }
+            None => (None, None, None, true, true),
         };
         let mut outcome = NativeReplayOutcome {
             schema_version: NATIVE_REPLAY_OUTCOME_SCHEMA.to_string(),
@@ -3325,14 +3471,14 @@ mod engine {
             captured_terminal_state: terminal_state,
             replay_terminal_state: replayed.terminal_state,
             terminal_state_match: replayed.terminal_state == terminal_state,
-            ir3_hash_match: None,
+            ir3_hash_match,
             ir4_witness_match: None,
             execution_value_match: None,
-            instruction_count_match: None,
+            instruction_count_match,
             console_match: *console_output == replayed.console_output,
             host_effects_match: expected_effects == replayed.host_effect_transcript
                 && expected_journal.is_none_or(|journal| journal == replayed.host_effect_journal),
-            nondeterminism_trace_match: None,
+            nondeterminism_trace_match,
             lane_match: None,
             exit_code_match: None,
             exception_value_match: match expected {
@@ -3356,6 +3502,17 @@ mod engine {
                 outcome.exception_value_match != Some(false),
                 "exception value",
             ),
+            (outcome.ir3_hash_match != Some(false), "executed IR3"),
+            (
+                outcome.instruction_count_match != Some(false),
+                "executed instruction count",
+            ),
+            (
+                outcome.nondeterminism_trace_match != Some(false),
+                "nondeterminism trace",
+            ),
+            (dropped_console_match, "dropped console entry count"),
+            (imported_module_hashes_match, "consumed module hashes"),
             (outcome.console_match, "console output"),
             (outcome.host_effects_match, "host-effect prefix"),
             (*trace_id == replayed.trace_id, "execution trace identity"),
@@ -5132,9 +5289,10 @@ mod engine {
                                 && outcome.console_match
                                 && outcome.host_effects_match
                         );
+                        assert_eq!(outcome.ir3_hash_match, Some(true));
                         assert_eq!(outcome.ir4_witness_match, None);
-                        assert_eq!(outcome.instruction_count_match, None);
-                        assert_eq!(outcome.nondeterminism_trace_match, None);
+                        assert_eq!(outcome.instruction_count_match, Some(true));
+                        assert_eq!(outcome.nondeterminism_trace_match, Some(true));
                         assert_eq!(outcome.exception_value_match, None);
                         assert_eq!(outcome.decisions_match, None);
                         assert!(
@@ -5388,9 +5546,10 @@ mod engine {
                         outcome.replay_terminal_state,
                         NativeReplayTerminalState::EngineFailure
                     );
+                    assert_eq!(outcome.ir3_hash_match, Some(true));
                     assert_eq!(outcome.ir4_witness_match, None);
-                    assert_eq!(outcome.instruction_count_match, None);
-                    assert_eq!(outcome.nondeterminism_trace_match, None);
+                    assert_eq!(outcome.instruction_count_match, Some(true));
+                    assert_eq!(outcome.nondeterminism_trace_match, Some(true));
                     assert_eq!(outcome.exception_value_match, None);
                     assert_eq!(outcome.decisions_match, None);
                     assert!(outcome.module_load_disabled);
@@ -6559,11 +6718,11 @@ mod engine {
                 assert_eq!(outcome.exception_value_match, Some(true));
                 assert!(outcome.console_match);
                 assert!(outcome.host_effects_match);
-                assert_eq!(outcome.ir3_hash_match, None);
+                assert_eq!(outcome.ir3_hash_match, Some(true));
                 assert_eq!(outcome.ir4_witness_match, None);
                 assert_eq!(outcome.execution_value_match, None);
-                assert_eq!(outcome.instruction_count_match, None);
-                assert_eq!(outcome.nondeterminism_trace_match, None);
+                assert_eq!(outcome.instruction_count_match, Some(true));
+                assert_eq!(outcome.nondeterminism_trace_match, Some(true));
                 assert_eq!(outcome.lane_match, None);
                 assert_eq!(outcome.exit_code_match, None);
                 assert_eq!(outcome.decisions_match, None);
@@ -6631,6 +6790,96 @@ mod engine {
                 assert!(outcome.console_match);
                 assert!(outcome.host_effects_match);
                 assert_eq!(outcome.ir4_witness_match, None);
+            });
+        }
+
+        #[test]
+        fn failure_reexecution_rejects_tampered_failure_context_fields() {
+            on_native_stack(|| {
+                let root = tempfile::tempdir().expect("original application");
+                let capture = record(
+                    root.path(),
+                    "console.log('before-throw', Math.random()); throw 'original-failure';",
+                );
+                let original: NativeReplayPayload =
+                    serde_json::from_str(&capture.payload_json).expect("captured failure payload");
+                let CapturedAttempt::UncaughtException(expected) = &original.expected else {
+                    panic!("throwing run must capture an uncaught exception");
+                };
+                assert!(
+                    expected.failure_context.is_some(),
+                    "direct interpreter failure must retain FailedExecutionReplayContext"
+                );
+
+                // Tamper with each authenticated failure-context field and verify
+                // replay fails closed with the matching divergence.
+                for (label, expected_divergence, mutate) in [
+                    (
+                        "ir3_hash",
+                        "executed IR3",
+                        (|ctx: &mut CapturedFailureContext| {
+                            ctx.ir3_hash = if ctx.ir3_hash.starts_with('0') {
+                                format!("1{}", &ctx.ir3_hash[1..])
+                            } else {
+                                format!("0{}", &ctx.ir3_hash[1..])
+                            };
+                        }) as fn(&mut CapturedFailureContext),
+                    ),
+                    (
+                        "instructions_executed",
+                        "executed instruction count",
+                        (|ctx: &mut CapturedFailureContext| {
+                            ctx.instructions_executed = ctx.instructions_executed.saturating_add(1);
+                        }) as fn(&mut CapturedFailureContext),
+                    ),
+                    (
+                        "dropped_console_entries",
+                        "dropped console entry count",
+                        (|ctx: &mut CapturedFailureContext| {
+                            ctx.dropped_console_entries =
+                                ctx.dropped_console_entries.saturating_add(1);
+                        }) as fn(&mut CapturedFailureContext),
+                    ),
+                    (
+                        "imported_module_hashes",
+                        "consumed module hashes",
+                        (|ctx: &mut CapturedFailureContext| {
+                            ctx.imported_module_hashes
+                                .insert("tampered.cjs".to_string(), "f".repeat(64));
+                        }) as fn(&mut CapturedFailureContext),
+                    ),
+                ] {
+                    let mut tampered = original.clone();
+                    let CapturedAttempt::UncaughtException(failure) = &mut tampered.expected else {
+                        unreachable!();
+                    };
+                    mutate(failure.failure_context.as_mut().unwrap());
+                    let encoded = encode_capture(&tampered).expect("encode tampered capture");
+                    let outcome = reexecute(&encoded).expect("replay tampered failure capture");
+                    assert!(!outcome.matched, "{label} tamper must fail closed");
+                    assert!(
+                        outcome
+                            .divergences
+                            .iter()
+                            .any(|d| d.contains(expected_divergence)),
+                        "{label}: missing divergence {expected_divergence:?} in {:?}",
+                        outcome.divergences
+                    );
+                }
+
+                // Legacy captures without failure_context remain replayable and
+                // honestly report None for the unavailable prefix fields.
+                let mut legacy = original.clone();
+                let CapturedAttempt::UncaughtException(failure) = &mut legacy.expected else {
+                    unreachable!();
+                };
+                failure.failure_context = None;
+                let legacy_encoded = encode_capture(&legacy).expect("encode legacy capture");
+                let legacy_outcome = reexecute(&legacy_encoded).expect("replay legacy capture");
+                assert!(legacy_outcome.matched, "{legacy_outcome:?}");
+                assert_eq!(legacy_outcome.ir3_hash_match, None);
+                assert_eq!(legacy_outcome.instruction_count_match, None);
+                assert_eq!(legacy_outcome.nondeterminism_trace_match, None);
             });
         }
 
