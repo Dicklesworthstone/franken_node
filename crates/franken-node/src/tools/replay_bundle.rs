@@ -2346,6 +2346,7 @@ fn normalize_timestamp(timestamp: &str) -> Result<(String, i64), ReplayBundleErr
     Ok((normalized, parsed.timestamp_micros()))
 }
 
+#[cfg(any(debug_assertions, test))]
 fn deterministic_bundle_id(
     incident_id: &str,
     created_at: &str,
