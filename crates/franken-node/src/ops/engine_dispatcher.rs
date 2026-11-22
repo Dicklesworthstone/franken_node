@@ -1303,13 +1303,12 @@ fn persist_runtime_evidence_capture(
 
 #[cfg(feature = "engine")]
 fn provision_runtime_evidence_session(
-    project_root: &Path,
+    prepared_directories: (PathBuf, PathBuf, PathBuf),
     session_nonce: &str,
     activation_epoch: SecurityEpoch,
 ) -> Result<ProvisionedRuntimeEvidenceSession> {
     uuid::Uuid::parse_str(session_nonce).context("runtime evidence session nonce is invalid")?;
-    let (product_root_path, capture_directory, protected_state_root) =
-        prepare_runtime_evidence_directories(project_root)?;
+    let (product_root_path, capture_directory, protected_state_root) = prepared_directories;
     let product_root = load_or_create_runtime_evidence_product_root(&product_root_path)?;
     let root_key_id = product_root_key_id(&product_root.verifying_key());
 
@@ -11610,12 +11609,98 @@ impl EngineDispatcher {
         let fleet_policy_sha256 = fleet_policy
             .map(crate::ops::native_session_inventory::fleet_policy_observation_digest)
             .transpose()?;
+        let worker_config = config.clone();
+        #[cfg(unix)]
+        let mut worker_config = worker_config;
+        // Retain the admitted source owner before the worker can enter guest
+        // code. The worker rechecks its own authority and must recapture the
+        // same graph; a changed live project cannot silently replace this
+        // supervisor-authenticated forensic snapshot.
+        #[cfg(unix)]
+        let admitted_source_graph = if config.runtime.frozen_modules == Some(true) {
+            use crate::supply_chain::module_resolution_graph::file_resolution::SymlinkPolicy;
+            use crate::supply_chain::module_resolution_graph::file_resolution::source_graph::{
+                GraphOptions, capture,
+            };
+
+            let root = project_paths.project_root();
+            let entrypoint = project_paths
+                .entrypoint()
+                .strip_prefix(root)
+                .context("admitted source entrypoint escapes the project root")?
+                .to_str()
+                .context("admitted source entrypoint is not UTF-8")?;
+            let graph = if let Some(approval) = &trust_requirements.registry_artifact_approval {
+                approval.validate_run(
+                    entrypoint,
+                    true,
+                    config.runtime.frozen_module_symlinks == Some(true),
+                    &config.runtime.module_conditions,
+                    config.runtime.frozen_module_graph_hash.as_deref(),
+                )?;
+                approval
+                    .revalidate_source_graph()
+                    .context("reauthenticate publisher source before native-session admission")?
+            } else {
+                capture(
+                    root,
+                    entrypoint,
+                    GraphOptions {
+                        symlink_policy: if config.runtime.frozen_module_symlinks == Some(true) {
+                            SymlinkPolicy::Contained
+                        } else {
+                            SymlinkPolicy::Reject
+                        },
+                        additional_conditions: config.runtime.module_conditions.clone(),
+                        ..GraphOptions::default()
+                    },
+                )
+                .context("capture frozen source before native-session admission")?
+            };
+            for probe in &graph.report().probes {
+                trust_requirements.verify_operator_module_path(root, &probe.path)?;
+            }
+            anyhow::ensure!(
+                config
+                    .runtime
+                    .frozen_module_graph_hash
+                    .as_deref()
+                    .is_none_or(|expected| expected == graph.report().input_hash),
+                "frozen source graph disagrees with the operator pin before native-session admission"
+            );
+            worker_config.runtime.frozen_module_graph_hash =
+                Some(graph.report().input_hash.clone());
+            Some(graph)
+        } else {
+            None
+        };
+        let prepared_evidence_directories =
+            prepare_runtime_evidence_directories(project_paths.project_root())
+                .context("prepare protected native-session evidence before source retention")?;
+        // A full or corrupt retention store must refuse before minting an
+        // identity. Otherwise an unstarted attempt leaves an untracked capture
+        // that must conservatively remain unknown to a later fleet drain.
+        #[cfg(unix)]
+        let source_capsule = admitted_source_graph
+            .as_ref()
+            .map(|graph| {
+                crate::ops::native_session_inventory::retain_native_session_source_capsule(
+                    &prepared_evidence_directories.2,
+                    graph,
+                )
+            })
+            .transpose()
+            .context("native-session source retention failed; worker was not started")?;
+        #[cfg(unix)]
+        drop(admitted_source_graph);
+        #[cfg(not(unix))]
+        let source_capsule = None;
         let ProvisionedRuntimeEvidenceSession {
             grant: runtime_evidence_grant,
             capture_path: evidence_capture_path,
             protected_state_root: runtime_evidence_state_root,
         } = provision_runtime_evidence_session(
-            project_paths.project_root(),
+            prepared_evidence_directories,
             &nonce,
             security_epoch_for_profile(config.profile),
         )
@@ -11655,6 +11740,7 @@ impl EngineDispatcher {
                 fleet_zone_id: fleet_policy.map(|policy| policy.zone_id.clone()),
                 fleet_policy_sha256,
                 process_spawn_authority_granted: Some(process_spawn_admission.is_some()),
+                source_capsule,
             },
             admission_generation,
         )
@@ -11685,7 +11771,7 @@ impl EngineDispatcher {
             trust_requirements: trust_requirements.clone(),
             fleet_policy: fleet_policy.cloned(),
             policy_mode: policy_mode.to_string(),
-            config: config.clone(),
+            config: worker_config,
             telemetry_socket_path: telemetry_socket_path.to_path_buf(),
             process_spawn_trust_key_hex: process_spawn_trust_key_hex.map(str::to_string),
             ifc_trust_key_hex,

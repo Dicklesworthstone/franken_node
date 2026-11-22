@@ -167,6 +167,154 @@ fn run_app_with_policy_and_env(
     (dir, outcome)
 }
 
+/// Ordinary frozen execution retains its source before entry, without an
+/// explicit replay capture. A conflicting retained object or an operator pin
+/// mismatch must refuse a later launch before the guest can touch its marker.
+#[cfg(unix)]
+#[test]
+fn frozen_source_retention_refuses_tamper_and_pin_drift_before_guest_entry() {
+    use base64::Engine as _;
+    use frankenengine_node::ops::native_session_inventory::NativeSessionAdmission;
+    use frankenengine_verifier_sdk::native_session::{
+        NativeSessionForensicBundle, verify_native_session_forensics,
+    };
+
+    for tamper_retained_object in [false, true] {
+        let state_home = tempfile::tempdir().expect("private source-retention state");
+        let (project, first) = run_app_with_policy_and_env(
+            "require('fs').writeFileSync('source-retention-guest.marker', 'entered');\n",
+            "legacy-risky",
+            &["--frozen-modules", "--json"],
+            &[("XDG_STATE_HOME", state_home.path().to_str().unwrap())],
+        );
+        assert_eq!(first.exit_code, Some(0), "{}", first.stderr);
+        let report: Value = serde_json::from_str(&first.stdout).expect("completed frozen run JSON");
+        let capture = &report["dispatch"]["runtime_evidence_identity_capture"];
+        let nonce = capture["session_nonce"]
+            .as_str()
+            .expect("original session nonce");
+        let root_bytes: [u8; 32] = hex::decode(
+            capture["product_root_verification_key_hex"]
+                .as_str()
+                .expect("root independently retained from original run"),
+        )
+        .unwrap()
+        .try_into()
+        .unwrap();
+        let trusted_root = ed25519_dalek::VerifyingKey::from_bytes(&root_bytes).unwrap();
+        let destination = tempfile::tempdir().expect("independent forensic destination");
+        let export = Command::new(franken_node_bin())
+            .args([
+                "incident",
+                "capture",
+                "--from-session",
+                nonce,
+                "--out",
+                "source.json",
+                "--json",
+            ])
+            .env("XDG_STATE_HOME", state_home.path())
+            .current_dir(destination.path())
+            .output()
+            .expect("export automatically retained sources");
+        assert!(
+            export.status.success(),
+            "{}",
+            String::from_utf8_lossy(&export.stderr)
+        );
+        let encoded = std::fs::read(destination.path().join("source.json")).unwrap();
+        let verified = verify_native_session_forensics(&encoded, &trusted_root)
+            .expect("independently verify source-bound admission");
+        assert_eq!(
+            verified.schema_version,
+            "franken-node/native-session-forensics/v3"
+        );
+        assert!(verified.source_capsule.is_some());
+        assert!(!verified.replay_certified && !verified.historical_completeness);
+        let bundle: NativeSessionForensicBundle = serde_json::from_slice(&encoded).unwrap();
+        let admission: NativeSessionAdmission =
+            serde_json::from_str(&bundle.admission_json).unwrap();
+        let binding = admission
+            .source_capsule
+            .as_ref()
+            .expect("signed source commitment");
+        let captures_directory = admission.identity_capture_path.parent().unwrap();
+        let captures_before = std::fs::read_dir(captures_directory).unwrap().count();
+        let retained_path = admission
+            .identity_capture_path
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("session-source-capsules")
+            .join(format!(
+                "{}.fnsgcap",
+                binding.capsule_digest.strip_prefix("sha256:").unwrap()
+            ));
+        let original = std::fs::read(&retained_path).expect("pre-entry source object");
+        assert_eq!(original.len(), binding.capsule_bytes);
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(bundle.source_capsule_base64.as_ref().unwrap())
+                .unwrap(),
+            original
+        );
+        let marker = project.path().join("source-retention-guest.marker");
+        assert_eq!(std::fs::read(&marker).unwrap(), b"entered");
+        std::fs::rename(&marker, project.path().join("previous-guest.marker")).unwrap();
+        if tamper_retained_object {
+            let mut changed = original;
+            *changed.last_mut().unwrap() ^= 1;
+            std::fs::write(&retained_path, changed).unwrap();
+        }
+        let mut retry = Command::new(franken_node_bin());
+        retry
+            .args([
+                "run",
+                "app.js",
+                "--policy",
+                "legacy-risky",
+                "--runtime",
+                "franken-engine",
+                "--engine-bin",
+                franken_node_bin(),
+                "--frozen-modules",
+                "--json",
+            ])
+            .env("XDG_STATE_HOME", state_home.path())
+            .env_remove("FRANKEN_NODE_RUNTIME_ALLOW_PROCESS_SHAPE")
+            .current_dir(project.path());
+        if !tamper_retained_object {
+            retry.args([
+                "--frozen-module-graph-hash",
+                &format!("sha256:{}", "00".repeat(32)),
+            ]);
+        }
+        let refused = retry.output().expect("attempt conflicting frozen launch");
+        assert!(
+            !refused.status.success(),
+            "conflicting source must refuse launch"
+        );
+        assert!(!marker.exists(), "refused launch must not enter guest code");
+        assert_eq!(
+            std::fs::read_dir(captures_directory).unwrap().count(),
+            captures_before,
+            "source refusal must not create an untracked session identity"
+        );
+        let diagnostics = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&refused.stdout),
+            String::from_utf8_lossy(&refused.stderr)
+        );
+        let expected_refusal = if tamper_retained_object {
+            "source retention failed"
+        } else {
+            "operator pin before native-session admission"
+        };
+        assert!(diagnostics.contains(expected_refusal), "{diagnostics}");
+    }
+}
+
 /// Exercise the product argv -> engine process shape -> native util factory
 /// path, not a Node/Bun fallback or a standalone JavaScript reference shim.
 #[test]
@@ -541,8 +689,9 @@ fn native_worker_sigkill_preserves_admitted_http_io_and_durable_evidence() {
 }
 
 /// The supervisor cannot publish a terminal receipt after SIGKILL. Its
-/// pre-provider journal must already survive, and losing the authenticated
-/// parent channel must stop the worker without a fabricated terminal outcome.
+/// pre-entry frozen sources and pre-provider journal must already survive, and
+/// losing the authenticated parent channel must stop the worker without a
+/// fabricated terminal outcome.
 #[cfg(target_os = "linux")]
 #[test]
 fn native_supervisor_sigkill_preserves_durable_provider_prefix_without_terminal_receipt() {
@@ -770,6 +919,11 @@ fn assert_native_interruption_retains_admitted_http_io(fault: NativeInterruption
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0);
+    if matches!(fault, NativeInterruptionFault::SupervisorSigkill) {
+        // No --capture-replay is requested: pre-entry source retention belongs
+        // to ordinary frozen supervision, including abrupt parent loss.
+        command.arg("--frozen-modules");
+    }
     let started = Instant::now();
     let mut child = command.spawn().expect("spawn product timeout run");
 
@@ -832,6 +986,10 @@ fn assert_native_interruption_retains_admitted_http_io(fault: NativeInterruption
                 record.status == NativeSessionForensicStatus::PendingLivenessUnknown
                     && record.outcome.is_none(),
                 "the blocked live call must not have a terminal supervisor observation"
+            );
+            anyhow::ensure!(
+                record.admission.source_capsule.is_some(),
+                "the frozen worker reached the HTTP sink without pre-entry retained sources"
             );
             anyhow::ensure!(
                 !report
@@ -973,7 +1131,7 @@ fn assert_native_interruption_retains_admitted_http_io(fault: NativeInterruption
         assert_eq!(exported.exit_code, Some(0), "{}", exported.stderr);
         assert_eq!(
             report["verification"]["schema_version"],
-            "franken-node/native-session-forensics/v2"
+            "franken-node/native-session-forensics/v3"
         );
         assert_eq!(report["verification"]["outcome_kind"], "pending");
         let exported_path = export_directory.path().join("parent-loss.fnforensics.json");
@@ -988,6 +1146,20 @@ fn assert_native_interruption_retains_admitted_http_io(fault: NativeInterruption
         assert!(verified.observed_at.is_none() && verified.process_observation.is_none());
         assert_eq!(verified.completed_provider_calls, None);
         assert_eq!(verified.indeterminate_provider_calls, None);
+        let source_binding = admission
+            .source_capsule
+            .as_ref()
+            .expect("source commitment captured before supervisor loss");
+        let source_summary = verified
+            .source_capsule
+            .as_ref()
+            .expect("independently authenticated original frozen sources");
+        assert_eq!(
+            source_summary.graph_input_hash,
+            source_binding.graph_input_hash
+        );
+        assert_eq!(source_summary.capsule_bytes, source_binding.capsule_bytes);
+        assert!(!source_summary.graph_hash_recomputed);
         assert!(
             !verified.replay_certified
                 && !verified.quiescence_certified
@@ -1011,6 +1183,7 @@ fn assert_native_interruption_retains_admitted_http_io(fault: NativeInterruption
             bundle.outcome.is_none(),
             "SIGKILL cannot manufacture a supervisor terminal receipt"
         );
+        assert!(bundle.source_capsule_base64.is_some());
         let exported_admission: frankenengine_node::ops::native_session_inventory::NativeSessionAdmission =
             serde_json::from_str(&bundle.admission_json).expect("original signed admission");
         assert_eq!(exported_admission, admission);

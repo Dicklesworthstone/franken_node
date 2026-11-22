@@ -175,6 +175,11 @@ unsigned 64-bit **little-endian** capsule length, and the exact capsule bytes.
 The admission receipt authenticates this binding using its existing protocol.
 Historical admissions omit the field and keep their original signature bytes.
 
+The producer reuses identical private source objects and bounds retained sources
+to 256 MiB per protected state root. Partial and orphaned objects still count.
+It refuses a new launch when retention is full or conflicting; it never repairs
+damaged evidence by overwriting it or silently recapturing the current project.
+
 An export of such an admission uses
 `franken-node/native-session-forensics/v3` and includes the required
 `source_capsule_base64` field. It may also carry `journal_jsonl` and a retained

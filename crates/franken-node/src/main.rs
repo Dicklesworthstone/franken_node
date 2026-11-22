@@ -14286,12 +14286,14 @@ fn handle_incident_session_forensics(
             ops::native_session_inventory::export_local_native_session_forensics(session_nonce)?;
         let bytes = serde_json::to_vec(&export.bundle)
             .context("failed serializing authenticated native-session forensics")?;
-        let byte_cap = if export.bundle.schema_version
-            == frankenengine_verifier_sdk::native_session::NATIVE_SESSION_FORENSICS_V2_SCHEMA
-        {
-            frankenengine_verifier_sdk::native_session::MAX_NATIVE_SESSION_FORENSICS_V2_BYTES
-        } else {
-            frankenengine_verifier_sdk::native_session::MAX_NATIVE_SESSION_FORENSICS_BYTES
+        let byte_cap = match export.bundle.schema_version.as_str() {
+            frankenengine_verifier_sdk::native_session::NATIVE_SESSION_FORENSICS_V3_SCHEMA => {
+                frankenengine_verifier_sdk::native_session::MAX_NATIVE_SESSION_FORENSICS_V3_BYTES
+            }
+            frankenengine_verifier_sdk::native_session::NATIVE_SESSION_FORENSICS_V2_SCHEMA => {
+                frankenengine_verifier_sdk::native_session::MAX_NATIVE_SESSION_FORENSICS_V2_BYTES
+            }
+            _ => frankenengine_verifier_sdk::native_session::MAX_NATIVE_SESSION_FORENSICS_BYTES,
         };
         if bytes.len() > byte_cap {
             anyhow::bail!("native-session forensic export exceeds its byte bound");

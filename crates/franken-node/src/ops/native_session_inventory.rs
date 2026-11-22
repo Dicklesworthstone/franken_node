@@ -51,6 +51,12 @@ const MAX_ADMISSION_BYTES: usize = NATIVE_SESSION_MAX_REQUEST_BYTES;
 const ADMISSION_RECEIPT_SCHEMA: &str = "franken-node/native-session-admission-receipt/v1";
 const ADMISSION_RECEIPT_DIRECTORY: &str = "session-admissions";
 const MAX_ADMISSION_RECEIPT_BYTES: usize = 4 * 1024;
+const SOURCE_CAPSULE_DIRECTORY: &str = "session-source-capsules";
+// Source retention has its own bounded allocation. Duplicate source capsules
+// share one immutable object; orphaned/partial files still consume this budget.
+#[cfg(unix)]
+const MAX_RETAINED_SOURCE_CAPSULE_BYTES: usize =
+    crate::capacity_defaults::base::SMALL * 1024 * 1024;
 const MAX_OUTCOME_BYTES: usize =
     NATIVE_SESSION_MAX_EFFECT_WAL_STREAM_BYTES + NATIVE_SESSION_MAX_DIAGNOSTIC_BYTES;
 const OUTCOME_RECEIPT_SCHEMA: &str = "franken-node/native-session-outcome-receipt/v1";
@@ -96,6 +102,17 @@ pub struct NativeSessionControlScope {
     pub fleet_policy_sha256: Option<String>,
 }
 
+/// Exact immutable inputs retained before a frozen worker may start. This
+/// commitment is covered by the existing admission signature; it is not a
+/// publisher endorsement or proof that the guest ran or its effects completed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeSessionSourceCapsuleBinding {
+    pub capsule_digest: String,
+    pub graph_input_hash: String,
+    pub capsule_bytes: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NativeSessionAdmission {
@@ -123,6 +140,10 @@ pub struct NativeSessionAdmission {
     /// from any project's drain. Omission preserves old receipt preimages.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control_scopes: Option<Vec<NativeSessionControlScope>>,
+    /// Historical and non-frozen admissions omit this. Omission preserves
+    /// their original receipt preimages and never implies source retention.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_capsule: Option<NativeSessionSourceCapsuleBinding>,
 }
 
 impl NativeSessionAdmission {
@@ -707,6 +728,7 @@ pub enum NativeSessionForensicErrorKind {
     OutcomeReceiptInvalid,
     OutcomeProjectionConflict,
     JournalInvalid,
+    SourceCapsuleInvalid,
     IdentityInventoryInvalid,
 }
 
@@ -784,6 +806,9 @@ fn validate_admission(admission: &NativeSessionAdmission) -> Result<()> {
     if admission.fleet_zone_id.is_some() != admission.fleet_policy_sha256.is_some() {
         bail!("native-session fleet observation is incomplete");
     }
+    if let Some(source) = &admission.source_capsule {
+        validate_source_capsule_binding(source)?;
+    }
     if !admission
         .product_root_key_id
         .strip_prefix("ed25519:")
@@ -794,6 +819,24 @@ fn validate_admission(admission: &NativeSessionAdmission) -> Result<()> {
             .is_some_and(|value| !valid_digest(value))
     {
         bail!("native-session admission contains an invalid identity or digest");
+    }
+    Ok(())
+}
+
+fn validate_source_capsule_binding(source: &NativeSessionSourceCapsuleBinding) -> Result<()> {
+    use frankenengine_verifier_sdk::native_session::MAX_NATIVE_SESSION_SOURCE_CAPSULE_BYTES;
+
+    if !source
+        .capsule_digest
+        .strip_prefix("sha256:")
+        .is_some_and(valid_digest)
+        || !source
+            .graph_input_hash
+            .strip_prefix("sha256:")
+            .is_some_and(valid_digest)
+        || !(12..=MAX_NATIVE_SESSION_SOURCE_CAPSULE_BYTES).contains(&source.capsule_bytes)
+    {
+        bail!("native-session source capsule binding has an invalid digest or byte bound");
     }
     Ok(())
 }
@@ -1086,6 +1129,148 @@ fn validate_private_path_if_present(path: &Path) -> Result<bool> {
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(error).with_context(|| format!("inspect {}", path.display())),
+    }
+}
+
+#[cfg(unix)]
+fn source_capsule_path(
+    protected_root: &Path,
+    binding: &NativeSessionSourceCapsuleBinding,
+) -> Result<PathBuf> {
+    validate_source_capsule_binding(binding)?;
+    let digest = binding
+        .capsule_digest
+        .strip_prefix("sha256:")
+        .context("native-session source capsule digest has no prefix")?;
+    Ok(protected_root
+        .join(SOURCE_CAPSULE_DIRECTORY)
+        .join(format!("{digest}.fnsgcap")))
+}
+
+#[cfg(unix)]
+fn check_source_capsule_capacity(
+    directory: &Path,
+    additional_files: usize,
+    additional_bytes: usize,
+    max_files: usize,
+    max_bytes: usize,
+) -> Result<()> {
+    let mut files = additional_files;
+    let mut bytes = additional_bytes;
+    for entry in
+        std::fs::read_dir(directory).context("enumerate retained native-session sources")?
+    {
+        let path = entry?.path();
+        if !validate_private_path_if_present(&path)? {
+            bail!("retained native-session source disappeared during capacity accounting");
+        }
+        let metadata = std::fs::symlink_metadata(&path)?;
+        files = files.saturating_add(1);
+        bytes = bytes.saturating_add(usize::try_from(metadata.len())?);
+        if files > max_files || bytes > max_bytes {
+            bail!(
+                "native-session source capsule capacity exceeded: {files}/{max_files} retained files, \
+                 {bytes}/{max_bytes} bytes; refusing to discard retained sources"
+            );
+        }
+    }
+    if files > max_files || bytes > max_bytes {
+        bail!("native-session source capsule capacity exceeded before retention");
+    }
+    Ok(())
+}
+
+/// Persist the existing source-capsule format before admission. Publication is
+/// no-clobber and serialized with inventory writers, including capacity checks.
+/// A reused object must match byte-for-byte; damaged retained evidence is never
+/// silently replaced by recapturing a live project.
+#[cfg(unix)]
+pub(crate) fn retain_native_session_source_capsule(
+    protected_root: &Path,
+    graph: &crate::supply_chain::module_resolution_graph::file_resolution::source_graph::CapturedModuleGraph,
+) -> Result<NativeSessionSourceCapsuleBinding> {
+    use crate::supply_chain::module_resolution_graph::file_resolution::source_graph::capsule;
+
+    let encoded =
+        capsule::encode(graph).context("encode admitted native-session source capsule")?;
+    let binding = NativeSessionSourceCapsuleBinding {
+        capsule_digest: encoded.digest().to_owned(),
+        graph_input_hash: graph.report().input_hash.clone(),
+        capsule_bytes: encoded.bytes().len(),
+    };
+    validate_source_capsule_binding(&binding)?;
+    ensure_runtime_evidence_directory(protected_root, true)?;
+    let directory = protected_root.join(SOURCE_CAPSULE_DIRECTORY);
+    ensure_runtime_evidence_directory(&directory, true)?;
+    let _write_lock = lock_inventory_file(protected_root, true)?;
+    let path = source_capsule_path(protected_root, &binding)?;
+    let exists = validate_private_path_if_present(&path)?;
+    check_source_capsule_capacity(
+        &directory,
+        usize::from(!exists),
+        if exists { 0 } else { encoded.bytes().len() },
+        MAX_STORED_SESSIONS,
+        MAX_RETAINED_SOURCE_CAPSULE_BYTES,
+    )?;
+    if !exists {
+        create_new_runtime_evidence_private_file(&path, encoded.bytes())?;
+    }
+    // Re-read through the same private, no-follow reader used by forensics.
+    // This also rejects a conflicting object that raced publication.
+    if !validate_private_path_if_present(&path)? {
+        bail!("native-session source capsule disappeared after retention");
+    }
+    let retained = read_runtime_evidence_private_file(&path, capsule::MAX_CAPSULE_BYTES)?;
+    if retained.as_slice() != encoded.bytes() {
+        bail!("retained native-session source capsule conflicts with the admitted capture");
+    }
+    std::fs::File::open(protected_root)?.sync_all()?;
+    Ok(binding)
+}
+
+/// Validate retained bytes against the original admission, without reading any
+/// live project path or repairing the evidence store. Capsule replay here only
+/// reconstructs source analysis; it does not execute or replay guest effects.
+fn read_retained_native_session_source_capsule(
+    protected_root: &Path,
+    admission: &NativeSessionAdmission,
+) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>> {
+    let Some(binding) = &admission.source_capsule else {
+        return Ok(None);
+    };
+    validate_source_capsule_binding(binding)?;
+    #[cfg(not(unix))]
+    {
+        let _ = protected_root;
+        bail!("retained native-session source verification requires Unix");
+    }
+    #[cfg(unix)]
+    {
+        use crate::supply_chain::module_resolution_graph::file_resolution::source_graph::capsule;
+
+        validate_existing_forensic_directory(&protected_root.join(SOURCE_CAPSULE_DIRECTORY))?;
+        let path = source_capsule_path(protected_root, binding)?;
+        if !validate_private_path_if_present(&path)? {
+            bail!("native-session admission source capsule is missing");
+        }
+        let bytes = read_runtime_evidence_private_file(&path, capsule::MAX_CAPSULE_BYTES)?;
+        if bytes.len() != binding.capsule_bytes {
+            bail!("retained native-session source capsule length disagrees with admission");
+        }
+        let graph = capsule::replay(&bytes, &binding.capsule_digest)
+            .context("authenticate retained native-session source capsule")?;
+        let entrypoint = admission
+            .entrypoint
+            .strip_prefix(&admission.project_root)
+            .context("native-session source entrypoint escapes its admitted project")?
+            .to_str()
+            .context("native-session source entrypoint is not UTF-8")?;
+        if graph.report().input_hash != binding.graph_input_hash
+            || graph.report().entrypoint != entrypoint
+        {
+            bail!("retained native-session sources disagree with the admitted graph or entrypoint");
+        }
+        Ok(Some(bytes))
     }
 }
 
@@ -1581,6 +1766,8 @@ impl NativeSessionInventoryGuard {
             expected_scopes.insert(scope.project_root.as_path(), scope.admission_generation);
         }
         verify_admission_capture(protected_root, &admission)?;
+        read_retained_native_session_source_capsule(protected_root, &admission)
+            .context("native-session sources must be retained before admission")?;
         let admission_json = bounded_json(&admission, MAX_ADMISSION_BYTES)?;
         let write_lock = lock_inventory_file(protected_root, true)?;
         let connection = retry_snapshot_conflict(|| open_inventory_unlocked(protected_root, true))?
@@ -3002,6 +3189,37 @@ fn read_native_session_forensics_at(
                             report.source_errors.push(error);
                         }
                     }
+                    // Charge the authenticated size before reading/replaying,
+                    // so corrupt repeated objects cannot bypass the scan budget.
+                    if let Some(source) = &record.admission.source_capsule {
+                        retained_bytes = retained_bytes.saturating_add(source.capsule_bytes);
+                        if retained_bytes > MAX_RESERVED_BYTES {
+                            report.source_errors.push(forensic_source_error(
+                                Some(nonce),
+                                protected_root.join(SOURCE_CAPSULE_DIRECTORY),
+                                NativeSessionForensicErrorKind::SourceCapsuleInvalid,
+                                "native-session forensic sources exceed the aggregate byte bound",
+                            ));
+                            report.records.push(record);
+                            break;
+                        }
+                    }
+                    let source_capsule = match read_retained_native_session_source_capsule(
+                        protected_root,
+                        &record.admission,
+                    ) {
+                        Ok(source) => source,
+                        Err(error) => {
+                            report.source_errors.push(forensic_source_error(
+                                Some(nonce),
+                                protected_root.join(SOURCE_CAPSULE_DIRECTORY),
+                                NativeSessionForensicErrorKind::SourceCapsuleInvalid,
+                                format!("{error:#}"),
+                            ));
+                            report.records.push(record);
+                            continue;
+                        }
+                    };
                     let journal = read_retained_native_session_effect_journal(protected_root, nonce)
                         .and_then(|journal| {
                             journal
@@ -3015,13 +3233,14 @@ fn read_native_session_forensics_at(
                                         &admission_receipt,
                                         signed_outcome,
                                         Some(jsonl),
+                                        source_capsule.as_ref().map(|bytes| bytes.as_slice()),
                                     )?;
                                     let bytes = bounded_json(&bundle, byte_cap)?;
                                     let verified = frankenengine_verifier_sdk::native_session::verify_native_session_forensics(
                                         bytes.as_bytes(), &key,
                                     )?;
                                     verified.durable_journal.map(NativeSessionForensicJournal::from)
-                                        .context("verified v2 forensic bundle has no durable journal")
+                                        .context("verified forensic bundle has no durable journal")
                                 })
                                 .transpose()
                         });
@@ -3383,16 +3602,24 @@ fn make_native_session_forensic_bundle(
     receipt: &NativeSessionAdmissionReceipt,
     outcome: Option<frankenengine_verifier_sdk::native_session::NativeSessionForensicOutcome>,
     journal_jsonl: Option<String>,
+    source_capsule: Option<&[u8]>,
 ) -> Result<(
     frankenengine_verifier_sdk::native_session::NativeSessionForensicBundle,
     usize,
 )> {
+    use base64::Engine as _;
     use frankenengine_verifier_sdk::native_session::{
         MAX_NATIVE_SESSION_FORENSICS_BYTES, MAX_NATIVE_SESSION_FORENSICS_V2_BYTES,
-        NATIVE_SESSION_FORENSICS_SCHEMA, NATIVE_SESSION_FORENSICS_V2_SCHEMA,
+        MAX_NATIVE_SESSION_FORENSICS_V3_BYTES, NATIVE_SESSION_FORENSICS_SCHEMA,
+        NATIVE_SESSION_FORENSICS_V2_SCHEMA, NATIVE_SESSION_FORENSICS_V3_SCHEMA,
         NativeSessionForensicAdmissionReceipt, NativeSessionForensicBundle,
     };
-    let (schema, byte_cap) = if journal_jsonl.is_some() {
+    let (schema, byte_cap) = if source_capsule.is_some() {
+        (
+            NATIVE_SESSION_FORENSICS_V3_SCHEMA,
+            MAX_NATIVE_SESSION_FORENSICS_V3_BYTES,
+        )
+    } else if journal_jsonl.is_some() {
         (
             NATIVE_SESSION_FORENSICS_V2_SCHEMA,
             MAX_NATIVE_SESSION_FORENSICS_V2_BYTES,
@@ -3407,7 +3634,8 @@ fn make_native_session_forensic_bundle(
         schema_version: schema.to_owned(),
         admission_json: bounded_json(admission, MAX_ADMISSION_BYTES)?,
         journal_jsonl,
-        source_capsule_base64: None,
+        source_capsule_base64: source_capsule
+            .map(|bytes| base64::engine::general_purpose::STANDARD.encode(bytes)),
         admission_receipt: NativeSessionForensicAdmissionReceipt {
             schema_version: receipt.schema_version.clone(),
             session_nonce: receipt.session_nonce.clone(),
@@ -3470,6 +3698,7 @@ fn export_native_session_forensics_at(
         &key,
     )?;
     let journal_jsonl = read_retained_native_session_effect_journal(protected_root, nonce)?;
+    let source_capsule = read_retained_native_session_source_capsule(protected_root, &admission)?;
     let (bundle, byte_cap) = make_native_session_forensic_bundle(
         &admission,
         &receipt,
@@ -3482,6 +3711,7 @@ fn export_native_session_forensics_at(
             })
             .transpose()?,
         journal_jsonl,
+        source_capsule.as_ref().map(|bytes| bytes.as_slice()),
     )?;
     let bytes = bounded_json(&bundle, byte_cap)?;
     let verification = verify_native_session_forensics(bytes.as_bytes(), &key)
@@ -3823,6 +4053,7 @@ mod tests {
             fleet_policy_sha256: None,
             process_spawn_authority_granted: Some(false),
             control_scopes: Some(Vec::new()),
+            source_capsule: None,
         }
     }
 
@@ -3928,6 +4159,215 @@ mod tests {
         let mut files = BTreeMap::new();
         visit(root, root, &mut files);
         files
+    }
+
+    #[cfg(unix)]
+    fn frozen_source_fixture(root: &Path, marker: u8) -> (NativeSessionAdmission, Vec<u8>) {
+        use crate::supply_chain::module_resolution_graph::file_resolution::source_graph::{
+            GraphOptions, capsule, capture,
+        };
+
+        let mut admission = fixture(root, marker);
+        std::fs::create_dir_all(&admission.project_root).unwrap();
+        std::fs::write(
+            admission.project_root.join("package.json"),
+            r#"{"type":"module"}"#,
+        )
+        .unwrap();
+        std::fs::write(&admission.entrypoint, "import './dep.js';\n").unwrap();
+        std::fs::write(
+            admission.project_root.join("dep.js"),
+            "export const retainedValue = 42;\n",
+        )
+        .unwrap();
+        let graph = capture(&admission.project_root, "index.js", GraphOptions::default()).unwrap();
+        let capsule = capsule::encode(&graph).unwrap();
+        admission.source_capsule =
+            Some(retain_native_session_source_capsule(root, &graph).unwrap());
+        (admission, capsule.bytes().to_vec())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_capsule_forensics_survive_parent_loss_and_source_removal() {
+        use base64::Engine as _;
+
+        for with_journal in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("evidence");
+            let (admission, original) = frozen_source_fixture(&root, 151);
+            let binding = admission.source_capsule.as_ref().unwrap();
+            let mut guard =
+                NativeSessionInventoryGuard::admit(&root, admission.clone(), 0).unwrap();
+            if with_journal {
+                let mut journal = guard.prepare_effect_journal().unwrap();
+                let request_hash = format!("sha256:{}", "ef".repeat(32));
+                journal.admit(0, "fs_write", &request_hash).unwrap();
+                journal.complete(0).unwrap();
+                journal.admit(1, "network_request", &request_hash).unwrap();
+            }
+            // Model process loss before any signed outcome. Retained source is
+            // evidence of admission, never a claim that the guest completed.
+            guard.finished = true;
+            drop(guard);
+            std::fs::rename(&admission.project_root, temp.path().join("retired-source")).unwrap();
+            let before = forensic_state_snapshot(&root);
+            let export =
+                export_native_session_forensics_at(&root, &admission.session_nonce).unwrap();
+            assert_eq!(
+                export.bundle.schema_version,
+                "franken-node/native-session-forensics/v3"
+            );
+            assert_eq!(
+                base64::engine::general_purpose::STANDARD
+                    .decode(export.bundle.source_capsule_base64.as_ref().unwrap())
+                    .unwrap(),
+                original
+            );
+            assert!(export.bundle.outcome.is_none());
+            assert_eq!(export.verification.outcome_kind, "pending");
+            let sources = export.verification.source_capsule.as_ref().unwrap();
+            assert_eq!(sources.graph_input_hash, binding.graph_input_hash);
+            assert_eq!(sources.capsule_bytes, binding.capsule_bytes);
+            assert!(!sources.graph_hash_recomputed);
+            assert!(!export.verification.replay_certified);
+            assert!(!export.verification.quiescence_certified);
+            assert!(!export.verification.historical_completeness);
+            assert_eq!(export.verification.durable_journal.is_some(), with_journal);
+            if let Some(journal) = &export.verification.durable_journal {
+                assert_eq!(journal.admitted_provider_calls, 2);
+                assert_eq!(journal.returned_provider_calls, 1);
+                assert_eq!(journal.indeterminate_provider_calls, 1);
+            }
+            let discovery = read_native_session_forensics_at(&root, None).unwrap();
+            assert!(
+                discovery.source_errors.is_empty(),
+                "{:?}",
+                discovery.source_errors
+            );
+            assert_eq!(
+                discovery.records[0].admission.source_capsule.as_ref(),
+                Some(binding)
+            );
+            assert_eq!(discovery.records[0].durable_journal.is_some(), with_journal);
+            assert_eq!(forensic_state_snapshot(&root), before);
+            assert!(!admission.project_root.exists());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_capsule_admission_rejects_missing_tampered_or_misbound_sources() {
+        for mutation in 0..6 {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("evidence");
+            let (mut admission, original) = frozen_source_fixture(&root, 152);
+            let binding = admission.source_capsule.as_ref().unwrap();
+            let path = source_capsule_path(&root, binding).unwrap();
+            match mutation {
+                0 => std::fs::rename(&path, path.with_extension("retained")).unwrap(),
+                1 => {
+                    let mut changed = original;
+                    *changed.last_mut().unwrap() ^= 1;
+                    std::fs::write(&path, changed).unwrap();
+                }
+                2 => admission.entrypoint = admission.project_root.join("dep.js"),
+                3 => {
+                    admission.source_capsule.as_mut().unwrap().graph_input_hash =
+                        format!("sha256:{}", "ba".repeat(32))
+                }
+                4 => admission.source_capsule.as_mut().unwrap().capsule_bytes += 1,
+                5 => {
+                    admission.source_capsule.as_mut().unwrap().capsule_digest =
+                        "sha256:../../outside".to_owned()
+                }
+                _ => unreachable!(),
+            }
+            let before = forensic_state_snapshot(&root);
+            assert!(
+                NativeSessionInventoryGuard::admit(&root, admission.clone(), 0).is_err(),
+                "mutation {mutation}"
+            );
+            assert!(!admission_receipt_path(&root, &admission.session_nonce).exists());
+            assert_eq!(forensic_state_snapshot(&root), before);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_capsule_retention_reuses_exact_bytes_and_enforces_aggregate_capacity() {
+        use crate::supply_chain::module_resolution_graph::file_resolution::source_graph::{
+            GraphOptions, capture,
+        };
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("evidence");
+        let (admission, original) = frozen_source_fixture(&root, 153);
+        let binding = admission.source_capsule.as_ref().unwrap();
+        let graph = capture(&admission.project_root, "index.js", GraphOptions::default()).unwrap();
+        let before = forensic_state_snapshot(&root);
+        assert_eq!(
+            retain_native_session_source_capsule(&root, &graph).unwrap(),
+            *binding
+        );
+        assert_eq!(forensic_state_snapshot(&root), before);
+        let directory = root.join(SOURCE_CAPSULE_DIRECTORY);
+        assert!(check_source_capsule_capacity(&directory, 0, 0, 1, original.len()).is_ok());
+        assert!(check_source_capsule_capacity(&directory, 1, 0, 1, original.len()).is_err());
+        assert!(check_source_capsule_capacity(&directory, 0, 1, 1, original.len()).is_err());
+        // An incomplete retained object is still charged and never repaired.
+        let path = source_capsule_path(&root, binding).unwrap();
+        std::fs::write(&path, &original[..12]).unwrap();
+        assert!(retain_native_session_source_capsule(&root, &graph).is_err());
+        assert_eq!(std::fs::read(path).unwrap(), original[..12]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_capsule_forensics_refuse_lost_tampered_or_unsafe_retention_without_repair() {
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+
+        for mutation in 0..5 {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("evidence");
+            let (admission, original) = frozen_source_fixture(&root, 154);
+            let mut guard =
+                NativeSessionInventoryGuard::admit(&root, admission.clone(), 0).unwrap();
+            guard.finished = true;
+            drop(guard);
+            let path =
+                source_capsule_path(&root, admission.source_capsule.as_ref().unwrap()).unwrap();
+            let retained = path.with_extension("retained");
+            match mutation {
+                0 => std::fs::rename(&path, &retained).unwrap(),
+                1 => {
+                    let mut changed = original;
+                    *changed.last_mut().unwrap() ^= 1;
+                    std::fs::write(&path, changed).unwrap();
+                }
+                2 => {
+                    std::fs::rename(&path, &retained).unwrap();
+                    symlink(&retained, &path).unwrap();
+                }
+                3 => {
+                    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap()
+                }
+                4 => std::fs::hard_link(&path, &retained).unwrap(),
+                _ => unreachable!(),
+            }
+            let before = forensic_state_snapshot(&root);
+            assert!(export_native_session_forensics_at(&root, &admission.session_nonce).is_err());
+            let report = read_native_session_forensics_at(&root, None).unwrap();
+            assert_eq!(report.records.len(), 1);
+            assert_eq!(
+                report.records[0].status,
+                NativeSessionForensicStatus::PendingLivenessUnknown
+            );
+            assert!(report.source_errors.iter().any(|error| {
+                error.kind == NativeSessionForensicErrorKind::SourceCapsuleInvalid
+            }));
+            assert_eq!(forensic_state_snapshot(&root), before);
+        }
     }
 
     #[test]
