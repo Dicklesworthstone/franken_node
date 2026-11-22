@@ -1,0 +1,84 @@
+{
+  "summary_id": "issue-11-parser-failure-evidence",
+  "contract_version": "1.0",
+  "change_summary": {
+    "intent": "Retain the effective parser and execution limits on authenticated frozen-source parser failures without claiming guest execution.",
+    "scope": {
+      "subsystems": [
+        "franken_node.ops.engine_dispatcher",
+        "franken_node.native_failure_evidence"
+      ],
+      "modules": [
+        "crates/franken-node/src/ops/engine_dispatcher.rs"
+      ]
+    },
+    "surface_area_delta": {
+      "new_apis": [],
+      "removed_apis": [],
+      "changed_signatures": [
+        "Private prepare_native_frozen_modules returns a typed failure that records whether parser settings were applied."
+      ]
+    },
+    "affected_contracts": {
+      "beads": [
+        "bd-efx3z"
+      ],
+      "documents": [
+        "docs/plans/PLAN_TO_CREATE_FRANKEN_NODE.md"
+      ]
+    },
+    "operational_impact": {
+      "operator_notes": "Frozen-source token and source-size refusals retain the actual attenuated invocation settings in the worker failure and signed run receipt. Source-pin and protected-operator-file refusals do not acquire parser evidence. Selected execution lane and completed engine decision remain absent.",
+      "required_actions": [
+        "Rebuild franken-node and rerun the focused parser-failure regression before release qualification."
+      ],
+      "rollout_notes": "Rebuild the native product. Existing historical records retain their original optional-field semantics."
+    },
+    "risk_delta": {
+      "previous_tier": "medium",
+      "new_tier": "medium",
+      "rationale": "The change preserves failure evidence through an existing typed worker response. It does not alter parser budgets, capabilities, source admission, execution decisions, or signature verification."
+    },
+    "compatibility": {
+      "backward_compatibility": "compatible",
+      "forward_compatibility": "enables",
+      "details": "Existing optional invocation fields become populated for observed frozen-source parser admissions. Public schemas and historical records are unchanged."
+    },
+    "dependency_changes": {
+      "added": [],
+      "removed": [],
+      "updated": []
+    }
+  },
+  "validation": {
+    "initial_source_commit": "61909c6c0409efd4f35a68fccbdf77f08d02acd3",
+    "preserved_concurrent_source_commit": "29fb4cd9939e1aa7c8e08ccf5288f6c993f5a27d",
+    "toolchain": "nightly-2026-09-21",
+    "passed": [
+      "Pinned rustfmt --check on both changed Rust files",
+      "git diff --check",
+      "Independent source/type-flow review against the actual captured resolver error definitions"
+    ],
+    "regression_coverage_added": [
+      "frozen_module_preparation_distinguishes_parser_failure_from_source_refusal: token limit, source byte limit, wrong source pin and admitted source",
+      "parser_failure_records_invocation_settings_without_claiming_guest_execution: automatic frozen sources, explicit frozen mode and replay capture; signed receipt rejects substituted token limit"
+    ],
+    "runtime_status": "Not executed. Locked metadata reached registry resolution and was killed with exit 137 before native compilation. The execution host then reset. No native compile, Clippy or runtime pass is claimed.",
+    "static_analysis": {
+      "tool": "UBS",
+      "before_exit": 1,
+      "after_exit": 1,
+      "before_counts": {
+        "critical": 27,
+        "warning": 2132,
+        "info": 1008
+      },
+      "after_counts": {
+        "critical": 27,
+        "warning": 2143,
+        "info": 1009
+      },
+      "review": "All 27 critical findings are unchanged after line mapping. Added occurrences are test assertions, a deliberate receipt clone for tampering, and a temporary fixture write. No new production finding was identified. Cargo phases were disabled; ast-grep rule-pack mode was unavailable. This is not a clean static-analysis result."
+    }
+  }
+}

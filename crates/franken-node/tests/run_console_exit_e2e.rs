@@ -4171,32 +4171,54 @@ fn failed_process_shape_run_keeps_actual_settings_and_signed_receipt_binding() {
 
 #[test]
 fn parser_failure_records_invocation_settings_without_claiming_guest_execution() {
-    let (dir, outcome) = run_app_with_policy_and_env(
-        "console.log('parser-refusal-must-not-print');\n",
-        "balanced",
-        &["--json"],
-        &[
-            ("FRANKEN_NODE_RUNTIME_ALLOW_PROCESS_SHAPE", "true"),
-            ("FRANKEN_NODE_RUNTIME_MAX_PARSE_TOKENS", "1"),
-        ],
-    );
-    let evidence: Value = serde_json::from_str(&outcome.stdout).unwrap_or_else(|error| {
-        panic!(
-            "parser failure must emit JSON: {error}; stderr={}",
-            outcome.stderr
-        )
-    });
-    let (_path, receipt) = persisted_failed_run_receipt(dir.path(), &outcome, &evidence);
-    assert_eq!(evidence["captured_output"]["stdout"], "");
-    assert!(evidence["dispatch"]["engine_decision"].is_null());
-    assert_eq!(
-        evidence["dispatch"]["invocation_settings"]["parser_budget"]["max_token_count"],
-        1
-    );
-    assert_eq!(receipt["parser_budget"]["max_token_count"], 1);
-    assert_eq!(receipt["process_shape_read_allowed"], true);
-    assert!(receipt["execution_limits"]["selected_lane"].is_null());
-    authenticated_failed_run_record(dir.path(), &evidence, &receipt);
+    for arguments in [
+        &["--json"][..],
+        &["--json", "--frozen-modules"][..],
+        &["--json", "--capture-replay"][..],
+    ] {
+        let state_home = tempfile::tempdir().expect("private parser-failure state");
+        let (dir, outcome) = run_app_with_policy_and_env(
+            "console.log('parser-refusal-must-not-print');\n",
+            "balanced",
+            arguments,
+            &[
+                ("XDG_STATE_HOME", state_home.path().to_str().unwrap()),
+                ("FRANKEN_NODE_RUNTIME_ALLOW_PROCESS_SHAPE", "true"),
+                ("FRANKEN_NODE_RUNTIME_MAX_PARSE_TOKENS", "1"),
+            ],
+        );
+        let evidence: Value = serde_json::from_str(&outcome.stdout).unwrap_or_else(|error| {
+            panic!(
+                "parser failure must emit JSON: {error}; stderr={}",
+                outcome.stderr
+            )
+        });
+        let (_path, receipt) = persisted_failed_run_receipt(dir.path(), &outcome, &evidence);
+        assert_eq!(evidence["captured_output"]["stdout"], "");
+        assert!(evidence["dispatch"]["engine_decision"].is_null());
+        assert!(evidence["dispatch"]["native_replay"].is_null());
+        assert_eq!(
+            evidence["dispatch"]["invocation_settings"]["parser_budget"]["max_token_count"],
+            1
+        );
+        assert_eq!(receipt["parser_budget"]["max_token_count"], 1);
+        assert_eq!(receipt["process_shape_read_allowed"], true);
+        assert!(receipt["execution_limits"]["selected_lane"].is_null());
+        let record = authenticated_failed_run_record(dir.path(), &evidence, &receipt)
+            .expect("parser failure retains its authenticated run record");
+        let record_bytes = serde_json::to_vec(&record).unwrap();
+        let mut changed_limits = receipt.clone();
+        changed_limits["parser_budget"]["max_token_count"] = serde_json::json!(2);
+        assert!(
+            frankenengine_node::tools::replay_bundle::parse_verified_run_ledger_record(
+                &record_bytes,
+                &changed_limits,
+                &receipt_verifying_key(dir.path()),
+            )
+            .is_err(),
+            "signed failure evidence must reject substituted parser limits"
+        );
+    }
 }
 
 /// A program's whole console output reaches the operator. 1,500 lines used to

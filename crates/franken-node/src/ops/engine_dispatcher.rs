@@ -5866,8 +5866,9 @@ pub struct NativeModuleGraphSummary {
     pub publisher_artifact: Option<PublisherArtifactIdentity>,
 }
 
-/// Settings supplied to one native orchestrator invocation. The invocation can
-/// fail during parsing or lowering before any guest instruction executes.
+/// Settings supplied to native source preparation or an orchestrator invocation.
+/// Captured source can exceed a parser limit before the orchestrator is
+/// constructed; neither that refusal nor a lowering failure proves guest execution.
 /// Lane selection and completed security decisions belong to the execution
 /// outcome; the limits here therefore keep `selected_lane` absent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -6943,8 +6944,9 @@ enum EngineProcessError {
 
 #[cfg(feature = "engine")]
 impl EngineProcessError {
-    /// Mark the actual configuration of an invocation that returned a typed
-    /// execution error. Startup and telemetry-only failures have no snapshot.
+    /// Mark the actual configuration applied to source parser admission or an
+    /// orchestrator invocation. Other startup and telemetry-only failures
+    /// have no snapshot.
     fn with_invocation_settings(mut self, settings: NativeInvocationSettings) -> Self {
         if let Self::Spawn {
             invocation_settings,
@@ -8643,6 +8645,27 @@ fn apply_publisher_runtime_authority(
     Ok(())
 }
 
+/// Preserve applied parser settings while source admission errors cross the
+/// worker. Other preparation refusals must not acquire an invocation snapshot
+/// merely because limits were configured. A source-size refusal applies the
+/// parser budget before parsing and does not prove guest execution.
+#[cfg(feature = "engine")]
+#[derive(Debug)]
+struct FrozenModulePreparationError {
+    message: String,
+    parser_settings_applied: bool,
+}
+
+#[cfg(feature = "engine")]
+impl From<String> for FrozenModulePreparationError {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            parser_settings_applied: false,
+        }
+    }
+}
+
 /// Prepare source only after the worker's project, trust and fleet-policy
 /// rechecks. Publisher runs consume the authenticated capsule directly; other
 /// frozen runs capture the live project. Neither retains loader disk authority.
@@ -8657,7 +8680,7 @@ fn prepare_native_frozen_modules(
     expected_graph_hash: Option<&str>,
     publisher_approval: Option<&PublisherSourceGraphApproval>,
     trust_requirements: &RunTrustRequirements,
-) -> std::result::Result<FrozenNativeModules, String> {
+) -> std::result::Result<FrozenNativeModules, FrozenModulePreparationError> {
     #[cfg(not(unix))]
     {
         let _ = (
@@ -8670,7 +8693,7 @@ fn prepare_native_frozen_modules(
             publisher_approval,
             trust_requirements,
         );
-        Err("Frozen module capture requires Unix".to_string())
+        Err("Frozen module capture requires Unix".to_string().into())
     }
     #[cfg(unix)]
     {
@@ -8744,7 +8767,11 @@ fn prepare_native_frozen_modules(
                 orchestrator_config.parser_options.clone(),
             )
             .map_err(|error| {
-                if error.code == "ERR_MODULE_ENGINE_PARSE_LIMIT" {
+                let parser_settings_applied = matches!(
+                    error.code,
+                    "ERR_MODULE_ENGINE_PARSE" | "ERR_MODULE_ENGINE_PARSE_LIMIT"
+                );
+                let message = if error.code == "ERR_MODULE_ENGINE_PARSE_LIMIT" {
                     let budget = &orchestrator_config.parser_options.budget;
                     format!(
                         "Frozen module source admission failed: {error} (BudgetExceeded); \
@@ -8761,6 +8788,10 @@ fn prepare_native_frozen_modules(
                     )
                 } else {
                     format!("Frozen module source admission failed: {error}")
+                };
+                FrozenModulePreparationError {
+                    message,
+                    parser_settings_applied,
                 }
             })?,
         );
@@ -13949,6 +13980,14 @@ impl EngineDispatcher {
                 .budget
                 .max_recursion_depth,
         };
+        let execution_limits =
+            EngineExecutionLimitsReport::from_execution_config(&runtime_config.execution);
+        let invocation_settings = NativeInvocationSettings {
+            parser_budget,
+            execution_limits,
+            process_shape_read_allowed: ambient_authority_grant
+                == AmbientAuthorityGrant::TrustedProcessShape,
+        };
         let frozen_modules = if config.runtime.frozen_modules == Some(true) {
             Some(
                 prepare_native_frozen_modules(
@@ -13962,7 +14001,15 @@ impl EngineDispatcher {
                     &trust_requirements,
                 )
                 .map_err(|error| {
-                    native_engine_spawn_error_with_telemetry_cleanup(error, &mut telemetry_guard)
+                    let failure = native_engine_spawn_error_with_telemetry_cleanup(
+                        error.message,
+                        &mut telemetry_guard,
+                    );
+                    if error.parser_settings_applied {
+                        failure.with_invocation_settings(invocation_settings)
+                    } else {
+                        failure
+                    }
                 })?,
             )
         } else {
@@ -14030,9 +14077,6 @@ impl EngineDispatcher {
         // bd-656a2: capture a stable trace label for the SSRF gate's audit records
         // before `orchestrator_config` is moved into the orchestrator below.
         let run_egress_trace = orchestrator_config.policy_id.clone();
-        let execution_limits =
-            EngineExecutionLimitsReport::from_execution_config(&runtime_config.execution);
-
         let expected_evidence_identity = evidence_authority.verification_identity();
         let host_effect_ledger_authority = evidence_authority.clone();
         let host_effect_ledger_epoch = security_epoch_for_profile(config.profile);
@@ -14324,15 +14368,10 @@ impl EngineDispatcher {
         );
 
         // Execute through native API
-        // These are the same values passed into the orchestrator above. Only
-        // errors at or after this invocation may carry them: prepared settings
-        // alone do not prove that the native invocation was attempted.
-        let invocation_settings = NativeInvocationSettings {
-            parser_budget,
-            execution_limits,
-            process_shape_read_allowed: ambient_authority_grant
-                == AmbientAuthorityGrant::TrustedProcessShape,
-        };
+        // These are the same values used during frozen source parsing and
+        // passed into the orchestrator above. Attaching them still requires an
+        // actual source parser admission or execution error, not just a
+        // prepared configuration.
         let exec_start = Instant::now();
         let execution_result = {
             let _exec_span = tracing::info_span!(
@@ -16235,10 +16274,14 @@ mod tests {
         )
         .err()
         .expect("custom operator file must not become a module or replay source");
-        assert!(error.contains("protected operator state"), "{error}");
+        assert!(!error.parser_settings_applied);
         assert!(
-            !error.contains("OPERATOR_SECRET_MUST_NOT_APPEAR"),
-            "{error}"
+            error.message.contains("protected operator state"),
+            "{error:?}"
+        );
+        assert!(
+            !error.message.contains("OPERATOR_SECRET_MUST_NOT_APPEAR"),
+            "{error:?}"
         );
     }
 
@@ -18664,6 +18707,103 @@ mod tests {
             telemetry_error,
             EngineProcessError::TelemetryDrain(message) if message == "drain failed"
         ));
+    }
+
+    #[cfg(all(feature = "engine", unix))]
+    #[test]
+    fn frozen_module_preparation_distinguishes_parser_failure_from_source_refusal() {
+        let directory = tempfile::tempdir().expect("frozen parser project");
+        let root = directory.path().canonicalize().unwrap();
+        std::fs::write(root.join("app.js"), "console.log('must not execute');\n").unwrap();
+        let paths = RunProjectPaths::resolve(Path::new("app.js"), &root).unwrap();
+        let config = Config::for_profile(Profile::Balanced);
+        let capabilities = EngineDispatcher::map_profile_to_capabilities(Profile::Balanced);
+        let requirements = RunTrustRequirements::default();
+        let mut orchestrator = EngineDispatcher::map_config_to_orchestrator_config(&config);
+        orchestrator.parser_options.budget.max_token_count = 1;
+
+        let parse_failure = prepare_native_frozen_modules(
+            &paths,
+            &orchestrator,
+            &capabilities,
+            false,
+            false,
+            None,
+            None,
+            &requirements,
+        )
+        .err()
+        .expect("the engine must enforce the one-token parser budget");
+        assert!(parse_failure.parser_settings_applied, "{parse_failure:?}");
+        assert!(
+            parse_failure
+                .message
+                .contains("ERR_MODULE_ENGINE_PARSE_LIMIT"),
+            "{parse_failure:?}"
+        );
+
+        // A wrong source pin is rejected before parsing even with a budget
+        // that would refuse this source. It must not gain invocation evidence.
+        let wrong_pin = format!("sha256:{}", "0".repeat(64));
+        let source_failure = prepare_native_frozen_modules(
+            &paths,
+            &orchestrator,
+            &capabilities,
+            false,
+            false,
+            Some(&wrong_pin),
+            None,
+            &requirements,
+        )
+        .err()
+        .expect("independently pinned source identity must be checked first");
+        assert!(
+            !source_failure.parser_settings_applied,
+            "{source_failure:?}"
+        );
+        assert!(
+            !source_failure
+                .message
+                .contains("ERR_MODULE_ENGINE_PARSE_LIMIT"),
+            "{source_failure:?}"
+        );
+
+        let admitted = EngineDispatcher::map_config_to_orchestrator_config(&config);
+        let mut source_limited = admitted.clone();
+        source_limited.parser_options.budget.max_source_bytes = 1;
+        let size_failure = prepare_native_frozen_modules(
+            &paths,
+            &source_limited,
+            &capabilities,
+            false,
+            false,
+            None,
+            None,
+            &requirements,
+        )
+        .err()
+        .expect("source bytes must be bounded before parsing");
+        assert!(size_failure.parser_settings_applied, "{size_failure:?}");
+        assert!(
+            size_failure
+                .message
+                .contains("ERR_MODULE_ENGINE_PARSE_LIMIT"),
+            "{size_failure:?}"
+        );
+        assert!(
+            prepare_native_frozen_modules(
+                &paths,
+                &admitted,
+                &capabilities,
+                false,
+                false,
+                None,
+                None,
+                &requirements,
+            )
+            .is_ok(),
+            "the same source remains preparable under its normal parser budget"
+        );
     }
 
     #[cfg(feature = "engine")]
