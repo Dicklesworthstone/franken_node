@@ -7,9 +7,47 @@ records the resulting findings on the package's signed trust card.
 
 The collector is responsible for isolating the package and measuring it under
 a repeatable workload. A signature authenticates that collector's statement;
-it does not establish that the experiment was correct. Native `run` currently
-records application-level effects without package-origin attribution. Those
-effects cannot be copied into an observation for each dependency.
+it does not establish that the experiment was correct. Native `run` records
+application-level effects and can attach a package inventory with candidate
+callers. The engine does not supply an authenticated calling-module witness,
+so those effects cannot be copied into an observation for each dependency.
+
+## Native run package inventory
+
+When native `run --json` has a captured package inventory,
+`receipt.package_attribution` uses
+`franken-node/package-attribution-report/v2`. The same report appears in
+`dispatch.engine_decision.package_attribution`.
+
+Package metadata comes exclusively from manifests retained in that source
+graph. Frozen and publisher-capsule execution retain those names, versions,
+manifest commitments, and module hashes even if installed manifests change
+or the original source directory is unavailable. Ordinary non-frozen runs
+use a best-effort graph inventory; that snapshot does not prove that live
+sources remained unchanged during execution.
+
+| Field | Meaning |
+|---|---|
+| `graph_input_hash` | Commitment to the captured graph inputs used for the inventory. |
+| Package `package_name`, `package_version` | Strings from the captured manifest, or `null` for missing, blank, or non-string fields. No version such as `0.0.0` is invented. |
+| Package `manifest_identity` | `{"status":"captured","relative_path":"…","sha256":"sha256:…"}` identifies retained manifest bytes. `{"status":"not_captured","relative_path":"…"}` records missing captured metadata. |
+| Package `package_id` | Unique known identities retain `app:<name>@<version>` or `npm:<name>@<version>`. Distinct dependency installations sharing a nominal ID use `npm-instance:<relative-package-directory>`, preserving each installation's manifest and sources. Unknown identities use `app-path:root` or `npm-path:<relative-package-directory>`. These path IDs are local to the graph. |
+| Package `loaded_modules` | Module IDs, origin paths, and source hashes retained by the graph. Manifest identity and module hashes describe sources; they do not identify an effect's caller. |
+| Effect `seq`, `receipt_hash`, `effect_kind`, `outcome` | Link to the corresponding host-effect ledger entry and its actual policy outcome. |
+| Effect `attribution_basis`, `candidate_packages` | New reports use `candidate_loaded_packages` with known package candidates. `attributed_package` is omitted because no exact caller has been established. |
+| Effect `capability_importing_packages`, `target_package_hint` | Separate import/source hints and the known package containing a filesystem target. Empty hints are omitted. Imports do not prove capability ownership or exclude delegated callers, and targeting another package's file does not make that package the caller. |
+
+The package fields `exact_effect_seqs`, `allowed_effects`, `denied_effects`,
+and `failed_effects` count exactly attributed effects. New v2 reports leave
+the sequence list empty and those counters at zero until a calling-module
+witness is available. Those zeros do not establish absence of package
+activity. Use each effect's `outcome` for the recorded policy result and
+`candidate_effect_seqs` to follow a package's candidate links to that ledger.
+`declared_effect_kinds` also contains import/source hints, not authority grants.
+
+Historical v1 reports remain readable with their original fields and inference
+labels preserved. Reading an old report does not add captured-manifest
+provenance or strengthen its historical caller inference.
 
 ## Admit an observation
 

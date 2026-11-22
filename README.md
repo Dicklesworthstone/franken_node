@@ -84,10 +84,15 @@ Every gate above is a runtime default, not an external scanner. Each `run`
 (including a preflight refusal) and each `trust revoke`/`quarantine`/`release`
 and `fleet release` decision appends a signed, hash-chained entry to the
 evidence ledger; other decisions (a trust-scan risk raise, for example) are
-recorded on the trust card, not in the ledger. Every multi-dependency `run`
-also attaches `receipt.package_attribution`, binding each allowed or denied
-host effect (`seq`, `receipt_hash`, `effect_kind`) to its originating package
-or candidate capability-holder set. You can replay the entire scenario offline
+recorded on the trust card, not in the ledger. Native runs with a captured
+package inventory also attach `receipt.package_attribution`. Its v2 report
+retains module hashes and captured manifest identities, and links each host
+effect (`seq`, `receipt_hash`, `effect_kind`, `outcome`) to known package
+candidates. Builtin imports and filesystem targets are separate hints; the
+engine does not yet supply a calling-module witness. See the
+[package inventory contract](docs/TRUST_BEHAVIORAL_OBSERVATIONS.md#native-run-package-inventory)
+for source provenance, candidate semantics, and per-package counters.
+You can replay the entire scenario offline
 against hermetic packuments (`trust scan --deep --offline-registry-dir`) via
 `bash scripts/demo_readme_scenario.sh`.
 
@@ -2243,8 +2248,8 @@ The command checks an independently pinned collector key, exact version and
 artifact bindings, measurement continuity, and observation replay protection.
 See [Signed behavioral observations](docs/TRUST_BEHAVIORAL_OBSERVATIONS.md) for
 the CLI, collector signing API, units, and storage limits. Native application
-effect ledgers still lack per-dependency attribution, so this surface consumes
-isolated-package collector observations.
+effect ledgers and package candidates do not establish which dependency made
+each call, so this surface consumes isolated-package collector observations.
 
 `security::bpet::evolution_risk_scorer::compute_risk_score` takes a
 `FeatureVector` of four normalized features (each in `[0.0, 1.0]`):

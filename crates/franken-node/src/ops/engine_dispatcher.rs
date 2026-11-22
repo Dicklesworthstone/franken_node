@@ -5741,15 +5741,19 @@ pub struct EngineContainmentDecision {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EffectAttributionBasis {
-    /// Only one package had been loaded at the moment the effect crossed the host boundary.
+    /// Historical v1 inference, retained only when decoding old reports. New
+    /// reports do not infer a calling package from the known loaded inventory.
     ExactSingleLoadedPackage,
-    /// Multiple packages were loaded, and exactly one held the capability family for this effect.
+    /// Historical v1 inference. Importing a builtin does not prove who called
+    /// a function later delegated to another package.
     ExactRuntimeCapabilityHolder,
-    /// Multiple capable packages were loaded, and the filesystem target path lies inside one package's directory.
+    /// Historical v1 inference. Owning a target file does not identify its caller.
     ExactTargetWithinPackage,
-    /// Multiple loaded packages held the capability family when the effect fired; all candidates are reported without guessing.
+    /// Historical v1 subset inferred from builtin imports. It need not contain
+    /// the actual caller of a delegated function.
     CandidateRuntimeCapabilityHolders,
-    /// Multiple packages were loaded without an isolated capability holder; all loaded packages are reported as candidates.
+    /// Known loaded packages are an inventory of candidates. Neither source
+    /// imports nor target paths supply an authenticated calling-module witness.
     CandidateLoadedPackages,
 }
 
@@ -5761,15 +5765,50 @@ pub struct PackageModuleEntry {
     pub source_sha256: String,
 }
 
-/// Aggregated source and host-effect attribution summary for one package (`app:*` or `npm:*`).
+/// Identity metadata comes only from the immutable source graph. An absent
+/// captured manifest is not an installed package identity or version `0.0.0`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum PackageManifestIdentity {
+    /// Historical reports did not retain manifest provenance.
+    #[default]
+    Unrecorded,
+    Captured {
+        relative_path: String,
+        sha256: String,
+    },
+    NotCaptured {
+        relative_path: String,
+    },
+}
+
+impl PackageManifestIdentity {
+    fn is_unrecorded(&self) -> bool {
+        matches!(self, Self::Unrecorded)
+    }
+}
+
+/// Source and host-effect inventory for one package instance. Known unique
+/// identities use `app:*` / `npm:*`; unknown or colliding identities use a
+/// graph-local path so one manifest cannot stand in for a different instance.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PackageAttributionEntry {
     pub package_id: String,
-    pub package_name: String,
-    pub package_version: String,
+    /// None when the captured manifest did not contain a nonempty string name.
+    pub package_name: Option<String>,
+    /// None when the captured manifest did not contain a nonempty string version.
+    pub package_version: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "PackageManifestIdentity::is_unrecorded"
+    )]
+    pub manifest_identity: PackageManifestIdentity,
     pub is_root_application: bool,
     pub loaded_modules: Vec<PackageModuleEntry>,
+    /// Effect families mentioned by captured imports/source; not capability grants.
     pub declared_effect_kinds: Vec<crate::runtime::effect_receipt::EffectKind>,
+    /// Historical exact inferences are retained when decoding v1 reports. V2
+    /// leaves these empty until the engine supplies a calling-module witness.
     pub exact_effect_seqs: Vec<u64>,
     pub candidate_effect_seqs: Vec<u64>,
     pub allowed_effects: usize,
@@ -5778,7 +5817,9 @@ pub struct PackageAttributionEntry {
 }
 
 /// Per-effect attribution binding an [`EffectReceiptChainEntry`](crate::runtime::effect_receipt::EffectReceiptChainEntry)
-/// (`seq`, `receipt_hash`) to its originating package or candidate package set.
+/// (`seq`, `receipt_hash`) to known package candidates. Module source identity
+/// is separate from effect origin: an import or target path cannot identify a
+/// caller, and the current engine host-I/O boundary supplies no such witness.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EffectAttributionEntry {
     pub seq: u64,
@@ -5789,6 +5830,12 @@ pub struct EffectAttributionEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attributed_package: Option<String>,
     pub candidate_packages: Vec<String>,
+    /// Import/source hints, not authority grants and not an exhaustive caller set.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capability_importing_packages: Vec<String>,
+    /// Which known package contains a filesystem target, never who accessed it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_package_hint: Option<String>,
 }
 
 /// Complete per-package module provenance and runtime host-effect attribution report
@@ -7832,8 +7879,9 @@ struct ModulePackageDescriptor {
     origin_path: String,
     source_sha256: String,
     package_id: String,
-    package_name: String,
-    package_version: String,
+    package_name: Option<String>,
+    package_version: Option<String>,
+    manifest_identity: PackageManifestIdentity,
     is_root_application: bool,
     package_rel_dir: Option<String>,
     static_effect_kinds: std::collections::BTreeSet<crate::runtime::effect_receipt::EffectKind>,
@@ -7862,6 +7910,74 @@ struct RuntimeAttributionState {
     effect_snapshots: Vec<ObservedRuntimeEffectSnapshot>,
 }
 
+#[cfg(feature = "engine")]
+#[derive(Debug, Clone)]
+struct CapturedPackageIdentity {
+    name: Option<String>,
+    version: Option<String>,
+    manifest: PackageManifestIdentity,
+}
+
+#[cfg(feature = "engine")]
+impl CapturedPackageIdentity {
+    fn package_id(&self, kind: &str, fallback_path: &str) -> String {
+        match (&self.name, &self.version) {
+            (Some(name), Some(version)) => format!("{kind}:{name}@{version}"),
+            // The path is an inventory identity within this graph, not an
+            // invented package name/version or an independently trusted name.
+            _ => format!("{kind}-path:{fallback_path}"),
+        }
+    }
+}
+
+/// Retain only identity fields and the digest of already captured metadata.
+/// This deliberately has no filesystem fallback: a capsule may execute with
+/// no installed source tree, or with unrelated bytes at its logical origin.
+#[cfg(feature = "engine")]
+#[derive(Debug)]
+struct CapturedPackageIdentities {
+    manifests: std::collections::BTreeMap<String, CapturedPackageIdentity>,
+}
+
+#[cfg(feature = "engine")]
+impl CapturedPackageIdentities {
+    fn from_graph(
+        graph: &crate::supply_chain::module_resolution_graph::file_resolution::source_graph::CapturedModuleGraph,
+    ) -> Self {
+        let manifests = graph
+            .captured_package_identities()
+            .into_iter()
+            .map(|(path, identity)| {
+                (
+                    path,
+                    CapturedPackageIdentity {
+                        name: identity.name,
+                        version: identity.version,
+                        manifest: PackageManifestIdentity::Captured {
+                            relative_path: identity.relative_path,
+                            sha256: identity.sha256,
+                        },
+                    },
+                )
+            })
+            .collect();
+        Self { manifests }
+    }
+
+    fn get(&self, relative_path: &str) -> CapturedPackageIdentity {
+        self.manifests
+            .get(relative_path)
+            .cloned()
+            .unwrap_or_else(|| CapturedPackageIdentity {
+                name: None,
+                version: None,
+                manifest: PackageManifestIdentity::NotCaptured {
+                    relative_path: relative_path.to_owned(),
+                },
+            })
+    }
+}
+
 /// Tracks runtime module resolutions alongside host-effect crossings to produce
 /// per-package behavioral and source attribution (`bd-reality-20260923-26n9r.15`).
 #[cfg(feature = "engine")]
@@ -7871,44 +7987,16 @@ struct RuntimePackageAttributionTracker {
     graph_input_hash: String,
     entrypoint_origin: Option<String>,
     root_package_id: String,
-    root_package_name: String,
-    root_package_version: String,
+    root_package_name: Option<String>,
+    root_package_version: Option<String>,
+    root_manifest_identity: PackageManifestIdentity,
     modules: std::collections::BTreeMap<String, ModulePackageDescriptor>,
     state: Mutex<RuntimeAttributionState>,
 }
 
 #[cfg(feature = "engine")]
 impl RuntimePackageAttributionTracker {
-    const SCHEMA_VERSION: &'static str = "franken-node/package-attribution-report/v1";
-    const MANIFEST_MAX_BYTES: u64 = 256 * 1024;
-
-    fn read_package_manifest_identity(
-        manifest_path: &Path,
-        fallback_name: &str,
-        fallback_version: &str,
-    ) -> (String, String) {
-        let Ok(bytes) = crate::bounded_read(manifest_path, Self::MANIFEST_MAX_BYTES) else {
-            return (fallback_name.to_owned(), fallback_version.to_owned());
-        };
-        let Ok(json) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
-            return (fallback_name.to_owned(), fallback_version.to_owned());
-        };
-        let name = json
-            .get("name")
-            .and_then(serde_json::Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .unwrap_or(fallback_name)
-            .to_owned();
-        let version = json
-            .get("version")
-            .and_then(serde_json::Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .unwrap_or(fallback_version)
-            .to_owned();
-        (name, version)
-    }
+    const SCHEMA_VERSION: &'static str = "franken-node/package-attribution-report/v2";
 
     fn classify_node_modules_origin(origin_path: &str) -> Option<(String, String)> {
         let normalized = origin_path.trim_start_matches("./");
@@ -7951,24 +8039,31 @@ impl RuntimePackageAttributionTracker {
         project_root: &Path,
         graph_input_hash: &str,
         specs: &[crate::supply_chain::module_resolution_graph::file_resolution::source_graph::engine_resolver::CapturedModuleAttributionSpec],
+        manifests: &CapturedPackageIdentities,
     ) -> Self {
         use crate::runtime::effect_receipt::EffectKind;
 
-        let default_app_name = project_root
-            .file_name()
-            .and_then(|name| name.to_str())
-            .filter(|name| !name.is_empty())
-            .unwrap_or("application");
-        let (root_package_name, root_package_version) = Self::read_package_manifest_identity(
-            &project_root.join("package.json"),
-            default_app_name,
-            "0.0.0",
-        );
-        let root_package_id = format!("app:{root_package_name}@{root_package_version}");
-
-        let mut manifest_cache: std::collections::BTreeMap<String, (String, String)> =
-            std::collections::BTreeMap::new();
+        let root_identity = manifests.get("package.json");
+        let root_package_name = root_identity.name.clone();
+        let root_package_version = root_identity.version.clone();
+        let root_package_id = root_identity.package_id("app", "root");
+        let root_manifest_identity = root_identity.manifest;
         let mut modules = std::collections::BTreeMap::new();
+
+        // Nested installs can contain distinct bytes with the same declared
+        // name/version. Preserve each captured manifest's ownership instead
+        // of merging such instances under the first manifest's digest.
+        let mut package_instances =
+            std::collections::BTreeMap::<String, std::collections::BTreeSet<String>>::new();
+        for spec in specs {
+            if let Some((directory, _)) = Self::classify_node_modules_origin(&spec.origin_path) {
+                let identity = manifests.get(&format!("{directory}/package.json"));
+                package_instances
+                    .entry(identity.package_id("npm", &directory))
+                    .or_default()
+                    .insert(directory);
+            }
+        }
 
         for spec in specs {
             let mut static_effect_kinds = std::collections::BTreeSet::new();
@@ -7990,36 +8085,44 @@ impl RuntimePackageAttributionTracker {
                 static_effect_kinds.insert(EffectKind::RandomRead);
             }
 
-            let (package_id, package_name, package_version, is_root_application, package_rel_dir) =
-                if let Some((pkg_rel_dir, fallback_pkg_name)) =
-                    Self::classify_node_modules_origin(&spec.origin_path)
+            let (
+                package_id,
+                package_name,
+                package_version,
+                manifest_identity,
+                is_root_application,
+                package_rel_dir,
+            ) = if let Some((pkg_rel_dir, _)) =
+                Self::classify_node_modules_origin(&spec.origin_path)
+            {
+                let identity = manifests.get(&format!("{pkg_rel_dir}/package.json"));
+                let nominal_id = identity.package_id("npm", &pkg_rel_dir);
+                let package_id = if package_instances
+                    .get(&nominal_id)
+                    .is_some_and(|instances| instances.len() > 1)
                 {
-                    let (name, version) = manifest_cache
-                        .entry(pkg_rel_dir.clone())
-                        .or_insert_with(|| {
-                            Self::read_package_manifest_identity(
-                                &project_root.join(&pkg_rel_dir).join("package.json"),
-                                &fallback_pkg_name,
-                                "0.0.0",
-                            )
-                        })
-                        .clone();
-                    (
-                        format!("npm:{name}@{version}"),
-                        name,
-                        version,
-                        false,
-                        Some(pkg_rel_dir),
-                    )
+                    format!("npm-instance:{pkg_rel_dir}")
                 } else {
-                    (
-                        root_package_id.clone(),
-                        root_package_name.clone(),
-                        root_package_version.clone(),
-                        true,
-                        None,
-                    )
+                    nominal_id
                 };
+                (
+                    package_id,
+                    identity.name,
+                    identity.version,
+                    identity.manifest,
+                    false,
+                    Some(pkg_rel_dir),
+                )
+            } else {
+                (
+                    root_package_id.clone(),
+                    root_package_name.clone(),
+                    root_package_version.clone(),
+                    root_manifest_identity.clone(),
+                    true,
+                    None,
+                )
+            };
 
             modules.insert(
                 spec.id.clone(),
@@ -8030,6 +8133,7 @@ impl RuntimePackageAttributionTracker {
                     package_id,
                     package_name,
                     package_version,
+                    manifest_identity,
                     is_root_application,
                     package_rel_dir,
                     static_effect_kinds,
@@ -8044,6 +8148,7 @@ impl RuntimePackageAttributionTracker {
             root_package_id,
             root_package_name,
             root_package_version,
+            root_manifest_identity,
             modules,
             state: Mutex::new(RuntimeAttributionState::default()),
         }
@@ -8165,8 +8270,6 @@ impl RuntimePackageAttributionTracker {
         imported_module_hashes: &std::collections::BTreeMap<String, String>,
         ledger: &HostEffectLedger,
     ) -> PackageAttributionReport {
-        use crate::runtime::effect_receipt::PolicyOutcome;
-
         let (observed_module_authorizations, final_loaded_modules, final_runtime_grants, snapshots) =
             match self.state.lock() {
                 Ok(guard) => (
@@ -8212,6 +8315,7 @@ impl RuntimePackageAttributionTracker {
                 package_id: self.root_package_id.clone(),
                 package_name: self.root_package_name.clone(),
                 package_version: self.root_package_version.clone(),
+                manifest_identity: self.root_manifest_identity.clone(),
                 is_root_application: true,
                 loaded_modules: Vec::new(),
                 declared_effect_kinds: Vec::new(),
@@ -8238,6 +8342,7 @@ impl RuntimePackageAttributionTracker {
                     package_id: desc.package_id.clone(),
                     package_name: desc.package_name.clone(),
                     package_version: desc.package_version.clone(),
+                    manifest_identity: desc.manifest_identity.clone(),
                     is_root_application: desc.is_root_application,
                     loaded_modules: Vec::new(),
                     declared_effect_kinds: Vec::new(),
@@ -8302,63 +8407,14 @@ impl RuntimePackageAttributionTracker {
                 }
             }
 
-            let target_hint = snapshot.and_then(|snap| snap.target_package_hint.clone());
-            let (basis, attributed_package, candidate_packages) = if loaded_packages.len() == 1 {
-                let pkg = loaded_packages.iter().next().cloned();
-                (
-                    EffectAttributionBasis::ExactSingleLoadedPackage,
-                    pkg,
-                    loaded_packages.into_iter().collect::<Vec<_>>(),
-                )
-            } else if capable_packages.len() == 1 {
-                let pkg = capable_packages.iter().next().cloned();
-                (
-                    EffectAttributionBasis::ExactRuntimeCapabilityHolder,
-                    pkg,
-                    capable_packages.into_iter().collect::<Vec<_>>(),
-                )
-            } else if capable_packages.len() > 1 {
-                if let Some(hint) = target_hint.filter(|hint| capable_packages.contains(hint)) {
-                    (
-                        EffectAttributionBasis::ExactTargetWithinPackage,
-                        Some(hint),
-                        capable_packages.into_iter().collect::<Vec<_>>(),
-                    )
-                } else {
-                    (
-                        EffectAttributionBasis::CandidateRuntimeCapabilityHolders,
-                        None,
-                        capable_packages.into_iter().collect::<Vec<_>>(),
-                    )
-                }
-            } else {
-                (
-                    EffectAttributionBasis::CandidateLoadedPackages,
-                    None,
-                    loaded_packages.into_iter().collect::<Vec<_>>(),
-                )
-            };
-
-            if let Some(pkg_id) = &attributed_package {
-                if let Some(pkg_entry) = package_map.get_mut(pkg_id) {
-                    pkg_entry.exact_effect_seqs.push(receipt.seq);
-                    match &receipt.policy_outcome {
-                        PolicyOutcome::Allowed { .. } => {
-                            pkg_entry.allowed_effects = pkg_entry.allowed_effects.saturating_add(1);
-                        }
-                        PolicyOutcome::Denied { .. } => {
-                            pkg_entry.denied_effects = pkg_entry.denied_effects.saturating_add(1);
-                        }
-                        PolicyOutcome::Failed { .. } => {
-                            pkg_entry.failed_effects = pkg_entry.failed_effects.saturating_add(1);
-                        }
-                    }
-                }
-            } else {
-                for candidate in &candidate_packages {
-                    if let Some(pkg_entry) = package_map.get_mut(candidate) {
-                        pkg_entry.candidate_effect_seqs.push(receipt.seq);
-                    }
+            let candidate_packages = loaded_packages.into_iter().collect::<Vec<_>>();
+            // A package can call a builtin function imported and exported by
+            // another package, and any caller can target another package's
+            // files. Preserve those hints without promoting either to an
+            // authenticated caller or excluding delegated callers.
+            for candidate in &candidate_packages {
+                if let Some(pkg_entry) = package_map.get_mut(candidate) {
+                    pkg_entry.candidate_effect_seqs.push(receipt.seq);
                 }
             }
 
@@ -8367,9 +8423,11 @@ impl RuntimePackageAttributionTracker {
                 receipt_hash: chain_entry.receipt_hash.clone(),
                 effect_kind: receipt.effect_kind,
                 outcome: receipt.policy_outcome.label().to_owned(),
-                attribution_basis: basis,
-                attributed_package,
+                attribution_basis: EffectAttributionBasis::CandidateLoadedPackages,
+                attributed_package: None,
                 candidate_packages,
+                capability_importing_packages: capable_packages.into_iter().collect(),
+                target_package_hint: snapshot.and_then(|snap| snap.target_package_hint.clone()),
             });
         }
 
@@ -8678,6 +8736,7 @@ fn prepare_native_frozen_modules(
             .or(expected_graph_hash)
             .unwrap_or(&graph.report().input_hash)
             .to_owned();
+        let package_identities = CapturedPackageIdentities::from_graph(&graph);
         let resolver = Arc::new(
             CapturedEngineResolver::new_with_parser_options(
                 graph,
@@ -8710,6 +8769,7 @@ fn prepare_native_frozen_modules(
                 root,
                 &resolver.summary().graph_input_hash,
                 &resolver.module_attribution_specs(),
+                &package_identities,
             )
             .with_entrypoint_origin(resolver.summary().entrypoint.clone()),
         );
@@ -8804,6 +8864,7 @@ fn prepare_best_effort_package_attribution_tracker(
         };
         let graph = capture(root, entrypoint, options).ok()?;
         let pin = graph.report().input_hash.clone();
+        let package_identities = CapturedPackageIdentities::from_graph(&graph);
         let resolver = CapturedEngineResolver::new_with_parser_options(
             graph,
             &pin,
@@ -8815,6 +8876,7 @@ fn prepare_best_effort_package_attribution_tracker(
                 root,
                 &resolver.summary().graph_input_hash,
                 &resolver.module_attribution_specs(),
+                &package_identities,
             )
             .with_entrypoint_origin(resolver.summary().entrypoint.clone()),
         ))
@@ -15571,6 +15633,320 @@ impl EngineDispatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn package_attribution_v1_round_trip_preserves_signed_wire_shape() {
+        // Historical signed receipts must not acquire new provenance or hint
+        // fields merely because the current reader understands the v2 report.
+        let historical = serde_json::json!({
+            "schema_version": "franken-node/package-attribution-report/v1",
+            "graph_input_hash": "sha256:retained-historical-graph",
+            "root_package_id": "app:historical@1.0.0",
+            "packages": [{
+                "package_id": "app:historical@1.0.0",
+                "package_name": "historical",
+                "package_version": "1.0.0",
+                "is_root_application": true,
+                "loaded_modules": [],
+                "declared_effect_kinds": ["fs_read"],
+                "exact_effect_seqs": [0],
+                "candidate_effect_seqs": [],
+                "allowed_effects": 1,
+                "denied_effects": 0,
+                "failed_effects": 0
+            }],
+            "effects": [{
+                "seq": 0,
+                "receipt_hash": "historical-effect-hash",
+                "effect_kind": "fs_read",
+                "outcome": "allowed",
+                "attribution_basis": "exact_single_loaded_package",
+                "attributed_package": "app:historical@1.0.0",
+                "candidate_packages": []
+            }]
+        });
+        let report: PackageAttributionReport = serde_json::from_value(historical.clone()).unwrap();
+        assert_eq!(
+            report.packages[0].manifest_identity,
+            PackageManifestIdentity::Unrecorded
+        );
+        assert_eq!(
+            report.packages[0].package_name.as_deref(),
+            Some("historical")
+        );
+        assert_eq!(report.packages[0].package_version.as_deref(), Some("1.0.0"));
+        assert!(report.effects[0].capability_importing_packages.is_empty());
+        assert!(report.effects[0].target_package_hint.is_none());
+        assert_eq!(serde_json::to_value(&report).unwrap(), historical);
+    }
+
+    #[cfg(all(feature = "engine", unix))]
+    #[test]
+    fn package_attribution_retains_capsule_identities_after_live_metadata_changes() {
+        use crate::supply_chain::module_resolution_graph::file_resolution::source_graph::{
+            GraphOptions, capsule, capture, engine_resolver::CapturedEngineResolver,
+        };
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("source");
+        let dependency = root.join("node_modules/@scope/fixture");
+        std::fs::create_dir_all(&dependency).unwrap();
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"name":"captured-app","version":"1.2.3","type":"commonjs"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dependency.join("package.json"),
+            r#"{"name":"@scope/fixture","version":"4.5.6","main":"index.js"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("app.js"),
+            "module.exports=require('@scope/fixture');",
+        )
+        .unwrap();
+        std::fs::write(dependency.join("index.js"), "module.exports=42;").unwrap();
+        let graph = capture(&root, "app.js", GraphOptions::default()).unwrap();
+        let pin = graph.report().input_hash.clone();
+        let encoded = capsule::encode(&graph).unwrap();
+        let identities = CapturedPackageIdentities::from_graph(&graph);
+        let resolver = CapturedEngineResolver::new(graph, &pin).ok().unwrap();
+        let specs = resolver.module_attribution_specs();
+        let imports = specs
+            .iter()
+            .map(|spec| (spec.origin_path.clone(), spec.source_sha256.clone()))
+            .collect();
+        let authority = host_effect_ledger_authority_for_test();
+        let ledger = EngineDispatcher::build_host_effect_ledger(
+            "captured-package-identities",
+            &[],
+            &authority,
+            SecurityEpoch::from_raw(STANDARD_SECURITY_EPOCH),
+        )
+        .unwrap();
+        let before = RuntimePackageAttributionTracker::from_captured_resolver(
+            &root,
+            &pin,
+            &specs,
+            &identities,
+        )
+        .with_entrypoint_origin("app.js")
+        .finalize(&imports, &ledger);
+        assert_eq!(
+            before.schema_version,
+            "franken-node/package-attribution-report/v2"
+        );
+        assert_eq!(before.root_package_id, "app:captured-app@1.2.3");
+        let package = before
+            .packages
+            .iter()
+            .find(|package| package.package_id == "npm:@scope/fixture@4.5.6")
+            .expect("captured dependency identity");
+        assert_eq!(package.package_name.as_deref(), Some("@scope/fixture"));
+        assert_eq!(package.package_version.as_deref(), Some("4.5.6"));
+        assert!(matches!(
+            &package.manifest_identity,
+            PackageManifestIdentity::Captured { relative_path, sha256 }
+                if relative_path == "node_modules/@scope/fixture/package.json"
+                    && sha256.starts_with("sha256:")
+        ));
+        assert_eq!(package.loaded_modules.len(), 1);
+        assert_eq!(
+            package.loaded_modules[0].origin_path,
+            "node_modules/@scope/fixture/index.js"
+        );
+
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"name":"forged","version":"99"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dependency.join("package.json"),
+            r#"{"name":"forged-dep","version":"99"}"#,
+        )
+        .unwrap();
+        let changed = RuntimePackageAttributionTracker::from_captured_resolver(
+            &root,
+            &pin,
+            &specs,
+            &identities,
+        )
+        .with_entrypoint_origin("app.js")
+        .finalize(&imports, &ledger);
+        assert_eq!(changed, before);
+
+        std::fs::rename(&root, directory.path().join("retired-source")).unwrap();
+        assert!(!root.exists());
+        let graph = capsule::replay(encoded.bytes(), encoded.digest()).unwrap();
+        let identities = CapturedPackageIdentities::from_graph(&graph);
+        let restored = CapturedEngineResolver::new(graph, &pin).ok().unwrap();
+        let offline = RuntimePackageAttributionTracker::from_captured_resolver(
+            &root,
+            &pin,
+            &restored.module_attribution_specs(),
+            &identities,
+        )
+        .with_entrypoint_origin("app.js")
+        .finalize(&imports, &ledger);
+        assert_eq!(offline, before);
+    }
+
+    #[cfg(all(feature = "engine", unix))]
+    #[test]
+    fn package_attribution_keeps_same_version_nested_instances_separate() {
+        use crate::supply_chain::module_resolution_graph::file_resolution::source_graph::{
+            GraphOptions, capture, engine_resolver::CapturedEngineResolver,
+        };
+        use sha2::{Digest, Sha256};
+
+        let root = tempfile::tempdir().unwrap();
+        let put = |path: &str, contents: &str| {
+            let path = root.path().join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, contents).unwrap();
+        };
+        put(
+            "package.json",
+            r#"{"name":"host","version":"1.0.0","type":"commonjs"}"#,
+        );
+        put(
+            "app.js",
+            "require('fixture'); module.exports=require('parent');",
+        );
+        put(
+            "node_modules/parent/package.json",
+            r#"{"name":"parent","version":"1.0.0","main":"index.js"}"#,
+        );
+        put(
+            "node_modules/parent/index.js",
+            "module.exports=require('fixture');",
+        );
+        let top_manifest =
+            r#"{"name":"repeat","version":"1.0.0","main":"index.js","description":"top"}"#;
+        let nested_manifest =
+            r#"{"name":"repeat","version":"1.0.0","main":"index.js","description":"nested"}"#;
+        let instances = [
+            ("node_modules/fixture", top_manifest, "module.exports=1;"),
+            (
+                "node_modules/parent/node_modules/fixture",
+                nested_manifest,
+                "module.exports=2;",
+            ),
+        ];
+        for (directory, manifest, source) in instances {
+            put(&format!("{directory}/package.json"), manifest);
+            put(&format!("{directory}/index.js"), source);
+        }
+        let graph = capture(root.path(), "app.js", GraphOptions::default()).unwrap();
+        let pin = graph.report().input_hash.clone();
+        let identities = CapturedPackageIdentities::from_graph(&graph);
+        let resolver = CapturedEngineResolver::new(graph, &pin).ok().unwrap();
+        let specs = resolver.module_attribution_specs();
+        let imports = specs
+            .iter()
+            .map(|spec| (spec.origin_path.clone(), spec.source_sha256.clone()))
+            .collect();
+        let ledger = EngineDispatcher::build_host_effect_ledger(
+            "same-version-package-instances",
+            &[],
+            &host_effect_ledger_authority_for_test(),
+            SecurityEpoch::from_raw(STANDARD_SECURITY_EPOCH),
+        )
+        .unwrap();
+        let report = RuntimePackageAttributionTracker::from_captured_resolver(
+            root.path(),
+            &pin,
+            &specs,
+            &identities,
+        )
+        .with_entrypoint_origin("app.js")
+        .finalize(&imports, &ledger);
+        let repeated = report
+            .packages
+            .iter()
+            .filter(|package| package.package_name.as_deref() == Some("repeat"))
+            .collect::<Vec<_>>();
+        assert_eq!(repeated.len(), 2, "distinct installs must not merge");
+        for (directory, manifest, source) in instances {
+            let package = repeated
+                .iter()
+                .find(|package| package.package_id == format!("npm-instance:{directory}"))
+                .expect("instance-specific package identity");
+            assert_eq!(package.package_version.as_deref(), Some("1.0.0"));
+            assert_eq!(
+                package.manifest_identity,
+                PackageManifestIdentity::Captured {
+                    relative_path: format!("{directory}/package.json"),
+                    sha256: format!(
+                        "sha256:{}",
+                        hex::encode(Sha256::digest(manifest.as_bytes()))
+                    ),
+                }
+            );
+            assert_eq!(package.loaded_modules.len(), 1);
+            assert_eq!(
+                package.loaded_modules[0].origin_path,
+                format!("{directory}/index.js")
+            );
+            assert_eq!(
+                package.loaded_modules[0].source_sha256,
+                hex::encode(Sha256::digest(source.as_bytes()))
+            );
+        }
+        assert!(
+            report
+                .packages
+                .iter()
+                .any(|package| package.package_id == "npm:parent@1.0.0")
+        );
+    }
+
+    #[cfg(all(feature = "engine", unix))]
+    #[test]
+    fn package_attribution_missing_manifest_has_typed_unknown_identity() {
+        use crate::supply_chain::module_resolution_graph::file_resolution::source_graph::{
+            GraphOptions, capture, engine_resolver::CapturedEngineResolver,
+        };
+
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("app.js"), "module.exports=42;").unwrap();
+        let graph = capture(root.path(), "app.js", GraphOptions::default()).unwrap();
+        let pin = graph.report().input_hash.clone();
+        let identities = CapturedPackageIdentities::from_graph(&graph);
+        let resolver = CapturedEngineResolver::new(graph, &pin).ok().unwrap();
+        let tracker = RuntimePackageAttributionTracker::from_captured_resolver(
+            root.path(),
+            &pin,
+            &resolver.module_attribution_specs(),
+            &identities,
+        );
+        assert_eq!(tracker.root_package_name, None);
+        assert_eq!(tracker.root_package_version, None);
+        assert_eq!(tracker.root_package_id, "app-path:root");
+        assert_eq!(
+            tracker.root_manifest_identity,
+            PackageManifestIdentity::NotCaptured {
+                relative_path: "package.json".to_owned()
+            }
+        );
+        // A late live identity is neither captured nor authenticated by this graph.
+        std::fs::write(
+            root.path().join("package.json"),
+            r#"{"name":"late-install","version":"0.0.0"}"#,
+        )
+        .unwrap();
+        let after = RuntimePackageAttributionTracker::from_captured_resolver(
+            root.path(),
+            &pin,
+            &resolver.module_attribution_specs(),
+            &identities,
+        );
+        assert_eq!(after.root_package_name, None);
+        assert_eq!(after.root_package_version, None);
+        assert_eq!(after.root_manifest_identity, tracker.root_manifest_identity);
+    }
 
     #[cfg(unix)]
     #[test]

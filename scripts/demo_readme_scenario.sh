@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # bd-reality-20260923-26n9r.15 — Step-by-step hermetic replay of the opening
-# README trust scenario + per-dependency runtime host-effect attribution.
+# README trust scenario + package source inventory and host-effect candidates.
 set -euo pipefail
 
 BIN="${FRANKEN_NODE_BIN:-target/release/franken-node}"
@@ -167,7 +167,7 @@ else
   report_step "hermetic_deep_scan_signals" "0" "deep scan card assertions failed"
 fi
 
-# Step 2: multi-dependency run (both plain balanced + frozen replay capture) + per-package host-effect attribution
+# Step 2: multi-dependency run (plain balanced + frozen replay capture) + package effect candidates
 if plain_json="$(cd "$TMP_WS" && "$BIN" run app.js --policy balanced --json 2>/dev/null)" \
   && run_json="$(cd "$TMP_WS" && "$BIN" run app.js --policy balanced --frozen-modules --capture-replay --json 2>/dev/null)" \
   && detail="$(python3 - "$plain_json" "$run_json" <<'PY'
@@ -175,11 +175,26 @@ import json, sys
 plain, doc = json.loads(sys.argv[1]), json.loads(sys.argv[2])
 for item in (plain, doc):
     pa = item["receipt"]["package_attribution"]
+    assert pa["schema_version"] == "franken-node/package-attribution-report/v2"
+    assert pa["root_package_id"] == "app:readme-scenario-app@1.0.0"
     effects = pa["effects"]
     assert len(effects) == 2
-    assert effects[0]["effect_kind"] == "fs_read" and effects[0]["attributed_package"] == "npm:config-loader@1.0.0"
-    assert effects[1]["effect_kind"] == "http_request" and effects[1]["outcome"] == "denied" and effects[1]["attributed_package"] == "npm:telemetry-drift@0.0.5"
-print(f"receipt={doc['receipt']['receipt_id']} fs_read->config-loader(allowed) http_request->telemetry-drift(denied)")
+    assert effects[0]["effect_kind"] == "fs_read" and effects[0]["outcome"] == "allowed"
+    assert effects[1]["effect_kind"] == "http_request" and effects[1]["outcome"] == "denied"
+    packages = {package["package_id"]: package for package in pa["packages"]}
+    for effect, importer in zip(effects, ("npm:config-loader@1.0.0", "npm:telemetry-drift@0.0.5")):
+        assert effect["attribution_basis"] == "candidate_loaded_packages"
+        assert effect.get("attributed_package") is None
+        assert effect["capability_importing_packages"] == [importer]
+        assert importer in effect["candidate_packages"]
+        assert pa["root_package_id"] in effect["candidate_packages"]
+        for candidate in effect["candidate_packages"]:
+            assert effect["seq"] in packages[candidate]["candidate_effect_seqs"]
+    for package in packages.values():
+        assert package["manifest_identity"]["status"] == "captured"
+        assert package["exact_effect_seqs"] == []
+        assert package["allowed_effects"] == package["denied_effects"] == package["failed_effects"] == 0
+print(f"receipt={doc['receipt']['receipt_id']} fs_read=allowed(import hint:config-loader) http_request=denied(import hint:telemetry-drift) caller=unknown")
 PY
 )"; then
   receipt_id="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["receipt"]["receipt_id"])' "$run_json")"

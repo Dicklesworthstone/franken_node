@@ -305,6 +305,126 @@ fn trust_observe_routes_real_detector_findings_into_persistent_card_risk() {
 }
 
 #[test]
+fn package_effect_attribution_does_not_mistake_targets_or_imports_for_callers() {
+    // Both executions read the provider's file, but in the second execution a
+    // different package invokes a builtin function delegated by the provider.
+    // Neither target ownership nor the direct builtin importer proves caller
+    // identity, and the real caller must remain in the candidate inventory.
+    for delegated in [false, true] {
+        let dir = tempfile::tempdir().expect("caller attribution workspace");
+        let root = dir.path();
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"name":"caller-app","version":"1.0.0","type":"commonjs"}"#,
+        )
+        .unwrap();
+        for (name, code) in [
+            (
+                "provider",
+                "const fs = require('fs');\nexports.read = fs.readFileSync;\n",
+            ),
+            (
+                "relay",
+                "exports.call = (read, path) => read(path, 'utf8');\n",
+            ),
+        ] {
+            let package = root.join("node_modules").join(name);
+            std::fs::create_dir_all(&package).unwrap();
+            std::fs::write(
+                package.join("package.json"),
+                serde_json::to_vec(&serde_json::json!({
+                    "name": name,
+                    "version": "1.0.0",
+                    "main": "index.js"
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            std::fs::write(package.join("index.js"), code).unwrap();
+        }
+        std::fs::write(
+            root.join("node_modules/provider/data.txt"),
+            "delegated-value",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("app.js"),
+            if delegated {
+                "const read = require('provider').read;\nconst relay = require('relay');\nconsole.log(relay.call(read, 'node_modules/provider/data.txt'));\n"
+            } else {
+                "const fs = require('fs');\nrequire('provider');\nconsole.log(fs.readFileSync('node_modules/provider/data.txt', 'utf8'));\n"
+            },
+        )
+        .unwrap();
+        let init = run(
+            root,
+            &["init", "--profile", "balanced", "--out-dir", ".", "--json"],
+        );
+        assert!(
+            init.status.success(),
+            "init: {}",
+            String::from_utf8_lossy(&init.stderr)
+        );
+        let output = run(
+            root,
+            &[
+                "run",
+                "app.js",
+                "--policy",
+                "balanced",
+                "--frozen-modules",
+                "--json",
+            ],
+        );
+        let report = json(&output);
+        assert!(output.status.success(), "delegated={delegated}: {report}");
+        assert_eq!(
+            report["dispatch"]["captured_output"]["stdout"],
+            "delegated-value\n"
+        );
+        let attribution = &report["receipt"]["package_attribution"];
+        assert_eq!(
+            attribution["schema_version"],
+            "franken-node/package-attribution-report/v2"
+        );
+        let effects = attribution["effects"].as_array().unwrap();
+        assert_eq!(effects.len(), 1, "{attribution}");
+        let effect = &effects[0];
+        assert_eq!(effect["effect_kind"], "fs_read");
+        assert_eq!(effect["outcome"], "allowed");
+        assert_eq!(effect["attribution_basis"], "candidate_loaded_packages");
+        assert!(effect["attributed_package"].is_null(), "{effect}");
+        assert_eq!(effect["target_package_hint"], "npm:provider@1.0.0");
+        let candidates = effect["candidate_packages"].as_array().unwrap();
+        assert!(candidates.contains(&serde_json::json!("app:caller-app@1.0.0")));
+        assert!(candidates.contains(&serde_json::json!("npm:provider@1.0.0")));
+        let importers = effect["capability_importing_packages"].as_array().unwrap();
+        if delegated {
+            assert!(candidates.contains(&serde_json::json!("npm:relay@1.0.0")));
+            assert_eq!(importers, &[serde_json::json!("npm:provider@1.0.0")]);
+        } else {
+            assert!(importers.contains(&serde_json::json!("app:caller-app@1.0.0")));
+            assert!(importers.contains(&serde_json::json!("npm:provider@1.0.0")));
+        }
+        for package in attribution["packages"].as_array().unwrap() {
+            assert!(package["exact_effect_seqs"].as_array().unwrap().is_empty());
+            assert_eq!(package["allowed_effects"], 0);
+            assert_eq!(package["denied_effects"], 0);
+            assert_eq!(package["failed_effects"], 0);
+            if candidates.contains(&package["package_id"]) {
+                assert!(
+                    package["candidate_effect_seqs"]
+                        .as_array()
+                        .unwrap()
+                        .contains(&effect["seq"]),
+                    "candidate must retain the real effect sequence: {package}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn complete_readme_trust_scenario_and_multi_dependency_effect_attribution() {
     let dir = tempfile::tempdir().expect("readme scenario workspace");
     let root = dir.path();
@@ -615,7 +735,7 @@ fn complete_readme_trust_scenario_and_multi_dependency_effect_attribution() {
     );
 
     // 4a. Execute multi-dependency app under default balanced (non-frozen) and verify
-    //     automatic per-package runtime effect attribution without requiring --frozen-modules.
+    //     package candidates and import hints without requiring --frozen-modules.
     let plain_out = run(root, &["run", "app.js", "--policy", "balanced", "--json"]);
     let plain_json = json(&plain_out);
     assert!(
@@ -623,17 +743,27 @@ fn complete_readme_trust_scenario_and_multi_dependency_effect_attribution() {
         "plain balanced run failed: stdout={plain_json} stderr={}",
         String::from_utf8_lossy(&plain_out.stderr)
     );
-    assert_eq!(
-        plain_json["receipt"]["package_attribution"]["effects"][0]["attributed_package"],
-        "npm:config-loader@1.0.0"
-    );
-    assert_eq!(
-        plain_json["receipt"]["package_attribution"]["effects"][1]["attributed_package"],
-        "npm:telemetry-drift@0.0.5"
-    );
+    let plain_effects = plain_json["receipt"]["package_attribution"]["effects"]
+        .as_array()
+        .expect("plain run effect candidates");
+    assert_eq!(plain_effects.len(), 2);
+    for (effect, importer) in plain_effects
+        .iter()
+        .zip(["npm:config-loader@1.0.0", "npm:telemetry-drift@0.0.5"])
+    {
+        assert!(effect["attributed_package"].is_null(), "{effect}");
+        assert_eq!(effect["attribution_basis"], "candidate_loaded_packages");
+        assert!(
+            effect["capability_importing_packages"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!(importer)),
+            "{effect}"
+        );
+    }
 
     // 4b. Execute multi-dependency app under balanced with --frozen-modules --capture-replay
-    //     and verify exact per-package runtime effect attribution + hermetic replay capture.
+    //     and verify candidate attribution plus hermetic replay capture.
     let run_out = run(
         root,
         &[
@@ -659,7 +789,7 @@ fn complete_readme_trust_scenario_and_multi_dependency_effect_attribution() {
     let attribution = &run_json["receipt"]["package_attribution"];
     assert_eq!(
         attribution["schema_version"],
-        "franken-node/package-attribution-report/v1"
+        "franken-node/package-attribution-report/v2"
     );
     assert_eq!(
         attribution["root_package_id"],
@@ -675,20 +805,19 @@ fn complete_readme_trust_scenario_and_multi_dependency_effect_attribution() {
     assert_eq!(effects.len(), 2, "{attribution}");
     assert_eq!(effects[0]["effect_kind"], "fs_read");
     assert_eq!(effects[0]["outcome"], "allowed");
+    assert_eq!(effects[0]["attribution_basis"], "candidate_loaded_packages");
+    assert!(effects[0]["attributed_package"].is_null());
     assert_eq!(
-        effects[0]["attribution_basis"],
-        "exact_runtime_capability_holder"
+        effects[0]["capability_importing_packages"],
+        serde_json::json!(["npm:config-loader@1.0.0"])
     );
-    assert_eq!(effects[0]["attributed_package"], "npm:config-loader@1.0.0");
     assert_eq!(effects[1]["effect_kind"], "http_request");
     assert_eq!(effects[1]["outcome"], "denied");
+    assert_eq!(effects[1]["attribution_basis"], "candidate_loaded_packages");
+    assert!(effects[1]["attributed_package"].is_null());
     assert_eq!(
-        effects[1]["attribution_basis"],
-        "exact_runtime_capability_holder"
-    );
-    assert_eq!(
-        effects[1]["attributed_package"],
-        "npm:telemetry-drift@0.0.5"
+        effects[1]["capability_importing_packages"],
+        serde_json::json!(["npm:telemetry-drift@0.0.5"])
     );
 
     let packages = attribution["packages"]
@@ -700,12 +829,22 @@ fn complete_readme_trust_scenario_and_multi_dependency_effect_attribution() {
             .find(|entry| entry["package_id"].as_str() == Some(id))
             .unwrap_or_else(|| panic!("missing package {id} in {packages:?}"))
     };
-    assert_eq!(pkg_for("npm:config-loader@1.0.0")["allowed_effects"], 1);
+    assert_eq!(pkg_for("npm:config-loader@1.0.0")["allowed_effects"], 0);
     assert_eq!(pkg_for("npm:config-loader@1.0.0")["denied_effects"], 0);
     assert_eq!(pkg_for("npm:telemetry-drift@0.0.5")["allowed_effects"], 0);
-    assert_eq!(pkg_for("npm:telemetry-drift@0.0.5")["denied_effects"], 1);
+    assert_eq!(pkg_for("npm:telemetry-drift@0.0.5")["denied_effects"], 0);
     assert_eq!(pkg_for("npm:expresss@4.0.0")["allowed_effects"], 0);
     assert_eq!(pkg_for("npm:expresss@4.0.0")["denied_effects"], 0);
+    for effect in effects {
+        for candidate in effect["candidate_packages"].as_array().unwrap() {
+            assert!(
+                pkg_for(candidate.as_str().unwrap())["candidate_effect_seqs"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&effect["seq"])
+            );
+        }
+    }
 
     // 5. Strict profile refuses high-risk dependencies at preflight before guest execution
     let strict_out = run(root, &["run", "app.js", "--policy", "strict", "--json"]);
