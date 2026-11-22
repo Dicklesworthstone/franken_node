@@ -1064,14 +1064,30 @@ identity and version are checked. This works across npm lockfile versions 1–3,
 including scoped packages, aliases, and hoisted or nested installation locations.
 Selectors for one package must be disjoint, and each original request must match
 at most one rule; ambiguous overlaps require review even when one rule is a
-literal no-op. At most 64 selectors per package are admitted. Nested
-ancestor-dependent rules, opaque requests requiring version comparison, nonregistry sources,
-omitted alias ranges, dist-tags, and bundled or nested-shrinkwrap contexts still
-require review.
+literal no-op. At most 64 sibling selectors per package are admitted.
+
+Ancestor-scoped rules such as `"parent": {"vulnerable": "npm:@maintained/fork@^2"}`
+also apply through logical dependency edges, so a descendant can be hoisted into
+the root `node_modules` without losing its parent-specific repair. Nested
+ancestors and version-qualified ancestor keys are supported. A package rule's
+`"."` value controls replacement of that package itself; omitting `"."` uses the
+key's version range, while literal `"*"` or `""` makes its self replacement a
+no-op. The same exact-spec direct-dependency constraint still applies. Root
+workspace links establish ancestry from their captured real manifests; an
+override can repair their descendants without replacing the local workspace.
+
+Closest scoped rules take precedence over inherited rules, including explicit
+no-ops. Shared installations may inherit comparable parent/child rule contexts;
+incomparable contexts, including conflicts encountered during refinement,
+require review. Consumers with dependencies but no captured logical root path
+also require review. Rule depth, package count, edge propagation, and elapsed
+time remain bounded; cycles do not create extra authority. Opaque requests
+requiring version comparison, nonregistry sources, omitted alias ranges,
+dist-tags, and bundled or nested-shrinkwrap contexts still require review.
 Workspace and installed-package manifests cannot redefine the root's overrides.
 
 On Linux, trust dependency queries use that same captured override authority,
-including the replacement fork's identity and its locked version. Reports keep
+including scoped ancestry, the replacement fork's identity, and its locked version. Reports keep
 the original dependency request alongside the effective override. The topology
 commitment binds the complete selected root rules, including unused entries and
 resolved `$dependency` references; later queries do not reopen package metadata.

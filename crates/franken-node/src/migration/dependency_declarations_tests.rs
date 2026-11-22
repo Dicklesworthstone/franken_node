@@ -436,6 +436,293 @@ fn fork_override_tree(
 }
 
 #[test]
+fn ancestor_scoped_overrides_follow_hoisted_logical_edges_for_every_npm_lock_version() {
+    // Independently exercised with npm 11.19.1 / Arborist 9.9.1 loadActual:
+    // first -> hoisted middle -> hoisted aliased child selects the fork, while
+    // second -> private child retains its original request. Every edge is valid.
+    for lock_version in [1, 2, 3] {
+        for rules in [
+            json!({"first":{"child":"npm:@patched/child@^2"}}),
+            json!({"first@^1":{".":"*","child":"npm:@patched/child@^2"}}),
+            json!({"first":{"middle@^1":{"child":"npm:@patched/child@^2"}}}),
+        ] {
+            let first = json!({"name":"first","version":"1.0.0","dependencies":{"middle":"1"}});
+            let middle = json!({"name":"middle","version":"1.0.0","dependencies":{"child":"npm:original@^1"}});
+            let patched = json!({"name":"@patched/child","version":"2.1.0"});
+            let second = json!({"name":"second","version":"1.0.0","dependencies":{"child":"1"}});
+            let ordinary = json!({"name":"child","version":"1.0.0"});
+            let root = fixture(
+                json!({"dependencies":{"first":"1","second":"1"},"overrides":rules}),
+                json!({"node_modules/first":first,"node_modules/middle":middle,
+                    "node_modules/child":patched,"node_modules/second":second,
+                    "node_modules/second/node_modules/child":ordinary}),
+            );
+            for (path, manifest) in [
+                ("node_modules/first", &first),
+                ("node_modules/middle", &middle),
+                ("node_modules/child", &patched),
+                ("node_modules/second", &second),
+                ("node_modules/second/node_modules/child", &ordinary),
+            ] {
+                put(root.path(), &format!("{path}/package.json"), manifest);
+            }
+            if lock_version == 1 {
+                put(
+                    root.path(),
+                    "package-lock.json",
+                    &json!({"lockfileVersion":1,"dependencies":{
+                        "first":{"version":"1.0.0","requires":{"middle":"1"}},
+                        "middle":{"version":"1.0.0","requires":{"child":"npm:original@^1"}},
+                        "child":{"version":"npm:@patched/child@2.1.0"},
+                        "second":{"version":"1.0.0","requires":{"child":"1"},"dependencies":{
+                            "child":{"version":"1.0.0"}}}
+                    }}),
+                );
+            } else if lock_version == 2 {
+                let mut lock: Value = serde_json::from_slice(
+                    &fs::read(root.path().join("package-lock.json")).unwrap(),
+                )
+                .unwrap();
+                lock["lockfileVersion"] = json!(2);
+                put(root.path(), "package-lock.json", &lock);
+            }
+            let report = inspect_for_execution(root.path(), deadline()).unwrap();
+            assert!(
+                !report.requires_review() && report.installation_checked,
+                "v{lock_version}, {rules}: {report:#?}"
+            );
+            assert_eq!(report.installed_packages_scanned, 5);
+            assert!(report.scope.contains("ancestor-scoped npm overrides"));
+            assert_eq!(
+                report,
+                inspect_for_execution(root.path(), deadline()).unwrap()
+            );
+
+            // The scoped repair cannot authorize the same fork outside its
+            // logical ancestors, even though the physical hoist is nearby.
+            put(
+                root.path(),
+                "node_modules/second/node_modules/child/package.json",
+                &patched,
+            );
+            let changed = inspect_for_execution(root.path(), deadline()).unwrap();
+            assert!(changed.installation_checked && has(&changed, "installed_identity_mismatch"));
+        }
+    }
+}
+
+#[test]
+fn nested_override_specificity_self_values_and_literal_noops_match_npm() {
+    for (rules, request, selected) in [
+        (json!({"child":"3","parent":{"child":"2"}}), "^1", "2.0.0"),
+        (json!({"child":"3","parent":{"child":"*"}}), "^1", "1.0.0"),
+        (json!({"child":"3","parent":{"child":""}}), "^1", "1.0.0"),
+        (json!({"parent":{".":"1","child":{".":"2"}}}), "^1", "2.0.0"),
+        (json!({"parent":{"child@^1":{}}}), "^1", "1.5.0"),
+        (json!({"parent":{"child@^1":{".":"*"}}}), "^1", "1.5.0"),
+        (json!({"parent":{"child@^9":"2"}}), "^1", "1.5.0"),
+        (
+            json!({"parent":{"child":"2"},"unused":{".":"2"}}),
+            "^1",
+            "2.0.0",
+        ),
+    ] {
+        let root = overridden_tree(rules.clone(), request, selected);
+        let report = inspect_for_execution(root.path(), deadline()).unwrap();
+        assert!(
+            !report.requires_review() && report.installation_checked,
+            "{rules}: {report:#?}"
+        );
+    }
+    // npm defaults an object's self value to its version-qualified key. Root
+    // exact-text EOVERRIDE still applies; explicit '.' '*' suppresses the self
+    // replacement while preserving descendant rules.
+    let root = overridden_tree(json!({"parent@^1":{"child":"2"}}), "^1", "2.0.0");
+    let report = inspect_for_execution(root.path(), deadline()).unwrap();
+    assert!(has(&report, "conflicting_npm_override") && !report.installation_checked);
+    let root = overridden_tree(json!({"parent@^1":{".":"*","child":"2"}}), "^1", "2.0.0");
+    assert!(
+        !inspect_for_execution(root.path(), deadline())
+            .unwrap()
+            .requires_review()
+    );
+}
+
+#[test]
+fn scoped_overrides_resolve_root_references_and_aliased_ancestor_requests() {
+    let parent = json!({"name":"original-parent","version":"1.0.0","dependencies":{"child":"npm:original-child@^1"}});
+    let patched = json!({"name":"@patched/child","version":"2.1.0"});
+    let root = fixture(
+        json!({
+            "dependencies":{"parent":"npm:original-parent@^1","patch":"npm:@patched/child@^2"},
+            "overrides":{"parent@^1":{".":"*","child":"$patch"}}
+        }),
+        json!({"node_modules/parent":parent,"node_modules/patch":patched,"node_modules/child":patched}),
+    );
+    put(root.path(), "node_modules/parent/package.json", &parent);
+    put(root.path(), "node_modules/patch/package.json", &patched);
+    put(root.path(), "node_modules/child/package.json", &patched);
+    let report = inspect_for_execution(root.path(), deadline()).unwrap();
+    assert!(
+        !report.requires_review() && report.installation_checked,
+        "{report:#?}"
+    );
+}
+
+#[test]
+fn scoped_override_cycles_terminate_and_incomparable_or_unbound_contexts_fail_closed() {
+    let parent =
+        json!({"name":"parent","version":"1.0.0","dependencies":{"middle":"1","child":"1"}});
+    let middle = json!({"name":"middle","version":"1.0.0","dependencies":{"parent":"1"}});
+    let child = json!({"name":"child","version":"2.0.0"});
+    let root = fixture(
+        json!({"dependencies":{"parent":"1"},"overrides":{"parent":{"child":"2"}}}),
+        json!({"node_modules/parent":parent,"node_modules/middle":middle,"node_modules/child":child}),
+    );
+    for (path, manifest) in [("parent", &parent), ("middle", &middle), ("child", &child)] {
+        put(
+            root.path(),
+            &format!("node_modules/{path}/package.json"),
+            manifest,
+        );
+    }
+    let report = inspect_for_execution(root.path(), deadline()).unwrap();
+    assert!(
+        !report.requires_review() && report.installation_checked,
+        "{report:#?}"
+    );
+
+    for (manifest, records, expected) in [
+        (
+            json!({"dependencies":{"a":"1","b":"1"},"overrides":{"a":{"child":"2"},"b":{"child":"3"}}}),
+            json!({"node_modules/a":{"version":"1.0.0","dependencies":{"middle":"1"}},
+            "node_modules/b":{"version":"1.0.0","dependencies":{"middle":"1"}},
+            "node_modules/middle":{"version":"1.0.0","dependencies":{"child":"1"}},
+            "node_modules/child":{"version":"2.0.0"}}),
+            "incomparable logical ancestor",
+        ),
+        (
+            json!({"overrides":{"parent":{"child":"2"}}}),
+            json!({"node_modules/parent":{"version":"1.0.0","dependencies":{"child":"1"}},
+            "node_modules/child":{"version":"2.0.0"}}),
+            "no captured logical ancestry",
+        ),
+    ] {
+        let root = fixture(manifest, records);
+        let error = inspect_for_execution(root.path(), deadline()).unwrap_err();
+        assert!(format!("{error:#}").contains(expected), "{error:#}");
+        assert!(!root.path().join("node_modules").exists());
+    }
+}
+
+#[test]
+fn comparable_shared_contexts_refine_but_incompatible_historical_scopes_require_review() {
+    // npm 11.19.1 / Arborist 9.9.1 independently admits the comparable
+    // root->a and root->z->a contexts, applying z's child rule to a.
+    let a = json!({"name":"a","version":"1.0.0","dependencies":{"child":"1"}});
+    let z = json!({"name":"z","version":"1.0.0","dependencies":{"a":"1"}});
+    let child = json!({"name":"child","version":"2.0.0"});
+    let root = fixture(
+        json!({"dependencies":{"a":"1","z":"1"},"overrides":{"z":{"child":"2"}}}),
+        json!({"node_modules/a":a,"node_modules/z":z,"node_modules/child":child}),
+    );
+    for (path, manifest) in [("a", &a), ("z", &z), ("child", &child)] {
+        put(
+            root.path(),
+            &format!("node_modules/{path}/package.json"),
+            manifest,
+        );
+    }
+    let report = inspect_for_execution(root.path(), deadline()).unwrap();
+    assert!(
+        !report.requires_review() && report.installation_checked,
+        "{report:#?}"
+    );
+
+    // The independently exercised npm graph below remains INVALID even after
+    // middle's effective edge becomes "2": its already-selected global child
+    // context conflicts with z's different child scope. Do not overwrite that
+    // context, infer a fresh authority, and report successful npm admission.
+    let root = fixture(
+        json!({"dependencies":{"a":"1","z":"1"},"overrides":{
+        "child":"3","z":{"child":{".":"2","leaf":"4"}}}}),
+        json!({
+            "node_modules/a":{"version":"1.0.0","dependencies":{"middle":"1"}},
+            "node_modules/z":{"version":"1.0.0","dependencies":{"a":"1"}},
+            "node_modules/middle":{"version":"1.0.0","dependencies":{"child":"1"}},
+            "node_modules/child":{"version":"2.0.0","dependencies":{"leaf":"1"}},
+            "node_modules/leaf":{"version":"4.0.0"}
+        }),
+    );
+    let error = inspect_for_execution(root.path(), deadline()).unwrap_err();
+    assert!(
+        format!("{error:#}").contains("incomparable logical ancestor"),
+        "{error:#}"
+    );
+}
+
+#[test]
+fn workspace_scoped_overrides_follow_implicit_root_edges_and_real_manifest_locations() {
+    let member = json!({"name":"member","version":"1.0.0","dependencies":{"child":"1"},
+        "overrides":{"child":"99"}});
+    let child = json!({"name":"@patched/child","version":"2.1.0"});
+    let manifest = json!({"workspaces":["packages/member"],"overrides":{
+        "member":{"child":"npm:@patched/child@^2"}}});
+    let root = fixture(
+        manifest.clone(),
+        json!({
+            "packages/member":member,
+            "node_modules/member":{"link":true,"resolved":"packages/member"},
+            "node_modules/child":child
+        }),
+    );
+    put(root.path(), "packages/member/package.json", &member);
+    put(root.path(), "node_modules/child/package.json", &child);
+    std::os::unix::fs::symlink(
+        "../packages/member",
+        root.path().join("node_modules/member"),
+    )
+    .unwrap();
+    let report = inspect_for_execution(root.path(), deadline()).unwrap();
+    assert!(
+        !report.requires_review() && report.installation_checked,
+        "{report:#?}"
+    );
+    let mut conflicting = manifest;
+    conflicting["overrides"]["member"]["."] = json!("npm:replacement-member@1");
+    put(root.path(), "package.json", &conflicting);
+    let report = inspect_for_execution(root.path(), deadline()).unwrap();
+    assert!(
+        has(&report, "conflicting_npm_override") && !report.installation_checked,
+        "{report:#?}"
+    );
+}
+
+#[test]
+fn scoped_override_rule_depth_and_unknown_nested_sources_remain_bounded() {
+    let mut nested = json!("2");
+    for _ in 0..=MAX_DEPTH + 1 {
+        nested = json!({"parent":nested});
+    }
+    let root = overridden_tree(nested, "1", "1.0.0");
+    assert!(inspect(root.path(), deadline()).is_err());
+    for rules in [
+        json!({"parent":{"child":"npm:fork"}}),
+        json!({"parent":{"child":"$missing"}}),
+        json!({"parent":{"child":"file:../fork"}}),
+        json!({"parent":{"child@^1":"2","child@>=1":"3"}}),
+        json!({".":"2","parent":{"child":"2"}}),
+    ] {
+        let root = overridden_tree(rules, "1", "1.0.0");
+        let report = inspect_for_execution(root.path(), deadline()).unwrap();
+        assert!(
+            has(&report, "unsupported_npm_override") && !report.installation_checked,
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
 fn registry_fork_overrides_bind_actual_identities_for_every_npm_lock_version() {
     // npm 11.9.0 / Arborist 9.2.0 loadActual independently selects the
     // literal fork spec for ordinary AND aliased incoming requests. npm v1
@@ -1262,8 +1549,8 @@ fn unsupported_override_rules_cannot_be_hidden_by_a_supported_prefix_or_unused_n
     for (key, value) in [
         ("unused@latest", json!("2")),
         ("@scope/unused@^1 || latest", json!("2")),
-        ("unused", json!({"child":"2"})),
-        ("unused", json!({".":"2"})),
+        ("unused", json!({"child":"latest"})),
+        ("unused", json!({".":{"child":"2"}})),
         ("unused", json!(["2"])),
         ("unused", json!(true)),
         ("unused", json!(null)),

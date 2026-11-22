@@ -666,7 +666,10 @@ fn declarations(
     authority: &DeclarationAuthority<'_>,
 ) -> Result<()> {
     for edge in declaration_selection::select(manifest, true, deadline, count, MAX_PACKAGES)? {
-        let request = authority.overrides.apply(edge.installed_as, edge.request)?;
+        let consumer = source.strip_suffix("/package.json").unwrap_or("");
+        let request = authority
+            .overrides
+            .apply_from(consumer, edge.installed_as, edge.request)?;
         let (actual, requirement) = if request == edge.request {
             (edge.package, edge.requirement)
         } else {
@@ -784,24 +787,31 @@ pub fn inspect_for_execution(project: &Path, deadline: Instant) -> Result<Depend
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct CapturedRootOverrides {
     source: &'static str,
-    raw_rules: BTreeMap<String, String>,
+    raw_rules: BTreeMap<String, Value>,
     effective: declaration_selection::Overrides,
 }
 
 impl CapturedRootOverrides {
-    pub(crate) fn replacement(&self, installed_as: &str, request: &str) -> Result<Option<&str>> {
-        self.effective.replacement(installed_as, request)
+    pub(crate) fn replacement_from(
+        &self,
+        consumer: &str,
+        installed_as: &str,
+        request: &str,
+    ) -> Result<Option<&str>> {
+        self.effective
+            .replacement_from(consumer, installed_as, request)
     }
 
     pub(crate) fn validate_selected_pin(
         &self,
+        consumer: &str,
         installed_as: &str,
         request: &str,
         selected_name: Option<&str>,
         selected_version: Option<&str>,
         linked: bool,
     ) -> Result<()> {
-        let Some(replacement) = self.replacement(installed_as, request)? else {
+        let Some(replacement) = self.replacement_from(consumer, installed_as, request)? else {
             return Ok(());
         };
         ensure!(
@@ -848,7 +858,7 @@ pub(crate) fn capture_topology_overrides(
         installation_checked: false,
         installed_packages_scanned: 0,
     };
-    let effective = if bun {
+    let mut effective = if bun {
         declaration_selection::Overrides::capture_bun(
             root.as_object()
                 .context("Bun root manifest must be an object")?,
@@ -940,6 +950,17 @@ pub(crate) fn capture_topology_overrides(
             finding.detail
         );
     }
+    if effective.has_contextual_rules() {
+        let packages = match lock {
+            None => BTreeMap::new(),
+            Some(lock) => match lock.get("lockfileVersion").and_then(Value::as_u64) {
+                Some(1) => legacy(lock, deadline)?,
+                Some(2 | 3) => modern(lock, deadline)?,
+                _ => bail!("unsupported npm override lockfileVersion"),
+            },
+        };
+        effective.bind_contexts(manifests, lock, &packages, deadline)?;
+    }
     let (source, raw) = if bun && root.get("overrides").is_none() {
         ("package.json#resolutions", root.get("resolutions"))
     } else {
@@ -952,13 +973,7 @@ pub(crate) fn capture_topology_overrides(
             .context("root override rules must be an object")?
         {
             time_remaining(deadline)?;
-            raw_rules.insert(
-                key.clone(),
-                value
-                    .as_str()
-                    .context("root override rule must be a string")?
-                    .to_owned(),
-            );
+            raw_rules.insert(key.clone(), value.clone());
         }
     }
     time_remaining(deadline)?;
@@ -1089,7 +1104,7 @@ fn inspect_with_installation(
     }
     // Root authority is immutable and independent of installed/workspace
     // overrides. Each package manager retains its own selection contract.
-    let overrides = if source == "bun.lock" {
+    let mut overrides = if source == "bun.lock" {
         declaration_selection::Overrides::capture_bun(
             manifests
                 .get("")
@@ -1109,6 +1124,7 @@ fn inspect_with_installation(
             deadline,
         )?
     };
+    overrides.bind_contexts(&manifests, lock.as_ref(), &packages, deadline)?;
     package_findings(&mut report, &packages, source, &workspace_links)?;
     graph::inspect(
         lock.as_ref(),
@@ -1180,8 +1196,10 @@ fn inspect_with_installation(
     if !overrides.is_empty() {
         report.scope.push_str(if source == "bun.lock" {
             "; captured root scalar Bun overrides/resolutions applied; contextual and source-replacement override rules require explicit review"
+        } else if overrides.has_contextual_rules() {
+            "; captured root and ancestor-scoped npm overrides applied along logical dependency edges (including hoisted registry aliases); version-qualified selectors use original dependency ranges; incomparable shared contexts, overlapping sibling selectors and nonregistry replacements require explicit review"
         } else {
-            "; captured root scalar npm overrides applied (including explicit registry aliases); version-qualified selectors use original dependency ranges; nested, overlapping and nonregistry source-replacement override rules require explicit review"
+            "; captured root scalar npm overrides applied (including explicit registry aliases); version-qualified selectors use original dependency ranges; overlapping and nonregistry source-replacement override rules require explicit review"
         });
     }
     time_remaining(deadline)?;

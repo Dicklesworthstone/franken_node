@@ -6,8 +6,8 @@
 //! declarations too; precedence is not permission to hide malformed metadata.
 
 use super::{
-    DependencyAdmission, DependencyFinding, MAX_PACKAGES, alias, bounded_text, flag, graph, name,
-    time_remaining,
+    DependencyAdmission, DependencyFinding, LockedPackage, MAX_DEPTH, MAX_PACKAGES, alias,
+    bounded_text, flag, graph, name, time_remaining,
 };
 use anyhow::{Context, Result, ensure};
 use serde::Serialize;
@@ -119,12 +119,14 @@ pub(super) fn select<'a>(
     Ok(selected.into_values().collect())
 }
 
-/// Captured root authority for scalar registry overrides, optionally selected
-/// by the original dependency's version range.
+/// Captured root authority for registry overrides, optionally selected by the
+/// original dependency's version range and logical ancestor rules.
 /// npm and Bun retain their distinct selection contracts; both reuse the same
 /// immutable authority for metadata AND actual installed edges. npm registry
-/// aliases retain their replacement identity; contextual rules and nonregistry
-/// replacement sources require review rather than partial application.
+/// aliases retain their replacement identity. Nested rules follow logical
+/// dependency ancestry, including hoisted installations, through captured
+/// consumer contexts. Ambiguous contexts and nonregistry replacements require
+/// review rather than partial application.
 /// Contracts: docs.npmjs.com/cli/v11/configuring-npm/package-json/#overrides
 ///            bun.com/docs/pm/overrides
 #[derive(Debug, Default, Clone, Serialize)]
@@ -134,6 +136,10 @@ pub(super) struct Overrides {
     qualified: BTreeMap<String, Vec<QualifiedOverride>>,
     #[serde(skip)]
     has_qualified_replacements: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    contextual_rules: Vec<ContextualRule>,
+    #[serde(skip)]
+    contexts: BTreeMap<String, usize>,
     bun: bool,
 }
 
@@ -141,6 +147,16 @@ pub(super) struct Overrides {
 struct QualifiedOverride {
     selector: String,
     replacement: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ContextualRule {
+    key: String,
+    package: String,
+    selector: String,
+    replacement: Option<String>,
+    parent: Option<usize>,
+    children: BTreeMap<String, Vec<usize>>,
 }
 
 fn plain_override_name(key: &str) -> bool {
@@ -215,12 +231,26 @@ impl Overrides {
             .into_iter()
             .map(|edge| (edge.installed_as, edge.request))
             .collect();
+        if rules.values().any(Value::is_object) {
+            return Self::capture_contextual(rules, &direct, report, deadline, &mut count);
+        }
+        Self::capture_flat(rules, &direct, true, report, deadline, &mut count)
+    }
+
+    fn capture_flat(
+        rules: &Map<String, Value>,
+        direct: &BTreeMap<&str, &str>,
+        root: bool,
+        report: &mut DependencyAdmission,
+        deadline: Instant,
+        count: &mut usize,
+    ) -> Result<Self> {
         let mut selected = BTreeMap::new();
         let mut qualified: BTreeMap<String, Vec<QualifiedOverride>> = BTreeMap::new();
         let mut selectors: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
         let mut supported = true;
         for (key, value) in rules {
-            account(&mut count, MAX_PACKAGES, deadline)?;
+            account(count, MAX_PACKAGES, deadline)?;
             ensure!(
                 key.len() <= 4096 && !key.chars().any(char::is_control),
                 "invalid or oversized npm override key"
@@ -241,7 +271,7 @@ impl Overrides {
                     "version-qualified override selectors per package exceed limit"
                 );
                 for previous in preceding.iter() {
-                    account(&mut count, MAX_PACKAGES, deadline)?;
+                    account(count, MAX_PACKAGES, deadline)?;
                     if graph::ranges_intersect(previous, range) != Some(false)
                         || graph::ranges_intersect(range, previous) != Some(false)
                     {
@@ -292,7 +322,7 @@ impl Overrides {
                 None => {
                     issue = Some((
                         "unsupported_npm_override",
-                        "Nested or nonscalar npm override rules require explicit review",
+                        "Override self replacements must be scalar registry requests",
                     ))
                 }
             }
@@ -300,7 +330,7 @@ impl Overrides {
                 // npm's EOVERRIDE contract compares exact effective text,
                 // not semantic range equivalence. Dev/optional precedence is
                 // the same selection used for root $reference resolution.
-                if let Some(raw) = direct.get(package) {
+                if root && let Some(raw) = direct.get(package) {
                     match range.map_or(Ok(true), |range| selector_matches(package, range, raw)) {
                         Ok(true) if *raw != request => {
                             issue = Some((
@@ -357,6 +387,113 @@ impl Overrides {
         } else {
             Self::default()
         })
+    }
+
+    fn capture_contextual(
+        rules: &Map<String, Value>,
+        direct: &BTreeMap<&str, &str>,
+        report: &mut DependencyAdmission,
+        deadline: Instant,
+        count: &mut usize,
+    ) -> Result<Self> {
+        let findings = report.findings.len();
+        let mut captured = Self::default();
+        // Index zero is npm's root OverrideSet, with no self replacement.
+        captured.contextual_rules.push(ContextualRule {
+            key: String::new(),
+            package: String::new(),
+            selector: "*".into(),
+            replacement: None,
+            parent: None,
+            children: BTreeMap::new(),
+        });
+        let mut pending = vec![(0_usize, rules, 0_usize)];
+        while let Some((parent, children, depth)) = pending.pop() {
+            time_remaining(deadline)?;
+            ensure!(depth <= MAX_DEPTH, "npm override ancestry exceeds limit");
+            let mut normalized = Map::new();
+            for (key, value) in children {
+                time_remaining(deadline)?;
+                if parent != 0 && key == "." {
+                    continue;
+                }
+                // A package-rule object defaults its own value to its key's
+                // range. Explicit '.' '*' or '' suppresses that replacement.
+                // This is npm 11 OverrideSet semantics, not an inferred pin.
+                let own = match value.as_object() {
+                    Some(object) => object.get(".").cloned().unwrap_or_else(|| {
+                        Value::String(
+                            override_selector(key)
+                                .and_then(|(_, selector)| selector)
+                                .unwrap_or("*")
+                                .into(),
+                        )
+                    }),
+                    None => value.clone(),
+                };
+                normalized.insert(key.clone(), own);
+            }
+            let flat =
+                Self::capture_flat(&normalized, direct, parent == 0, report, deadline, count)?;
+            if report.findings.len() != findings {
+                // Never retain partially interpreted authority after an
+                // unsupported key, replacement, reference or EOVERRIDE.
+                return Ok(Self::default());
+            }
+            if parent == 0 {
+                captured.rules = flat.rules.clone();
+                captured.qualified = flat.qualified.clone();
+                captured.has_qualified_replacements = flat.has_qualified_replacements;
+            }
+            for (key, value) in children {
+                time_remaining(deadline)?;
+                if parent != 0 && key == "." {
+                    continue;
+                }
+                let (package, selector) = override_selector(key)
+                    .context("validated npm override selector disappeared")?;
+                let replacement = match selector {
+                    None => flat.rules.get(package).cloned(),
+                    Some(selector) => flat.qualified[package]
+                        .iter()
+                        .find(|rule| rule.selector == selector)
+                        .and_then(|rule| rule.replacement.clone()),
+                };
+                let id = captured.contextual_rules.len();
+                ensure!(id <= MAX_PACKAGES, "npm override rule count exceeds limit");
+                captured.contextual_rules.push(ContextualRule {
+                    key: key.clone(),
+                    package: package.into(),
+                    selector: selector.unwrap_or("*").into(),
+                    replacement,
+                    parent: Some(parent),
+                    children: BTreeMap::new(),
+                });
+                captured.contextual_rules[parent]
+                    .children
+                    .entry(package.into())
+                    .or_default()
+                    .push(id);
+                if let Some(object) = value.as_object() {
+                    // Keep original child objects borrowed; '.' is the own
+                    // value, never a dependency selector at this level.
+                    if object.keys().any(|key| key != ".") {
+                        pending.push((id, object, depth + 1));
+                    }
+                }
+            }
+        }
+        if captured
+            .contextual_rules
+            .iter()
+            .skip(1)
+            .all(|rule| rule.parent == Some(0))
+        {
+            // Full object notation with only '.' has the same global
+            // semantics as its scalar form and needs no ancestry inference.
+            captured.contextual_rules.clear();
+        }
+        Ok(captured)
     }
 
     /// Bun records either root field as canonical lockfile "overrides", while
@@ -425,6 +562,9 @@ impl Overrides {
     }
 
     pub(super) fn replacement(&self, installed_as: &str, request: &str) -> Result<Option<&str>> {
+        if self.has_contextual_rules() {
+            return self.replacement_in(0, installed_as, request);
+        }
         // Bun's plain-name rules do not replace versioned npm aliases. Alias
         // selectors and dist-tag alias rules remain outside this bounded set;
         // their original requests still undergo the ordinary range checks.
@@ -453,8 +593,122 @@ impl Overrides {
         Ok(self.replacement(installed_as, request)?.unwrap_or(request))
     }
 
+    pub(super) fn has_contextual_rules(&self) -> bool {
+        !self.contextual_rules.is_empty()
+    }
+
+    /// Resolve a rule using npm's closest-scope-first ruleset. Children precede
+    /// the scope's own rule, then inherited children/self rules. A nearer exact
+    /// key shadows the inherited key even when its value is a literal no-op.
+    pub(super) fn edge_context(
+        &self,
+        context: usize,
+        installed_as: &str,
+        request: &str,
+    ) -> Result<usize> {
+        let mut scope = Some(context);
+        let mut shadowed = std::collections::BTreeSet::new();
+        while let Some(id) = scope {
+            let current = &self.contextual_rules[id];
+            let mut selected = None;
+            for child in current.children.get(installed_as).into_iter().flatten() {
+                let rule = &self.contextual_rules[*child];
+                if shadowed.insert(rule.key.as_str())
+                    && selector_matches(installed_as, &rule.selector, request)?
+                {
+                    ensure!(
+                        selected.is_none(),
+                        "dependency request intersects multiple version-qualified override selectors; explicit review required"
+                    );
+                    selected = Some(*child);
+                }
+            }
+            if let Some(selected) = selected {
+                return Ok(selected);
+            }
+            if id != 0
+                && current.package == installed_as
+                && shadowed.insert(current.key.as_str())
+                && selector_matches(installed_as, &current.selector, request)?
+            {
+                return Ok(id);
+            }
+            scope = current.parent;
+        }
+        // Arborist retains the current scope when no rule matches an edge.
+        Ok(context)
+    }
+
+    fn replacement_in(
+        &self,
+        context: usize,
+        installed_as: &str,
+        request: &str,
+    ) -> Result<Option<&str>> {
+        let selected = &self.contextual_rules[self.edge_context(context, installed_as, request)?];
+        Ok((selected.package == installed_as)
+            .then_some(selected.replacement.as_deref())
+            .flatten())
+    }
+
+    pub(super) fn dominates(&self, descendant: usize, ancestor: usize) -> bool {
+        let mut current = Some(descendant);
+        while let Some(id) = current {
+            if id == ancestor {
+                return true;
+            }
+            current = self.contextual_rules[id].parent;
+        }
+        false
+    }
+
+    pub(super) fn bind_contexts(
+        &mut self,
+        projects: &BTreeMap<String, Value>,
+        lock: Option<&Value>,
+        packages: &BTreeMap<String, LockedPackage>,
+        deadline: Instant,
+    ) -> Result<()> {
+        if self.has_contextual_rules() {
+            self.contexts = graph::override_contexts(projects, lock, packages, self, deadline)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn replacement_from(
+        &self,
+        consumer: &str,
+        installed_as: &str,
+        request: &str,
+    ) -> Result<Option<&str>> {
+        if !self.has_contextual_rules() {
+            return self.replacement(installed_as, request);
+        }
+        let consumer = if consumer == "." { "" } else { consumer };
+        let context = self.contexts.get(consumer).with_context(|| {
+            format!("npm override ancestry is unbound for consumer {consumer:?}")
+        })?;
+        self.replacement_in(*context, installed_as, request)
+    }
+
+    pub(super) fn apply_from<'a>(
+        &'a self,
+        consumer: &str,
+        installed_as: &str,
+        request: &'a str,
+    ) -> Result<&'a str> {
+        Ok(self
+            .replacement_from(consumer, installed_as, request)?
+            .unwrap_or(request))
+    }
+
     pub(super) fn is_empty(&self) -> bool {
-        self.rules.is_empty() && !self.has_qualified_replacements
+        self.rules.is_empty()
+            && !self.has_qualified_replacements
+            && !self
+                .contextual_rules
+                .iter()
+                .any(|rule| rule.replacement.is_some())
     }
 
     pub(super) fn review_workspace(

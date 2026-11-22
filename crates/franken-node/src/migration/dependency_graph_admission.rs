@@ -13,18 +13,18 @@
 //! Legacy `requires` lacks per-edge optionality: unresolved edges stay review
 //! findings rather than being guessed optional. Supported registry version
 //! ranges are checked; opaque requests require review. Installed-content
-//! authentication, contextual npm overrides and JS resolution remain separate
-//! claims. Supported root scalar overrides share one captured authority with
+//! authentication and JS resolution remain separate claims. Supported root
+//! overrides share one captured authority with
 //! project declarations and actual installed-manifest checks.
 
 use super::{
     DependencyAdmission, DependencyFinding, LockedPackage, MAX_DEPTH, MAX_PACKAGES, alias,
-    bounded_text, declaration_selection::Overrides, flag, name, native_addon, nearest_package,
-    time_remaining,
+    bounded_text, declaration_selection, declaration_selection::Overrides, flag, name,
+    native_addon, nearest_package, time_remaining,
 };
 use anyhow::{Context, Result, ensure};
 use serde_json::{Map, Value};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::time::Instant;
 
 #[path = "npm_version_req.rs"]
@@ -88,7 +88,9 @@ impl Admission<'_> {
             "transitive dependency edge limit exceeded"
         );
         let declared = alias(edge.installed_as, Some(edge.request))?;
-        let request = self.overrides.apply(edge.installed_as, edge.request)?;
+        let request = self
+            .overrides
+            .apply_from(edge.consumer, edge.installed_as, edge.request)?;
         let (actual, requirement) = if request == edge.request {
             declared
         } else {
@@ -231,6 +233,219 @@ fn section<'a>(
             .as_object()
             .with_context(|| format!("transitive {key} must be an object")),
     }
+}
+
+/// Bind npm override contexts along logical dependency edges, not directory
+/// nesting. Hoisted packages inherit the contexts of their actual consumers.
+/// Context refinement is monotone down the finite rule tree; incomparable
+/// incoming contexts are explicitly unsupported rather than order-dependent.
+/// This deliberately includes conflicts exposed during refinement: npm can
+/// retain an incompatible installation context even after an edge changes.
+pub(super) fn override_contexts(
+    projects: &BTreeMap<String, Value>,
+    lock: Option<&Value>,
+    packages: &BTreeMap<String, LockedPackage>,
+    overrides: &Overrides,
+    deadline: Instant,
+) -> Result<BTreeMap<String, usize>> {
+    let mut outgoing: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
+    let mut declared = 0;
+    for (directory, manifest) in projects {
+        let edges = declaration_selection::select(
+            manifest,
+            true,
+            deadline,
+            &mut declared,
+            MAX_DEPENDENCY_EDGES,
+        )?;
+        outgoing.insert(
+            directory.clone(),
+            edges
+                .into_iter()
+                .map(|edge| (edge.installed_as.into(), edge.request.into()))
+                .collect(),
+        );
+    }
+    ensure!(
+        outgoing.contains_key(""),
+        "npm override ancestry requires a root manifest"
+    );
+    if let Some(lock) = lock {
+        match lock.get("lockfileVersion").and_then(Value::as_u64) {
+            Some(2 | 3) => {
+                let records = lock
+                    .get("packages")
+                    .and_then(Value::as_object)
+                    .context("npm override ancestry requires captured package records")?;
+                for package in packages.values() {
+                    time_remaining(deadline)?;
+                    if package.linked || outgoing.contains_key(&package.path) {
+                        continue;
+                    }
+                    let record = records
+                        .get(&package.path)
+                        .context("npm override ancestry is missing a package record")?;
+                    let edges = declaration_selection::select(
+                        record,
+                        false,
+                        deadline,
+                        &mut declared,
+                        MAX_DEPENDENCY_EDGES,
+                    )?;
+                    outgoing.insert(
+                        package.path.clone(),
+                        edges
+                            .into_iter()
+                            .map(|edge| (edge.installed_as.into(), edge.request.into()))
+                            .collect(),
+                    );
+                }
+            }
+            Some(1) => {
+                let empty = Map::new();
+                let root = lock
+                    .as_object()
+                    .context("legacy override lock must be an object")?;
+                let mut pending = vec![(
+                    String::new(),
+                    section(root, "dependencies", &empty)?,
+                    0_usize,
+                )];
+                let mut visited = 0;
+                while let Some((parent, children, depth)) = pending.pop() {
+                    time_remaining(deadline)?;
+                    ensure!(
+                        depth <= MAX_DEPTH,
+                        "legacy override graph nesting exceeds limit"
+                    );
+                    for (installed_as, value) in children {
+                        time_remaining(deadline)?;
+                        visited += 1;
+                        ensure!(
+                            visited <= MAX_PACKAGES,
+                            "override graph package limit exceeded"
+                        );
+                        name(installed_as)?;
+                        let path = if parent.is_empty() {
+                            format!("node_modules/{installed_as}")
+                        } else {
+                            format!("{parent}/node_modules/{installed_as}")
+                        };
+                        let record = value
+                            .as_object()
+                            .context("invalid legacy override record")?;
+                        let mut edges = Vec::new();
+                        for (dependency, request) in section(record, "requires", &empty)? {
+                            declared += 1;
+                            ensure!(
+                                declared <= MAX_DEPENDENCY_EDGES,
+                                "override graph edge limit exceeded"
+                            );
+                            name(dependency)?;
+                            let request =
+                                bounded_text(request, "legacy override dependency request")?;
+                            alias(dependency, Some(request))?;
+                            edges.push((dependency.clone(), request.into()));
+                        }
+                        outgoing.insert(path.clone(), edges);
+                        let nested = section(record, "dependencies", &empty)?;
+                        if !nested.is_empty() {
+                            pending.push((path, nested, depth + 1));
+                        }
+                    }
+                }
+            }
+            _ => anyhow::bail!("unsupported npm override graph version"),
+        }
+    }
+    // npm adds a direct file: edge for every selected workspace. Never infer
+    // its rule context from a physical node_modules symlink or registry pin.
+    let mut workspace_targets = BTreeMap::new();
+    for (directory, manifest) in projects
+        .iter()
+        .filter(|(directory, _)| !directory.is_empty())
+    {
+        time_remaining(deadline)?;
+        let package = manifest
+            .get("name")
+            .and_then(Value::as_str)
+            .context("npm override workspace requires a captured name")?;
+        ensure!(
+            workspace_targets
+                .insert(package.to_owned(), directory.clone())
+                .is_none(),
+            "npm override workspace names must be unique"
+        );
+        let root = outgoing.get_mut("").expect("root was checked above");
+        root.retain(|(installed_as, _)| installed_as != package);
+        root.push((package.into(), format!("file:{directory}")));
+    }
+    let mut contexts = BTreeMap::from([(String::new(), 0_usize)]);
+    let mut pending = VecDeque::from([String::new()]);
+    let mut work = 0_usize;
+    while let Some(consumer) = pending.pop_front() {
+        time_remaining(deadline)?;
+        let context = contexts[&consumer];
+        let edges = outgoing
+            .get(&consumer)
+            .context("npm override consumer metadata missing")?;
+        for (installed_as, request) in edges {
+            time_remaining(deadline)?;
+            work += 1;
+            ensure!(
+                work <= MAX_DEPENDENCY_EDGES,
+                "npm override context propagation exceeds edge limit"
+            );
+            let selected = overrides.edge_context(context, installed_as, request)?;
+            let target = if consumer.is_empty() && workspace_targets.contains_key(installed_as) {
+                workspace_targets[installed_as].clone()
+            } else {
+                let source = if consumer.is_empty() {
+                    "package.json".into()
+                } else {
+                    format!("{consumer}/package.json")
+                };
+                let Some(package) = nearest_package(packages, &source, installed_as) else {
+                    // Ordinary admission distinguishes missing optional and
+                    // required edges; no absent code gets an invented context.
+                    continue;
+                };
+                if package.linked {
+                    workspace_targets
+                        .get(&package.name)
+                        .context("npm override ancestry cannot bind an unselected workspace link")?
+                        .clone()
+                } else {
+                    package.path.clone()
+                }
+            };
+            match contexts.get(&target).copied() {
+                Some(previous)
+                    if previous == selected || overrides.dominates(previous, selected) => {}
+                Some(previous) => {
+                    ensure!(
+                        overrides.dominates(selected, previous),
+                        "unsupported npm override context: shared installation {target:?} has incomparable logical ancestor rules"
+                    );
+                    contexts.insert(target.clone(), selected);
+                    pending.push_back(target);
+                }
+                None => {
+                    contexts.insert(target.clone(), selected);
+                    pending.push_back(target);
+                }
+            }
+        }
+    }
+    for (consumer, edges) in outgoing {
+        time_remaining(deadline)?;
+        ensure!(
+            edges.is_empty() || contexts.contains_key(&consumer),
+            "unsupported npm override context: consumer {consumer:?} has no captured logical ancestry"
+        );
+    }
+    time_remaining(deadline)?;
+    Ok(contexts)
 }
 
 pub(super) fn inspect(

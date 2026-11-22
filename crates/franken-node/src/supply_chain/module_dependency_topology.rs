@@ -472,7 +472,11 @@ impl DependencyTopology {
                     .override_authority
                     .as_ref()
                     .map(|authority| {
-                        authority.replacement(&edge.dependency_name, &edge.requested_range)
+                        authority.replacement_from(
+                            &edge.importer,
+                            &edge.dependency_name,
+                            &edge.requested_range,
+                        )
                     })
                     .transpose()
                     .map_err(|error| ModuleResolutionGraphError::InvalidMetadata {
@@ -499,6 +503,7 @@ impl DependencyTopology {
                         };
                         authority
                             .validate_selected_pin(
+                                &edge.importer,
                                 &edge.dependency_name,
                                 &edge.requested_range,
                                 identity.name.as_deref(),
@@ -994,6 +999,121 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn scoped_trust_overrides_bind_hoisted_ancestry_and_frozen_fork_identity() {
+        for version in [1, 2, 3] {
+            let root = fixture(json!({}));
+            let manifest = json!({"dependencies":{"first":"1","second":"1"},"overrides":{
+                "first":{"middle":{"child":"npm:@patched/child@^2"}},
+                "unused":{"child":"*"}}});
+            put(root.path(), "package.json", manifest.clone());
+            let lock = if version == 1 {
+                json!({"lockfileVersion":1,"dependencies":{
+                    "first":{"version":"1.0.0","requires":{"middle":"1"}},
+                    "middle":{"version":"1.0.0","requires":{"child":"npm:original@^1"}},
+                    "child":{"version":"npm:@patched/child@2.1.0"},
+                    "second":{"version":"1.0.0","requires":{"child":"1"},"dependencies":{
+                        "child":{"version":"1.0.0"}}}
+                }})
+            } else {
+                json!({"lockfileVersion":version,"packages":{
+                    "node_modules/first":{"version":"1.0.0","dependencies":{"middle":"1"}},
+                    "node_modules/middle":{"version":"1.0.0","dependencies":{"child":"npm:original@^1"}},
+                    "node_modules/child":{"name":"@patched/child","version":"2.1.0"},
+                    "node_modules/second":{"version":"1.0.0","dependencies":{"child":"1"}},
+                    "node_modules/second/node_modules/child":{"version":"1.0.0"}
+                }})
+            };
+            put(root.path(), "package-lock.json", lock.clone());
+            let topology = build(root.path()).unwrap();
+            let dependencies = topology.trust_dependencies(".", false).unwrap();
+            let fork = dependencies
+                .iter()
+                .find(|edge| edge.package_name == "@patched/child")
+                .unwrap();
+            assert_eq!(fork.requested_range, "npm:original@^1");
+            assert_eq!(
+                fork.override_request.as_deref(),
+                Some("npm:@patched/child@^2")
+            );
+            assert_eq!(fork.target.as_deref(), Some("node_modules/child"));
+            assert_eq!(fork.pinned_version.as_deref(), Some("2.1.0"));
+            let ordinary = dependencies
+                .iter()
+                .find(|edge| edge.package_name == "child")
+                .unwrap();
+            assert_eq!(ordinary.override_request, None);
+            assert_eq!(
+                ordinary.target.as_deref(),
+                Some("node_modules/second/node_modules/child")
+            );
+            assert_eq!(
+                topology
+                    .trust_dependencies("node_modules/middle", false)
+                    .unwrap(),
+                [fork.clone()]
+            );
+
+            let mut changed = manifest;
+            changed["overrides"]["unused"]["child"] = json!("4");
+            put(root.path(), "package.json", changed);
+            assert_ne!(
+                topology.canonical_hash(),
+                build(root.path()).unwrap().canonical_hash(),
+                "unused nested authority must be included in the captured topology commitment"
+            );
+            let mut stale = lock;
+            if version == 1 {
+                stale["dependencies"]["child"]["version"] = json!("npm:@patched/child@1.9.0");
+            } else {
+                stale["packages"]["node_modules/child"]["version"] = json!("1.9.0");
+            }
+            put(root.path(), "package-lock.json", stale);
+            let error = build(root.path())
+                .unwrap()
+                .trust_dependencies(".", false)
+                .unwrap_err();
+            assert!(
+                error.to_string().contains("dependency_version_mismatch"),
+                "{error}"
+            );
+            fs::write(root.path().join("package.json"), "{").unwrap();
+            fs::write(root.path().join("package-lock.json"), "{").unwrap();
+            assert_eq!(
+                dependencies,
+                topology.trust_dependencies(".", false).unwrap()
+            );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn scoped_trust_overrides_refuse_ambiguous_shared_consumers_and_unbound_ancestry() {
+        let records = json!({
+            "node_modules/a":{"version":"1.0.0","dependencies":{"shared":"1"}},
+            "node_modules/b":{"version":"1.0.0","dependencies":{"shared":"1"}},
+            "node_modules/shared":{"version":"1.0.0","dependencies":{"child":"1"}},
+            "node_modules/child":{"version":"2.0.0"}
+        });
+        for (manifest, expected) in [
+            (
+                json!({"dependencies":{"a":"1","b":"1"},"overrides":{
+                "a":{"child":"2"},"b":{"child":"3"}}}),
+                "incomparable logical ancestor",
+            ),
+            (
+                json!({"overrides":{"a":{"child":"2"}}}),
+                "no captured logical ancestry",
+            ),
+        ] {
+            let root = fixture(records.clone());
+            put(root.path(), "package.json", manifest);
+            let error = build(root.path()).unwrap_err();
+            assert!(error.to_string().contains(expected), "{error}");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn version_selected_trust_overrides_bind_original_ranges_and_frozen_pins() {
         let root = fixture(json!({
             "node_modules/first":{"version":"1.0.0","dependencies":{"child":"npm:original@^1"}},
@@ -1207,7 +1327,7 @@ mod tests {
     #[test]
     fn trust_override_authority_rejects_partial_rules_conflicts_and_excluded_contexts() {
         for rules in [
-            json!({"child":"npm:@patched/child@^2","unused":{"nested":"1"}}),
+            json!({"child":"npm:@patched/child@^2","unused":{"nested":"latest"}}),
             json!({"child":"npm:@patched/child@^2","unused@latest":"2"}),
             json!({"child":"npm:@patched/child@^2","unused":"$missing"}),
             json!({"child":"npm:@patched/child@^2","unused":"npm:fork@latest"}),

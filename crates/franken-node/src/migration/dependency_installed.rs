@@ -583,11 +583,18 @@ pub(super) fn inspect(
     // Reuse the actual native alias/version/peer checker, with manifest bytes
     // read from the installation rather than trusting the lock's projection.
     let actual_lock = serde_json::json!({"lockfileVersion":3,"packages":inspector.manifests});
+    let mut actual_overrides = overrides.clone();
+    actual_overrides.bind_contexts(
+        projects,
+        Some(&actual_lock),
+        &inspector.actual,
+        inspector.capture.deadline,
+    )?;
     graph::inspect(
         Some(&actual_lock),
         &inspector.actual,
         "captured-installed-manifests",
-        overrides,
+        &actual_overrides,
         inspector.report,
         inspector.capture.deadline,
     )?;
