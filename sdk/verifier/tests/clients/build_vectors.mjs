@@ -856,14 +856,22 @@ add("counterfactual_unknown_schema", "counterfactual-receipt", cfWire(cfSingleOu
 // Native-session receipt and durable-journal protocols are encoded independently
 // with Node crypto. These signed fixtures model supervisor observations; they
 // do not claim that the test guest ran, that history is complete, or cleanup.
-function nativeFixture(epoch = 7n, projectRoot = "/captured/project") {
+function nativeFixture(epoch = 7n, projectRoot = "/captured/project", capsuleBytes = undefined) {
+  const source = capsuleBytes === undefined ? undefined : sourceFacts(
+    sourceManifest(capsuleBytes), Buffer.from(ordered(sourceManifest(capsuleBytes))), capsuleBytes);
+  const sourceHeader = capsuleBytes === undefined ? undefined
+    : JSON.parse(capsuleBytes.subarray(12, 12 + capsuleBytes.readUInt32LE(8)));
   const admission = {
     session_nonce: sessionNonce, product_root_key_id: "ed25519:" + anchor,
     identity_capture_path: "/evidence/session-identity.json", security_epoch: epoch,
     admitted_at: "2026-11-14T12:00:00Z", project_root: projectRoot,
-    entrypoint: projectRoot + "/main.mjs", dependency_ids: ["PRIVATE-dependency"],
+    entrypoint: projectRoot + "/" + (sourceHeader?.entrypoint ?? "main.mjs"), dependency_ids: ["PRIVATE-dependency"],
     configured_node_id: null, fleet_zone_id: null, fleet_policy_sha256: null,
     process_spawn_authority_granted: false, control_scopes: [],
+    ...(source === undefined ? {} : { source_capsule: {
+      capsule_digest: source.capsule_digest, graph_input_hash: source.capsule.graph_input_hash,
+      capsule_bytes: capsuleBytes.length,
+    } }),
   };
   const admissionJson = ordered(admission);
   const receipt = {
@@ -873,8 +881,11 @@ function nativeFixture(epoch = 7n, projectRoot = "/captured/project") {
   };
   receipt.signature_hex = sign(null, frame("franken-node/native-session-admission-signature/v1\0",
     Buffer.from(ordered(receipt))), key).toString("hex");
-  const bundle = { schema_version: "franken-node/native-session-forensics/v1",
-    admission_json: admissionJson, admission_receipt: receipt, outcome: null };
+  const bundle = {
+    schema_version: `franken-node/native-session-forensics/v${source === undefined ? 1 : 3}`,
+    admission_json: admissionJson, admission_receipt: receipt, outcome: null,
+    ...(source === undefined ? {} : { source_capsule_base64: capsuleBytes.toString("base64") }),
+  };
   const facts = {
     schema_version: bundle.schema_version, scope: "authenticated_supervisor_observations",
     session_nonce: sessionNonce, product_root_key_id: admission.product_root_key_id,
@@ -884,6 +895,7 @@ function nativeFixture(epoch = 7n, projectRoot = "/captured/project") {
     containment_empty_observed: null, completed_provider_calls: null, indeterminate_provider_calls: null,
     final_ledger_effect_count: null, failed_effect_count: null, journal_complete: null, durable_journal: null,
     replay_certified: false, quiescence_certified: false, historical_completeness: false,
+    ...(source === undefined ? {} : { source_capsule: source.capsule }),
   };
   return { bundle, facts };
 }
@@ -938,7 +950,8 @@ function nativeJournal(fixture, events, torn = false) {
     if (event.kind === "provider_returned") returned += 1;
     return raw + "\n";
   });
-  fixture.bundle.schema_version = "franken-node/native-session-forensics/v2";
+  fixture.bundle.schema_version = Object.hasOwn(fixture.bundle, "source_capsule_base64")
+    ? "franken-node/native-session-forensics/v3" : "franken-node/native-session-forensics/v2";
   fixture.bundle.journal_jsonl = records.join("") + (torn ? '{"payload_json":"torn' : "");
   fixture.facts.schema_version = fixture.bundle.schema_version;
   fixture.facts.durable_journal = {
@@ -1007,6 +1020,17 @@ addNative("native_supervision_not_spawned", nativeOutcome(nativeFixture(), {
 }));
 addNative("native_v2_pending_torn_journal", nativeJournal(nativeFixture(), [nativeAdmit(0)], true));
 addNative("native_v2_header_only_pending", nativeJournal(nativeFixture(), []));
+for (const [index, fixture] of sourceFixtures.vectors.entries()) {
+  addNative(`native_v3_source_fixture_${index}`, nativeFixture(7n, "/removed/project",
+    Buffer.from(fixture.module_sources.capsule_base64, "base64")));
+}
+const nativeSourcePending = nativeFixture(7n, "/removed/project", sourceBytes);
+const nativeSourceInterrupted = nativeJournal(nativeOutcome(
+  nativeFixture(7n, "/removed/project", sourceBytes), nativeInterrupted(), {
+    completed_provider_calls: 1, indeterminate_provider_calls: 1, journal_complete: true,
+  }), [nativeAdmit(0), nativeReturn(0), nativeAdmit(1)], true);
+addNative("native_v3_source_with_interrupted_journal", nativeSourceInterrupted);
+addNative("native_v3_source_pending_header_only", nativeJournal(clone(nativeSourcePending), []));
 addNative("native_foreign_anchor", nativePending, "SIGNER_UNTRUSTED", { anchor: foreign });
 function mutateNative(name, fixture, mutate, expected) {
   const changed = clone(fixture);
@@ -1020,6 +1044,50 @@ mutateNative("native_invalid_admission_signature", nativePending,
   (bundle) => { bundle.admission_receipt.signature_hex = "00".repeat(64); }, "SIGNATURE_INVALID");
 mutateNative("native_invalid_outcome_signature", nativeComplete,
   (bundle) => { bundle.outcome.signature_hex = "00".repeat(64); }, "SIGNATURE_INVALID");
+mutateNative("native_v3_source_bytes_tampered", nativeSourcePending, (bundle) => {
+  const bytes = Buffer.from(bundle.source_capsule_base64, "base64");
+  bytes[bytes.length - 1] ^= 1;
+  bundle.source_capsule_base64 = bytes.toString("base64");
+}, "SOURCE_CAPSULE_INVALID");
+mutateNative("native_v3_source_missing", nativeSourcePending,
+  (bundle) => { delete bundle.source_capsule_base64; }, "SCHEMA_UNSUPPORTED");
+mutateNative("native_v3_source_downgrade_and_strip", nativeSourcePending, (bundle) => {
+  bundle.schema_version = "franken-node/native-session-forensics/v1";
+  delete bundle.source_capsule_base64;
+}, "SOURCE_CAPSULE_INVALID");
+mutateNative("native_v3_source_downgrade_keeps_body", nativeSourcePending,
+  (bundle) => { bundle.schema_version = "franken-node/native-session-forensics/v1"; }, "SCHEMA_UNSUPPORTED");
+mutateNative("native_v3_source_null", nativeSourcePending,
+  (bundle) => { bundle.source_capsule_base64 = null; }, "JSON_INVALID");
+mutateNative("native_v3_source_noncanonical_base64", nativeSourcePending,
+  (bundle) => { bundle.source_capsule_base64 += "\n"; }, "SOURCE_CAPSULE_INVALID");
+mutateNative("native_v3_source_other_signed_session_journal", nativeSourceInterrupted,
+  (bundle) => { bundle.journal_jsonl = nativeDurable.bundle.journal_jsonl; }, "IDENTITY_INVALID");
+function resignNativeAdmission(fixture, mutate) {
+  const admission = JSON.parse(fixture.bundle.admission_json);
+  mutate(admission);
+  fixture.bundle.admission_json = ordered(admission);
+  const receipt = fixture.bundle.admission_receipt;
+  receipt.admission_sha256 = hash(frame("franken-node/native-session-admission/v1\0",
+    Buffer.from(fixture.bundle.admission_json)));
+  const payload = { schema_version: receipt.schema_version, session_nonce: receipt.session_nonce,
+    product_root_key_id: receipt.product_root_key_id, admission_sha256: receipt.admission_sha256 };
+  receipt.signature_hex = sign(null, frame("franken-node/native-session-admission-signature/v1\0",
+    Buffer.from(ordered(payload))), key).toString("hex");
+  return fixture;
+}
+for (const [name, mutate] of [
+  ["digest", (admission) => { admission.source_capsule.capsule_digest = "sha256:" + "0".repeat(64); }],
+  ["graph", (admission) => { admission.source_capsule.graph_input_hash = "sha256:" + "0".repeat(64); }],
+  ["length", (admission) => { admission.source_capsule.capsule_bytes += 1; }],
+  ["entry", (admission) => { admission.entrypoint = "/removed/project/other.mjs"; }],
+  ["missing_binding", (admission) => { delete admission.source_capsule; }],
+]) {
+  addNative(`native_v3_source_signed_wrong_${name}`,
+    resignNativeAdmission(clone(nativeSourcePending), mutate), "SOURCE_CAPSULE_INVALID");
+}
+addNative("native_v3_source_signed_null_binding", resignNativeAdmission(clone(nativeSourcePending),
+  (admission) => { admission.source_capsule = null; }), "JSON_INVALID");
 mutateNative("native_missing_outcome_field", nativePending,
   (bundle) => { delete bundle.outcome; }, "JSON_INVALID");
 mutateNative("native_unknown_transport_field", nativePending,

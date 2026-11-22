@@ -3407,6 +3407,7 @@ fn make_native_session_forensic_bundle(
         schema_version: schema.to_owned(),
         admission_json: bounded_json(admission, MAX_ADMISSION_BYTES)?,
         journal_jsonl,
+        source_capsule_base64: None,
         admission_receipt: NativeSessionForensicAdmissionReceipt {
             schema_version: receipt.schema_version.clone(),
             session_nonce: receipt.session_nonce.clone(),

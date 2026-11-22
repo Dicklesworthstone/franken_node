@@ -7,17 +7,27 @@
 
 use std::fmt;
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::{DateTime, Timelike as _};
 use ed25519_dalek::{Signature, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::incident_bundle::decode_evidence_json;
+use crate::incident_bundle::native_capture::module_capsule;
+pub use module_capsule::SourceCapsuleSummary;
 
 pub const NATIVE_SESSION_FORENSICS_SCHEMA: &str = "franken-node/native-session-forensics/v1";
 pub const NATIVE_SESSION_FORENSICS_V2_SCHEMA: &str = "franken-node/native-session-forensics/v2";
+pub const NATIVE_SESSION_FORENSICS_V3_SCHEMA: &str = "franken-node/native-session-forensics/v3";
 pub const MAX_NATIVE_SESSION_FORENSICS_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_NATIVE_SESSION_FORENSICS_V2_BYTES: usize = 32 * 1024 * 1024;
+/// A v3 export may retain a full bounded source capsule as well as the v2
+/// supervisor evidence. Older schema versions retain their original bounds.
+pub const MAX_NATIVE_SESSION_FORENSICS_V3_BYTES: usize = 96 * 1024 * 1024;
+pub const MAX_NATIVE_SESSION_SOURCE_CAPSULE_BYTES: usize = 40 * 1024 * 1024 + 12;
+const MAX_SOURCE_CAPSULE_BASE64_BYTES: usize =
+    MAX_NATIVE_SESSION_SOURCE_CAPSULE_BYTES.div_ceil(3) * 4;
 pub const NATIVE_SESSION_EFFECT_JOURNAL_SCHEMA: &str =
     "franken-node/native-effect-journal-record/v1";
 pub const MAX_NATIVE_SESSION_EFFECT_JOURNAL_BYTES: usize = 4 * 1024 * 1024;
@@ -54,6 +64,14 @@ pub struct NativeSessionForensicBundle {
         deserialize_with = "nonnull_option"
     )]
     pub journal_jsonl: Option<String>,
+    /// Present only in v3. The exact bytes were committed by the original
+    /// pre-entry admission; an outcome is not required for their inspection.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "nonnull_option"
+    )]
+    pub source_capsule_base64: Option<String>,
 }
 
 impl fmt::Debug for NativeSessionForensicBundle {
@@ -67,6 +85,10 @@ impl fmt::Debug for NativeSessionForensicBundle {
             .field(
                 "journal_jsonl",
                 &self.journal_jsonl.as_ref().map(|_| "[redacted]"),
+            )
+            .field(
+                "source_capsule_base64",
+                &self.source_capsule_base64.as_ref().map(|_| "[redacted]"),
             )
             .finish()
     }
@@ -135,6 +157,10 @@ pub struct VerifiedNativeSessionForensics {
     pub failed_effect_count: Option<usize>,
     pub journal_complete: Option<bool>,
     pub durable_journal: Option<VerifiedNativeSessionEffectJournal>,
+    /// Byte-integrity facts for the sources retained before worker launch.
+    /// Presence does not establish execution or source-graph completeness.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_capsule: Option<SourceCapsuleSummary>,
     pub replay_certified: bool,
     pub quiescence_certified: bool,
     pub historical_completeness: bool,
@@ -154,6 +180,7 @@ pub enum NativeSessionForensicError {
     OutcomeSignatureInvalid,
     JournalSignatureInvalid,
     JournalInvalid,
+    SourceCapsuleInvalid,
     ObservationInvalid,
 }
 
@@ -173,6 +200,9 @@ impl fmt::Display for NativeSessionForensicError {
             Self::OutcomeSignatureInvalid => "native-session outcome signature is invalid",
             Self::JournalSignatureInvalid => "native-session effect journal signature is invalid",
             Self::JournalInvalid => "native-session effect journal prefix is inconsistent",
+            Self::SourceCapsuleInvalid => {
+                "native-session sources do not match the authenticated admission"
+            }
             Self::ObservationInvalid => "native-session supervisor observation is inconsistent",
         })
     }
@@ -441,6 +471,16 @@ struct Admission {
     process_spawn_authority_granted: Option<bool>,
     #[serde(default)]
     control_scopes: Option<Vec<ControlScope>>,
+    #[serde(default, deserialize_with = "nonnull_option")]
+    source_capsule: Option<SourceCapsuleBinding>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SourceCapsuleBinding {
+    capsule_digest: String,
+    graph_input_hash: String,
+    capsule_bytes: usize,
 }
 
 #[derive(Deserialize)]
@@ -728,7 +768,43 @@ fn validate_admission(admission: &Admission) -> Result<(), NativeSessionForensic
             let _ = scope.admission_generation;
         }
     }
+    if let Some(source) = &admission.source_capsule
+        && (!prefixed_digest_valid(&source.capsule_digest)
+            || !prefixed_digest_valid(&source.graph_input_hash)
+            || !(12..=MAX_NATIVE_SESSION_SOURCE_CAPSULE_BYTES).contains(&source.capsule_bytes))
+    {
+        return Err(NativeSessionForensicError::SourceCapsuleInvalid);
+    }
     Ok(())
+}
+
+fn verify_retained_sources(
+    encoded: &str,
+    binding: &SourceCapsuleBinding,
+    admission: &Admission,
+) -> Result<SourceCapsuleSummary, NativeSessionForensicError> {
+    let invalid = NativeSessionForensicError::SourceCapsuleInvalid;
+    if encoded.len() > MAX_SOURCE_CAPSULE_BASE64_BYTES {
+        return Err(NativeSessionForensicError::InputTooLarge);
+    }
+    if encoded.len() != binding.capsule_bytes.div_ceil(3) * 4 {
+        return Err(invalid);
+    }
+    let bytes = STANDARD.decode(encoded).map_err(|_| invalid)?;
+    if bytes.len() != binding.capsule_bytes
+        || STANDARD.encode(&bytes) != encoded
+        || module_capsule::capsule_digest(&bytes) != binding.capsule_digest
+    {
+        return Err(invalid);
+    }
+    // Interpret the producer's path syntax lexically even when verification
+    // runs on another OS. Neither the original project nor any source path is
+    // opened, and the capsule's requested entry must be the admitted entry.
+    let project = absolute_path_parts(&admission.project_root).ok_or(invalid)?;
+    let entry = absolute_path_parts(&admission.entrypoint).ok_or(invalid)?;
+    let relative_entry = entry.get(project.len()..).ok_or(invalid)?.join("/");
+    module_capsule::inspect_admitted(&bytes, &binding.graph_input_hash, &relative_entry)
+        .map_err(|_| invalid)
 }
 
 fn signing_bytes(domain: &[u8], bytes: &[u8]) -> Vec<u8> {
@@ -956,19 +1032,27 @@ pub fn verify_native_session_forensics(
     input: &[u8],
     trusted_root: &VerifyingKey,
 ) -> Result<VerifiedNativeSessionForensics, NativeSessionForensicError> {
-    let bundle: NativeSessionForensicBundle = decode(input, MAX_NATIVE_SESSION_FORENSICS_V2_BYTES)?;
+    let bundle: NativeSessionForensicBundle = decode(input, MAX_NATIVE_SESSION_FORENSICS_V3_BYTES)?;
     let schema_version = match bundle.schema_version.as_str() {
         NATIVE_SESSION_FORENSICS_SCHEMA => {
             if input.len() > MAX_NATIVE_SESSION_FORENSICS_BYTES {
                 return Err(NativeSessionForensicError::InputTooLarge);
             }
-            if bundle.journal_jsonl.is_some() {
+            if bundle.journal_jsonl.is_some() || bundle.source_capsule_base64.is_some() {
                 return Err(NativeSessionForensicError::SchemaUnsupported);
             }
             NATIVE_SESSION_FORENSICS_SCHEMA
         }
-        NATIVE_SESSION_FORENSICS_V2_SCHEMA if bundle.journal_jsonl.is_some() => {
+        NATIVE_SESSION_FORENSICS_V2_SCHEMA
+            if bundle.journal_jsonl.is_some() && bundle.source_capsule_base64.is_none() =>
+        {
+            if input.len() > MAX_NATIVE_SESSION_FORENSICS_V2_BYTES {
+                return Err(NativeSessionForensicError::InputTooLarge);
+            }
             NATIVE_SESSION_FORENSICS_V2_SCHEMA
+        }
+        NATIVE_SESSION_FORENSICS_V3_SCHEMA if bundle.source_capsule_base64.is_some() => {
+            NATIVE_SESSION_FORENSICS_V3_SCHEMA
         }
         _ => return Err(NativeSessionForensicError::SchemaUnsupported),
     };
@@ -1016,6 +1100,14 @@ pub fn verify_native_session_forensics(
         )
         .map_err(|_| NativeSessionForensicError::AdmissionSignatureInvalid)?;
 
+    let source_capsule = match (&admission.source_capsule, &bundle.source_capsule_base64) {
+        (Some(binding), Some(encoded)) => {
+            Some(verify_retained_sources(encoded, binding, &admission)?)
+        }
+        (None, None) => None,
+        _ => return Err(NativeSessionForensicError::SourceCapsuleInvalid),
+    };
+
     let durable_journal = bundle
         .journal_jsonl
         .as_deref()
@@ -1052,6 +1144,7 @@ pub fn verify_native_session_forensics(
         durable_journal: durable_journal
             .as_ref()
             .map(|prefix| prefix.summary.clone()),
+        source_capsule,
         replay_certified: false,
         quiescence_certified: false,
         historical_completeness: false,
@@ -1208,6 +1301,7 @@ mod tests {
             },
             outcome: None,
             journal_jsonl: None,
+            source_capsule_base64: None,
         };
         issue_admission(&mut bundle, &key);
         (key, bundle)
@@ -1246,6 +1340,242 @@ mod tests {
         key: &SigningKey,
     ) -> Result<VerifiedNativeSessionForensics, NativeSessionForensicError> {
         verify_native_session_forensics(&serde_json::to_vec(bundle).unwrap(), &key.verifying_key())
+    }
+
+    fn bind_retained_sources(
+        bundle: &mut NativeSessionForensicBundle,
+        key: &SigningKey,
+        bytes: &[u8],
+        graph_hash: &str,
+    ) {
+        // Independently reproduce the producer's capsule framing, which uses
+        // a little-endian length unlike the admission signature framing.
+        let digest = hex::encode(Sha256::digest(
+            [
+                b"franken-node/module-source-capsule/v1\0".as_slice(),
+                &(bytes.len() as u64).to_le_bytes(),
+                bytes,
+            ]
+            .concat(),
+        ));
+        let mut admission: Value = serde_json::from_str(&bundle.admission_json).unwrap();
+        admission["source_capsule"] = json!({
+            "capsule_digest": format!("sha256:{digest}"),
+            "graph_input_hash": graph_hash,
+            "capsule_bytes": bytes.len(),
+        });
+        bundle.admission_json = admission.to_string();
+        issue_admission(bundle, key);
+        bundle.schema_version = NATIVE_SESSION_FORENSICS_V3_SCHEMA.into();
+        bundle.source_capsule_base64 = Some(STANDARD.encode(bytes));
+    }
+
+    fn retained_source_fixture() -> (SigningKey, NativeSessionForensicBundle, Vec<u8>) {
+        // Real production graph-builder output, not a second implementation
+        // of graph capture inside the independent verifier's tests.
+        let vectors: Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/module_source_capsules.json"
+        ))
+        .unwrap();
+        let sources = &vectors["vectors"][0]["module_sources"];
+        let bytes = STANDARD
+            .decode(sources["capsule_base64"].as_str().unwrap())
+            .unwrap();
+        let (key, mut bundle) = pending_fixture();
+        let mut admission: Value = serde_json::from_str(&bundle.admission_json).unwrap();
+        admission["entrypoint"] = json!("/removed/project/app.mjs");
+        bundle.admission_json = admission.to_string();
+        bind_retained_sources(
+            &mut bundle,
+            &key,
+            &bytes,
+            sources["graph_input_hash"].as_str().unwrap(),
+        );
+        (key, bundle, bytes)
+    }
+
+    #[test]
+    fn retained_sources_verify_offline_before_any_outcome_without_execution_claims() {
+        let (key, bundle, bytes) = retained_source_fixture();
+        let verified = verify_bundle(&bundle, &key).unwrap();
+        assert_eq!(verified.schema_version, NATIVE_SESSION_FORENSICS_V3_SCHEMA);
+        assert_eq!(verified.outcome_kind, "pending");
+        assert!(verified.durable_journal.is_none());
+        let source = verified.source_capsule.as_ref().unwrap();
+        assert_eq!(source.capsule_bytes, bytes.len());
+        assert!(source.file_count > 1);
+        assert!(!source.graph_hash_recomputed);
+        assert!(!verified.replay_certified);
+        assert!(!verified.quiescence_certified);
+        assert!(!verified.historical_completeness);
+        let summary = serde_json::to_string(&verified).unwrap();
+        assert!(!summary.contains("never execute"));
+        assert!(!summary.contains("node_modules"));
+        assert!(!format!("{bundle:?}").contains(bundle.source_capsule_base64.as_ref().unwrap()));
+    }
+
+    #[test]
+    fn retained_sources_preserve_interrupted_effects_and_original_journal_bindings() {
+        let (key, mut bundle, _) = retained_source_fixture();
+        let binding = bundle.admission_receipt.admission_sha256.clone();
+        let mut journal = journal_header(&key, &binding);
+        append_journal_event(&mut journal, &key, &binding, journal_admission(0));
+        append_journal_event(
+            &mut journal,
+            &key,
+            &binding,
+            json!({"kind":"provider_returned","sequence":0}),
+        );
+        append_journal_event(&mut journal, &key, &binding, journal_admission(1));
+        bundle.journal_jsonl = Some(journal);
+        issue_outcome(&mut bundle, &key, interrupted());
+        let verified = verify_bundle(&bundle, &key).unwrap();
+        assert_eq!(verified.outcome_kind, "interrupted");
+        assert_eq!(verified.indeterminate_provider_calls, Some(1));
+        assert_eq!(
+            verified
+                .durable_journal
+                .unwrap()
+                .indeterminate_provider_calls,
+            1
+        );
+        assert!(verified.source_capsule.is_some());
+        assert!(!verified.replay_certified && !verified.quiescence_certified);
+
+        // A fresh source admission cannot inherit a different admission's
+        // otherwise correctly signed provider journal or outcome.
+        let mut admission: Value = serde_json::from_str(&bundle.admission_json).unwrap();
+        admission["security_epoch"] = json!(8);
+        bundle.admission_json = admission.to_string();
+        issue_admission(&mut bundle, &key);
+        assert!(verify_bundle(&bundle, &key).is_err());
+    }
+
+    #[test]
+    fn retained_sources_reject_resigned_wrong_statement_and_inner_byte_tampering() {
+        let (key, bundle, bytes) = retained_source_fixture();
+        for case in 0..6 {
+            let mut changed = bundle.clone();
+            let mut admission: Value = serde_json::from_str(&changed.admission_json).unwrap();
+            match case {
+                0 => {
+                    admission["source_capsule"]["capsule_digest"] =
+                        json!(format!("sha256:{}", "0".repeat(64)))
+                }
+                1 => {
+                    admission["source_capsule"]["graph_input_hash"] =
+                        json!(format!("sha256:{}", "0".repeat(64)))
+                }
+                2 => admission["source_capsule"]["capsule_bytes"] = json!(bytes.len() + 1),
+                3 => admission["entrypoint"] = json!("/removed/project/another.mjs"),
+                4 => {
+                    admission.as_object_mut().unwrap().remove("source_capsule");
+                }
+                5 => {
+                    admission["source_capsule"]["capsule_bytes"] =
+                        json!(MAX_NATIVE_SESSION_SOURCE_CAPSULE_BYTES + 1)
+                }
+                _ => unreachable!(),
+            }
+            changed.admission_json = admission.to_string();
+            issue_admission(&mut changed, &key);
+            assert_eq!(
+                verify_bundle(&changed, &key).unwrap_err(),
+                NativeSessionForensicError::SourceCapsuleInvalid,
+                "case {case}"
+            );
+        }
+        let mut corrupted = bytes;
+        *corrupted.last_mut().unwrap() ^= 1;
+        let mut changed = bundle.clone();
+        changed.source_capsule_base64 = Some(STANDARD.encode(&corrupted));
+        assert_eq!(
+            verify_bundle(&changed, &key).unwrap_err(),
+            NativeSessionForensicError::SourceCapsuleInvalid
+        );
+
+        // Even a correctly signed capsule digest cannot excuse file bytes
+        // that disagree with the capsule's own recorded file commitments.
+        let admission: Value = serde_json::from_str(&bundle.admission_json).unwrap();
+        bind_retained_sources(
+            &mut changed,
+            &key,
+            &corrupted,
+            admission["source_capsule"]["graph_input_hash"]
+                .as_str()
+                .unwrap(),
+        );
+        assert_eq!(
+            verify_bundle(&changed, &key).unwrap_err(),
+            NativeSessionForensicError::SourceCapsuleInvalid
+        );
+    }
+
+    #[test]
+    fn retained_sources_reject_stripping_downgrade_null_and_noncanonical_transport() {
+        let (key, bundle, _) = retained_source_fixture();
+        let mut stripped = bundle.clone();
+        stripped.source_capsule_base64 = None;
+        assert_eq!(
+            verify_bundle(&stripped, &key).unwrap_err(),
+            NativeSessionForensicError::SchemaUnsupported
+        );
+        stripped.schema_version = NATIVE_SESSION_FORENSICS_SCHEMA.into();
+        assert_eq!(
+            verify_bundle(&stripped, &key).unwrap_err(),
+            NativeSessionForensicError::SourceCapsuleInvalid
+        );
+        stripped.schema_version = NATIVE_SESSION_FORENSICS_V2_SCHEMA.into();
+        stripped.journal_jsonl = Some(journal_header(
+            &key,
+            &stripped.admission_receipt.admission_sha256,
+        ));
+        assert_eq!(
+            verify_bundle(&stripped, &key).unwrap_err(),
+            NativeSessionForensicError::SourceCapsuleInvalid
+        );
+
+        for schema in [
+            NATIVE_SESSION_FORENSICS_SCHEMA,
+            NATIVE_SESSION_FORENSICS_V2_SCHEMA,
+        ] {
+            let mut old = bundle.clone();
+            old.schema_version = schema.into();
+            assert_eq!(
+                verify_bundle(&old, &key).unwrap_err(),
+                NativeSessionForensicError::SchemaUnsupported
+            );
+        }
+        let mut changed = bundle.clone();
+        changed.source_capsule_base64.as_mut().unwrap().push('\n');
+        assert_eq!(
+            verify_bundle(&changed, &key).unwrap_err(),
+            NativeSessionForensicError::SourceCapsuleInvalid
+        );
+        let mut explicit_null = serde_json::to_value(&bundle).unwrap();
+        explicit_null["source_capsule_base64"] = Value::Null;
+        assert_eq!(
+            verify_native_session_forensics(
+                &serde_json::to_vec(&explicit_null).unwrap(),
+                &key.verifying_key()
+            )
+            .unwrap_err(),
+            NativeSessionForensicError::JsonInvalid
+        );
+        for invalid_binding in [
+            Value::Null,
+            json!({"capsule_digest":"bad","graph_input_hash":"bad","capsule_bytes":12,"extra":true}),
+        ] {
+            let mut changed = bundle.clone();
+            let mut admission: Value = serde_json::from_str(&changed.admission_json).unwrap();
+            admission["source_capsule"] = invalid_binding;
+            changed.admission_json = admission.to_string();
+            issue_admission(&mut changed, &key);
+            assert_eq!(
+                verify_bundle(&changed, &key).unwrap_err(),
+                NativeSessionForensicError::JsonInvalid
+            );
+        }
     }
 
     #[test]
@@ -1641,7 +1971,7 @@ mod tests {
         }
         assert_eq!(
             verify_native_session_forensics(
-                &vec![b' '; MAX_NATIVE_SESSION_FORENSICS_V2_BYTES + 1],
+                &vec![b' '; MAX_NATIVE_SESSION_FORENSICS_V3_BYTES + 1],
                 &root
             )
             .unwrap_err(),
@@ -2106,6 +2436,11 @@ mod tests {
         let mut v2 = serde_json::to_vec(&bundle).unwrap();
         v2.resize(MAX_NATIVE_SESSION_FORENSICS_BYTES + 1, b' ');
         assert!(verify_native_session_forensics(&v2, &key.verifying_key()).is_ok());
+        v2.resize(MAX_NATIVE_SESSION_FORENSICS_V2_BYTES + 1, b' ');
+        assert_eq!(
+            verify_native_session_forensics(&v2, &key.verifying_key()).unwrap_err(),
+            NativeSessionForensicError::InputTooLarge
+        );
         bundle.journal_jsonl = None;
         assert_eq!(
             verify_bundle(&bundle, &key).unwrap_err(),

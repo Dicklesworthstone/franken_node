@@ -86,6 +86,15 @@ if mode.startswith("native_"):
         },
         "replay_certified": False, "quiescence_certified": False, "historical_completeness": False,
     }
+if mode.startswith("native_v3_"):
+    response["facts"]["schema_version"] = "franken-node/native-session-forensics/v3"
+    response["facts"]["source_capsule"] = {
+        "schema_version": "franken-node/module-source-capsule/v1",
+        "graph_input_hash": "sha256:" + "d" * 64, "graph_hash_recomputed": False,
+        "capsule_bytes": 128, "payload_bytes": 16, "input_count": 3, "file_count": 1,
+        "metadata_file_count": 0, "directory_count": 1, "missing_count": 1, "symlink_count": 0,
+        "symlink_policy": "reject", "condition_count": None, "additional_condition_count": 0,
+    }
 if mode.startswith("resolution_"):
     response["format"] = "resolution-receipt"
     response["scope"] = "authenticated_resolution_decision"
@@ -303,6 +312,48 @@ elif mode == "native_v1_with_journal":
     response["facts"]["schema_version"] = "franken-node/native-session-forensics/v1"
 elif mode == "native_v2_without_journal":
     response["facts"]["durable_journal"] = None
+elif mode == "native_v3_without_journal":
+    response["facts"]["durable_journal"] = None
+elif mode == "native_v3_maximum_source":
+    response["facts"]["source_capsule"]["capsule_bytes"] = 40 * 1024 * 1024 + 12
+    response["facts"]["source_capsule"]["payload_bytes"] = 32 * 1024 * 1024
+elif mode == "native_v3_missing_source":
+    del response["facts"]["source_capsule"]
+elif mode == "native_v3_null_source":
+    response["facts"]["source_capsule"] = None
+elif mode == "native_v3_source_wrong_schema":
+    response["facts"]["source_capsule"]["schema_version"] = "franken-node/module-source-capsule/v99"
+elif mode == "native_v3_source_wrong_graph":
+    response["facts"]["source_capsule"]["graph_input_hash"] = "a" * 64
+elif mode == "native_v3_source_graph_claim":
+    response["facts"]["source_capsule"]["graph_hash_recomputed"] = True
+elif mode == "native_v3_source_unknown_field":
+    response["facts"]["source_capsule"]["guest_executed"] = True
+elif mode == "native_v3_source_oversize":
+    response["facts"]["source_capsule"]["capsule_bytes"] = 40 * 1024 * 1024 + 13
+elif mode == "native_v3_source_payload_oversize":
+    response["facts"]["source_capsule"]["capsule_bytes"] = 40 * 1024 * 1024 + 12
+    response["facts"]["source_capsule"]["payload_bytes"] = 32 * 1024 * 1024 + 1
+elif mode == "native_v3_source_payload_exceeds_capsule":
+    response["facts"]["source_capsule"]["payload_bytes"] = 128
+elif mode == "native_v3_source_counts_disagree":
+    response["facts"]["source_capsule"]["file_count"] = 2
+elif mode == "native_v3_source_boolean_count":
+    response["facts"]["source_capsule"]["input_count"] = True
+elif mode == "native_v3_source_excess_inputs":
+    response["facts"]["source_capsule"]["input_count"] = 1025
+    response["facts"]["source_capsule"]["file_count"] = 1023
+elif mode == "native_v3_source_forbidden_symlink":
+    response["facts"]["source_capsule"]["missing_count"] = 0
+    response["facts"]["source_capsule"]["symlink_count"] = 1
+elif mode == "native_v3_source_excess_conditions":
+    response["facts"]["source_capsule"]["condition_count"] = 64
+    response["facts"]["source_capsule"]["additional_condition_count"] = 1
+elif mode == "native_v3_source_on_v1":
+    response["facts"]["schema_version"] = "franken-node/native-session-forensics/v1"
+    response["facts"]["durable_journal"] = None
+elif mode == "native_v3_source_on_v2":
+    response["facts"]["schema_version"] = "franken-node/native-session-forensics/v2"
 elif mode == "native_unknown_schema":
     response["facts"]["schema_version"] = "franken-node/native-session-forensics/v99"
 elif mode == "native_journal_wrong_nonce":

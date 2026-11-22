@@ -4,7 +4,7 @@ import json
 import os
 from pathlib import Path
 
-from franken_verifier import MAX_INPUT_BYTES, VerifierError, verify_artifact
+from franken_verifier import MAX_INPUT_BYTES, MAX_NATIVE_SESSION_INPUT_BYTES, VerifierError, verify_artifact
 
 root = Path.cwd()
 executable = os.environ.get("VERIFIER_EXECUTABLE", str(root / "verifier"))
@@ -226,7 +226,23 @@ native_controls = [
   "native_journal_replay_claim",
   "native_journal_quiescence_claim",
   "native_journal_history_claim",
-  "native_journal_contradicts_complete_outcome"
+  "native_journal_contradicts_complete_outcome",
+  "native_v3_missing_source",
+  "native_v3_null_source",
+  "native_v3_source_wrong_schema",
+  "native_v3_source_wrong_graph",
+  "native_v3_source_graph_claim",
+  "native_v3_source_unknown_field",
+  "native_v3_source_oversize",
+  "native_v3_source_payload_oversize",
+  "native_v3_source_payload_exceeds_capsule",
+  "native_v3_source_counts_disagree",
+  "native_v3_source_boolean_count",
+  "native_v3_source_excess_inputs",
+  "native_v3_source_forbidden_symlink",
+  "native_v3_source_excess_conditions",
+  "native_v3_source_on_v1",
+  "native_v3_source_on_v2",
 ]
 for mode in native_controls:
     try:
@@ -237,7 +253,8 @@ for mode in native_controls:
         print(json.dumps({"case": "protocol_" + mode, "result": error.code}), flush=True)
     else:
         raise AssertionError("protocol_" + mode)
-native_positives = ["native_valid", "native_zero_epoch", "native_pending_prefix", "native_incomplete_with_later_journal"]
+native_positives = ["native_valid", "native_zero_epoch", "native_pending_prefix", "native_incomplete_with_later_journal",
+                    "native_v3_valid", "native_v3_without_journal", "native_v3_maximum_source"]
 for mode in native_positives:
     verified = verify_artifact(json.dumps({"protocol_control": mode}).encode(), cases[0]["anchor"],
                                verifier=str(root / "fake_verifier"), format="native-session-forensics")
@@ -249,7 +266,25 @@ for mode in native_positives:
     if mode == "native_incomplete_with_later_journal":
         assert verified["facts"]["journal_complete"] is False
         assert verified["facts"]["durable_journal"]["returned_provider_calls"] == 1
+    if mode.startswith("native_v3_"):
+        assert verified["facts"]["source_capsule"]["graph_hash_recomputed"] is False
+        assert verified["facts"]["source_capsule"]["input_count"] == 3
+    if mode == "native_v3_without_journal":
+        assert verified["facts"]["durable_journal"] is None
     print(json.dumps({"case": "protocol_" + mode, "result": "verified"}), flush=True)
+
+# Exercise the exact transport boundary without launching a subprocess or
+# constructing a large JSON/base64 artifact. Other formats retain their cap.
+assert MAX_NATIVE_SESSION_INPUT_BYTES == 96 * 1024 * 1024
+for size, expected in ((MAX_NATIVE_SESSION_INPUT_BYTES, "EXECUTABLE_INVALID"),
+                       (MAX_NATIVE_SESSION_INPUT_BYTES + 1, "INPUT_TOO_LARGE")):
+    try:
+        verify_artifact(bytes(size), cases[0]["anchor"], verifier="", format="native-session-forensics")
+    except VerifierError as error:
+        assert error.code == expected, (size, error.code)
+    else:
+        raise AssertionError("native transport boundary must reject before execution")
+    print(json.dumps({"case": f"native_transport_boundary_{size}", "result": expected}), flush=True)
 
 resolution_controls = ["resolution_invalid_decision", "resolution_reject_with_candidate",
                        "resolution_admit_without_candidate", "resolution_bad_graph", "resolution_wrong_signer",

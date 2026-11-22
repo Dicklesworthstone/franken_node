@@ -155,9 +155,52 @@ guest execution history, and worker cleanup are outside this journal's scope.
 Replay certification, quiescence certification and historical completeness
 remain false, including for an empty signed header or an all-returned prefix.
 
+## Sources retained before guest entry (v3)
+
+Frozen and publisher-capsule native launches retain the existing `FNSGCAP1`
+source capsule before the supervisor starts the worker. The private,
+content-addressed copy is immutable and its identity is included in the
+original signed admission as `source_capsule`:
+
+```json
+{
+  "capsule_digest": "sha256:<domain-separated capsule digest>",
+  "graph_input_hash": "sha256:<captured graph commitment>",
+  "capsule_bytes": 1234
+}
+```
+
+The digest is SHA-256 over `franken-node/module-source-capsule/v1\0`, the
+unsigned 64-bit **little-endian** capsule length, and the exact capsule bytes.
+The admission receipt authenticates this binding using its existing protocol.
+Historical admissions omit the field and keep their original signature bytes.
+
+An export of such an admission uses
+`franken-node/native-session-forensics/v3` and includes the required
+`source_capsule_base64` field. It may also carry `journal_jsonl` and a retained
+outcome, but neither is required: a worker can die before it emits either.
+The offline verifier authenticates the original admission, checks the capsule
+length and digest, and verifies the capsule's canonical header, path bounds,
+conditions, retained file/link digests and payload accounting. The header's
+graph commitment and project-relative entrypoint must match the admission.
+It never opens the original source tree or extracts or executes these bytes.
+
+The result adds `source_capsule`, a source-free summary of byte and input
+counts and the authenticated graph commitment. `graph_hash_recomputed` remains
+`false`: the SDK checks retained byte integrity and the signed graph identity;
+it does not independently reconstruct module-resolution semantics. The
+existing replay, quiescence and historical-completeness flags remain false.
+Missing, substituted, truncated or inconsistent retained sources are errors,
+including when an exporter tries to strip them and downgrade to v1 or v2.
+Source data and base64 are redacted from diagnostic and `Debug` output; the
+private export itself contains the retained source code.
+
 ## Bounded, unambiguous parsing
 
-The complete v1 export is limited to 16 MiB and v2 to 32 MiB. Admission JSON is
+The complete v1 export is limited to 16 MiB, v2 to 32 MiB and v3 to 96 MiB.
+The v3 source capsule is limited to 40 MiB plus its 12-byte prefix: at most
+8 MiB of canonical header and 32 MiB of retained payload, with at most 1,024
+input observations. Its base64 transport must be canonical. Admission JSON is
 limited to 4 MiB, and the
 outcome signing payload to 5 MiB plus 1 KiB of receipt framing. WAL evidence
 retains the producer's 4 MiB and 2,048 event limits; a completed provider call
@@ -168,7 +211,7 @@ The durable journal has a separate 4 MiB total limit and a 4 KiB limit per
 record, excluding its newline, including a final partial record. At most 2,048
 effect events follow the signed header. Duplicate members and unknown fields
 are rejected in both each record envelope and its embedded payload. The CLI
-reads at most 32 MiB and then applies the schema's narrower limit; diagnostics
+reads at most 96 MiB and then applies the schema's narrower limit; diagnostics
 and `Debug` output do not echo raw journal data.
 
 Duplicate object members are rejected recursively in the envelope and in each

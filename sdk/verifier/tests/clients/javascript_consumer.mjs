@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { MAX_INPUT_BYTES, VerifierError, verifyArtifact } from "./franken_verifier.mjs";
+import { MAX_INPUT_BYTES, MAX_NATIVE_SESSION_INPUT_BYTES, VerifierError, verifyArtifact } from "./franken_verifier.mjs";
 
 for (const path of JSON.parse(process.env.ABSENT_CHECKOUTS ?? "[]")) assert.equal(existsSync(path), false, `product checkout visible: ${path}`);
 assert.equal(existsSync("Cargo.toml"), false);
@@ -200,7 +200,23 @@ const nativeControls = [
   "native_journal_replay_claim",
   "native_journal_quiescence_claim",
   "native_journal_history_claim",
-  "native_journal_contradicts_complete_outcome"
+  "native_journal_contradicts_complete_outcome",
+  "native_v3_missing_source",
+  "native_v3_null_source",
+  "native_v3_source_wrong_schema",
+  "native_v3_source_wrong_graph",
+  "native_v3_source_graph_claim",
+  "native_v3_source_unknown_field",
+  "native_v3_source_oversize",
+  "native_v3_source_payload_oversize",
+  "native_v3_source_payload_exceeds_capsule",
+  "native_v3_source_counts_disagree",
+  "native_v3_source_boolean_count",
+  "native_v3_source_excess_inputs",
+  "native_v3_source_forbidden_symlink",
+  "native_v3_source_excess_conditions",
+  "native_v3_source_on_v1",
+  "native_v3_source_on_v2",
 ];
 for (const mode of nativeControls) {
   await assert.rejects(verifyArtifact(Buffer.from(JSON.stringify({ protocol_control: mode })), cases[0].anchor,
@@ -208,7 +224,8 @@ for (const mode of nativeControls) {
   (error) => error instanceof VerifierError && error.code === "PROTOCOL_INVALID", "protocol_" + mode);
   console.log(JSON.stringify({ case: "protocol_" + mode, result: "PROTOCOL_INVALID" }));
 }
-const nativePositives = ["native_valid", "native_zero_epoch", "native_pending_prefix", "native_incomplete_with_later_journal"];
+const nativePositives = ["native_valid", "native_zero_epoch", "native_pending_prefix", "native_incomplete_with_later_journal",
+  "native_v3_valid", "native_v3_without_journal", "native_v3_maximum_source"];
 for (const mode of nativePositives) {
   const verified = await verifyArtifact(Buffer.from(JSON.stringify({ protocol_control: mode })), cases[0].anchor,
     { verifier: resolve("fake_verifier"), format: "native-session-forensics" });
@@ -222,7 +239,22 @@ for (const mode of nativePositives) {
     assert.equal(verified.facts.journal_complete, false);
     assert.equal(verified.facts.durable_journal.returned_provider_calls, 1);
   }
+  if (mode.startsWith("native_v3_")) {
+    assert.equal(verified.facts.source_capsule.graph_hash_recomputed, false);
+    assert.equal(verified.facts.source_capsule.input_count, 3);
+  }
+  if (mode === "native_v3_without_journal") assert.equal(verified.facts.durable_journal, null);
   console.log(JSON.stringify({ case: "protocol_" + mode, result: "verified" }));
+}
+// Check exact transport limits without launching a process or retaining a huge
+// serialized fixture. Oversized inputs in every other format still fail above.
+assert.equal(MAX_NATIVE_SESSION_INPUT_BYTES, 96 * 1024 * 1024);
+for (const [size, expected] of [[MAX_NATIVE_SESSION_INPUT_BYTES, "EXECUTABLE_INVALID"],
+  [MAX_NATIVE_SESSION_INPUT_BYTES + 1, "INPUT_TOO_LARGE"]]) {
+  await assert.rejects(verifyArtifact(new Uint8Array(size), cases[0].anchor,
+    { verifier: "", format: "native-session-forensics" }),
+  (error) => error instanceof VerifierError && error.code === expected, `native_transport_boundary_${size}`);
+  console.log(JSON.stringify({ case: `native_transport_boundary_${size}`, result: expected }));
 }
 const resolutionControls = ["resolution_invalid_decision", "resolution_reject_with_candidate", "resolution_admit_without_candidate",
   "resolution_bad_graph", "resolution_wrong_signer", "resolution_unsafe_count", "resolution_wrong_scope", "resolution_unknown_field",

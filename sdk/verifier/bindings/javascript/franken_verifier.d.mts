@@ -96,8 +96,14 @@ export type NativeSessionForensicsFacts = {
   quiescence_certified: false;
   historical_completeness: false;
 } & (
-  { schema_version: "franken-node/native-session-forensics/v1"; durable_journal: null }
-  | { schema_version: "franken-node/native-session-forensics/v2"; durable_journal: NativeSessionEffectJournalFacts }
+  { schema_version: "franken-node/native-session-forensics/v1"; durable_journal: null; source_capsule?: never }
+  | { schema_version: "franken-node/native-session-forensics/v2"; durable_journal: NativeSessionEffectJournalFacts; source_capsule?: never }
+  | {
+    schema_version: "franken-node/native-session-forensics/v3";
+    durable_journal: NativeSessionEffectJournalFacts | null;
+    /** Authenticated original content; does not certify replay or recompute the graph. */
+    source_capsule: PublisherSourceCapsule;
+  }
 ) & (
   {
     outcome_kind: "pending";
@@ -285,4 +291,6 @@ export class VerifierError extends Error {
 }
 export const PROTOCOL: "franken-verifier-cli/v1";
 export const MAX_INPUT_BYTES: number;
+/** Native-session transport limit; other formats retain MAX_INPUT_BYTES. */
+export const MAX_NATIVE_SESSION_INPUT_BYTES: number;
 export function verifyArtifact(data: Uint8Array, trustedPublicKeyHex: string, options: VerifierOptions): Promise<Verification>;

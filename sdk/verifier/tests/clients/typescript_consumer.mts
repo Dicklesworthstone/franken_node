@@ -187,9 +187,21 @@ for (const observation of cases.filter((item) => item.format === "native-session
       const retained: number = verified.facts.durable_journal.record_count;
       const complete: false = verified.facts.durable_journal.historical_completeness;
       if (retained < 1 || complete) throw new Error("invalid retained prefix");
-    } else {
+    } else if (verified.facts.schema_version === "franken-node/native-session-forensics/v1") {
       const absent: null = verified.facts.durable_journal;
       assert.equal(absent, null);
+      const noSource: undefined = verified.facts.source_capsule;
+      assert.equal(noSource, undefined);
+    } else {
+      const source = verified.facts.source_capsule;
+      const reconstructed: false = source.graph_hash_recomputed;
+      const inputCount: number = source.input_count;
+      assert.equal(reconstructed, false);
+      assert(inputCount > 0);
+      if (verified.facts.durable_journal !== null) {
+        const retained: number = verified.facts.durable_journal.record_count;
+        assert(retained > 0);
+      }
     }
     nativePositive += 1;
   } catch (error: unknown) {

@@ -18,6 +18,7 @@ from typing import Any, Literal, TypedDict
 
 PROTOCOL = "franken-verifier-cli/v1"
 MAX_INPUT_BYTES = 64 * 1024 * 1024
+MAX_NATIVE_SESSION_INPUT_BYTES = 96 * 1024 * 1024
 MAX_RESPONSE_BYTES = 64 * 1024 + 1
 EvidenceFormat = Literal[
     "incident-bundle", "native-session-forensics", "capsule", "signed-bundle", "signed-session", "resolution-receipt",
@@ -103,11 +104,36 @@ class NativeSessionEffectJournalFacts(TypedDict):
     historical_completeness: Literal[False]
 
 
-class NativeSessionForensicsFacts(TypedDict):
+class SourceCapsuleSummary(TypedDict):
+    """Authenticated captured content; no module-graph reconstruction claim."""
+
+    schema_version: Literal["franken-node/module-source-capsule/v1"]
+    graph_input_hash: str
+    graph_hash_recomputed: Literal[False]
+    capsule_bytes: int
+    payload_bytes: int
+    input_count: int
+    file_count: int
+    metadata_file_count: int
+    directory_count: int
+    missing_count: int
+    symlink_count: int
+    symlink_policy: Literal["reject", "contained"]
+    condition_count: int | None
+    additional_condition_count: int
+
+
+class _NativeSessionSourceFacts(TypedDict, total=False):
+    # Required by v3 and absent from v1/v2; checked before returning a result.
+    source_capsule: SourceCapsuleSummary
+
+
+class NativeSessionForensicsFacts(_NativeSessionSourceFacts):
     """Supervisor observations; unknown outcome fields remain None."""
 
     schema_version: Literal["franken-node/native-session-forensics/v1",
-                            "franken-node/native-session-forensics/v2"]
+                            "franken-node/native-session-forensics/v2",
+                            "franken-node/native-session-forensics/v3"]
     scope: Literal["authenticated_supervisor_observations"]
     session_nonce: str
     product_root_key_id: str
@@ -357,8 +383,7 @@ def _publisher_authority_valid(authority: Any) -> bool:
     )
 
 
-def _publisher_source_valid(facts: dict[str, Any], anchor: str) -> bool:
-    summary = facts["capsule"]
+def _source_capsule_valid(summary: Any, capsule_limit: int, payload_limit: int) -> bool:
     counts = ("file_count", "metadata_file_count", "directory_count", "missing_count", "symlink_count")
     if not isinstance(summary, dict) or set(summary) != {
         "schema_version", "graph_input_hash", "graph_hash_recomputed", "capsule_bytes", "payload_bytes",
@@ -371,6 +396,22 @@ def _publisher_source_valid(facts: dict[str, Any], anchor: str) -> bool:
     condition_count = summary["condition_count"]
     additional_count = summary["additional_condition_count"]
     return (
+        summary["schema_version"] == "franken-node/module-source-capsule/v1"
+        and _digest(summary["graph_input_hash"]) and summary["graph_hash_recomputed"] is False
+        and type(summary["capsule_bytes"]) is int and 12 <= summary["capsule_bytes"] <= capsule_limit
+        and type(summary["payload_bytes"]) is int
+        and 0 <= summary["payload_bytes"] <= min(payload_limit, summary["capsule_bytes"] - 12)
+        and summary["input_count"] > 0 and sum(summary[name] for name in counts) == summary["input_count"]
+        and summary["symlink_policy"] in ("reject", "contained")
+        and (summary["symlink_policy"] == "contained" or summary["symlink_count"] == 0)
+        and (condition_count is None or type(condition_count) is int and 0 <= condition_count <= 64)
+        and type(additional_count) is int and 0 <= additional_count <= 62
+        and (condition_count is None or condition_count + additional_count <= 64)
+    )
+
+
+def _publisher_source_valid(facts: dict[str, Any], anchor: str) -> bool:
+    return (
         _publisher_text(facts["package_name"], 256) and _publisher_text(facts["publisher_id"], 256)
         and _publisher_text(facts["version"], 128)
         and re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", facts["version"]) is not None
@@ -382,16 +423,7 @@ def _publisher_source_valid(facts: dict[str, Any], anchor: str) -> bool:
              and facts["runtime_authority"] is None
              or facts["registration_schema"] == "franken-node/extension-registration-manifest/v2"
              and _publisher_authority_valid(facts["runtime_authority"]))
-        and summary["schema_version"] == "franken-node/module-source-capsule/v1"
-        and _digest(summary["graph_input_hash"]) and summary["graph_hash_recomputed"] is False
-        and type(summary["capsule_bytes"]) is int and 12 <= summary["capsule_bytes"] <= 5 * 1024 * 1024
-        and type(summary["payload_bytes"]) is int and 0 <= summary["payload_bytes"] <= summary["capsule_bytes"] - 12
-        and summary["input_count"] > 0 and sum(summary[name] for name in counts) == summary["input_count"]
-        and summary["symlink_policy"] in ("reject", "contained")
-        and (summary["symlink_policy"] == "contained" or summary["symlink_count"] == 0)
-        and (condition_count is None or type(condition_count) is int and 0 <= condition_count <= 64)
-        and type(additional_count) is int and 0 <= additional_count <= 62
-        and (condition_count is None or condition_count + additional_count <= 64)
+        and _source_capsule_valid(facts["capsule"], 5 * 1024 * 1024, 5 * 1024 * 1024 - 12)
     )
 
 
@@ -448,14 +480,18 @@ def _native_journal_valid(journal: Any, facts: dict[str, Any]) -> bool:
 
 
 def _native_session_valid(facts: Any, anchor: str) -> bool:
+    source_backed = isinstance(facts, dict) and facts.get("schema_version") == "franken-node/native-session-forensics/v3"
     if (not isinstance(facts, dict) or set(facts) != {
             "schema_version", "scope", "session_nonce", "product_root_key_id", "admission_sha256",
             "project_root", "entrypoint", "security_epoch", "admitted_at", "observed_at", "outcome_kind",
             "process_observation", "effect_observation", "containment_empty_observed", "completed_provider_calls",
             "indeterminate_provider_calls", "final_ledger_effect_count", "failed_effect_count", "journal_complete",
             "durable_journal", "replay_certified", "quiescence_certified", "historical_completeness",
+            *({"source_capsule"} if source_backed else set()),
         }
-            or facts["schema_version"] not in ("franken-node/native-session-forensics/v1", "franken-node/native-session-forensics/v2")
+            or facts["schema_version"] not in ("franken-node/native-session-forensics/v1",
+                                               "franken-node/native-session-forensics/v2",
+                                               "franken-node/native-session-forensics/v3")
             or facts["scope"] != "authenticated_supervisor_observations"
             or facts["product_root_key_id"] != "ed25519:" + anchor
             or not isinstance(facts["session_nonce"], str)
@@ -472,11 +508,13 @@ def _native_session_valid(facts: Any, anchor: str) -> bool:
     project, entry = _native_path_parts(facts["project_root"]), _native_path_parts(facts["entrypoint"])
     if project is None or entry is None or len(entry) <= len(project) or entry[:len(project)] != project:
         return False
+    if source_backed and not _source_capsule_valid(facts["source_capsule"], 40 * 1024 * 1024 + 12, 32 * 1024 * 1024):
+        return False
     journal = facts["durable_journal"]
     if facts["schema_version"] == "franken-node/native-session-forensics/v1":
         if journal is not None:
             return False
-    elif not _native_journal_valid(journal, facts):
+    elif (journal is not None or not source_backed) and not _native_journal_valid(journal, facts):
         return False
     outcome_fields = (
         "observed_at", "process_observation", "effect_observation", "containment_empty_observed",
@@ -699,6 +737,7 @@ def verify_artifact(
     It does not establish guest replay, external effect completion or quiescence.
     Native-session forensics authenticates retained supervisor observations.
     A pending outcome and a retained journal prefix never certify complete history.
+    Version 3 authenticates retained source capsule content without replaying it.
     Its security_epoch is an exact decimal u64 string, including zero.
     Publisher-source trust requires an independent revocation authority, an
     explicit RFC3339 evaluation time, and a positive decimal u64 freshness window.
@@ -715,10 +754,11 @@ def verify_artifact(
     """
     if not isinstance(data, bytes):
         raise VerifierError("INPUT_INVALID", "data must be the original bytes")
-    if len(data) > MAX_INPUT_BYTES:
-        raise VerifierError("INPUT_TOO_LARGE", "evidence exceeds 64 MiB")
     if not isinstance(format, str) or format not in _SCOPES:
         raise VerifierError("UNSUPPORTED_FORMAT", "unsupported evidence format")
+    input_limit = MAX_NATIVE_SESSION_INPUT_BYTES if format == "native-session-forensics" else MAX_INPUT_BYTES
+    if len(data) > input_limit:
+        raise VerifierError("INPUT_TOO_LARGE", f"evidence exceeds {input_limit // (1024 * 1024)} MiB")
     if not _hex(trusted_public_key_hex, 64):
         raise VerifierError("ANCHOR_INVALID", "expected a 32-byte hexadecimal public key")
     if trusted_run_public_key_hex is not None:

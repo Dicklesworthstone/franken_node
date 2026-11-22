@@ -5,6 +5,7 @@ import { isIP } from "node:net";
 
 export const PROTOCOL = "franken-verifier-cli/v1";
 export const MAX_INPUT_BYTES = 64 * 1024 * 1024;
+export const MAX_NATIVE_SESSION_INPUT_BYTES = 96 * 1024 * 1024;
 const MAX_RESPONSE_BYTES = 64 * 1024 + 1;
 const SCOPES = Object.freeze({
   "incident-bundle": "authenticated_recorded_incident",
@@ -176,22 +177,14 @@ function publisherAuthorityValid(authority) {
       || publisherHostAuthorityValid(authority.host_io, authority.allowed_capabilities, authority.max_instructions));
 }
 
-function publisherSourceValid(facts, anchor) {
-  const summary = facts.capsule;
+function sourceCapsuleValid(summary, capsuleLimit, payloadLimit) {
   const counts = ["file_count", "metadata_file_count", "directory_count", "missing_count", "symlink_count"];
-  return publisherText(facts.package_name, 256) && publisherText(facts.publisher_id, 256)
-    && publisherText(facts.version, 128) && /^[0-9]+\.[0-9]+\.[0-9]+$/u.test(facts.version)
-    && ["manifest_sha256", "artifact_sha256", "capsule_digest"].every((name) => digest(facts[name]))
-    && facts.signer_key_id === createHash("sha256").update("artifact_signing_keyid_v1:")
-      .update(Buffer.from([32, 0, 0, 0, 0, 0, 0, 0])).update(Buffer.from(anchor, "hex")).digest("hex").slice(0, 16)
-    && (facts.registration_schema === "franken-node/extension-registration-manifest/v1" && facts.runtime_authority === null
-      || facts.registration_schema === "franken-node/extension-registration-manifest/v2" && publisherAuthorityValid(facts.runtime_authority))
-    && keys(summary, ["schema_version", "graph_input_hash", "graph_hash_recomputed", "capsule_bytes", "payload_bytes",
+  return keys(summary, ["schema_version", "graph_input_hash", "graph_hash_recomputed", "capsule_bytes", "payload_bytes",
       "input_count", ...counts, "symlink_policy", "condition_count", "additional_condition_count"])
     && summary.schema_version === "franken-node/module-source-capsule/v1"
     && digest(summary.graph_input_hash) && summary.graph_hash_recomputed === false
-    && count(summary.capsule_bytes) && summary.capsule_bytes >= 12 && summary.capsule_bytes <= 5 * 1024 * 1024
-    && count(summary.payload_bytes) && summary.payload_bytes <= summary.capsule_bytes - 12
+    && count(summary.capsule_bytes) && summary.capsule_bytes >= 12 && summary.capsule_bytes <= capsuleLimit
+    && count(summary.payload_bytes) && summary.payload_bytes <= Math.min(payloadLimit, summary.capsule_bytes - 12)
     && count(summary.input_count) && summary.input_count > 0 && summary.input_count <= 1024
     && counts.every((name) => count(summary[name]) && summary[name] <= summary.input_count)
     && counts.reduce((total, name) => total + summary[name], 0) === summary.input_count
@@ -200,6 +193,17 @@ function publisherSourceValid(facts, anchor) {
     && (summary.condition_count === null || count(summary.condition_count) && summary.condition_count <= 64)
     && count(summary.additional_condition_count) && summary.additional_condition_count <= 62
     && (summary.condition_count === null || summary.condition_count + summary.additional_condition_count <= 64);
+}
+
+function publisherSourceValid(facts, anchor) {
+  return publisherText(facts.package_name, 256) && publisherText(facts.publisher_id, 256)
+    && publisherText(facts.version, 128) && /^[0-9]+\.[0-9]+\.[0-9]+$/u.test(facts.version)
+    && ["manifest_sha256", "artifact_sha256", "capsule_digest"].every((name) => digest(facts[name]))
+    && facts.signer_key_id === createHash("sha256").update("artifact_signing_keyid_v1:")
+      .update(Buffer.from([32, 0, 0, 0, 0, 0, 0, 0])).update(Buffer.from(anchor, "hex")).digest("hex").slice(0, 16)
+    && (facts.registration_schema === "franken-node/extension-registration-manifest/v1" && facts.runtime_authority === null
+      || facts.registration_schema === "franken-node/extension-registration-manifest/v2" && publisherAuthorityValid(facts.runtime_authority))
+    && sourceCapsuleValid(facts.capsule, 5 * 1024 * 1024, 5 * 1024 * 1024 - 12);
 }
 
 // These are authenticated supervisor observations, never a replay or cleanup
@@ -239,12 +243,15 @@ function nativeJournalValid(journal, facts) {
 }
 
 function nativeSessionValid(facts, anchor) {
+  const sourceBacked = object(facts) && facts.schema_version === "franken-node/native-session-forensics/v3";
   if (!keys(facts, ["schema_version", "scope", "session_nonce", "product_root_key_id", "admission_sha256",
     "project_root", "entrypoint", "security_epoch", "admitted_at", "observed_at", "outcome_kind",
     "process_observation", "effect_observation", "containment_empty_observed", "completed_provider_calls",
     "indeterminate_provider_calls", "final_ledger_effect_count", "failed_effect_count", "journal_complete",
-    "durable_journal", "replay_certified", "quiescence_certified", "historical_completeness"])
-      || !["franken-node/native-session-forensics/v1", "franken-node/native-session-forensics/v2"].includes(facts.schema_version)
+    "durable_journal", "replay_certified", "quiescence_certified", "historical_completeness",
+    ...(sourceBacked ? ["source_capsule"] : [])])
+      || !["franken-node/native-session-forensics/v1", "franken-node/native-session-forensics/v2",
+        "franken-node/native-session-forensics/v3"].includes(facts.schema_version)
       || facts.scope !== "authenticated_supervisor_observations"
       || facts.product_root_key_id !== "ed25519:" + anchor
       || typeof facts.session_nonce !== "string" || facts.session_nonce.length !== 36
@@ -261,10 +268,11 @@ function nativeSessionValid(facts, anchor) {
   const project = nativePathParts(facts.project_root), entry = nativePathParts(facts.entrypoint);
   if (project === null || entry === null || entry.length <= project.length
       || project.some((part, index) => part !== entry[index])) return false;
+  if (sourceBacked && !sourceCapsuleValid(facts.source_capsule, 40 * 1024 * 1024 + 12, 32 * 1024 * 1024)) return false;
   const journal = facts.durable_journal;
   if (facts.schema_version === "franken-node/native-session-forensics/v1") {
     if (journal !== null) return false;
-  } else if (!nativeJournalValid(journal, facts)) return false;
+  } else if ((journal !== null || !sourceBacked) && !nativeJournalValid(journal, facts)) return false;
   const outcomeFields = ["observed_at", "process_observation", "effect_observation", "containment_empty_observed",
     "completed_provider_calls", "indeterminate_provider_calls", "final_ledger_effect_count",
     "failed_effect_count", "journal_complete"];
@@ -396,6 +404,7 @@ function factsValid(facts, format, anchor, runAnchor, runtimeAnchor,
  * and session signatures; it does not establish guest execution or cleanup.
  * Native-session forensics authenticates retained supervisor observations; a pending
  * outcome stays pending, and durable journal prefixes never certify complete history.
+ * Version 3 also authenticates retained source capsule content without replaying it.
  * Its security_epoch is an exact decimal u64 string, including zero.
  * Publisher-source trust requires an independent revocation authority, an explicit
  * RFC3339 time (four-digit year, non-leap seconds, at most nine fraction digits),
@@ -411,8 +420,9 @@ export async function verifyArtifact(data, trustedPublicKeyHex, options) {
     expectedManifestSha256, expectedSourceArtifactSha256, expectedGraphInputHash,
     signatureHex, timeoutMs = 10_000 } = options ?? {};
   if (!(data instanceof Uint8Array)) throw new VerifierError("INPUT_INVALID", "data must contain the original bytes");
-  if (data.byteLength > MAX_INPUT_BYTES) throw new VerifierError("INPUT_TOO_LARGE", "evidence exceeds 64 MiB");
   if (typeof format !== "string" || !Object.hasOwn(SCOPES, format)) throw new VerifierError("UNSUPPORTED_FORMAT", "unsupported evidence format");
+  const inputLimit = format === "native-session-forensics" ? MAX_NATIVE_SESSION_INPUT_BYTES : MAX_INPUT_BYTES;
+  if (data.byteLength > inputLimit) throw new VerifierError("INPUT_TOO_LARGE", `evidence exceeds ${inputLimit / (1024 * 1024)} MiB`);
   if (!hex(trustedPublicKeyHex, 64)) throw new VerifierError("ANCHOR_INVALID", "expected a 32-byte hexadecimal public key");
   if (trustedRunPublicKeyHex !== undefined) {
     if (format !== "incident-bundle") throw new VerifierError("INPUT_INVALID", "original-run trust applies only to incident-bundle");

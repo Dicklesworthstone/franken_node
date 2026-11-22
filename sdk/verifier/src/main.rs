@@ -19,14 +19,15 @@ use frankenengine_verifier_sdk::incident_bundle::{
     verify_incident_bundle_with_runtime_keys,
 };
 use frankenengine_verifier_sdk::native_session::{
-    MAX_NATIVE_SESSION_FORENSICS_V2_BYTES, NativeSessionForensicError,
+    MAX_NATIVE_SESSION_FORENSICS_V3_BYTES, NativeSessionForensicError,
     verify_native_session_forensics,
 };
 use frankenengine_verifier_sdk::publisher_source::{
     MAX_PUBLISHER_SOURCE_INPUT_BYTES, MAX_PUBLISHER_SOURCE_TRUST_INPUT_BYTES, PublisherSourceError,
     PublisherSourceExpectedIdentity, PublisherSourceIdentityError, PublisherTrustAnchors,
     verify_publisher_source_input, verify_publisher_source_input_with_expected_identity,
-    verify_publisher_source_trust_input, verify_publisher_source_trust_input_with_expected_identity,
+    verify_publisher_source_trust_input,
+    verify_publisher_source_trust_input_with_expected_identity,
 };
 use frankenengine_verifier_sdk::resolution::{
     ResolutionReceiptError, verify_signed_resolution_receipt,
@@ -131,7 +132,8 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
         (None, None, None, None, None);
     let (mut revocation_anchor, mut provenance_anchor, mut evaluation_time, mut max_age) =
         (None, None, None, None);
-    let (mut expected_manifest, mut expected_source_artifact, mut expected_graph) = (None, None, None);
+    let (mut expected_manifest, mut expected_source_artifact, mut expected_graph) =
+        (None, None, None);
     let (options, remainder) = args[1..].as_chunks::<2>();
     for option in options {
         let slot = match option[0].as_str() {
@@ -298,7 +300,10 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
         || expected_source_artifact.is_some()
         || expected_graph.is_some()
     {
-        if !matches!(format.as_str(), "publisher-source" | "publisher-source-trust") {
+        if !matches!(
+            format.as_str(),
+            "publisher-source" | "publisher-source-trust"
+        ) {
             return Err(failure(
                 "EXPECTED_IDENTITY_INVALID",
                 "expected publisher identity applies only to publisher-source formats",
@@ -420,6 +425,7 @@ fn native_session_failure(error: NativeSessionForensicError) -> Failure {
         | NativeSessionForensicError::OutcomeSignatureInvalid
         | NativeSessionForensicError::JournalSignatureInvalid => "SIGNATURE_INVALID",
         NativeSessionForensicError::JournalInvalid => "JOURNAL_INVALID",
+        NativeSessionForensicError::SourceCapsuleInvalid => "SOURCE_CAPSULE_INVALID",
         NativeSessionForensicError::ObservationInvalid => "OBSERVATION_INVALID",
     };
     failure(
@@ -879,7 +885,7 @@ fn verify(request: &Request, bytes: &[u8]) -> Result<Value, Failure> {
 fn run(args: &[String], input: &mut impl Read) -> Result<Value, Failure> {
     let request = arguments(args)?;
     let input_limit = match request.format.as_str() {
-        "native-session-forensics" => MAX_NATIVE_SESSION_FORENSICS_V2_BYTES,
+        "native-session-forensics" => MAX_NATIVE_SESSION_FORENSICS_V3_BYTES,
         "publisher-source" => MAX_PUBLISHER_SOURCE_INPUT_BYTES,
         "publisher-source-trust" => MAX_PUBLISHER_SOURCE_TRUST_INPUT_BYTES,
         _ => MAX_INCIDENT_BUNDLE_BYTES,
@@ -897,7 +903,7 @@ fn run(args: &[String], input: &mut impl Read) -> Result<Value, Failure> {
         return Err(failure(
             "INPUT_TOO_LARGE",
             if request.format == "native-session-forensics" {
-                "native-session forensic evidence exceeds the 32 MiB input limit"
+                "native-session forensic evidence exceeds the 96 MiB input limit"
             } else if matches!(
                 request.format.as_str(),
                 "publisher-source" | "publisher-source-trust"
@@ -1025,6 +1031,7 @@ mod tests {
             admission_receipt,
             outcome,
             journal_jsonl: None,
+            source_capsule_base64: None,
         };
         (serde_json::to_vec(&bundle).unwrap(), public_key)
     }
@@ -1077,14 +1084,14 @@ mod tests {
             request.extend([option.to_owned(), key.clone()]);
             assert_eq!(arguments(&request).unwrap_err().code, "USAGE");
         }
-        let oversized = vec![b' '; MAX_NATIVE_SESSION_FORENSICS_V2_BYTES + 1];
+        let oversized = vec![b' '; MAX_NATIVE_SESSION_FORENSICS_V3_BYTES + 1];
         let error = run(
             &args("native-session-forensics", &key),
             &mut oversized.as_slice(),
         )
         .unwrap_err();
         assert_eq!(error.code, "INPUT_TOO_LARGE");
-        assert!(error.message.contains("32 MiB"));
+        assert!(error.message.contains("96 MiB"));
     }
 
     #[test]
@@ -1411,7 +1418,10 @@ mod tests {
             }
             let mut manifest_only = request;
             manifest_only.extend([pins[0].0.into(), pins[0].1.into()]);
-            assert_eq!(run(&manifest_only, &mut input.as_slice()).unwrap(), baseline);
+            assert_eq!(
+                run(&manifest_only, &mut input.as_slice()).unwrap(),
+                baseline
+            );
         }
     }
 

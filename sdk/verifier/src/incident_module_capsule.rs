@@ -156,10 +156,25 @@ pub struct SourceCapsuleSummary {
 /// The caller authenticates and bounds these bytes before inspection. Incident
 /// verification additionally supplies its separately captured graph commitment.
 pub(crate) fn inspect_authenticated(bytes: &[u8]) -> Result<SourceCapsuleSummary> {
-    verify_frame(bytes, None)
+    verify_frame(bytes, None, None)
 }
 
-fn verify_frame(bytes: &[u8], graph_hash: Option<&str>) -> Result<SourceCapsuleSummary> {
+/// Inspect retained pre-entry sources against the independently authenticated
+/// admission. This checks byte identity and the requested entrypoint, without
+/// claiming graph reconstruction or that the worker reached guest execution.
+pub(crate) fn inspect_admitted(
+    bytes: &[u8],
+    graph_hash: &str,
+    entrypoint: &str,
+) -> Result<SourceCapsuleSummary> {
+    verify_frame(bytes, Some(graph_hash), Some(entrypoint))
+}
+
+fn verify_frame(
+    bytes: &[u8],
+    graph_hash: Option<&str>,
+    entrypoint: Option<&str>,
+) -> Result<SourceCapsuleSummary> {
     if bytes.len() < PREFIX_BYTES || &bytes[..8] != MAGIC {
         return Err(invalid(FIELD, "invalid source capsule framing"));
     }
@@ -199,6 +214,12 @@ fn verify_frame(bytes: &[u8], graph_hash: Option<&str>) -> Result<SourceCapsuleS
         return Err(invalid(
             FIELD,
             "source capsule entrypoint is not canonical and project-relative",
+        ));
+    }
+    if entrypoint.is_some_and(|expected| header.entrypoint != expected) {
+        return Err(invalid(
+            FIELD,
+            "source capsule entrypoint disagrees with the signed admission",
         ));
     }
     let options = &header.options;
@@ -387,7 +408,7 @@ pub(super) fn verify(value: &Value) -> Result<()> {
             "source capsule digest does not match captured bytes",
         ));
     }
-    verify_frame(&bytes, Some(graph_hash)).map(|_| ())
+    verify_frame(&bytes, Some(graph_hash), None).map(|_| ())
 }
 
 #[cfg(test)]
