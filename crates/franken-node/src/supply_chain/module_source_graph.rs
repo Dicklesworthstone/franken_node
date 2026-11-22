@@ -309,6 +309,17 @@ pub struct CapturedModuleGraph {
     inputs: BTreeMap<String, Rc<Entry>>,
 }
 
+/// Source-free identity fields from a manifest retained by this graph. Missing
+/// or non-string fields stay unknown; the path and digest bind the observation
+/// to captured bytes even when no installed source tree is available.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapturedPackageManifestIdentity {
+    pub relative_path: String,
+    pub sha256: String,
+    pub name: Option<String>,
+    pub version: Option<String>,
+}
+
 impl CapturedModuleGraph {
     pub fn report(&self) -> &SourceGraphReport {
         &self.report
@@ -333,6 +344,33 @@ impl CapturedModuleGraph {
                 _ => None,
             }
         })
+    }
+
+    /// Extract source-free package identity from the same immutable capture.
+    /// A manifest absent from this inventory was not captured. Never consult
+    /// live package metadata or substitute an invented name/version for it.
+    pub fn captured_package_identities(&self) -> BTreeMap<String, CapturedPackageManifestIdentity> {
+        self.captured_package_manifests()
+            .map(|(path, bytes)| {
+                let json = serde_json::from_slice::<serde_json::Value>(bytes).ok();
+                let field = |name: &str| {
+                    json.as_ref()
+                        .and_then(|json| json.get(name))
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|value| !value.trim().is_empty())
+                        .map(str::to_owned)
+                };
+                (
+                    path.to_owned(),
+                    CapturedPackageManifestIdentity {
+                        relative_path: path.to_owned(),
+                        sha256: format!("sha256:{}", hex::encode(Sha256::digest(bytes))),
+                        name: field("name"),
+                        version: field("version"),
+                    },
+                )
+            })
+            .collect()
     }
 }
 
@@ -3334,6 +3372,144 @@ mod tests {
             .iter()
             .map(|n| n.id.path.as_str())
             .collect()
+    }
+
+    #[test]
+    fn captured_package_identities_survive_live_metadata_mutation_and_source_retirement() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("source");
+        let app_manifest = r#"{"name":"sealed-app","version":"1.2.3","type":"commonjs"}"#;
+        let dependency_manifest =
+            r#"{"name":"@scope/dependency","version":"4.5.6","main":"index.js"}"#;
+        let nested_manifest = r#"{"name":"nested","version":"7.8.9","main":"index.js"}"#;
+        put(&root, "package.json", app_manifest);
+        put(
+            &root,
+            "app.js",
+            "module.exports=require('@scope/dependency');",
+        );
+        put(
+            &root,
+            "node_modules/@scope/dependency/package.json",
+            dependency_manifest,
+        );
+        put(
+            &root,
+            "node_modules/@scope/dependency/index.js",
+            "module.exports=require('nested');",
+        );
+        put(
+            &root,
+            "node_modules/@scope/dependency/node_modules/nested/package.json",
+            nested_manifest,
+        );
+        put(
+            &root,
+            "node_modules/@scope/dependency/node_modules/nested/index.js",
+            "module.exports=42;",
+        );
+        let captured = capture(&root, "app.js", GraphOptions::default()).unwrap();
+        let encoded = capsule::encode(&captured).unwrap();
+        let identities = captured.captured_package_identities();
+        for (path, name, version, manifest) in [
+            ("package.json", "sealed-app", "1.2.3", app_manifest),
+            (
+                "node_modules/@scope/dependency/package.json",
+                "@scope/dependency",
+                "4.5.6",
+                dependency_manifest,
+            ),
+            (
+                "node_modules/@scope/dependency/node_modules/nested/package.json",
+                "nested",
+                "7.8.9",
+                nested_manifest,
+            ),
+        ] {
+            let identity = identities.get(path).expect("captured manifest identity");
+            assert_eq!(identity.relative_path, path);
+            assert_eq!(identity.name.as_deref(), Some(name));
+            assert_eq!(identity.version.as_deref(), Some(version));
+            assert_eq!(
+                identity.sha256,
+                format!(
+                    "sha256:{}",
+                    hex::encode(Sha256::digest(manifest.as_bytes()))
+                )
+            );
+        }
+        assert_eq!(captured.report().modules.len(), 3);
+
+        // A changed installation cannot relabel the retained code or packages.
+        put(
+            &root,
+            "package.json",
+            r#"{"name":"substitute","version":"99.0.0"}"#,
+        );
+        put(
+            &root,
+            "node_modules/@scope/dependency/package.json",
+            r#"{"name":"substitute-dependency","version":"99.0.0"}"#,
+        );
+        put(
+            &root,
+            "node_modules/@scope/dependency/node_modules/nested/index.js",
+            "module.exports=0;",
+        );
+        let replay = capsule::replay(encoded.bytes(), encoded.digest()).unwrap();
+        assert_eq!(replay.captured_package_identities(), identities);
+        assert_eq!(replay.report(), captured.report());
+
+        // Retire, rather than delete, the original source location. Both
+        // source bytes and package identities must remain available offline.
+        std::fs::rename(&root, directory.path().join("retired-source")).unwrap();
+        assert!(!root.exists());
+        let offline = capsule::replay(encoded.bytes(), encoded.digest()).unwrap();
+        assert_eq!(offline.captured_package_identities(), identities);
+        assert_eq!(offline.report(), captured.report());
+        for module in &captured.report().modules {
+            assert_eq!(
+                offline.source_bytes(&module.id),
+                captured.source_bytes(&module.id)
+            );
+        }
+    }
+
+    #[test]
+    fn captured_package_identities_keep_missing_and_nonstring_fields_unknown() {
+        let root = tempfile::tempdir().unwrap();
+        put(
+            root.path(),
+            "package.json",
+            r#"{"type":"commonjs","name":" ","version":123}"#,
+        );
+        put(root.path(), "app.js", "module.exports=42;");
+        let captured = capture(root.path(), "app.js", GraphOptions::default()).unwrap();
+        let identities = captured.captured_package_identities();
+        let identity = identities.get("package.json").unwrap();
+        assert_eq!(identity.name, None);
+        assert_eq!(identity.version, None);
+        assert!(identity.sha256.starts_with("sha256:"));
+
+        let missing = tempfile::tempdir().unwrap();
+        put(missing.path(), "app.js", "module.exports=42;");
+        let captured = capture(missing.path(), "app.js", GraphOptions::default()).unwrap();
+        assert!(
+            !captured
+                .captured_package_identities()
+                .contains_key("package.json")
+        );
+        // Installing metadata after capture cannot upgrade a missing identity.
+        put(
+            missing.path(),
+            "package.json",
+            r#"{"name":"late","version":"0.0.0"}"#,
+        );
+        assert!(
+            !captured
+                .captured_package_identities()
+                .contains_key("package.json")
+        );
     }
 
     #[test]
