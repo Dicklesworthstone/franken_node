@@ -428,7 +428,19 @@ expression: matrix
         "terminal_sessions": 0,
         "pending_sessions": 0,
         "indeterminate_sessions": 0,
-        "fence_held": false
+        "fence_held": false,
+        "supervisor_attestation": {
+          "schema_version": "franken-node/native-session-drain-attestation/v1",
+          "node_id": "agent-golden-once",
+          "zone_id": "zone-golden-agent",
+          "drain_id": "[drain-id]",
+          "generation": 1,
+          "project_root_sha256": "[project-root-sha256]",
+          "observed_at": "[observed_at]",
+          "product_root_key_id": "[product-root-key-id]",
+          "checkpoint_sha256": "[checkpoint-sha256]",
+          "signature_hex": "[signature-hex]"
+        }
       }
     }
   ],

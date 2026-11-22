@@ -153,7 +153,36 @@ fn spawn_cli_in_dir_with_fleet_state(
 }
 
 #[cfg(feature = "engine")]
-fn assert_completed_empty_native_drain(poll: &serde_json::Value, zone_id: &str) {
+fn assert_completed_empty_native_drain(
+    poll: &serde_json::Value,
+    zone_id: &str,
+    project_root: &std::path::Path,
+    fleet_state_dir: &std::path::Path,
+) {
+    let drain: NativeSessionDrainCheckpoint =
+        serde_json::from_value(poll["native_session_drain"].clone())
+            .expect("complete native drain checkpoint");
+    let attestation = drain
+        .supervisor_attestation
+        .as_ref()
+        .expect("empty native drain retains its supervisor attestation");
+    // Trust the independently retained supervisor root, never the key identity
+    // embedded in the observation being verified.
+    let root_path = runtime_state_home_for_fleet(project_root, fleet_state_dir)
+        .join("franken-node/runtime-evidence/keys/product-root.key");
+    let root_seed: [u8; 32] = std::fs::read(root_path)
+        .expect("protected supervisor root")
+        .try_into()
+        .expect("32-byte supervisor root");
+    let trusted_root = ed25519_dalek::SigningKey::from_bytes(&root_seed).verifying_key();
+    attestation
+        .verify(
+            &drain,
+            poll["node_id"].as_str().expect("agent node identity"),
+            zone_id,
+            &trusted_root,
+        )
+        .expect("empty drain signature binds the exact accounting and supervisor");
     let checkpoint = fleet_application_checkpoint(&[], zone_id).expect("empty action checkpoint");
     assert_eq!(
         poll["native_session_drain"],
@@ -165,6 +194,7 @@ fn assert_completed_empty_native_drain(poll: &serde_json::Value, zone_id: &str) 
             "pending_sessions": 0,
             "indeterminate_sessions": 0,
             "fence_held": false,
+            "supervisor_attestation": attestation,
         }),
         "empty native drain must remain bound to the exact zone action checkpoint"
     );
@@ -1522,6 +1552,13 @@ fn canonicalize_fleet_reconcile_snapshot(
                         "actions_sha256" => {
                             *nested = serde_json::Value::String("[actions-sha256]".to_string());
                         }
+                        "drain_id"
+                        | "project_root_sha256"
+                        | "product_root_key_id"
+                        | "checkpoint_sha256" => {
+                            *nested =
+                                serde_json::Value::String(format!("[{}]", key.replace('_', "-")));
+                        }
                         "payload_hash" => {
                             *nested = serde_json::Value::String("[payload-hash]".to_string());
                         }
@@ -1548,7 +1585,8 @@ fn canonicalize_fleet_reconcile_snapshot(
                             }
                         }
                         "timestamp" | "signed_at" | "emitted_at" | "recorded_at" | "issued_at"
-                        | "completed_at" | "last_seen" | "as_of" | "poll_timestamp" => {
+                        | "completed_at" | "last_seen" | "as_of" | "poll_timestamp"
+                        | "observed_at" => {
                             *nested = serde_json::Value::String(format!("[{key}]"));
                         }
                         "state_dir" => {
@@ -3949,19 +3987,17 @@ fn fleet_agent_once_processes_pending_actions_and_exits() {
     let fleet_state_dir = fleet_state.path().join("fleet-state");
     seed_transport(&fleet_state_dir);
 
-    let output = run_cli_with_fleet_state(
-        &[
-            "fleet",
-            "agent",
-            "--node-id",
-            "agent-node-once",
-            "--zone",
-            "zone-1",
-            "--once",
-            "--json",
-        ],
-        &fleet_state_dir,
-    );
+    let args = [
+        "fleet",
+        "agent",
+        "--node-id",
+        "agent-node-once",
+        "--zone",
+        "zone-1",
+        "--once",
+        "--json",
+    ];
+    let output = run_cli_with_fleet_state(&args, &fleet_state_dir);
     assert!(
         output.status.success(),
         "fleet agent --once failed: {}",
@@ -3976,7 +4012,7 @@ fn fleet_agent_once_processes_pending_actions_and_exits() {
     assert_eq!(poll["node_id"], "agent-node-once");
     #[cfg(feature = "engine")]
     {
-        assert_completed_empty_native_drain(&poll, "zone-1");
+        assert_completed_empty_native_drain(&poll, "zone-1", &repo_root(), &fleet_state_dir);
         let nodes = seed_durable_transport(&fleet_state_dir)
             .list_node_statuses()
             .expect("persisted agent heartbeat");
@@ -3990,6 +4026,24 @@ fn fleet_agent_once_processes_pending_actions_and_exits() {
         assert_eq!(
             serde_json::to_value(drain).expect("drain JSON"),
             poll["native_session_drain"]
+        );
+
+        let restarted = run_cli_with_fleet_state(&args, &fleet_state_dir);
+        assert!(
+            restarted.status.success(),
+            "restarted fleet agent --once failed: {}",
+            String::from_utf8_lossy(&restarted.stderr)
+        );
+        let restarted_poll = json_stdout(&restarted, "restarted fleet agent once");
+        assert_completed_empty_native_drain(
+            &restarted_poll,
+            "zone-1",
+            &repo_root(),
+            &fleet_state_dir,
+        );
+        assert_eq!(
+            restarted_poll["native_session_drain"], poll["native_session_drain"],
+            "reopening an unchanged empty drain preserves its complete signed observation"
         );
     }
     #[cfg(not(feature = "engine"))]
@@ -7178,7 +7232,12 @@ fn fleet_cli_json_output_matrix_matches_snapshots() {
     );
     let agent_polls = jsonl_stdout(&agent_output, "fleet agent once");
     #[cfg(feature = "engine")]
-    assert_completed_empty_native_drain(&agent_polls[0], "zone-golden-agent");
+    assert_completed_empty_native_drain(
+        &agent_polls[0],
+        "zone-golden-agent",
+        agent_state.path(),
+        &agent_state_dir,
+    );
     #[cfg(not(feature = "engine"))]
     assert!(agent_polls[0].get("native_session_drain").is_none());
 

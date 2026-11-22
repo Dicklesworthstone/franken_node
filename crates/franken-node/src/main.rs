@@ -33817,6 +33817,14 @@ fn run_fleet_agent(args: &FleetAgentArgs) -> Result<()> {
                     &resolved.node_id,
                     &resolved.zone_id,
                     &expected_checkpoint,
+                    // Enrolled HTTP guards require fresh observations, including
+                    // recovery after withdrawn evidence. Local polls retain an
+                    // unchanged signed checkpoint across process restarts.
+                    if transport_kind == FleetTransportKind::Http {
+                        ops::native_session_inventory::NativeSessionDrainAttestationMode::Refresh
+                    } else {
+                        ops::native_session_inventory::NativeSessionDrainAttestationMode::Retain
+                    },
                 ) {
                     Ok(report) => {
                         // The signed read may discover newly unavailable

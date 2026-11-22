@@ -1,0 +1,98 @@
+{
+  "summary_id": "issue-11-stable-native-drain-attestations",
+  "contract_version": "1.0",
+  "change_summary": {
+    "intent": "Preserve authenticated native drain checkpoints across unchanged local polls and restarts while keeping explicit fresh HTTP observations.",
+    "scope": {
+      "subsystems": [
+        "franken_node.ops.native_session_inventory",
+        "franken_node.fleet_agent"
+      ],
+      "modules": [
+        "crates/franken-node/src/ops/native_session_inventory.rs",
+        "crates/franken-node/src/main.rs"
+      ]
+    },
+    "surface_area_delta": {
+      "new_apis": [
+        "NativeSessionDrainAttestationMode::{Retain, Refresh}"
+      ],
+      "removed_apis": [],
+      "changed_signatures": [
+        "attest_local_native_session_drain accepts an explicit NativeSessionDrainAttestationMode"
+      ]
+    },
+    "affected_contracts": {
+      "beads": [
+        "bd-k25j"
+      ],
+      "documents": [
+        "docs/plans/PLAN_TO_CREATE_FRANKEN_NODE.md",
+        "docs/policy/fleet_quarantine_operations.md"
+      ]
+    },
+    "operational_impact": {
+      "operator_notes": "Unchanged local checkpoints retain the same observation time and signature. HTTP polls request fresh evidence without overwriting unchanged historical checkpoints. Cached evidence never bypasses current census and receipt authentication.",
+      "required_actions": [
+        "Rebuild API callers with an explicit Retain or Refresh mode; use Refresh for live freshness and withdrawal guards."
+      ],
+      "rollout_notes": "Existing drain rows without an attested checkpoint acquire one after successful authentication. Preserve the runtime-evidence store; older binaries reject the newly stored field."
+    },
+    "risk_delta": {
+      "previous_tier": "medium",
+      "new_tier": "medium",
+      "rationale": "Durable signature reuse fixes checkpoint instability while requiring verification of both the saved observation and current underlying evidence; HTTP freshness and anti-replay rules remain unchanged."
+    },
+    "compatibility": {
+      "backward_compatibility": "breaking",
+      "forward_compatibility": "enables",
+      "details": "The Rust signing API adds a mode argument and stored drain JSON gains an optional attested_checkpoint. New readers accept existing rows; old strict readers reject rows with the new field. Public checkpoint schemas and signing payloads are unchanged."
+    },
+    "dependency_changes": {
+      "added": [],
+      "removed": [],
+      "updated": []
+    }
+  },
+  "validation": {
+    "toolchain": "nightly-2026-09-21",
+    "initial_source_commit": "6e4261dccc3df7a94640ce1f34fe7bbb6ac4284c",
+    "integrated_build_fix_commit": "1e53bc2d0b4998f0492b1169bf2ad9aa43945109",
+    "integrated_ci_fix_commit": "e292a0cf0d366e5f40d8df942653accb8dda0b3e",
+    "passed": [
+      "Pinned rustfmt --check on all three changed Rust files",
+      "git diff --cached --check",
+      "scripts/check_change_summary_contract.py against the changed file list",
+      "scripts/check_inline_lib_tests.py --preflight --json (test wiring only)"
+    ],
+    "initial_validation_blockers": [
+      {
+        "command": "RUSTFLAGS='--cfg franken_node_inline_tests' cargo test --locked -p frankenengine-node --lib --features extended-surfaces,test-support ops::native_session_inventory::tests::",
+        "result": "Exit 101: rustc compiling dependency asupersync 0.6.2 was killed by SIGKILL before FrankenNode tests executed."
+      },
+      {
+        "command": "cargo check --locked --all-targets",
+        "result": "Exit 101: E0599 at crates/franken-node/src/ops/native_replay.rs:3248; the checked-in franken_engine pin lacks ExecutionOrchestrator::last_failed_execution_replay_context. No errors were reported from the changed drain production code."
+      },
+      {
+        "command": "cargo clippy --locked --all-targets -- -D warnings",
+        "result": "Blocked by the same E0599 at native_replay.rs:3248 before Clippy could complete."
+      },
+      {
+        "command": "cargo fmt --all -- --check",
+        "result": "Existing formatting drift in four untouched files: tests/conformance/cx_first_api_gate.rs, crates/franken-node/tests/security_timing_attack_resistance.rs, crates/franken-node/tests/vef_proof_generator_test_support_gate.rs, sdk/verifier/src/publisher_source.rs."
+      },
+      {
+        "command": "scripts/check_no_contract_no_merge.py against the changed file list",
+        "result": "The broader release contract requires benchmark, threat, EV, loss, fallback, rollout and CI-tested rollback evidence that this focused fix does not claim. No override was applied."
+      }
+    ],
+    "current_pin_follow_up": {
+      "engine_commit": "763389e24a84171abf381cb85ccf7aec2c0e2ff9",
+      "command": "cargo check --locked -p frankenengine-node --lib --bin franken-node",
+      "result": "Interrupted with exit 130 before reaching FrankenNode code after package-cache lock contention and shared host resource pressure. An isolated cache cleared the lock, but host load reached 49.10 with approximately 1.3 GiB available memory and no swap; even file reads stalled.",
+      "runtime_tests": "Current-pin drain E2E tests, fleet CLI filters and Clippy were not launched. No current-pin compilation or runtime pass is claimed."
+    },
+    "scope": "Independent source review and static checks completed. Initial Rust regression execution was blocked. Concurrent build and CI fixes are preserved in the commit ancestry; the old missing-engine-method and formatting results above describe the initial base, not current main. This drain patch does not change dependency pins, lockfiles, freshness checks or anti-replay gates. This addresses the drain-attestation portion of GitHub issue #11."
+  }
+}

@@ -104,6 +104,21 @@ or changing that population cannot produce a new valid observation. Missing
 historical receipts remain indeterminate rather than being upgraded to
 successful terminal observations.
 
+Local file-transport polls retain the complete signed checkpoint in the drain
+store. Repeated polls and agent restarts preserve its original `observed_at` and
+`signature_hex` when the authenticated accounting is unchanged, including after
+later admissions outside a released cohort. Each poll still verifies the census,
+signed admission/outcome receipts, and the retained attestation's binding to the
+project and drain generation before reuse. Changed accounting creates a new
+signed checkpoint; a new action generation starts with its own observation.
+Corrupt retained signatures are rejected rather than repaired by re-signing.
+
+HTTP agents explicitly request a fresh supervisor observation for each poll.
+This renewal keeps the enrolled transport's freshness and withdrawal checks
+intact without replacing an unchanged local checkpoint. A retained local
+signature is historical evidence: its original timestamp still controls expiry
+and cannot establish current maintenance readiness after it has expired.
+
 With a supervisor key enrolled, an unsigned, altered, foreign-key, future-dated,
 or expired drain is refused. A signature expires after the existing 300-second
 maximum maintenance observation window; replaying its heartbeat does not extend

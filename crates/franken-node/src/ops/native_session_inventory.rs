@@ -178,6 +178,17 @@ pub struct NativeSessionDrainReport {
     pub fleet_quiescence_certified: bool,
 }
 
+/// Local checkpoints preserve their original signed observation. Enrolled
+/// transports can explicitly request a new observation for their freshness
+/// and evidence-withdrawal checks, without changing the retained population.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeSessionDrainAttestationMode {
+    /// Reuse unchanged historical evidence; elapsed time does not renew it.
+    Retain,
+    /// Sign a current observation without replacing unchanged local evidence.
+    Refresh,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StoredNativeSessionDrain {
@@ -199,6 +210,11 @@ struct StoredNativeSessionDrain {
     /// drains remain inspectable but cannot become authenticated observations.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     census_signature_hex: Option<String>,
+    /// Keep the complete signed observation so it can be authenticated before
+    /// reuse or replacement, even when current accounting has since changed.
+    /// This mutable observation is not part of the immutable census preimage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    attested_checkpoint: Option<NativeSessionDrainCheckpoint>,
 }
 
 impl StoredNativeSessionDrain {
@@ -2142,6 +2158,22 @@ fn require_open_admission(drain: Option<&StoredNativeSessionDrain>) -> Result<u6
     Ok(drain.map_or(0, |drain| drain.generation))
 }
 
+fn check_retained_drain_byte_budget(tx: &Transaction<'_>) -> Result<()> {
+    let sizes = tx.query(
+        "SELECT COALESCE(SUM(LENGTH(CAST(state_json AS BLOB))), 0) FROM native_session_drains;",
+    )?;
+    let [row] = sizes.as_slice() else {
+        bail!("invalid native drain byte count")
+    };
+    let [SqliteValue::Integer(bytes)] = row.values() else {
+        bail!("invalid native drain byte count")
+    };
+    if usize::try_from(*bytes)? > MAX_RESERVED_BYTES {
+        bail!("native-session drain history exceeds its retained byte budget");
+    }
+    Ok(())
+}
+
 fn admission_ticket_at(protected_root: &Path, project_root: &Path) -> Result<u64> {
     retry_snapshot_conflict(|| {
         let Some(connection) = open_inventory(protected_root, false)? else {
@@ -2638,6 +2670,7 @@ fn begin_drain_at(
             maintenance_hold_ids: maintenance_hold_ids.clone(),
             actions_applied: false,
             census_signature_hex: None,
+            attested_checkpoint: None,
         };
         drain.seal_census(&product_root)?;
         let report = drain_report(&drain, &records, &authority)?;
@@ -2651,18 +2684,7 @@ fn begin_drain_at(
                 SqliteValue::Text(bounded_json(&drain, MAX_DRAIN_BYTES)?.into()),
             ],
         )?;
-        let sizes = tx.query(
-            "SELECT COALESCE(SUM(LENGTH(CAST(state_json AS BLOB))), 0) FROM native_session_drains;",
-        )?;
-        let [row] = sizes.as_slice() else {
-            bail!("invalid native drain byte count")
-        };
-        let [SqliteValue::Integer(bytes)] = row.values() else {
-            bail!("invalid native drain byte count")
-        };
-        if usize::try_from(*bytes)? > MAX_RESERVED_BYTES {
-            bail!("native-session drain history exceeds its retained byte budget");
-        }
+        check_retained_drain_byte_budget(&tx)?;
         tx.commit()?;
         Ok(report)
     })
@@ -2749,9 +2771,11 @@ fn finish_drain_at(
     })
 }
 
-/// Produce a fresh source-free supervisor observation from the retained
+/// Authenticate a source-free supervisor observation from the retained
 /// inventory, after rechecking the exact action snapshot and every signed
-/// admission/outcome. Caller-provided counts are never signing inputs.
+/// admission/outcome. Caller-provided counts are never signing inputs. Retain
+/// mode preserves the exact signature of unchanged accounting across restarts;
+/// refresh mode explicitly renews the observation for live transport guards.
 ///
 /// This authenticates local accounting only. A released fence allows later
 /// admissions, so the result cannot certify ongoing fleet quiescence.
@@ -2760,12 +2784,13 @@ pub fn attest_local_native_session_drain(
     node_id: &str,
     zone_id: &str,
     checkpoint: &FleetApplicationCheckpoint,
+    mode: NativeSessionDrainAttestationMode,
 ) -> Result<NativeSessionDrainReport> {
     let project_root = project_root
         .canonicalize()
         .context("resolve native drain attestation project")?;
     let root = inventory_root()?;
-    attest_drain_at(&root, &project_root, node_id, zone_id, checkpoint)
+    attest_drain_at(&root, &project_root, node_id, zone_id, checkpoint, mode)
 }
 
 fn attest_drain_at(
@@ -2774,6 +2799,7 @@ fn attest_drain_at(
     node_id: &str,
     zone_id: &str,
     checkpoint: &FleetApplicationCheckpoint,
+    mode: NativeSessionDrainAttestationMode,
 ) -> Result<NativeSessionDrainReport> {
     use ed25519_dalek::Signer as _;
 
@@ -2791,7 +2817,7 @@ fn attest_drain_at(
         // Serialize with both admission and fence transitions. Do not freshly
         // sign an earlier read that can omit a newly committed session.
         serialize_project_admission(&mut tx, project_root)?;
-        let drain = latest_drain(&tx, project_root)?
+        let mut drain = latest_drain(&tx, project_root)?
             .context("native-session drain attestation requires a retained drain")?;
         check_drain_owner(&drain, node_id, zone_id)?;
         drain.verify_census(&root.verifying_key())?;
@@ -2813,25 +2839,74 @@ fn attest_drain_at(
         digest.update(b"franken-node/native-session-drain-project/v1\0");
         digest.update(u64::try_from(project.len())?.to_be_bytes());
         digest.update(project.as_bytes());
-        let mut attestation = NativeSessionDrainAttestation {
-            schema_version: NATIVE_SESSION_DRAIN_ATTESTATION_SCHEMA.to_owned(),
-            node_id: drain.node_id.clone(),
-            zone_id: drain.zone_id.clone(),
-            drain_id: drain.drain_id.clone(),
-            generation: drain.generation,
-            project_root_sha256: hex::encode(digest.finalize()),
-            observed_at: Utc::now(),
-            product_root_key_id: format!(
-                "ed25519:{}",
-                hex::encode(root.verifying_key().as_bytes())
-            ),
-            checkpoint_sha256: report.checkpoint.observation_sha256()?,
-            signature_hex: String::new(),
-        };
-        attestation.signature_hex =
-            hex::encode(root.sign(&attestation.signing_payload()?).to_bytes());
-        attestation.verify(&report.checkpoint, node_id, zone_id, &root.verifying_key())?;
-        report.checkpoint.supervisor_attestation = Some(attestation);
+        let project_root_sha256 = hex::encode(digest.finalize());
+        let checkpoint_sha256 = report.checkpoint.observation_sha256()?;
+        let retained_attestation = drain
+            .attested_checkpoint
+            .as_ref()
+            .map(|retained| -> Result<&NativeSessionDrainAttestation> {
+                let attestation = retained
+                    .supervisor_attestation
+                    .as_ref()
+                    .context("retained native-session drain observation has no attestation")?;
+                attestation.verify(retained, node_id, zone_id, &root.verifying_key())?;
+                if attestation.drain_id != drain.drain_id
+                    || attestation.generation != drain.generation
+                    || attestation.project_root_sha256 != project_root_sha256
+                    || retained.applied_actions != drain.actions
+                    || retained.session_set_sha256 != report.checkpoint.session_set_sha256
+                    || retained.admitted_sessions != report.checkpoint.admitted_sessions
+                {
+                    bail!(
+                        "retained native-session drain attestation does not match its sealed census"
+                    );
+                }
+                Ok(attestation)
+            })
+            .transpose()?;
+        let observation_changed = retained_attestation
+            .is_none_or(|attestation| attestation.checkpoint_sha256 != checkpoint_sha256);
+        if mode == NativeSessionDrainAttestationMode::Retain && !observation_changed {
+            // Authentication and population coverage above still run on every
+            // poll. Reuse never hides a missing receipt or changed obligation.
+            report.checkpoint.supervisor_attestation = retained_attestation.cloned();
+        } else {
+            let mut attestation = NativeSessionDrainAttestation {
+                schema_version: NATIVE_SESSION_DRAIN_ATTESTATION_SCHEMA.to_owned(),
+                node_id: drain.node_id.clone(),
+                zone_id: drain.zone_id.clone(),
+                drain_id: drain.drain_id.clone(),
+                generation: drain.generation,
+                project_root_sha256,
+                observed_at: Utc::now(),
+                product_root_key_id: format!(
+                    "ed25519:{}",
+                    hex::encode(root.verifying_key().as_bytes())
+                ),
+                checkpoint_sha256,
+                signature_hex: String::new(),
+            };
+            attestation.signature_hex =
+                hex::encode(root.sign(&attestation.signing_payload()?).to_bytes());
+            attestation.verify(&report.checkpoint, node_id, zone_id, &root.verifying_key())?;
+            if let Some(previous) = retained_attestation {
+                attestation.validate_successor_of(previous)?;
+            }
+            report.checkpoint.supervisor_attestation = Some(attestation);
+            if observation_changed {
+                // A transport renewal must not replace the original local
+                // observation when its accounting has not changed.
+                drain.attested_checkpoint = Some(report.checkpoint.clone());
+                tx.execute_with_params(
+                    "UPDATE native_session_drains SET state_json = ?1 WHERE drain_id = ?2;",
+                    &[
+                        SqliteValue::Text(bounded_json(&drain, MAX_DRAIN_BYTES)?.into()),
+                        SqliteValue::Text(drain.drain_id.clone().into()),
+                    ],
+                )?;
+                check_retained_drain_byte_budget(&tx)?;
+            }
+        }
         tx.commit()?;
         protect_sidecars(protected_root)?;
         Ok(report)
@@ -6378,6 +6453,7 @@ mod tests {
             maintenance_hold_ids: Vec::new(),
             actions_applied: false,
             census_signature_hex: None,
+            attested_checkpoint: None,
         };
         let bytes = bounded_json(&drain, MAX_DRAIN_BYTES).unwrap();
         assert!(
@@ -6425,6 +6501,43 @@ mod tests {
             checkpoint,
             &action_history(checkpoint.action_count),
         )
+    }
+
+    fn attest_drain_at(
+        root: &Path,
+        project: &Path,
+        node: &str,
+        zone: &str,
+        checkpoint: &FleetApplicationCheckpoint,
+    ) -> Result<NativeSessionDrainReport> {
+        super::attest_drain_at(
+            root,
+            project,
+            node,
+            zone,
+            checkpoint,
+            NativeSessionDrainAttestationMode::Retain,
+        )
+    }
+
+    fn alter_retained_drain_checkpoint(
+        root: &Path,
+        project: &Path,
+        alter: impl FnOnce(&mut NativeSessionDrainCheckpoint),
+    ) {
+        let connection = open_inventory(root, false).unwrap().unwrap();
+        let mut tx = connection.transaction().unwrap();
+        let mut drain = latest_drain(&tx, project).unwrap().unwrap();
+        alter(drain.attested_checkpoint.as_mut().unwrap());
+        tx.execute_with_params(
+            "UPDATE native_session_drains SET state_json = ?1 WHERE drain_id = ?2;",
+            &[
+                SqliteValue::Text(serde_json::to_string(&drain).unwrap().into()),
+                SqliteValue::Text(drain.drain_id.into()),
+            ],
+        )
+        .unwrap();
+        tx.commit().unwrap();
     }
 
     fn maintenance_action(id: &str, resume: Option<&str>) -> FleetActionRecord {
@@ -7225,6 +7338,12 @@ mod tests {
         assert!(signed.checkpoint.supervisor_attestation.is_some());
         assert!(!signed.checkpoint.is_complete());
         assert!(admission_ticket_at(&root, &project).is_err());
+        finish_drain_at(&root, &project, "node-a", "prod", &actions(1)).unwrap();
+        assert_eq!(
+            attest_drain_at(&root, &project, "node-a", "prod", &actions(1)).unwrap(),
+            signed,
+            "an unchanged indeterminate obligation retains its exact signed checkpoint"
+        );
         assert_eq!(
             read_records(&connection).unwrap()[0].outcome.as_ref(),
             Some(&forged)
@@ -7249,6 +7368,8 @@ mod tests {
         let checkpoint = fleet_application_checkpoint(&history, "prod").unwrap();
         super::begin_drain_at(&root, &project, "node-a", "prod", &checkpoint, &history).unwrap();
         finish_drain_at(&root, &project, "node-a", "prod", &checkpoint).unwrap();
+        let signed = attest_drain_at(&root, &project, "node-a", "prod", &checkpoint).unwrap();
+        assert!(signed.checkpoint.supervisor_attestation.is_some());
         let mut receipt: NativeSessionOutcomeReceipt =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         receipt.outcome.containment_empty_observed = true;
@@ -7402,6 +7523,21 @@ mod tests {
         let completed = finish_drain_at(&root, &project, "node-a", "prod", &actions(1)).unwrap();
         let before = attest_drain_at(&root, &project, "node-a", "prod", &actions(1)).unwrap();
         assert!(before.checkpoint.is_complete());
+        {
+            let connection = open_inventory(&root, false).unwrap().unwrap();
+            let mut tx = connection.transaction().unwrap();
+            let retained = latest_drain(&tx, &project).unwrap().unwrap();
+            assert_eq!(
+                retained.attested_checkpoint.as_ref(),
+                Some(&before.checkpoint)
+            );
+            tx.commit().unwrap();
+        }
+        assert_eq!(
+            attest_drain_at(&root, &project, "node-a", "prod", &actions(1)).unwrap(),
+            before,
+            "reopening the inventory must preserve the full signed completed checkpoint"
+        );
         let next = fixture(&root, 89);
         let mut guard =
             NativeSessionInventoryGuard::admit(&root, next, completed.generation).unwrap();
@@ -7413,6 +7549,7 @@ mod tests {
         assert_eq!(during.checkpoint.admitted_sessions, 1);
         assert!(!during.checkpoint.fence_held);
         assert!(!during.fleet_quiescence_certified);
+        assert_eq!(during, before);
         assert_eq!(read_inventory_at(&root, None).unwrap().pending_sessions, 1);
         let same = begin_drain_at(&root, &project, "node-a", "prod", &actions(1)).unwrap();
         assert_eq!(same.generation, before.generation);
@@ -7429,15 +7566,245 @@ mod tests {
         let historical = attest_drain_at(&root, &project, "node-a", "prod", &actions(1)).unwrap();
         assert_eq!(historical.session_nonces, before.session_nonces);
         assert_eq!(historical.checkpoint.admitted_sessions, 1);
+        assert_eq!(historical, before);
         let next = begin_drain_at(&root, &project, "node-a", "prod", &actions(2)).unwrap();
         assert_eq!(next.checkpoint.admitted_sessions, 2);
         finish_drain_at(&root, &project, "node-a", "prod", &actions(2)).unwrap();
-        assert!(
-            attest_drain_at(&root, &project, "node-a", "prod", &actions(2))
-                .unwrap()
-                .checkpoint
-                .is_complete()
+        let next = attest_drain_at(&root, &project, "node-a", "prod", &actions(2)).unwrap();
+        assert!(next.checkpoint.is_complete());
+        assert_eq!(next.generation, before.generation + 1);
+        assert_ne!(next.drain_id, before.drain_id);
+        assert_ne!(
+            next.checkpoint.supervisor_attestation,
+            before.checkpoint.supervisor_attestation
         );
+        assert_eq!(
+            attest_drain_at(&root, &project, "node-a", "prod", &actions(2)).unwrap(),
+            next
+        );
+    }
+
+    #[test]
+    fn empty_action_checkpoint_retains_its_signed_empty_population() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("evidence");
+        let admission = fixture(&root, 180);
+        let project = admission.project_root.clone();
+        drop(NativeSessionInventoryGuard::admit(&root, admission, 0).unwrap());
+        begin_drain_at(&root, &project, "node-a", "prod", &actions(0)).unwrap();
+        finish_drain_at(&root, &project, "node-a", "prod", &actions(0)).unwrap();
+        let first = attest_drain_at(&root, &project, "node-a", "prod", &actions(0)).unwrap();
+        assert!(first.checkpoint.is_complete());
+        assert_eq!(first.checkpoint.admitted_sessions, 0);
+        assert!(first.session_nonces.is_empty());
+        first
+            .checkpoint
+            .supervisor_attestation
+            .as_ref()
+            .unwrap()
+            .verify(
+                &first.checkpoint,
+                "node-a",
+                "prod",
+                &ed25519_dalek::SigningKey::from_bytes(&[17; 32]).verifying_key(),
+            )
+            .unwrap();
+        begin_drain_at(&root, &project, "node-a", "prod", &actions(0)).unwrap();
+        finish_drain_at(&root, &project, "node-a", "prod", &actions(0)).unwrap();
+        assert_eq!(
+            attest_drain_at(&root, &project, "node-a", "prod", &actions(0)).unwrap(),
+            first
+        );
+    }
+
+    #[test]
+    fn changed_pending_drain_replaces_its_attestation_only_after_real_completion() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("evidence");
+        let admission = fixture(&root, 181);
+        let project = admission.project_root.clone();
+        let mut guard = NativeSessionInventoryGuard::admit(&root, admission, 0).unwrap();
+        guard.worker_started();
+        begin_drain_at(&root, &project, "node-a", "prod", &actions(1)).unwrap();
+        finish_drain_at(&root, &project, "node-a", "prod", &actions(1)).unwrap();
+        let pending = attest_drain_at(&root, &project, "node-a", "prod", &actions(1)).unwrap();
+        assert_eq!(pending.checkpoint.pending_sessions, 1);
+        assert!(pending.checkpoint.fence_held);
+        assert_eq!(
+            attest_drain_at(&root, &project, "node-a", "prod", &actions(1)).unwrap(),
+            pending
+        );
+        guard.worker_reaped();
+        guard.finish(
+            NativeSessionOutcomeKind::ControlStopped,
+            successful_ledger_observation(),
+        );
+        finish_drain_at(&root, &project, "node-a", "prod", &actions(1)).unwrap();
+        let completed = attest_drain_at(&root, &project, "node-a", "prod", &actions(1)).unwrap();
+        assert!(completed.checkpoint.is_complete());
+        assert_eq!(completed.checkpoint.terminal_sessions, 1);
+        assert_eq!(completed.drain_id, pending.drain_id);
+        assert_eq!(completed.generation, pending.generation);
+        assert_eq!(completed.session_nonces, pending.session_nonces);
+        assert_ne!(
+            completed.checkpoint.supervisor_attestation,
+            pending.checkpoint.supervisor_attestation
+        );
+        assert_eq!(
+            attest_drain_at(&root, &project, "node-a", "prod", &actions(1)).unwrap(),
+            completed
+        );
+    }
+
+    #[test]
+    fn fresh_transport_observation_preserves_expired_retained_attestation() {
+        use ed25519_dalek::Signer as _;
+
+        for maintenance in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("evidence");
+            let admission = fixture(&root, 182);
+            let project = admission.project_root.clone();
+            drop(NativeSessionInventoryGuard::admit(&root, admission, 0).unwrap());
+            let history = if maintenance {
+                vec![maintenance_action("refresh-held", None)]
+            } else {
+                action_history(1)
+            };
+            let checkpoint = fleet_application_checkpoint(&history, "prod").unwrap();
+            super::begin_drain_at(&root, &project, "node-a", "prod", &checkpoint, &history)
+                .unwrap();
+            finish_drain_at(&root, &project, "node-a", "prod", &checkpoint).unwrap();
+            attest_drain_at(&root, &project, "node-a", "prod", &checkpoint).unwrap();
+            let signing_key = ed25519_dalek::SigningKey::from_bytes(&[17; 32]);
+            alter_retained_drain_checkpoint(&root, &project, |cached| {
+                let attestation = cached.supervisor_attestation.as_mut().unwrap();
+                attestation.observed_at = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+                attestation.signature_hex = hex::encode(
+                    signing_key
+                        .sign(&attestation.signing_payload().unwrap())
+                        .to_bytes(),
+                );
+            });
+            let retained = attest_drain_at(&root, &project, "node-a", "prod", &checkpoint).unwrap();
+            let old = retained.checkpoint.supervisor_attestation.as_ref().unwrap();
+            old.verify(
+                &retained.checkpoint,
+                "node-a",
+                "prod",
+                &signing_key.verifying_key(),
+            )
+            .unwrap();
+            assert!(old.validate_freshness(Utc::now()).is_err());
+            assert_eq!(
+                attest_drain_at(&root, &project, "node-a", "prod", &checkpoint).unwrap(),
+                retained,
+                "elapsed time must not rewrite a retained observation"
+            );
+            let refreshed = super::attest_drain_at(
+                &root,
+                &project,
+                "node-a",
+                "prod",
+                &checkpoint,
+                NativeSessionDrainAttestationMode::Refresh,
+            )
+            .unwrap();
+            let fresh = refreshed
+                .checkpoint
+                .supervisor_attestation
+                .as_ref()
+                .unwrap();
+            fresh
+                .verify(
+                    &refreshed.checkpoint,
+                    "node-a",
+                    "prod",
+                    &signing_key.verifying_key(),
+                )
+                .unwrap();
+            fresh.validate_freshness(Utc::now()).unwrap();
+            fresh.validate_successor_of(old).unwrap();
+            assert!(fresh.observed_at > old.observed_at);
+            assert_ne!(fresh.signature_hex, old.signature_hex);
+            let mut refreshed_accounting = refreshed;
+            refreshed_accounting.checkpoint.supervisor_attestation =
+                retained.checkpoint.supervisor_attestation.clone();
+            assert_eq!(refreshed_accounting, retained);
+            assert_eq!(
+                attest_drain_at(&root, &project, "node-a", "prod", &checkpoint).unwrap(),
+                retained,
+                "a transport refresh must not replace the retained historical signature"
+            );
+        }
+    }
+
+    #[test]
+    fn corrupt_or_foreign_cached_attestation_cannot_be_reused_or_resigned() {
+        use ed25519_dalek::Signer as _;
+
+        for mutation in 0..5 {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("evidence");
+            let admission = fixture(&root, 183);
+            let project = admission.project_root.clone();
+            let mut guard = NativeSessionInventoryGuard::admit(&root, admission, 0).unwrap();
+            guard.worker_started();
+            begin_drain_at(&root, &project, "node-a", "prod", &actions(1)).unwrap();
+            finish_drain_at(&root, &project, "node-a", "prod", &actions(1)).unwrap();
+            attest_drain_at(&root, &project, "node-a", "prod", &actions(1)).unwrap();
+            alter_retained_drain_checkpoint(&root, &project, |cached| {
+                if mutation == 0 {
+                    cached.supervisor_attestation = None;
+                    return;
+                }
+                let attestation = cached.supervisor_attestation.as_mut().unwrap();
+                match mutation {
+                    1 => attestation.signature_hex = "0".repeat(128),
+                    2 => attestation.drain_id = uuid::Uuid::now_v7().to_string(),
+                    3 => attestation.generation += 1,
+                    _ => attestation.project_root_sha256 = "c".repeat(64),
+                }
+                if mutation >= 2 {
+                    // A valid signature from the same product root still
+                    // cannot substitute another local drain or project.
+                    let key = ed25519_dalek::SigningKey::from_bytes(&[17; 32]);
+                    attestation.signature_hex =
+                        hex::encode(key.sign(&attestation.signing_payload().unwrap()).to_bytes());
+                    cached
+                        .supervisor_attestation
+                        .as_ref()
+                        .unwrap()
+                        .verify(cached, "node-a", "prod", &key.verifying_key())
+                        .unwrap();
+                }
+            });
+            for mode in [
+                NativeSessionDrainAttestationMode::Retain,
+                NativeSessionDrainAttestationMode::Refresh,
+            ] {
+                assert!(
+                    super::attest_drain_at(&root, &project, "node-a", "prod", &actions(1), mode)
+                        .is_err(),
+                    "cached mutation {mutation} must fail with unchanged accounting"
+                );
+            }
+            guard.worker_reaped();
+            guard.finish(
+                NativeSessionOutcomeKind::ControlStopped,
+                successful_ledger_observation(),
+            );
+            for mode in [
+                NativeSessionDrainAttestationMode::Retain,
+                NativeSessionDrainAttestationMode::Refresh,
+            ] {
+                assert!(
+                    super::attest_drain_at(&root, &project, "node-a", "prod", &actions(1), mode)
+                        .is_err(),
+                    "changed accounting must not launder cached mutation {mutation}"
+                );
+            }
+        }
     }
 
     #[test]
