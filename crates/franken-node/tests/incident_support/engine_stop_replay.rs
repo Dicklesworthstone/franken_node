@@ -11,7 +11,9 @@ use std::process::{Command, Output};
 const INSTRUCTION_BUDGET: u64 = 10_000;
 const CONSOLE_BYTE_LIMIT: usize = 8 * 1024 * 1024;
 const EFFECT_PREFIX: &str = "const fs = require('fs'); console.log(fs.readFileSync('input.txt', 'utf8')); console.warn('captured-warning'); ";
-const DENIAL: &str = "process.env.FRANKEN_ENGINE_FAILURE_TEST;";
+// `balanced` grants `fs_read` and denies `fs_write` at runtime without raising
+// the module-wide lowering IFC ceiling to Secret before `EFFECT_PREFIX` runs.
+const DENIAL: &str = "fs.writeFileSync('denied-output.txt', 'blocked');";
 const EXHAUSTION: &str = "while (true) {}";
 
 struct Project {
@@ -296,7 +298,7 @@ fn exercise_stop_with_console_limit(
 fn native_engine_stop_cli_captures_and_replays_capability_denial_after_real_read() {
     exercise_stop(
         DENIAL,
-        serde_json::json!({"kind":"capability_denied","capability":"env_read"}),
+        serde_json::json!({"kind":"capability_denied","capability":"fs:write"}),
     );
 }
 
@@ -505,15 +507,71 @@ fn native_engine_stop_cli_keeps_opt_in_and_unsupported_failures_distinct() {
         "captured-input\n"
     );
 
-    let invalid = Project::new("const = ;");
-    // Keep coverage of the legacy engine parse-failure path. Ordinary replay
-    // capture now refuses this source during immutable graph admission instead.
-    let config_path = invalid.root().join("franken_node.toml");
+    // Keep coverage of the legacy engine parse-failure path without placing
+    // operator state inside the guest project root (which intentionally
+    // requires frozen module resolution).
+    let invalid_root = tempfile::tempdir().expect("clean guest project");
+    let invalid_config_dir = tempfile::tempdir().expect("outside operator config");
+    let invalid_state = tempfile::tempdir().expect("private product evidence state");
+    let init_output = Command::new(
+        resolve_binary_path()
+            .canonicalize()
+            .expect("built product executable"),
+    )
+    .env_clear()
+    .env("PATH", "/usr/bin:/bin")
+    .env("HOME", invalid_state.path())
+    .env("XDG_STATE_HOME", invalid_state.path())
+    .env("TMPDIR", std::env::temp_dir())
+    .current_dir(invalid_config_dir.path())
+    .args(["init", "--profile", "balanced", "--out-dir", ".", "--json"])
+    .output()
+    .expect("initialize outside operator config");
+    assert!(
+        init_output.status.success(),
+        "outside init failed: {}",
+        String::from_utf8_lossy(&init_output.stderr)
+    );
+    let config_path = invalid_config_dir.path().join("franken_node.toml");
     let mut config: frankenengine_node::config::Config =
         toml::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
     config.runtime.frozen_modules = Some(false);
-    fs::write(config_path, config.to_toml().unwrap()).unwrap();
-    let run = invalid.failed_run(true);
+    config.security.decision_receipt_signing_key_path = Some(
+        invalid_config_dir
+            .path()
+            .join(".franken-node/keys/receipt-signing.key"),
+    );
+    fs::write(&config_path, config.to_toml().unwrap()).unwrap();
+    fs::write(invalid_root.path().join("app.js"), "const = ;").unwrap();
+    let invalid_project = Project {
+        workspace: invalid_root,
+        state: invalid_state,
+    };
+    let config_arg = config_path.to_str().expect("UTF-8 config path");
+    let output = invalid_project.invoke(&[
+        "run",
+        "app.js",
+        "--config",
+        config_arg,
+        "--runtime",
+        "franken-engine",
+        "--capture-replay",
+        "--json",
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "legacy parse failure must exit 1: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let run: Value = serde_json::from_slice(&output.stdout).expect("failed-run JSON");
+    assert_eq!(run["success"], false, "{run}");
+    assert_eq!(run["dispatch"]["exit_code"], 1);
+    assert_eq!(run["receipt"]["exit_code"], 1);
+    assert_eq!(run["dispatch"]["used_fallback_runtime"], false);
+    assert!(run["dispatch"]["engine_decision"].is_null());
+    assert!(run["receipt"]["execution_failure"].is_string());
     assert!(run["dispatch"].get("native_replay").is_none());
     assert!(run["receipt"]["native_replay_payload_sha256"].is_null());
     assert!(run["dispatch"]["host_effect_ledger"].is_null());

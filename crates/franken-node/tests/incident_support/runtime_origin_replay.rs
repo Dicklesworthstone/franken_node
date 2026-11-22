@@ -226,8 +226,18 @@ mod native {
             }
             fs::write(producer.path().join("app.js"), source_text).unwrap();
             fs::write(producer.path().join("input.txt"), "ORIGINAL").unwrap();
+            // EntryOnly runs with `frozen_modules = false`, which requires an
+            // operator-state-free guest project root so the live loader cannot
+            // reach `.franken-node` or `franken_node.toml`. Initialize operator
+            // config/keys in a sibling directory during `run`, then place them
+            // into `producer` afterward for `incident capture` / `bundle`.
+            let external_config_dir = (source_mode == SourceMode::EntryOnly)
+                .then(|| tempfile::tempdir().expect("outside operator config"));
+            let init_root = external_config_dir
+                .as_ref()
+                .map_or(producer.path(), tempfile::TempDir::path);
             let initialized = run_cli_in_workspace_with_state_home(
-                producer.path(),
+                init_root,
                 &[
                     "init",
                     "--profile",
@@ -239,7 +249,7 @@ mod native {
                 Some(producer_state.path()),
             );
             assert!(initialized.status.success(), "{initialized:?}");
-            let config_path = producer.path().join("franken_node.toml");
+            let config_path = init_root.join("franken_node.toml");
             let mut config: frankenengine_node::config::Config =
                 toml::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
             assert_eq!(config.runtime.frozen_modules, None);
@@ -252,8 +262,16 @@ mod native {
                 // frozen flag still overrides a configured false value.
                 config.runtime.frozen_modules = Some(false);
             }
-            fs::write(config_path, config.to_toml().unwrap()).unwrap();
+            if source_mode == SourceMode::EntryOnly {
+                config.security.decision_receipt_signing_key_path =
+                    Some(init_root.join(".franken-node/keys/receipt-signing.key"));
+            }
+            fs::write(&config_path, config.to_toml().unwrap()).unwrap();
+            let config_arg = config_path.to_str().expect("UTF-8 config path").to_string();
             let mut args = vec!["run", "app.js", "--capture-replay", "--json"];
+            if source_mode == SourceMode::EntryOnly {
+                args.extend(["--config", &config_arg]);
+            }
             if source_mode == SourceMode::ExplicitFrozen {
                 args.push("--frozen-modules");
             }
@@ -263,6 +281,23 @@ mod native {
                 Some(producer_state.path()),
             );
             assert_eq!(recorded.status.success(), !guest_exception, "{recorded:?}");
+            if let Some(cfg_dir) = external_config_dir.as_ref() {
+                fs::create_dir_all(producer.path().join(".franken-node/keys")).unwrap();
+                for name in ["receipt-signing.key", "receipt-signing.pub"] {
+                    fs::copy(
+                        cfg_dir.path().join(".franken-node/keys").join(name),
+                        producer.path().join(".franken-node/keys").join(name),
+                    )
+                    .unwrap();
+                }
+                config.security.decision_receipt_signing_key_path =
+                    Some(PathBuf::from(".franken-node/keys/receipt-signing.key"));
+                fs::write(
+                    producer.path().join("franken_node.toml"),
+                    config.to_toml().unwrap(),
+                )
+                .unwrap();
+            }
             let run: Value = serde_json::from_slice(&recorded.stdout).unwrap();
             assert_eq!(run["success"], !guest_exception);
             let capture = &run["dispatch"]["native_replay"];
@@ -571,11 +606,12 @@ mod native {
         );
         assert_eq!(execution["terminal_state"], "engine_failure");
         assert_eq!(execution["terminal_state_matches_original"], false);
+        let failure = execution["engine_failure"].as_str().unwrap();
         assert!(
-            execution["engine_failure"]
-                .as_str()
-                .unwrap()
-                .contains("fs_write")
+            failure.contains("fs_write")
+                || failure.contains("fs.write")
+                || failure.contains("fs:write"),
+            "{failure}"
         );
         assert_eq!(execution["captured_host_effects"], 2);
         assert_eq!(execution["consumed_host_effects"], 1);
