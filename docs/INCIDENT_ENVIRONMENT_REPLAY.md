@@ -48,6 +48,32 @@ SDK non-exfiltration claims match exact label-set commitments. A policy that
 forbids mixed file/environment flows must also disclose the canonical combined
 label-set commitment; a single-source commitment does not cover another set.
 
+## Publisher quotas and engine network refusals
+
+Publisher-scoped host-only captures distinguish deferred HTTP requests refused
+by the native information-flow check from attempts that entered the host
+provider. The engine's exact `FLOW_POLICY_BLOCKED` network refusal occurs before
+publisher admission, so it consumes no publisher invocation quota. It remains
+replayable even when the publisher allows zero network calls or excludes that
+destination. Real provider attempts,
+including failed attempts, still consume the admitted quota.
+
+Replay independently regenerates that engine refusal. The recorder withholds
+the captured denial instead of returning it to an ordinary request; the native
+IFC path must record the identical request and refusal. An ordinary provider
+attempt reaches only the no-live-I/O backstop and permanently fails verification,
+even if guest code catches or ignores the resulting error. Exact order,
+transcript exhaustion, terminal state and existing witness comparisons remain
+required. Merely placing the denial string in a signed capture cannot create a
+quota exemption.
+
+This distinction currently applies to host-only publisher-scoped captures.
+Process-authorized captures retain strict provider accounting because their
+concrete global journal materializes outcomes before native execution and does
+not expose a separately verifiable pre-provider refusal boundary. A composition
+that cannot satisfy that stricter validation remains refused. This change does
+not grant process authority or extend counterfactual branch support.
+
 ## Privacy and authentication
 
 Captures can contain secrets in environment outcomes, execution results,

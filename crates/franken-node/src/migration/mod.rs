@@ -455,12 +455,34 @@ pub struct MigrationValidationCheck {
     pub remediation: Option<String>,
 }
 
+/// Policy selected by the operator for a migration validation invocation.
+/// Static inspection never resolves or starts a runtime, even when the policy
+/// requires lockstep before a migration can be considered runtime-validated.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MigrationValidationOptions<'a> {
+    pub static_only: bool,
+    pub require_lockstep_validation: bool,
+    /// An independently selected Bun executable. When absent, required
+    /// lockstep searches only absolute PATH entries outside the project.
+    pub bun_executable: Option<&'a Path>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MigrationValidateReport {
     pub schema_version: String,
     pub project_path: String,
     pub generated_at_utc: String,
     pub status: MigrationValidateStatus,
+    /// Requested inspection scope, not an assertion that execution succeeded.
+    /// Historical reports without a scope remain unknown (the empty string).
+    #[serde(default)]
+    pub validation_scope: String,
+    #[serde(default)]
+    pub lockstep_required: bool,
+    /// Every selected case produced all three runtime observations. A measured
+    /// divergence can set this true while validation correctly remains FAIL.
+    #[serde(default)]
+    pub lockstep_performed: bool,
     pub checks: Vec<MigrationValidationCheck>,
     pub blocking_findings: Vec<MigrationAuditFinding>,
     pub warning_findings: Vec<MigrationAuditFinding>,
@@ -475,12 +497,24 @@ pub struct MigrationValidateReport {
     #[cfg(target_os = "linux")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub test_suite: Option<validation_suite::SuiteReport>,
+    /// Genuine Node/Bun/native evidence, never a projection of a paired suite.
+    #[cfg(target_os = "linux")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lockstep_suite: Option<validation_suite::product_oracle::ProductReport>,
 }
 
 impl MigrationValidateReport {
     #[must_use]
     pub const fn is_pass(&self) -> bool {
         matches!(self.status, MigrationValidateStatus::Pass)
+    }
+
+    /// A static PASS is useful inspection, not a runtime rollout prerequisite.
+    #[must_use]
+    pub fn runtime_validation_passed(&self) -> bool {
+        self.is_pass()
+            && self.validation_scope == "runtime"
+            && (!self.lockstep_required || self.lockstep_performed)
     }
 }
 
@@ -2823,7 +2857,7 @@ fn select_admitted_runtime_project(
 
 pub fn run_validate(
     project_path: &Path,
-    static_only: bool,
+    options: MigrationValidationOptions<'_>,
 ) -> anyhow::Result<MigrationValidateReport> {
     let audit = run_audit(project_path)?;
 
@@ -2883,12 +2917,83 @@ pub fn run_validate(
     });
     #[cfg(target_os = "linux")]
     let mut test_suite = None;
+    #[cfg(target_os = "linux")]
+    let mut lockstep_suite = None;
     // Static-only never starts guest code. On Linux, an existing test inventory
     // upgrades runtime validation to complete differential suite execution.
     // Only an absent inventory retains the single-entrypoint smoke behavior;
     // suite errors and failures may NEVER fall back to a smoke PASS.
-    if !static_only {
-        if checks.iter().all(|check| check.passed) {
+    if !options.static_only {
+        if !checks.iter().all(|check| check.passed) {
+            checks.push(if options.require_lockstep_validation {
+                MigrationValidationCheck {
+                    id: "mig-validate-005".into(),
+                    passed: false,
+                    message: "required lockstep skipped because static validation checks failed"
+                        .into(),
+                    remediation: Some(
+                        "Resolve the static findings before executing Node, Bun and native validation."
+                            .into(),
+                    ),
+                }
+            } else {
+                runtime_smoke_prerequisite_failure_check()
+            });
+        } else if options.require_lockstep_validation {
+            #[cfg(target_os = "linux")]
+            match select_admitted_runtime_project(project_path, &audit).and_then(|(root, inputs)| {
+                validation_suite::run_product_if_present_with_dependency_inputs(
+                    &root,
+                    &inputs,
+                    options.bun_executable,
+                )
+            }) {
+                Ok(Some(report)) => {
+                    checks.push(MigrationValidationCheck {
+                        id: "mig-validate-005".into(),
+                        passed: report.verdict == "PASS",
+                        message: format!(
+                            "required Node/Bun/native lockstep: verdict={} total={} passed={} failed={} errored={} skipped={} input_sha256={}",
+                            report.verdict, report.total_tests, report.passed, report.failed,
+                            report.errored, report.skipped, report.input_sha256
+                        ),
+                        remediation: Some(
+                            "Inspect lockstep_suite for reference disagreement, native divergences and workspace effects; this is captured test validation, not release certification."
+                                .into(),
+                        ),
+                    });
+                    lockstep_suite = Some(report);
+                }
+                Ok(None) => checks.push(MigrationValidationCheck {
+                    id: "mig-validate-005".into(),
+                    passed: false,
+                    message: "required lockstep has no captured test inventory; single-runtime smoke cannot satisfy the migration policy".into(),
+                    remediation: Some(
+                        "Add *.test.js/*.spec.js tests, or .franken-node/migration-tests.json with schema_version=franken-node/migration-tests/v1 and a nonempty tests array selecting project-relative entrypoints. Use --static-only for inspection without runtime validation."
+                            .into(),
+                    ),
+                }),
+                Err(error) => checks.push(MigrationValidationCheck {
+                    id: "mig-validate-005".into(),
+                    passed: false,
+                    message: format!("required Node/Bun/native lockstep failed: {error:#}"),
+                    remediation: Some(
+                        "Provide admitted project inputs and distinct trusted Node, Bun and franken-node executables outside the project; select Bun with --bun-bin or an absolute PATH entry. Required lockstep never falls back to a pair or smoke PASS."
+                            .into(),
+                    ),
+                }),
+            }
+            #[cfg(not(target_os = "linux"))]
+            checks.push(MigrationValidationCheck {
+                id: "mig-validate-005".into(),
+                passed: false,
+                message: "required Node/Bun/native captured lockstep is currently supported on Linux only".into(),
+                remediation: Some(
+                    "Run required runtime validation on Linux; --static-only remains available for inspection."
+                        .into(),
+                ),
+            });
+        } else {
             #[cfg(target_os = "linux")]
             match select_admitted_runtime_project(project_path, &audit).and_then(
                 |(root, inputs)| {
@@ -2936,10 +3041,20 @@ pub fn run_validate(
             }
             #[cfg(not(target_os = "linux"))]
             checks.push(runtime_smoke_validation_check(project_path));
-        } else {
-            checks.push(runtime_smoke_prerequisite_failure_check());
         }
     }
+
+    #[cfg(target_os = "linux")]
+    let lockstep_performed = lockstep_suite.as_ref().is_some_and(|report| {
+        report.total_tests > 0
+            && report.cases.len() == report.total_tests
+            && report
+                .cases
+                .iter()
+                .all(|case| case.node.is_some() && case.bun.is_some() && case.native.is_some())
+    });
+    #[cfg(not(target_os = "linux"))]
+    let lockstep_performed = false;
 
     let status = if checks.iter().all(|check| check.passed) {
         MigrationValidateStatus::Pass
@@ -2952,6 +3067,14 @@ pub fn run_validate(
         project_path: project_path.to_string_lossy().replace('\\', "/"),
         generated_at_utc: chrono::Utc::now().to_rfc3339(),
         status,
+        validation_scope: if options.static_only {
+            "static"
+        } else {
+            "runtime"
+        }
+        .into(),
+        lockstep_required: options.require_lockstep_validation,
+        lockstep_performed,
         checks,
         blocking_findings,
         warning_findings,
@@ -2961,13 +3084,18 @@ pub fn run_validate(
         dependency_admission_error: audit.dependency_admission_error,
         #[cfg(target_os = "linux")]
         test_suite,
+        #[cfg(target_os = "linux")]
+        lockstep_suite,
     })
 }
 
-pub fn run_one_command_report(project_path: &Path) -> anyhow::Result<OneCommandMigrationReport> {
+pub fn run_one_command_report(
+    project_path: &Path,
+    options: MigrationValidationOptions<'_>,
+) -> anyhow::Result<OneCommandMigrationReport> {
     let audit = run_audit(project_path)?;
     let rewrite_suggestions = run_rewrite(project_path, false)?;
-    let validation = run_validate(project_path, false)?;
+    let validation = run_validate(project_path, options)?;
     Ok(build_one_command_report(
         project_path,
         audit,
@@ -2988,10 +3116,18 @@ fn build_one_command_report(
         .iter()
         .filter(|check| !check.passed)
         .count();
-    let go_no_go = migration_report_go_no_go(&risk_assessment, validation.is_pass()).to_string();
-    let confidence = build_migration_report_confidence(&risk_assessment, validation.is_pass());
+    let go_no_go =
+        migration_report_go_no_go(&risk_assessment, validation.runtime_validation_passed())
+            .to_string();
+    let confidence =
+        build_migration_report_confidence(&risk_assessment, validation.runtime_validation_passed());
     let executive_summary = MigrationReportExecutiveSummary {
-        recommendation: migration_report_recommendation(&go_no_go).to_string(),
+        recommendation: if validation.validation_scope == "static" && validation.is_pass() {
+            "Static inspection passed. Execute the required runtime validation before rollout."
+                .into()
+        } else {
+            migration_report_recommendation(&go_no_go).to_string()
+        },
         go_no_go,
         risk_score: risk_assessment.risk_score,
         confidence_score: confidence.score,
@@ -3134,7 +3270,7 @@ fn build_migration_report_rollout_plan(
     rewrite: &MigrationRewriteReport,
     validation: &MigrationValidateReport,
 ) -> MigrationReportRolloutPlan {
-    let go_no_go = migration_report_go_no_go(risk, validation.is_pass());
+    let go_no_go = migration_report_go_no_go(risk, validation.runtime_validation_passed());
     let rewrite_status = if rewrite.rewrites_planned == 0 {
         "no_changes"
     } else if rewrite.manual_review_items > 0 {
@@ -3170,7 +3306,13 @@ fn build_migration_report_rollout_plan(
             MigrationReportRolloutPhase {
                 name: "validate".to_string(),
                 status: if validation.is_pass() { "pass" } else { "fail" }.to_string(),
-                gate: format!("{} validation checks", validation.checks.len()),
+                gate: format!(
+                    "{} validation checks; scope={}; lockstep_required={}; lockstep_performed={}; release_certification=false",
+                    validation.checks.len(),
+                    validation.validation_scope,
+                    validation.lockstep_required,
+                    validation.lockstep_performed
+                ),
                 evidence_refs: vec!["validation.checks".to_string()],
             },
             MigrationReportRolloutPhase {
@@ -3254,8 +3396,11 @@ fn render_one_command_report_html(report: &OneCommandMigrationReport) -> String 
     let _ = writeln!(&mut output, "</ul></section>");
     let _ = writeln!(
         &mut output,
-        "<section id=\"validation\"><h2>Validation</h2><p>status={:?}</p><ul>",
-        report.validation.status
+        "<section id=\"validation\"><h2>Validation</h2><p>status={:?}; scope={}; lockstep_required={}; lockstep_performed={}; release_certification=false</p><ul>",
+        report.validation.status,
+        escape_html(&report.validation.validation_scope),
+        report.validation.lockstep_required,
+        report.validation.lockstep_performed,
     );
     for check in &report.validation.checks {
         let _ = writeln!(
@@ -3310,6 +3455,11 @@ pub fn render_validate_report(report: &MigrationValidateReport) -> String {
     let _ = writeln!(&mut output, "franken-node migrate validate");
     let _ = writeln!(&mut output, "target: {}", report.project_path);
     let _ = writeln!(&mut output, "status: {}", report.status.as_str());
+    let _ = writeln!(
+        &mut output,
+        "scope: {}; lockstep_required={}; lockstep_performed={}; release_certification=false",
+        report.validation_scope, report.lockstep_required, report.lockstep_performed,
+    );
     let _ = writeln!(
         &mut output,
         "summary: checks={} blocking_findings={} warning_findings={}",
@@ -5331,7 +5481,8 @@ mod tests {
         let original_manifest =
             std::fs::read_to_string(project.join("package.json")).expect("read manifest");
 
-        let report = run_one_command_report(project).expect("one-command report");
+        let report = run_one_command_report(project, MigrationValidationOptions::default())
+            .expect("one-command report");
 
         assert_eq!(report.schema_version, "franken-node/migrate-report/v1");
         assert_eq!(report.executive_summary.go_no_go, "no_go");
@@ -5362,7 +5513,8 @@ mod tests {
             }"#,
         );
 
-        let report = run_one_command_report(&project).expect("one-command report");
+        let report = run_one_command_report(&project, MigrationValidationOptions::default())
+            .expect("one-command report");
         let html = render_one_command_report(&report, OneCommandMigrationReportFormat::Html)
             .expect("HTML report");
 
@@ -6407,6 +6559,102 @@ mod tests {
     }
 
     #[test]
+    fn required_lockstep_static_inspection_is_not_runtime_rollout_evidence() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project = temp.path();
+        write_project_file(
+            project,
+            "index.js",
+            "throw new Error('static inspection must not execute');",
+        );
+        write_hardened_manifest(project);
+        write_lockfile(project);
+        let options = MigrationValidationOptions {
+            static_only: true,
+            require_lockstep_validation: true,
+            bun_executable: Some(Path::new("/missing-bun-must-not-be-resolved")),
+        };
+        let report = run_validate(project, options).expect("static validation");
+        assert!(report.is_pass(), "{report:#?}");
+        assert_eq!(report.validation_scope, "static");
+        assert!(report.lockstep_required);
+        assert!(!report.lockstep_performed);
+        assert!(!report.runtime_validation_passed());
+        #[cfg(target_os = "linux")]
+        assert!(report.test_suite.is_none() && report.lockstep_suite.is_none());
+        let rendered = render_validate_report(&report);
+        assert!(
+            rendered.contains("scope: static; lockstep_required=true; lockstep_performed=false")
+        );
+        assert!(rendered.contains("release_certification=false"));
+
+        let combined = run_one_command_report(project, options).expect("static migration report");
+        assert!(combined.validation.is_pass());
+        assert_eq!(combined.executive_summary.go_no_go, "no_go");
+        assert!(
+            combined
+                .executive_summary
+                .recommendation
+                .contains("runtime validation before rollout")
+        );
+        assert!(
+            combined
+                .rollout_plan
+                .phases
+                .iter()
+                .any(|phase| phase.name == "rollout" && phase.status == "blocked")
+        );
+        let html =
+            render_one_command_report(&combined, OneCommandMigrationReportFormat::Html).unwrap();
+        assert!(html.contains("scope=static; lockstep_required=true; lockstep_performed=false; release_certification=false"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn required_lockstep_without_tests_cannot_fall_back_to_native_smoke() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project = temp.path();
+        write_project_file(
+            project,
+            "index.js",
+            "throw new Error('missing tests must not run smoke');",
+        );
+        write_hardened_manifest(project);
+        write_lockfile(project);
+        let report = run_validate(
+            project,
+            MigrationValidationOptions {
+                require_lockstep_validation: true,
+                bun_executable: Some(Path::new("/missing-bun-must-not-be-resolved")),
+                ..Default::default()
+            },
+        )
+        .expect("required runtime validation");
+        assert!(!report.is_pass());
+        assert_eq!(report.validation_scope, "runtime");
+        assert!(report.lockstep_required);
+        assert!(!report.lockstep_performed);
+        assert!(report.test_suite.is_none() && report.lockstep_suite.is_none());
+        let failure = report
+            .checks
+            .iter()
+            .find(|check| check.id == "mig-validate-005")
+            .unwrap();
+        assert!(!failure.passed);
+        assert!(
+            failure.message.contains("no captured test inventory"),
+            "{report:#?}"
+        );
+        assert!(
+            failure
+                .remediation
+                .as_deref()
+                .unwrap()
+                .contains(".franken-node/migration-tests.json")
+        );
+    }
+
+    #[test]
     fn run_validate_fails_without_lockfile_and_with_risky_scripts() {
         let temp = tempfile::tempdir().expect("tempdir");
         let project = temp.path();
@@ -6422,7 +6670,8 @@ mod tests {
         )
         .expect("write package");
 
-        let report = run_validate(project, false).expect("validate report");
+        let report =
+            run_validate(project, MigrationValidationOptions::default()).expect("validate report");
         assert!(!report.is_pass());
         assert!(
             report
@@ -6461,7 +6710,8 @@ mod tests {
         .expect("write lockfile");
         init_native_smoke_config(project);
 
-        let report = run_validate(project, false).expect("validate report");
+        let report =
+            run_validate(project, MigrationValidationOptions::default()).expect("validate report");
         assert!(report.is_pass(), "{report:#?}");
         assert!(report.blocking_findings.is_empty());
         assert!(report.checks.iter().all(|check| check.passed));
@@ -6477,7 +6727,8 @@ mod tests {
         write_lockfile(project);
         init_native_smoke_config(project);
 
-        let report = run_validate(project, false).expect("validate report");
+        let report =
+            run_validate(project, MigrationValidationOptions::default()).expect("validate report");
 
         assert!(report.is_pass(), "{report:#?}");
         assert!(report.blocking_findings.is_empty());
@@ -6504,7 +6755,8 @@ mod tests {
         write_lockfile(project);
         init_native_smoke_config(project);
 
-        let report = run_validate(project, false).expect("validate report");
+        let report =
+            run_validate(project, MigrationValidationOptions::default()).expect("validate report");
         let has_lockstep_warning = report.warning_findings.iter().any(|finding| {
             finding
                 .recommendation
@@ -6525,7 +6777,8 @@ mod tests {
         write_project_file(project, "package.json", r#"{"name":"demo","#);
         write_lockfile(project);
 
-        let report = run_validate(project, false).expect("validate report");
+        let report =
+            run_validate(project, MigrationValidationOptions::default()).expect("validate report");
 
         assert!(!report.is_pass());
         assert!(report.checks.iter().any(|check| {
@@ -6552,7 +6805,8 @@ mod tests {
         write_project_file(project, "index.ts", "export const answer = 42;");
         write_lockfile(project);
 
-        let report = run_validate(project, false).expect("validate report");
+        let report =
+            run_validate(project, MigrationValidationOptions::default()).expect("validate report");
 
         assert!(!report.is_pass());
         assert!(report.checks.iter().any(|check| {

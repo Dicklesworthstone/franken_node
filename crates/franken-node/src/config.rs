@@ -746,6 +746,47 @@ impl Config {
         Ok(resolved)
     }
 
+    /// Resolve migration policy without requiring unrelated registry or API
+    /// credentials before a project can be assessed. This uses the ordinary
+    /// file/profile/environment precedence and validates every migration
+    /// threshold. It does not authorize guest execution: each measured native
+    /// process still resolves and enforces its own runtime configuration.
+    pub fn resolve_for_migration(
+        explicit_path: Option<&Path>,
+        cli_overrides: CliOverrides,
+    ) -> Result<ResolvedConfig, ConfigError> {
+        Self::resolve_for_migration_env(explicit_path, cli_overrides, &|key| {
+            std::env::var(key).ok()
+        })
+    }
+
+    /// Environment-injectable variant of [`Config::resolve_for_migration`].
+    pub fn resolve_for_migration_env(
+        explicit_path: Option<&Path>,
+        cli_overrides: CliOverrides,
+        env_lookup: &impl Fn(&str) -> Option<String>,
+    ) -> Result<ResolvedConfig, ConfigError> {
+        let resolved =
+            Self::resolve_without_validation_with_env(explicit_path, cli_overrides, env_lookup)?;
+        resolved.config.validate_migration()?;
+        Ok(resolved)
+    }
+
+    fn validate_migration(&self) -> Result<(), ConfigError> {
+        validate_opt_score(
+            "migration.verification_threshold",
+            self.migration.verification_threshold,
+        )?;
+        validate_opt_score(
+            "migration.confidence_level",
+            self.migration.confidence_level,
+        )?;
+        validate_opt_score(
+            "migration.determinism_rate",
+            self.migration.determinism_rate,
+        )
+    }
+
     /// Synthesize fresh fail-closed security defaults for first-run bootstrap.
     ///
     /// - If `trust.registry_signing_key` is absent, generate a fresh 32-byte
@@ -2558,18 +2599,7 @@ impl Config {
         self.runtime.validate_environment_allowlist()?;
         self.runtime.validate_frozen_module_graph_hash()?;
         self.runtime.validate_module_conditions()?;
-        validate_opt_score(
-            "migration.verification_threshold",
-            self.migration.verification_threshold,
-        )?;
-        validate_opt_score(
-            "migration.confidence_level",
-            self.migration.confidence_level,
-        )?;
-        validate_opt_score(
-            "migration.determinism_rate",
-            self.migration.determinism_rate,
-        )?;
+        self.validate_migration()?;
         validate_opt_score("trust.min_trust_score", self.trust.min_trust_score)?;
         validate_opt_score("trust.decay_factor", self.trust.decay_factor)?;
         validate_opt_pct(
@@ -3721,7 +3751,9 @@ impl std::str::FromStr for CompatibilityMode {
 pub struct MigrationConfig {
     /// Enable automatic rewrite suggestions.
     pub autofix: bool,
-    /// Doctor WARN when false. `migrate validate` does not invoke `verify lockstep`.
+    /// Require Node/Bun/native agreement over captured project tests and
+    /// workspace effects for runtime migration validation. Explicit static-only
+    /// assessment never satisfies this requirement or certifies a release.
     pub require_lockstep_validation: bool,
     /// Optional verification threshold for migration validation.
     /// When `None`, consumers use the default (0.95).
@@ -8208,6 +8240,88 @@ authorized_api_keys = ["test-api-key"]
         assert!(resolved.decisions.iter().any(|decision| {
             decision.field == "registry.builder_identity" && decision.stage == MergeStage::Env
         }));
+    }
+
+    #[test]
+    fn migration_policy_resolution_does_not_require_service_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("franken_node.toml");
+        for (profile, required) in [
+            ("strict", true),
+            ("balanced", true),
+            ("legacy-risky", false),
+        ] {
+            std::fs::write(&path, format!("profile = \"{profile}\"\n")).unwrap();
+            let resolved =
+                Config::resolve_for_migration_env(Some(&path), CliOverrides::default(), &|_| None)
+                    .unwrap();
+            assert_eq!(
+                resolved.config.migration.require_lockstep_validation,
+                required
+            );
+            assert!(resolved.config.security.authorized_api_keys.is_empty());
+            // Resolving an assessment policy must not weaken the execution
+            // boundary that still requires credentials where they are used.
+            assert!(
+                Config::resolve_with_env(Some(&path), CliOverrides::default(), &|_| None).is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn migration_policy_resolution_preserves_profile_and_environment_precedence() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("franken_node.toml");
+        std::fs::write(
+            &path,
+            r#"
+profile = "strict"
+[migration]
+require_lockstep_validation = false
+[profiles.strict.migration]
+require_lockstep_validation = true
+"#,
+        )
+        .unwrap();
+        let from_file =
+            Config::resolve_for_migration_env(Some(&path), CliOverrides::default(), &|_| None)
+                .unwrap();
+        assert!(from_file.config.migration.require_lockstep_validation);
+        let from_env =
+            Config::resolve_for_migration_env(Some(&path), CliOverrides::default(), &|key| {
+                (key == "FRANKEN_NODE_MIGRATION_REQUIRE_LOCKSTEP_VALIDATION")
+                    .then(|| "false".to_string())
+            })
+            .unwrap();
+        assert!(!from_env.config.migration.require_lockstep_validation);
+        assert!(from_env.decisions.iter().any(|decision| {
+            decision.field == "migration.require_lockstep_validation"
+                && decision.stage == MergeStage::Env
+        }));
+    }
+
+    #[test]
+    fn migration_policy_resolution_rejects_invalid_selected_inputs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("franken_node.toml");
+        for field in [
+            "verification_threshold",
+            "confidence_level",
+            "determinism_rate",
+        ] {
+            std::fs::write(&path, format!("[migration]\n{field} = 1.1\n")).unwrap();
+            let error =
+                Config::resolve_for_migration_env(Some(&path), CliOverrides::default(), &|_| None)
+                    .unwrap_err();
+            assert!(error.to_string().contains(field), "{error}");
+        }
+        std::fs::write(&path, "").unwrap();
+        assert!(
+            Config::resolve_for_migration_env(Some(&path), CliOverrides::default(), &|key| (key
+                == "FRANKEN_NODE_MIGRATION_REQUIRE_LOCKSTEP_VALIDATION")
+                .then(|| "perhaps".to_string()),)
+            .is_err()
+        );
     }
 
     #[test]

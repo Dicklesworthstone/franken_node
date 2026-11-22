@@ -753,8 +753,8 @@ profile**, not the packaging profile:
 
 | Profile | When to use | Behavior |
 |---|---|---|
-| `strict` | High-assurance environments, regulated workloads, post-incident lockdowns | Maximum trust-card freshness requirements, revocation gates on all risky actions, all divergence emits receipts, `migration.require_lockstep_validation=true` (doctor WARN when false; `migrate validate` still does not run `verify lockstep`) |
-| `balanced` | Default for most teams | Reasonable freshness windows, revocation gates on risky and dangerous classes, lockstep recommended as a separate `verify lockstep` stage |
+| `strict` | High-assurance environments, regulated workloads, post-incident lockdowns | Maximum trust-card freshness requirements, revocation gates on all risky actions, all divergence emits receipts, `migration.require_lockstep_validation=true` (runtime migration validation requires captured Node/Bun/native agreement; doctor WARNs when disabled) |
+| `balanced` | Default for most teams | Reasonable freshness windows, revocation gates on risky and dangerous classes, captured Node/Bun/native agreement required for runtime migration validation |
 | `legacy-risky` | Constrained migration windows on legacy codebases | Permits insecure compatibility behaviors when explicitly enabled by policy. Not a long-term mode. |
 
 Native execution also applies the following independent resource limits:
@@ -978,9 +978,9 @@ every leaf command available in the current build.
 | `franken-node migrate autopilot <path>` | Capture and audit the project, prepare rewrites, and compare every captured test and its filesystem effects under Node, Bun, and this native product. Requires `--execute --bun-bin <absolute-path>`. Defaults to a validated preview that does not install source edits or recover transactions; `--apply` installs only the measured candidate using the packed durable transaction journal and returns its exact rollback identity. Optional `--rollout` signs fresh installed-project validation and attempts Canary admission using the existing confidence and recovery gates. Linux only. Flags: `--execute`, `--bun-bin`, `--apply`, `--rollout`, `--signing-key`, `--rollout-signing-key`, `--out`, `--json`. |
 | `franken-node migrate rewrite <path>` | Apply migration transforms. `--emit-rollback` writes an unsigned JSON `MigrationRollbackPlan` (not Ed25519-signed) plus `.migrate-backup/` snapshots. The project path is handler-required so `--json` failures emit `franken-node/migrate-error-cli/v1` instead of a human clap error. Flags: `--apply`, `--emit-rollback`, `--json`. |
 | `franken-node migrate rollback <path>` | Inspect retained native rewrite transactions or restore one by its explicit identity. `--transaction <ID>` selects the transaction; without `--apply` the command is preview-only, and there is no latest-ID inference. The project path is handler-required so `--json` failures emit `franken-node/migrate-error-cli/v1` instead of a human clap error. Flags: `--transaction`, `--apply`, `--json`. |
-| `franken-node migrate validate <path>` | Rerun static migration audit checks and, unless `--static-only`, a transformed-runtime smoke test. Does **not** run `verify lockstep`. The project path is handler-required so `--json` failures emit `franken-node/migrate-error-cli/v1` instead of a human clap error. Flags: `--format` (json\|text), `--json`, `--static-only`. |
+| `franken-node migrate validate <path>` | Rerun static migration checks and enforce the resolved migration policy. With `require_lockstep_validation=true` (strict/balanced defaults), execute captured tests on Node, Bun and native franken-node and compare outputs and workspace effects. Captured three-runtime validation currently requires Linux. Missing tests/runtimes or inconclusive evidence cannot fall back to a passing smoke test. `--static-only` reports static scope without executing code; it does not satisfy runtime validation. The project path is handler-required so `--json` failures emit `franken-node/migrate-error-cli/v1`. Flags include `--format` (json\|text), `--json`, `--static-only`, and `--bun-bin` (explicit three-runtime selection). |
 | `franken-node migrate rollout <path>` | Drive the progressive rollout state machine (shadow → canary → ramp → default) with fail-closed gates. `--action` is `promote` (default), `rollback`, or `status`; `--stage` overrides the target stage; `--ramp-pct` applies in ramp stage. The state machine records stages and evidence; it does not start or route traffic to instances. Leaving Shadow requires `--lockstep-report <path>`, the JSON printed by `franken-node verify lockstep <project> --json`. The report must have verdict Pass, include a franken leg and a reference leg, and match the project's current input. Without it the promotion fails closed. `--force` bypasses the confidence and evidence checks but never records `lockstep_verified`. `--no-auto-rollback` disables automatic rollback on verification failure. The project path is handler-required so `--json` failures emit `franken-node/migrate-error-cli/v1` instead of a human clap error. Flags: `--migration-id`, `--action`, `--stage`, `--ramp-pct`, `--lockstep-report`, `--force`, `--no-auto-rollback`, `--json`. |
-| `franken-node migrate-report <path>` | Export one-command migration assessment. The project path is handler-required so `--json` failures emit `franken-node/migrate-error-cli/v1` instead of a human clap error. Flags: `--format` (json\|html), `--json` (alias for `--format json`), `--output`. |
+| `franken-node migrate-report <path>` | Export one-command migration assessment with the same resolved runtime validation policy and explicit static scope as `migrate validate`. The project path is handler-required so `--json` failures emit `franken-node/migrate-error-cli/v1`. Flags: `--format` (json\|html), `--json` (alias for `--format json`), `--output`, `--static-only`, `--bun-bin`. |
 
 For a complete checked migration in one process:
 
@@ -1549,7 +1549,7 @@ default_receipt_ttl_secs = 3600
 [migration]
 # Enable automatic rewrite suggestions
 autofix = true
-# Doctor WARN when false. `migrate validate` does not invoke `verify lockstep`.
+# Require captured Node/Bun/native agreement for runtime migration validation.
 require_lockstep_validation = true
 
 [trust]
@@ -2962,7 +2962,7 @@ convention. The most common:
 | `FRANKEN_NODE_OBSERVABILITY_NAMESPACE` | `observability.namespace` | Metrics namespace |
 | `FRANKEN_NODE_OBSERVABILITY_EMIT_STRUCTURED_AUDIT_EVENTS` | `observability.emit_structured_audit_events` | `true`/`false` |
 | `FRANKEN_NODE_MIGRATION_AUTOFIX` | `migration.autofix` | Autofix toggle |
-| `FRANKEN_NODE_MIGRATION_REQUIRE_LOCKSTEP_VALIDATION` | `migration.require_lockstep_validation` | Doctor WARN when false; `migrate validate` still does not run `verify lockstep` |
+| `FRANKEN_NODE_MIGRATION_REQUIRE_LOCKSTEP_VALIDATION` | `migration.require_lockstep_validation` | Require captured Node/Bun/native output and workspace-effect agreement for runtime `migrate validate` and `migrate-report`; doctor WARNs when false. Explicit static-only results remain static assessments. |
 | `FRANKEN_NODE_SECURITY_MAX_MERGE_DECISIONS` | (security cap) | Bounded decision history |
 | `FRANKEN_NODE_BENCHMARK_MIN_THROUGHPUT_OPS` / `..._MAX_LATENCY_MS` / `..._MIN_AGGREGATE_SCORE` | bench thresholds | Bench gate parameters |
 | `RUST_LOG` | (none) | `tracing-subscriber` filter expression for diagnostic logging |
@@ -3894,11 +3894,25 @@ Stage details:
    `MigrationRollbackPlan` (not Ed25519-signed) plus `.migrate-backup/`
    snapshots so the transformation can be unwound from file contents.
 3. **Validate** (`migrate validate <path>`) reruns static migration
-   audit checks and, unless `--static-only`, a transformed-runtime
-   smoke test (franken-node, node, or bun). It does not run
-   `verify lockstep`. Doctor WARNs when
-   `migration.require_lockstep_validation` is false; that flag does
-   not make `migrate validate` invoke lockstep.
+   audit checks and honors `migration.require_lockstep_validation`.
+   The strict and balanced defaults require the captured project tests
+   to agree on Node, Bun and native franken-node, including persistent
+   workspace changes. Captured three-runtime validation currently runs on
+   Linux; static assessment remains available on other platforms.
+   Bun is discovered outside the project on absolute `PATH` entries,
+   or selected explicitly with `--bun-bin /absolute/bun`.
+   Missing tests, unavailable runtimes, reference disagreement and failed
+   native execution are non-passing results. For a project without a
+   discovered test suite, explicitly select an entry in
+   `.franken-node/migration-tests.json`, for example
+   `{"schema_version":"franken-node/migration-tests/v1","tests":["index.cjs"]}`.
+   `--static-only` executes no code and reports `validation_scope=static`,
+   `lockstep_performed=false`; even a static PASS does not establish
+   runtime readiness. Disabling the requirement retains the paired-suite
+   or native-smoke path, while explicit `--bun-bin` still selects all three
+   runtimes. These comparisons execute trusted project code with the
+   selected runtimes' authority; workspace copies are not an OS sandbox.
+   The result is scoped behavioral evidence, not release certification.
 4. **Rollout** uses the configured fleet store (the local file
    transport, or a `fleet serve` coordinator):
    `franken-node fleet release --incident <migration-id>` emits the
@@ -3906,7 +3920,9 @@ Stage details:
 
 `franken-node migrate-report` produces a single-document operator
 assessment that summarizes the audit and (if run) the validation result
-in HTML or JSON.
+in HTML or JSON. It honors the same migration validation policy and supports
+`--bun-bin` and `--static-only`; a static assessment never reports that runtime
+rollout prerequisites have passed.
 
 ---
 

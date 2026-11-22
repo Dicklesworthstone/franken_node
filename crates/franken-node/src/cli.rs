@@ -144,7 +144,7 @@ pub enum Command {
     #[command(subcommand)]
     Proofs(ProofsCommand),
 
-    /// Migration audit, rewrite, and validation (rollback JSON is unsigned; validate is not lockstep).
+    /// Migration audit, rewrite, and policy-governed runtime validation.
     #[command(subcommand)]
     Migrate(MigrateCommand),
 
@@ -1673,10 +1673,8 @@ pub struct MigrateValidateArgs {
     #[arg(long)]
     pub json: bool,
 
-    /// Run only the deterministic static checks and skip the transformed-runtime
-    /// smoke test. Use this in CI/golden contexts where no JavaScript runtime is
-    /// guaranteed (the smoke test executes the project and its result depends on
-    /// which runtime is installed).
+    /// Assess static checks without executing project code. A static PASS does
+    /// not satisfy a configured lockstep requirement or certify runtime behavior.
     #[arg(long)]
     pub static_only: bool,
 
@@ -1690,8 +1688,9 @@ pub struct MigrateValidateArgs {
     )]
     pub attest: bool,
 
-    /// Absolute Bun executable for attested three-runtime validation.
-    #[arg(long, requires = "attest")]
+    /// Request Node/Bun/native validation using this trusted absolute Bun
+    /// executable. Required validation otherwise discovers Bun on PATH.
+    #[arg(long, conflicts_with = "static_only")]
     pub bun_bin: Option<PathBuf>,
 
     /// Dedicated owner-only 32-byte raw Ed25519 seed outside both projects.
@@ -1968,6 +1967,16 @@ pub struct MigrateReportArgs {
     /// all-commands `--json` contract.
     #[arg(long)]
     pub json: bool,
+
+    /// Assess static checks without executing project code; this does not
+    /// satisfy the configured runtime lockstep requirement.
+    #[arg(long)]
+    pub static_only: bool,
+
+    /// Request Node/Bun/native validation using this trusted absolute Bun
+    /// executable. Required validation otherwise discovers Bun on PATH.
+    #[arg(long, conflicts_with = "static_only")]
+    pub bun_bin: Option<PathBuf>,
 
     /// Output file path. When omitted, the report is written to stdout.
     #[arg(long, alias = "out", value_parser = parse_safe_content_pathbuf)]
@@ -7381,7 +7390,6 @@ mod tests {
     fn migrate_validate_attestation_options_cannot_silently_use_ordinary_validation() {
         for flags in [
             vec!["--attest"],
-            vec!["--bun-bin", "/bun"],
             vec!["--signing-key", "/key"],
             vec!["--out", "/report"],
             vec!["--execute"],
@@ -7394,6 +7402,76 @@ mod tests {
             command.extend(flags);
             assert!(Cli::try_parse_from(&command).is_err(), "{command:?}");
         }
+    }
+
+    #[test]
+    fn migrate_validate_accepts_explicit_bun_without_signing_or_attestation() {
+        let cli = Cli::try_parse_from([
+            "franken-node",
+            "migrate",
+            "validate",
+            "/project",
+            "--bun-bin",
+            "/bun",
+            "--json",
+        ])
+        .unwrap();
+        let Command::Migrate(MigrateCommand::Validate(args)) = cli.command else {
+            panic!("wrong command");
+        };
+        assert_eq!(args.bun_bin, Some(PathBuf::from("/bun")));
+        assert!(!args.attest && !args.static_only && args.json);
+        assert!(
+            Cli::try_parse_from([
+                "franken-node",
+                "migrate",
+                "validate",
+                "/project",
+                "--bun-bin",
+                "/bun",
+                "--static-only",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn migrate_report_distinguishes_static_assessment_from_runtime_selection() {
+        let cli = Cli::try_parse_from([
+            "franken-node",
+            "migrate-report",
+            "/project",
+            "--static-only",
+        ])
+        .unwrap();
+        let Command::MigrateReport(args) = cli.command else {
+            panic!("wrong command");
+        };
+        assert!(args.static_only && args.bun_bin.is_none());
+        let cli = Cli::try_parse_from([
+            "franken-node",
+            "migrate-report",
+            "/project",
+            "--bun-bin",
+            "/bun",
+        ])
+        .unwrap();
+        let Command::MigrateReport(args) = cli.command else {
+            panic!("wrong command");
+        };
+        assert!(!args.static_only);
+        assert_eq!(args.bun_bin, Some(PathBuf::from("/bun")));
+        assert!(
+            Cli::try_parse_from([
+                "franken-node",
+                "migrate-report",
+                "/project",
+                "--static-only",
+                "--bun-bin",
+                "/bun",
+            ])
+            .is_err()
+        );
     }
 
     #[test]

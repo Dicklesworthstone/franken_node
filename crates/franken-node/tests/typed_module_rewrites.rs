@@ -239,7 +239,11 @@ fn public_validation_refuses_stripped_script_semantics_before_any_runtime_launch
             manifest["scripts"]["presmoke"] = "node setup.js".into();
         }
         fs::write(root.path().join("package.json"), manifest.to_string()).unwrap();
-        let report = migration::run_validate(root.path(), false).unwrap();
+        let report = migration::run_validate(
+            root.path(),
+            migration::MigrationValidationOptions::default(),
+        )
+        .unwrap();
         assert!(!report.is_pass(), "{report:#?}");
         assert!(report.test_suite.is_none());
         assert!(

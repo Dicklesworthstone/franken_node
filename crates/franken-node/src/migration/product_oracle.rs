@@ -287,6 +287,11 @@ pub(super) fn run_captured_cancellable(
         identities[0].sha256 != identities[1].sha256,
         "Node and Bun references must have distinct executable hashes"
     );
+    ensure!(
+        identities[2].sha256 != identities[0].sha256
+            && identities[2].sha256 != identities[1].sha256,
+        "native runtime must have different executable bytes from both references"
+    );
     execute_cancellable(
         snapshots[0],
         snapshots[1],
