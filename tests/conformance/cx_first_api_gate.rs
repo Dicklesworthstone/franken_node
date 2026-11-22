@@ -107,7 +107,8 @@ fn write_verification_artifacts(
 fn cx_first_policy_gate_has_no_non_excepted_violations() {
     let root = repo_root();
     assert!(
-        root.join("artifacts/10.15/cx_first_compliance.csv").is_file(),
+        root.join("artifacts/10.15/cx_first_compliance.csv")
+            .is_file(),
         "checked-in cx_first_compliance.csv artifact must exist"
     );
     assert!(
@@ -128,7 +129,8 @@ fn cx_first_policy_gate_has_no_non_excepted_violations() {
     };
     let csv_path = output_root.join("artifacts/10.15/cx_first_compliance.csv");
     cx_first_policy::write_compliance_csv(&report, &csv_path).expect("compliance csv should write");
-    write_verification_artifacts(&report, output_root).expect("verification artifacts should write");
+    write_verification_artifacts(&report, output_root)
+        .expect("verification artifacts should write");
 
     let csv_text = std::fs::read_to_string(csv_path).expect("csv should exist");
     assert!(

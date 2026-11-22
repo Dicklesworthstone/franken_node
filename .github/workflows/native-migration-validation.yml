@@ -5,6 +5,10 @@ on:
     branches: [main]
     paths:
       - '.github/workflows/native-migration-validation.yml'
+      - '.github/actions/franken-siblings/action.yml'
+      - 'scripts/bootstrap_source.sh'
+      - 'packaging/source-siblings.tsv'
+      - 'rust-toolchain.toml'
       - 'crates/franken-node/src/migration/**'
       - 'crates/franken-node/tests/migrate_cli_e2e.rs'
       - 'crates/franken-node/tests/native_project_suite_cli.rs'
@@ -15,6 +19,10 @@ on:
   pull_request:
     paths:
       - '.github/workflows/native-migration-validation.yml'
+      - '.github/actions/franken-siblings/action.yml'
+      - 'scripts/bootstrap_source.sh'
+      - 'packaging/source-siblings.tsv'
+      - 'rust-toolchain.toml'
       - 'crates/franken-node/src/migration/**'
       - 'crates/franken-node/tests/migrate_cli_e2e.rs'
       - 'crates/franken-node/tests/native_project_suite_cli.rs'
@@ -267,23 +275,25 @@ jobs:
         with:
           path: franken_node
           persist-credentials: false
-      - name: Checkout declared sibling development dependencies
+      - name: Materialize the pinned native admission source set
         run: |
           set -euo pipefail
           mkdir -p evidence
-          git -C franken_node rev-parse HEAD > evidence/franken_node.revision
-          for repo in franken_engine frankentui fastapi_rust sqlmodel_rust asupersync frankensqlite; do
-            git clone --depth 1 "https://github.com/Dicklesworthstone/$repo.git" "$repo"
+          bash franken_node/scripts/bootstrap_source.sh \
+            --workspace "$GITHUB_WORKSPACE/franken_node" \
+            --engine-ref 763389e24a84171abf381cb85ccf7aec2c0e2ff9 \
+            --receipt "$GITHUB_WORKSPACE/evidence/source-inputs.tsv"
+          for repo in franken_node franken_engine frankentui fastapi_rust sqlmodel_rust; do
             git -C "$repo" rev-parse HEAD > "evidence/$repo.revision"
           done
-          sudo mkdir -p /dp
-          for repo in franken_node franken_engine frankentui fastapi_rust sqlmodel_rust asupersync frankensqlite; do
-            sudo ln -s "$GITHUB_WORKSPACE/$repo" "/dp/$repo"
-          done
-      - name: Install Rust required by fsqlite-pager
+          cat evidence/source-inputs.tsv
+      - name: Install the workspace-pinned Rust toolchain
+        working-directory: franken_node
         run: |
-          rustup toolchain install nightly --profile minimal --component rustfmt --component clippy
-          rustc +nightly --version | tee evidence/rust-version.txt
+          set -euo pipefail
+          channel=$(python3 -c 'import pathlib, tomllib; print(tomllib.loads(pathlib.Path("rust-toolchain.toml").read_text())["toolchain"]["channel"])')
+          rustup toolchain install "$channel" --profile minimal --component rustfmt --component clippy
+          rustc --version | tee ../evidence/rust-version.txt
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
       - name: Record actual attested validation references
         run: |
@@ -294,17 +304,17 @@ jobs:
         run: |
           set -euo pipefail
           for path in crates/franken-node/src/migration/mod.rs crates/franken-node/src/migration/smoke_supervisor.rs crates/franken-node/src/migration/validation_suite.rs crates/franken-node/tests/migrate_cli_e2e.rs crates/franken-node/tests/native_project_suite_cli.rs; do
-            rustfmt +nightly --edition 2024 --config skip_children=true --emit stdout "$path" > /dev/null
+            rustfmt --edition 2024 --config skip_children=true --emit stdout "$path" > /dev/null
           done
       - name: Compile and run native admission regressions
         working-directory: franken_node
         run: |
           set -euo pipefail
-          cargo +nightly test -p frankenengine-node --features test-support --test migrate_cli_e2e native_project_suite_cli -- --nocapture --test-threads=2 2>&1 | tee ../evidence/primary-suite-cli.log
-          cargo +nightly test -p frankenengine-node --features test-support --test migrate_cli_e2e native_smoke_admission_regressions -- --nocapture 2>&1 | tee ../evidence/native-admission.log
-          cargo +nightly test -p frankenengine-node --features test-support --test migrate_cli_e2e native_smoke_supervisor -- --nocapture 2>&1 | tee ../evidence/native-supervisor-integration.log
-          cargo +nightly test -p frankenengine-node --features test-support --test migrate_cli_e2e migrate_validate_native_failure_never_launches_hanging_reference -- --nocapture 2>&1 | tee ../evidence/no-reference-fallback.log
-          cargo +nightly test -p frankenengine-node --features test-support --test migrate_cli_e2e migrate_validate_passes_for_hardened_project -- --nocapture 2>&1 | tee ../evidence/native-positive-smoke.log
+          cargo test --locked -p frankenengine-node --features test-support --test migrate_cli_e2e native_project_suite_cli -- --nocapture --test-threads=2 2>&1 | tee ../evidence/primary-suite-cli.log
+          cargo test --locked -p frankenengine-node --features test-support --test migrate_cli_e2e native_smoke_admission_regressions -- --nocapture 2>&1 | tee ../evidence/native-admission.log
+          cargo test --locked -p frankenengine-node --features test-support --test migrate_cli_e2e native_smoke_supervisor -- --nocapture 2>&1 | tee ../evidence/native-supervisor-integration.log
+          cargo test --locked -p frankenengine-node --features test-support --test migrate_cli_e2e migrate_validate_native_failure_never_launches_hanging_reference -- --nocapture 2>&1 | tee ../evidence/no-reference-fallback.log
+          cargo test --locked -p frankenengine-node --features test-support --test migrate_cli_e2e migrate_validate_passes_for_hardened_project -- --nocapture 2>&1 | tee ../evidence/native-positive-smoke.log
       - name: Preserve native application build evidence
         if: always()
         uses: actions/upload-artifact@v4

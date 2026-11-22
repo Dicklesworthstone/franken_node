@@ -143,12 +143,10 @@ pub enum PublisherSourceIdentityError {
 impl std::fmt::Display for PublisherSourceIdentityError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::ExpectedIdentityInvalid => formatter.write_str(
-                "expected publisher identity requires canonical SHA-256 commitments",
-            ),
-            Self::ExpectedIdentityMismatch => formatter.write_str(
-                "authenticated publisher source does not match the expected identity",
-            ),
+            Self::ExpectedIdentityInvalid => formatter
+                .write_str("expected publisher identity requires canonical SHA-256 commitments"),
+            Self::ExpectedIdentityMismatch => formatter
+                .write_str("authenticated publisher source does not match the expected identity"),
             Self::Source(error) => std::fmt::Display::fmt(error, formatter),
         }
     }

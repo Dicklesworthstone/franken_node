@@ -26,7 +26,8 @@ use frankenengine_verifier_sdk::publisher_source::{
     MAX_PUBLISHER_SOURCE_INPUT_BYTES, MAX_PUBLISHER_SOURCE_TRUST_INPUT_BYTES, PublisherSourceError,
     PublisherSourceExpectedIdentity, PublisherSourceIdentityError, PublisherTrustAnchors,
     verify_publisher_source_input, verify_publisher_source_input_with_expected_identity,
-    verify_publisher_source_trust_input, verify_publisher_source_trust_input_with_expected_identity,
+    verify_publisher_source_trust_input,
+    verify_publisher_source_trust_input_with_expected_identity,
 };
 use frankenengine_verifier_sdk::resolution::{
     ResolutionReceiptError, verify_signed_resolution_receipt,
@@ -465,9 +466,9 @@ fn counterfactual_failure(error: &CounterfactualReceiptError) -> Failure {
         CounterfactualReceiptError::Signature(BundleError::Ed25519SignatureInvalid) => {
             "SIGNATURE_INVALID"
         }
-        CounterfactualReceiptError::Signature(BundleError::Ed25519SignatureMalformed { .. }) => {
-            "SIGNATURE_MALFORMED"
-        }
+        CounterfactualReceiptError::Signature(BundleError::Ed25519SignatureMalformed {
+            ..
+        }) => "SIGNATURE_MALFORMED",
         _ => "EVIDENCE_INVALID",
     };
     failure(code, "signed counterfactual receipt verification failed")

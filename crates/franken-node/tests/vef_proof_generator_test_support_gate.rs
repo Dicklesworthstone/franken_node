@@ -148,7 +148,9 @@ fn test_proof_backend_requires_test_support_feature() {
         .expect("Cargo.toml [features] table");
 
     for production_umbrella in ["default", "extended-surfaces"] {
-        let enabled = features[production_umbrella].as_array().expect("feature list");
+        let enabled = features[production_umbrella]
+            .as_array()
+            .expect("feature list");
         assert!(
             !enabled
                 .iter()
@@ -162,7 +164,8 @@ fn test_proof_backend_requires_test_support_feature() {
     );
 
     let proof_generator_path = crate_dir().join("src/vef/proof_generator.rs");
-    let source = fs::read_to_string(&proof_generator_path).expect("read src/vef/proof_generator.rs");
+    let source =
+        fs::read_to_string(&proof_generator_path).expect("read src/vef/proof_generator.rs");
     let gated_count = verify_test_proof_backend_source_gating(&source)
         .expect("production proof_generator.rs must gate TestProofBackend behind test-support");
     assert!(
@@ -214,8 +217,10 @@ fn main() {
             "",
             probe_source,
         );
-        let production_output =
-            cargo_check(&temp_dir.path().join("probe-production"), &production_target);
+        let production_output = cargo_check(
+            &temp_dir.path().join("probe-production"),
+            &production_target,
+        );
         assert!(
             !production_output.status.success(),
             "production surface should not expose TestProofBackend"

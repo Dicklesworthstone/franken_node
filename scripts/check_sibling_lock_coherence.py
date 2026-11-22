@@ -50,6 +50,7 @@ ENGINE_PINNED_WORKFLOWS = (
     "inline-lib-tests-gate.yml",
     "module-graph.yml",
     "native-egress.yml",
+    "native-migration-validation.yml",
 )
 
 
