@@ -369,28 +369,7 @@ impl Config {
     /// ```
     #[allow(dead_code)]
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
-        // Open file and check size atomically to prevent TOCTOU file swapping
-        let mut file = File::open(path).map_err(|e| ConfigError::ReadFailed(path.into(), e))?;
-        let metadata = file
-            .metadata()
-            .map_err(|e| ConfigError::ReadFailed(path.into(), e))?;
-        if metadata.len() > MAX_CONFIG_FILE_BYTES {
-            return Err(ConfigError::ReadFailed(
-                path.into(),
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!(
-                        "Config file too large: {} bytes (limit: {} bytes)",
-                        metadata.len(),
-                        MAX_CONFIG_FILE_BYTES
-                    ),
-                ),
-            ));
-        }
-
-        let mut content = String::new();
-        file.read_to_string(&mut content)
-            .map_err(|e| ConfigError::ReadFailed(path.into(), e))?;
+        let content = read_config_content(path)?;
         let parsed: Self =
             toml::from_str(&content).map_err(|e| ConfigError::ParseFailed(path.into(), e))?;
         parsed.validate()?;
@@ -3308,16 +3287,54 @@ impl ConfigDocument {
 }
 
 fn read_config_content(path: &Path) -> Result<String, ConfigError> {
-    let file = File::open(path).map_err(|e| ConfigError::ReadFailed(path.into(), e))?;
-    let metadata = file
-        .metadata()
-        .map_err(|e| ConfigError::ReadFailed(path.into(), e))?;
-    if !metadata.is_file() || metadata.len() > MAX_CONFIG_FILE_BYTES {
+    let observed = std::fs::metadata(path).map_err(|e| ConfigError::ReadFailed(path.into(), e))?;
+    if !observed.is_file() {
         return Err(ConfigError::ReadFailed(
             path.into(),
             std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                "Config must be a regular file no larger than 1048576 bytes",
+                "Config must be a regular file",
+            ),
+        ));
+    }
+    // Config paths may intentionally be symlinks, but a substituted FIFO must
+    // never block before the opened descriptor's type can be checked.
+    #[cfg(unix)]
+    let file = {
+        use rustix::fs::{Mode, OFlags, open};
+        File::from(
+            open(
+                path,
+                OFlags::RDONLY | OFlags::NONBLOCK | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(|e| ConfigError::ReadFailed(path.into(), e.into()))?,
+        )
+    };
+    #[cfg(not(unix))]
+    let file = File::open(path).map_err(|e| ConfigError::ReadFailed(path.into(), e))?;
+    let metadata = file
+        .metadata()
+        .map_err(|e| ConfigError::ReadFailed(path.into(), e))?;
+    if !metadata.is_file() {
+        return Err(ConfigError::ReadFailed(
+            path.into(),
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Config must be a regular file",
+            ),
+        ));
+    }
+    if metadata.len() > MAX_CONFIG_FILE_BYTES {
+        return Err(ConfigError::ReadFailed(
+            path.into(),
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "Config file too large: {} bytes (limit: {} bytes)",
+                    metadata.len(),
+                    MAX_CONFIG_FILE_BYTES
+                ),
             ),
         ));
     }
@@ -6788,6 +6805,21 @@ authorized_api_keys = ["test-api-key"]
             "Error should include byte counts: {}",
             error_msg
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_preserves_regular_config_symlinks_and_refuses_directories() {
+        let dir = tempfile::tempdir().expect("config fixture");
+        let path = dir.path().join("operator.toml");
+        std::fs::write(&path, admitted_config_fixture()).expect("regular config");
+        let link = dir.path().join("franken_node.toml");
+        std::os::unix::fs::symlink(&path, &link).expect("intentional config link");
+        let loaded = Config::load(&link).expect("regular config symlinks remain supported");
+        assert_eq!(loaded.profile, Profile::Balanced);
+        assert_eq!(loaded.runtime.max_instructions, Some(9000));
+        let error = Config::load(dir.path()).expect_err("a directory is not config input");
+        assert!(error.to_string().contains("regular file"));
     }
 
     fn admitted_config_fixture() -> String {

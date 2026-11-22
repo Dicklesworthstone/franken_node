@@ -1,0 +1,49 @@
+{
+  "summary_id": "issue-11-init-special-file-refusal",
+  "contract_version": "1.0",
+  "change_summary": {
+    "intent": "Reject FIFO and unsafe backup sources promptly during initialization while preserving operator files and bounded configuration reads.",
+    "scope": {
+      "subsystems": ["franken_node.init", "franken_node.config"],
+      "modules": ["crates/franken-node/src/main.rs", "crates/franken-node/src/config.rs"]
+    },
+    "surface_area_delta": {
+      "new_apis": [],
+      "removed_apis": [],
+      "changed_signatures": []
+    },
+    "affected_contracts": {
+      "beads": ["bd-34d5"],
+      "documents": ["docs/plans/PLAN_TO_CREATE_FRANKEN_NODE.md"]
+    },
+    "operational_impact": {
+      "operator_notes": "Init backup sources must be regular files and cannot be symlinks or reparse points. Known invalid sources are checked before either generated file is published. Ordinary config symlinks to regular files remain supported.",
+      "required_actions": ["Use regular files as init backup inputs; retain any intentional config symlink separately before replacing it with a generated file."],
+      "rollout_notes": "Unix opens use NONBLOCK and descriptor checks; backup opens also use NOFOLLOW and inode identity checks. Existing private atomic publication remains unchanged. Multi-file publication is not claimed atomic against concurrent path replacement."
+    },
+    "risk_delta": {
+      "previous_tier": "medium",
+      "new_tier": "low",
+      "rationale": "Rejecting special files before reads and rechecking descriptors prevents FIFO hangs and unsafe backup traversal. Config::load shares the existing bounded reader instead of its duplicated unbounded read."
+    },
+    "compatibility": {
+      "backward_compatibility": "breaking",
+      "forward_compatibility": "enables",
+      "details": "Backup sources that are symlinks are now explicitly refused. Regular backups, overwrite behavior and intentional regular-file config symlinks retain their existing contracts. No CLI flags or schemas change."
+    },
+    "dependency_changes": {"added": [], "removed": [], "updated": []}
+  },
+  "validation": {
+    "base_commit": "61909c6c0409efd4f35a68fccbdf77f08d02acd3",
+    "toolchain": "nightly-2026-09-21",
+    "regressions": [
+      "init_backup_rejects_fifo_sources_without_blocking",
+      "init_backup_rejects_symlink_sources_without_modifying_targets",
+      "write_policy_rejects_directory_backup_source_without_publication",
+      "write_policy_rejects_symlink_backup_source_without_publication",
+      "load_preserves_regular_config_symlinks_and_refuses_directories"
+    ],
+    "runtime_status": "Full init CLI regression tests have not completed. An isolated exact-source backup-helper harness and minimal engine-feature library check were attempted before executor loss; neither had produced a passing result at that point. Final validation outcomes are recorded in the commit message.",
+    "static_status": "Pinned rustfmt completed on all three changed Rust files after executor restoration. Final whitespace and change-summary validation are recorded in the commit message."
+  }
+}

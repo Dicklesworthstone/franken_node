@@ -278,58 +278,129 @@ fn init_backup_rejects_fifo_sources_without_blocking() {
     use std::os::unix::fs::FileTypeExt as _;
 
     let seed = TempDir::new().expect("bootstrap seed");
-    let project = TempDir::new().expect("private FIFO project");
     let home = TempDir::new().expect("isolated home");
     let initial = init_with_public_umask(seed.path(), home.path(), &[]);
     assert!(initial.status.success(), "{initial:?}");
-    let config = std::fs::read(seed.path().join("franken_node.toml")).unwrap();
-    std::fs::write(project.path().join("franken_node.toml"), &config).unwrap();
-    let fifo = project.path().join("franken_node.profile_examples.toml");
-    rustix::fs::mkfifoat(
-        rustix::fs::CWD,
-        &fifo,
-        rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
-    )
-    .expect("create an actual FIFO without a writer");
+    for (name, other) in [
+        ("franken_node.toml", "franken_node.profile_examples.toml"),
+        ("franken_node.profile_examples.toml", "franken_node.toml"),
+    ] {
+        let project = TempDir::new().expect("private FIFO project");
+        let mut preserved = b"# Keep this operator comment on refusal.\n".to_vec();
+        preserved.extend(std::fs::read(seed.path().join(other)).unwrap());
+        std::fs::write(project.path().join(other), &preserved).unwrap();
+        let fifo = project.path().join(name);
+        rustix::fs::mkfifoat(
+            rustix::fs::CWD,
+            &fifo,
+            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+        )
+        .expect("create an actual FIFO without a writer");
 
-    let mut command = assert_cmd::Command::new(franken_node_binary());
-    command
-        .current_dir(project.path())
-        .env_clear()
-        .env("HOME", home.path())
-        .env("USERPROFILE", home.path())
-        .env("XDG_CONFIG_HOME", home.path())
-        .args([
-            "init",
-            "--profile",
-            "balanced",
-            "--no-state",
-            "--out-dir",
-            ".",
-            "--backup-existing",
-        ])
-        .timeout(std::time::Duration::from_secs(3));
-    // A killed timeout has no exit code and cannot satisfy this assertion.
-    let assertion = command.assert().code(1);
-    let error = String::from_utf8_lossy(&assertion.get_output().stderr);
-    assert!(error.contains("regular file"), "{error}");
-    assert!(
-        std::fs::symlink_metadata(&fifo)
-            .unwrap()
-            .file_type()
-            .is_fifo()
-    );
-    assert!(
-        std::fs::read(project.path().join("franken_node.toml")).unwrap() == config,
-        "refusing the FIFO changed configured key values"
-    );
-    assert!(std::fs::read_dir(project.path()).unwrap().all(|entry| {
-        !entry
-            .unwrap()
-            .file_name()
-            .to_string_lossy()
-            .starts_with("franken_node.profile_examples.toml.bak.")
-    }));
+        let mut command = assert_cmd::Command::new(franken_node_binary());
+        command
+            .current_dir(project.path())
+            .env_clear()
+            .env("HOME", home.path())
+            .env("USERPROFILE", home.path())
+            .env("XDG_CONFIG_HOME", home.path())
+            .args([
+                "init",
+                "--profile",
+                "balanced",
+                "--no-state",
+                "--out-dir",
+                ".",
+                "--backup-existing",
+            ])
+            .timeout(std::time::Duration::from_secs(3));
+        // A killed timeout has no exit code and cannot satisfy this assertion.
+        let assertion = command.assert().code(1);
+        let error = String::from_utf8_lossy(&assertion.get_output().stderr);
+        assert!(error.contains("regular file"), "{name}: {error}");
+        assert!(
+            std::fs::symlink_metadata(&fifo)
+                .unwrap()
+                .file_type()
+                .is_fifo()
+        );
+        assert_eq!(
+            std::fs::read(project.path().join(other)).unwrap(),
+            preserved,
+            "refusing {name} changed the other generated file"
+        );
+        assert_eq!(
+            std::fs::read_dir(project.path()).unwrap().count(),
+            2,
+            "refusing {name} must not publish any backup or staging file"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn init_backup_rejects_symlink_sources_without_modifying_targets() {
+    use std::os::unix::fs::symlink;
+
+    let seed = TempDir::new().expect("bootstrap seed");
+    let home = TempDir::new().expect("isolated home");
+    let initial = init_with_public_umask(seed.path(), home.path(), &[]);
+    assert!(initial.status.success(), "{initial:?}");
+    for (name, other) in [
+        ("franken_node.toml", "franken_node.profile_examples.toml"),
+        ("franken_node.profile_examples.toml", "franken_node.toml"),
+    ] {
+        let project = TempDir::new().expect("private symlink project");
+        let outside = TempDir::new().expect("outside backup target");
+        let original = std::fs::read(seed.path().join(name)).unwrap();
+        let target = outside.path().join(name);
+        std::fs::write(&target, &original).unwrap();
+        let link = project.path().join(name);
+        symlink(&target, &link).unwrap();
+        let mut preserved = b"# Keep this operator comment on refusal.\n".to_vec();
+        preserved.extend(std::fs::read(seed.path().join(other)).unwrap());
+        std::fs::write(project.path().join(other), &preserved).unwrap();
+
+        let mut command = assert_cmd::Command::new(franken_node_binary());
+        command
+            .current_dir(project.path())
+            .env_clear()
+            .env("HOME", home.path())
+            .env("USERPROFILE", home.path())
+            .env("XDG_CONFIG_HOME", home.path())
+            .args([
+                "init",
+                "--profile",
+                "balanced",
+                "--no-state",
+                "--out-dir",
+                ".",
+                "--backup-existing",
+                "--json",
+            ])
+            .timeout(std::time::Duration::from_secs(3));
+        let assertion = command.assert().code(1);
+        let error: serde_json::Value =
+            serde_json::from_slice(&assertion.get_output().stdout).expect("JSON init refusal");
+        assert_eq!(error["schema_version"], "franken-node/init-error-cli/v1");
+        assert_eq!(error["ok"], false);
+        assert!(
+            error["error"].as_str().unwrap().contains("regular file"),
+            "{name}: {error}"
+        );
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(std::fs::read(target).unwrap(), original);
+        assert_eq!(
+            std::fs::read(project.path().join(other)).unwrap(),
+            preserved
+        );
+        assert_eq!(std::fs::read_dir(project.path()).unwrap().count(), 2);
+    }
 }
 
 #[test]

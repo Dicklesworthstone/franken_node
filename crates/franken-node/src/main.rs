@@ -10863,6 +10863,72 @@ fn build_backup_path(path: &Path, timestamp_suffix: &str) -> PathBuf {
     }
 }
 
+/// Refuse special files before opening them, then validate the opened object
+/// again. NONBLOCK and NOFOLLOW close the FIFO/symlink substitution window
+/// between inspecting a backup source and opening it.
+fn open_init_backup_source(path: &Path) -> Result<Option<std::fs::File>> {
+    let observed = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("failed inspecting init backup source {}", path.display())
+            });
+        }
+    };
+    anyhow::ensure!(
+        observed.is_file(),
+        "init backup source must be a regular file: {}",
+        path.display()
+    );
+    #[cfg(unix)]
+    let file = {
+        use rustix::fs::{Mode, OFlags, open};
+        std::fs::File::from(open(
+            path,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::empty(),
+        )?)
+    };
+    #[cfg(windows)]
+    let file = {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)?
+    };
+    #[cfg(not(any(unix, windows)))]
+    let file = std::fs::File::open(path)?;
+    let opened = file.metadata()?;
+    anyhow::ensure!(
+        opened.is_file(),
+        "init backup source must be a regular file: {}",
+        path.display()
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        anyhow::ensure!(
+            observed.dev() == opened.dev() && observed.ino() == opened.ino(),
+            "init backup source changed while opening {}",
+            path.display()
+        );
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt as _;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+        anyhow::ensure!(
+            opened.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0,
+            "init backup source must be a regular file without a reparse point: {}",
+            path.display()
+        );
+    }
+    Ok(Some(file))
+}
+
 /// Stage sensitive contents privately and sync them before atomic publication.
 fn write_private_file(path: &Path, mut source: impl std::io::Read, overwrite: bool) -> Result<()> {
     let parent = normalized_directory(path.parent().unwrap_or_else(|| Path::new(".")));
@@ -10903,8 +10969,8 @@ fn apply_init_write_policy(
     if path.symlink_metadata().is_ok() {
         if backup_existing {
             let backup_path = build_backup_path(path, timestamp_suffix);
-            let original = std::fs::File::open(path)
-                .with_context(|| format!("failed opening init backup source {}", path.display()))?;
+            let original = open_init_backup_source(path)?
+                .with_context(|| format!("init backup source disappeared: {}", path.display()))?;
             write_private_file(&backup_path, original, false).with_context(|| {
                 format!(
                     "failed creating backup {} from {}",
@@ -19508,6 +19574,37 @@ mod init_tests {
             std::fs::read_to_string(backup_path).expect("read should succeed"),
             "old"
         );
+    }
+
+    #[test]
+    fn write_policy_rejects_directory_backup_source_without_publication() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("franken_node.toml");
+        std::fs::create_dir(&path).expect("directory at backup source");
+        let error = apply_init_write_policy(&path, "new", false, true, "t0")
+            .expect_err("a directory is not a backup source");
+        assert!(error.to_string().contains("regular file"));
+        assert!(path.is_dir());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_policy_rejects_symlink_backup_source_without_publication() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("operator-config.toml");
+        std::fs::write(&target, "operator contents").expect("backup target");
+        let path = dir.path().join("franken_node.toml");
+        std::os::unix::fs::symlink(&target, &path).expect("linked backup source");
+        let error = apply_init_write_policy(&path, "new", false, true, "t0")
+            .expect_err("backup must not follow a symlink");
+        assert!(error.to_string().contains("regular file"));
+        assert!(path.symlink_metadata().unwrap().file_type().is_symlink());
+        assert_eq!(
+            std::fs::read_to_string(target).unwrap(),
+            "operator contents"
+        );
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
     }
 }
 
@@ -45588,6 +45685,17 @@ fn main() -> Result<()> {
                                 existing.join(", ")
                             ),
                         );
+                    }
+                }
+
+                // Validate every backup source before publishing either file.
+                // Each write opens and checks its source again, so replacing a
+                // validated path cannot turn the later copy into a FIFO read.
+                if backup_existing {
+                    for path in [&config_path, &profile_path] {
+                        if let Err(err) = open_init_backup_source(path) {
+                            return init_fail(json, err);
+                        }
                     }
                 }
 
