@@ -22,7 +22,9 @@ DEFAULT_ACTION_YML = ROOT / ".github" / "actions" / "franken-siblings" / "action
 
 REQUIRED_SIBLINGS = ("frankentui", "fastapi_rust", "sqlmodel_rust")
 SHA40_RE = re.compile(r"^[0-9a-f]{40}$")
-ENGINE_REF_FLAG_RE = re.compile(r"--engine-ref\s+([^\s\\]+)")
+ENGINE_REF_FLAG_RE = re.compile(
+    r"""--engine-ref(?:\s+|=)("[^"]*"|'[^']*'|\$\{\{[^}]*\}\}|[^\s\\]+)(?=\s|$)"""
+)
 
 MAX_CRATE_GENERATIONS = {
     # 0.3.x (transitive fsqlite 0.1.19), 0.5.0 (sqlmodel dev-deps only; zero normal edges),
@@ -43,6 +45,7 @@ REQUIRED_MAIN_PUSH_WORKFLOWS = (
 )
 
 ENGINE_PINNED_WORKFLOWS = (
+    "dist.yml",
     "mutants-gate.yml",
     "inline-lib-tests-gate.yml",
     "module-graph.yml",
@@ -380,32 +383,90 @@ def check_workflows(workflows_dir: Path) -> list[dict[str, Any]]:
     return checks
 
 
+def _resolve_engine_ref(value: Any, env: dict[str, Any], *, shell: bool) -> str:
+    """Resolve only the literal env forms used by our checked-in workflows.
+
+    Unknown variables and expressions are returned unchanged so that SHA
+    validation rejects them. In particular, a checkout ref is not a shell
+    command and must not expand a bare shell variable.
+    """
+    if not isinstance(value, str):
+        return ""
+    ref = value.strip() if shell else value
+    quote = ""
+    if shell and len(ref) >= 2 and ref[0] == ref[-1] and ref[0] in ("'", '"'):
+        quote = ref[0]
+        ref = ref[1:-1]
+
+    expression = re.fullmatch(r"\$\{\{\s*env\.([A-Za-z_]\w*)\s*\}\}", ref)
+    variable = (
+        re.fullmatch(r"\$(?:([A-Za-z_]\w*)|\{([A-Za-z_]\w*)\})", ref)
+        if shell and quote != "'"
+        else None
+    )
+    name = (
+        expression.group(1)
+        if expression
+        else (variable.group(1) or variable.group(2)) if variable else None
+    )
+    if name is not None:
+        resolved = env.get(name)
+        return resolved if isinstance(resolved, str) else ref
+    return ref
+
+
 def _extract_engine_refs(path: Path) -> list[str]:
     if not path.is_file():
         return []
-    raw = path.read_text(encoding="utf-8")
-    refs = [m.group(1) for m in ENGINE_REF_FLAG_RE.finditer(raw) if not m.group(1).startswith("$")]
     try:
-        data = yaml.safe_load(raw)
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
     except yaml.YAMLError:
-        data = None
-    if isinstance(data, dict):
-        jobs = data.get("jobs", {})
-        if isinstance(jobs, dict):
-            for job in jobs.values():
-                if not isinstance(job, dict):
-                    continue
-                for step in job.get("steps", []):
-                    if not isinstance(step, dict):
-                        continue
-                    with_cfg = step.get("with", {})
-                    if (
-                        isinstance(with_cfg, dict)
-                        and with_cfg.get("repository") == "Dicklesworthstone/franken_engine"
-                    ):
-                        ref = str(with_cfg.get("ref", "")).strip()
-                        if ref:
-                            refs.append(ref)
+        return ["<invalid workflow YAML>"]
+    if not isinstance(data, dict):
+        return ["<invalid workflow mapping>"]
+
+    refs: list[str] = []
+
+    def inherited_env(parent: dict[str, Any], scope: dict[str, Any]) -> dict[str, Any]:
+        local = scope.get("env", {})
+        return {**parent, **local} if isinstance(local, dict) else parent
+
+    def visit_steps(steps: Any, env: dict[str, Any]) -> None:
+        if not isinstance(steps, list):
+            return
+        for step in steps:
+            if not isinstance(step, dict):
+                continue
+            step_env = inherited_env(env, step)
+            run = step.get("run", "")
+            if isinstance(run, str):
+                matches = list(ENGINE_REF_FLAG_RE.finditer(run))
+                refs.extend(
+                    _resolve_engine_ref(match.group(1), step_env, shell=True)
+                    for match in matches
+                )
+                if len(matches) != len(re.findall(r"--engine-ref(?:\s|=|$)", run)):
+                    refs.append("<missing or unsupported engine-ref argument>")
+
+            with_cfg = step.get("with", {})
+            if (
+                isinstance(with_cfg, dict)
+                and str(with_cfg.get("repository", "")).lower()
+                == "dicklesworthstone/franken_engine"
+            ):
+                refs.append(
+                    _resolve_engine_ref(with_cfg.get("ref", ""), step_env, shell=False)
+                )
+
+    workflow_env = inherited_env({}, data)
+    runs = data.get("runs", {})
+    if isinstance(runs, dict):
+        visit_steps(runs.get("steps", []), workflow_env)
+    jobs = data.get("jobs", {})
+    if isinstance(jobs, dict):
+        for job in jobs.values():
+            if isinstance(job, dict):
+                visit_steps(job.get("steps", []), inherited_env(workflow_env, job))
     return refs
 
 
@@ -416,7 +477,7 @@ def check_engine_pin_coherence(
 ) -> tuple[list[dict[str, Any]], str | None]:
     checks: list[dict[str, Any]] = []
     action_refs = _extract_engine_refs(action_yml)
-    canonical_ref = action_refs[0] if len(action_refs) == 1 and SHA40_RE.match(action_refs[0]) else None
+    canonical_ref = action_refs[0] if len(action_refs) == 1 and SHA40_RE.fullmatch(action_refs[0]) else None
     checks.append(
         {
             "check": "engine_pin:franken_siblings_action_sha40",
@@ -425,15 +486,22 @@ def check_engine_pin_coherence(
         }
     )
 
-    for wf_name in ENGINE_PINNED_WORKFLOWS:
-        wf_path = workflows_dir / wf_name
-        if not wf_path.is_file():
-            continue
+    # Scan new workflows too, including env-selected release pins. A missing
+    # known pin owner must fail instead of silently dropping out of the census.
+    workflow_paths = {
+        path.name: path
+        for pattern in ("*.yml", "*.yaml")
+        for path in workflows_dir.glob(pattern)
+    }
+    for wf_name in sorted(set(ENGINE_PINNED_WORKFLOWS) | set(workflow_paths)):
+        wf_path = workflow_paths.get(wf_name, workflows_dir / wf_name)
         wf_refs = _extract_engine_refs(wf_path)
+        if wf_name not in ENGINE_PINNED_WORKFLOWS and not wf_refs:
+            continue
         coherent = (
             bool(wf_refs)
             and canonical_ref is not None
-            and all(r == canonical_ref and SHA40_RE.match(r) for r in wf_refs)
+            and all(r == canonical_ref and SHA40_RE.fullmatch(r) for r in wf_refs)
         )
         checks.append(
             {
@@ -467,36 +535,41 @@ def check_engine_pin_coherence(
                 }
             )
             dispatcher_rs = ROOT / "crates" / "franken-node" / "src" / "ops" / "engine_dispatcher.rs"
-            if is_commit and dispatcher_rs.is_file() and ".set_clock_epoch_ms(" in dispatcher_rs.read_text(encoding="utf-8"):
-                api_proc = subprocess.run(
-                    [
-                        "git",
-                        "-C",
-                        str(engine_dir),
-                        "grep",
-                        "-q",
-                        "pub fn set_clock_epoch_ms",
-                        canonical_ref,
-                        "--",
-                        "crates/franken-engine/src/execution_orchestrator.rs",
-                    ],
-                    capture_output=True,
-                    text=True,
-                    timeout=10,
-                    check=False,
-                )
-                provides_api = api_proc.returncode == 0
-                checks.append(
-                    {
-                        "check": "engine_pin:provides_set_clock_epoch_ms",
-                        "pass": provides_api,
-                        "detail": (
-                            f"{canonical_ref} provides ExecutionOrchestrator::set_clock_epoch_ms"
-                            if provides_api
-                            else f"{canonical_ref} missing ExecutionOrchestrator::set_clock_epoch_ms required by engine_dispatcher.rs"
-                        ),
-                    }
-                )
+            if is_commit and dispatcher_rs.is_file():
+                dispatcher = dispatcher_rs.read_text(encoding="utf-8")
+                for method in ("set_clock_epoch_ms", "last_failed_execution_replay_context"):
+                    if f".{method}(" not in dispatcher:
+                        continue
+                    api_proc = subprocess.run(
+                        [
+                            "git",
+                            "-C",
+                            str(engine_dir),
+                            "grep",
+                            "-q",
+                            "-F",
+                            f"pub fn {method}(",
+                            canonical_ref,
+                            "--",
+                            "crates/franken-engine/src/execution_orchestrator.rs",
+                        ],
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                        check=False,
+                    )
+                    provides_api = api_proc.returncode == 0
+                    checks.append(
+                        {
+                            "check": f"engine_pin:provides_{method}",
+                            "pass": provides_api,
+                            "detail": (
+                                f"{canonical_ref} provides ExecutionOrchestrator::{method}"
+                                if provides_api
+                                else f"{canonical_ref} missing ExecutionOrchestrator::{method} required by engine_dispatcher.rs"
+                            ),
+                        }
+                    )
 
     return checks, canonical_ref
 

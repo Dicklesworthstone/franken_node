@@ -1,18 +1,15 @@
-# Recurrence-prevention gate (bd-rjc2m.G1): fail if ANY verification target fails to compile.
-#
-# Root cause this prevents: cargo test / cargo fuzz abort the WHOLE build on a single
-# non-compiling target, silently dropping coverage. A Round-0 gauntlet census found
-# 23/264 conformance + 45/146 fuzz targets rotted this way (see docs/specs/API_DRIFT_REMEDIATION.md).
-#
-# MODE: starts WARN-ONLY (annotate, do not block) so in-flight remediation under
-# bd-rjc2m is not wedged. FLIP to blocking by setting BLOCKING=1 below once bd-rjc2m.E2E1
-# (the full e2e verification) is green.
+# Block regressions in both production defaults and expanded verification targets.
+# Expanded features can hide accidental dependencies on optional product modules;
+# formatting and strict production linting must also run independently of builds.
+# The census retains per-target diagnostics, but a failed Cargo command cannot
+# become a passing gate merely because the log parser found no named target.
 name: verification-target-compile-gate
 
 on:
   pull_request:
     paths:
-      - 'crates/franken-node/**'
+      - 'crates/**'
+      - 'sdk/verifier/**'
       - 'tests/**'
       - 'fuzz/**'
       - 'Cargo.toml'
@@ -20,14 +17,19 @@ on:
       - 'rust-toolchain.toml'
       - 'packaging/source-siblings.tsv'
       - 'scripts/bootstrap_source.sh'
-      - '.github/actions/franken-siblings/action.yml'
+      - '.github/actions/franken-siblings/**'
+      - '.github/workflows/**'
+      - 'scripts/check_sibling_lock_coherence.py'
       - 'scripts/check_verification_targets_compile.py'
+      - 'scripts/test_check_verification_targets_compile.py'
+      - 'scripts/check_fuzz_regression_corpus.py'
       - 'scripts/remediation_log.py'
-      - '.github/workflows/verification-target-compile-gate.yml'
+      - 'scripts/test_remediation_log.py'
   push:
     branches: [main]
     paths:
-      - 'crates/franken-node/**'
+      - 'crates/**'
+      - 'sdk/verifier/**'
       - 'tests/**'
       - 'fuzz/**'
       - 'Cargo.toml'
@@ -35,16 +37,97 @@ on:
       - 'rust-toolchain.toml'
       - 'packaging/source-siblings.tsv'
       - 'scripts/bootstrap_source.sh'
-      - '.github/actions/franken-siblings/action.yml'
+      - '.github/actions/franken-siblings/**'
+      - '.github/workflows/**'
+      - 'scripts/check_sibling_lock_coherence.py'
       - 'scripts/check_verification_targets_compile.py'
+      - 'scripts/test_check_verification_targets_compile.py'
+      - 'scripts/check_fuzz_regression_corpus.py'
       - 'scripts/remediation_log.py'
-      - '.github/workflows/verification-target-compile-gate.yml'
+      - 'scripts/test_remediation_log.py'
   workflow_dispatch: {}
+
+permissions:
+  contents: read
 
 env:
   BLOCKING: "1"
 
 jobs:
+  source-contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install the source gate parser
+        run: python3 -m pip install PyYAML==6.0.2
+      - name: Exercise pin drift, missing APIs and failed build regressions
+        run: |
+          python3 -m unittest discover -s tests -p test_check_sibling_lock_coherence.py -v
+          python3 scripts/test_check_verification_targets_compile.py
+      - name: Require CI and release source selections to agree
+        run: python3 scripts/check_sibling_lock_coherence.py --no-local-git --json
+
+  format:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Checkout sibling repositories and pinned toolchain
+        uses: ./.github/actions/franken-siblings
+      - name: Check workspace formatting with the pinned compiler
+        run: cargo fmt --check
+
+  default-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        gate: [check, clippy]
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        if: matrix.gate == 'check'
+        with:
+          python-version: '3.12'
+      - name: Checkout sibling repositories and pinned toolchain
+        uses: ./.github/actions/franken-siblings
+      - name: Verify required APIs in the selected engine commit
+        if: matrix.gate == 'check'
+        run: |
+          python3 -m pip install PyYAML==6.0.2
+          python3 scripts/check_sibling_lock_coherence.py --json
+      - name: Check every workspace target with default features
+        if: matrix.gate == 'check'
+        run: cargo check --locked --workspace --all-targets
+      - name: Reject warnings in default production libraries and binaries
+        if: matrix.gate == 'clippy'
+        run: cargo clippy --locked --workspace --lib --bins -- -D warnings
+      - name: Replay promoted fuzz regressions with default features
+        if: matrix.gate == 'check'
+        run: cargo test --locked -p frankenengine-node --test remote_capability_gate_fuzz_regression
+      - name: Verify the source graph CLI schema contract
+        if: matrix.gate == 'check'
+        run: |
+          cargo test --locked -p frankenengine-node --test cli_arg_validation \
+            source_graph_cli_captures_without_evaluation_and_preserves_incomplete_evidence
+      - name: Preserve the default-feature source selection
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: default-build-${{ matrix.gate }}-sources
+          path: ${{ runner.temp }}/sibling-revisions.txt
+          if-no-files-found: error
+          retention-days: 7
+
   compile-census:
     runs-on: ubuntu-latest
     timeout-minutes: 150
@@ -64,27 +147,31 @@ jobs:
             --summary-out artifacts/verification/fuzz_regression_corpus_summary.json
       - name: Replay promoted fuzz regressions and 146-target seed corpora
         run: |
-          cargo test -p frankenengine-node \
+          cargo test --locked -p frankenengine-node \
             --features extended-surfaces,test-support \
             --test remote_capability_gate_fuzz_regression
       - name: Census — conformance [[test]] targets
         run: |
-          set +e
-          cargo build -p frankenengine-node --tests --keep-going \
-            --features extended-surfaces,test-support > conf_census.log 2>&1
-          echo "conformance census exit: $?"
+          status=0
+          cargo build --locked -p frankenengine-node --tests --keep-going \
+            --features extended-surfaces,test-support > conf_census.log 2>&1 || status=$?
+          printf '%s\n' "$status" > conf_census.status
+          echo "conformance census exit: $status"
       - name: Census — fuzz targets
         run: |
-          set +e
-          cargo build --manifest-path fuzz/Cargo.toml --bins --keep-going \
-            > fuzz_census.log 2>&1
-          echo "fuzz census exit: $?"
-      - name: Evaluate gate (warn-only unless BLOCKING=1)
+          status=0
+          cargo build --locked --manifest-path fuzz/Cargo.toml --bins --keep-going \
+            > fuzz_census.log 2>&1 || status=$?
+          printf '%s\n' "$status" > fuzz_census.status
+          echo "fuzz census exit: $status"
+      - name: Evaluate gate and require successful Cargo commands
         run: |
           export GATE_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           ARGS="--from-log conf=conf_census.log,fuzz=fuzz_census.log --out artifacts/verification --ts $GATE_TS"
           if [ "${BLOCKING}" = "1" ]; then
             python3 scripts/check_verification_targets_compile.py $ARGS
+            test "$(cat conf_census.status)" -eq 0
+            test "$(cat fuzz_census.status)" -eq 0
           else
             python3 scripts/check_verification_targets_compile.py $ARGS --warn-only
           fi
@@ -97,4 +184,6 @@ jobs:
             artifacts/verification/*.jsonl
             artifacts/verification/fuzz_regression_corpus_summary.json
             conf_census.log
+            conf_census.status
             fuzz_census.log
+            fuzz_census.status

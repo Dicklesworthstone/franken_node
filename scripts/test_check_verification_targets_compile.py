@@ -4,10 +4,15 @@
 Fixtures use the exact cargo `--keep-going` output format observed in the Round-0 census.
 Run: python3 scripts/test_check_verification_targets_compile.py
 """
+import io
+import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from check_verification_targets_compile import (  # noqa: E402
@@ -97,6 +102,113 @@ class TestGateExitCode(unittest.TestCase):
             conf = self._write(d, "conf.txt", CONF_FIXTURE)
             rc = main(["--from-log", f"conf={conf}", "--warn-only", "--out", os.path.join(d, "out"), "--ts", "2026-05-30T00:00:00Z"])
             self.assertEqual(rc, 0)  # warn-only annotates but does not block
+
+
+class TestRunCommandExitCode(unittest.TestCase):
+    def _run_censuses(self, results, *, warn_only=False):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with tempfile.TemporaryDirectory() as directory:
+            args = ["--run", "--out", directory, "--ts", "2026-05-30T00:00:00Z"]
+            if warn_only:
+                args.append("--warn-only")
+            with patch("check_verification_targets_compile.subprocess.run", side_effect=results) as run:
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    rc = main(args)
+            self.assertEqual(
+                [invocation.args[0] for invocation in run.call_args_list],
+                [_CONF_CMD, _FUZZ_CMD],
+                "both censuses must run even when the first command fails",
+            )
+            report_path = os.path.join(directory, "compile_census_20260530T000000Z.jsonl")
+            with open(report_path, encoding="utf-8") as report:
+                records = [json.loads(line) for line in report if line.strip()]
+        return rc, stdout.getvalue(), stderr.getvalue(), records
+
+    def test_run_passes_only_when_commands_succeed_and_no_targets_fail(self):
+        rc, stdout, stderr, records = self._run_censuses([
+            subprocess.CompletedProcess(_CONF_CMD, 0, stdout=CLEAN_FIXTURE, stderr=""),
+            subprocess.CompletedProcess(_FUZZ_CMD, 0, stdout=CLEAN_FIXTURE, stderr=""),
+        ])
+        self.assertEqual(rc, 0)
+        self.assertIn("ALL verification targets compile", stdout)
+        self.assertIn("failed commands: 0", stdout)
+        self.assertEqual(stderr, "")
+        self.assertEqual(records, [])
+
+    def test_run_fails_on_library_error_and_preserves_both_output_streams(self):
+        diagnostic = "error: could not compile `frankenengine-node` (lib) due to 1 previous error\n"
+        rc, stdout, stderr, records = self._run_censuses([
+            subprocess.CompletedProcess(_CONF_CMD, 101, stdout="upstream compiler output\n", stderr=diagnostic),
+            subprocess.CompletedProcess(_FUZZ_CMD, 0, stdout=CLEAN_FIXTURE, stderr=""),
+        ])
+        self.assertEqual(rc, 1)
+        self.assertNotIn("ALL verification targets compile", stdout)
+        self.assertIn("failed commands: 1", stdout)
+        self.assertIn("conformance census command exited 101", stderr)
+        self.assertIn("upstream compiler output", stderr)
+        self.assertIn(diagnostic, stderr)
+        self.assertEqual(records, [], "a library error must not fabricate named-target records")
+
+    def test_run_fails_on_fuzz_dependency_error_without_named_targets(self):
+        diagnostic = "error: failed to get dependency for package franken-node-fuzz\n"
+        rc, stdout, stderr, records = self._run_censuses([
+            subprocess.CompletedProcess(_CONF_CMD, 0, stdout=CLEAN_FIXTURE, stderr=""),
+            subprocess.CompletedProcess(_FUZZ_CMD, 101, stdout="", stderr=diagnostic),
+        ])
+        self.assertEqual(rc, 1)
+        self.assertNotIn("ALL verification targets compile", stdout)
+        self.assertIn("fuzz census command exited 101", stderr)
+        self.assertIn(diagnostic, stderr)
+        self.assertEqual(records, [])
+
+    def test_run_fails_on_empty_output_and_signal_termination(self):
+        for status in (101, -9):
+            with self.subTest(status=status):
+                rc, stdout, stderr, records = self._run_censuses([
+                    subprocess.CompletedProcess(_CONF_CMD, status, stdout="", stderr=""),
+                    subprocess.CompletedProcess(_FUZZ_CMD, 0, stdout=CLEAN_FIXTURE, stderr=""),
+                ])
+                self.assertEqual(rc, 1)
+                self.assertNotIn("ALL verification targets compile", stdout)
+                self.assertIn(f"conformance census command exited {status}", stderr)
+                self.assertEqual(records, [])
+
+    def test_run_retains_named_target_census_alongside_command_failures(self):
+        rc, stdout, stderr, records = self._run_censuses([
+            subprocess.CompletedProcess(_CONF_CMD, 101, stdout="", stderr=CONF_FIXTURE),
+            subprocess.CompletedProcess(_FUZZ_CMD, 101, stdout="", stderr="dependency unavailable"),
+        ])
+        self.assertEqual(rc, 1)
+        self.assertIn("failed commands: 2", stdout)
+        self.assertIn("conformance census command exited 101", stderr)
+        self.assertIn("fuzz census command exited 101", stderr)
+        by_target = {record["target"]: record for record in records}
+        self.assertEqual(len(by_target), 2)
+        self.assertEqual(by_target["rollback_bundle_conformance"]["errors_before"], 36)
+        self.assertTrue(all(not record["compiles"] for record in records))
+
+    def test_run_named_target_failures_still_fail_when_runner_returns_zero(self):
+        rc, stdout, stderr, records = self._run_censuses([
+            subprocess.CompletedProcess(_CONF_CMD, 0, stdout=CONF_FIXTURE, stderr=""),
+            subprocess.CompletedProcess(_FUZZ_CMD, 0, stdout=CLEAN_FIXTURE, stderr=""),
+        ])
+        self.assertEqual(rc, 1)
+        self.assertNotIn("ALL verification targets compile", stdout)
+        self.assertIn("failed commands: 0", stdout)
+        self.assertEqual(stderr, "")
+        self.assertEqual(len(records), 2)
+
+    def test_run_warn_only_reports_command_failure_without_claiming_success(self):
+        rc, stdout, stderr, records = self._run_censuses([
+            subprocess.CompletedProcess(_CONF_CMD, 101, stdout="", stderr="compiler unavailable"),
+            subprocess.CompletedProcess(_FUZZ_CMD, 0, stdout=CLEAN_FIXTURE, stderr=""),
+        ], warn_only=True)
+        self.assertEqual(rc, 0)
+        self.assertNotIn("ALL verification targets compile", stdout)
+        self.assertIn("::warning::conformance census command exited 101", stderr)
+        self.assertNotIn("::error::", stderr)
+        self.assertEqual(records, [])
 
 
 if __name__ == "__main__":

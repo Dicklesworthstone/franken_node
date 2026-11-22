@@ -747,7 +747,8 @@ pub fn verify_publisher_source_with_expected_identity(
     expected: &PublisherSourceExpectedIdentity,
 ) -> IdentityResult<VerifiedPublisherSource> {
     expected.validate()?;
-    let source = verify_publisher_source(manifest_bytes, signature, capsule_bytes, trusted_publisher)?;
+    let source =
+        verify_publisher_source(manifest_bytes, signature, capsule_bytes, trusted_publisher)?;
     expected.require_match(&source)?;
     Ok(source)
 }
@@ -1464,7 +1465,10 @@ mod tests {
         bytes
     }
 
-    fn expected_release(manifest_bytes: &[u8], capsule_bytes: &[u8]) -> PublisherSourceExpectedIdentity {
+    fn expected_release(
+        manifest_bytes: &[u8],
+        capsule_bytes: &[u8],
+    ) -> PublisherSourceExpectedIdentity {
         let metadata: Value = serde_json::from_str(header(capsule_bytes).0).unwrap();
         PublisherSourceExpectedIdentity {
             manifest_sha256: format!("sha256:{}", hex::encode(Sha256::digest(manifest_bytes))),

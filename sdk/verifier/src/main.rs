@@ -26,8 +26,7 @@ use frankenengine_verifier_sdk::publisher_source::{
     MAX_PUBLISHER_SOURCE_INPUT_BYTES, MAX_PUBLISHER_SOURCE_TRUST_INPUT_BYTES, PublisherSourceError,
     PublisherSourceExpectedIdentity, PublisherSourceIdentityError, PublisherTrustAnchors,
     verify_publisher_source_input, verify_publisher_source_input_with_expected_identity,
-    verify_publisher_source_trust_input,
-    verify_publisher_source_trust_input_with_expected_identity,
+    verify_publisher_source_trust_input, verify_publisher_source_trust_input_with_expected_identity,
 };
 use frankenengine_verifier_sdk::resolution::{
     ResolutionReceiptError, verify_signed_resolution_receipt,
@@ -466,9 +465,9 @@ fn counterfactual_failure(error: &CounterfactualReceiptError) -> Failure {
         CounterfactualReceiptError::Signature(BundleError::Ed25519SignatureInvalid) => {
             "SIGNATURE_INVALID"
         }
-        CounterfactualReceiptError::Signature(BundleError::Ed25519SignatureMalformed {
-            ..
-        }) => "SIGNATURE_MALFORMED",
+        CounterfactualReceiptError::Signature(BundleError::Ed25519SignatureMalformed { .. }) => {
+            "SIGNATURE_MALFORMED"
+        }
         _ => "EVIDENCE_INVALID",
     };
     failure(code, "signed counterfactual receipt verification failed")
@@ -1022,7 +1021,13 @@ mod tests {
                 "{{\"schema_version\":\"franken-node/native-session-outcome-receipt/v1\",\"session_nonce\":\"{nonce}\",\"product_root_key_id\":\"{key_id}\",\"admission_sha256\":\"{digest}\",\"outcome\":{observation}}}"
             );
             NativeSessionForensicOutcome {
-                signature_hex: hex::encode(key.sign(&signing_bytes(b"franken-node/native-session-outcome-signature/v1\0", &payload_json)).to_bytes()),
+                signature_hex: hex::encode(
+                    key.sign(&signing_bytes(
+                        b"franken-node/native-session-outcome-signature/v1\0",
+                        &payload_json,
+                    ))
+                    .to_bytes(),
+                ),
                 payload_json,
             }
         });

@@ -7,7 +7,7 @@ gauntlet census found 23/264 conformance + 45/146 fuzz targets rotted this way.
 
 This gate runs (via rch) the two `--keep-going` census builds, parses the per-target
 compile status, emits a remediation-log JSONL + a human summary, and EXITS NON-ZERO on
-any broken target.
+any broken target or nonzero census command, including failures with no named target.
 
 Modes:
   --run                 run the cargo censuses (default; needs rch/cargo)
@@ -75,14 +75,14 @@ _CONF_CMD = [
     "--tests", "--keep-going", "--locked", "--features", "extended-surfaces,test-support",
 ]
 _FUZZ_CMD = [
-    "rch", "exec", "--", "cargo", "+nightly", "build",
+    "rch", "exec", "--", "cargo", "build",
     "--manifest-path", "fuzz/Cargo.toml", "--bins", "--keep-going", "--locked",
 ]
 
 
-def _run(cmd: List[str]) -> str:
+def _run(cmd: List[str]) -> Tuple[str, int]:
     p = subprocess.run(cmd, capture_output=True, text=True, timeout=3600, check=False)
-    return (p.stdout or "") + "\n" + (p.stderr or "")
+    return (p.stdout or "") + "\n" + (p.stderr or ""), p.returncode
 
 
 def main(argv: List[str]) -> int:
@@ -99,27 +99,49 @@ def main(argv: List[str]) -> int:
         args.ts = os.environ.get("GATE_TS", "1970-01-01T00:00:00Z")
 
     output = ""
+    command_failures: List[Tuple[str, int, str]] = []
     if args.from_log:
         for part in args.from_log.split(","):
             _, path = part.split("=", 1)
             with open(path, encoding="utf-8") as fh:
                 output += fh.read() + "\n"
     else:  # --run (default)
-        output = _run(_CONF_CMD) + "\n" + _run(_FUZZ_CMD)
+        # Always collect both censuses. Dependency/library errors and killed
+        # compilers need not emit a named test/bin diagnostic for the parser.
+        for label, cmd in (("conformance", _CONF_CMD), ("fuzz", _FUZZ_CMD)):
+            cargo_output, returncode = _run(cmd)
+            output += cargo_output + "\n"
+            if returncode != 0:
+                command_failures.append((label, returncode, cargo_output))
 
     recs = records_from_output(output, args.ts)
     os.makedirs(args.out, exist_ok=True)
     jsonl = os.path.join(args.out, f"compile_census_{args.ts.replace(':', '').replace('-', '')}.jsonl")
     write_jsonl(recs, jsonl)
-    summary = render_summary(recs) if recs else "# Compile census: ALL verification targets compile ✓\n"
+    if command_failures:
+        summary = "# Compile census: FAILED (census command did not succeed)\n"
+        if recs:
+            summary += render_summary(recs)
+    else:
+        summary = render_summary(recs) if recs else "# Compile census: ALL verification targets compile ✓\n"
     sys.stdout.write(summary)
-    sys.stdout.write(f"\n[gate] broken targets: {len(recs)}; report: {jsonl}\n")
+    sys.stdout.write(
+        f"\n[gate] broken targets: {len(recs)}; failed commands: {len(command_failures)}; report: {jsonl}\n"
+    )
+    annotation = "warning" if args.warn_only else "error"
+    for label, returncode, cargo_output in command_failures:
+        sys.stderr.write(
+            f"::{annotation}::{label} census command exited {returncode}; compilation was not verified\n"
+        )
+        sys.stderr.write(cargo_output)
+        if not cargo_output.endswith("\n"):
+            sys.stderr.write("\n")
 
     if args.warn_only:
         if recs:
             sys.stderr.write(f"::warning::{len(recs)} verification targets do not compile (warn-only mode)\n")
         return 0
-    return 1 if recs else 0
+    return 1 if recs or command_failures else 0
 
 
 if __name__ == "__main__":

@@ -107,8 +107,7 @@ fn write_verification_artifacts(
 fn cx_first_policy_gate_has_no_non_excepted_violations() {
     let root = repo_root();
     assert!(
-        root.join("artifacts/10.15/cx_first_compliance.csv")
-            .is_file(),
+        root.join("artifacts/10.15/cx_first_compliance.csv").is_file(),
         "checked-in cx_first_compliance.csv artifact must exist"
     );
     assert!(

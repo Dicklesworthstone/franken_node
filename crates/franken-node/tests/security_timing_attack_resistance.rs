@@ -233,11 +233,8 @@ fn test_consistent_timing_under_load() {
         black_box(acc)
     });
 
-    let [match_time, mismatch_time] = alternating_str_medians(
-        secret,
-        [(candidate1, true), (candidate2, false)],
-        5_000,
-    );
+    let [match_time, mismatch_time] =
+        alternating_str_medians(secret, [(candidate1, true), (candidate2, false)], 5_000);
     let _ = load_thread.join();
 
     let ratio = match_time.as_nanos() as f64 / mismatch_time.as_nanos().max(1) as f64;
