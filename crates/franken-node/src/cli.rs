@@ -4391,6 +4391,13 @@ pub struct LtvAttestArgs {
     #[arg(long = "witness-key")]
     pub witness_keys: Vec<PathBuf>,
 
+    /// Operator-approved witness keys and crypto-suite validity/compromise
+    /// policy. The completed evidence must verify against this independently
+    /// selected anchor before publication. Required by the handler so --json
+    /// reports a structured error when the anchor is missing.
+    #[arg(long, default_value = "", value_parser = parse_handler_required_pathbuf)]
+    pub witness_anchor: PathBuf,
+
     /// Minimum number of valid witness signatures the receipt requires
     /// (defaults to every supplied witness key).
     #[arg(long)]
@@ -4441,8 +4448,10 @@ pub struct LtvVerifyAsOfArgs {
     /// Path to the operator's witness trust anchor JSON.
     ///
     /// REQUIRED and fail-closed (bd-7fubt). The file pins
-    /// `{witness_group_id, witness_policy_id, threshold_config}` — including the
-    /// witness signer keys — that a receipt must satisfy. Without it the witness
+    /// `{witness_group_id, witness_policy_id, threshold_config, suite_records}`
+    /// including the witness signer keys and approved suite validity/compromise
+    /// records that the evidence must satisfy. Candidate-provided suite records
+    /// never establish their own trust. Without this anchor the witness
     /// receipt would be verified against the signer set it carries itself, which
     /// any forger can choose, so proof-of-anteriority would be unforgeable in
     /// name only. There are no built-in witness roots, exactly as `verify
@@ -8100,6 +8109,7 @@ mod tests {
                 assert!(args.json);
                 assert!(args.bundle.as_os_str().is_empty());
                 assert!(args.out.as_os_str().is_empty());
+                assert!(args.witness_anchor.as_os_str().is_empty());
             }
             other => panic!("expected ltv attest, got {other:?}"),
         }

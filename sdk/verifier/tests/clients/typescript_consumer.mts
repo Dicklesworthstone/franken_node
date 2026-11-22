@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import assert from "node:assert/strict";
 import { resolve } from "node:path";
 import { verifyArtifact, VerifierError } from "./franken_verifier.mjs";
-import type { Verification, EvidenceFormat, PublisherSourceTrustFacts, NativeSessionForensicsFacts, SignedSessionFacts } from "./franken_verifier.mjs";
+import type { Verification, EvidenceFormat, PublisherSourceTrustFacts, NativeSessionForensicsFacts, SignedSessionFacts, LtvEvidenceFacts } from "./franken_verifier.mjs";
 
 const cases: Array<{ name: string; input_hex: string; anchor: string; format: EvidenceFormat;
   signature_hex?: string; run_anchor?: string; runtime_anchor?: string; event_count?: number;
@@ -11,6 +11,7 @@ const cases: Array<{ name: string; input_hex: string; anchor: string; format: Ev
   expected_manifest_sha256?: string; expected_source_artifact_sha256?: string; expected_graph_input_hash?: string;
   native_facts?: NativeSessionForensicsFacts;
   session_facts?: SignedSessionFacts;
+  ltv_facts?: LtvEvidenceFacts;
   expected: string; artifact_sha256: string }> =
   JSON.parse(readFileSync("vectors.json", "utf8"));
 const positive = cases.find((item) => item.name === "genuine_cli_incident")!;
@@ -236,8 +237,27 @@ for (const session of cases.filter((item) => item.format === "signed-session")) 
 }
 assert.deepEqual([...sessionVerdicts].sort(), ["fail", "inconclusive", "pass"]);
 if (sessionNegative === 0) throw new Error("signed-session negative matrix is missing");
-console.log(JSON.stringify({ consumer: "typescript", positive: 8 + trustPositive + nativePositive + sessionPositive + identityPositive,
-  negative: 2 + trustNegative + nativeNegative + sessionNegative + identityNegative, publisher_trust_cases: trustPositive + trustNegative,
+let ltvPositive = 0, ltvNegative = 0;
+for (const candidate of cases.filter((item) => item.format === "ltv-evidence")) {
+  try {
+    const verified = await verifyArtifact(Buffer.from(candidate.input_hex, "hex"), candidate.anchor,
+      { verifier: resolve("verifier"), format: "ltv-evidence" });
+    if (candidate.expected !== "verified" || verified.format !== "ltv-evidence"
+        || verified.scope !== "authenticated_ltv_anteriority") throw new Error("LTV policy scope mismatch");
+    const policyHash: string = verified.facts.trust_policy_sha256;
+    assert.equal(policyHash, candidate.ltv_facts!.trust_policy_sha256);
+    assert.deepEqual(verified.facts, candidate.ltv_facts, candidate.name);
+    ltvPositive += 1;
+  } catch (error: unknown) {
+    if (candidate.expected === "verified" || !(error instanceof VerifierError)
+        || error.code !== candidate.expected) throw error;
+    ltvNegative += 1;
+  }
+}
+assert(ltvPositive >= 4 && ltvNegative >= 16, "LTV authority policy controls must execute");
+console.log(JSON.stringify({ consumer: "typescript", positive: 8 + trustPositive + nativePositive + sessionPositive + identityPositive + ltvPositive,
+  negative: 2 + trustNegative + nativeNegative + sessionNegative + identityNegative + ltvNegative, publisher_trust_cases: trustPositive + trustNegative,
   publisher_identity_cases: identityPositive + identityNegative,
   native_session_cases: nativePositive + nativeNegative, signed_session_cases: sessionPositive + sessionNegative,
+  ltv_policy_cases: ltvPositive + ltvNegative,
   passed: true }));

@@ -599,6 +599,8 @@ fn ltv_leg(
     bundle_integrity_hash: &str,
     trace_id: &str,
 ) {
+    use sha2::{Digest, Sha256};
+
     std::fs::write(
         workspace.join("run-report.json"),
         serde_json::to_string(run_report).expect("serialize run report"),
@@ -613,6 +615,35 @@ fn ltv_leg(
         )
         .expect("write witness key");
     }
+
+    // Select trust before generating the evidence. Neither witness keys nor
+    // suite validity/compromise records are recovered from the candidate.
+    let approved_anchor = json!({
+        "witness_group_id": "tnr-e2e-witnesses",
+        "witness_policy_id": "ltv-policy-v1",
+        "threshold_config": {
+            "threshold": 2,
+            "total_signers": 3,
+            "signer_keys": (0..3_u8).map(|index| json!({
+                "key_id": format!("ltv-witness-{index}"),
+                "public_key_hex": hex::encode(witness_signing_key(index).verifying_key().to_bytes()),
+            })).collect::<Vec<_>>(),
+        },
+        "suite_records": [{
+            "crypto_suite": "ed25519-v1",
+            "valid_from_unix_seconds": 1,
+            "valid_until_unix_seconds": null,
+            "compromised_at_unix_seconds": null,
+        }],
+    });
+    let approved_anchor_bytes =
+        serde_json::to_vec_pretty(&approved_anchor).expect("serialize approved witness anchor");
+    let approved_policy_sha256 = hex::encode(Sha256::digest(&approved_anchor_bytes));
+    std::fs::write(
+        workspace.join("witness-anchor.json"),
+        &approved_anchor_bytes,
+    )
+    .expect("write approved witness anchor before attestation");
 
     let attest_output = run_cli(
         workspace,
@@ -631,6 +662,8 @@ fn ltv_leg(
             "keys/ltv-witness-1.key",
             "--witness-key",
             "keys/ltv-witness-2.key",
+            "--witness-anchor",
+            "witness-anchor.json",
             "--witness-threshold",
             "2",
             "--witness-group-id",
@@ -676,6 +709,7 @@ fn ltv_leg(
     );
     assert_eq!(attest["witnesses"], json!(3));
     assert_eq!(attest["witness_threshold"], json!(2));
+    assert_eq!(attest["trust_policy_sha256"], approved_policy_sha256);
     layer_pass(
         "L6 LTV attest (CLI, chain+bundle leaves)",
         &format!(
@@ -686,27 +720,32 @@ fn ltv_leg(
 
     // The CLI evidence's cosigned witness receipt is wire-compatible with the
     // product evidence ledger's proof-of-anteriority consumer.
-    let evidence_json: Value = serde_json::from_str(
-        &std::fs::read_to_string(workspace.join("ltv-evidence.json")).expect("read ltv evidence"),
-    )
-    .expect("ltv evidence is canonical JSON");
+    let evidence_bytes =
+        std::fs::read(workspace.join("ltv-evidence.json")).expect("read ltv evidence");
+    let evidence_json: Value =
+        serde_json::from_slice(&evidence_bytes).expect("ltv evidence is canonical JSON");
+    assert_eq!(
+        serde_json::from_value::<Vec<frankenengine_verifier_sdk::LongTermCryptoSuiteRecord>>(
+            evidence_json["suite_records"].clone(),
+        )
+        .expect("retained suite policy"),
+        serde_json::from_value::<Vec<frankenengine_verifier_sdk::LongTermCryptoSuiteRecord>>(
+            approved_anchor["suite_records"].clone(),
+        )
+        .expect("approved suite policy"),
+    );
     let receipt: MmrRootWitnessReceipt =
         serde_json::from_value(evidence_json["witness_receipt"].clone())
             .expect("CLI witness receipt must deserialize as the product receipt type");
     let as_of = evidence_json["as_of_unix_seconds"].as_u64().expect("as_of");
     let mut evidence_ledger = EvidenceLedger::new(LedgerCapacity::new(16, 1 << 20));
-    // bd-7fubt: the ledger no longer trusts a receipt's own embedded signer set,
-    // so an anchor is required. This leg asserts WIRE COMPATIBILITY — that the
-    // CLI's witness receipt deserializes as the product type and appends — so the
-    // anchor is derived from the receipt on purpose. That derivation is circular
-    // and proves nothing about forgery resistance; the enforcement itself is
-    // pinned by `mmr_root_witness_receipt_rejects_a_self_anchored_forgery` in
-    // `observability::evidence_ledger`, where the anchor is independent of the
-    // receipt under test.
+    // The ledger receives the same independently selected witness authority;
+    // its narrower root-witness contract does not certify suite policy.
     let witness_anchor = MmrRootWitnessTrustAnchor::new(
-        &receipt.statement.witness_group_id,
-        &receipt.statement.witness_policy_id,
-        receipt.threshold_config.clone(),
+        "tnr-e2e-witnesses",
+        "ltv-policy-v1",
+        serde_json::from_value(approved_anchor["threshold_config"].clone())
+            .expect("approved product witness threshold"),
     )
     .expect("operator witness trust anchor");
     let (_, verification) = evidence_ledger
@@ -720,20 +759,6 @@ fn ltv_leg(
             verification.valid_signatures, verification.threshold
         ),
     );
-
-    // bd-7fubt: `verify-as-of` is fail-closed without an operator-supplied
-    // witness trust anchor. Write the one this operator holds for the witness
-    // group `ltv attest` just cosigned with.
-    std::fs::write(
-        workspace.join("witness-anchor.json"),
-        serde_json::to_vec_pretty(&serde_json::json!({
-            "witness_group_id": receipt.statement.witness_group_id,
-            "witness_policy_id": receipt.statement.witness_policy_id,
-            "threshold_config": receipt.threshold_config,
-        }))
-        .expect("witness anchor serializes"),
-    )
-    .expect("write witness anchor");
 
     let verify_output = run_cli(
         workspace,
@@ -767,6 +792,7 @@ fn ltv_leg(
         json!("franken-node/ltv-verify-as-of-cli/v1")
     );
     assert_eq!(verdict["verdict"], json!("Pass"));
+    assert_eq!(verdict["trust_policy_sha256"], approved_policy_sha256);
     assert!(
         verdict["sdk_transcript"]
             .as_array()
@@ -778,6 +804,53 @@ fn ltv_leg(
     layer_pass(
         "L6 LTV verify-as-of (offline SDK via CLI)",
         "verdict=Pass anteriority proven FN-LTV-003 on trace",
+    );
+
+    // A newly approved compromise policy cannot be erased by retaining the
+    // candidate's old, unsigned "not compromised" suite record. The exact
+    // threshold signatures still verify, but anteriority must be refused.
+    let mut compromised_anchor = approved_anchor.clone();
+    compromised_anchor["suite_records"][0]["compromised_at_unix_seconds"] =
+        evidence_json["witness_receipt"]["statement"]["observed_at_unix_seconds"].clone();
+    std::fs::write(
+        workspace.join("compromised-witness-anchor.json"),
+        serde_json::to_vec_pretty(&compromised_anchor).expect("serialize compromise policy"),
+    )
+    .expect("write independently updated compromise policy");
+    let compromised_output = run_cli(
+        workspace,
+        &[
+            "ltv",
+            "verify-as-of",
+            "--evidence",
+            "ltv-evidence.json",
+            "--witness-anchor",
+            "compromised-witness-anchor.json",
+            "--json",
+        ],
+    );
+    assert!(
+        !compromised_output.status.success(),
+        "candidate policy cannot erase a trusted compromise"
+    );
+    let compromised: Value = serde_json::from_slice(&compromised_output.stdout)
+        .expect("compromised policy refusal is JSON");
+    assert_eq!(compromised["verdict"], json!("Fail"));
+    assert!(
+        compromised["checked_assertions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|check| {
+                check["assertion"] == "ltv_witness_precedes_key_compromise_records"
+                    && check["passed"] == false
+            }),
+        "trusted compromise must reject the unchanged witness: {compromised}"
+    );
+    assert_eq!(
+        std::fs::read(workspace.join("ltv-evidence.json")).unwrap(),
+        evidence_bytes,
+        "verification must not rewrite historical evidence to fit a policy",
     );
 
     // Anti-backdating arm: an as-of before the witness observation must fail

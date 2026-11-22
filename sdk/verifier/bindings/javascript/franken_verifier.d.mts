@@ -250,6 +250,8 @@ export interface LtvEvidenceFacts {
   claimed_at_unix_seconds: string;
   witness_group_id: string;
   witness_policy_id: string;
+  /** SHA-256 of the exact root-signed witness authority and crypto-suite policy bytes. */
+  trust_policy_sha256: string;
   reattestation_count: number;
   hybrid_survived_algo_death: boolean;
   signer_public_key_hex: string;

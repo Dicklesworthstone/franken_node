@@ -434,6 +434,7 @@ pub struct LongTermArtifactEvidence {
 
 /// Validity interval and compromise marker for one cryptographic suite.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LongTermCryptoSuiteRecord {
     pub crypto_suite: String,
     pub valid_from_unix_seconds: u64,
@@ -532,7 +533,7 @@ pub struct LongTermMmrRootWitnessStatement {
     pub content_hash: String,
 }
 
-/// Operator-pinned trust anchor for LTV witness receipts.
+/// Operator-pinned witness authority and crypto-suite policy for LTV receipts.
 ///
 /// bd-7fubt: verification must not read the witness signer set out of the
 /// artifact being verified. This anchor names the witness group and policy the
@@ -543,12 +544,23 @@ pub struct LongTermMmrRootWitnessStatement {
 ///
 /// Pinning the group/policy alone would not be enough: `ThresholdConfig` carries
 /// `signer_keys`, so an attacker could keep the advertised group name and swap
-/// the key set. Both are bound.
+/// the key set. Both are bound. The suite records are also supplied by the
+/// operator: an authentic historical witness cannot authenticate a candidate's
+/// claim that a suite has never been compromised. Candidate suite records must
+/// exactly match this policy, including every validity and compromise marker.
+///
+/// `suite_records` is mandatory. Historical anchors without it must be replaced
+/// with an independently approved policy; deriving it from candidate evidence
+/// would restore the same trust vulnerability. The anchor establishes only the
+/// approved policy snapshot, not that the snapshot contains the latest or every
+/// known compromise.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LongTermWitnessTrustAnchor {
     pub witness_group_id: String,
     pub witness_policy_id: String,
     pub threshold_config: LongTermThresholdConfig,
+    pub suite_records: Vec<LongTermCryptoSuiteRecord>,
 }
 
 /// Threshold-cosigned receipt proving a root was observed by independent witnesses.
@@ -2837,7 +2849,14 @@ fn verify_long_term_evidence(
         },
     );
 
-    let suite_check = verify_long_term_suite_record(evidence);
+    push_long_term_assertion(
+        &mut assertions,
+        "ltv_suite_records_match_trusted_policy",
+        evidence.suite_records == witness_anchor.suite_records,
+        || "candidate suite records exactly match the operator-approved policy".to_string(),
+        || "candidate suite records differ from the operator-approved policy".to_string(),
+    );
+    let suite_check = verify_long_term_suite_record(evidence, &witness_anchor.suite_records);
     push_long_term_assertion_detail(
         &mut assertions,
         "ltv_crypto_suite_valid_at_claimed_time",
@@ -2950,7 +2969,11 @@ fn verify_long_term_evidence(
     let compromise_check = witness_check.as_ref().map_or_else(
         |error| Err(error.clone()),
         |witness| {
-            verify_long_term_compromise_anteriority(evidence, witness.observed_at_unix_seconds)
+            verify_long_term_compromise_anteriority(
+                evidence,
+                &witness_anchor.suite_records,
+                witness.observed_at_unix_seconds,
+            )
         },
     );
     push_long_term_assertion_detail(
@@ -3025,22 +3048,20 @@ fn validate_long_term_artifact(artifact: &LongTermArtifactEvidence) -> Result<()
     Ok(())
 }
 
-fn verify_long_term_suite_record(
-    evidence: &LongTermVerificationEvidence,
-) -> Result<String, String> {
-    validate_long_term_artifact(&evidence.artifact)?;
-    if evidence.suite_records.is_empty() {
-        return Err("suite_records must contain the artifact crypto suite".to_string());
+fn validate_long_term_suite_policy(records: &[LongTermCryptoSuiteRecord]) -> Result<(), String> {
+    if records.is_empty() {
+        return Err("trusted suite_records must contain the artifact crypto suite".to_string());
     }
-    if evidence.suite_records.len() > MAX_LONG_TERM_SUITE_RECORDS {
+    if records.len() > MAX_LONG_TERM_SUITE_RECORDS {
         return Err(format!(
-            "suite_records len={} exceeds limit={MAX_LONG_TERM_SUITE_RECORDS}",
-            evidence.suite_records.len()
+            "trusted suite_records len={} exceeds limit={MAX_LONG_TERM_SUITE_RECORDS}",
+            records.len()
         ));
     }
 
-    let mut matching_records = 0usize;
-    for record in &evidence.suite_records {
+    // Validate the complete trusted snapshot before selecting a matching
+    // interval. A valid first record must not hide malformed trailing records.
+    for record in records {
         validate_long_term_identifier("suite_record.crypto_suite", &record.crypto_suite)?;
         if record
             .valid_until_unix_seconds
@@ -3051,7 +3072,19 @@ fn verify_long_term_suite_record(
                 record.crypto_suite
             ));
         }
+    }
+    Ok(())
+}
 
+fn verify_long_term_suite_record(
+    evidence: &LongTermVerificationEvidence,
+    trusted_records: &[LongTermCryptoSuiteRecord],
+) -> Result<String, String> {
+    validate_long_term_artifact(&evidence.artifact)?;
+    validate_long_term_suite_policy(trusted_records)?;
+
+    let mut matching_records = 0usize;
+    for record in trusted_records {
         if !constant_time_eq(&record.crypto_suite, &evidence.artifact.crypto_suite) {
             continue;
         }
@@ -3087,10 +3120,12 @@ fn verify_long_term_suite_record(
 
 fn verify_long_term_compromise_anteriority(
     evidence: &LongTermVerificationEvidence,
+    trusted_records: &[LongTermCryptoSuiteRecord],
     observed_at_unix_seconds: u64,
 ) -> Result<String, String> {
+    validate_long_term_suite_policy(trusted_records)?;
     let mut saw_suite = false;
-    for record in &evidence.suite_records {
+    for record in trusted_records {
         if !constant_time_eq(&record.crypto_suite, &evidence.artifact.crypto_suite) {
             continue;
         }
@@ -3712,8 +3747,10 @@ pub struct LongTermEvidenceRequest {
     pub observed_at_unix_seconds: u64,
     /// Verification target time; the witness observation must be anterior.
     pub as_of_unix_seconds: u64,
-    /// Unix time from which the crypto suite is on record as valid.
-    pub suite_valid_from_unix_seconds: u64,
+    /// Complete independently approved crypto-suite policy to retain in the
+    /// evidence. The verifier must receive the same policy out of band in its
+    /// witness trust anchor; the builder does not confer authority on it.
+    pub suite_records: Vec<LongTermCryptoSuiteRecord>,
     pub witness_group_id: String,
     pub witness_policy_id: String,
     /// Minimum number of valid witness signatures the receipt requires.
@@ -3878,12 +3915,7 @@ pub fn build_long_term_verification_evidence(
         schema_version: LONG_TERM_VERIFICATION_SCHEMA_VERSION.to_string(),
         as_of_unix_seconds: request.as_of_unix_seconds,
         artifact,
-        suite_records: vec![LongTermCryptoSuiteRecord {
-            crypto_suite: request.crypto_suite.clone(),
-            valid_from_unix_seconds: request.suite_valid_from_unix_seconds,
-            valid_until_unix_seconds: None,
-            compromised_at_unix_seconds: None,
-        }],
+        suite_records: request.suite_records.clone(),
         inclusion_proof,
         reattestation_chain: LongTermMmrRootReattestationChain {
             origin_root,
@@ -3905,6 +3937,7 @@ pub fn build_long_term_verification_evidence(
         witness_group_id: evidence.witness_receipt.statement.witness_group_id.clone(),
         witness_policy_id: evidence.witness_receipt.statement.witness_policy_id.clone(),
         threshold_config: evidence.witness_receipt.threshold_config.clone(),
+        suite_records: request.suite_records.clone(),
     };
     let verification = verify_long_term_evidence(&evidence, &self_check_anchor);
     if let Some(failed) = verification
@@ -4871,6 +4904,7 @@ mod tests {
             witness_group_id: evidence.witness_receipt.statement.witness_group_id.clone(),
             witness_policy_id: evidence.witness_receipt.statement.witness_policy_id.clone(),
             threshold_config: evidence.witness_receipt.threshold_config.clone(),
+            suite_records: evidence.suite_records.clone(),
         }
     }
 
@@ -5854,6 +5888,118 @@ mod tests {
         }));
     }
 
+    #[test]
+    fn verify_as_of_ltv_rejects_erasing_trusted_compromise_without_new_signatures() {
+        let sdk = create_verifier_sdk("verifier://ltv-policy-regression");
+        let mut evidence = reference_long_term_verification_evidence();
+        evidence.suite_records[0].compromised_at_unix_seconds = Some(1_600);
+        let trusted = witness_anchor_for(&evidence);
+        let rejected = sdk.verify_as_of_ltv(&evidence, &trusted).unwrap();
+        assert_eq!(rejected.verdict, VerificationVerdict::Fail);
+
+        // The witness observed this root at 1_700. Its signatures remain valid
+        // when an attacker edits only the unauthenticated suite metadata.
+        let original_witness = evidence.witness_receipt.clone();
+        evidence.suite_records[0].compromised_at_unix_seconds = None;
+        assert_eq!(evidence.witness_receipt, original_witness);
+        let erased = sdk.verify_as_of_ltv(&evidence, &trusted).unwrap();
+        assert_eq!(
+            erased.verdict,
+            VerificationVerdict::Fail,
+            "a valid historical witness cannot erase the verifier's compromise policy"
+        );
+        for assertion in [
+            "ltv_suite_records_match_trusted_policy",
+            "ltv_witness_precedes_key_compromise_records",
+        ] {
+            assert!(
+                erased
+                    .checked_assertions
+                    .iter()
+                    .any(|check| { check.assertion == assertion && !check.passed })
+            );
+        }
+    }
+
+    #[test]
+    fn verify_as_of_ltv_binds_every_suite_policy_field_to_the_trusted_snapshot() {
+        let sdk = create_verifier_sdk("verifier://ltv-policy-fields");
+        let original = reference_long_term_verification_evidence();
+        let trusted = witness_anchor_for(&original);
+        assert_eq!(
+            sdk.verify_as_of_ltv(&original, &trusted).unwrap().verdict,
+            VerificationVerdict::Pass
+        );
+        let mut variants = vec![original.clone(); 6];
+        variants[0].suite_records[0].compromised_at_unix_seconds = Some(3_000);
+        variants[1].suite_records[0].valid_from_unix_seconds = 800;
+        variants[2].suite_records[0].valid_until_unix_seconds = Some(2_000);
+        variants[3].suite_records[0].crypto_suite = "another-suite".into();
+        variants[4].suite_records.clear();
+        variants[5].suite_records.push(LongTermCryptoSuiteRecord {
+            crypto_suite: "another-suite".into(),
+            valid_from_unix_seconds: 800,
+            valid_until_unix_seconds: None,
+            compromised_at_unix_seconds: None,
+        });
+        for candidate in variants {
+            assert_eq!(candidate.witness_receipt, original.witness_receipt);
+            let result = sdk.verify_as_of_ltv(&candidate, &trusted).unwrap();
+            assert_eq!(result.verdict, VerificationVerdict::Fail);
+            assert!(result.checked_assertions.iter().any(|check| {
+                check.assertion == "ltv_suite_records_match_trusted_policy" && !check.passed
+            }));
+        }
+    }
+
+    #[test]
+    fn verify_as_of_ltv_validates_all_trusted_suite_records_before_selecting_one() {
+        let sdk = create_verifier_sdk("verifier://ltv-policy-validation");
+        let original = reference_long_term_verification_evidence();
+        let mut variants = vec![original.clone(); 4];
+        variants[0].suite_records.push(LongTermCryptoSuiteRecord {
+            crypto_suite: String::new(),
+            valid_from_unix_seconds: 800,
+            valid_until_unix_seconds: None,
+            compromised_at_unix_seconds: None,
+        });
+        variants[1].suite_records.push(LongTermCryptoSuiteRecord {
+            crypto_suite: "another-suite".into(),
+            valid_from_unix_seconds: 800,
+            valid_until_unix_seconds: Some(799),
+            compromised_at_unix_seconds: None,
+        });
+        variants[2].suite_records.clear();
+        variants[3].suite_records =
+            vec![original.suite_records[0].clone(); MAX_LONG_TERM_SUITE_RECORDS + 1];
+        for candidate in variants {
+            let trusted = witness_anchor_for(&candidate);
+            let result = sdk.verify_as_of_ltv(&candidate, &trusted).unwrap();
+            assert_eq!(result.verdict, VerificationVerdict::Fail);
+            assert!(result.checked_assertions.iter().any(|check| {
+                check.assertion == "ltv_crypto_suite_valid_at_claimed_time" && !check.passed
+            }));
+        }
+    }
+
+    #[test]
+    fn ltv_anchor_deserialization_requires_explicit_unambiguous_suite_policy() {
+        let trusted = witness_anchor_for(&reference_long_term_verification_evidence());
+        let mut missing_policy = serde_json::to_value(&trusted).unwrap();
+        missing_policy
+            .as_object_mut()
+            .unwrap()
+            .remove("suite_records");
+        assert!(serde_json::from_value::<LongTermWitnessTrustAnchor>(missing_policy).is_err());
+
+        let mut misspelled_compromise = serde_json::to_value(&trusted).unwrap();
+        misspelled_compromise["suite_records"][0]["compromised_at_unix_second"] =
+            serde_json::json!(1_600);
+        assert!(
+            serde_json::from_value::<LongTermWitnessTrustAnchor>(misspelled_compromise).is_err()
+        );
+    }
+
     fn builder_witness_signers(count: u8) -> Vec<LongTermWitnessSigner> {
         (0..count)
             .map(|index| LongTermWitnessSigner {
@@ -5879,7 +6025,12 @@ mod tests {
             reattested_at_unix_seconds: 1_500,
             observed_at_unix_seconds: 1_700,
             as_of_unix_seconds: 1_900,
-            suite_valid_from_unix_seconds: 900,
+            suite_records: vec![LongTermCryptoSuiteRecord {
+                crypto_suite: "ed25519-v1".to_string(),
+                valid_from_unix_seconds: 900,
+                valid_until_unix_seconds: None,
+                compromised_at_unix_seconds: Some(2_100),
+            }],
             witness_group_id: "builder-witnesses".to_string(),
             witness_policy_id: "builder-policy-v1".to_string(),
             witness_threshold: 2,
@@ -5913,6 +6064,16 @@ mod tests {
         );
         assert_eq!(result.verdict, VerificationVerdict::Pass);
         assert_eq!(result.artifact_binding_hash, evidence.artifact.marker_hash);
+        assert_eq!(evidence.suite_records, request.suite_records);
+    }
+
+    #[test]
+    fn public_builder_refuses_policy_that_compromised_the_suite_before_observation() {
+        let mut request = builder_reference_request();
+        request.suite_records[0].compromised_at_unix_seconds = Some(1_600);
+        let error = build_long_term_verification_evidence(&request, &builder_witness_signers(2))
+            .unwrap_err();
+        assert!(error.contains("ltv_witness_precedes_key_compromise_records"));
     }
 
     #[test]

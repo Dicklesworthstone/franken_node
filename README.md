@@ -1447,8 +1447,21 @@ franken-node fleet status --json   # transport=http, live_control_plane=true
 
 | Command | Purpose |
 |---|---|
-| `franken-node ltv attest` | Build self-contained long-term verification evidence from a signature-verified incident bundle: the bundle (plus, with `--run-report`, its run's host-effect chain hashes) becomes Merkle leaves, the root is re-attested and threshold-cosigned by operator witness keys. **Required: `--bundle`, `--out`, at least one `--witness-key`, and a trust anchor (`--trusted-public-key` or `--key-dir`).** `--bundle`, `--out`, and `--witness-key` are handler-required so `--json` failures emit `franken-node/ltv-error-cli/v1` instead of a human clap error. Flags: `--json`. |
-| `franken-node ltv verify-as-of` | Re-verify LTV evidence offline through the verifier SDK (`verify_as_of_ltv`): inclusion, re-attestation chain, witness threshold, and anteriority against `--as-of`. Fails closed (non-zero exit) on any failed assertion. Required: `--evidence` and `--witness-anchor`. Both are handler-required so `--json` failures emit `franken-node/ltv-error-cli/v1` instead of a human clap error. Flags: `--json`. |
+| `franken-node ltv attest` | Build self-contained long-term verification evidence from a signature-verified incident bundle: the bundle (plus, with `--run-report`, its run's host-effect chain hashes) becomes Merkle leaves, the root is re-attested and threshold-cosigned by operator witness keys. **Required: `--bundle`, `--out`, at least one `--witness-key`, an independently approved `--witness-anchor`, and a bundle trust anchor (`--trusted-public-key` or `--key-dir`).** The witness anchor supplies the crypto-suite policy and pins the witness keys/group/threshold; the completed evidence must satisfy that authority before any output is written. Handler-required arguments preserve structured `--json` failures (`franken-node/ltv-error-cli/v1`). |
+| `franken-node ltv verify-as-of` | Re-verify LTV evidence offline through the verifier SDK (`verify_as_of_ltv`): inclusion, re-attestation chain, witness threshold, trusted crypto-suite validity/compromise policy, and anteriority against `--as-of`. Fails closed (non-zero exit) on any failed assertion. Required: `--evidence` and `--witness-anchor`. Both are handler-required so `--json` failures emit `franken-node/ltv-error-cli/v1` instead of a human clap error. Flags: `--json`. |
+
+An LTV witness anchor contains `witness_group_id`, `witness_policy_id`,
+`threshold_config` (including public signer keys), and a required `suite_records`
+array. Each suite record specifies `crypto_suite`, `valid_from_unix_seconds`,
+`valid_until_unix_seconds`, and `compromised_at_unix_seconds`; the last two may be
+`null` when the independently approved policy has no such cutoff. Provision this
+anchor through your policy authority before attestation or verification. A
+candidate's embedded records cannot authorize themselves, and deleting or
+changing a compromise cutoff in the candidate cannot override the trusted
+policy. Historical anchors without suite policy must be explicitly updated by
+that authority. Successful offline verification establishes the claim under the
+selected policy snapshot; it does not establish that the snapshot is the latest
+revocation information.
 
 ### Runtime, safe-mode, and proofs
 

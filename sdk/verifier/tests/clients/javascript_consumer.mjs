@@ -74,6 +74,10 @@ for (const test of cases) {
       assert.equal(result.facts.result_count, test.cf_count);
       assert.equal(result.facts.baseline_integrity_hash, test.cf_baseline);
     }
+    if (test.format === "ltv-evidence") {
+      assert.equal(result.scope, "authenticated_ltv_anteriority");
+      assert.deepEqual(result.facts, test.ltv_facts, test.name);
+    }
     assert.equal(JSON.stringify(result).includes("PRIVATE-"), false);
     console.log(JSON.stringify({ case: test.name, result: "verified", scope: result.scope }));
   } catch (error) {
@@ -431,9 +435,14 @@ for (const mode of counterfactualControls) {
   console.log(JSON.stringify({ case: `protocol_${mode}`, result: "PROTOCOL_INVALID" }));
 }
 const ltvControls = ["ltv_wrong_scope", "ltv_rounded_timestamp", "ltv_overflow_timestamp",
-  "ltv_bad_artifact_hash", "ltv_unknown_field"];
+  "ltv_bad_artifact_hash", "ltv_unknown_field", "ltv_missing_policy_hash",
+  "ltv_wrong_policy_hash", "ltv_uppercase_policy_hash"];
+const ltvProtocol = await verifyArtifact(Buffer.from(JSON.stringify({
+  protocol_control: "ltv_policy_bound", witness_anchor_base64: "e30=",
+})), cases[0].anchor, { verifier: resolve("fake_verifier"), format: "ltv-evidence" });
+assert.equal(ltvProtocol.facts.trust_policy_sha256, createHash("sha256").update("{}").digest("hex"));
 for (const mode of ltvControls) {
-  await assert.rejects(verifyArtifact(Buffer.from(JSON.stringify({ protocol_control: mode })), cases[0].anchor,
+  await assert.rejects(verifyArtifact(Buffer.from(JSON.stringify({ protocol_control: mode, witness_anchor_base64: "e30=" })), cases[0].anchor,
     { verifier: resolve("fake_verifier"), format: "ltv-evidence" }),
   (error) => error instanceof VerifierError && error.code === "PROTOCOL_INVALID", `protocol_${mode}`);
   console.log(JSON.stringify({ case: `protocol_${mode}`, result: "PROTOCOL_INVALID" }));

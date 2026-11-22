@@ -7,6 +7,7 @@ execute a captured guest. Only Python's standard library is required.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import ipaddress
 import json
@@ -581,6 +582,21 @@ def _native_session_valid(facts: Any, anchor: str) -> bool:
     return True
 
 
+def _ltv_policy_matches(facts: dict[str, Any], data: bytes) -> bool:
+    try:
+        # Commit the exact root-signed bytes; never reconstruct trusted policy
+        # from the candidate evidence or from a reserialized JSON value.
+        envelope = json.loads(data.decode("utf-8"), object_pairs_hook=_object)
+        encoded = envelope["witness_anchor_base64"]
+        if not isinstance(encoded, str) or len(encoded) > ((65536 + 2) // 3) * 4:
+            return False
+        policy = base64.b64decode(encoded, validate=True)
+        return (0 < len(policy) <= 65536 and base64.b64encode(policy).decode("ascii") == encoded
+                and facts["trust_policy_sha256"] == hashlib.sha256(policy).hexdigest())
+    except (UnicodeError, ValueError, TypeError, KeyError, RecursionError):
+        return False
+
+
 def _facts_valid(facts: Any, format: str, anchor: str, run_anchor: str | None,
                  runtime_anchor: str | None, revocation_anchor: str | None = None,
                  provenance_anchor: str | None = None, evaluation_time: str | None = None,
@@ -610,7 +626,7 @@ def _facts_valid(facts: Any, format: str, anchor: str, run_anchor: str | None,
                              "signer_public_key_hex", "runtime_authority", "capsule"},
         "counterfactual-receipt": {"baseline_integrity_hash", "mode", "result_count", "signer_public_key_hex"},
         "ltv-evidence": {"artifact_id", "artifact_hash", "crypto_suite", "as_of_unix_seconds",
-                         "claimed_at_unix_seconds", "witness_group_id", "witness_policy_id",
+                         "claimed_at_unix_seconds", "witness_group_id", "witness_policy_id", "trust_policy_sha256",
                          "reattestation_count", "hybrid_survived_algo_death", "signer_public_key_hex"},
     }[format]
     if run_anchor is not None:
@@ -653,6 +669,8 @@ def _facts_valid(facts: Any, format: str, anchor: str, run_anchor: str | None,
                     and int(facts[k]) <= 2**64 - 1 for k in ("as_of_unix_seconds", "claimed_at_unix_seconds"))
             and _publisher_text(facts["witness_group_id"], 256)
             and _publisher_text(facts["witness_policy_id"], 256)
+            and isinstance(facts["trust_policy_sha256"], str)
+            and re.fullmatch(r"[0-9a-f]{64}", facts["trust_policy_sha256"]) is not None
             and type(facts["reattestation_count"]) is int and 0 <= facts["reattestation_count"] <= 64
             and type(facts["hybrid_survived_algo_death"]) is bool
         )
@@ -859,7 +877,8 @@ def verify_artifact(
             or result.get("format") != format or result.get("scope") != scope
             or result.get("artifact_sha256") != hashlib.sha256(data).hexdigest()
             or not _facts_valid(result.get("facts"), format, anchor, run_anchor, runtime_anchor,
-                                revocation_anchor, provenance_anchor, evaluation_time, max_revocation_age_secs)):
+                                revocation_anchor, provenance_anchor, evaluation_time, max_revocation_age_secs)
+            or (format == "ltv-evidence" and not _ltv_policy_matches(result["facts"], data))):
         raise VerifierError("PROTOCOL_INVALID", "verification response does not match the request")
     if expected_manifest_sha256 is not None:
         source = result["facts"]["source"] if format == "publisher-source-trust" else result["facts"]

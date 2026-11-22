@@ -1252,6 +1252,67 @@ fn ltv_attest_json_fails_closed_when_witness_key_missing() -> Result<(), Box<dyn
 }
 
 #[test]
+fn ltv_attest_json_requires_approved_suite_policy_before_output() -> Result<(), Box<dyn Error>> {
+    let temp = TempDir::new()?;
+    fs::write(
+        temp.path().join("franken_node.toml"),
+        "profile = \"balanced\"\n\n[trust]\nregistry_signing_key = \"QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI=\"\n\n[security]\nauthorized_api_keys = [\"fnode-e2e-ltv-cli-key\"]\n",
+    )?;
+    fs::write(temp.path().join("present.fnbundle"), b"not-a-real-bundle")?;
+    fs::write(
+        temp.path().join("retained-evidence.json"),
+        b"previous evidence",
+    )?;
+    fs::write(
+        temp.path().join("old-anchor.json"),
+        serde_json::to_vec(&json!({
+            "witness_group_id": "operator-witnesses",
+            "witness_policy_id": "ltv-policy-v1",
+            "threshold_config": {"threshold": 1, "total_signers": 1, "signer_keys": []},
+        }))?,
+    )?;
+    for (anchor, expected) in [
+        (None, "--witness-anchor"),
+        (Some("old-anchor.json"), "missing field `suite_records`"),
+    ] {
+        let mut command = Command::cargo_bin("franken-node")?;
+        command.current_dir(temp.path()).args([
+            "ltv",
+            "attest",
+            "--bundle",
+            "present.fnbundle",
+            "--out",
+            "retained-evidence.json",
+            "--witness-key",
+            "not-read.key",
+            "--json",
+        ]);
+        if let Some(anchor) = anchor {
+            command.args(["--witness-anchor", anchor]);
+        }
+        let assertion = command.assert().failure();
+        let payload = parse_json_stdout(
+            "ltv attest policy requirement",
+            &assertion.get_output().stdout,
+        )?;
+        assert_eq!(payload["schema_version"], "franken-node/ltv-error-cli/v1");
+        assert_eq!(payload["command"], "ltv.attest");
+        assert_eq!(payload["ok"], false);
+        assert!(
+            payload["error"].as_str().unwrap().contains(expected),
+            "{payload}"
+        );
+        assert_eq!(
+            fs::read(temp.path().join("retained-evidence.json"))?,
+            b"previous evidence"
+        );
+        let stderr = String::from_utf8_lossy(&assertion.get_output().stderr);
+        assert!(!stderr.contains("Error:") && !stderr.contains("error: the following required"));
+    }
+    Ok(())
+}
+
+#[test]
 fn ltv_attest_json_fails_closed_when_bundle_flag_missing() -> Result<(), Box<dyn Error>> {
     let temp = TempDir::new()?;
     fs::write(

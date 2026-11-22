@@ -111,6 +111,14 @@ fn external_python_and_javascript_consumers_verify_signed_evidence() {
     assert!(
         cases
             .iter()
+            .filter(|case| case["format"] == "ltv-evidence")
+            .count()
+            >= 20,
+        "independently signed LTV policy acceptance and refusal matrix must execute",
+    );
+    assert!(
+        cases
+            .iter()
             .filter(|case| case["format"] == "publisher-source-trust")
             .count()
             >= 25,
@@ -173,6 +181,10 @@ fn external_python_and_javascript_consumers_verify_signed_evidence() {
             );
             assert_eq!(response["artifact_sha256"], case["artifact_sha256"]);
             assert_eq!(response["verdict"], "verified");
+            if case["format"] == "ltv-evidence" {
+                assert_eq!(response["scope"], "authenticated_ltv_anteriority");
+                assert_eq!(response["facts"], case["ltv_facts"]);
+            }
             if case["format"] == "publisher-source" {
                 assert_eq!(response["scope"], "authenticated_publisher_source_content");
                 assert_eq!(response["facts"], case["publisher_facts"]);

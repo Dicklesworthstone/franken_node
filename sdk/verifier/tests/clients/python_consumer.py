@@ -81,6 +81,9 @@ for case in cases:
             assert result["facts"]["mode"] == case["cf_mode"]
             assert result["facts"]["result_count"] == case["cf_count"]
             assert result["facts"]["baseline_integrity_hash"] == case["cf_baseline"]
+        if case["format"] == "ltv-evidence":
+            assert result["scope"] == "authenticated_ltv_anteriority"
+            assert result["facts"] == case["ltv_facts"], case["name"]
         assert "PRIVATE-" not in json.dumps(result)
         print(json.dumps({"case": case["name"], "result": "verified", "scope": result["scope"]}), flush=True)
 
@@ -491,10 +494,15 @@ for mode in counterfactual_controls:
     else:
         raise AssertionError(f"protocol_{mode}")
 ltv_controls = ["ltv_wrong_scope", "ltv_rounded_timestamp", "ltv_overflow_timestamp",
-                "ltv_bad_artifact_hash", "ltv_unknown_field"]
+                "ltv_bad_artifact_hash", "ltv_unknown_field", "ltv_missing_policy_hash",
+                "ltv_wrong_policy_hash", "ltv_uppercase_policy_hash"]
+ltv_protocol = verify_artifact(json.dumps({
+    "protocol_control": "ltv_policy_bound", "witness_anchor_base64": "e30=",
+}).encode(), cases[0]["anchor"], verifier=str(root / "fake_verifier"), format="ltv-evidence")
+assert ltv_protocol["facts"]["trust_policy_sha256"] == hashlib.sha256(b"{}").hexdigest()
 for mode in ltv_controls:
     try:
-        verify_artifact(json.dumps({"protocol_control": mode}).encode(), cases[0]["anchor"],
+        verify_artifact(json.dumps({"protocol_control": mode, "witness_anchor_base64": "e30="}).encode(), cases[0]["anchor"],
                         verifier=str(root / "fake_verifier"), format="ltv-evidence")
     except VerifierError as error:
         assert error.code == "PROTOCOL_INVALID", (mode, error.code)

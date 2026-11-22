@@ -170,6 +170,7 @@ if mode.startswith("ltv_"):
         "claimed_at_unix_seconds": "1700000100",
         "witness_group_id": "witness-quorum",
         "witness_policy_id": "policy-2of2",
+        "trust_policy_sha256": hashlib.sha256(b"{}").hexdigest(),
         "reattestation_count": 1,
         "hybrid_survived_algo_death": False,
         "signer_public_key_hex": anchor,
@@ -600,6 +601,12 @@ elif mode == "ltv_bad_artifact_hash":
     response["facts"]["artifact_hash"] = "sha256:invalid"
 elif mode == "ltv_unknown_field":
     response["facts"]["execution_authorized"] = True
+elif mode == "ltv_missing_policy_hash":
+    del response["facts"]["trust_policy_sha256"]
+elif mode == "ltv_wrong_policy_hash":
+    response["facts"]["trust_policy_sha256"] = "a" * 64
+elif mode == "ltv_uppercase_policy_hash":
+    response["facts"]["trust_policy_sha256"] = response["facts"]["trust_policy_sha256"].upper()
 elif mode == "session_fail":
     response["facts"]["final_verdict"] = "fail"
 elif mode == "session_empty":

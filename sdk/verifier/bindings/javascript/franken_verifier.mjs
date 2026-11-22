@@ -321,6 +321,21 @@ function nativeSessionValid(facts, anchor) {
   return true;
 }
 
+function ltvPolicyMatches(facts, bytes) {
+  try {
+    // Hash the exact root-signed policy bytes, without re-encoding the policy
+    // or rounding the evidence's u64 timestamps through JavaScript numbers.
+    const envelope = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+    const encoded = envelope.witness_anchor_base64;
+    if (typeof encoded !== "string" || encoded.length > Math.ceil(65536 / 3) * 4) return false;
+    const policy = Buffer.from(encoded, "base64");
+    return policy.length > 0 && policy.length <= 65536 && policy.toString("base64") === encoded
+      && facts.trust_policy_sha256 === createHash("sha256").update(policy).digest("hex");
+  } catch {
+    return false;
+  }
+}
+
 function factsValid(facts, format, anchor, runAnchor, runtimeAnchor,
   revocationAnchor, provenanceAnchor, evaluationTime, maxAge) {
   if (format === "native-session-forensics") return nativeSessionValid(facts, anchor);
@@ -335,7 +350,7 @@ function factsValid(facts, format, anchor, runAnchor, runtimeAnchor,
     "resolution-receipt": ["receipt_id", "crypto_suite", "module_graph_hash", "package_name", "requested_range", "policy_profile", "capability_budget_mode", "decision", "selected_version", "rejected_alternative_count", "canonical_hash", "signer_key_id", "signer_public_key_hex"],
     "publisher-source": ["registration_schema", "package_name", "publisher_id", "version", "manifest_sha256", "artifact_sha256", "capsule_digest", "signer_key_id", "signer_public_key_hex", "runtime_authority", "capsule"],
     "counterfactual-receipt": ["baseline_integrity_hash", "mode", "result_count", "signer_public_key_hex"],
-    "ltv-evidence": ["artifact_id", "artifact_hash", "crypto_suite", "as_of_unix_seconds", "claimed_at_unix_seconds", "witness_group_id", "witness_policy_id", "reattestation_count", "hybrid_survived_algo_death", "signer_public_key_hex"],
+    "ltv-evidence": ["artifact_id", "artifact_hash", "crypto_suite", "as_of_unix_seconds", "claimed_at_unix_seconds", "witness_group_id", "witness_policy_id", "trust_policy_sha256", "reattestation_count", "hybrid_survived_algo_death", "signer_public_key_hex"],
   }[format];
   if (runAnchor !== undefined) expected.push("run_origin");
   if (runtimeAnchor !== undefined) expected.push("runtime_origin");
@@ -365,6 +380,7 @@ function factsValid(facts, format, anchor, runAnchor, runtimeAnchor,
       && ["as_of_unix_seconds", "claimed_at_unix_seconds"].every((k) => typeof facts[k] === "string"
         && /^(0|[1-9][0-9]{0,19})$/u.test(facts[k]) && BigInt(facts[k]) <= 18_446_744_073_709_551_615n)
       && publisherText(facts.witness_group_id, 256) && publisherText(facts.witness_policy_id, 256)
+      && typeof facts.trust_policy_sha256 === "string" && /^[0-9a-f]{64}$/u.test(facts.trust_policy_sha256)
       && count(facts.reattestation_count) && facts.reattestation_count <= 64
       && typeof facts.hybrid_survived_algo_death === "boolean";
   }
@@ -501,7 +517,8 @@ export async function verifyArtifact(data, trustedPublicKeyHex, options) {
           || result.verdict !== "verified" || result.format !== format || result.scope !== scope
           || result.artifact_sha256 !== createHash("sha256").update(bytes).digest("hex")
           || !factsValid(result.facts, format, anchor, runAnchor, runtimeAnchor,
-            revocationAnchor, provenanceAnchor, evaluationTime, maxRevocationAgeSecs)) {
+            revocationAnchor, provenanceAnchor, evaluationTime, maxRevocationAgeSecs)
+          || (format === "ltv-evidence" && !ltvPolicyMatches(result.facts, bytes))) {
         return reject(new VerifierError("PROTOCOL_INVALID", "verification response does not match the request"));
       }
       if (expectedManifestSha256 !== undefined) {

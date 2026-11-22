@@ -872,6 +872,7 @@ fn verify(request: &Request, bytes: &[u8]) -> Result<Value, Failure> {
                     "claimed_at_unix_seconds": evidence.artifact.claimed_at_unix_seconds.to_string(),
                     "witness_group_id": witness_anchor.witness_group_id,
                     "witness_policy_id": witness_anchor.witness_policy_id,
+                    "trust_policy_sha256": hex::encode(Sha256::digest(&anchor_bytes)),
                     "reattestation_count": evidence.reattestation_chain.attestations.len(),
                     "hybrid_survived_algo_death": hybrid_survived,
                     "signer_public_key_hex": hex::encode(request.anchor.as_bytes()),
@@ -1828,8 +1829,8 @@ mod tests {
     fn ltv_evidence_cli_verifies_anteriority_and_rejects_untrusted_or_backdated_witness() {
         use ed25519_dalek::{Signer, SigningKey};
         use frankenengine_verifier_sdk::{
-            LongTermEvidenceRequest, LongTermSignerKey, LongTermThresholdConfig,
-            LongTermWitnessSigner, build_long_term_verification_evidence,
+            LongTermCryptoSuiteRecord, LongTermEvidenceRequest, LongTermSignerKey,
+            LongTermThresholdConfig, LongTermWitnessSigner, build_long_term_verification_evidence,
         };
 
         let operator_root = SigningKey::from_bytes(&[0x44; 32]);
@@ -1845,6 +1846,12 @@ mod tests {
                 signing_key: witness_key_2.clone(),
             },
         ];
+        let suite_records = vec![LongTermCryptoSuiteRecord {
+            crypto_suite: "ed25519-v1".into(),
+            valid_from_unix_seconds: 1_700_000_000,
+            valid_until_unix_seconds: None,
+            compromised_at_unix_seconds: Some(1_700_000_400),
+        }];
         let evidence = build_long_term_verification_evidence(
             &LongTermEvidenceRequest {
                 artifact_id: "release-capsule-1".into(),
@@ -1856,7 +1863,7 @@ mod tests {
                 reattested_at_unix_seconds: 1_700_000_200,
                 observed_at_unix_seconds: 1_700_000_300,
                 as_of_unix_seconds: 1_700_000_500,
-                suite_valid_from_unix_seconds: 1_700_000_000,
+                suite_records: suite_records.clone(),
                 witness_group_id: "independent-witness-quorum".into(),
                 witness_policy_id: "policy-quorum-2of2".into(),
                 witness_threshold: 2,
@@ -1869,6 +1876,7 @@ mod tests {
         let witness_anchor = LongTermWitnessTrustAnchor {
             witness_group_id: "independent-witness-quorum".into(),
             witness_policy_id: "policy-quorum-2of2".into(),
+            suite_records,
             threshold_config: LongTermThresholdConfig {
                 threshold: 2,
                 total_signers: 2,
@@ -1905,6 +1913,52 @@ mod tests {
         assert_eq!(verified["facts"]["artifact_id"], "release-capsule-1");
         assert_eq!(verified["facts"]["as_of_unix_seconds"], "1700000500");
         assert_eq!(verified["facts"]["reattestation_count"], 1);
+        assert_eq!(
+            verified["facts"]["trust_policy_sha256"],
+            hex::encode(Sha256::digest(&anchor_bytes))
+        );
+
+        // The authentic historical receipt cannot replace the operator's
+        // suite policy. No witness or root signature is modified here.
+        let mut erased_policy = serde_json::from_slice::<Value>(&payload).unwrap();
+        erased_policy["evidence"]["suite_records"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("compromised_at_unix_seconds");
+        assert_eq!(
+            run(
+                &cli_args,
+                &mut serde_json::to_vec(&erased_policy).unwrap().as_slice()
+            )
+            .unwrap_err()
+            .code,
+            "LTV_ANTERIORITY_REJECTED"
+        );
+
+        // A root-signed legacy anchor still has no independently approved
+        // crypto-suite policy. Never fill that missing authority from evidence.
+        let mut legacy_anchor = serde_json::to_value(&witness_anchor).unwrap();
+        legacy_anchor
+            .as_object_mut()
+            .unwrap()
+            .remove("suite_records");
+        let legacy_bytes = serde_json::to_vec(&legacy_anchor).unwrap();
+        let mut legacy_payload = serde_json::from_slice::<Value>(&payload).unwrap();
+        legacy_payload["witness_anchor_base64"] = json!(STANDARD.encode(&legacy_bytes));
+        legacy_payload["witness_anchor_signature_hex"] = json!(hex::encode(
+            operator_root
+                .sign(&ltv_anchor_signing_payload(&legacy_bytes))
+                .to_bytes()
+        ));
+        assert_eq!(
+            run(
+                &cli_args,
+                &mut serde_json::to_vec(&legacy_payload).unwrap().as_slice()
+            )
+            .unwrap_err()
+            .code,
+            "EVIDENCE_INVALID"
+        );
 
         // Foreign operator root anchor must be rejected with SIGNATURE_INVALID.
         assert_eq!(

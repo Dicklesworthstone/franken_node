@@ -25861,6 +25861,24 @@ fn load_ltv_witness_signers(
     Ok(signers)
 }
 
+fn load_ltv_witness_anchor(
+    path: &Path,
+) -> Result<(
+    frankenengine_verifier_sdk::LongTermWitnessTrustAnchor,
+    String,
+)> {
+    let raw = crate::bounded_read(path, MAX_LTV_EVIDENCE_BYTES)
+        .with_context(|| format!("failed reading witness trust anchor {}", path.display()))?;
+    let anchor = serde_json::from_slice(&raw).with_context(|| {
+        format!(
+            "witness trust anchor {} must contain independently approved \
+             witness_group_id, witness_policy_id, threshold_config and suite_records",
+            path.display()
+        )
+    })?;
+    Ok((anchor, frankenengine_verifier_sdk::bundle::hash(&raw)))
+}
+
 fn handle_ltv_attest_command(args: &cli::LtvAttestArgs) -> Result<()> {
     if args.bundle.as_os_str().is_empty() {
         anyhow::bail!("--bundle is required");
@@ -25878,6 +25896,10 @@ fn handle_ltv_attest_command(args: &cli::LtvAttestArgs) -> Result<()> {
     if args.witness_keys.is_empty() {
         anyhow::bail!("ltv attest requires at least one --witness-key");
     }
+    if args.witness_anchor.as_os_str().is_empty() {
+        anyhow::bail!("ltv attest requires --witness-anchor with an approved crypto-suite policy");
+    }
+    let (witness_anchor, trust_policy_sha256) = load_ltv_witness_anchor(&args.witness_anchor)?;
     let trusted_key_ids = replay_trusted_key_ids(
         args.trusted_public_key.as_deref(),
         args.trusted_key_dir.as_deref(),
@@ -25922,7 +25944,7 @@ fn handle_ltv_attest_command(args: &cli::LtvAttestArgs) -> Result<()> {
         reattested_at_unix_seconds: now_unix_seconds,
         observed_at_unix_seconds: now_unix_seconds,
         as_of_unix_seconds,
-        suite_valid_from_unix_seconds: claimed_at_unix_seconds,
+        suite_records: witness_anchor.suite_records.clone(),
         witness_group_id: args.witness_group_id.clone(),
         witness_policy_id: args.witness_policy_id.clone(),
         witness_threshold,
@@ -25934,6 +25956,23 @@ fn handle_ltv_attest_command(args: &cli::LtvAttestArgs) -> Result<()> {
         &witness_signers,
     )
     .map_err(|reason| anyhow::anyhow!("ltv attest failed to build evidence: {reason}"))?;
+
+    // Publication requires the operator's independently selected witness and
+    // suite authority, never the candidate's embedded signer/policy records.
+    let verification =
+        frankenengine_verifier_sdk::VerifierSdk::new("verifier://franken-node-ltv-attestation")
+            .verify_as_of_ltv(&evidence, &witness_anchor)
+            .map_err(|error| anyhow::anyhow!("LTV attestation authority check failed: {error}"))?;
+    if verification.verdict != frankenengine_verifier_sdk::VerificationVerdict::Pass {
+        let failures = verification
+            .checked_assertions
+            .iter()
+            .filter(|assertion| !assertion.passed)
+            .map(|assertion| assertion.assertion.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        anyhow::bail!("LTV evidence does not satisfy the approved witness anchor: {failures}");
+    }
 
     let rendered = serde_json::to_string_pretty(&evidence)?;
     std::fs::write(&args.out, rendered.as_bytes())
@@ -26008,6 +26047,7 @@ fn handle_ltv_attest_command(args: &cli::LtvAttestArgs) -> Result<()> {
             "observed_at_unix_seconds": now_unix_seconds,
             "as_of_unix_seconds": as_of_unix_seconds,
             "evidence_path": args.out.display().to_string(),
+            "trust_policy_sha256": trust_policy_sha256,
         });
         println!("{}", serde_json::to_string_pretty(&payload)?);
     } else {
@@ -26050,22 +26090,8 @@ fn handle_ltv_verify_as_of_command(args: &cli::LtvVerifyAsOfArgs) -> Result<()> 
         evidence.as_of_unix_seconds = as_of;
     }
 
-    // bd-7fubt: the witness trust anchor is operator-supplied and mandatory.
-    let anchor_raw = crate::bounded_read(&args.witness_anchor, MAX_LTV_EVIDENCE_BYTES)
-        .with_context(|| {
-            format!(
-                "failed reading witness trust anchor {}",
-                args.witness_anchor.display()
-            )
-        })?;
-    let witness_anchor: frankenengine_verifier_sdk::LongTermWitnessTrustAnchor =
-        serde_json::from_slice(&anchor_raw).with_context(|| {
-            format!(
-                "witness trust anchor {} does not parse as \
-                 {{witness_group_id, witness_policy_id, threshold_config}}",
-                args.witness_anchor.display()
-            )
-        })?;
+    // Both witness identity and suite policy come from operator authority.
+    let (witness_anchor, trust_policy_sha256) = load_ltv_witness_anchor(&args.witness_anchor)?;
 
     let sdk = frankenengine_verifier_sdk::VerifierSdk::new(args.verifier_identity.as_str());
     let result = sdk
@@ -26148,6 +26174,7 @@ fn handle_ltv_verify_as_of_command(args: &cli::LtvVerifyAsOfArgs) -> Result<()> 
         let payload = serde_json::json!({
             "command": "ltv.verify-as-of",
             "schema_version": LTV_VERIFY_AS_OF_CLI_SCHEMA,
+            "trust_policy_sha256": trust_policy_sha256,
             "verdict": format!("{:?}", result.verdict),
             "as_of_unix_seconds": evidence.as_of_unix_seconds,
             "artifact_id": &evidence.artifact.artifact_id,

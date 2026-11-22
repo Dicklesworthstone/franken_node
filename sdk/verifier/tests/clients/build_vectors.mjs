@@ -1264,5 +1264,138 @@ add("signed_session_duplicate_step", "signed-session",
   sessionCompact.replace('"step_index":0', '"step_index":0,"step_index":0'), "JSON_INVALID");
 add("signed_session_trailing_json", "signed-session", sessionCompact + "{}", "JSON_INVALID");
 
+// LTV policy is an independent authority input. These fixtures implement the
+// public length-prefixed hashes and Ed25519 messages directly; neither the
+// producer nor the Rust evidence builder participates in constructing them.
+const ltvWitnessKeys = [seedKey(0x71), seedKey(0x72)];
+const ltvDigest = (domain, ...parts) => hash(Buffer.concat([Buffer.from(domain), ...parts]));
+const ltvRootBytes = (root) => Buffer.concat([u64(root.tree_size), lp(root.root_hash)]);
+function ltvFixture({ claimed = 1000n, observed = 1700n, asOf = 1900n,
+  compromised = 2100n, suite = "ed25519-v1" } = {}) {
+  const artifact = {
+    artifact_id: "independent-ltv-artifact", artifact_hash: hash(Buffer.from("retained artifact bytes")),
+    crypto_suite: suite, claimed_at_unix_seconds: claimed,
+  };
+  artifact.marker_hash = ltvDigest("frankenengine-verifier-sdk:ltv-artifact-marker:v1:",
+    lp(artifact.artifact_id), lp(artifact.artifact_hash), lp(suite), u64(claimed));
+  const leaf = ltvDigest("mmr_proofs_leaf_v1:", lp(artifact.marker_hash));
+  const appended = ltvDigest("mmr_proofs_leaf_v1:", lp(hash(Buffer.from("later log leaf"))));
+  const origin = { tree_size: 1, root_hash: leaf };
+  const newest = { tree_size: 2, root_hash: ltvDigest("mmr_proofs_node_v1:", lp(leaf), lp(appended)) };
+  const prefix = { prefix_size: 1, super_tree_size: 2, prefix_root_hash: leaf,
+    super_root_hash: newest.root_hash, prefix_root_from_super: leaf, super_leaf_hashes: [leaf, appended] };
+  const link = { schema_version: "mmr-root-reattestation-v1", previous_root: origin,
+    attested_root: newest, prefix_proof: prefix, issued_at_unix_seconds: claimed + 1n, crypto_suite: suite };
+  link.attestation_hash = ltvDigest("mmr_root_reattestation_v1:", lp(link.schema_version),
+    ltvRootBytes(origin), ltvRootBytes(newest), u64(1), u64(2), lp(leaf), lp(newest.root_hash),
+    lp(leaf), u64(2), lp(leaf), lp(appended), u64(link.issued_at_unix_seconds), lp(suite));
+  const statement = { schema_version: "mmr-root-witness-v1", root: newest,
+    observed_at_unix_seconds: observed, witness_group_id: "independent-witnesses",
+    witness_policy_id: "independent-policy-2of2" };
+  statement.content_hash = ltvDigest("mmr_root_witness_v1:", lp(statement.schema_version),
+    ltvRootBytes(newest), u64(observed), lp(statement.witness_group_id), lp(statement.witness_policy_id));
+  const witnessMessage = Buffer.concat([Buffer.from("threshold_sig_verify_v2:"),
+    lp("mmr-root-witness"), lp("franken-node-root-witness"), lp(statement.content_hash)]);
+  const policy = [{ crypto_suite: suite, valid_from_unix_seconds: claimed - 100n,
+    compromised_at_unix_seconds: compromised }];
+  const threshold = { threshold: 2, total_signers: 2, signer_keys: ltvWitnessKeys.map((signing, index) => ({
+    key_id: `independent-${index}`, public_key_hex: publicBytes(signing).toString("hex"),
+  })) };
+  const trusted = { witness_group_id: statement.witness_group_id, witness_policy_id: statement.witness_policy_id,
+    threshold_config: clone(threshold), suite_records: clone(policy) };
+  const evidence = { schema_version: "vsdk-ltv-evidence-v1.0", as_of_unix_seconds: asOf,
+    artifact, suite_records: clone(policy), inclusion_proof: { leaf_index: 0, tree_size: 1, leaf_hash: leaf, audit_path: [] },
+    reattestation_chain: { origin_root: origin, attestations: [link] }, witness_receipt: {
+      statement, threshold_config: threshold, witness_artifact: { artifact_id: "mmr-root-witness",
+        connector_id: "franken-node-root-witness", content_hash: statement.content_hash,
+        signatures: ltvWitnessKeys.map((signing, index) => ({ signer_id: `independent-${index}`,
+          key_id: `independent-${index}`, signature_hex: sign(null, witnessMessage, signing).toString("hex") })) },
+      trace_id: "independent-ltv-conformance", timestamp: "2026-11-22T00:00:00Z",
+    } };
+  return { evidence, trusted };
+}
+function ltvEnvelope({ evidence, trusted }) {
+  const policyBytes = Buffer.from(canonical(trusted));
+  const message = Buffer.concat([Buffer.from("franken-verifier/ltv-witness-anchor/v1:"), u64(policyBytes.length), policyBytes]);
+  return { schema_version: "franken-verifier/ltv-evidence-input/v1", evidence: clone(evidence),
+    witness_anchor_base64: policyBytes.toString("base64"), witness_anchor_signature_hex: sign(null, message, key).toString("hex") };
+}
+function addLtv(name, envelope, expected = "verified", options = {}) {
+  const evidence = envelope.evidence;
+  const statement = evidence.witness_receipt.statement;
+  const facts = { artifact_id: evidence.artifact.artifact_id, artifact_hash: evidence.artifact.artifact_hash,
+    crypto_suite: evidence.artifact.crypto_suite, as_of_unix_seconds: evidence.as_of_unix_seconds.toString(),
+    claimed_at_unix_seconds: evidence.artifact.claimed_at_unix_seconds.toString(),
+    witness_group_id: statement.witness_group_id, witness_policy_id: statement.witness_policy_id,
+    trust_policy_sha256: hash(Buffer.from(envelope.witness_anchor_base64, "base64")),
+    reattestation_count: evidence.reattestation_chain.attestations.length,
+    hybrid_survived_algo_death: evidence.artifact.crypto_suite.includes("hybrid"), signer_public_key_hex: anchor };
+  add(name, "ltv-evidence", canonical(envelope), expected, { ltv_facts: facts, ...options });
+}
+const ltvGood = ltvEnvelope(ltvFixture());
+addLtv("ltv_independent_precompromise", ltvGood);
+addLtv("ltv_valid_historical_witness_after_compromise", ltvEnvelope(ltvFixture({ asOf: 2500n })));
+addLtv("ltv_lossless_u64_timestamps", ltvEnvelope(ltvFixture({ claimed: 18446744073709551215n,
+  observed: 18446744073709551614n, asOf: 18446744073709551615n, compromised: 18446744073709551615n })));
+const ltvHybrid = ltvFixture({ suite: "ed25519-pq-hybrid-v1" });
+const deadClassical = { crypto_suite: "ed25519-v1", valid_from_unix_seconds: 900n,
+  valid_until_unix_seconds: 1200n, compromised_at_unix_seconds: 1600n };
+ltvHybrid.trusted.suite_records.push(clone(deadClassical));
+ltvHybrid.evidence.suite_records.push(clone(deadClassical));
+addLtv("ltv_approved_hybrid_survives_classical_compromise", ltvEnvelope(ltvHybrid));
+const ltvCompromised = ltvEnvelope(ltvFixture({ compromised: 1600n }));
+addLtv("ltv_trusted_compromise_precedes_witness", ltvCompromised, "LTV_ANTERIORITY_REJECTED");
+addLtv("ltv_witness_at_compromise_boundary", ltvEnvelope(ltvFixture({ compromised: 1700n })), "LTV_ANTERIORITY_REJECTED");
+for (const [name, mutate] of [
+  ["ltv_erased_trusted_compromise", (value) => { delete value.evidence.suite_records[0].compromised_at_unix_seconds; }],
+  ["ltv_shifted_trusted_compromise", (value) => { value.evidence.suite_records[0].compromised_at_unix_seconds = 3000n; }],
+]) {
+  const candidate = clone(ltvCompromised);
+  mutate(candidate);
+  assert.deepEqual(candidate.evidence.witness_receipt, ltvCompromised.evidence.witness_receipt);
+  assert.equal(candidate.witness_anchor_signature_hex, ltvCompromised.witness_anchor_signature_hex);
+  addLtv(name, candidate, "LTV_ANTERIORITY_REJECTED");
+}
+for (const [name, mutate] of [
+  ["ltv_changed_policy_valid_from", (value) => { value.evidence.suite_records[0].valid_from_unix_seconds = 0n; }],
+  ["ltv_changed_policy_valid_until", (value) => { value.evidence.suite_records[0].valid_until_unix_seconds = 3000n; }],
+  ["ltv_empty_candidate_policy", (value) => { value.evidence.suite_records = []; }],
+  ["ltv_appended_unapproved_suite", (value) => { value.evidence.suite_records.push(clone(deadClassical)); }],
+  ["ltv_below_witness_threshold", (value) => { value.evidence.witness_receipt.witness_artifact.signatures.pop(); }],
+  ["ltv_duplicate_witness_signature", (value) => { value.evidence.witness_receipt.witness_artifact.signatures[1] = clone(value.evidence.witness_receipt.witness_artifact.signatures[0]); }],
+  ["ltv_forged_witness_signature", (value) => { value.evidence.witness_receipt.witness_artifact.signatures[0].signature_hex = "00".repeat(64); }],
+  ["ltv_observation_after_as_of", (value) => { value.evidence.as_of_unix_seconds = 1699n; }],
+]) {
+  const candidate = clone(ltvGood);
+  mutate(candidate);
+  addLtv(name, candidate, "LTV_ANTERIORITY_REJECTED");
+}
+const ltvDropped = ltvEnvelope(ltvHybrid);
+ltvDropped.evidence.suite_records.pop();
+addLtv("ltv_dropped_trusted_suite_record", ltvDropped, "LTV_ANTERIORITY_REJECTED");
+for (const [name, mutate, expected] of [
+  ["ltv_legacy_anchor_missing_suite_policy", (value) => { delete value.trusted.suite_records; }, "EVIDENCE_INVALID"],
+  ["ltv_unknown_trusted_policy_field", (value) => { value.trusted.suite_records[0].compromised_at_unix_second = 1600n; }, "EVIDENCE_INVALID"],
+  ["ltv_malformed_trailing_trusted_interval", (value) => {
+    const invalid = { crypto_suite: "another-suite", valid_from_unix_seconds: 900n, valid_until_unix_seconds: 899n };
+    value.trusted.suite_records.push(clone(invalid)); value.evidence.suite_records.push(clone(invalid));
+  }, "LTV_ANTERIORITY_REJECTED"],
+  ["ltv_empty_trusted_policy", (value) => { value.trusted.suite_records = []; value.evidence.suite_records = []; }, "LTV_ANTERIORITY_REJECTED"],
+  ["ltv_excessive_trusted_policy", (value) => {
+    value.trusted.suite_records = Array.from({ length: 129 }, () => clone(value.trusted.suite_records[0]));
+    value.evidence.suite_records = clone(value.trusted.suite_records);
+  }, "LTV_ANTERIORITY_REJECTED"],
+]) {
+  const fixture = ltvFixture();
+  mutate(fixture);
+  addLtv(name, ltvEnvelope(fixture), expected);
+}
+const ltvUnsignedPolicy = clone(ltvGood);
+const changedAuthority = ltvFixture().trusted;
+delete changedAuthority.suite_records[0].compromised_at_unix_seconds;
+ltvUnsignedPolicy.witness_anchor_base64 = Buffer.from(canonical(changedAuthority)).toString("base64");
+addLtv("ltv_changed_anchor_without_authority_signature", ltvUnsignedPolicy, "SIGNATURE_INVALID");
+addLtv("ltv_foreign_policy_authority", ltvGood, "SIGNATURE_INVALID", { anchor: foreign });
+
 writeFileSync(output, JSON.stringify(cases));
 console.log(JSON.stringify({ vectors: cases.length, incident_sha256: hash(incidentBytes), capsule_expected_hash: capsule.manifest.expected_output_hash, sdk_integrity: sdk.integrity_hash }));

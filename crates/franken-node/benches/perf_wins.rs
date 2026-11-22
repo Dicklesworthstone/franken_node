@@ -448,6 +448,9 @@ fn tnr_ltv_reattestation_verification(c: &mut Criterion) {
             witness_group_id: evidence.witness_receipt.statement.witness_group_id.clone(),
             witness_policy_id: evidence.witness_receipt.statement.witness_policy_id.clone(),
             threshold_config: evidence.witness_receipt.threshold_config.clone(),
+            // This benchmark measures verification work on synthetic inputs;
+            // copying its fixed policy is not independent authenticity proof.
+            suite_records: evidence.suite_records.clone(),
         };
         b.iter(|| black_box(sdk.verify_as_of_ltv(black_box(&evidence), black_box(&witness_anchor))))
     });
