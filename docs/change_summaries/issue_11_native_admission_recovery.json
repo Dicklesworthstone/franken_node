@@ -1,0 +1,51 @@
+{
+  "summary_id": "issue-11-native-admission-recovery",
+  "contract_version": "1.0",
+  "change_summary": {
+    "intent": "Recover authenticated native-session outcomes during capacity-constrained admission so lost database projections do not permanently consume completed-session reservations.",
+    "scope": {
+      "subsystems": ["franken_node.ops.native_session_inventory"],
+      "modules": ["crates/franken-node/src/ops/native_session_inventory.rs"]
+    },
+    "surface_area_delta": {
+      "new_apis": [],
+      "removed_apis": [],
+      "changed_signatures": []
+    },
+    "affected_contracts": {
+      "beads": ["bd-reality-20260923-26n9r.30"],
+      "documents": [
+        "docs/plans/PLAN_TO_CREATE_FRANKEN_NODE.md",
+        "docs/policy/fleet_quarantine_operations.md"
+      ]
+    },
+    "operational_impact": {
+      "operator_notes": "Capacity recovery uses existing signed receipts and preserves original observations. Missing receipts keep their full reservation; unknown effects remain unknown; fleet fences remain held.",
+      "required_actions": ["Install the rebuilt binary while preserving the existing runtime-evidence store; no state migration is required."],
+      "rollout_notes": "No migration or budget change. Recover only historical pending rows, exclude the prospective admission, and require the original count and byte ceilings before committing. No receipt scan or additional aggregate query on ordinary successful admission."
+    },
+    "risk_delta": {
+      "previous_tier": "medium",
+      "new_tier": "medium",
+      "rationale": "All candidate receipts authenticate before writes, and recovery shares the admission transaction and existing lock. Invalid evidence or insufficient reclaimed capacity rolls back the complete transaction."
+    },
+    "compatibility": {
+      "backward_compatibility": "compatible",
+      "forward_compatibility": "enables",
+      "details": "Existing inventory, receipt and public checkpoint schemas are unchanged. No signature is regenerated, no history is evicted, and read-only inspection remains non-mutating."
+    },
+    "dependency_changes": {"added": [], "removed": [], "updated": []}
+  },
+  "validation": {
+    "base_commit": "61909c6c0409efd4f35a68fccbdf77f08d02acd3",
+    "toolchain": "nightly-2026-09-21",
+    "engine_commit": "763389e24a84171abf381cb85ccf7aec2c0e2ff9",
+    "regressions_added": [
+      "admission_recovers_signed_outcomes_before_reservation_exhaustion",
+      "admission_capacity_recovery_is_atomic_and_preserves_unknown_obligations"
+    ],
+    "review": "Independent source review confirmed bounded transactional recovery, exact receipt retention and the prospective-nonce exclusion. Tests cover the actual 51-pending reservation threshold, missing and foreign receipts, orphan receipts for a retried identity, unknown effects and held fences.",
+    "runtime_status": "Unverified: the minimal engine-feature library check reached only manifest warnings before executor loss. Full runtime tests and Clippy have not completed. The original issue's database-write failure trigger has not been reproduced; this change fixes the independently confirmed missing admission-recovery path.",
+    "static_status": "Pinned rustfmt completed on the changed Rust source after executor restoration. Final whitespace and change-summary validation are recorded in the commit message."
+  }
+}

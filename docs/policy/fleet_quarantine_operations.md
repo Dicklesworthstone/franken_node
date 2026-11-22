@@ -104,6 +104,16 @@ or changing that population cannot produce a new valid observation. Missing
 historical receipts remain indeterminate rather than being upgraded to
 successful terminal observations.
 
+Native-session admission also recovers signed outcomes when missing database
+projections would exhaust the inventory's reserved capacity. It authenticates
+the whole pending recovery batch and commits the exact observations together
+with the new admission, without issuing replacement receipts. The new session
+cannot recover its own historical receipt or release its own reservation.
+Missing receipts retain their full reservation; signed unknown outcomes retain
+their unknown status. The existing 256 MiB budget and session count limit still
+apply, and admission recovery does not release fleet fences. Inventory
+inspection remains read-only.
+
 Local file-transport polls retain the complete signed checkpoint in the drain
 store. Repeated polls and agent restarts preserve its original `observed_at` and
 `signature_hex` when the authenticated accounting is unchanged, including after
