@@ -578,7 +578,7 @@ fn source_graph_cli_captures_without_evaluation_and_preserves_incomplete_evidenc
     );
     assert_eq!(
         report["schema_version"],
-        "franken-node/module-source-graph/v2"
+        "franken-node/module-source-graph/v3"
     );
     assert_eq!(report["fully_resolved"], true);
     assert_eq!(report["execution_performed"], false);

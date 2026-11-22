@@ -425,6 +425,7 @@ fn checked_in_fuzz_crash_artifacts_replay_deterministically_without_panicking() 
 }
 
 fn exercise_domain_parsers(bytes: &[u8]) {
+    #[cfg(feature = "control-plane")]
     use frankenengine_node::api::fleet_quarantine::QuarantineRequest;
     use frankenengine_node::replay::time_travel_engine::WorkflowTrace;
     use frankenengine_node::runtime::checkpoint::{
@@ -447,6 +448,7 @@ fn exercise_domain_parsers(bytes: &[u8]) {
     if let Ok(scope) = serde_json::from_slice::<RemoteScope>(bytes) {
         let _ = scope.allows_endpoint("https://api.example.com/v1/health");
     }
+    #[cfg(feature = "control-plane")]
     let _ = serde_json::from_slice::<QuarantineRequest>(bytes);
     let _ = serde_json::from_slice::<ExtensionRegistrationManifest>(bytes);
     let _ = serde_json::from_slice::<SignedReceipt>(bytes);

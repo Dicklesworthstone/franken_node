@@ -24,8 +24,9 @@ on:
 
 env:
   # bd-2djfa: release evidence and binaries are one immutable source pair.
-  # Update this only with a fresh compatibility + close-condition campaign.
-  FRANKEN_ENGINE_REVISION: 6d204d13c710cb6e8d279f93b629ba6588add106
+  # Keep this in sync with franken-siblings; the campaign below must freshly
+  # qualify this source pair before publication. A pin bump is not certification.
+  FRANKEN_ENGINE_REVISION: 763389e24a84171abf381cb85ccf7aec2c0e2ff9
   BUN_VERSION: 1.3.14
   NODE_VERSION: 22.14.0
   RELEASE_EVIDENCE_MAX_AGE_HOURS: 6
