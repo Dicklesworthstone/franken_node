@@ -3500,18 +3500,22 @@ impl PublisherHostAuthority {
         &self,
         request: &ProcessSpawnRequest,
         granted: &[ProcessSpawnCapability],
-    ) -> std::result::Result<(), ProcessSpawnError> {
+    ) -> std::result::Result<(), Box<ProcessSpawnError>> {
         use crate::extensions::artifact_contract::InvocationDecision;
 
-        let denied = |reason: &str| ProcessSpawnError::Denied {
-            reason: format!("publisher_authority: {reason}"),
+        let denied = |reason: &str| {
+            Box::new(ProcessSpawnError::Denied {
+                reason: format!("publisher_authority: {reason}"),
+            })
         };
         if matches!(request, ProcessSpawnRequest::Cleanup { .. }) {
             return Err(denied("process cleanup is reserved for engine teardown"));
         }
         let capability = request.required_capability();
         if !granted.contains(&capability) {
-            return Err(ProcessSpawnError::CapabilityMissing { capability });
+            return Err(Box::new(ProcessSpawnError::CapabilityMissing {
+                capability,
+            }));
         }
         if !self.ceiling.permits_capability("process_spawn") {
             return Err(denied("process capability is outside the admitted ceiling"));
@@ -3624,7 +3628,9 @@ impl ProcessSpawnProvider for PublisherAuthorityProcessSpawn {
         request: &ProcessSpawnRequest,
         granted: &[ProcessSpawnCapability],
     ) -> ProcessSpawnOutcome {
-        self.authority.authorize_process(request, granted)?;
+        self.authority
+            .authorize_process(request, granted)
+            .map_err(|err| *err)?;
         self.inner.perform(request, granted)
     }
 
@@ -3634,7 +3640,9 @@ impl ProcessSpawnProvider for PublisherAuthorityProcessSpawn {
         granted: &[ProcessSpawnCapability],
         control: Arc<dyn ProcessSpawnControl>,
     ) -> ProcessSpawnOutcome {
-        self.authority.authorize_process(request, granted)?;
+        self.authority
+            .authorize_process(request, granted)
+            .map_err(|err| *err)?;
         control.checkpoint()?;
         self.inner.perform_controlled(request, granted, control)
     }

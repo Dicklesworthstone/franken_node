@@ -2392,7 +2392,7 @@ mod engine {
                 return Err("captured process attempt lacks successful request preparation".into());
             }
             let agrees = match authority.authorize_process(request, granted) {
-                Err(denial) => outcome.as_ref().err() == Some(&denial),
+                Err(denial) => outcome.as_ref().err() == Some(denial.as_ref()),
                 Ok(()) => !publisher_denial(outcome),
             };
             if !agrees {
