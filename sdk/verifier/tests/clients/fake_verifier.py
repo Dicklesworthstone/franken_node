@@ -203,6 +203,64 @@ if mode.startswith("counterfactual_"):
         "result_count": 2,
         "signer_public_key_hex": anchor,
     }
+if mode.startswith("cf_incident_"):
+    baseline = response["facts"]
+    baseline["signer_public_key_hex"] = sys.argv[sys.argv.index("--trusted-incident-key-hex") + 1]
+    baseline["integrity_hash"] = sys.argv[sys.argv.index("--expected-baseline-integrity-hash") + 1]
+    baseline_scope = "authenticated_recorded_incident"
+    if "--trusted-run-key-hex" in sys.argv:
+        baseline_scope = "authenticated_run_incident"
+        baseline["run_origin"] = {
+            "receipt_id": "run-protocol-control", "receipt_hash": "sha256:" + "a" * 64,
+            "signer_public_key_hex": run_anchor, "record_sha256": "b" * 64,
+        }
+    if "--trusted-runtime-key-hex" in sys.argv:
+        baseline_scope = "authenticated_runtime_incident"
+        baseline["runtime_origin"] = {
+            "session_nonce": "0199abcd-1234-7000-8000-123456789abc",
+            "product_root_key_id": "ed25519:" + runtime_anchor,
+            "producer_id": "runtime-protocol-control", "evidence_key_id": "ed25519:" + "c" * 64,
+            "signed_epoch": "18446744073709551615",
+        }
+    response["format"] = "counterfactual-incident"
+    response["scope"] = "authenticated_counterfactual_incident"
+    facts = response["facts"] = {
+        "baseline_integrity_hash": baseline["integrity_hash"],
+        "counterfactual_output_sha256": "d" * 64, "signer_public_key_hex": anchor,
+        "mode": "single", "result_count": 1, "baseline_scope": baseline_scope,
+        "baseline": baseline, "guest_execution_verified": False,
+    }
+    if mode == "cf_incident_wrong_pin":
+        facts["baseline_integrity_hash"] = "e" * 64
+    elif mode == "cf_incident_wrong_nested_pin":
+        baseline["integrity_hash"] = "e" * 64
+    elif mode == "cf_incident_wrong_receipt_signer":
+        facts["signer_public_key_hex"] = "e" * 64
+    elif mode == "cf_incident_wrong_exporter":
+        baseline["signer_public_key_hex"] = anchor
+    elif mode == "cf_incident_guest_execution_claim":
+        facts["guest_execution_verified"] = True
+    elif mode == "cf_incident_wrong_scope":
+        response["scope"] = "authenticated_runtime_incident"
+    elif mode == "cf_incident_downgraded_baseline":
+        facts["baseline_scope"] = "authenticated_recorded_incident"
+    elif mode == "cf_incident_missing_run_origin":
+        baseline.pop("run_origin", None)
+    elif mode == "cf_incident_missing_runtime_origin":
+        baseline.pop("runtime_origin", None)
+    elif mode == "cf_incident_extra_field":
+        facts["replay_certified"] = True
+    elif mode == "cf_incident_bad_output_hash":
+        facts["counterfactual_output_sha256"] = "sha256:" + "d" * 64
+    elif mode == "cf_incident_noncanonical_output_hash":
+        facts["counterfactual_output_sha256"] = "D" * 64
+    elif mode == "cf_incident_boolean_count":
+        facts["result_count"] = True
+    elif mode == "cf_incident_excessive_count":
+        facts["mode"] = "sweep"
+        facts["result_count"] = 21
+    elif mode == "cf_incident_single_count_mismatch":
+        facts["result_count"] = 2
 if mode.startswith("ltv_"):
     response["format"] = "ltv-evidence"
     response["scope"] = "authenticated_ltv_anteriority"

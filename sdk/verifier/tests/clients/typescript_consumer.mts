@@ -6,6 +6,7 @@ import type { Verification, EvidenceFormat, PublisherSourceTrustFacts, NativeSes
 
 type KeyCase = { name: string; input_hex: string; anchor: string; format: Exclude<EvidenceFormat, "fleet-quiescence-observations" | "fleet-epoch-commit">;
   signature_hex?: string; run_anchor?: string; runtime_anchor?: string; event_count?: number;
+  incident_anchor?: string; expected_baseline_integrity_hash?: string;
   revocation_anchor?: string; provenance_anchor?: string | null; evaluation_time?: string;
   max_revocation_age_secs?: string; publisher_trust_facts?: PublisherSourceTrustFacts;
   expected_manifest_sha256?: string; expected_source_artifact_sha256?: string; expected_graph_input_hash?: string;
@@ -23,7 +24,7 @@ const allCases: Array<KeyCase | FleetCase | EpochCase> =
 const cases = allCases.filter((item): item is KeyCase => item.format !== "fleet-quiescence-observations" && item.format !== "fleet-epoch-commit");
 const positive = cases.find((item) => item.name === "genuine_cli_incident")!;
 const result: Verification = await verifyArtifact(Buffer.from(positive.input_hex, "hex"), positive.anchor,
-  { verifier: resolve("verifier"), format: positive.format });
+  { verifier: resolve("verifier"), format: "incident-bundle" });
 if (result.format !== "incident-bundle" || result.facts.event_count !== 3
     || result.scope !== "authenticated_recorded_incident"
     || result.artifact_sha256 !== positive.artifact_sha256) throw new Error("TypeScript consumer mismatch");
@@ -116,6 +117,39 @@ if (cfVerified.format !== "counterfactual-receipt"
     || cfVerified.facts.result_count !== 2) {
   throw new Error("TypeScript counterfactual receipt mismatch");
 }
+let cfIncidentPositive = 0;
+let cfIncidentNegative = 0;
+for (const source of cases.filter((item) => item.format === "counterfactual-incident")) {
+  try {
+    const verified = await verifyArtifact(Buffer.from(source.input_hex, "hex"), source.anchor, {
+      verifier: resolve("verifier"), format: "counterfactual-incident", signatureHex: source.signature_hex!,
+      trustedIncidentPublicKeyHex: source.incident_anchor!,
+      expectedBaselineIntegrityHash: source.expected_baseline_integrity_hash!,
+      trustedRunPublicKeyHex: source.run_anchor, trustedRuntimePublicKeyHex: source.runtime_anchor,
+    });
+    if (source.expected !== "verified" || verified.format !== "counterfactual-incident"
+        || verified.scope !== "authenticated_counterfactual_incident") {
+      throw new Error("TypeScript counterfactual incident mismatch: " + source.name);
+    }
+    const executed: false = verified.facts.guest_execution_verified;
+    assert.equal(executed, false);
+    assert.equal(verified.facts.baseline_integrity_hash, source.expected_baseline_integrity_hash);
+    assert.equal(verified.facts.baseline.signer_public_key_hex, source.incident_anchor);
+    if (verified.facts.baseline_scope === "authenticated_runtime_incident") {
+      const epoch: string = verified.facts.baseline.runtime_origin.signed_epoch;
+      assert.equal(epoch, "18446744073709551615");
+      assert.equal(verified.facts.baseline.run_origin.signer_public_key_hex, source.run_anchor);
+    } else if (verified.facts.baseline_scope === "authenticated_run_incident") {
+      assert.equal(verified.facts.baseline.run_origin.signer_public_key_hex, source.run_anchor);
+    }
+    cfIncidentPositive += 1;
+  } catch (error: unknown) {
+    if (source.expected === "verified" || !(error instanceof VerifierError)
+        || error.code !== source.expected) throw error;
+    cfIncidentNegative += 1;
+  }
+}
+assert(cfIncidentPositive >= 5 && cfIncidentNegative >= 20, "counterfactual incident matrix missing");
 let identityPositive = 0;
 let identityNegative = 0;
 for (const source of cases.filter((item) => item.format === "publisher-source" && item.expected_manifest_sha256 !== undefined)) {

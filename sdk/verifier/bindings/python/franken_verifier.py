@@ -31,7 +31,7 @@ MAX_FLEET_QUIESCENCE_POLICY_BYTES = 1024 * 1024
 MAX_RESPONSE_BYTES = 64 * 1024 + 1
 EvidenceFormat = Literal[
     "incident-bundle", "native-session-forensics", "capsule", "signed-bundle", "signed-session", "resolution-receipt",
-    "publisher-source", "publisher-source-trust", "counterfactual-receipt", "ltv-evidence",
+    "publisher-source", "publisher-source-trust", "counterfactual-receipt", "counterfactual-incident", "ltv-evidence",
     "fleet-quiescence-observations", "fleet-epoch-commit",
 ]
 _SCOPES = {
@@ -44,6 +44,7 @@ _SCOPES = {
     "publisher-source": "authenticated_publisher_source_content",
     "publisher-source-trust": "authenticated_publisher_source_trust",
     "counterfactual-receipt": "authenticated_counterfactual_receipt",
+    "counterfactual-incident": "authenticated_counterfactual_incident",
     "ltv-evidence": "authenticated_ltv_anteriority",
     "fleet-quiescence-observations": "authenticated_fleet_supervisor_observations",
     "fleet-epoch-commit": "authenticated_fleet_epoch_commit",
@@ -60,7 +61,8 @@ class Verification(TypedDict):
                    "authenticated_verification_session",
                    "authenticated_resolution_decision", "authenticated_publisher_source_content",
                    "authenticated_publisher_source_trust",
-                   "authenticated_counterfactual_receipt", "authenticated_ltv_anteriority",
+                   "authenticated_counterfactual_receipt", "authenticated_counterfactual_incident",
+                   "authenticated_ltv_anteriority",
                    "authenticated_fleet_supervisor_observations", "authenticated_fleet_epoch_commit"]
     artifact_sha256: str
     facts: dict[str, Any]
@@ -138,6 +140,48 @@ class RuntimeOriginMetadata(TypedDict):
     producer_id: str
     evidence_key_id: str
     signed_epoch: str
+
+
+class NativeCaptureMetadata(TypedDict):
+    payload_sha256: str
+    payload_bytes: int
+    captured_terminal_state: Literal["completed", "uncaught_exception", "engine_failure"]
+    host_io_exchange_count: int
+
+
+class IncidentFacts(TypedDict):
+    bundle_id: str
+    incident_id: str
+    created_at: str
+    policy_version: str
+    event_count: int
+    integrity_hash: str
+    decision_sequence_hash: str
+    signer_public_key_hex: str
+    signing_identity: str
+    native_capture: NativeCaptureMetadata | None
+
+
+class RunIncidentFacts(IncidentFacts):
+    run_origin: RunOriginMetadata
+
+
+class RuntimeIncidentFacts(RunIncidentFacts):
+    runtime_origin: RuntimeOriginMetadata
+
+
+class CounterfactualIncidentFacts(TypedDict):
+    """Signed counterfactual bound to an independently authenticated baseline."""
+
+    baseline_integrity_hash: str
+    counterfactual_output_sha256: str
+    signer_public_key_hex: str
+    mode: Literal["single", "sweep"]
+    result_count: int
+    baseline_scope: Literal["authenticated_recorded_incident", "authenticated_run_incident",
+                            "authenticated_runtime_incident"]
+    baseline: IncidentFacts | RunIncidentFacts | RuntimeIncidentFacts
+    guest_execution_verified: Literal[False]
 
 
 class NativeSessionEffectJournalFacts(TypedDict):
@@ -843,12 +887,37 @@ def _fleet_facts_valid(facts: Any, raw_policy: bytes, policy: dict[str, Any], da
 def _facts_valid(facts: Any, format: str, anchor: str, run_anchor: str | None,
                  runtime_anchor: str | None, revocation_anchor: str | None = None,
                  provenance_anchor: str | None = None, evaluation_time: str | None = None,
-                 max_age: str | None = None) -> bool:
+                 max_age: str | None = None, incident_anchor: str | None = None,
+                 expected_baseline: str | None = None) -> bool:
     if format == "native-session-forensics":
         return _native_session_valid(facts, anchor)
     if format == "publisher-source-trust":
         return _publisher_source_trust_valid(
             facts, anchor, revocation_anchor, provenance_anchor, evaluation_time, max_age,
+        )
+    if format == "counterfactual-incident":
+        baseline_scope = ("authenticated_runtime_incident" if runtime_anchor is not None else
+                          "authenticated_run_incident" if run_anchor is not None else
+                          "authenticated_recorded_incident")
+        return (
+            isinstance(facts, dict)
+            and set(facts) == {"baseline_integrity_hash", "counterfactual_output_sha256",
+                               "signer_public_key_hex", "mode", "result_count", "baseline_scope",
+                               "baseline", "guest_execution_verified"}
+            and facts["signer_public_key_hex"] == anchor
+            and isinstance(expected_baseline, str)
+            and facts["baseline_integrity_hash"] == expected_baseline
+            and isinstance(facts["counterfactual_output_sha256"], str)
+            and re.fullmatch(r"[0-9a-f]{64}", facts["counterfactual_output_sha256"]) is not None
+            and facts["mode"] in ("single", "sweep")
+            and type(facts["result_count"]) is int and 1 <= facts["result_count"] <= 20
+            and (facts["mode"] == "sweep" or facts["result_count"] == 1)
+            and facts["baseline_scope"] == baseline_scope
+            and facts["guest_execution_verified"] is False
+            and isinstance(incident_anchor, str)
+            and _facts_valid(facts["baseline"], "incident-bundle", incident_anchor,
+                             run_anchor, runtime_anchor)
+            and facts["baseline"]["integrity_hash"] == expected_baseline
         )
     if not isinstance(facts, dict) or facts.get("signer_public_key_hex") != anchor:
         return False
@@ -975,6 +1044,8 @@ def verify_artifact(
     trusted_fleet_policy: str | os.PathLike[str] | None = None,
     trusted_coordinator_id: str | None = None,
     trusted_coordinator_public_key_hex: str | None = None,
+    trusted_incident_public_key_hex: str | None = None,
+    expected_baseline_integrity_hash: str | None = None,
     trusted_run_public_key_hex: str | None = None,
     trusted_runtime_public_key_hex: str | None = None,
     trusted_revocation_public_key_hex: str | None = None,
@@ -999,6 +1070,11 @@ def verify_artifact(
     Adding ``trusted_runtime_public_key_hex`` requires that run authority plus
     the portable product-root/session signatures over the original effect ledger.
     It does not establish guest replay, external effect completion or quiescence.
+    Counterfactual incidents require a separate incident exporter key and a
+    caller-pinned raw lowercase baseline integrity hash. The primary key and
+    detached signature authenticate the counterfactual receipt; optional run
+    and runtime keys strengthen the nested baseline's origin evidence only.
+    The binding never claims that the guest was independently re-executed.
     Native-session forensics authenticates retained supervisor observations.
     A pending outcome and a retained journal prefix never certify complete history.
     Version 3 authenticates retained source capsule content without replaying it.
@@ -1052,14 +1128,22 @@ def verify_artifact(
             raise VerifierError("INPUT_INVALID", "fleet policy applies only to fleet verification formats")
         if not _hex(trusted_public_key_hex, 64):
             raise VerifierError("ANCHOR_INVALID", "expected a 32-byte hexadecimal public key")
+    if format == "counterfactual-incident":
+        if not _hex(trusted_incident_public_key_hex, 64):
+            raise VerifierError("INCIDENT_ANCHOR_INVALID", "an independent incident exporter public key is required")
+        if (not isinstance(expected_baseline_integrity_hash, str)
+                or re.fullmatch(r"[0-9a-f]{64}", expected_baseline_integrity_hash) is None):
+            raise VerifierError("EXPECTED_BASELINE_INVALID", "an exact lowercase baseline integrity hash is required")
+    elif trusted_incident_public_key_hex is not None or expected_baseline_integrity_hash is not None:
+        raise VerifierError("INPUT_INVALID", "incident exporter trust and baseline pins require counterfactual-incident")
     if trusted_run_public_key_hex is not None:
-        if format != "incident-bundle":
-            raise VerifierError("INPUT_INVALID", "original-run trust applies only to incident-bundle")
+        if format not in ("incident-bundle", "counterfactual-incident"):
+            raise VerifierError("INPUT_INVALID", "original-run trust requires an incident verification format")
         if not _hex(trusted_run_public_key_hex, 64):
             raise VerifierError("RUN_ANCHOR_INVALID", "expected a 32-byte hexadecimal run public key")
     if trusted_runtime_public_key_hex is not None:
-        if format != "incident-bundle" or trusted_run_public_key_hex is None:
-            raise VerifierError("INPUT_INVALID", "runtime trust requires incident-bundle and original-run trust")
+        if format not in ("incident-bundle", "counterfactual-incident") or trusted_run_public_key_hex is None:
+            raise VerifierError("INPUT_INVALID", "runtime trust requires incident verification and original-run trust")
         if not _hex(trusted_runtime_public_key_hex, 64):
             raise VerifierError("RUNTIME_ANCHOR_INVALID", "expected a 32-byte hexadecimal product-root public key")
     publisher_trust_options = (
@@ -1093,11 +1177,13 @@ def verify_artifact(
     if not isinstance(executable, str) or not executable or "\0" in executable:
         raise VerifierError("EXECUTABLE_INVALID", "verifier must be a trusted executable path")
     anchor = trusted_public_key_hex.lower() if trusted_public_key_hex is not None else None
+    incident_anchor = trusted_incident_public_key_hex.lower() if trusted_incident_public_key_hex is not None else None
     run_anchor = trusted_run_public_key_hex.lower() if trusted_run_public_key_hex is not None else None
     runtime_anchor = trusted_runtime_public_key_hex.lower() if trusted_runtime_public_key_hex is not None else None
     revocation_anchor = trusted_revocation_public_key_hex.lower() if trusted_revocation_public_key_hex is not None else None
     provenance_anchor = trusted_provenance_public_key_hex.lower() if trusted_provenance_public_key_hex is not None else None
-    scope = ("authenticated_runtime_incident" if runtime_anchor is not None else
+    scope = (_SCOPES[format] if format == "counterfactual-incident" else
+             "authenticated_runtime_incident" if runtime_anchor is not None else
              "authenticated_run_incident" if run_anchor is not None else _SCOPES[format])
     args = [executable, "verify", "--format", format]
     if fleet_policy is not None:
@@ -1106,6 +1192,9 @@ def verify_artifact(
             args.extend(["--trusted-coordinator-id", coordinator[0], "--trusted-coordinator-key-hex", coordinator[1]])
     else:
         args.extend(["--trusted-key-hex", anchor])
+    if incident_anchor is not None:
+        args.extend(["--trusted-incident-key-hex", incident_anchor,
+                     "--expected-baseline-integrity-hash", expected_baseline_integrity_hash])
     if run_anchor is not None:
         args.extend(["--trusted-run-key-hex", run_anchor])
     if runtime_anchor is not None:
@@ -1121,12 +1210,12 @@ def verify_artifact(
         args.extend(["--expected-source-artifact-sha256", expected_source_artifact_sha256])
     if expected_graph_input_hash is not None:
         args.extend(["--expected-graph-input-hash", expected_graph_input_hash])
-    if format in ("signed-bundle", "publisher-source", "publisher-source-trust", "counterfactual-receipt"):
+    if format in ("signed-bundle", "publisher-source", "publisher-source-trust", "counterfactual-receipt", "counterfactual-incident"):
         if not _hex(signature_hex, 128):
             raise VerifierError("SIGNATURE_MALFORMED", "a detached 64-byte signature is required")
         args.extend(["--signature-hex", signature_hex])
     elif signature_hex is not None:
-        raise VerifierError("INPUT_INVALID", "detached signatures require a signed-bundle, publisher-source format, or counterfactual-receipt")
+        raise VerifierError("INPUT_INVALID", "detached signatures require a signed-bundle, publisher-source format, or counterfactual format")
     try:
         process = _run_bounded(args, data, timeout)
     except OSError as error:
@@ -1153,7 +1242,8 @@ def verify_artifact(
             or not (_fleet_facts_valid(result.get("facts"), fleet_policy[1], fleet_policy[2], data, coordinator)
                     if fleet_policy is not None else
                     _facts_valid(result.get("facts"), format, anchor, run_anchor, runtime_anchor,
-                                 revocation_anchor, provenance_anchor, evaluation_time, max_revocation_age_secs))
+                                 revocation_anchor, provenance_anchor, evaluation_time, max_revocation_age_secs,
+                                 incident_anchor, expected_baseline_integrity_hash))
             or (format == "ltv-evidence" and not _ltv_policy_matches(result["facts"], data))):
         raise VerifierError("PROTOCOL_INVALID", "verification response does not match the request")
     if expected_manifest_sha256 is not None:

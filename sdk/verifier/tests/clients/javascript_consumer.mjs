@@ -14,6 +14,8 @@ for (const test of cases) {
   try {
     const result = await verifyArtifact(data, test.anchor, { verifier: executable, format: test.format, signatureHex: test.signature_hex,
       trustedRunPublicKeyHex: test.run_anchor, trustedRuntimePublicKeyHex: test.runtime_anchor,
+      trustedIncidentPublicKeyHex: test.incident_anchor,
+      expectedBaselineIntegrityHash: test.expected_baseline_integrity_hash,
       trustedRevocationPublicKeyHex: test.revocation_anchor,
       trustedProvenancePublicKeyHex: test.provenance_anchor ?? undefined,
       evaluationTime: test.evaluation_time, maxRevocationAgeSecs: test.max_revocation_age_secs,
@@ -77,6 +79,29 @@ for (const test of cases) {
       assert.equal(result.facts.result_count, test.cf_count);
       assert.equal(result.facts.baseline_integrity_hash, test.cf_baseline);
     }
+    if (test.format === "counterfactual-incident") {
+      assert.equal(result.scope, "authenticated_counterfactual_incident");
+      const facts = result.facts;
+      assert.equal(facts.mode, test.cf_mode);
+      assert.equal(facts.result_count, test.cf_count);
+      assert.equal(facts.baseline_integrity_hash, test.cf_baseline);
+      assert.equal(facts.counterfactual_output_sha256, test.cf_output_hash);
+      assert.equal(facts.signer_public_key_hex, test.anchor);
+      assert.equal(facts.guest_execution_verified, false);
+      assert.equal(facts.baseline.integrity_hash, test.cf_baseline);
+      assert.equal(facts.baseline.signer_public_key_hex, test.incident_anchor);
+      let expectedScope = "authenticated_recorded_incident";
+      if (test.run_anchor !== undefined) {
+        expectedScope = "authenticated_run_incident";
+        assert.equal(facts.baseline.run_origin.signer_public_key_hex, test.run_anchor);
+      }
+      if (test.runtime_anchor !== undefined) {
+        expectedScope = "authenticated_runtime_incident";
+        assert.equal(facts.baseline.runtime_origin.product_root_key_id, `ed25519:${test.runtime_anchor}`);
+        assert.equal(facts.baseline.runtime_origin.signed_epoch, "18446744073709551615");
+      }
+      assert.equal(facts.baseline_scope, expectedScope);
+    }
     if (test.format === "ltv-evidence") {
       assert.equal(result.scope, "authenticated_ltv_anteriority");
       assert.deepEqual(result.facts, test.ltv_facts, test.name);
@@ -112,6 +137,32 @@ for (const test of cases) {
     console.log(JSON.stringify({ case: test.name, result: error.code }));
   }
 }
+const cfIncidentCase = cases.find((test) => test.name === "counterfactual_incident_runtime_origin");
+const cfIncidentOptions = {
+  verifier: resolve("fake_verifier"), format: "counterfactual-incident",
+  signatureHex: cfIncidentCase.signature_hex,
+  trustedIncidentPublicKeyHex: cfIncidentCase.incident_anchor,
+  expectedBaselineIntegrityHash: cfIncidentCase.expected_baseline_integrity_hash,
+  trustedRunPublicKeyHex: cfIncidentCase.run_anchor,
+  trustedRuntimePublicKeyHex: cfIncidentCase.runtime_anchor,
+};
+for (const mode of [
+  "cf_incident_wrong_pin", "cf_incident_wrong_nested_pin", "cf_incident_wrong_receipt_signer",
+  "cf_incident_wrong_exporter", "cf_incident_guest_execution_claim", "cf_incident_wrong_scope",
+  "cf_incident_downgraded_baseline", "cf_incident_missing_run_origin", "cf_incident_missing_runtime_origin",
+  "cf_incident_extra_field", "cf_incident_bad_output_hash", "cf_incident_noncanonical_output_hash",
+  "cf_incident_boolean_count", "cf_incident_excessive_count", "cf_incident_single_count_mismatch",
+]) {
+  await assert.rejects(verifyArtifact(Buffer.from(JSON.stringify({ protocol_control: mode })),
+    cfIncidentCase.anchor, cfIncidentOptions),
+  (error) => error instanceof VerifierError && error.code === "PROTOCOL_INVALID", "protocol_" + mode);
+  console.log(JSON.stringify({ case: "protocol_" + mode, result: "PROTOCOL_INVALID" }));
+}
+const cfIncidentProtocol = await verifyArtifact(Buffer.from(JSON.stringify({ protocol_control: "cf_incident_valid" })),
+  cfIncidentCase.anchor, cfIncidentOptions);
+assert.equal(cfIncidentProtocol.facts.baseline_scope, "authenticated_runtime_incident");
+assert.equal(cfIncidentProtocol.facts.guest_execution_verified, false);
+console.log(JSON.stringify({ case: "protocol_cf_incident_valid", result: "verified" }));
 const fleetCase = cases.find((test) => test.name === "fleet_independent_http_observations");
 const epochCase = cases.find((test) => test.name === "epoch_independent_http_commit");
 const epochControls = [

@@ -11,7 +11,8 @@ use ed25519_dalek::{Signature, VerifyingKey};
 use frankenengine_verifier_sdk::bundle::{self, BundleError};
 use frankenengine_verifier_sdk::capsule::{self, CapsuleError, CapsuleVerdict, ReplayCapsule};
 use frankenengine_verifier_sdk::counterfactual::{
-    CounterfactualReceiptError, verify_counterfactual_receipt,
+    CounterfactualIncidentTrust, CounterfactualReceiptError, verify_counterfactual_incident,
+    verify_counterfactual_receipt,
 };
 use frankenengine_verifier_sdk::fleet_quiescence::{
     FleetCoordinatorTrust, FleetQuiescencePolicy, MAX_FLEET_QUIESCENCE_POLICY_BYTES,
@@ -20,7 +21,8 @@ use frankenengine_verifier_sdk::fleet_quiescence::{
 };
 use frankenengine_verifier_sdk::incident_bundle::{
     CapturedNativeTerminalState, IncidentBundleError, MAX_INCIDENT_BUNDLE_BYTES,
-    decode_evidence_json, verify_incident_bundle, verify_incident_bundle_with_run_key,
+    VerifiedIncidentBundle, VerifiedRunOrigin, VerifiedRuntimeOrigin, decode_evidence_json,
+    verify_incident_bundle, verify_incident_bundle_with_run_key,
     verify_incident_bundle_with_runtime_keys,
 };
 use frankenengine_verifier_sdk::native_session::{
@@ -49,10 +51,12 @@ use sha2::{Digest, Sha256};
 const PROTOCOL: &str = "franken-verifier-cli/v1";
 const MAX_RESPONSE_BYTES: usize = 64 * 1024;
 const COUNTERFACTUAL_INPUT_SCHEMA: &str = "franken-verifier/counterfactual-receipt-input/v1";
+const COUNTERFACTUAL_INCIDENT_INPUT_SCHEMA: &str =
+    "franken-verifier/counterfactual-incident-input/v1";
 const LTV_INPUT_SCHEMA: &str = "franken-verifier/ltv-evidence-input/v1";
 const LTV_WITNESS_ANCHOR_DOMAIN: &[u8] = b"franken-verifier/ltv-witness-anchor/v1:";
 const MAX_LTV_WITNESS_ANCHOR_BYTES: usize = 64 * 1024;
-const USAGE: &str = "franken-verifier verify --format incident-bundle|native-session-forensics|capsule|signed-bundle|signed-session|resolution-receipt|publisher-source|publisher-source-trust|counterfactual-receipt|ltv-evidence --trusted-key-hex HEX [--trusted-run-key-hex HEX [--trusted-runtime-key-hex HEX]] [--signature-hex HEX] [--trusted-revocation-key-hex HEX --evaluation-time RFC3339 --max-revocation-age-secs SECONDS [--trusted-provenance-key-hex HEX]] [--expected-manifest-sha256 sha256:HEX [--expected-source-artifact-sha256 sha256:HEX] [--expected-graph-input-hash sha256:HEX]] < artifact; fleet observations: franken-verifier verify --format fleet-quiescence-observations --trusted-fleet-policy FILE < artifact; committed fleet epoch: franken-verifier verify --format fleet-epoch-commit --trusted-fleet-policy FILE --trusted-coordinator-id ID --trusted-coordinator-key-hex HEX < artifact";
+const USAGE: &str = "franken-verifier verify --format incident-bundle|native-session-forensics|capsule|signed-bundle|signed-session|resolution-receipt|publisher-source|publisher-source-trust|counterfactual-receipt|counterfactual-incident|ltv-evidence --trusted-key-hex HEX [--trusted-run-key-hex HEX [--trusted-runtime-key-hex HEX]] [--signature-hex HEX] [--trusted-incident-key-hex HEX --expected-baseline-integrity-hash HEX] [--trusted-revocation-key-hex HEX --evaluation-time RFC3339 --max-revocation-age-secs SECONDS [--trusted-provenance-key-hex HEX]] [--expected-manifest-sha256 sha256:HEX [--expected-source-artifact-sha256 sha256:HEX] [--expected-graph-input-hash sha256:HEX]] < artifact; fleet observations: franken-verifier verify --format fleet-quiescence-observations --trusted-fleet-policy FILE < artifact; committed fleet epoch: franken-verifier verify --format fleet-epoch-commit --trusted-fleet-policy FILE --trusted-coordinator-id ID --trusted-coordinator-key-hex HEX < artifact";
 
 #[derive(Debug)]
 struct PublisherTrustRequest {
@@ -69,9 +73,16 @@ struct Request {
     run_anchor: Option<VerifyingKey>,
     runtime_anchor: Option<VerifyingKey>,
     signature: Option<[u8; 64]>,
+    counterfactual_incident: Option<CounterfactualIncidentRequest>,
     publisher_trust: Option<PublisherTrustRequest>,
     expected_publisher_identity: Option<PublisherSourceExpectedIdentity>,
     fleet_policy: Option<FleetPolicyRequest>,
+}
+
+#[derive(Debug)]
+struct CounterfactualIncidentRequest {
+    incident_anchor: VerifyingKey,
+    expected_baseline_integrity_hash: String,
 }
 
 // Redact the caller's enrollment policy: it contains private project and
@@ -183,6 +194,7 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
         (None, None, None, None);
     let (mut expected_manifest, mut expected_source_artifact, mut expected_graph) =
         (None, None, None);
+    let (mut incident_anchor, mut expected_baseline) = (None, None);
     let mut fleet_policy_path = None;
     let (mut coordinator_id, mut coordinator_key) = (None, None);
     let (options, remainder) = args[1..].as_chunks::<2>();
@@ -193,6 +205,8 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
             "--trusted-run-key-hex" => &mut run_anchor,
             "--trusted-runtime-key-hex" => &mut runtime_anchor,
             "--signature-hex" => &mut signature,
+            "--trusted-incident-key-hex" => &mut incident_anchor,
+            "--expected-baseline-integrity-hash" => &mut expected_baseline,
             "--trusted-revocation-key-hex" => &mut revocation_anchor,
             "--trusted-provenance-key-hex" => &mut provenance_anchor,
             "--evaluation-time" => &mut evaluation_time,
@@ -224,6 +238,7 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
             | "publisher-source"
             | "publisher-source-trust"
             | "counterfactual-receipt"
+            | "counterfactual-incident"
             | "ltv-evidence"
             | "fleet-quiescence-observations"
             | "fleet-epoch-commit"
@@ -289,7 +304,7 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
         (Some(key), None)
     };
     let run_anchor = match (format.as_str(), run_anchor) {
-        ("incident-bundle", Some(text)) => {
+        ("incident-bundle" | "counterfactual-incident", Some(text)) => {
             let mut key = [0_u8; 32];
             hex::decode_to_slice(text, &mut key).map_err(|_| {
                 failure(
@@ -306,7 +321,7 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
         (_, None) => None,
     };
     let runtime_anchor = match (format.as_str(), run_anchor.as_ref(), runtime_anchor) {
-        ("incident-bundle", Some(_), Some(text)) => {
+        ("incident-bundle" | "counterfactual-incident", Some(_), Some(text)) => {
             let mut key = [0_u8; 32];
             hex::decode_to_slice(text, &mut key).map_err(|_| {
                 failure(
@@ -329,7 +344,8 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
             "signed-bundle"
             | "publisher-source"
             | "publisher-source-trust"
-            | "counterfactual-receipt",
+            | "counterfactual-receipt"
+            | "counterfactual-incident",
             Some(text),
         ) => {
             let mut bytes = [0_u8; 64];
@@ -345,7 +361,8 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
             "signed-bundle"
             | "publisher-source"
             | "publisher-source-trust"
-            | "counterfactual-receipt",
+            | "counterfactual-receipt"
+            | "counterfactual-incident",
             None,
         ) => {
             return Err(failure(
@@ -355,6 +372,42 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
         }
         (_, Some(_)) => return Err(usage()),
         (_, None) => None,
+    };
+    let counterfactual_incident = if format == "counterfactual-incident" {
+        let encoded = incident_anchor.ok_or_else(usage)?;
+        let mut bytes = [0_u8; 32];
+        hex::decode_to_slice(encoded, &mut bytes).map_err(|_| {
+            failure(
+                "INCIDENT_ANCHOR_INVALID",
+                "expected a 32-byte hexadecimal incident public key",
+            )
+        })?;
+        let incident_anchor = VerifyingKey::from_bytes(&bytes).map_err(|_| {
+            failure(
+                "INCIDENT_ANCHOR_INVALID",
+                "invalid Ed25519 incident public key",
+            )
+        })?;
+        let expected_baseline_integrity_hash = expected_baseline.ok_or_else(usage)?;
+        if expected_baseline_integrity_hash.len() != 64
+            || !expected_baseline_integrity_hash
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(failure(
+                "EXPECTED_BASELINE_INVALID",
+                "expected baseline must be a lowercase SHA-256 integrity hash",
+            ));
+        }
+        Some(CounterfactualIncidentRequest {
+            incident_anchor,
+            expected_baseline_integrity_hash,
+        })
+    } else {
+        if incident_anchor.is_some() || expected_baseline.is_some() {
+            return Err(usage());
+        }
+        None
     };
     let publisher_trust = if format == "publisher-source-trust" {
         let parse_authority = |text: &str, code: &'static str| {
@@ -437,6 +490,7 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
         run_anchor,
         runtime_anchor,
         signature,
+        counterfactual_incident,
         publisher_trust,
         expected_publisher_identity,
         fleet_policy,
@@ -550,6 +604,14 @@ struct CounterfactualInputEnvelope {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct CounterfactualIncidentInputEnvelope {
+    schema_version: String,
+    baseline_bundle_base64: String,
+    counterfactual_output: Value,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct LtvInputEnvelope {
     schema_version: String,
     witness_anchor_base64: String,
@@ -578,6 +640,42 @@ fn counterfactual_failure(error: &CounterfactualReceiptError) -> Failure {
         _ => "EVIDENCE_INVALID",
     };
     failure(code, "signed counterfactual receipt verification failed")
+}
+
+fn incident_verification_response(
+    verified: VerifiedIncidentBundle,
+    run_origin: Option<VerifiedRunOrigin>,
+    runtime_origin: Option<VerifiedRuntimeOrigin>,
+) -> Value {
+    let capture = verified.native_capture.map(|capture| {
+        let state = match capture.captured_terminal_state {
+            CapturedNativeTerminalState::Completed => "completed",
+            CapturedNativeTerminalState::UncaughtException => "uncaught_exception",
+            CapturedNativeTerminalState::EngineFailure => "engine_failure",
+        };
+        json!({"payload_sha256": capture.payload_sha256, "payload_bytes": capture.payload_bytes,
+            "captured_terminal_state": state, "host_io_exchange_count": capture.host_io_exchange_count})
+    });
+    let mut result = json!({"scope": "authenticated_recorded_incident", "facts": {
+        "bundle_id": verified.bundle_id, "incident_id": verified.incident_id,
+        "created_at": verified.created_at, "policy_version": verified.policy_version,
+        "event_count": verified.event_count, "integrity_hash": verified.integrity_hash,
+        "decision_sequence_hash": verified.decision_sequence_hash,
+        "signer_public_key_hex": verified.signer_public_key_hex,
+        "signing_identity": verified.signing_identity, "native_capture": capture}});
+    if let Some(origin) = run_origin {
+        result["scope"] = json!("authenticated_run_incident");
+        result["facts"]["run_origin"] = json!({
+            "receipt_id": origin.receipt_id, "receipt_hash": origin.receipt_hash,
+            "signer_public_key_hex": origin.signer_public_key_hex,
+            "record_sha256": origin.record_sha256,
+        });
+    }
+    if let Some(origin) = runtime_origin {
+        result["scope"] = json!("authenticated_runtime_incident");
+        result["facts"]["runtime_origin"] = json!(origin);
+    }
+    result
 }
 
 fn verify(request: &Request, bytes: &[u8]) -> Result<Value, Failure> {
@@ -806,35 +904,11 @@ fn verify(request: &Request, bytes: &[u8]) -> Result<Value, Failure> {
                     ),
                     (None, Some(_)) => return Err(failure("USAGE", USAGE)),
                 };
-            let capture = verified.native_capture.map(|capture| {
-                let state = match capture.captured_terminal_state {
-                    CapturedNativeTerminalState::Completed => "completed",
-                    CapturedNativeTerminalState::UncaughtException => "uncaught_exception",
-                    CapturedNativeTerminalState::EngineFailure => "engine_failure",
-                };
-                json!({"payload_sha256": capture.payload_sha256, "payload_bytes": capture.payload_bytes,
-                    "captured_terminal_state": state, "host_io_exchange_count": capture.host_io_exchange_count})
-            });
-            let mut result = json!({"scope": "authenticated_recorded_incident", "facts": {
-                "bundle_id": verified.bundle_id, "incident_id": verified.incident_id,
-                "created_at": verified.created_at, "policy_version": verified.policy_version,
-                "event_count": verified.event_count, "integrity_hash": verified.integrity_hash,
-                "decision_sequence_hash": verified.decision_sequence_hash,
-                "signer_public_key_hex": verified.signer_public_key_hex,
-                "signing_identity": verified.signing_identity, "native_capture": capture}});
-            if let Some(origin) = run_origin {
-                result["scope"] = json!("authenticated_run_incident");
-                result["facts"]["run_origin"] = json!({
-                    "receipt_id": origin.receipt_id, "receipt_hash": origin.receipt_hash,
-                    "signer_public_key_hex": origin.signer_public_key_hex,
-                    "record_sha256": origin.record_sha256,
-                });
-            }
-            if let Some(origin) = runtime_origin {
-                result["scope"] = json!("authenticated_runtime_incident");
-                result["facts"]["runtime_origin"] = json!(origin);
-            }
-            Ok(result)
+            Ok(incident_verification_response(
+                verified,
+                run_origin,
+                runtime_origin,
+            ))
         }
         "capsule" => {
             let value = decode_evidence_json(bytes).map_err(|error| incident_failure(&error))?;
@@ -881,6 +955,75 @@ fn verify(request: &Request, bytes: &[u8]) -> Result<Value, Failure> {
                 "event_count": evidence.timeline.len(), "integrity_hash": evidence.integrity_hash,
                 "signer_public_key_hex": hex::encode(trusted_key.as_bytes())}}),
             )
+        }
+        "counterfactual-incident" => {
+            let policy = request
+                .counterfactual_incident
+                .as_ref()
+                .ok_or_else(|| failure("USAGE", USAGE))?;
+            let signature = request
+                .signature
+                .as_ref()
+                .ok_or_else(|| failure("SIGNATURE_MALFORMED", "detached signature is required"))?;
+            let value = decode_evidence_json(bytes).map_err(|error| incident_failure(&error))?;
+            let envelope: CounterfactualIncidentInputEnvelope = serde_json::from_value(value)
+                .map_err(|_| {
+                    failure(
+                        "EVIDENCE_INVALID",
+                        "invalid counterfactual incident transport",
+                    )
+                })?;
+            if envelope.schema_version != COUNTERFACTUAL_INCIDENT_INPUT_SCHEMA
+                || envelope.baseline_bundle_base64.is_empty()
+                || envelope.baseline_bundle_base64.len() > MAX_INCIDENT_BUNDLE_BYTES.div_ceil(3) * 4
+            {
+                return Err(failure(
+                    "EVIDENCE_INVALID",
+                    "invalid counterfactual incident transport",
+                ));
+            }
+            let baseline_bytes = STANDARD
+                .decode(&envelope.baseline_bundle_base64)
+                .map_err(|_| failure("EVIDENCE_INVALID", "invalid baseline bundle encoding"))?;
+            if STANDARD.encode(&baseline_bytes) != envelope.baseline_bundle_base64 {
+                return Err(failure(
+                    "EVIDENCE_INVALID",
+                    "noncanonical baseline bundle encoding",
+                ));
+            }
+            let verified = verify_counterfactual_incident(
+                &baseline_bytes,
+                &envelope.counterfactual_output,
+                signature,
+                &CounterfactualIncidentTrust {
+                    expected_baseline_integrity_hash: &policy.expected_baseline_integrity_hash,
+                    trusted_counterfactual_signer: trusted_key,
+                    trusted_bundle_signer: &policy.incident_anchor,
+                    trusted_run_signer: request.run_anchor.as_ref(),
+                    trusted_product_root: request.runtime_anchor.as_ref(),
+                },
+            )
+            .map_err(|error| {
+                failure(error.code(), "counterfactual incident verification failed")
+            })?;
+            let baseline = incident_verification_response(
+                verified.baseline,
+                verified.run_origin,
+                verified.runtime_origin,
+            );
+            Ok(json!({
+                "scope": "authenticated_counterfactual_incident",
+                "facts": {
+                    "baseline_integrity_hash": baseline["facts"]["integrity_hash"],
+                    "counterfactual_output_sha256": verified.counterfactual_output_sha256,
+                    "signer_public_key_hex": verified.counterfactual_signer_public_key_hex,
+                    "mode": verified.mode,
+                    "result_count": verified.result_count,
+                    "baseline_scope": baseline["scope"],
+                    "baseline": baseline["facts"],
+                    "guest_execution_verified": verified.guest_execution_verified,
+                }
+            }))
         }
         "counterfactual-receipt" => {
             let signature = request
@@ -1178,6 +1321,7 @@ mod tests {
             run_anchor: None,
             runtime_anchor: None,
             signature: None,
+            counterfactual_incident: None,
             publisher_trust: None,
             expected_publisher_identity: None,
             fleet_policy: Some(FleetPolicyRequest {

@@ -89,6 +89,8 @@ for case in cases:
                                  format=case["format"], signature_hex=case.get("signature_hex"),
                                  trusted_run_public_key_hex=case.get("run_anchor"),
                                  trusted_runtime_public_key_hex=case.get("runtime_anchor"),
+                                 trusted_incident_public_key_hex=case.get("incident_anchor"),
+                                 expected_baseline_integrity_hash=case.get("expected_baseline_integrity_hash"),
                                  trusted_revocation_public_key_hex=case.get("revocation_anchor"),
                                  trusted_provenance_public_key_hex=case.get("provenance_anchor"),
                                  evaluation_time=case.get("evaluation_time"),
@@ -153,6 +155,26 @@ for case in cases:
             assert result["facts"]["mode"] == case["cf_mode"]
             assert result["facts"]["result_count"] == case["cf_count"]
             assert result["facts"]["baseline_integrity_hash"] == case["cf_baseline"]
+        if case["format"] == "counterfactual-incident":
+            assert result["scope"] == "authenticated_counterfactual_incident"
+            facts = result["facts"]
+            assert facts["mode"] == case["cf_mode"]
+            assert facts["result_count"] == case["cf_count"]
+            assert facts["baseline_integrity_hash"] == case["cf_baseline"]
+            assert facts["counterfactual_output_sha256"] == case["cf_output_hash"]
+            assert facts["signer_public_key_hex"] == case["anchor"]
+            assert facts["guest_execution_verified"] is False
+            assert facts["baseline"]["integrity_hash"] == case["cf_baseline"]
+            assert facts["baseline"]["signer_public_key_hex"] == case["incident_anchor"]
+            expected_scope = "authenticated_recorded_incident"
+            if case.get("run_anchor") is not None:
+                expected_scope = "authenticated_run_incident"
+                assert facts["baseline"]["run_origin"]["signer_public_key_hex"] == case["run_anchor"]
+            if case.get("runtime_anchor") is not None:
+                expected_scope = "authenticated_runtime_incident"
+                assert facts["baseline"]["runtime_origin"]["product_root_key_id"] == "ed25519:" + case["runtime_anchor"]
+                assert facts["baseline"]["runtime_origin"]["signed_epoch"] == "18446744073709551615"
+            assert facts["baseline_scope"] == expected_scope
         if case["format"] == "ltv-evidence":
             assert result["scope"] == "authenticated_ltv_anteriority"
             assert result["facts"] == case["ltv_facts"], case["name"]
@@ -178,6 +200,36 @@ for case in cases:
             assert "trace-maintenance" not in json.dumps(result)
         assert "PRIVATE-" not in json.dumps(result)
         print(json.dumps({"case": case["name"], "result": "verified", "scope": result["scope"]}), flush=True)
+
+cf_incident_case = next(case for case in cases if case["name"] == "counterfactual_incident_runtime_origin")
+cf_incident_options = {
+    "verifier": str(root / "fake_verifier"), "format": "counterfactual-incident",
+    "signature_hex": cf_incident_case["signature_hex"],
+    "trusted_incident_public_key_hex": cf_incident_case["incident_anchor"],
+    "expected_baseline_integrity_hash": cf_incident_case["expected_baseline_integrity_hash"],
+    "trusted_run_public_key_hex": cf_incident_case["run_anchor"],
+    "trusted_runtime_public_key_hex": cf_incident_case["runtime_anchor"],
+}
+for mode in (
+    "cf_incident_wrong_pin", "cf_incident_wrong_nested_pin", "cf_incident_wrong_receipt_signer",
+    "cf_incident_wrong_exporter", "cf_incident_guest_execution_claim", "cf_incident_wrong_scope",
+    "cf_incident_downgraded_baseline", "cf_incident_missing_run_origin", "cf_incident_missing_runtime_origin",
+    "cf_incident_extra_field", "cf_incident_bad_output_hash", "cf_incident_noncanonical_output_hash",
+    "cf_incident_boolean_count", "cf_incident_excessive_count", "cf_incident_single_count_mismatch",
+):
+    try:
+        verify_artifact(json.dumps({"protocol_control": mode}).encode(), cf_incident_case["anchor"],
+                        **cf_incident_options)
+    except VerifierError as error:
+        assert error.code == "PROTOCOL_INVALID", (mode, error.code)
+        print(json.dumps({"case": f"protocol_{mode}", "result": error.code}), flush=True)
+    else:
+        raise AssertionError(f"protocol_{mode}")
+cf_incident_protocol = verify_artifact(json.dumps({"protocol_control": "cf_incident_valid"}).encode(),
+                                      cf_incident_case["anchor"], **cf_incident_options)
+assert cf_incident_protocol["facts"]["baseline_scope"] == "authenticated_runtime_incident"
+assert cf_incident_protocol["facts"]["guest_execution_verified"] is False
+print(json.dumps({"case": "protocol_cf_incident_valid", "result": "verified"}), flush=True)
 
 fleet_case = next(case for case in cases if case["name"] == "fleet_independent_http_observations")
 epoch_case = next(case for case in cases if case["name"] == "epoch_independent_http_commit")

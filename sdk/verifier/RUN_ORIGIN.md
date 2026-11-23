@@ -31,7 +31,10 @@ receipt paths, telemetry, or the signed record itself.
 Supplying `--trusted-run-key-hex` requires an original run proof. A historical
 bundle without one fails with `RUN_ORIGIN_MISSING`; verification never falls
 back to the weaker scope. A wrong original authority produces
-`RUN_ORIGIN_SIGNATURE_INVALID`. The option applies only to `incident-bundle`.
+`RUN_ORIGIN_SIGNATURE_INVALID`. This option also applies to the authenticated
+baseline inside [`counterfactual-incident`](COUNTERFACTUAL.md); that format
+additionally requires an independent receipt authority and a retained baseline
+integrity pin.
 
 Omitting this option preserves the existing one-key interface and
 `authenticated_recorded_incident` scope. That result does not authenticate the

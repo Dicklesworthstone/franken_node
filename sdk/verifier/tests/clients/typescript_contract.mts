@@ -15,6 +15,7 @@ export async function audit(data: Uint8Array, anchor: string, executable: string
     if (verified.format === "publisher-source") return verified.facts.package_name;
     if (verified.format === "publisher-source-trust") return verified.facts.source.package_name;
     if (verified.format === "counterfactual-receipt") return verified.facts.baseline_integrity_hash;
+    if (verified.format === "counterfactual-incident") return verified.facts.baseline.incident_id;
     if (verified.format === "ltv-evidence") return verified.facts.artifact_id;
     return verified.facts.bundle_id;
   } catch (error: unknown) {
@@ -104,6 +105,33 @@ export async function auditOriginalRun(
   });
   if (verified.scope !== "authenticated_run_incident") throw new Error("original-run proof required");
   return `${verified.facts.run_origin.receipt_id}:${verified.facts.run_origin.record_sha256}`;
+}
+
+export async function auditCounterfactualIncident(
+  data: Uint8Array, receiptAnchor: string, incidentAnchor: string, expectedBaseline: string,
+  signature: string, runAnchor: string, runtimeAnchor: string, executable: string,
+): Promise<string> {
+  const verified = await verifyArtifact(data, receiptAnchor, {
+    verifier: executable, format: "counterfactual-incident", signatureHex: signature,
+    trustedIncidentPublicKeyHex: incidentAnchor, expectedBaselineIntegrityHash: expectedBaseline,
+    trustedRunPublicKeyHex: runAnchor, trustedRuntimePublicKeyHex: runtimeAnchor,
+  });
+  if (verified.format !== "counterfactual-incident"
+      || verified.facts.baseline_scope !== "authenticated_runtime_incident") {
+    throw new Error("counterfactual result bound to a runtime-authenticated incident required");
+  }
+  const executed: false = verified.facts.guest_execution_verified;
+  const epoch: string = verified.facts.baseline.runtime_origin.signed_epoch;
+  return `${verified.facts.baseline.run_origin.receipt_id}:${epoch}:${executed}`;
+}
+
+export async function refuseCounterfactualTrustOmissions(data: Uint8Array, anchor: string): Promise<void> {
+  // @ts-expect-error An authenticated incident requires its independent exporter and retained pin.
+  await verifyArtifact(data, anchor, { format: "counterfactual-incident", signatureHex: "signature" });
+  // @ts-expect-error A receipt signature and exporter cannot select the expected incident identity.
+  await verifyArtifact(data, anchor, { format: "counterfactual-incident", signatureHex: "signature", trustedIncidentPublicKeyHex: anchor });
+  // @ts-expect-error The independently trusted exporter cannot be supplied by the artifact itself.
+  await verifyArtifact(data, anchor, { format: "counterfactual-incident", signatureHex: "signature", expectedBaselineIntegrityHash: "hash" });
 }
 
 export async function auditRuntimeOrigin(

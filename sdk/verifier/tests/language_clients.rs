@@ -163,6 +163,11 @@ fn external_python_and_javascript_consumers_verify_signed_evidence() {
             verifier.args(["--trusted-runtime-key-hex", runtime_anchor]);
         }
         for (field, option) in [
+            ("incident_anchor", "--trusted-incident-key-hex"),
+            (
+                "expected_baseline_integrity_hash",
+                "--expected-baseline-integrity-hash",
+            ),
             ("coordinator_id", "--trusted-coordinator-id"),
             ("coordinator_key_hex", "--trusted-coordinator-key-hex"),
             ("revocation_anchor", "--trusted-revocation-key-hex"),
@@ -244,9 +249,38 @@ fn external_python_and_javascript_consumers_verify_signed_evidence() {
                 );
                 assert!(!response.to_string().contains("PRIVATE-"));
             }
+            let (incident_scope, incident_facts) = if case["format"] == "counterfactual-incident" {
+                assert_eq!(response["scope"], "authenticated_counterfactual_incident");
+                assert_eq!(
+                    response["facts"]["baseline_integrity_hash"],
+                    case["cf_baseline"]
+                );
+                assert_eq!(
+                    response["facts"]["counterfactual_output_sha256"],
+                    case["cf_output_hash"]
+                );
+                assert_eq!(response["facts"]["signer_public_key_hex"], case["anchor"]);
+                assert_eq!(response["facts"]["mode"], case["cf_mode"]);
+                assert_eq!(response["facts"]["result_count"], case["cf_count"]);
+                assert_eq!(response["facts"]["guest_execution_verified"], false);
+                assert_eq!(
+                    response["facts"]["baseline"]["signer_public_key_hex"],
+                    case["incident_anchor"]
+                );
+                assert_eq!(
+                    response["facts"]["baseline"]["integrity_hash"],
+                    case["cf_baseline"]
+                );
+                (
+                    &response["facts"]["baseline_scope"],
+                    &response["facts"]["baseline"],
+                )
+            } else {
+                (&response["scope"], &response["facts"])
+            };
             if let Some(run_anchor) = case["run_anchor"].as_str() {
                 assert_eq!(
-                    response["scope"],
+                    incident_scope,
                     if case["runtime_anchor"].is_string() {
                         "authenticated_runtime_incident"
                     } else {
@@ -254,17 +288,17 @@ fn external_python_and_javascript_consumers_verify_signed_evidence() {
                     }
                 );
                 assert_eq!(
-                    response["facts"]["run_origin"]["signer_public_key_hex"],
+                    incident_facts["run_origin"]["signer_public_key_hex"],
                     run_anchor
                 );
             }
             if let Some(runtime_anchor) = case["runtime_anchor"].as_str() {
                 assert_eq!(
-                    response["facts"]["runtime_origin"]["product_root_key_id"],
+                    incident_facts["runtime_origin"]["product_root_key_id"],
                     format!("ed25519:{runtime_anchor}")
                 );
                 assert_eq!(
-                    response["facts"]["runtime_origin"]["signed_epoch"],
+                    incident_facts["runtime_origin"]["signed_epoch"],
                     "18446744073709551615"
                 );
             }

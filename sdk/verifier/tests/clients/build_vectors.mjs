@@ -854,6 +854,120 @@ add("counterfactual_unknown_schema", "counterfactual-receipt", cfWire(cfSingleOu
   signature_hex: cfSingleSig,
 });
 
+// Composed counterfactual verification uses an independently retained incident
+// pin and separate exporter/receipt authorities. These synthetic assessments
+// bind signed evidence; none claims that this independent verifier ran a guest.
+const cfIncidentKey = seedKey(0x75);
+const cfIncidentAnchor = publicBytes(cfIncidentKey).toString("hex");
+assert.notEqual(cfIncidentAnchor, anchor);
+function cfIncidentResult(baseline, policy = baseline.policy_version) {
+  const outcomes = baseline.timeline.map((event) => ({
+    sequence_number: event.sequence_number, event_type: event.event_type,
+    decision: "allow", rationale: "Signed assessment; guest not executed", expected_loss: 0,
+  }));
+  return {
+    scenario_id: `${baseline.incident_id}::${policy}`,
+    original_outcomes: outcomes, counterfactual_outcomes: clone(outcomes), divergence_points: [],
+    summary_statistics: { total_decisions: outcomes.length, changed_decisions: 0, severity_delta: 0 },
+    metadata: {
+      bundle_hash: baseline.integrity_hash,
+      policy_override_diff: policy === baseline.policy_version ? []
+        : [{ field: "policy_name", original: baseline.policy_version, counterfactual: policy }],
+      replay_timestamp: baseline.created_at, engine_version: "counterfactual-v1",
+      invocation_event_codes: ["COUNTERFACTUAL_REPLAY_STARTED", "COUNTERFACTUAL_REPLAY_COMPLETED"],
+    },
+  };
+}
+function addCfIncident(name, expected = "verified", options = {}) {
+  const bytes = Buffer.from(options.baselineBytes ?? incidentBytes);
+  const baseline = JSON.parse(bytes);
+  const result = options.output ?? { mode: "single", ...cfIncidentResult(baseline) };
+  options.mutateResult?.(result);
+  const signature = sign(null, Buffer.from(canonical(result)), cfIncidentKey).toString("hex");
+  const transport = {
+    schema_version: "franken-verifier/counterfactual-incident-input/v1",
+    baseline_bundle_base64: bytes.toString("base64"), counterfactual_output: result,
+  };
+  options.mutateTransport?.(transport);
+  add(name, "counterfactual-incident", options.encode?.(transport) ?? JSON.stringify(transport), expected, {
+    anchor: cfIncidentAnchor, incident_anchor: anchor,
+    expected_baseline_integrity_hash: baseline.integrity_hash,
+    signature_hex: signature, cf_mode: result.mode ?? "single", cf_count: result.results?.length ?? 1,
+    cf_baseline: baseline.integrity_hash, cf_output_hash: hash(canonical(result)), ...options.metadata,
+  });
+}
+addCfIncident("counterfactual_incident_separate_authorities");
+addCfIncident("counterfactual_incident_direct_result", "verified", { output: cfIncidentResult(incident, "strict") });
+addCfIncident("counterfactual_incident_sweep", "verified", { output: {
+  mode: "sweep", parameter: "quarantine_threshold",
+  results: [cfIncidentResult(incident, "strict"), cfIncidentResult(incident, "balanced")],
+} });
+addCfIncident("counterfactual_incident_original_run", "verified", {
+  baselineBytes: originalRunBytes, metadata: { incident_anchor: exporterAnchor, run_anchor: runAnchor },
+});
+addCfIncident("counterfactual_incident_runtime_origin", "verified", {
+  baselineBytes: runtimeWire, metadata: { run_anchor: runAnchor, runtime_anchor: runtimeAnchor },
+});
+addCfIncident("counterfactual_incident_foreign_receipt_authority", "COUNTERFACTUAL_RECEIPT_INVALID", {
+  metadata: { anchor: foreign },
+});
+addCfIncident("counterfactual_incident_foreign_exporter", "COUNTERFACTUAL_BASELINE_INVALID", {
+  metadata: { incident_anchor: foreign },
+});
+addCfIncident("counterfactual_incident_receipt_key_cannot_export", "COUNTERFACTUAL_BASELINE_INVALID", {
+  metadata: { incident_anchor: cfIncidentAnchor },
+});
+addCfIncident("counterfactual_incident_invalid_receipt_signature", "COUNTERFACTUAL_RECEIPT_INVALID", {
+  metadata: { signature_hex: "00".repeat(64) },
+});
+addCfIncident("counterfactual_incident_untrusted_baseline_bytes", "COUNTERFACTUAL_BASELINE_INVALID", {
+  baselineBytes: canonical(tampered),
+});
+addCfIncident("counterfactual_incident_independent_pin", "COUNTERFACTUAL_BASELINE_PIN_MISMATCH", {
+  metadata: { expected_baseline_integrity_hash: hash("another independently selected incident") },
+});
+const substitutedBaseline = clone(incident);
+substitutedBaseline.created_at = "2026-11-23T12:00:00Z";
+addCfIncident("counterfactual_incident_validly_signed_substitute", "COUNTERFACTUAL_BASELINE_PIN_MISMATCH", {
+  baselineBytes: resealIncident(substitutedBaseline),
+  metadata: { expected_baseline_integrity_hash: incident.integrity_hash },
+});
+addCfIncident("counterfactual_incident_signed_foreign_hash", "COUNTERFACTUAL_RECEIPT_INVALID", {
+  mutateResult: (result) => { result.metadata.bundle_hash = cfBundleHash; },
+});
+for (const [name, mutateResult] of [
+  ["scenario", (result) => { result.scenario_id = "PRIVATE-substituted-incident::strict"; }],
+  ["capture_time", (result) => { result.metadata.replay_timestamp = "2026-11-23T12:00:00Z"; }],
+  ["original_policy", (result) => { result.metadata.policy_override_diff = [
+    { field: "policy_name", original: "PRIVATE-substituted-policy", counterfactual: "strict" },
+  ]; }],
+  ["event_order", (result) => { result.original_outcomes.reverse(); }],
+  ["event_type", (result) => { result.counterfactual_outcomes[0].event_type = "PRIVATE-invented-event"; }],
+  ["omitted_event", (result) => { result.original_outcomes.pop(); }],
+  ["invented_event", (result) => { result.counterfactual_outcomes.push(clone(result.counterfactual_outcomes[0])); }],
+  ["population_count", (result) => { result.summary_statistics.total_decisions += 1; }],
+]) addCfIncident(`counterfactual_incident_signed_${name}`, "COUNTERFACTUAL_CONTEXT_MISMATCH", { mutateResult });
+addCfIncident("counterfactual_incident_sweep_member_substitution", "COUNTERFACTUAL_CONTEXT_MISMATCH", {
+  output: { mode: "sweep", parameter: "observe_threshold",
+    results: [cfIncidentResult(incident), cfIncidentResult(incident, "strict")] },
+  mutateResult: (result) => { result.results[1].original_outcomes[0].sequence_number += 1; },
+});
+for (const [name, metadata, baselineBytes = incidentBytes] of [
+  ["run_proof_required", { run_anchor: runAnchor }],
+  ["wrong_run_authority", { incident_anchor: exporterAnchor, run_anchor: foreign }, originalRunBytes],
+  ["runtime_proof_required", { incident_anchor: exporterAnchor, run_anchor: runAnchor, runtime_anchor: runtimeAnchor }, originalRunBytes],
+  ["wrong_runtime_authority", { run_anchor: runAnchor, runtime_anchor: foreign }, runtimeWire],
+]) addCfIncident(`counterfactual_incident_${name}`, "COUNTERFACTUAL_BASELINE_INVALID", { metadata, baselineBytes });
+addCfIncident("counterfactual_incident_noncanonical_base64", "EVIDENCE_INVALID", {
+  mutateTransport: (transport) => { transport.baseline_bundle_base64 += "\n"; },
+});
+addCfIncident("counterfactual_incident_transport_cannot_select_trust", "EVIDENCE_INVALID", {
+  mutateTransport: (transport) => { transport.trusted_incident_key = anchor; },
+});
+addCfIncident("counterfactual_incident_duplicate_member", "JSON_INVALID", {
+  encode: (transport) => JSON.stringify(transport).slice(0, -1) + ',"baseline_bundle_base64":""}',
+});
+
 // Native-session receipt and durable-journal protocols are encoded independently
 // with Node crypto. These signed fixtures model supervisor observations; they
 // do not claim that the test guest ran, that history is complete, or cleanup.
