@@ -3285,6 +3285,10 @@ pub enum FleetCommand {
     /// a fresh terminal native-session population under retained admission holds.
     CertifyQuiescence(FleetCertifyQuiescenceArgs),
 
+    /// Retrieve a retained signed epoch commit without advancing the epoch or
+    /// changing maintenance holds. Requires the coordinator's operator token.
+    ExportEpoch(FleetExportEpochArgs),
+
     /// Resume one maintenance owner without clearing other owners' holds.
     Resume(FleetResumeArgs),
 
@@ -3363,6 +3367,16 @@ pub struct FleetServeArgs {
     /// the operator token retains read and administrative access.
     #[arg(long)]
     pub node_credentials_file: Option<PathBuf>,
+
+    /// Stable coordinator identity, independently enrolled by proof consumers.
+    /// Enables public epoch-commit proofs with --coordinator-signing-key.
+    #[arg(long, requires = "coordinator_signing_key")]
+    pub coordinator_id: Option<String>,
+
+    /// Separately provisioned Ed25519 key for public epoch-commit proofs.
+    /// This key is never generated from the bearer token or fleet state.
+    #[arg(long, requires = "coordinator_id")]
+    pub coordinator_signing_key: Option<PathBuf>,
 
     /// Create the token file (0600, 256 random bits) if it does not exist.
     #[arg(long)]
@@ -3487,6 +3501,18 @@ pub struct FleetCertifyQuiescenceArgs {
 
     /// Emit the verified coordinator certificate and complete drain evidence.
     /// Requires the configured HTTP coordinator and its operator token.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Parser)]
+pub struct FleetExportEpochArgs {
+    /// Positive committed epoch to retrieve. Required by the handler so
+    /// --json failures remain structured. Export never creates a new epoch.
+    #[arg(long, default_value_t = 0)]
+    pub epoch: u64,
+
+    /// Emit the original retained evidence, certificate and public commit proof.
     #[arg(long)]
     pub json: bool,
 }
@@ -6104,6 +6130,68 @@ mod parser_contract_extra_tests {
             .is_err(),
             "certification must cover the coordinator's complete enrolled population"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn fleet_serve_requires_complete_coordinator_signing_authority() -> Result<(), String> {
+        let cli = parse(&[
+            "franken-node",
+            "fleet",
+            "serve",
+            "--coordinator-id",
+            "production-east",
+            "--coordinator-signing-key",
+            "/operator/coordinator.key",
+            "--json",
+        ])
+        .map_err(|error| error.to_string())?;
+        let Command::Fleet(FleetCommand::Serve(args)) = cli.command else {
+            return Err("expected fleet coordinator server".into());
+        };
+        assert_eq!(args.coordinator_id.as_deref(), Some("production-east"));
+        assert_eq!(
+            args.coordinator_signing_key,
+            Some(PathBuf::from("/operator/coordinator.key"))
+        );
+        for option in ["--coordinator-id", "--coordinator-signing-key"] {
+            assert!(parse(&["franken-node", "fleet", "serve", option, "value"]).is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn fleet_export_epoch_parses_exact_history_without_transition_inputs() -> Result<(), String> {
+        let cli = parse(&[
+            "franken-node",
+            "fleet",
+            "export-epoch",
+            "--epoch",
+            "18446744073709551615",
+            "--json",
+        ])
+        .map_err(|error| error.to_string())?;
+        let Command::Fleet(FleetCommand::ExportEpoch(args)) = cli.command else {
+            return Err("expected historical fleet epoch export".into());
+        };
+        assert_eq!(args.epoch, u64::MAX);
+        assert!(args.json);
+        assert!(
+            parse(&[
+                "franken-node",
+                "fleet",
+                "export-epoch",
+                "--reason",
+                "new-transition"
+            ])
+            .is_err()
+        );
+        let cli = parse(&["franken-node", "fleet", "export-epoch", "--json"])
+            .map_err(|error| error.to_string())?;
+        let Command::Fleet(FleetCommand::ExportEpoch(args)) = cli.command else {
+            return Err("expected handler-validated historical export".into());
+        };
+        assert_eq!(args.epoch, 0);
         Ok(())
     }
 

@@ -4603,6 +4603,295 @@ pub(crate) fn fleet_epoch_quiescence_manifest_hash(
     Ok(hex::encode(digest.finalize()))
 }
 
+pub const FLEET_EPOCH_COMMIT_STATEMENT_SCHEMA: &str =
+    "franken-node/fleet-epoch-commit-statement/v1";
+pub const FLEET_EPOCH_COMMIT_PROOF_SCHEMA: &str = "franken-node/fleet-epoch-commit-proof/v1";
+const FLEET_EPOCH_AUTHORIZATION_SCHEMA: &str = "franken-node/fleet-epoch-authorization/v1";
+const FLEET_EPOCH_AUTHORIZATION_DOMAIN: &[u8] =
+    b"franken-node/fleet-epoch-authorization-signature/v1\0";
+const FLEET_EPOCH_COMMIT_DOMAIN: &[u8] = b"franken-node/fleet-epoch-commit-signature/v1\0";
+
+/// A separately provisioned coordinator identity. The private signing key is
+/// never derived from the operator bearer token or supplied by an export.
+#[derive(Clone)]
+pub struct FleetEpochCommitSigner {
+    coordinator_id: String,
+    signing_key: ed25519_dalek::SigningKey,
+}
+
+impl FleetEpochCommitSigner {
+    pub fn new(
+        coordinator_id: impl Into<String>,
+        signing_key: ed25519_dalek::SigningKey,
+    ) -> Result<Self, FleetTransportError> {
+        let coordinator_id = coordinator_id.into();
+        validate_transport_identifier(&coordinator_id, "coordinator_id", MAX_NODE_ID_LEN)?;
+        Ok(Self {
+            coordinator_id,
+            signing_key,
+        })
+    }
+
+    #[must_use]
+    pub fn coordinator_id(&self) -> &str {
+        &self.coordinator_id
+    }
+
+    #[must_use]
+    pub fn verifying_key(&self) -> ed25519_dalek::VerifyingKey {
+        self.signing_key.verifying_key()
+    }
+
+    /// Authorize exactly the live checked barrier snapshot. This signature is
+    /// retained in its SQL transaction; it is deliberately not a commit proof.
+    pub(crate) fn authorize(
+        &self,
+        evidence: &FleetNativeDrainEvidence,
+        certificate: &FleetEpochQuiescenceCertificate,
+    ) -> Result<FleetEpochCommitAuthorization, FleetTransportError> {
+        let statement = FleetEpochCommitStatement {
+            schema_version: FLEET_EPOCH_COMMIT_STATEMENT_SCHEMA.to_owned(),
+            coordinator_id: self.coordinator_id.clone(),
+            coordinator_key_id: format!("ed25519:{}", hex::encode(self.verifying_key().as_bytes())),
+            evidence_certificate_sha256: fleet_epoch_quiescence_manifest_hash(
+                evidence,
+                certificate,
+            )?,
+            pre_epoch: certificate.pre_epoch,
+            committed_epoch: certificate.committed_epoch,
+            transition_id: certificate.transition_id.clone(),
+            trace_id: certificate.trace_id.clone(),
+        };
+        statement.validate_bindings(evidence, certificate)?;
+        let signature = self
+            .signing_key
+            .sign(&statement.signing_bytes(FLEET_EPOCH_AUTHORIZATION_DOMAIN)?);
+        Ok(FleetEpochCommitAuthorization {
+            schema_version: FLEET_EPOCH_AUTHORIZATION_SCHEMA.to_owned(),
+            statement,
+            signature_hex: hex::encode(signature.to_bytes()),
+        })
+    }
+
+    /// Called only by the durable owner after it closes a committed read
+    /// transaction. A valid authorization alone must never become public
+    /// evidence that its originating write transaction committed.
+    pub(crate) fn attest_committed(
+        &self,
+        authorization: FleetEpochCommitAuthorization,
+        evidence: &FleetNativeDrainEvidence,
+        certificate: &FleetEpochQuiescenceCertificate,
+    ) -> Result<FleetEpochCommitProof, FleetTransportError> {
+        authorization.verify(self, evidence, certificate)?;
+        let commit_signature = self.signing_key.sign(
+            &authorization
+                .statement
+                .signing_bytes(FLEET_EPOCH_COMMIT_DOMAIN)?,
+        );
+        Ok(FleetEpochCommitProof {
+            schema_version: FLEET_EPOCH_COMMIT_PROOF_SCHEMA.to_owned(),
+            statement: authorization.statement,
+            authorization_signature_hex: authorization.signature_hex,
+            commit_signature_hex: hex::encode(commit_signature.to_bytes()),
+        })
+    }
+}
+
+/// Exact historical commit identity. The digest binds the complete ordered
+/// evidence/certificate pair, including the supervisor-signed populations.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FleetEpochCommitStatement {
+    pub schema_version: String,
+    pub coordinator_id: String,
+    pub coordinator_key_id: String,
+    pub evidence_certificate_sha256: String,
+    pub pre_epoch: u64,
+    pub committed_epoch: u64,
+    pub transition_id: String,
+    pub trace_id: String,
+}
+
+impl FleetEpochCommitStatement {
+    fn signing_bytes(&self, domain: &[u8]) -> Result<Vec<u8>, FleetTransportError> {
+        let bytes = canonical_fleet_convergence_receipt_payload(self)?;
+        let mut framed = Vec::with_capacity(domain.len() + 8 + bytes.len());
+        framed.extend_from_slice(domain);
+        framed.extend_from_slice(&(bytes.len() as u64).to_be_bytes());
+        framed.extend_from_slice(&bytes);
+        Ok(framed)
+    }
+
+    fn validate_bindings(
+        &self,
+        evidence: &FleetNativeDrainEvidence,
+        certificate: &FleetEpochQuiescenceCertificate,
+    ) -> Result<(), FleetTransportError> {
+        validate_transport_identifier(&self.coordinator_id, "coordinator_id", MAX_NODE_ID_LEN)?;
+        if self.schema_version != FLEET_EPOCH_COMMIT_STATEMENT_SCHEMA
+            || self.pre_epoch.checked_add(1) != Some(self.committed_epoch)
+            || self.pre_epoch != certificate.pre_epoch
+            || self.committed_epoch != certificate.committed_epoch
+            || self.transition_id != certificate.transition_id
+            || self.trace_id != certificate.trace_id
+            || self.evidence_certificate_sha256
+                != fleet_epoch_quiescence_manifest_hash(evidence, certificate)?
+        {
+            return Err(FleetTransportError::stale_state(
+                "coordinator epoch statement does not bind this evidence and certificate",
+            ));
+        }
+        Ok(())
+    }
+
+    fn embedded_key(&self) -> Result<ed25519_dalek::VerifyingKey, FleetTransportError> {
+        let encoded = self
+            .coordinator_key_id
+            .strip_prefix("ed25519:")
+            .ok_or_else(|| {
+                FleetTransportError::serialization("invalid coordinator epoch key identity")
+            })?;
+        let key = canonical_epoch_hex::<32>(encoded)?;
+        ed25519_dalek::VerifyingKey::from_bytes(&key)
+            .map_err(|_| FleetTransportError::serialization("invalid coordinator epoch public key"))
+    }
+}
+
+fn canonical_epoch_hex<const N: usize>(encoded: &str) -> Result<[u8; N], FleetTransportError> {
+    if encoded.len() != N * 2
+        || !encoded
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(FleetTransportError::serialization(
+            "epoch proof requires canonical lowercase hexadecimal",
+        ));
+    }
+    hex::decode(encoded)
+        .ok()
+        .and_then(|bytes| bytes.try_into().ok())
+        .ok_or_else(|| FleetTransportError::serialization("invalid epoch proof hexadecimal"))
+}
+
+fn verify_epoch_signature(
+    statement: &FleetEpochCommitStatement,
+    domain: &[u8],
+    encoded: &str,
+    root: &ed25519_dalek::VerifyingKey,
+) -> Result<(), FleetTransportError> {
+    let signature = ed25519_dalek::Signature::from_bytes(&canonical_epoch_hex::<64>(encoded)?);
+    root.verify_strict(&statement.signing_bytes(domain)?, &signature)
+        .map_err(|_| FleetTransportError::stale_state("coordinator epoch signature is invalid"))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FleetEpochCommitAuthorization {
+    schema_version: String,
+    statement: FleetEpochCommitStatement,
+    signature_hex: String,
+}
+
+impl FleetEpochCommitAuthorization {
+    pub(crate) fn verify_integrity(
+        &self,
+        evidence: &FleetNativeDrainEvidence,
+        certificate: &FleetEpochQuiescenceCertificate,
+    ) -> Result<(), FleetTransportError> {
+        if self.schema_version != FLEET_EPOCH_AUTHORIZATION_SCHEMA {
+            return Err(FleetTransportError::stale_state(
+                "unknown fleet epoch authorization schema",
+            ));
+        }
+        self.statement.validate_bindings(evidence, certificate)?;
+        verify_epoch_signature(
+            &self.statement,
+            FLEET_EPOCH_AUTHORIZATION_DOMAIN,
+            &self.signature_hex,
+            &self.statement.embedded_key()?,
+        )
+    }
+
+    pub(crate) fn verify(
+        &self,
+        signer: &FleetEpochCommitSigner,
+        evidence: &FleetNativeDrainEvidence,
+        certificate: &FleetEpochQuiescenceCertificate,
+    ) -> Result<(), FleetTransportError> {
+        self.verify_integrity(evidence, certificate)?;
+        if self.statement.coordinator_id != signer.coordinator_id
+            || self.statement.embedded_key()? != signer.verifying_key()
+        {
+            return Err(FleetTransportError::stale_state(
+                "retained epoch authorization belongs to another coordinator identity or key",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Two signatures separate live barrier authorization from durable commit
+/// acknowledgement. Neither signature proves a whole epoch chain or present
+/// quiescence; callers independently pin the coordinator and supervisor roots.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FleetEpochCommitProof {
+    pub schema_version: String,
+    pub statement: FleetEpochCommitStatement,
+    pub authorization_signature_hex: String,
+    pub commit_signature_hex: String,
+}
+
+impl FleetEpochCommitProof {
+    /// Check the response's internal signature/binding integrity. This does
+    /// not enroll its embedded key as a trusted coordinator.
+    pub fn verify_integrity(
+        &self,
+        evidence: &FleetNativeDrainEvidence,
+        certificate: &FleetEpochQuiescenceCertificate,
+    ) -> Result<(), FleetTransportError> {
+        if self.schema_version != FLEET_EPOCH_COMMIT_PROOF_SCHEMA {
+            return Err(FleetTransportError::stale_state(
+                "unknown fleet epoch commit proof schema",
+            ));
+        }
+        self.statement.validate_bindings(evidence, certificate)?;
+        let root = self.statement.embedded_key()?;
+        verify_epoch_signature(
+            &self.statement,
+            FLEET_EPOCH_AUTHORIZATION_DOMAIN,
+            &self.authorization_signature_hex,
+            &root,
+        )?;
+        verify_epoch_signature(
+            &self.statement,
+            FLEET_EPOCH_COMMIT_DOMAIN,
+            &self.commit_signature_hex,
+            &root,
+        )
+    }
+
+    /// Authenticate the coordinator against independently enrolled identity
+    /// and key pins. Supervisor population policy remains a separate check.
+    pub fn verify_with_coordinator(
+        &self,
+        evidence: &FleetNativeDrainEvidence,
+        certificate: &FleetEpochQuiescenceCertificate,
+        coordinator_id: &str,
+        root: &ed25519_dalek::VerifyingKey,
+    ) -> Result<(), FleetTransportError> {
+        self.verify_integrity(evidence, certificate)?;
+        if self.statement.coordinator_id != coordinator_id
+            || self.statement.embedded_key()? != *root
+        {
+            return Err(FleetTransportError::stale_state(
+                "epoch proof does not match the independently enrolled coordinator",
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct FleetEpochBarrierParams<'a> {
     pub initiator: &'a str,
@@ -8373,6 +8662,222 @@ mod tests {
         assert!(err.to_string().contains("aborted before commit"), "{err}");
         assert_eq!(coordinator.current_epoch(), 1);
         assert_eq!(coordinator.abort_manager().abort_events().len(), 1);
+    }
+
+    fn fleet_epoch_commit_fixture() -> (
+        super::FleetNativeDrainEvidence,
+        super::FleetEpochQuiescenceCertificate,
+        super::FleetEpochCommitSigner,
+    ) {
+        use crate::control_plane::control_epoch::EpochSigningKey;
+        use crate::control_plane::epoch_transition_barrier::BarrierConfig;
+        use crate::runtime::epoch_transition::ProductEpochCoordinator;
+
+        let root = SigningKey::from_bytes(&[41; 32]);
+        let now = DateTime::from_timestamp(1_800_000_000, 0).unwrap();
+        let (hold, node) = signed_supervisor_fixture(&root, now);
+        let roots = std::collections::BTreeMap::from([(
+            ("zone-a".to_string(), "node-a".to_string()),
+            root.verifying_key(),
+        )]);
+        let state = FleetSharedState {
+            schema_version: FLEET_SHARED_STATE_SCHEMA.to_string(),
+            actions: vec![hold],
+            nodes: vec![node],
+        };
+        let mut coordinator = ProductEpochCoordinator::new(
+            7,
+            2,
+            BarrierConfig::default(),
+            EpochSigningKey::new(b"operator-bearer-owned-hmac").unwrap(),
+        );
+        let (evidence, certificate) = super::certify_fleet_epoch_quiescence(
+            &mut coordinator,
+            &state,
+            &roots,
+            super::FleetEpochBarrierParams {
+                initiator: "operator",
+                reason: "retain exact historical commit proof",
+                now,
+                stale_after: Duration::from_secs(30),
+                trace_id: "trace-commit-proof",
+            },
+        )
+        .unwrap();
+        (
+            evidence,
+            certificate,
+            super::FleetEpochCommitSigner::new(
+                "coordinator-test",
+                SigningKey::from_bytes(&[43; 32]),
+            )
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn fleet_epoch_commit_requires_distinct_authorization_and_commit_domains() {
+        let (evidence, certificate, signer) = fleet_epoch_commit_fixture();
+        let authorization = signer.authorize(&evidence, &certificate).unwrap();
+        assert!(
+            serde_json::from_value::<super::FleetEpochCommitProof>(
+                serde_json::to_value(&authorization).unwrap(),
+            )
+            .is_err()
+        );
+        let proof = signer
+            .attest_committed(authorization.clone(), &evidence, &certificate)
+            .unwrap();
+        assert_ne!(
+            proof.authorization_signature_hex,
+            proof.commit_signature_hex
+        );
+        proof
+            .verify_with_coordinator(
+                &evidence,
+                &certificate,
+                "coordinator-test",
+                &signer.verifying_key(),
+            )
+            .unwrap();
+        assert_eq!(
+            proof,
+            signer
+                .attest_committed(authorization, &evidence, &certificate)
+                .unwrap()
+        );
+
+        let mut intent_only = proof.clone();
+        intent_only.commit_signature_hex = intent_only.authorization_signature_hex.clone();
+        assert!(
+            intent_only
+                .verify_integrity(&evidence, &certificate)
+                .is_err()
+        );
+        let mut swapped = proof.clone();
+        std::mem::swap(
+            &mut swapped.authorization_signature_hex,
+            &mut swapped.commit_signature_hex,
+        );
+        assert!(swapped.verify_integrity(&evidence, &certificate).is_err());
+        let mut commit_only = proof;
+        commit_only.authorization_signature_hex = commit_only.commit_signature_hex.clone();
+        assert!(
+            commit_only
+                .verify_integrity(&evidence, &certificate)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn fleet_epoch_commit_binds_full_manifest_statement_and_enrolled_coordinator() {
+        let (evidence, certificate, signer) = fleet_epoch_commit_fixture();
+        let authorization = signer.authorize(&evidence, &certificate).unwrap();
+        let proof = signer
+            .attest_committed(authorization.clone(), &evidence, &certificate)
+            .unwrap();
+        let foreign = super::FleetEpochCommitSigner::new(
+            "coordinator-test",
+            SigningKey::from_bytes(&[44; 32]),
+        )
+        .unwrap();
+        assert!(
+            authorization
+                .verify(&foreign, &evidence, &certificate)
+                .is_err()
+        );
+        assert!(
+            proof
+                .verify_with_coordinator(
+                    &evidence,
+                    &certificate,
+                    "other-coordinator",
+                    &signer.verifying_key()
+                )
+                .is_err()
+        );
+        assert!(
+            proof
+                .verify_with_coordinator(
+                    &evidence,
+                    &certificate,
+                    "coordinator-test",
+                    &foreign.verifying_key()
+                )
+                .is_err()
+        );
+
+        let mut changed_evidence = evidence.clone();
+        changed_evidence.nodes[0].last_seen =
+            Some(evidence.observed_at - chrono::Duration::seconds(1));
+        assert!(
+            proof
+                .verify_integrity(&changed_evidence, &certificate)
+                .is_err()
+        );
+        let mut changed_certificate = certificate.clone();
+        changed_certificate.reason.push_str("-substituted");
+        assert!(
+            proof
+                .verify_integrity(&evidence, &changed_certificate)
+                .is_err()
+        );
+        let mut rebound = proof.clone();
+        rebound.statement.evidence_certificate_sha256 =
+            super::fleet_epoch_quiescence_manifest_hash(&evidence, &changed_certificate).unwrap();
+        assert!(
+            rebound
+                .verify_integrity(&evidence, &changed_certificate)
+                .is_err()
+        );
+
+        for field in [
+            "coordinator_id",
+            "coordinator_key_id",
+            "transition_id",
+            "trace_id",
+            "schema_version",
+        ] {
+            let mut mutated = serde_json::to_value(&proof).unwrap();
+            mutated["statement"][field] = "substituted".into();
+            let mutated: super::FleetEpochCommitProof = serde_json::from_value(mutated).unwrap();
+            assert!(
+                mutated.verify_integrity(&evidence, &certificate).is_err(),
+                "{field}"
+            );
+        }
+        let mut uppercase = proof;
+        uppercase.commit_signature_hex.make_ascii_uppercase();
+        assert!(uppercase.verify_integrity(&evidence, &certificate).is_err());
+    }
+
+    #[test]
+    fn fleet_epoch_commit_rejects_ambiguous_coordinator_identity() {
+        for id in [
+            "",
+            ".",
+            "..",
+            "east..coordinator",
+            "name/other",
+            " with-space",
+            "nonascii-λ",
+        ] {
+            assert!(
+                super::FleetEpochCommitSigner::new(id, SigningKey::from_bytes(&[43; 32])).is_err(),
+                "{id}"
+            );
+        }
+        assert!(
+            super::FleetEpochCommitSigner::new("a".repeat(129), SigningKey::from_bytes(&[43; 32]))
+                .is_err()
+        );
+        assert!(
+            super::FleetEpochCommitSigner::new(
+                "coordinator-1.east_prod",
+                SigningKey::from_bytes(&[43; 32])
+            )
+            .is_ok()
+        );
     }
 
     #[test]

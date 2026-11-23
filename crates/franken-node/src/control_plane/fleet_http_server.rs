@@ -31,19 +31,21 @@ use crate::capacity_defaults::aliases::MAX_NODES_CAP;
 use crate::control_plane::control_epoch::EpochSigningKey;
 
 use super::fleet_transport::{
-    FleetAction, FleetActionRecord, FleetGuardedPolicyObservationScope, FleetTransport,
-    FleetTransportError, GuardedFleetPolicyPublication, MAX_GUARDED_POLICY_REQUEST_BYTES,
-    MAX_GUARDED_POLICY_STALE_AFTER, NodeHealth, NodeStatus, SeqlockControlPage,
-    validate_action_record, validate_node_id, validate_node_status, validate_zone_id,
+    FleetAction, FleetActionRecord, FleetEpochCommitSigner, FleetGuardedPolicyObservationScope,
+    FleetTransport, FleetTransportError, GuardedFleetPolicyPublication,
+    MAX_GUARDED_POLICY_REQUEST_BYTES, MAX_GUARDED_POLICY_STALE_AFTER, NodeHealth, NodeStatus,
+    SeqlockControlPage, validate_action_record, validate_node_id, validate_node_status,
+    validate_zone_id,
 };
 use super::fleet_transport_durable::DurableFleetTransport;
 use super::fleet_transport_http::{
     FLEET_HTTP_ACTIONS_PATH, FLEET_HTTP_API_SCHEMA, FLEET_HTTP_EPOCH_BARRIER_PATH,
-    FLEET_HTTP_GUARDED_POLICY_PATH, FLEET_HTTP_HEALTH_PATH, FLEET_HTTP_MAX_REQUEST_BYTES,
-    FLEET_HTTP_NODES_PATH, FLEET_HTTP_STATE_PATH, FleetHttpAck, FleetHttpActionList,
-    FleetHttpEpochBarrierRequest, FleetHttpEpochBarrierResponse, FleetHttpHealth,
-    FleetHttpNodeList, FleetHttpProblem, FleetHttpState, bearer_token_matches, parse_bearer_header,
-    validate_bearer_token,
+    FLEET_HTTP_EPOCH_COMMIT_RESPONSE_SCHEMA, FLEET_HTTP_EPOCH_COMMIT_ROUTE,
+    FLEET_HTTP_EPOCH_COMMITS_PREFIX, FLEET_HTTP_GUARDED_POLICY_PATH, FLEET_HTTP_HEALTH_PATH,
+    FLEET_HTTP_MAX_REQUEST_BYTES, FLEET_HTTP_NODES_PATH, FLEET_HTTP_STATE_PATH, FleetHttpAck,
+    FleetHttpActionList, FleetHttpEpochBarrierRequest, FleetHttpEpochBarrierResponse,
+    FleetHttpHealth, FleetHttpNodeList, FleetHttpProblem, FleetHttpState, bearer_token_matches,
+    parse_bearer_header, validate_bearer_token,
 };
 
 /// Service name reported by the health route.
@@ -429,6 +431,7 @@ pub struct FleetControlPlaneService {
     token: String,
     node_credentials: Option<Arc<FleetNodeCredentials>>,
     epoch_signing_key: Arc<EpochSigningKey>,
+    epoch_commit_signer: Option<Arc<FleetEpochCommitSigner>>,
     seqlock_page: Arc<SeqlockControlPage>,
     clock: fn() -> DateTime<Utc>,
 }
@@ -568,6 +571,7 @@ impl FleetControlPlaneService {
             token: token.to_string(),
             node_credentials: None,
             epoch_signing_key,
+            epoch_commit_signer: None,
             seqlock_page,
             clock: Utc::now,
         })
@@ -595,6 +599,27 @@ impl FleetControlPlaneService {
             ));
         }
         self.node_credentials = Some(Arc::new(credentials));
+        Ok(self)
+    }
+
+    /// Enable independent public commit proofs with an explicitly provisioned
+    /// identity/key pair. Existing signed history pins both across restarts.
+    pub fn with_epoch_commit_signer(
+        mut self,
+        signer: FleetEpochCommitSigner,
+    ) -> Result<Self, FleetTransportError> {
+        if self.epoch_commit_signer.is_some() {
+            return Err(FleetTransportError::not_initialized(
+                "restart the fleet coordinator to replace its epoch signing identity",
+            ));
+        }
+        let signer = Arc::new(signer);
+        let candidate = Arc::clone(&signer);
+        let key = Arc::clone(&self.epoch_signing_key);
+        self.with_store(move |transport, _| {
+            transport.validate_epoch_commit_signer(&key, &candidate)
+        })?;
+        self.epoch_commit_signer = Some(signer);
         Ok(self)
     }
 
@@ -652,15 +677,17 @@ impl FleetControlPlaneService {
         } else {
             path
         };
-        let known_path = matches!(
-            path,
-            FLEET_HTTP_HEALTH_PATH
-                | FLEET_HTTP_ACTIONS_PATH
-                | FLEET_HTTP_NODES_PATH
-                | FLEET_HTTP_STATE_PATH
-                | FLEET_HTTP_GUARDED_POLICY_PATH
-                | FLEET_HTTP_EPOCH_BARRIER_PATH
-        );
+        let epoch_export = path.strip_prefix(FLEET_HTTP_EPOCH_COMMITS_PREFIX);
+        let known_path = epoch_export.is_some()
+            || matches!(
+                path,
+                FLEET_HTTP_HEALTH_PATH
+                    | FLEET_HTTP_ACTIONS_PATH
+                    | FLEET_HTTP_NODES_PATH
+                    | FLEET_HTTP_STATE_PATH
+                    | FLEET_HTTP_GUARDED_POLICY_PATH
+                    | FLEET_HTTP_EPOCH_BARRIER_PATH
+            );
         if !known_path {
             return FleetHttpResponse::problem(
                 404,
@@ -732,7 +759,7 @@ impl FleetControlPlaneService {
         }
         if matches!(&principal, FleetPrincipal::Node { .. })
             && request.method == "GET"
-            && path == FLEET_HTTP_STATE_PATH
+            && (path == FLEET_HTTP_STATE_PATH || epoch_export.is_some())
         {
             return FleetHttpResponse::problem(
                 403,
@@ -743,6 +770,47 @@ impl FleetControlPlaneService {
         }
 
         let enrollment = self.node_credentials.clone();
+
+        if let Some(encoded_epoch) = epoch_export {
+            if request.method != "GET" {
+                return method_not_allowed(request.method, path);
+            }
+            let Some(epoch) = encoded_epoch
+                .parse::<u64>()
+                .ok()
+                .filter(|epoch| *epoch > 0 && epoch.to_string() == encoded_epoch)
+            else {
+                return FleetHttpResponse::problem(
+                    400,
+                    "bad_request",
+                    "FLEET_HTTP_INVALID_EPOCH",
+                    "a retained epoch must be a canonical positive decimal u64",
+                );
+            };
+            let Some(signer) = self.epoch_commit_signer.clone() else {
+                return FleetHttpResponse::problem(
+                    409,
+                    "conflict",
+                    "FLEET_HTTP_COORDINATOR_SIGNING_KEY_REQUIRED",
+                    "retained public epoch proof export requires its provisioned coordinator signing key",
+                );
+            };
+            let key = Arc::clone(&self.epoch_signing_key);
+            return self.with_transport(move |transport, _| {
+                let (evidence, certificate, proof) =
+                    transport.export_epoch_commit(&key, &signer, epoch)?;
+                Ok(FleetHttpResponse::json(
+                    200,
+                    "ok",
+                    &FleetHttpEpochBarrierResponse {
+                        schema_version: FLEET_HTTP_EPOCH_COMMIT_RESPONSE_SCHEMA.to_owned(),
+                        evidence,
+                        certificate,
+                        commit_proof: Some(proof),
+                    },
+                ))
+            });
+        }
 
         match (request.method, path) {
             ("GET", FLEET_HTTP_ACTIONS_PATH) => self.with_transport(move |transport, _| {
@@ -844,11 +912,13 @@ impl FleetControlPlaneService {
                 };
                 let clock = self.clock;
                 let epoch_signing_key = Arc::clone(&self.epoch_signing_key);
+                let epoch_commit_signer = self.epoch_commit_signer.clone();
                 let seqlock_page = Arc::clone(&self.seqlock_page);
                 let seqlock_path = self.state_dir.join("seqlock.page");
                 self.with_transport(move |transport, authenticated| {
                     let (evidence, certificate, max_qv) = transport.certify_epoch_quiescence_projected(
                         &epoch_signing_key,
+                        epoch_commit_signer.as_deref(),
                         &roots,
                         super::fleet_transport::FleetEpochBarrierParams {
                             initiator: &barrier_req.initiator,
@@ -862,6 +932,14 @@ impl FleetControlPlaneService {
                         clock,
                         |nodes| enrolled_node_view(nodes, &enrollment, authenticated, clock()),
                     )?;
+                    let commit_proof = epoch_commit_signer
+                        .as_ref()
+                        .map(|signer| {
+                            transport
+                                .export_epoch_commit(&epoch_signing_key, signer, certificate.committed_epoch)
+                                .map(|(_, _, proof)| proof)
+                        })
+                        .transpose()?;
                     let checkpoint = &certificate.action_log_checkpoint;
                     let mut digest_prefix = [0_u8; 32];
                     if let Ok(decoded) = hex::decode(&checkpoint.actions_sha256)
@@ -892,9 +970,14 @@ impl FleetControlPlaneService {
                         200,
                         "ok",
                         &FleetHttpEpochBarrierResponse {
-                            schema_version: FLEET_HTTP_API_SCHEMA.to_string(),
+                            schema_version: if commit_proof.is_some() {
+                                FLEET_HTTP_EPOCH_COMMIT_RESPONSE_SCHEMA
+                            } else {
+                                FLEET_HTTP_API_SCHEMA
+                            }.to_owned(),
                             evidence,
                             certificate,
+                            commit_proof,
                         },
                     ))
                 })
@@ -1007,6 +1090,19 @@ impl FleetControlPlaneService {
         + Send
         + 'static,
     ) -> FleetHttpResponse {
+        self.with_store(operation)
+            .unwrap_or_else(|error| store_error(&error))
+    }
+
+    fn with_store<T: Send + 'static>(
+        &self,
+        operation: impl FnOnce(
+            &mut DurableFleetTransport,
+            &mut AuthenticatedNodes,
+        ) -> Result<T, FleetTransportError>
+        + Send
+        + 'static,
+    ) -> Result<T, FleetTransportError> {
         let (reply, answer) = mpsc::sync_channel(1);
         let job: StoreJob = Box::new(move |transport, authenticated| {
             let _ = reply.send(operation(transport, authenticated));
@@ -1024,12 +1120,11 @@ impl FleetControlPlaneService {
                 .and_then(|tx| tx.send(job).map_err(|_| ()))
         };
         if sent.is_err() {
-            return store_error(&FleetTransportError::io("fleet store thread has stopped"));
+            return Err(FleetTransportError::io("fleet store thread has stopped"));
         }
         match answer.recv() {
-            Ok(Ok(response)) => response,
-            Ok(Err(err)) => store_error(&err),
-            Err(_) => store_error(&FleetTransportError::io(
+            Ok(result) => result,
+            Err(_) => Err(FleetTransportError::io(
                 "fleet store thread stopped before answering",
             )),
         }
@@ -1341,6 +1436,7 @@ fn build_fleet_app(
         .post(FLEET_HTTP_ACTIONS_PATH, route("POST"))
         .post(FLEET_HTTP_GUARDED_POLICY_PATH, route("POST"))
         .post(FLEET_HTTP_EPOCH_BARRIER_PATH, route("POST"))
+        .get(FLEET_HTTP_EPOCH_COMMIT_ROUTE, route("GET"))
         .get(FLEET_HTTP_NODES_PATH, route("GET"))
         .post(FLEET_HTTP_NODES_PATH, route("POST"))
         .get(FLEET_HTTP_STATE_PATH, route("GET"))
@@ -1518,10 +1614,49 @@ mod tests {
     fn service_with_committed_epoch(
         root: &ed25519_dalek::SigningKey,
     ) -> (tempfile::TempDir, FleetControlPlaneService) {
+        service_with_epoch_signer(root, None)
+    }
+
+    fn coordinator_signer() -> FleetEpochCommitSigner {
+        FleetEpochCommitSigner::new(
+            "coordinator-test",
+            ed25519_dalek::SigningKey::from_bytes(&[43; 32]),
+        )
+        .unwrap()
+    }
+
+    fn service_with_epoch_signer(
+        root: &ed25519_dalek::SigningKey,
+        signer: Option<FleetEpochCommitSigner>,
+    ) -> (tempfile::TempDir, FleetControlPlaneService) {
+        let (dir, service) = service_with_held_population(root, signer);
+        let response = epoch_barrier_response(&service, "trace-first-epoch");
+        assert_eq!(
+            response.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&response.body)
+        );
+        let response: FleetHttpEpochBarrierResponse =
+            serde_json::from_slice(&response.body).unwrap();
+        assert_eq!(response.certificate.pre_epoch, 0);
+        assert_eq!(response.certificate.committed_epoch, 1);
+        (dir, service)
+    }
+
+    fn service_with_held_population(
+        root: &ed25519_dalek::SigningKey,
+        signer: Option<FleetEpochCommitSigner>,
+    ) -> (tempfile::TempDir, FleetControlPlaneService) {
         let (dir, service) = service();
         let service = service
             .with_node_credentials(supervisor_enrollment(root))
             .unwrap();
+        let service = if let Some(signer) = signer {
+            service.with_epoch_commit_signer(signer).unwrap()
+        } else {
+            service
+        };
         let hold = FleetActionRecord {
             action_id: "supervisor-maintenance".into(),
             emitted_at: fixed_clock(),
@@ -1553,18 +1688,336 @@ mod tests {
                 .status,
             200
         );
-        let response = epoch_barrier_response(&service, "trace-first-epoch");
+        (dir, service)
+    }
+
+    fn export_epoch(service: &FleetControlPlaneService, epoch: u64) -> FleetHttpResponse {
+        service.handle(request(
+            "GET",
+            &format!("{FLEET_HTTP_EPOCH_COMMITS_PREFIX}{epoch}"),
+            Some(&bearer()),
+            b"",
+        ))
+    }
+
+    #[test]
+    fn epoch_commit_export_survives_restart_without_renewing_node_authority() {
+        let root = ed25519_dalek::SigningKey::from_bytes(&[51; 32]);
+        let (dir, service) = service_with_epoch_signer(&root, Some(coordinator_signer()));
+        let exported = export_epoch(&service, 1);
         assert_eq!(
-            response.status,
+            exported.status,
             200,
             "{}",
-            String::from_utf8_lossy(&response.body)
+            String::from_utf8_lossy(&exported.body)
         );
         let response: FleetHttpEpochBarrierResponse =
-            serde_json::from_slice(&response.body).unwrap();
-        assert_eq!(response.certificate.pre_epoch, 0);
-        assert_eq!(response.certificate.committed_epoch, 1);
-        (dir, service)
+            serde_json::from_slice(&exported.body).unwrap();
+        assert_eq!(
+            response.schema_version,
+            FLEET_HTTP_EPOCH_COMMIT_RESPONSE_SCHEMA
+        );
+        response
+            .commit_proof
+            .as_ref()
+            .unwrap()
+            .verify_with_coordinator(
+                &response.evidence,
+                &response.certificate,
+                "coordinator-test",
+                &coordinator_signer().verifying_key(),
+            )
+            .unwrap();
+        let before = service.seqlock_page().read_safepoint();
+        assert_eq!(export_epoch(&service, 1).body, exported.body);
+        assert_eq!(service.seqlock_page().read_safepoint(), before);
+        drop(service);
+
+        let service = FleetControlPlaneService::open(dir.path().join("fleet"), TOKEN)
+            .unwrap()
+            .with_clock(fixed_clock)
+            .with_node_credentials(supervisor_enrollment(&root))
+            .unwrap()
+            .with_epoch_commit_signer(coordinator_signer())
+            .unwrap();
+        assert_eq!(export_epoch(&service, 1).body, exported.body);
+        assert_eq!(
+            epoch_barrier_response(&service, "trace-unrefreshed-after-export").status,
+            409,
+            "historical export must not reauthenticate retained supervisor observations"
+        );
+        assert_eq!(service.seqlock_page().read_safepoint().control_epoch, 1);
+        assert_eq!(export_epoch(&service, 2).status, 409);
+    }
+
+    #[test]
+    fn epoch_commit_export_recovers_after_post_commit_cache_failure() {
+        let root = ed25519_dalek::SigningKey::from_bytes(&[51; 32]);
+        let (dir, service) = service_with_held_population(&root, Some(coordinator_signer()));
+        std::fs::create_dir(dir.path().join("fleet/seqlock.page")).unwrap();
+        let failed = epoch_barrier_response(&service, "trace-cache-publication-failed");
+        assert_eq!(
+            failed.status,
+            500,
+            "{}",
+            String::from_utf8_lossy(&failed.body)
+        );
+        assert!(String::from_utf8_lossy(&failed.body).contains("committed durably"));
+        let first = export_epoch(&service, 1);
+        assert_eq!(
+            first.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&first.body)
+        );
+        assert_eq!(export_epoch(&service, 1).body, first.body);
+        assert_eq!(export_epoch(&service, 2).status, 409);
+        assert_eq!(service.seqlock_page().read_safepoint().control_epoch, 1);
+    }
+
+    #[test]
+    fn epoch_commit_legacy_history_cannot_gain_public_authority_retroactively() {
+        let root = ed25519_dalek::SigningKey::from_bytes(&[51; 32]);
+        let (_dir, service) = service_with_committed_epoch(&root);
+        assert_eq!(export_epoch(&service, 1).status, 409);
+        let service = service
+            .with_epoch_commit_signer(coordinator_signer())
+            .unwrap();
+        let legacy = export_epoch(&service, 1);
+        assert_eq!(legacy.status, 409);
+        assert!(String::from_utf8_lossy(&legacy.body).contains("HMAC-only"));
+        let second = epoch_barrier_response(&service, "trace-new-signed-epoch");
+        assert_eq!(
+            second.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&second.body)
+        );
+        let second: FleetHttpEpochBarrierResponse = serde_json::from_slice(&second.body).unwrap();
+        assert_eq!(second.certificate.committed_epoch, 2);
+        assert!(second.commit_proof.is_some());
+        assert_eq!(export_epoch(&service, 2).status, 200);
+        assert_eq!(export_epoch(&service, 1).status, 409);
+    }
+
+    #[test]
+    fn epoch_commit_signed_head_rejects_missing_or_foreign_coordinator_signer() {
+        let root = ed25519_dalek::SigningKey::from_bytes(&[51; 32]);
+        let (dir, service) = service_with_epoch_signer(&root, Some(coordinator_signer()));
+        drop(service);
+        let state_dir = dir.path().join("fleet");
+        for (identity, seed) in [("other-coordinator", 43), ("coordinator-test", 44)] {
+            let service = FleetControlPlaneService::open(state_dir.clone(), TOKEN).unwrap();
+            let signer = FleetEpochCommitSigner::new(
+                identity,
+                ed25519_dalek::SigningKey::from_bytes(&[seed; 32]),
+            )
+            .unwrap();
+            assert!(service.with_epoch_commit_signer(signer).is_err());
+        }
+        let service = FleetControlPlaneService::open(state_dir, TOKEN)
+            .unwrap()
+            .with_clock(fixed_clock)
+            .with_node_credentials(supervisor_enrollment(&root))
+            .unwrap();
+        let auth = format!("Bearer {NODE_TOKEN}");
+        assert_eq!(
+            service
+                .handle(request(
+                    "POST",
+                    FLEET_HTTP_NODES_PATH,
+                    Some(&auth),
+                    &serde_json::to_vec(&signed_maintenance(&root, fixed_clock())).unwrap()
+                ))
+                .status,
+            200
+        );
+        let refused = epoch_barrier_response(&service, "trace-key-downgrade");
+        assert_eq!(refused.status, 409);
+        assert!(String::from_utf8_lossy(&refused.body).contains("signing key"));
+        assert_eq!(service.seqlock_page().read_safepoint().control_epoch, 1);
+        assert_eq!(export_epoch(&service, 1).status, 409);
+    }
+
+    #[test]
+    fn epoch_commit_export_requires_operator_and_canonical_retained_epoch() {
+        let root = ed25519_dalek::SigningKey::from_bytes(&[51; 32]);
+        let (_dir, service) = service_with_epoch_signer(&root, Some(coordinator_signer()));
+        let path = format!("{FLEET_HTTP_EPOCH_COMMITS_PREFIX}1");
+        assert_eq!(service.handle(request("GET", &path, None, b"")).status, 401);
+        assert_eq!(
+            service
+                .handle(request(
+                    "GET",
+                    &path,
+                    Some(&format!("Bearer {NODE_TOKEN}")),
+                    b""
+                ))
+                .status,
+            403
+        );
+        for encoded in ["0", "01", "+1", "-1", "18446744073709551616", "1/extra"] {
+            let path = format!("{FLEET_HTTP_EPOCH_COMMITS_PREFIX}{encoded}");
+            assert_eq!(
+                service
+                    .handle(request("GET", &path, Some(&bearer()), b""))
+                    .status,
+                400,
+                "{encoded}"
+            );
+        }
+        assert_eq!(export_epoch(&service, 2).status, 409);
+        assert_eq!(export_epoch(&service, 1).status, 200);
+    }
+
+    #[test]
+    fn epoch_commit_operator_hmac_cannot_rebind_retained_public_authorization() {
+        use crate::control_plane::control_epoch::{EpochStore, EpochTransition};
+        use crate::control_plane::fleet_transport::{
+            FleetEpochQuiescenceCertificate, FleetNativeDrainEvidence,
+            fleet_epoch_quiescence_manifest_hash,
+        };
+        use fsqlite::compat::TransactionExt as _;
+
+        let root = ed25519_dalek::SigningKey::from_bytes(&[51; 32]);
+        let (dir, service) = service_with_epoch_signer(&root, Some(coordinator_signer()));
+        drop(service);
+        let state_dir = dir.path().join("fleet");
+        {
+            let connection = fsqlite::Connection::open(
+                state_dir.join("fleet-state.db").to_string_lossy().as_ref(),
+            )
+            .unwrap();
+            for pragma in [
+                "PRAGMA journal_mode=WAL;",
+                "PRAGMA synchronous=FULL;",
+                "PRAGMA busy_timeout=5000;",
+            ] {
+                connection.query(pragma).unwrap();
+            }
+            let mut tx = connection.transaction().unwrap();
+            let rows = tx
+                .query("SELECT commit_json FROM fleet_epoch_commits WHERE epoch = '1';")
+                .unwrap();
+            let fsqlite::SqliteValue::Text(raw) = &rows[0].values()[0] else {
+                panic!("commit JSON text");
+            };
+            assert!(
+                !raw.contains("commit_signature_hex"),
+                "write transactions retain authorization, never a premature commit signature"
+            );
+            let mut commit: serde_json::Value = serde_json::from_str(raw.as_ref()).unwrap();
+            assert!(commit["coordinator_authorization"].is_object());
+            let evidence: FleetNativeDrainEvidence =
+                serde_json::from_value(commit["evidence"].clone()).unwrap();
+            let mut certificate: FleetEpochQuiescenceCertificate =
+                serde_json::from_value(commit["certificate"].clone()).unwrap();
+            certificate.reason = "forged using the operator's known HMAC key".to_owned();
+            let old: EpochTransition =
+                serde_json::from_value(commit["transition"].clone()).unwrap();
+            let material = Sha256::digest(format!("fleet-epoch-signing:{TOKEN}").as_bytes());
+            let key = EpochSigningKey::new(material.as_slice()).unwrap();
+            let mut forged_store = EpochStore::recover(certificate.pre_epoch, key.clone());
+            let forged = forged_store
+                .epoch_advance(
+                    &fleet_epoch_quiescence_manifest_hash(&evidence, &certificate).unwrap(),
+                    old.timestamp,
+                    &certificate.trace_id,
+                )
+                .unwrap();
+            assert!(
+                forged.verify(&key),
+                "attack must retain a valid operator HMAC"
+            );
+            commit["certificate"] = serde_json::to_value(certificate).unwrap();
+            commit["transition"] = serde_json::to_value(forged).unwrap();
+            tx.execute_with_params(
+                "UPDATE fleet_epoch_commits SET commit_json = ?1 WHERE epoch = '1';",
+                &[fsqlite::SqliteValue::Text(
+                    serde_json::to_string(&commit).unwrap().into(),
+                )],
+            )
+            .unwrap();
+            tx.commit().unwrap();
+        }
+        let error = FleetControlPlaneService::open(state_dir, TOKEN).expect_err(
+            "valid HMAC cannot replace the coordinator's independent live authorization",
+        );
+        assert!(error.to_string().contains("statement"), "{error}");
+    }
+
+    /// The SDK is an independent crate already used by the product. Verify the
+    /// actual serialized durable response through its separate implementation,
+    /// with no producer proof helpers or candidate-supplied enrollment.
+    #[test]
+    fn epoch_commit_durable_response_passes_standalone_verifier() {
+        use crate::control_plane::fleet_transport::fleet_action_log_checkpoint;
+        use frankenengine_verifier_sdk::fleet_quiescence::{
+            FleetCoordinatorTrust, parse_fleet_quiescence_policy, verify_fleet_epoch_commit,
+        };
+
+        let root = ed25519_dalek::SigningKey::from_bytes(&[51; 32]);
+        let (_dir, service) = service_with_epoch_signer(&root, Some(coordinator_signer()));
+        let exported = export_epoch(&service, 1);
+        assert_eq!(exported.status, 200);
+
+        // Construct enrollment and action expectations from the trusted test
+        // setup, independently of every field in the exported candidate.
+        let hold = FleetActionRecord {
+            action_id: "supervisor-maintenance".into(),
+            emitted_at: fixed_clock(),
+            action: FleetAction::NativeSessionHold {
+                zone_id: "zone-a".into(),
+                reason: "verified supervisor maintenance".into(),
+            },
+        };
+        let actions = [hold];
+        let policy = serde_json::json!({
+            "schema_version": "franken-verifier/fleet-quiescence-policy/v1",
+            "evaluation_time": (fixed_clock() + chrono::Duration::seconds(1))
+                .to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true),
+            "max_observation_age_secs": 30,
+            "expected_action_log": fleet_action_log_checkpoint(&actions).unwrap(),
+            "expected_pre_epoch": 0,
+            "expected_trace_id": "trace-first-epoch",
+            "participants": [{
+                "zone_id": "zone-a", "node_id": "node-a",
+                "supervisor_public_key_hex": hex::encode(root.verifying_key().as_bytes()),
+                "project_root_sha256": hex::encode(Sha256::digest(b"private-project-root")),
+                "minimum_generation": 2,
+                "expected_applied_actions": fleet_application_checkpoint(&actions, "zone-a").unwrap(),
+                "expected_active_hold_ids": ["supervisor-maintenance"]
+            }]
+        });
+        let policy = parse_fleet_quiescence_policy(&serde_json::to_vec(&policy).unwrap()).unwrap();
+        let trust = FleetCoordinatorTrust {
+            coordinator_id: "coordinator-test".into(),
+            coordinator_public_key_hex: hex::encode(
+                coordinator_signer().verifying_key().as_bytes(),
+            ),
+        };
+        let facts = verify_fleet_epoch_commit(&exported.body, &policy, &trust).unwrap();
+        assert!(facts.epoch_commit_authenticated);
+        assert!(!facts.current_quiescence_proven);
+        assert_eq!(facts.committed_epoch, 1);
+        assert_eq!(facts.participant_count, 1);
+        assert_eq!(facts.terminal_sessions, 2);
+
+        let foreign = FleetCoordinatorTrust {
+            coordinator_public_key_hex: hex::encode(
+                ed25519_dalek::SigningKey::from_bytes(&[44; 32])
+                    .verifying_key()
+                    .as_bytes(),
+            ),
+            ..trust.clone()
+        };
+        assert!(verify_fleet_epoch_commit(&exported.body, &policy, &foreign).is_err());
+        let mut tampered: serde_json::Value = serde_json::from_slice(&exported.body).unwrap();
+        tampered["certificate"]["reason"] = "substituted after durable commit".into();
+        assert!(
+            verify_fleet_epoch_commit(&serde_json::to_vec(&tampered).unwrap(), &policy, &trust)
+                .is_err()
+        );
     }
 
     #[test]

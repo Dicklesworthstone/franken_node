@@ -31679,6 +31679,93 @@ fn handle_fleet_sessions(args: &cli::FleetSessionsArgs) -> Result<()> {
     }
 }
 
+#[cfg(feature = "http-client")]
+fn fleet_epoch_cli_payload(
+    command: &str,
+    control_plane_url: &str,
+    response: &control_plane::fleet_transport_http::FleetHttpEpochBarrierResponse,
+) -> serde_json::Value {
+    let mut payload = serde_json::json!({
+        "schema_version": if response.commit_proof.is_some() {
+            "franken-node/fleet-quiescence-cli/v2"
+        } else {
+            "franken-node/fleet-quiescence-cli/v1"
+        },
+        "command": command,
+        "ok": true,
+        "transport": FLEET_CLI_HTTP_TRANSPORT,
+        "live_control_plane": true,
+        "control_plane_url": control_plane_url,
+        "evidence": response.evidence,
+        "certificate": response.certificate,
+    });
+    if let Some(proof) = &response.commit_proof {
+        payload["commit_proof"] = serde_json::json!(proof);
+    }
+    payload
+}
+
+fn handle_fleet_export_epoch(args: &cli::FleetExportEpochArgs) -> Result<()> {
+    anyhow::ensure!(
+        args.epoch > 0,
+        "`fleet export-epoch` requires a positive --epoch"
+    );
+    #[cfg(not(feature = "http-client"))]
+    {
+        anyhow::bail!("`fleet export-epoch` requires the `http-client` feature");
+    }
+    #[cfg(feature = "http-client")]
+    {
+        let resolved = config::Config::resolve_for_fleet(None, config::CliOverrides::default())
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        let url = resolved.config.fleet.control_plane_url.as_deref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "`fleet export-epoch` requires the configured HTTP coordinator and its operator token"
+            )
+        })?;
+        let FleetTransportHandle::Http(transport) =
+            open_http_fleet_transport(Path::new("."), &resolved, url)?
+        else {
+            anyhow::bail!("`fleet export-epoch` requires the HTTP coordinator");
+        };
+        let response = transport
+            .export_epoch_commit(args.epoch)
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        let proof = response.commit_proof.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("retained epoch has no independent coordinator commit proof")
+        })?;
+        if args.json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&fleet_epoch_cli_payload(
+                    "fleet.export-epoch",
+                    transport.url().as_str(),
+                    &response,
+                ))?
+            );
+        } else {
+            println!(
+                "Retained signed fleet epoch {}",
+                response.certificate.committed_epoch
+            );
+            println!(
+                "  coordinator={} signer={}",
+                proof.statement.coordinator_id, proof.statement.coordinator_key_id
+            );
+            println!(
+                "  transition={} certified_at={} participants={}",
+                response.certificate.transition_id,
+                response.certificate.certified_at,
+                response.certificate.participants.len()
+            );
+            println!(
+                "  Export preserves the historical observation; current quiescence is not asserted."
+            );
+        }
+        Ok(())
+    }
+}
+
 fn handle_fleet_certify_quiescence(args: &cli::FleetCertifyQuiescenceArgs) -> Result<()> {
     if args.initiator.trim().is_empty() || args.reason.trim().is_empty() {
         anyhow::bail!("`fleet certify-quiescence` requires nonempty --initiator and --reason");
@@ -31743,16 +31830,11 @@ fn handle_fleet_certify_quiescence(args: &cli::FleetCertifyQuiescenceArgs) -> Re
         if args.json {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&serde_json::json!({
-                    "schema_version": "franken-node/fleet-quiescence-cli/v1",
-                    "command": "fleet.certify-quiescence",
-                    "ok": true,
-                    "transport": FLEET_CLI_HTTP_TRANSPORT,
-                    "live_control_plane": true,
-                    "control_plane_url": transport.url().as_str(),
-                    "evidence": response.evidence,
-                    "certificate": response.certificate,
-                }))?
+                serde_json::to_string_pretty(&fleet_epoch_cli_payload(
+                    "fleet.certify-quiescence",
+                    transport.url().as_str(),
+                    &response,
+                ))?
             );
         } else {
             let certificate = &response.certificate;
@@ -31769,6 +31851,12 @@ fn handle_fleet_certify_quiescence(args: &cli::FleetCertifyQuiescenceArgs) -> Re
                 response.evidence.stale_after.as_secs(),
             );
             println!("  trace_id={}", certificate.trace_id);
+            if let Some(proof) = &response.commit_proof {
+                println!(
+                    "  commit_proof=ed25519 coordinator={} signer={}",
+                    proof.statement.coordinator_id, proof.statement.coordinator_key_id
+                );
+            }
             for participant in &certificate.participants {
                 println!(
                     "  {}/{} terminal={}/{} holds={}",
@@ -33545,6 +33633,7 @@ fn run_fleet_serve(args: &cli::FleetServeArgs) -> Result<()> {
         FleetHttpEventSink, FleetHttpServerConfig, FleetHttpServerControl, FleetNodeCredentials,
         serve_fleet_control_plane,
     };
+    use control_plane::fleet_transport::FleetEpochCommitSigner;
     use std::io::Write as _;
     use std::sync::Arc;
 
@@ -33561,6 +33650,33 @@ fn run_fleet_serve(args: &cli::FleetServeArgs) -> Result<()> {
              proxy or an encrypted overlay and pass --allow-non-loopback"
         );
     }
+
+    // Resolve separately provisioned signing authority before opening the
+    // durable store or generating a transport token. Never derive it from the
+    // bearer credential, and never mint an authority from candidate state.
+    let (coordinator_signer, coordinator_identity) = match (
+        args.coordinator_id.as_ref(),
+        args.coordinator_signing_key.as_deref(),
+    ) {
+        (Some(identity), Some(path)) => {
+            let material = load_ed25519_signing_material_from_path(
+                path,
+                "fleet coordinator signing key",
+                "cli",
+            )?;
+            let key_id = format!(
+                "ed25519:{}",
+                hex::encode(material.signing_key.verifying_key().as_bytes(),)
+            );
+            let signer = FleetEpochCommitSigner::new(identity.clone(), material.signing_key)
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            (Some(signer), Some((identity.clone(), key_id)))
+        }
+        (None, None) => (None, None),
+        _ => anyhow::bail!(
+            "public epoch proofs require both --coordinator-id and --coordinator-signing-key"
+        ),
+    };
 
     let token_path = args
         .token_file
@@ -33585,6 +33701,11 @@ fn run_fleet_serve(args: &cli::FleetServeArgs) -> Result<()> {
     let state_dir = resolve_fleet_state_dir(Path::new("."), &resolved)?;
     let mut service = FleetControlPlaneService::open(state_dir.clone(), &token)
         .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+    if let Some(signer) = coordinator_signer {
+        service = service
+            .with_epoch_commit_signer(signer)
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    }
     if let Some(path) = &args.node_credentials_file {
         let credentials =
             FleetNodeCredentials::load(path).map_err(|err| anyhow::anyhow!(err.to_string()))?;
@@ -33618,6 +33739,14 @@ fn run_fleet_serve(args: &cli::FleetServeArgs) -> Result<()> {
                     "enrolled_node_count".to_string(),
                     enrolled_node_count.into(),
                 );
+                object.insert(
+                    "public_epoch_commit_proofs".into(),
+                    coordinator_identity.is_some().into(),
+                );
+                if let Some((identity, key_id)) = &coordinator_identity {
+                    object.insert("coordinator_id".into(), identity.clone().into());
+                    object.insert("coordinator_key_id".into(), key_id.clone().into());
+                }
             }
             println!("{line}");
         } else if event.event_code == FLEET_HTTP_LISTENING {
@@ -33626,6 +33755,9 @@ fn run_fleet_serve(args: &cli::FleetServeArgs) -> Result<()> {
                 event.bound_addr.as_deref().unwrap_or("?"),
                 if generated_token { ", generated" } else { "" }
             );
+            if let Some((identity, key_id)) = &coordinator_identity {
+                println!("  coordinator={identity} epoch_commit_signer={key_id}");
+            }
         } else if event.event_code == FLEET_HTTP_SHUTDOWN {
             eprintln!(
                 "fleet control plane stopped after {} request(s)",
@@ -47947,6 +48079,11 @@ fn main() -> Result<()> {
             FleetCommand::CertifyQuiescence(args) => {
                 if let Err(error) = handle_fleet_certify_quiescence(&args) {
                     return fleet_fail("fleet.certify-quiescence", args.json, error);
+                }
+            }
+            FleetCommand::ExportEpoch(args) => {
+                if let Err(error) = handle_fleet_export_epoch(&args) {
+                    return fleet_fail("fleet.export-epoch", args.json, error);
                 }
             }
             FleetCommand::Resume(args) => {

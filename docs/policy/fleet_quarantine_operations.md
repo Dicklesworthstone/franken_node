@@ -156,6 +156,60 @@ current action history remain mandatory for guarded policy publication; a
 released-cohort observation cannot satisfy that guard. Enrollment records without
 the additional key retain their existing bearer-authenticated observation scope.
 
+### Public coordinator epoch-commit proofs
+
+Provision a separate Ed25519 signing key and stable coordinator identity to
+enable independently verifiable epoch commits:
+
+```bash
+franken-node fleet serve --token-file operator.token \
+  --node-credentials-file enrolled-nodes.json \
+  --coordinator-id production-east \
+  --coordinator-signing-key /operator/coordinator-signing.key --json
+```
+
+The signing-key file uses the existing protected Ed25519 key format accepted by
+the CLI. Both coordinator options are required together. The coordinator never
+derives this key from a bearer token, generates it from database state, or treats
+supervisor enrollment as permission to sign its own epoch commits. Provision
+the identity and public key independently to auditors. Startup reports the
+public key ID, never private key material.
+
+`fleet certify-quiescence` still requires fresh, held, terminal observations from
+the complete enrolled population and the exact action history. With the signer
+configured, the existing serialized barrier transaction retains a coordinator
+authorization over the full evidence and certificate. Only a successful read of
+the committed row permits the distinct public commit signature. A prepared
+authorization cannot authenticate a committed epoch. After a signed head exists,
+an absent or different coordinator signer cannot advance it. Historical
+HMAC-only rows remain readable through the existing recovery path but cannot
+gain public signing authority retroactively.
+
+The existing barrier endpoint returns `franken-node/fleet-epoch-commit-response/v1`
+when a proof is present, while unsigned operation keeps its prior schema. Signed
+CLI output uses `franken-node/fleet-quiescence-cli/v2`. To retrieve a committed
+proof after a response is lost or the coordinator restarts, use the configured
+coordinator URL and operator credential:
+
+```bash
+franken-node fleet export-epoch --epoch 8 --json > fleet-epoch-8.json
+```
+
+This calls operator-only `GET /v2/fleet/epoch-commits/8`. It returns the retained
+evidence, certificate and deterministic commit proof without advancing the epoch,
+releasing admission holds, or refreshing node authentication. Original
+observation times remain intact even if the historical evidence has expired.
+Node credentials cannot export fleet-wide commit proofs. Restart recovery and
+publication-cache repair remain separate from establishing fresh readiness for
+another maintenance operation.
+
+Use the independent SDK's `fleet-epoch-commit` format with separately enrolled
+coordinator and supervisor anchors to authenticate the result. Its
+`epoch_commit_authenticated: true` covers the historical commit;
+`current_quiescence_proven` remains false. See
+[`NATIVE_SESSION_FORENSICS.md`](../../sdk/verifier/NATIVE_SESSION_FORENSICS.md#independently-authenticated-coordinator-epoch-commits)
+for CLI and language-client examples and the exact verification scope.
+
 ### Deployment operator and release control scopes
 
 `deploy run` retains the operator project as an additional native-session owner,

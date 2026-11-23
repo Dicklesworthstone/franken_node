@@ -41,7 +41,8 @@ use crate::runtime::epoch_transition::ProductEpochCoordinator;
 
 use super::fleet_transport::{
     FLEET_ACTION_LOG_FILE, FLEET_GUARDED_POLICY_RECEIPT_SCHEMA, FleetAction, FleetActionRecord,
-    FleetEpochBarrierParams, FleetEpochQuiescenceCertificate, FleetGuardedPolicyObservationScope,
+    FleetEpochBarrierParams, FleetEpochCommitAuthorization, FleetEpochCommitProof,
+    FleetEpochCommitSigner, FleetEpochQuiescenceCertificate, FleetGuardedPolicyObservationScope,
     FleetGuardedPolicyReceipt, FleetNativeDrainEvidence, FleetSharedState, FleetTransport,
     FleetTransportError, GuardedFleetPolicyPublication, MAX_ACTION_RECORD_BYTES,
     MAX_GUARDED_POLICY_RECEIPT_BYTES, MAX_GUARDED_POLICY_STALE_AFTER, NodeStatus,
@@ -68,6 +69,8 @@ struct SignedFleetEpochCommit {
     evidence: FleetNativeDrainEvidence,
     certificate: FleetEpochQuiescenceCertificate,
     transition: EpochTransition,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    coordinator_authorization: Option<FleetEpochCommitAuthorization>,
 }
 
 impl SignedFleetEpochCommit {
@@ -87,6 +90,9 @@ impl SignedFleetEpochCommit {
             return Err(FleetTransportError::stale_state(
                 "durable fleet epoch evidence failed coordinator authentication or binding",
             ));
+        }
+        if let Some(authorization) = &self.coordinator_authorization {
+            authorization.verify_integrity(&self.evidence, certificate)?;
         }
         Ok(())
     }
@@ -881,15 +887,24 @@ impl DurableFleetTransport {
                 "durable fleet epoch head and retained history disagree",
             ));
         }
+        Self::query_epoch_commit(connection, key, epoch)?;
+        Ok(epoch)
+    }
+
+    fn query_epoch_commit(
+        connection: &Connection,
+        key: &EpochSigningKey,
+        epoch: u64,
+    ) -> Result<SignedFleetEpochCommit, FleetTransportError> {
         let retained = connection
             .query_with_params(
                 "SELECT commit_json FROM fleet_epoch_commits WHERE epoch = ?1;",
-                &[SqliteValue::Text(encoded.into())],
+                &[SqliteValue::Text(epoch.to_string().into())],
             )
             .map_err(|error| FleetTransportError::io(error.to_string()))?;
         let [row] = retained.as_slice() else {
             return Err(FleetTransportError::stale_state(
-                "durable fleet epoch head is missing",
+                "requested durable fleet epoch commit is missing",
             ));
         };
         let [value] = row.values() else {
@@ -908,10 +923,102 @@ impl DurableFleetTransport {
         commit.verify(key)?;
         if commit.certificate.committed_epoch != epoch {
             return Err(FleetTransportError::stale_state(
-                "durable epoch head identifies another commit",
+                "durable epoch row identifies another commit",
             ));
         }
-        Ok(epoch)
+        Ok(commit)
+    }
+
+    fn validate_head_signer(
+        connection: &Connection,
+        key: &EpochSigningKey,
+        epoch: u64,
+        signer: Option<&FleetEpochCommitSigner>,
+    ) -> Result<(), FleetTransportError> {
+        if epoch > 0 {
+            let retained = Self::query_epoch_commit(connection, key, epoch)?;
+            if let Some(authorization) = &retained.coordinator_authorization {
+                let signer = signer.ok_or_else(|| {
+                    FleetTransportError::stale_state(
+                        "retained signed epoch requires its provisioned coordinator signing key",
+                    )
+                })?;
+                authorization.verify(signer, &retained.evidence, &retained.certificate)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Provisioning may upgrade a legacy coordinator, but cannot silently
+    /// replace the identity/key already authorizing its retained signed head.
+    pub fn validate_epoch_commit_signer(
+        &self,
+        key: &EpochSigningKey,
+        signer: &FleetEpochCommitSigner,
+    ) -> Result<(), FleetTransportError> {
+        self.ensure_initialized()?;
+        self.with_connection(|connection| {
+            let mut tx = connection
+                .transaction()
+                .map_err(|error| FleetTransportError::io(error.to_string()))?;
+            let epoch = self.query_epoch_head(connection, key)?;
+            Self::validate_head_signer(connection, key, epoch, Some(signer))?;
+            tx.commit()
+                .map_err(|error| FleetTransportError::io(error.to_string()))?;
+            Ok(())
+        })
+    }
+
+    /// Export a historical, already committed barrier without advancing the
+    /// epoch or refreshing any node admission. Legacy HMAC-only rows cannot
+    /// acquire public authority retroactively. The distinct commit signature
+    /// is created only after the committed SQL read transaction has closed.
+    pub fn export_epoch_commit(
+        &self,
+        key: &EpochSigningKey,
+        signer: &FleetEpochCommitSigner,
+        epoch: u64,
+    ) -> Result<
+        (
+            FleetNativeDrainEvidence,
+            FleetEpochQuiescenceCertificate,
+            FleetEpochCommitProof,
+        ),
+        FleetTransportError,
+    > {
+        if epoch == 0 {
+            return Err(FleetTransportError::serialization(
+                "a committed fleet epoch must be positive",
+            ));
+        }
+        self.ensure_initialized()?;
+        let retained = self.with_connection(|connection| {
+            let mut tx = connection
+                .transaction()
+                .map_err(|error| FleetTransportError::io(error.to_string()))?;
+            let head = self.query_epoch_head(connection, key)?;
+            if epoch > head {
+                return Err(FleetTransportError::stale_state(
+                    "requested fleet epoch has not committed",
+                ));
+            }
+            let retained = Self::query_epoch_commit(connection, key, epoch)?;
+            let authorization = retained.coordinator_authorization.as_ref().ok_or_else(|| {
+                FleetTransportError::stale_state(
+                    "legacy HMAC-only epoch has no independent coordinator authorization",
+                )
+            })?;
+            authorization.verify(signer, &retained.evidence, &retained.certificate)?;
+            tx.commit()
+                .map_err(|error| FleetTransportError::io(error.to_string()))?;
+            Ok(retained)
+        })?;
+        let authorization = retained.coordinator_authorization.ok_or_else(|| {
+            FleetTransportError::stale_state("committed epoch authorization is missing")
+        })?;
+        let proof =
+            signer.attest_committed(authorization, &retained.evidence, &retained.certificate)?;
+        Ok((retained.evidence, retained.certificate, proof))
     }
 
     /// Recover only a coordinator-authenticated epoch from one SQL snapshot.
@@ -936,6 +1043,7 @@ impl DurableFleetTransport {
     pub fn certify_epoch_quiescence_projected(
         &mut self,
         key: &EpochSigningKey,
+        signer: Option<&FleetEpochCommitSigner>,
         roots: &BTreeMap<(String, String), ed25519_dalek::VerifyingKey>,
         params: FleetEpochBarrierParams<'_>,
         now: impl Fn() -> DateTime<Utc>,
@@ -955,6 +1063,7 @@ impl DurableFleetTransport {
                 .map_err(|error| FleetTransportError::io(error.to_string()))?;
             serialize_fleet_mutation(&tx)?;
             let epoch = self.query_epoch_head(connection, key)?;
+            Self::validate_head_signer(connection, key, epoch, signer)?;
             let mut state = FleetSharedState {
                 schema_version: super::fleet_transport::FLEET_SHARED_STATE_SCHEMA.to_owned(),
                 actions: Self::query_actions(connection)?,
@@ -989,6 +1098,9 @@ impl DurableFleetTransport {
                 evidence: evidence.clone(),
                 certificate: certificate.clone(),
                 transition,
+                coordinator_authorization: signer
+                    .map(|signer| signer.authorize(&evidence, &certificate))
+                    .transpose()?,
             };
             commit.verify(key)?;
             let raw = serde_json::to_string(&commit)

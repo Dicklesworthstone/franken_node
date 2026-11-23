@@ -33,7 +33,7 @@ use crate::capacity_defaults::aliases::{MAX_ACTION_LOG_ENTRIES, MAX_NODES_CAP};
 
 use super::fleet_transport::{
     FLEET_EPOCH_BARRIER_CERTIFIED_DRAIN_SCOPE, FLEET_EPOCH_QUIESCENCE_CERTIFICATE_SCHEMA,
-    FLEET_SHARED_STATE_SCHEMA, FleetAcknowledgementStage, FleetActionRecord,
+    FLEET_SHARED_STATE_SCHEMA, FleetAcknowledgementStage, FleetActionRecord, FleetEpochCommitProof,
     FleetEpochQuiescenceCertificate, FleetGuardedPolicyObservationScope, FleetGuardedPolicyReceipt,
     FleetNativeDrainEvidence, FleetNativeDrainReadiness, FleetSharedState, FleetTransport,
     FleetTransportError, GuardedFleetPolicyPublication, MAX_GUARDED_POLICY_RECEIPT_BYTES,
@@ -42,8 +42,11 @@ use super::fleet_transport::{
     validate_action_record, validate_node_status,
 };
 
-/// Schema tag carried by every response; v2 binds coordinator append order.
+/// Schema for ordinary responses; v2 binds coordinator append order.
 pub const FLEET_HTTP_API_SCHEMA: &str = "franken-node/fleet-http-api/v2";
+/// Stronger envelope only for independently signed epoch commit responses.
+pub const FLEET_HTTP_EPOCH_COMMIT_RESPONSE_SCHEMA: &str =
+    "franken-node/fleet-epoch-commit-response/v1";
 /// Liveness probe; the only unauthenticated route.
 pub const FLEET_HTTP_HEALTH_PATH: &str = "/v2/fleet/health";
 /// `GET` lists actions, `POST` publishes one.
@@ -56,6 +59,9 @@ pub const FLEET_HTTP_STATE_PATH: &str = "/v2/fleet/state";
 pub const FLEET_HTTP_GUARDED_POLICY_PATH: &str = "/v2/fleet/policies/guarded";
 /// `POST` proposes, verifies enrolled supervisor drains, and commits an epoch transition barrier.
 pub const FLEET_HTTP_EPOCH_BARRIER_PATH: &str = "/v2/fleet/epoch-barrier";
+/// Operator-only retained commit export; append a canonical positive epoch.
+pub const FLEET_HTTP_EPOCH_COMMITS_PREFIX: &str = "/v2/fleet/epoch-commits/";
+pub const FLEET_HTTP_EPOCH_COMMIT_ROUTE: &str = "/v2/fleet/epoch-commits/{epoch}";
 /// Request body bound for ordinary fleet routes. Guarded publication has its
 /// own larger bound because it retains the complete participant identities.
 pub const FLEET_HTTP_MAX_REQUEST_BYTES: usize = 64 * 1024;
@@ -115,6 +121,8 @@ pub struct FleetHttpEpochBarrierResponse {
     pub schema_version: String,
     pub evidence: FleetNativeDrainEvidence,
     pub certificate: FleetEpochQuiescenceCertificate,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit_proof: Option<FleetEpochCommitProof>,
 }
 
 impl FleetHttpEpochBarrierResponse {
@@ -128,7 +136,11 @@ impl FleetHttpEpochBarrierResponse {
     ) -> Result<(), FleetTransportError> {
         let evidence = &self.evidence;
         let certificate = &self.certificate;
-        if self.schema_version != FLEET_HTTP_API_SCHEMA
+        let valid_envelope = match &self.commit_proof {
+            Some(_) => self.schema_version == FLEET_HTTP_EPOCH_COMMIT_RESPONSE_SCHEMA,
+            None => self.schema_version == FLEET_HTTP_API_SCHEMA,
+        };
+        if !valid_envelope
             || evidence.schema_version != "franken-node/fleet-native-drain-evidence/v1"
             || evidence.scope != FLEET_EPOCH_BARRIER_CERTIFIED_DRAIN_SCOPE
             || !evidence.complete
@@ -242,7 +254,27 @@ impl FleetHttpEpochBarrierResponse {
             attestation.verify(drain, &node.node_id, &node.zone_id, &root)?;
             attestation.validate_freshness(evidence.observed_at)?;
         }
+        if let Some(proof) = &self.commit_proof {
+            proof.verify_integrity(evidence, certificate)?;
+        }
         Ok(())
+    }
+
+    fn validate_for_export(&self, epoch: u64) -> Result<(), FleetTransportError> {
+        if self.schema_version != FLEET_HTTP_EPOCH_COMMIT_RESPONSE_SCHEMA
+            || self.commit_proof.is_none()
+            || self.certificate.committed_epoch != epoch
+        {
+            return Err(FleetTransportError::stale_state(
+                "coordinator did not return an independently signed commit for the requested epoch",
+            ));
+        }
+        self.validate_for_request(&FleetHttpEpochBarrierRequest {
+            initiator: self.certificate.initiator.clone(),
+            reason: self.certificate.reason.clone(),
+            trace_id: self.certificate.trace_id.clone(),
+            stale_after: self.evidence.stale_after,
+        })
     }
 }
 
@@ -494,6 +526,15 @@ impl HttpFleetTransport {
         path: &str,
         authenticated: bool,
     ) -> Result<T, FleetTransportError> {
+        self.get_json_with_limit(path, authenticated, FLEET_HTTP_MAX_RESPONSE_BYTES)
+    }
+
+    fn get_json_with_limit<T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        authenticated: bool,
+        response_limit: u64,
+    ) -> Result<T, FleetTransportError> {
         let endpoint = self.url.endpoint(path);
         let mut request = self
             .agent
@@ -505,7 +546,7 @@ impl HttpFleetTransport {
         let response = request
             .call()
             .map_err(|err| self.unreachable(&endpoint, &err))?;
-        self.decode(&endpoint, response)
+        self.decode_with_limit(&endpoint, response, response_limit)
     }
 
     fn post_json<B: Serialize, T: serde::de::DeserializeOwned>(
@@ -552,14 +593,6 @@ impl HttpFleetTransport {
         FleetTransportError::io(format!(
             "fleet control plane unreachable at {endpoint}: {err}"
         ))
-    }
-
-    fn decode<T: serde::de::DeserializeOwned>(
-        &self,
-        endpoint: &str,
-        response: ureq::http::Response<ureq::Body>,
-    ) -> Result<T, FleetTransportError> {
-        self.decode_with_limit(endpoint, response, FLEET_HTTP_MAX_RESPONSE_BYTES)
     }
 
     fn decode_with_limit<T: serde::de::DeserializeOwned>(
@@ -794,6 +827,27 @@ impl FleetTransport for HttpFleetTransport {
 }
 
 impl HttpFleetTransport {
+    /// Retrieve an exact historical signed commit. Export never starts a
+    /// barrier or renews supervisor observations; independent trust requires
+    /// caller-enrolled roots, as provided by the standalone verifier.
+    pub fn export_epoch_commit(
+        &self,
+        epoch: u64,
+    ) -> Result<FleetHttpEpochBarrierResponse, FleetTransportError> {
+        if epoch == 0 {
+            return Err(FleetTransportError::serialization(
+                "a committed fleet epoch must be positive",
+            ));
+        }
+        let response: FleetHttpEpochBarrierResponse = self.get_json_with_limit(
+            &format!("{FLEET_HTTP_EPOCH_COMMITS_PREFIX}{epoch}"),
+            true,
+            MAX_GUARDED_POLICY_RECEIPT_BYTES as u64,
+        )?;
+        response.validate_for_export(epoch)?;
+        Ok(response)
+    }
+
     /// Request distributed epoch-barrier quiescence certification from the live coordinator.
     pub fn certify_epoch_barrier(
         &self,
@@ -922,6 +976,7 @@ mod tests {
                 schema_version: FLEET_HTTP_API_SCHEMA.to_string(),
                 evidence,
                 certificate,
+                commit_proof: None,
             },
         )
     }
@@ -932,6 +987,73 @@ mod tests {
         response.validate_for_request(&request).unwrap();
         assert_eq!(response.certificate.pre_epoch, 7);
         assert_eq!(response.certificate.committed_epoch, 8);
+    }
+
+    #[test]
+    fn epoch_commit_accepts_independent_cross_language_signature_vector() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../sdk/verifier/tests/fixtures/fleet_epoch_commit.json"
+        )))
+        .unwrap();
+        assert_eq!(fixture["live_execution_performed"], false);
+        let response: FleetHttpEpochBarrierResponse =
+            serde_json::from_value(fixture["http_response"].clone()).unwrap();
+        response.validate_for_export(8).unwrap();
+        let root_bytes: [u8; 32] = hex::decode(
+            fixture["coordinator_trust"]["coordinator_public_key_hex"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap()
+        .try_into()
+        .unwrap();
+        let root = ed25519_dalek::VerifyingKey::from_bytes(&root_bytes).unwrap();
+        response
+            .commit_proof
+            .as_ref()
+            .unwrap()
+            .verify_with_coordinator(
+                &response.evidence,
+                &response.certificate,
+                "coordinator-test",
+                &root,
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn epoch_commit_client_rejects_downgrade_and_wrong_historical_epoch() {
+        let (request, mut response) = certified_epoch_response();
+        let signer = super::super::fleet_transport::FleetEpochCommitSigner::new(
+            "coordinator-test",
+            ed25519_dalek::SigningKey::from_bytes(&[43; 32]),
+        )
+        .unwrap();
+        let authorization = signer
+            .authorize(&response.evidence, &response.certificate)
+            .unwrap();
+        let proof = signer
+            .attest_committed(authorization, &response.evidence, &response.certificate)
+            .unwrap();
+        assert!(
+            response.validate_for_export(8).is_err(),
+            "legacy claims cannot be exported as public proof"
+        );
+        response.commit_proof = Some(proof);
+        assert!(
+            response.validate_for_request(&request).is_err(),
+            "proof cannot silently change the old envelope contract"
+        );
+        response.schema_version = FLEET_HTTP_EPOCH_COMMIT_RESPONSE_SCHEMA.to_owned();
+        response.validate_for_request(&request).unwrap();
+        response.validate_for_export(8).unwrap();
+        assert!(response.validate_for_export(7).is_err());
+        response.commit_proof = None;
+        assert!(
+            response.validate_for_request(&request).is_err(),
+            "new envelope cannot omit its proof"
+        );
     }
 
     #[test]

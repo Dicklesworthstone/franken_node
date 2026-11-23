@@ -804,6 +804,7 @@ fn authenticated_runtime_epoch_store(project: &Path, commit_epoch: bool) -> std:
     let (_, certificate, _) = transport
         .certify_epoch_quiescence_projected(
             &key,
+            None,
             &roots,
             FleetEpochBarrierParams {
                 initiator: "runtime-epoch-test",
