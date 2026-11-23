@@ -13,6 +13,7 @@ rounds append; never overwrite.
 | 4     | 2026-05-22    | `20260522T1740Z_migrate_tree_sitter_bench_cod2` | bd-98xo5.9.3 large-corpus tree-sitter profile; Criterion p50/p95/p99, perf top 30 symbols, heaptrack allocation summary | resolved migration tree-sitter parsing as parse-bound non-optimization finding; no new bead |
 | 5     | 2026-05-22    | `20260522T1841Z_dgis_large_graph_cod5` | bd-98xo5.10 large-graph DGIS contagion profile; Criterion 1k/10k/50k/1024-dense step loops plus perf self sample | **HOTSPOT CONFIRMED**: `contagion_simulator::step` is 46.54 % self cycles; filed bd-98xo5.17 |
 | 6     | 2026-05-22    | `20260522T1940Z_r38_dgis_step_cod5` | bd-98xo5.17 DGIS contagion step optimization; cached graph in-edges, borrowed matching interned state, targeted regression, Criterion rebaseline | **HOTSPOT OPTIMIZED**: step-loop means improved 2.98×-7.76× across sparse and dense large-graph cases |
+| 7     | 2026-11-23    | `20261123T091000Z_franken_node_dgis_t54_rebaseline` | bd-98xo5.5.4 T5.4 200x `release-perf` re-baseline of `dgis_contagion_simulator` (26/26 tests) post-T5.2/T5.3 + `80ce79d61` `NodeInterner` hash index (`cgu=16` env override; EPYC-Genoa, 89,148 samples, 0 lost) | **ALL T5.4 BARS MET**: `__memcmp_{avx2,evex}_movbe` `14.10% -> 6.47% (db84b00c4) -> 3.13%` (`<= 5%`), `BTreeMap<String, ...>` `6.81% -> 0.00%`, `<String as Clone>::clone` `0.46% -> 0.00%`, `generate_deterministic` `14.85% -> 0.65%` |
 
 ## Unified cross-round hotspot ranking (current)
 

@@ -1,0 +1,63 @@
+{
+  "run_id": "20261123T091000Z_franken_node_dgis_t54_rebaseline",
+  "captured_at_utc": "2026-11-23T09:10:00Z",
+  "iteration_of": "20260520T231041Z_franken_node_perf_r2",
+  "tracking_bead": "bd-98xo5.5.4",
+  "git_sha": "515ab64d99776024b2551c49b02f9164607f3c39",
+  "pre_fix_git_sha": "db84b00c4",
+  "interner_hash_index_commit": "80ce79d61",
+  "git_dirty": true,
+  "git_dirty_note": "Working tree held only unrelated engine-feature edits in supply_chain/module_engine_resolver.rs and tests/run_language_semantics_e2e.rs; dgis_contagion_simulator was built with --no-default-features (feature=engine excluded) so DGIS code matches committed 515ab64d9 / 80ce79d61 byte-for-byte.",
+  "cargo_lock_sha256": "dc1c0f7f9404321b366c0f9dd19689e8cc804f46d04c646e302c51ab55503dc4",
+  "binary_path": "target/t54-out-v2/dgis_contagion_simulator-2bd52b191ca80ef3",
+  "binary_sha256": "b19755e7bb6cf164fd07b0fb7e334d3c2fb6e5dea801c422f97c01ce62eccb6e",
+  "pre_fix_binary_sha256": "a9fc3652f2ecd8f77e67f455c9c84104446645c966cb3b26a418d8f981ad9dc0",
+  "host_diff_from_round2": "Different host and newer toolchain vs 2026-05-20 Round 2 (AMD EPYC-Genoa 16 vCPU, Linux 7.0.0-30-generic, rustc 1.100.0-nightly 2026-09-20, perf 7.0.14; test suite grew from 8 to 26 tests including proptest/fuzz stress tests). Direct same-host, same-26-test apples-to-apples comparison also captured against pre-80ce79d61 build db84b00c4.",
+  "hardware": {
+    "cpu_model": "AMD EPYC-Genoa Processor",
+    "logical_cpus": 16
+  },
+  "os": {
+    "kernel": "7.0.0-30-generic"
+  },
+  "toolchain": {
+    "rustc": "rustc 1.100.0-nightly (bba531001 2026-09-20)"
+  },
+  "build_profile": {
+    "name": "release-perf",
+    "inherits": "release",
+    "opt_level": 3,
+    "lto": "thin",
+    "codegen_units_checked_in": 1,
+    "codegen_units_env_override": 16,
+    "codegen_units_note": "Checked-in [profile.release-perf] in Cargo.toml kept untouched (codegen-units=1, check_release_perf_profile.py --ci PASS); CARGO_PROFILE_RELEASE_PERF_CODEGEN_UNITS=16 env override used on RCH worker vmi1152480 so the build completed within the 30-minute remote job window. Both pre-fix (db84b00c4) and post-fix (80ce79d61/515ab64d9) binaries used the identical env override.",
+    "debug": "line-tables-only",
+    "strip": false,
+    "RUSTFLAGS": "-C force-frame-pointers=yes",
+    "cargo_features": "--no-default-features"
+  },
+  "tuning_applied": {
+    "perf_event_paranoid": -1,
+    "kptr_restrict": 0,
+    "nmi_watchdog": 0,
+    "perf_event_mlock_kb": 516
+  },
+  "tools": {
+    "perf": "perf version 7.0.14"
+  },
+  "samples": {
+    "loop_iterations": 200,
+    "total_samples": 89148,
+    "lost_samples": 0,
+    "event": "cpu/cycles/P",
+    "event_count_approx": 218129019532
+  },
+  "acceptance_measurements": {
+    "memcmp_self_pct": 3.13,
+    "memcmp_symbol": "__memcmp_evex_movbe",
+    "memcmp_threshold_pct": 5.0,
+    "btreemap_string_self_pct": 0.0,
+    "string_clone_self_pct": 0.0,
+    "all_bars_met": true
+  }
+}
