@@ -1,11 +1,12 @@
 //! Ecosystem reputation graph with explainable trust transitions (charter
 //! impossible-by-default capability 9).
 //!
-//! Every input is observed, signature-verified data:
+//! Trust-card inputs are signature-verified; dependency topology is observed
+//! from the local lockfile, not authenticated by the card signatures:
 //! * nodes come from the trust-card registry (extensions) and the publishers
-//!   named on those cards;
-//! * `depends_on` edges come from the project's npm lockfile, so the graph is
-//!   the dependency structure the project actually installs;
+//!   named on those cards, plus explicitly untracked lockfile packages;
+//! * `depends_on` edges retain the project's npm lockfile dependency closure,
+//!   including packages without trust cards;
 //! * transitions come from consecutive versions of each card, with the audit
 //!   records added between two versions as their causes.
 //!
@@ -34,8 +35,12 @@ pub const DEPENDENCY_MARGIN: u16 = 200;
 pub const PUBLISHER_INCIDENT_CAP: u16 = 400;
 /// R4: an extension is trusted at most this much above its publisher.
 pub const PUBLISHER_MARGIN: u16 = 300;
-/// Bound on the lockfile entries and dependency names the graph ingests.
+/// Bound on lockfile entries and unique dependency names within one entry.
 pub const MAX_GRAPH_PACKAGES: usize = 20_000;
+/// Aggregate bound on dependency-name observations across all lockfile entries.
+/// This includes declared root dependencies and conservatively counts repeated
+/// observations from nested installs or overlapping lockfile representations.
+pub const MAX_GRAPH_DEPENDENCY_NAMES: usize = 100_000;
 
 pub const RULE_REVOKED: &str = "R1_REVOKED";
 pub const RULE_QUARANTINED: &str = "R2_QUARANTINED";
@@ -49,8 +54,8 @@ pub const RULE_UNTRACKED_DEPENDENCY: &str = "COVERAGE_UNTRACKED_DEPENDENCY";
 pub enum TrustNodeKind {
     Publisher,
     Extension,
-    /// A dependency the lockfile installs that has no trust card. It carries
-    /// no score; dependents report it as a trust-coverage gap.
+    /// A package named by the lockfile that has no trust card. It carries no
+    /// score; dependents report it as a trust-coverage gap.
     UntrackedDependency,
 }
 
@@ -59,7 +64,8 @@ pub enum TrustNodeKind {
 pub enum TrustRelation {
     /// publisher -> extension
     Publishes,
-    /// extension -> dependency (from the lockfile)
+    /// installed package -> dependency (from the lockfile), including packages
+    /// whose trust has not been measured.
     DependsOn,
 }
 
@@ -146,6 +152,10 @@ pub struct TrustGraphSummary {
     pub revoked: usize,
     pub degraded_by_propagation: usize,
     pub transitions: usize,
+    /// Input limits omitted lockfile entries or dependency names. A false value
+    /// only describes these parser limits, not trust or resolution completeness.
+    #[serde(default)]
+    pub lockfile_truncated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -172,6 +182,8 @@ pub struct LockfileDependencyGraph {
     pub root_dependencies: BTreeSet<String>,
     /// package name -> names of its direct dependencies.
     pub dependencies: BTreeMap<String, BTreeSet<String>>,
+    /// At least one entry or dependency name was omitted at an ingestion bound.
+    pub truncated: bool,
 }
 
 impl LockfileDependencyGraph {
@@ -182,16 +194,23 @@ impl LockfileDependencyGraph {
     pub fn from_lockfile_json(lockfile: &serde_json::Value) -> Self {
         let mut graph = Self::default();
         let mut ingested = 0_usize;
+        let mut remaining_names = MAX_GRAPH_DEPENDENCY_NAMES;
         if let Some(packages) = lockfile
             .get("packages")
             .and_then(serde_json::Value::as_object)
         {
             for (package_path, package) in packages {
                 if ingested >= MAX_GRAPH_PACKAGES {
+                    graph.truncated = true;
                     break;
                 }
                 ingested = ingested.saturating_add(1);
-                let names = dependency_names(package, &["dependencies", "optionalDependencies"]);
+                let names = dependency_names(
+                    package,
+                    &["dependencies", "optionalDependencies"],
+                    &mut remaining_names,
+                    &mut graph.truncated,
+                );
                 if package_path.is_empty() {
                     graph.root_dependencies.extend(names.iter().cloned());
                     continue;
@@ -222,13 +241,25 @@ impl LockfileDependencyGraph {
             while let Some(level) = pending.pop_front() {
                 for (name, entry) in level {
                     if ingested >= MAX_GRAPH_PACKAGES {
+                        graph.truncated = true;
                         break;
                     }
                     ingested = ingested.saturating_add(1);
-                    if top_level && graph.root_dependencies.len() < MAX_GRAPH_PACKAGES {
-                        graph.root_dependencies.insert(name.clone());
+                    if top_level && !graph.root_dependencies.contains(name) {
+                        if graph.root_dependencies.len() < MAX_GRAPH_PACKAGES && remaining_names > 0
+                        {
+                            graph.root_dependencies.insert(name.clone());
+                            remaining_names = remaining_names.saturating_sub(1);
+                        } else {
+                            graph.truncated = true;
+                        }
                     }
-                    let requires = dependency_names(entry, &["requires"]);
+                    let requires = dependency_names(
+                        entry,
+                        &["requires"],
+                        &mut remaining_names,
+                        &mut graph.truncated,
+                    );
                     graph
                         .dependencies
                         .entry(name.clone())
@@ -248,23 +279,36 @@ impl LockfileDependencyGraph {
     }
 }
 
-fn dependency_names(package: &serde_json::Value, keys: &[&str]) -> BTreeSet<String> {
-    keys.iter()
+fn dependency_names(
+    package: &serde_json::Value,
+    keys: &[&str],
+    remaining_names: &mut usize,
+    truncated: &mut bool,
+) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    for dependencies in keys
+        .iter()
         .filter_map(|key| package.get(*key).and_then(serde_json::Value::as_object))
-        .flat_map(|deps| deps.keys().cloned())
-        .filter(|name| !name.is_empty())
-        .take(MAX_GRAPH_PACKAGES)
-        .collect()
+    {
+        for name in dependencies.keys() {
+            if name.is_empty() || names.contains(name) {
+                continue;
+            }
+            if names.len() >= MAX_GRAPH_PACKAGES || *remaining_names == 0 {
+                *truncated = true;
+                return names;
+            }
+            names.insert(name.clone());
+            *remaining_names = remaining_names.saturating_sub(1);
+        }
+    }
+    names
 }
 
 /// Map a lockfile package name to the extension id trust scans assign it.
 #[must_use]
 pub fn npm_extension_id(package_name: &str) -> String {
     format!("npm:{package_name}")
-}
-
-fn package_name_of(extension_id: &str) -> Option<&str> {
-    extension_id.strip_prefix("npm:")
 }
 
 fn publisher_node_id(publisher_id: &str) -> String {
@@ -440,30 +484,36 @@ pub fn build_trust_graph(
         }
     }
 
-    // Lockfile dependency edges between packages that have cards; dependency
-    // names without a card become untracked nodes.
+    // Preserve the entire observed lockfile relation, including edges whose
+    // source has no card. Otherwise an untracked intermediate hides the blast
+    // radius of a known compromised transitive dependency. Root-only and
+    // disconnected installed packages also remain visible coverage gaps.
     let card_ids: BTreeSet<String> = cards
         .iter()
         .map(|card| card.extension.extension_id.clone())
         .collect();
     let mut untracked: BTreeSet<String> = BTreeSet::new();
-    for card_id in &card_ids {
-        let Some(package) = package_name_of(card_id) else {
-            continue;
-        };
-        let Some(dependencies) = lockfile.dependencies.get(package) else {
-            continue;
-        };
+    for package in &lockfile.root_dependencies {
+        let node_id = npm_extension_id(package);
+        if !card_ids.contains(&node_id) {
+            untracked.insert(node_id);
+        }
+    }
+    for (package, dependencies) in &lockfile.dependencies {
+        let source = npm_extension_id(package);
+        if !card_ids.contains(&source) {
+            untracked.insert(source.clone());
+        }
         for dependency in dependencies {
             let target = npm_extension_id(dependency);
-            if target == *card_id {
+            if target == source {
                 continue;
             }
             if !card_ids.contains(&target) {
                 untracked.insert(target.clone());
             }
             edges.insert(TrustGraphEdge {
-                source: card_id.clone(),
+                source: source.clone(),
                 target,
                 relation: TrustRelation::DependsOn,
                 evidence: format!("lockfile: `{package}` depends on `{dependency}`"),
@@ -485,7 +535,7 @@ pub fn build_trust_graph(
                 publisher_id: None,
                 explanation: vec![TrustExplanation {
                     rule: RULE_UNTRACKED_DEPENDENCY.to_string(),
-                    detail: "installed by the lockfile but has no trust card; run `trust scan`"
+                    detail: "named by the lockfile but has no trust card; run `trust scan`"
                         .to_string(),
                     cap: None,
                 }],
@@ -493,29 +543,31 @@ pub fn build_trust_graph(
         );
     }
 
-    // R3: weakest-dependency propagation to a fixed point. Scores only
-    // decrease and every cap adds a non-negative margin, so Bellman-Ford
-    // style relaxation settles within |nodes| passes even with cycles.
+    // R3: propagate known score ceilings independently of measured node scores.
+    // An untracked node remains unscored, but cannot hide a known downstream
+    // ceiling from its dependents. Each edge adds the same existing margin;
+    // missing data neither grants trust nor removes a known restriction.
     let depends_on: Vec<(String, String)> = edges
         .iter()
         .filter(|edge| edge.relation == TrustRelation::DependsOn)
         .map(|edge| (edge.source.clone(), edge.target.clone()))
         .collect();
+    let mut ceilings: BTreeMap<String, u16> = nodes
+        .values()
+        .filter_map(|node| Some((node.node_id.clone(), node.effective_score?)))
+        .collect();
     let mut binding: BTreeMap<String, (String, u16, u16)> = BTreeMap::new();
     for _ in 0..=nodes.len() {
         let mut changed = false;
         for (source, target) in &depends_on {
-            let Some(target_score) = nodes.get(target).and_then(|node| node.effective_score) else {
+            let Some(target_score) = ceilings.get(target).copied() else {
                 continue;
             };
             let cap = target_score
                 .saturating_add(DEPENDENCY_MARGIN)
                 .min(TRUST_SCORE_SCALE);
-            if let Some(node) = nodes.get_mut(source)
-                && let Some(effective) = node.effective_score
-                && effective > cap
-            {
-                node.effective_score = Some(cap);
+            if cap < ceilings.get(source).copied().unwrap_or(TRUST_SCORE_SCALE) {
+                ceilings.insert(source.clone(), cap);
                 binding.insert(source.clone(), (target.clone(), target_score, cap));
                 changed = true;
             }
@@ -525,11 +577,15 @@ pub fn build_trust_graph(
         }
     }
     for (source, (target, target_score, cap)) in binding {
-        if let Some(node) = nodes.get_mut(&source) {
+        if let Some(node) = nodes.get_mut(&source)
+            && let Some(effective) = node.effective_score
+            && effective > cap
+        {
+            node.effective_score = Some(cap);
             node.explanation.push(TrustExplanation {
                 rule: RULE_WEAK_DEPENDENCY.to_string(),
                 detail: format!(
-                    "depends on `{target}` (effective trust {target_score}); dependents are capped {DEPENDENCY_MARGIN} above their weakest dependency"
+                    "depends on `{target}` (known dependency trust ceiling {target_score}); dependents are capped {DEPENDENCY_MARGIN} above that ceiling even through untracked packages"
                 ),
                 cap: Some(cap),
             });
@@ -568,6 +624,7 @@ pub fn build_trust_graph(
             .filter(|node| node.degraded_by_propagation())
             .count(),
         transitions: transitions.len(),
+        lockfile_truncated: lockfile.truncated,
     };
     TrustGraph {
         schema_version: TRUST_GRAPH_SCHEMA.to_string(),
@@ -804,6 +861,108 @@ mod tests {
             v1.dependencies.get("b"),
             Some(&BTreeSet::from(["c".to_string()]))
         );
+        assert!(!v1.truncated);
+        assert!(!v3.truncated);
+    }
+
+    #[test]
+    fn lockfile_package_and_dependency_limits_report_truncation() {
+        let mut packages: serde_json::Map<String, serde_json::Value> = (0..MAX_GRAPH_PACKAGES)
+            .map(|index| {
+                (
+                    format!("node_modules/pkg-{index:05}"),
+                    serde_json::json!({ "version": "1.0.0" }),
+                )
+            })
+            .collect();
+        let exact = LockfileDependencyGraph::from_lockfile_json(&serde_json::json!({
+            "packages": packages,
+        }));
+        assert_eq!(exact.dependencies.len(), MAX_GRAPH_PACKAGES);
+        assert!(!exact.truncated);
+        packages.insert("node_modules/overflow".into(), serde_json::json!({}));
+        let truncated = LockfileDependencyGraph::from_lockfile_json(&serde_json::json!({
+            "packages": packages,
+        }));
+        assert_eq!(truncated.dependencies.len(), MAX_GRAPH_PACKAGES);
+        assert!(truncated.truncated);
+        let graph = build_trust_graph(&[], &BTreeMap::new(), &truncated);
+        assert!(graph.summary.lockfile_truncated);
+
+        let mut names: serde_json::Map<String, serde_json::Value> = (0..MAX_GRAPH_PACKAGES)
+            .map(|index| (format!("dep-{index:05}"), serde_json::json!("1")))
+            .collect();
+        let exact = LockfileDependencyGraph::from_lockfile_json(&serde_json::json!({
+            "packages": { "": { "dependencies": names } },
+        }));
+        assert_eq!(exact.root_dependencies.len(), MAX_GRAPH_PACKAGES);
+        assert!(!exact.truncated);
+        names.insert("overflow".into(), serde_json::json!("1"));
+        let truncated = LockfileDependencyGraph::from_lockfile_json(&serde_json::json!({
+            "packages": { "": { "dependencies": names } },
+        }));
+        assert_eq!(truncated.root_dependencies.len(), MAX_GRAPH_PACKAGES);
+        assert!(truncated.truncated);
+    }
+
+    #[test]
+    fn lockfile_aggregate_dependency_budget_preserves_sources_and_reports_omissions() {
+        let names: serde_json::Map<String, serde_json::Value> = (0..MAX_GRAPH_PACKAGES)
+            .map(|index| (format!("dep-{index:05}"), serde_json::json!("1")))
+            .collect();
+        let full_rows = MAX_GRAPH_DEPENDENCY_NAMES / MAX_GRAPH_PACKAGES;
+        let mut packages: serde_json::Map<String, serde_json::Value> = (0..full_rows)
+            .map(|index| {
+                (
+                    format!("node_modules/pkg-{index:05}"),
+                    serde_json::json!({ "dependencies": names }),
+                )
+            })
+            .collect();
+        let exact = LockfileDependencyGraph::from_lockfile_json(&serde_json::json!({
+            "packages": packages,
+        }));
+        assert!(!exact.truncated);
+        assert_eq!(
+            exact
+                .dependencies
+                .values()
+                .map(BTreeSet::len)
+                .sum::<usize>(),
+            MAX_GRAPH_DEPENDENCY_NAMES
+        );
+        packages.insert(
+            "node_modules/zzz-overflow".to_string(),
+            serde_json::json!({ "dependencies": { "omitted": "1" } }),
+        );
+        let over = LockfileDependencyGraph::from_lockfile_json(&serde_json::json!({
+            "packages": packages,
+        }));
+        assert!(over.truncated);
+        assert_eq!(over.dependencies.len(), full_rows + 1);
+        assert!(over.dependencies["zzz-overflow"].is_empty());
+        assert_eq!(
+            over.dependencies.values().map(BTreeSet::len).sum::<usize>(),
+            MAX_GRAPH_DEPENDENCY_NAMES
+        );
+    }
+
+    #[test]
+    fn lockfile_v1_limit_reports_omitted_nested_packages() {
+        let mut dependencies: serde_json::Map<String, serde_json::Value> = (0..MAX_GRAPH_PACKAGES)
+            .map(|index| (format!("pkg-{index:05}"), serde_json::json!({})))
+            .collect();
+        dependencies.insert(
+            "pkg-00000".into(),
+            serde_json::json!({ "dependencies": { "nested": { "version": "1" } } }),
+        );
+        let truncated = LockfileDependencyGraph::from_lockfile_json(&serde_json::json!({
+            "lockfileVersion": 1,
+            "dependencies": dependencies,
+        }));
+        assert!(truncated.truncated);
+        assert_eq!(truncated.dependencies.len(), MAX_GRAPH_PACKAGES);
+        assert!(!truncated.dependencies.contains_key("nested"));
     }
 
     #[test]
@@ -894,6 +1053,152 @@ mod tests {
     }
 
     #[test]
+    fn untracked_bridge_preserves_revoked_dependency_blast_radius_and_ceiling() {
+        let base = card("npm:@acme/auth-guard");
+        let mut revoked = named(&base, "npm:leaf", "pub-leaf", 900);
+        revoked.revocation_status = RevocationStatus::Revoked {
+            reason: "compromised transitive package".into(),
+            revoked_at: "2026-11-23T00:00:00Z".into(),
+        };
+        let lockfile = LockfileDependencyGraph::from_lockfile_json(&serde_json::json!({
+            "packages": {
+                "": { "dependencies": { "app": "1" } },
+                "node_modules/app": { "dependencies": { "bridge": "1" } },
+                "node_modules/bridge": { "dependencies": { "leaf": "1" } },
+                "node_modules/leaf": { "version": "1" },
+            },
+        }));
+        let graph = build_trust_graph(
+            &[named(&base, "npm:app", "pub-app", 900), revoked],
+            &BTreeMap::new(),
+            &lockfile,
+        );
+        assert_eq!(node(&graph, "npm:leaf").effective_score, Some(0));
+        let bridge = node(&graph, "npm:bridge");
+        assert_eq!(bridge.kind, TrustNodeKind::UntrackedDependency);
+        assert_eq!(bridge.base_score, None);
+        assert_eq!(bridge.effective_score, None);
+        let app = node(&graph, "npm:app");
+        assert_eq!(app.base_score, Some(900));
+        assert_eq!(app.effective_score, Some(2 * DEPENDENCY_MARGIN));
+        assert!(app.explanation.iter().any(|reason| {
+            reason.rule == RULE_WEAK_DEPENDENCY
+                && reason.detail.contains("npm:bridge")
+                && reason.cap == Some(2 * DEPENDENCY_MARGIN)
+        }));
+        assert_eq!(graph.summary.untracked_dependencies, 1);
+        assert_eq!(graph.summary.degraded_by_propagation, 1);
+        assert_eq!(
+            blast_radius(&graph, "npm:leaf"),
+            vec![
+                BlastRadiusEntry {
+                    extension_id: "npm:bridge".into(),
+                    depth: 1
+                },
+                BlastRadiusEntry {
+                    extension_id: "npm:app".into(),
+                    depth: 2
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn lockfile_only_projects_retain_roots_edges_and_disconnected_packages() {
+        let lockfile = LockfileDependencyGraph::from_lockfile_json(&serde_json::json!({
+            "packages": {
+                "": { "dependencies": { "root-only": "1" } },
+                "node_modules/app": { "dependencies": { "bridge": "1" } },
+                "node_modules/bridge": { "dependencies": { "leaf": "1" } },
+                "node_modules/leaf": { "version": "1" },
+                "node_modules/disconnected": { "version": "1" },
+            },
+        }));
+        let graph = build_trust_graph(&[], &BTreeMap::new(), &lockfile);
+        assert_eq!(graph.summary.extensions, 0);
+        assert_eq!(graph.summary.untracked_dependencies, 5);
+        assert_eq!(graph.summary.edges, 2);
+        assert!(!graph.summary.lockfile_truncated);
+        for id in ["app", "bridge", "leaf", "disconnected", "root-only"] {
+            let package = node(&graph, &npm_extension_id(id));
+            assert_eq!(package.kind, TrustNodeKind::UntrackedDependency);
+            assert_eq!(package.base_score, None);
+            assert_eq!(package.effective_score, None);
+        }
+        assert_eq!(
+            blast_radius(&graph, "npm:leaf"),
+            vec![
+                BlastRadiusEntry {
+                    extension_id: "npm:bridge".into(),
+                    depth: 1
+                },
+                BlastRadiusEntry {
+                    extension_id: "npm:app".into(),
+                    depth: 2
+                },
+            ]
+        );
+        assert!(blast_radius(&graph, "npm:disconnected").is_empty());
+        assert!(blast_radius(&graph, "npm:root-only").is_empty());
+    }
+
+    #[test]
+    fn untracked_cycles_preserve_shortest_paths_without_creating_scores() {
+        let base = card("npm:@acme/auth-guard");
+        let lockfile = LockfileDependencyGraph::from_lockfile_json(&serde_json::json!({
+            "packages": {
+                "node_modules/app": { "dependencies": { "a": "1" } },
+                "node_modules/a": { "dependencies": { "b": "1" } },
+                "node_modules/b": { "dependencies": { "a": "1", "b": "1", "leaf": "1" } },
+            },
+        }));
+        let graph = build_trust_graph(
+            &[
+                named(&base, "npm:app", "pub-app", 900),
+                named(&base, "npm:leaf", "pub-leaf", 50),
+            ],
+            &BTreeMap::new(),
+            &lockfile,
+        );
+        assert_eq!(node(&graph, "npm:app").effective_score, Some(650));
+        for id in ["npm:a", "npm:b"] {
+            assert_eq!(node(&graph, id).base_score, None);
+            assert_eq!(node(&graph, id).effective_score, None);
+        }
+        assert!(graph.edges.iter().all(|edge| edge.source != edge.target));
+        assert_eq!(
+            blast_radius(&graph, "npm:leaf"),
+            vec![
+                BlastRadiusEntry {
+                    extension_id: "npm:b".into(),
+                    depth: 1
+                },
+                BlastRadiusEntry {
+                    extension_id: "npm:a".into(),
+                    depth: 2
+                },
+                BlastRadiusEntry {
+                    extension_id: "npm:app".into(),
+                    depth: 3
+                },
+            ]
+        );
+        assert_eq!(
+            blast_radius(&graph, "npm:a"),
+            vec![
+                BlastRadiusEntry {
+                    extension_id: "npm:app".into(),
+                    depth: 1
+                },
+                BlastRadiusEntry {
+                    extension_id: "npm:b".into(),
+                    depth: 1
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn publisher_incidents_cap_sibling_extensions() {
         let base = card("npm:@acme/auth-guard");
         let mut bad = named(&base, "npm:bad", "pub-shared", 800);
@@ -935,7 +1240,9 @@ mod tests {
                 .iter()
                 .any(|reason| reason.rule == RULE_UNTRACKED_DEPENDENCY)
         );
-        assert_eq!(graph.summary.untracked_dependencies, 1);
+        // The fixture's root-only app-dep is also an honest coverage gap.
+        assert_eq!(node(&graph, "npm:app-dep").effective_score, None);
+        assert_eq!(graph.summary.untracked_dependencies, 2);
     }
 
     #[test]
