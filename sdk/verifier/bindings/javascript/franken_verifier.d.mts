@@ -1,8 +1,8 @@
-export type EvidenceFormat = "incident-bundle" | "native-session-forensics" | "capsule" | "signed-bundle" | "signed-session" | "resolution-receipt" | "publisher-source" | "publisher-source-trust" | "counterfactual-receipt" | "ltv-evidence";
+export type EvidenceFormat = "incident-bundle" | "native-session-forensics" | "capsule" | "signed-bundle" | "signed-session" | "resolution-receipt" | "publisher-source" | "publisher-source-trust" | "counterfactual-receipt" | "ltv-evidence" | "fleet-quiescence-observations";
 export interface VerifierOptions {
   /** Trusted SDK executable, installed separately; never supplied by evidence. */
   verifier: string;
-  format?: EvidenceFormat;
+  format?: Exclude<EvidenceFormat, "fleet-quiescence-observations">;
   /** Independent original receipt authority, only for incident-bundle. Missing proof fails. */
   trustedRunPublicKeyHex?: string;
   /** Independent product root; requires original-run trust and portable session evidence. */
@@ -24,6 +24,32 @@ export interface VerifierOptions {
   /** Required detached signature for signed-bundle, publisher-source formats, and counterfactual-receipt. */
   signatureHex?: string;
   timeoutMs?: number;
+}
+export interface FleetQuiescenceOptions {
+  /** Trusted SDK executable, installed separately from the evidence. */
+  verifier: string;
+  format: "fleet-quiescence-observations";
+  /** Independently provisioned regular JSON file: enrolled keys, expected population/action context and evaluation time. */
+  trustedFleetPolicy: string;
+  timeoutMs?: number;
+}
+/** Verified local supervisor observations; the coordinator commit remains unauthenticated. */
+export interface FleetQuiescenceFacts {
+  schema_version: "franken-verifier/fleet-quiescence-observations/v1";
+  evidence_sha256: string;
+  trust_policy_sha256: string;
+  trusted_policy_input_sha256: string;
+  evaluation_time: string;
+  observed_at: string;
+  participant_count: number;
+  /** Exact decimal u64, never rounded to a JavaScript number. */
+  admitted_sessions: string;
+  terminal_sessions: string;
+  supervisor_signatures_verified: true;
+  expected_population_complete: true;
+  expected_action_context_matched: true;
+  epoch_commit_authenticated: false;
+  current_quiescence_proven: false;
 }
 export interface NativeCaptureMetadata {
   payload_sha256: string;
@@ -276,6 +302,7 @@ export type Verification = {
   | { format: "incident-bundle"; scope: "authenticated_run_incident"; facts: RunIncidentFacts }
   | { format: "incident-bundle"; scope: "authenticated_runtime_incident"; facts: RuntimeIncidentFacts }
   | { format: "native-session-forensics"; scope: "authenticated_supervisor_observations"; facts: NativeSessionForensicsFacts }
+  | { format: "fleet-quiescence-observations"; scope: "authenticated_fleet_supervisor_observations"; facts: FleetQuiescenceFacts }
   | { format: "capsule"; scope: "authenticated_capsule_content"; facts: CapsuleFacts }
   | { format: "signed-bundle"; scope: "authenticated_sdk_replay_bundle"; facts: SignedBundleFacts }
   | { format: "signed-session"; scope: "authenticated_verification_session"; facts: SignedSessionFacts }
@@ -295,4 +322,7 @@ export const PROTOCOL: "franken-verifier-cli/v1";
 export const MAX_INPUT_BYTES: number;
 /** Native-session transport limit; other formats retain MAX_INPUT_BYTES. */
 export const MAX_NATIVE_SESSION_INPUT_BYTES: number;
+export const MAX_FLEET_QUIESCENCE_INPUT_BYTES: number;
+export const MAX_FLEET_QUIESCENCE_POLICY_BYTES: number;
 export function verifyArtifact(data: Uint8Array, trustedPublicKeyHex: string, options: VerifierOptions): Promise<Verification>;
+export function verifyArtifact(data: Uint8Array, trustedPublicKeyHex: null, options: FleetQuiescenceOptions): Promise<Verification>;

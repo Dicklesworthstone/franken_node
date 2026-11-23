@@ -7,6 +7,7 @@ export async function audit(data: Uint8Array, anchor: string, executable: string
     const verified: Verification = await verifyArtifact(data, anchor, { verifier: executable });
     if (verified.format === "incident-bundle") return verified.facts.incident_id;
     if (verified.format === "native-session-forensics") return verified.facts.session_nonce;
+    if (verified.format === "fleet-quiescence-observations") return verified.facts.evidence_sha256;
     if (verified.format === "capsule") return verified.facts.capsule_id;
     if (verified.format === "signed-session") return verified.facts.session_id;
     if (verified.format === "resolution-receipt") return verified.facts.receipt_id;
@@ -19,6 +20,35 @@ export async function audit(data: Uint8Array, anchor: string, executable: string
     if (error instanceof VerifierError) return error.code;
     throw error;
   }
+}
+
+export async function auditFleetObservations(
+  data: Uint8Array, policyPath: string, executable: string,
+): Promise<string> {
+  const verified = await verifyArtifact(data, null, {
+    verifier: executable, format: "fleet-quiescence-observations", trustedFleetPolicy: policyPath,
+  });
+  if (verified.format !== "fleet-quiescence-observations"
+      || verified.scope !== "authenticated_fleet_supervisor_observations") {
+    throw new Error("authenticated fleet supervisor observations required");
+  }
+  const admitted: string = verified.facts.admitted_sessions;
+  const terminal: string = verified.facts.terminal_sessions;
+  const committed: false = verified.facts.epoch_commit_authenticated;
+  const current: false = verified.facts.current_quiescence_proven;
+  if (admitted !== terminal || committed || current) throw new Error("fleet observations cannot certify a current epoch");
+  return `${verified.facts.trusted_policy_input_sha256}:${admitted}:${terminal}`;
+}
+
+// Invalid trust models must fail at the public declaration boundary too. This
+// function is type-checked, never executed by the consumer distribution.
+export async function refuseFleetTrustSubstitutions(data: Uint8Array, anchor: string, policyPath: string, executable: string): Promise<void> {
+  // @ts-expect-error Fleet verification requires an independent fleet policy.
+  await verifyArtifact(data, null, { verifier: executable, format: "fleet-quiescence-observations" });
+  // @ts-expect-error A single signing key cannot substitute for fleet enrollment.
+  await verifyArtifact(data, anchor, { verifier: executable, format: "fleet-quiescence-observations", trustedFleetPolicy: policyPath });
+  // @ts-expect-error Non-fleet formats still require their signing authority.
+  await verifyArtifact(data, null, { verifier: executable, format: "incident-bundle" });
 }
 
 export async function auditSignedSession(
@@ -140,9 +170,19 @@ export async function auditNativeSession(
     const retained: number = verified.facts.durable_journal.record_count;
     const complete: false = verified.facts.durable_journal.historical_completeness;
     if (complete || retained < 1) throw new Error("a journal must be a retained signed prefix");
-  } else {
+  } else if (verified.facts.schema_version === "franken-node/native-session-forensics/v1") {
     const absent: null = verified.facts.durable_journal;
     if (absent !== null) throw new Error("v1 carries no durable journal");
+  } else {
+    const schema: "franken-node/native-session-forensics/v3" = verified.facts.schema_version;
+    const reconstructed: false = verified.facts.source_capsule.graph_hash_recomputed;
+    const inputCount: number = verified.facts.source_capsule.input_count;
+    if (reconstructed || inputCount < 1) throw new Error(`${schema} must retain source content without graph reconstruction`);
+    if (verified.facts.durable_journal !== null) {
+      const retained: number = verified.facts.durable_journal.record_count;
+      const complete: false = verified.facts.durable_journal.historical_completeness;
+      if (complete || retained < 1) throw new Error("a journal must be a retained signed prefix");
+    }
   }
   if (verified.facts.outcome_kind === "pending") {
     const unknown: null = verified.facts.completed_provider_calls;

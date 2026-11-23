@@ -93,6 +93,7 @@ for case in cases:
                                  trusted_provenance_public_key_hex=case.get("provenance_anchor"),
                                  evaluation_time=case.get("evaluation_time"),
                                  max_revocation_age_secs=case.get("max_revocation_age_secs"),
+                                 trusted_fleet_policy=case.get("fleet_policy_path"),
                                  expected_manifest_sha256=case.get("expected_manifest_sha256"),
                                  expected_source_artifact_sha256=case.get("expected_source_artifact_sha256"),
                                  expected_graph_input_hash=case.get("expected_graph_input_hash"))
@@ -153,8 +154,48 @@ for case in cases:
         if case["format"] == "ltv-evidence":
             assert result["scope"] == "authenticated_ltv_anteriority"
             assert result["facts"] == case["ltv_facts"], case["name"]
+        if case["format"] == "fleet-quiescence-observations":
+            assert result["scope"] == "authenticated_fleet_supervisor_observations"
+            assert result["facts"] == case["fleet_facts"], case["name"]
+            assert result["facts"]["epoch_commit_authenticated"] is False
+            assert result["facts"]["current_quiescence_proven"] is False
+            assert isinstance(result["facts"]["admitted_sessions"], str)
+            assert isinstance(result["facts"]["terminal_sessions"], str)
+            assert result["facts"]["trusted_policy_input_sha256"] == hashlib.sha256(
+                Path(case["fleet_policy_path"]).read_bytes()).hexdigest()
+            assert "trace-maintenance" not in json.dumps(result)
         assert "PRIVATE-" not in json.dumps(result)
         print(json.dumps({"case": case["name"], "result": "verified", "scope": result["scope"]}), flush=True)
+
+fleet_case = next(case for case in cases if case["name"] == "fleet_independent_http_observations")
+fleet_controls = [
+    "fleet_wrong_scope", "fleet_wrong_format", "fleet_unknown_field", "fleet_missing_field",
+    "fleet_wrong_policy_input", "fleet_canonical_hash_as_input_hash", "fleet_malformed_policy_hash",
+    "fleet_wrong_evidence_input", "fleet_wrong_evaluation_time", "fleet_stale_observation",
+    "fleet_future_observation", "fleet_wrong_population", "fleet_boolean_population",
+    "fleet_numeric_count", "fleet_noncanonical_count", "fleet_overflow_count", "fleet_terminal_mismatch",
+    "fleet_unverified_signatures", "fleet_incomplete_population", "fleet_unmatched_action_context",
+    "fleet_epoch_commit_claim", "fleet_current_quiescence_claim",
+]
+for mode in fleet_controls:
+    try:
+        verify_artifact(json.dumps({"protocol_control": mode}).encode(), None,
+                        verifier=str(root / "fake_verifier"), format="fleet-quiescence-observations",
+                        trusted_fleet_policy=fleet_case["fleet_policy_path"])
+    except VerifierError as error:
+        assert error.code == "PROTOCOL_INVALID", (mode, error.code)
+        print(json.dumps({"case": f"protocol_{mode}", "result": error.code}), flush=True)
+    else:
+        raise AssertionError(f"protocol_{mode}")
+for mode, count in (("fleet_valid", str(2**64 - 1)), ("fleet_valid_empty_session_set", "0")):
+    result = verify_artifact(json.dumps({"protocol_control": mode}).encode(), None,
+                             verifier=str(root / "fake_verifier"), format="fleet-quiescence-observations",
+                             trusted_fleet_policy=fleet_case["fleet_policy_path"])
+    assert result["facts"]["admitted_sessions"] == count
+    assert result["facts"]["terminal_sessions"] == count
+    assert result["facts"]["epoch_commit_authenticated"] is False
+    assert result["facts"]["current_quiescence_proven"] is False
+    print(json.dumps({"case": f"protocol_{mode}", "result": "verified"}), flush=True)
 
 session_controls = [
     "session_wrong_scope", "session_wrong_signer", "session_unknown_field", "session_missing_field",

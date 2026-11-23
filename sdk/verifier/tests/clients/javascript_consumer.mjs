@@ -17,6 +17,7 @@ for (const test of cases) {
       trustedRevocationPublicKeyHex: test.revocation_anchor,
       trustedProvenancePublicKeyHex: test.provenance_anchor ?? undefined,
       evaluationTime: test.evaluation_time, maxRevocationAgeSecs: test.max_revocation_age_secs,
+      trustedFleetPolicy: test.fleet_policy_path,
       expectedManifestSha256: test.expected_manifest_sha256,
       expectedSourceArtifactSha256: test.expected_source_artifact_sha256,
       expectedGraphInputHash: test.expected_graph_input_hash });
@@ -78,6 +79,17 @@ for (const test of cases) {
       assert.equal(result.scope, "authenticated_ltv_anteriority");
       assert.deepEqual(result.facts, test.ltv_facts, test.name);
     }
+    if (test.format === "fleet-quiescence-observations") {
+      assert.equal(result.scope, "authenticated_fleet_supervisor_observations");
+      assert.deepEqual(result.facts, test.fleet_facts, test.name);
+      assert.equal(result.facts.epoch_commit_authenticated, false);
+      assert.equal(result.facts.current_quiescence_proven, false);
+      assert.equal(typeof result.facts.admitted_sessions, "string");
+      assert.equal(typeof result.facts.terminal_sessions, "string");
+      assert.equal(result.facts.trusted_policy_input_sha256,
+        createHash("sha256").update(readFileSync(test.fleet_policy_path)).digest("hex"));
+      assert.equal(JSON.stringify(result).includes("trace-maintenance"), false);
+    }
     assert.equal(JSON.stringify(result).includes("PRIVATE-"), false);
     console.log(JSON.stringify({ case: test.name, result: "verified", scope: result.scope }));
   } catch (error) {
@@ -87,6 +99,41 @@ for (const test of cases) {
     console.log(JSON.stringify({ case: test.name, result: error.code }));
   }
 }
+const fleetCase = cases.find((test) => test.name === "fleet_independent_http_observations");
+const fleetControls = [
+  "fleet_wrong_scope", "fleet_wrong_format", "fleet_unknown_field", "fleet_missing_field",
+  "fleet_wrong_policy_input", "fleet_canonical_hash_as_input_hash", "fleet_malformed_policy_hash",
+  "fleet_wrong_evidence_input", "fleet_wrong_evaluation_time", "fleet_stale_observation",
+  "fleet_future_observation", "fleet_wrong_population", "fleet_boolean_population",
+  "fleet_numeric_count", "fleet_noncanonical_count", "fleet_overflow_count", "fleet_terminal_mismatch",
+  "fleet_unverified_signatures", "fleet_incomplete_population", "fleet_unmatched_action_context",
+  "fleet_epoch_commit_claim", "fleet_current_quiescence_claim",
+];
+for (const mode of fleetControls) {
+  await assert.rejects(verifyArtifact(Buffer.from(JSON.stringify({ protocol_control: mode })), null,
+    { verifier: resolve("fake_verifier"), format: "fleet-quiescence-observations", trustedFleetPolicy: fleetCase.fleet_policy_path }),
+  (error) => error instanceof VerifierError && error.code === "PROTOCOL_INVALID", "protocol_" + mode);
+  console.log(JSON.stringify({ case: "protocol_" + mode, result: "PROTOCOL_INVALID" }));
+}
+for (const [mode, count] of [["fleet_valid", "18446744073709551615"], ["fleet_valid_empty_session_set", "0"]]) {
+  const result = await verifyArtifact(Buffer.from(JSON.stringify({ protocol_control: mode })), null,
+    { verifier: resolve("fake_verifier"), format: "fleet-quiescence-observations", trustedFleetPolicy: fleetCase.fleet_policy_path });
+  assert.equal(result.facts.admitted_sessions, count);
+  assert.equal(result.facts.terminal_sessions, count);
+  assert.equal(result.facts.epoch_commit_authenticated, false);
+  assert.equal(result.facts.current_quiescence_proven, false);
+  console.log(JSON.stringify({ case: "protocol_" + mode, result: "verified" }));
+}
+const mutableFleetInput = Buffer.from(JSON.stringify({ protocol_control: "fleet_valid", input: "original" }));
+const requestedFleetDigest = createHash("sha256").update(mutableFleetInput).digest("hex");
+const pendingFleetVerification = verifyArtifact(mutableFleetInput, null,
+  { verifier: resolve("fake_verifier"), format: "fleet-quiescence-observations", trustedFleetPolicy: fleetCase.fleet_policy_path });
+mutableFleetInput.write("modified", mutableFleetInput.indexOf("original"));
+assert.notEqual(createHash("sha256").update(mutableFleetInput).digest("hex"), requestedFleetDigest);
+const snapshottedFleetVerification = await pendingFleetVerification;
+assert.equal(snapshottedFleetVerification.artifact_sha256, requestedFleetDigest,
+  "policy I/O must not change the evidence bytes retained at invocation");
+console.log(JSON.stringify({ case: "fleet_input_snapshot_before_policy_io", result: "verified" }));
 const sessionControls = [
   "session_wrong_scope", "session_wrong_signer", "session_unknown_field", "session_missing_field",
   "session_boolean_count", "session_negative_count", "session_excessive_count",

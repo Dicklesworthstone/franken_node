@@ -225,3 +225,113 @@ unsupported schemas, malformed identities, missing required fields, explicit
 `panic_evidence: null`, truncated input, and trailing JSON data are rejected.
 An absent panic-evidence field remains compatible with older signed outcomes.
 Error output uses bounded diagnostic codes without echoing evidence contents.
+
+## Independently enrolled fleet supervisor observations
+
+The `fleet-quiescence-observations` format consumes the existing
+`fleet certify-quiescence --json` output or the raw
+`franken-node/fleet-http-api/v2` epoch-barrier response. It verifies every
+supervisor's original Ed25519 drain signature against a separately supplied
+enrollment policy. This makes the fleet's retained, held session populations
+auditable without importing the product, opening its databases, contacting the
+coordinator, or running guest code.
+
+```sh
+franken-verifier verify --format fleet-quiescence-observations \
+  --trusted-fleet-policy /auditor/fleet-policy.json \
+  < fleet-quiescence.json
+```
+
+This format takes its multiple public-key anchors from the policy file; it
+does not take `--trusted-key-hex`. Obtain the policy independently from the
+untrusted evidence. Never construct it by copying a response's embedded keys,
+participant list or action hashes into a new supposedly trusted policy.
+
+The Python and JavaScript clients use the same separate policy file and
+verify its exact byte commitment in the CLI result:
+
+```python
+from pathlib import Path
+from franken_verifier import verify_artifact
+
+verified = verify_artifact(
+    Path("fleet-quiescence.json").read_bytes(),
+    None,
+    verifier="/opt/franken-verifier/bin/franken-verifier",
+    format="fleet-quiescence-observations",
+    trusted_fleet_policy="/auditor/fleet-policy.json",
+)
+```
+
+```javascript
+import { readFile } from "node:fs/promises";
+import { verifyArtifact } from "./franken_verifier.mjs";
+
+const verified = await verifyArtifact(await readFile("fleet-quiescence.json"), null, {
+  verifier: "/opt/franken-verifier/bin/franken-verifier",
+  format: "fleet-quiescence-observations",
+  trustedFleetPolicy: "/auditor/fleet-policy.json",
+});
+```
+
+The policy schema is `franken-verifier/fleet-quiescence-policy/v1`:
+
+| Field | Independent expectation |
+| --- | --- |
+| `evaluation_time` | Trusted evaluation time with a four-digit year and non-leap seconds, in canonical UTC RFC3339 ending in `Z` |
+| `max_observation_age_secs` | Positive freshness limit, at most 300 seconds |
+| `expected_action_log` | Full reviewed ordered action log's `action_count` and lowercase `actions_sha256` |
+| `expected_pre_epoch` | Expected response context; this field is not authenticated by a supervisor signature |
+| `expected_trace_id` | Expected request context |
+| `participants` | Complete enrollment, strictly sorted by `(zone_id, node_id)` |
+
+Each participant supplies `zone_id`, `node_id`, the independently enrolled
+`supervisor_public_key_hex`, `project_root_sha256`, a positive retained
+`minimum_generation`, `expected_applied_actions` (the reviewed per-zone ordered
+action checkpoint), and sorted, unique `expected_active_hold_ids`. Nodes in the
+same zone must have the same expected action checkpoint and active hold owners.
+The policy must list 1–1,024 concrete node/zone identities. Empty populations,
+duplicate identities, weak Ed25519 keys and wildcard `all` participants are
+refused. The caller derives its checkpoint and hold pins from its own reviewed
+action history; this SDK reader does not reconstruct that history.
+
+The verifier rejects missing or extra participants, renamed identities, stale
+or future observations, foreign project roots or signing keys, older drain
+generations, changed action checkpoints or hold owners, pending or indeterminate
+sessions, released admission fences, and certificate summaries that disagree
+with the signed observations. Refreshing a heartbeat or changing an unsigned
+certificate timestamp cannot renew an expired supervisor signature. Freshness
+is checked against the caller's evaluation time as well as the response's
+claimed observation time. Counts use checked arithmetic; they cannot wrap when
+the full population is aggregated.
+
+Successful CLI results use scope `authenticated_fleet_supervisor_observations`
+and include source-free counts, evidence and policy commitments, evaluation and
+observation times, and these explicit facts:
+
+- `supervisor_signatures_verified: true`
+- `expected_population_complete: true`
+- `expected_action_context_matched: true`
+- `epoch_commit_authenticated: false`
+- `current_quiescence_proven: false`
+
+The last two limits are essential to the public wire contract. The response
+contains signed supervisor observations but no coordinator signature over its
+epoch certificate. Its durable HMAC-authenticated epoch state is not part of
+this public artifact. The verifier therefore does not authenticate an epoch
+commit, prove the action log's history, independently inventory all processes
+or remote effects, or show that holds remain active after the signed instant.
+`expected_population_complete` refers to the caller's supplied enrollment.
+The JSON CLI emits aggregate session counts as decimal strings to preserve
+full `u64` precision in JavaScript, and includes
+`trusted_policy_input_sha256` over the exact policy-file bytes.
+
+The response is capped at 8 MiB and the separate policy at 1 MiB. Duplicate
+members and unknown fields fail before verification; diagnostics do not echo
+untrusted node IDs, source paths, keys or evidence. Rust callers use
+`fleet_quiescence::parse_fleet_quiescence_policy(bytes)` followed by
+`fleet_quiescence::verify_fleet_quiescence_observations(response, &policy)`.
+The protocol-only fixture in
+`tests/fixtures/fleet_quiescence_observations.json` contains independently
+generated signatures for two supervisors; it is not evidence of live fleet
+execution or a completed distributed acceptance campaign.

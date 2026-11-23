@@ -3,9 +3,10 @@
 // input and is not copied into the verifier distribution/consumer sandbox.
 import { createHash, createPrivateKey, createPublicKey, sign } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import assert from "node:assert/strict";
 
-const [incidentPath, sdkBundlePath, seedPath, output, originalRunPath, exporterAnchorPath, runAnchorPath, sourceCapsulesPath] = process.argv.slice(2);
+const [incidentPath, sdkBundlePath, seedPath, output, originalRunPath, exporterAnchorPath, runAnchorPath, sourceCapsulesPath, fleetObservationsPath] = process.argv.slice(2);
 const anchor = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a";
 const foreign = "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c";
 const seed = Buffer.from(readFileSync(seedPath, "utf8").trim(), "hex");
@@ -1396,6 +1397,169 @@ delete changedAuthority.suite_records[0].compromised_at_unix_seconds;
 ltvUnsignedPolicy.witness_anchor_base64 = Buffer.from(canonical(changedAuthority)).toString("base64");
 addLtv("ltv_changed_anchor_without_authority_signature", ltvUnsignedPolicy, "SIGNATURE_INVALID");
 addLtv("ltv_foreign_policy_authority", ltvGood, "SIGNATURE_INVALID", { anchor: foreign });
+
+// The two supervisor signatures in this fixture were produced independently by
+// Python cryptography. Keep those original bytes for the HTTP and CLI controls;
+// Node signs only adversarial changes and exact-u64 protocol boundary vectors.
+const fleetFixture = JSON.parse(readFileSync(fleetObservationsPath, "utf8"));
+assert.equal(fleetFixture.live_execution_performed, false);
+const fleetPolicy = fleetFixture.policy;
+const fleetResponse = fleetFixture.http_response;
+const fleetKeys = [seedKey(41), seedKey(42)];
+for (let index = 0; index < fleetKeys.length; index += 1) {
+  assert.equal(publicBytes(fleetKeys[index]).toString("hex"), fleetPolicy.participants[index].supervisor_public_key_hex);
+}
+function fleetPayload(domain, value) {
+  const bytes = Buffer.from(canonical(value));
+  const length = Buffer.alloc(8);
+  length.writeBigUInt64BE(BigInt(bytes.length));
+  return Buffer.concat([Buffer.from(domain), length, bytes]);
+}
+function resignFleet(value, index, privateKey = fleetKeys[index]) {
+  const drain = value.evidence.nodes[index].native_session_drain;
+  const checkpoint = clone(drain);
+  delete checkpoint.supervisor_attestation;
+  const attestation = drain.supervisor_attestation;
+  attestation.checkpoint_sha256 = hash(fleetPayload("franken-node/native-session-drain-checkpoint/v1\0", checkpoint));
+  value.certificate.participants[index].checkpoint_sha256 = attestation.checkpoint_sha256;
+  const unsigned = clone(attestation);
+  delete unsigned.signature_hex;
+  attestation.signature_hex = sign(null, fleetPayload("franken-node/native-session-drain-signature/v1\0", unsigned), privateKey).toString("hex");
+}
+const fleetEncodingControl = clone(fleetResponse);
+resignFleet(fleetEncodingControl, 0);
+resignFleet(fleetEncodingControl, 1);
+assert.deepEqual(fleetEncodingControl, fleetResponse, "independent fleet wire encodings must agree");
+function addFleet(name, value, expected = "verified", policy = fleetPolicy, compactPolicy = false) {
+  const wire = typeof value === "string" ? value : canonical(value);
+  const bytes = Buffer.from(wire);
+  const policyBytes = Buffer.from(compactPolicy ? canonical(policy) : `${JSON.stringify(policy, null, 2)}\n`);
+  const policyPath = `${name}.policy.json`;
+  writeFileSync(join(dirname(output), policyPath), policyBytes);
+  const options = { anchor: null, fleet_policy_path: policyPath };
+  if (expected === "verified") {
+    const total = (field) => value.evidence.nodes.reduce((sum, node) => sum + BigInt(node.native_session_drain[field]), 0n).toString();
+    options.fleet_facts = {
+      schema_version: "franken-verifier/fleet-quiescence-observations/v1",
+      evidence_sha256: hash(bytes),
+      trust_policy_sha256: hash(Buffer.from(canonical(policy))),
+      trusted_policy_input_sha256: hash(policyBytes),
+      evaluation_time: policy.evaluation_time,
+      observed_at: value.evidence.observed_at,
+      participant_count: policy.participants.length,
+      admitted_sessions: total("admitted_sessions"),
+      terminal_sessions: total("terminal_sessions"),
+      supervisor_signatures_verified: true,
+      expected_population_complete: true,
+      expected_action_context_matched: true,
+      epoch_commit_authenticated: false,
+      current_quiescence_proven: false,
+    };
+  }
+  add(name, "fleet-quiescence-observations", bytes, expected, options);
+}
+addFleet("fleet_independent_http_observations", fleetResponse);
+addFleet("fleet_same_policy_different_raw_bytes", fleetResponse, "verified", fleetPolicy, true);
+const fleetCli = {
+  schema_version: "franken-node/fleet-quiescence-cli/v1",
+  command: "fleet.certify-quiescence", ok: true, transport: "http", live_control_plane: true,
+  control_plane_url: "https://coordinator.invalid/", evidence: clone(fleetResponse.evidence),
+  certificate: clone(fleetResponse.certificate),
+};
+addFleet("fleet_independent_cli_observations", fleetCli);
+const fleetBeforeExpiry = clone(fleetPolicy);
+fleetBeforeExpiry.evaluation_time = "2026-11-23T01:00:32.999999999Z";
+addFleet("fleet_last_nanosecond_before_signature_expiry", fleetResponse, "verified", fleetBeforeExpiry);
+const fleetExpiredPolicy = clone(fleetPolicy);
+fleetExpiredPolicy.evaluation_time = "2026-11-23T01:00:33Z";
+addFleet("fleet_exact_signature_expiry", fleetResponse, "FLEET_OBSERVATION_STALE", fleetExpiredPolicy);
+const fleetFuturePolicy = clone(fleetPolicy);
+fleetFuturePolicy.evaluation_time = "2026-11-23T01:00:04Z";
+addFleet("fleet_future_observation", fleetResponse, "FLEET_OBSERVATION_STALE", fleetFuturePolicy);
+const fleetRedated = clone(fleetResponse);
+fleetRedated.evidence.observed_at = fleetExpiredPolicy.evaluation_time;
+fleetRedated.certificate.certified_at = fleetExpiredPolicy.evaluation_time;
+for (const node of fleetRedated.evidence.nodes) node.last_seen = fleetExpiredPolicy.evaluation_time;
+addFleet("fleet_fresh_heartbeats_cannot_renew_old_signatures", fleetRedated, "FLEET_OBSERVATION_STALE", fleetExpiredPolicy);
+
+for (const [name, mutate, expected] of [
+  ["fleet_missing_enrolled_node", (value) => { value.evidence.nodes.pop(); value.certificate.participants.pop(); }, "FLEET_POPULATION_MISMATCH"],
+  ["fleet_extra_node", (value) => { value.evidence.nodes.push(clone(value.evidence.nodes[0])); }, "FLEET_POPULATION_MISMATCH"],
+  ["fleet_duplicated_node", (value) => { value.evidence.nodes[1] = clone(value.evidence.nodes[0]); value.certificate.participants[1] = clone(value.certificate.participants[0]); }, "FLEET_POPULATION_MISMATCH"],
+  ["fleet_reordered_population", (value) => { value.evidence.nodes.reverse(); value.certificate.participants.reverse(); }, "FLEET_POPULATION_MISMATCH"],
+  ["fleet_uncovered_zone", (value) => { value.evidence.uncovered_zones = ["east"]; }, "FLEET_POPULATION_MISMATCH"],
+  ["fleet_wrong_reviewed_actions", (value) => { value.certificate.action_log_checkpoint.actions_sha256 = "99".repeat(32); }, "FLEET_CONTEXT_MISMATCH"],
+  ["fleet_wrong_node_actions", (value) => { value.evidence.nodes[0].expected_actions.actions_sha256 = "99".repeat(32); }, "FLEET_CONTEXT_MISMATCH"],
+  ["fleet_foreign_hold_owner", (value) => { value.certificate.participants[0].active_hold_ids = ["foreign-hold"]; }, "FLEET_CONTEXT_MISMATCH"],
+  ["fleet_wrong_trace", (value) => { value.certificate.trace_id = "another-trace"; }, "FLEET_CONTEXT_MISMATCH"],
+  ["fleet_wrong_epoch", (value) => { value.certificate.pre_epoch += 1; value.certificate.committed_epoch += 1; }, "FLEET_CONTEXT_MISMATCH"],
+  ["fleet_unsigned_checkpoint_tamper", (value) => { value.evidence.nodes[0].native_session_drain.session_set_sha256 = "99".repeat(32); value.certificate.participants[0].session_set_sha256 = "99".repeat(32); }, "FLEET_OBSERVATION_INVALID"],
+  ["fleet_invalid_signature", (value) => { value.evidence.nodes[0].native_session_drain.supervisor_attestation.signature_hex = "00".repeat(64); }, "FLEET_SIGNATURE_INVALID"],
+  ["fleet_absent_supervisor_signature", (value) => { value.evidence.nodes[0].native_session_drain.supervisor_attestation = null; }, "FLEET_OBSERVATION_INVALID"],
+  ["fleet_unknown_unsigned_claim", (value) => { value.evidence.nodes[0].native_session_drain.extra_claim = true; }, "FLEET_OBSERVATION_INVALID"],
+  ["fleet_unsupported_wire_schema", (value) => { value.evidence.schema_version = "franken-node/fleet-native-drain-evidence/v999"; }, "FLEET_SCHEMA_UNSUPPORTED"],
+]) {
+  const value = clone(fleetResponse);
+  mutate(value);
+  addFleet(name, value, expected);
+}
+for (const [name, mutate, expected] of [
+  ["fleet_signed_foreign_project", (value) => { value.evidence.nodes[0].native_session_drain.supervisor_attestation.project_root_sha256 = "99".repeat(32); }, "FLEET_SIGNER_UNTRUSTED"],
+  ["fleet_signed_cross_node_binding", (value) => { value.evidence.nodes[0].native_session_drain.supervisor_attestation.node_id = "node-b"; }, "FLEET_SIGNER_UNTRUSTED"],
+  ["fleet_signed_generation_rollback", (value) => { value.evidence.nodes[0].native_session_drain.supervisor_attestation.generation = 6; value.certificate.participants[0].generation = 6; }, "FLEET_OBSERVATION_INVALID"],
+  ["fleet_signed_pending_session", (value) => { value.evidence.nodes[0].native_session_drain.pending_sessions = 1; }, "FLEET_OBSERVATION_INVALID"],
+  ["fleet_signed_indeterminate_session", (value) => { value.evidence.nodes[0].native_session_drain.indeterminate_sessions = 1; }, "FLEET_OBSERVATION_INVALID"],
+  ["fleet_signed_released_fence", (value) => { value.evidence.nodes[0].native_session_drain.fence_held = false; }, "FLEET_OBSERVATION_INVALID"],
+]) {
+  const value = clone(fleetResponse);
+  mutate(value);
+  resignFleet(value, 0);
+  addFleet(name, value, expected);
+}
+const fleetForeignSigner = clone(fleetResponse);
+const fleetForeignKey = seedKey(43);
+const fleetForeignKeyId = `ed25519:${publicBytes(fleetForeignKey).toString("hex")}`;
+fleetForeignSigner.evidence.nodes[0].native_session_drain.supervisor_attestation.product_root_key_id = fleetForeignKeyId;
+fleetForeignSigner.certificate.participants[0].supervisor_key_id = fleetForeignKeyId;
+resignFleet(fleetForeignSigner, 0, fleetForeignKey);
+addFleet("fleet_valid_signature_from_unenrolled_key", fleetForeignSigner, "FLEET_SIGNER_UNTRUSTED");
+const fleetForgedCheckpoint = clone(fleetResponse);
+fleetForgedCheckpoint.evidence.nodes[0].native_session_drain.session_set_sha256 = "99".repeat(32);
+fleetForgedCheckpoint.certificate.participants[0].session_set_sha256 = "99".repeat(32);
+resignFleet(fleetForgedCheckpoint, 0);
+fleetForgedCheckpoint.evidence.nodes[0].native_session_drain.supervisor_attestation.signature_hex = fleetResponse.evidence.nodes[0].native_session_drain.supervisor_attestation.signature_hex;
+addFleet("fleet_rehashed_checkpoint_without_signature", fleetForgedCheckpoint, "FLEET_SIGNATURE_INVALID");
+const fleetDuplicate = canonical(fleetResponse).replace('"complete":true', '"complete":false,"complete":true');
+assert.notEqual(fleetDuplicate, canonical(fleetResponse));
+addFleet("fleet_duplicate_json_member", fleetDuplicate, "FLEET_JSON_INVALID");
+const fleetFailedCli = clone(fleetCli);
+fleetFailedCli.ok = false;
+addFleet("fleet_failed_cli_command", fleetFailedCli, "FLEET_OBSERVATION_INVALID");
+const fleetEmptyPolicy = clone(fleetPolicy);
+fleetEmptyPolicy.participants = [];
+addFleet("fleet_empty_enrollment_policy", fleetResponse, "FLEET_POLICY_INVALID", fleetEmptyPolicy);
+const fleetWeakPolicy = clone(fleetPolicy);
+fleetWeakPolicy.participants[0].supervisor_public_key_hex = "00".repeat(32);
+addFleet("fleet_weak_enrollment_key", fleetResponse, "FLEET_POLICY_INVALID", fleetWeakPolicy);
+const fleetLeapSecondPolicy = clone(fleetPolicy);
+fleetLeapSecondPolicy.evaluation_time = "2026-11-23T01:00:60Z";
+fleetLeapSecondPolicy.max_observation_age_secs = 120;
+addFleet("fleet_leap_second_policy", fleetResponse, "FLEET_POLICY_INVALID", fleetLeapSecondPolicy);
+
+function fleetCounts(value, index, count) {
+  const drain = value.evidence.nodes[index].native_session_drain;
+  drain.admitted_sessions = count;
+  drain.terminal_sessions = count;
+  value.certificate.participants[index].admitted_sessions = count;
+  value.certificate.participants[index].terminal_sessions = count;
+  resignFleet(value, index);
+}
+const fleetMaximum = clone(fleetResponse);
+fleetCounts(fleetMaximum, 0, (1n << 64n) - 4n);
+addFleet("fleet_exact_u64_maximum_aggregate", fleetMaximum);
+const fleetOverflow = clone(fleetResponse);
+fleetCounts(fleetOverflow, 0, (1n << 64n) - 1n);
+addFleet("fleet_signed_aggregate_overflow", fleetOverflow, "FLEET_COUNT_OVERFLOW");
 
 writeFileSync(output, JSON.stringify(cases));
 console.log(JSON.stringify({ vectors: cases.length, incident_sha256: hash(incidentBytes), capsule_expected_hash: capsule.manifest.expected_output_hash, sdk_integrity: sdk.integrity_hash }));

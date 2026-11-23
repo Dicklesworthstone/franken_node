@@ -57,7 +57,8 @@ try:
     mode = json.loads(data).get("protocol_control", "accept_everything")
 except (ValueError, AttributeError):
     mode = "accept_everything"
-anchor = sys.argv[sys.argv.index("--trusted-key-hex") + 1]
+anchor = (sys.argv[sys.argv.index("--trusted-key-hex") + 1]
+          if "--trusted-key-hex" in sys.argv else "00" * 32)
 run_anchor = (sys.argv[sys.argv.index("--trusted-run-key-hex") + 1]
               if "--trusted-run-key-hex" in sys.argv else "11" * 32)
 runtime_anchor = (sys.argv[sys.argv.index("--trusted-runtime-key-hex") + 1]
@@ -218,6 +219,34 @@ if mode.startswith("ltv_"):
         "hybrid_survived_algo_death": False,
         "signer_public_key_hex": anchor,
     }
+if mode.startswith("fleet_"):
+    # An explicitly fake child can make protocol claims without authenticating
+    # anything. Test consumers must bind the claims to both retained inputs and
+    # refuse broader proof scopes, even when the process exits successfully.
+    policy_path = sys.argv[sys.argv.index("--trusted-fleet-policy") + 1]
+    with open(policy_path, "rb") as policy_file:
+        policy_bytes = policy_file.read()
+    policy = json.loads(policy_bytes)
+    response["format"] = "fleet-quiescence-observations"
+    response["scope"] = "authenticated_fleet_supervisor_observations"
+    response["facts"] = {
+        "schema_version": "franken-verifier/fleet-quiescence-observations/v1",
+        "evidence_sha256": hashlib.sha256(data).hexdigest(),
+        "trust_policy_sha256": hashlib.sha256(json.dumps(policy, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
+        "trusted_policy_input_sha256": hashlib.sha256(policy_bytes).hexdigest(),
+        "evaluation_time": policy["evaluation_time"],
+        "observed_at": "2026-11-23T01:00:05Z",
+        "participant_count": len(policy["participants"]),
+        "admitted_sessions": str(2**64 - 1),
+        "terminal_sessions": str(2**64 - 1),
+        "supervisor_signatures_verified": True,
+        "expected_population_complete": True,
+        "expected_action_context_matched": True,
+        "epoch_commit_authenticated": False,
+        "current_quiescence_proven": False,
+    }
+    if "--trusted-key-hex" in sys.argv:
+        raise AssertionError("fleet policy must be forwarded without a single-key anchor")
 exit_code = 0
 if mode in ("publisher_identity_forwarded", "publisher_trust_identity_forwarded"):
     for option, expected in (
@@ -650,6 +679,56 @@ elif mode == "ltv_wrong_policy_hash":
     response["facts"]["trust_policy_sha256"] = "a" * 64
 elif mode == "ltv_uppercase_policy_hash":
     response["facts"]["trust_policy_sha256"] = response["facts"]["trust_policy_sha256"].upper()
+elif mode == "fleet_wrong_scope":
+    response["scope"] = "authenticated_epoch_commit"
+elif mode == "fleet_wrong_format":
+    response["format"] = "native-session-forensics"
+elif mode == "fleet_unknown_field":
+    response["facts"]["execution_authorized"] = True
+elif mode == "fleet_missing_field":
+    del response["facts"]["current_quiescence_proven"]
+elif mode == "fleet_wrong_policy_input":
+    response["facts"]["trusted_policy_input_sha256"] = "a" * 64
+elif mode == "fleet_canonical_hash_as_input_hash":
+    response["facts"]["trusted_policy_input_sha256"] = response["facts"]["trust_policy_sha256"]
+elif mode == "fleet_malformed_policy_hash":
+    response["facts"]["trust_policy_sha256"] = "sha256:invalid"
+elif mode == "fleet_wrong_evidence_input":
+    response["facts"]["evidence_sha256"] = "a" * 64
+elif mode == "fleet_wrong_evaluation_time":
+    response["facts"]["evaluation_time"] = "2026-11-23T01:00:11Z"
+elif mode == "fleet_stale_observation":
+    response["facts"]["observed_at"] = "2026-11-23T00:59:40Z"
+elif mode == "fleet_future_observation":
+    response["facts"]["observed_at"] = "2026-11-23T01:00:11Z"
+elif mode == "fleet_wrong_population":
+    response["facts"]["participant_count"] = 1
+elif mode == "fleet_boolean_population":
+    response["facts"]["participant_count"] = True
+elif mode == "fleet_numeric_count":
+    response["facts"]["admitted_sessions"] = 2**64 - 1
+    response["facts"]["terminal_sessions"] = 2**64 - 1
+elif mode == "fleet_noncanonical_count":
+    response["facts"]["admitted_sessions"] = "01"
+    response["facts"]["terminal_sessions"] = "01"
+elif mode == "fleet_overflow_count":
+    response["facts"]["admitted_sessions"] = str(2**64)
+    response["facts"]["terminal_sessions"] = str(2**64)
+elif mode == "fleet_terminal_mismatch":
+    response["facts"]["terminal_sessions"] = "0"
+elif mode == "fleet_unverified_signatures":
+    response["facts"]["supervisor_signatures_verified"] = False
+elif mode == "fleet_incomplete_population":
+    response["facts"]["expected_population_complete"] = False
+elif mode == "fleet_unmatched_action_context":
+    response["facts"]["expected_action_context_matched"] = False
+elif mode == "fleet_epoch_commit_claim":
+    response["facts"]["epoch_commit_authenticated"] = True
+elif mode == "fleet_current_quiescence_claim":
+    response["facts"]["current_quiescence_proven"] = True
+elif mode == "fleet_valid_empty_session_set":
+    response["facts"]["admitted_sessions"] = "0"
+    response["facts"]["terminal_sessions"] = "0"
 elif mode == "session_fail":
     response["facts"]["final_verdict"] = "fail"
 elif mode == "session_empty":

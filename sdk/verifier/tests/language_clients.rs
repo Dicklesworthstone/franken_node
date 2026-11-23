@@ -103,7 +103,8 @@ fn external_python_and_javascript_consumers_verify_signed_evidence() {
         .arg(sdk.join("tests/fixtures/run_origin_protocol/producer-run.fnbundle"))
         .arg(sdk.join("tests/fixtures/run_origin_protocol/bundle-authority.pub"))
         .arg(sdk.join("tests/fixtures/run_origin_protocol/run-authority.pub"))
-        .arg(sdk.join("tests/fixtures/module_source_capsules.json"));
+        .arg(sdk.join("tests/fixtures/module_source_capsules.json"))
+        .arg(sdk.join("tests/fixtures/fleet_quiescence_observations.json"));
     checked(&mut vectors);
     let cases: Vec<serde_json::Value> =
         serde_json::from_slice(&fs::read(root.join("vectors.json")).unwrap()).unwrap();
@@ -124,15 +125,25 @@ fn external_python_and_javascript_consumers_verify_signed_evidence() {
             >= 25,
         "publisher trust acceptance and refusal matrix must execute",
     );
+    assert!(
+        cases
+            .iter()
+            .filter(|case| case["format"] == "fleet-quiescence-observations")
+            .count()
+            >= 30,
+        "independent fleet policy, signature, freshness and population controls must execute",
+    );
     for case in &cases {
         let mut verifier = Command::new(root.join("verifier"));
-        verifier.args([
-            "verify",
-            "--format",
-            case["format"].as_str().unwrap(),
-            "--trusted-key-hex",
-            case["anchor"].as_str().unwrap(),
-        ]);
+        verifier
+            .current_dir(&root)
+            .args(["verify", "--format", case["format"].as_str().unwrap()]);
+        if let Some(policy) = case["fleet_policy_path"].as_str() {
+            assert!(case["anchor"].is_null());
+            verifier.args(["--trusted-fleet-policy", policy]);
+        } else {
+            verifier.args(["--trusted-key-hex", case["anchor"].as_str().unwrap()]);
+        }
         if let Some(signature) = case["signature_hex"].as_str() {
             verifier.args(["--signature-hex", signature]);
         }
@@ -184,6 +195,18 @@ fn external_python_and_javascript_consumers_verify_signed_evidence() {
             if case["format"] == "ltv-evidence" {
                 assert_eq!(response["scope"], "authenticated_ltv_anteriority");
                 assert_eq!(response["facts"], case["ltv_facts"]);
+            }
+            if case["format"] == "fleet-quiescence-observations" {
+                assert_eq!(
+                    response["scope"],
+                    "authenticated_fleet_supervisor_observations"
+                );
+                assert_eq!(response["facts"], case["fleet_facts"]);
+                assert_eq!(response["facts"]["epoch_commit_authenticated"], false);
+                assert_eq!(response["facts"]["current_quiescence_proven"], false);
+                assert!(response["facts"]["admitted_sessions"].is_string());
+                assert!(response["facts"]["terminal_sessions"].is_string());
+                assert!(!response.to_string().contains("trace-maintenance"));
             }
             if case["format"] == "publisher-source" {
                 assert_eq!(response["scope"], "authenticated_publisher_source_content");

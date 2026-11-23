@@ -2,10 +2,13 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { isIP } from "node:net";
+import { open, stat } from "node:fs/promises";
 
 export const PROTOCOL = "franken-verifier-cli/v1";
 export const MAX_INPUT_BYTES = 64 * 1024 * 1024;
 export const MAX_NATIVE_SESSION_INPUT_BYTES = 96 * 1024 * 1024;
+export const MAX_FLEET_QUIESCENCE_INPUT_BYTES = 8 * 1024 * 1024;
+export const MAX_FLEET_QUIESCENCE_POLICY_BYTES = 1024 * 1024;
 const MAX_RESPONSE_BYTES = 64 * 1024 + 1;
 const SCOPES = Object.freeze({
   "incident-bundle": "authenticated_recorded_incident",
@@ -18,6 +21,7 @@ const SCOPES = Object.freeze({
   "publisher-source-trust": "authenticated_publisher_source_trust",
   "counterfactual-receipt": "authenticated_counterfactual_receipt",
   "ltv-evidence": "authenticated_ltv_anteriority",
+  "fleet-quiescence-observations": "authenticated_fleet_supervisor_observations",
 });
 
 export class VerifierError extends Error {
@@ -336,6 +340,60 @@ function ltvPolicyMatches(facts, bytes) {
   }
 }
 
+async function readFleetPolicy(path) {
+  let file;
+  try {
+    if (typeof path !== "string" || path.length === 0 || path.includes("\0") || !(await stat(path)).isFile()) {
+      throw new Error("invalid policy file");
+    }
+    file = await open(path, "r");
+    if (!(await file.stat()).isFile()) throw new Error("invalid policy file");
+    const buffer = Buffer.alloc(MAX_FLEET_QUIESCENCE_POLICY_BYTES + 1);
+    let offset = 0;
+    while (offset < buffer.length) {
+      const { bytesRead } = await file.read(buffer, offset, buffer.length - offset, null);
+      if (bytesRead === 0) break;
+      offset += bytesRead;
+    }
+    if (offset === 0 || offset > MAX_FLEET_QUIESCENCE_POLICY_BYTES) throw new Error("invalid policy length");
+    const bytes = buffer.subarray(0, offset);
+    const policy = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+    if (!object(policy)) throw new Error("invalid policy object");
+    // Never reserialize policy input: exact u64 numbers must reach the Rust
+    // verifier unchanged, and its duplicate-field parser remains authoritative.
+    return { path, bytes, policy };
+  } catch {
+    throw new VerifierError("FLEET_POLICY_INVALID", "cannot read a bounded trusted fleet policy");
+  } finally {
+    if (file !== undefined) await file.close();
+  }
+}
+
+function fleetFactsValid(facts, trusted, bytes) {
+  if (!keys(facts, ["schema_version", "evidence_sha256", "trust_policy_sha256", "trusted_policy_input_sha256",
+    "evaluation_time", "observed_at", "participant_count", "admitted_sessions", "terminal_sessions",
+    "supervisor_signatures_verified", "expected_population_complete", "expected_action_context_matched",
+    "epoch_commit_authenticated", "current_quiescence_proven"])) return false;
+  const evaluated = instantNs(facts.evaluation_time), observed = instantNs(facts.observed_at);
+  const { policy } = trusted;
+  return facts.schema_version === "franken-verifier/fleet-quiescence-observations/v1"
+    && facts.evidence_sha256 === createHash("sha256").update(bytes).digest("hex")
+    && facts.trusted_policy_input_sha256 === createHash("sha256").update(trusted.bytes).digest("hex")
+    && typeof facts.trust_policy_sha256 === "string" && /^[0-9a-f]{64}$/u.test(facts.trust_policy_sha256)
+    && evaluated !== null && observed !== null && evaluated === instantNs(policy.evaluation_time)
+    && Number.isInteger(policy.max_observation_age_secs) && policy.max_observation_age_secs >= 1
+    && policy.max_observation_age_secs <= 300 && evaluated >= observed
+    && evaluated - observed < BigInt(policy.max_observation_age_secs) * 1_000_000_000n
+    && Array.isArray(policy.participants) && policy.participants.length > 0 && policy.participants.length <= 1024
+    && count(facts.participant_count) && facts.participant_count === policy.participants.length
+    && typeof facts.admitted_sessions === "string" && /^(0|[1-9][0-9]{0,19})$/u.test(facts.admitted_sessions)
+    && BigInt(facts.admitted_sessions) <= 18_446_744_073_709_551_615n
+    && facts.terminal_sessions === facts.admitted_sessions
+    && facts.supervisor_signatures_verified === true && facts.expected_population_complete === true
+    && facts.expected_action_context_matched === true && facts.epoch_commit_authenticated === false
+    && facts.current_quiescence_proven === false;
+}
+
 function factsValid(facts, format, anchor, runAnchor, runtimeAnchor,
   revocationAnchor, provenanceAnchor, evaluationTime, maxAge) {
   if (format === "native-session-forensics") return nativeSessionValid(facts, anchor);
@@ -429,17 +487,34 @@ function factsValid(facts, format, anchor, runAnchor, runtimeAnchor,
  * Publisher identity pins come from caller policy. The exact manifest pin is
  * required when supplemental raw source-artifact or graph commitments are used;
  * none is inferred from the candidate. A graph pin does not reconstruct a graph.
+ * Fleet observations require a null single-key anchor and trustedFleetPolicy,
+ * a separately provisioned file with enrolled roots, population, action context
+ * and evaluation time. They do not certify an epoch commit or current quiescence.
  */
 export async function verifyArtifact(data, trustedPublicKeyHex, options) {
   const { verifier, format = "incident-bundle", trustedRunPublicKeyHex, trustedRuntimePublicKeyHex,
+    trustedFleetPolicy,
     trustedRevocationPublicKeyHex, trustedProvenancePublicKeyHex, evaluationTime, maxRevocationAgeSecs,
     expectedManifestSha256, expectedSourceArtifactSha256, expectedGraphInputHash,
     signatureHex, timeoutMs = 10_000 } = options ?? {};
   if (!(data instanceof Uint8Array)) throw new VerifierError("INPUT_INVALID", "data must contain the original bytes");
   if (typeof format !== "string" || !Object.hasOwn(SCOPES, format)) throw new VerifierError("UNSUPPORTED_FORMAT", "unsupported evidence format");
-  const inputLimit = format === "native-session-forensics" ? MAX_NATIVE_SESSION_INPUT_BYTES : MAX_INPUT_BYTES;
+  const inputLimit = format === "native-session-forensics" ? MAX_NATIVE_SESSION_INPUT_BYTES
+    : format === "fleet-quiescence-observations" ? MAX_FLEET_QUIESCENCE_INPUT_BYTES : MAX_INPUT_BYTES;
   if (data.byteLength > inputLimit) throw new VerifierError("INPUT_TOO_LARGE", `evidence exceeds ${inputLimit / (1024 * 1024)} MiB`);
-  if (!hex(trustedPublicKeyHex, 64)) throw new VerifierError("ANCHOR_INVALID", "expected a 32-byte hexadecimal public key");
+  // Retain the invocation's bytes before policy I/O yields to the caller,
+  // which may reuse or mutate its original Uint8Array in the meantime.
+  const bytes = Buffer.from(data);
+  let fleetPolicy;
+  if (format === "fleet-quiescence-observations") {
+    if (trustedPublicKeyHex !== null || trustedFleetPolicy === undefined) {
+      throw new VerifierError("FLEET_POLICY_INVALID", "fleet observations require a separate enrolled policy and no single-key anchor");
+    }
+    fleetPolicy = await readFleetPolicy(trustedFleetPolicy);
+  } else {
+    if (trustedFleetPolicy !== undefined) throw new VerifierError("INPUT_INVALID", "fleet policy applies only to fleet-quiescence-observations");
+    if (!hex(trustedPublicKeyHex, 64)) throw new VerifierError("ANCHOR_INVALID", "expected a 32-byte hexadecimal public key");
+  }
   if (trustedRunPublicKeyHex !== undefined) {
     if (format !== "incident-bundle") throw new VerifierError("INPUT_INVALID", "original-run trust applies only to incident-bundle");
     if (!hex(trustedRunPublicKeyHex, 64)) throw new VerifierError("RUN_ANCHOR_INVALID", "expected a 32-byte hexadecimal run public key");
@@ -467,14 +542,15 @@ export async function verifyArtifact(data, trustedPublicKeyHex, options) {
   }
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > 120_000) throw new VerifierError("TIMEOUT_INVALID", "timeoutMs must be finite and in (0, 120000]");
   if (typeof verifier !== "string" || verifier.length === 0 || verifier.includes("\0")) throw new VerifierError("EXECUTABLE_INVALID", "verifier must be a trusted executable path");
-  const bytes = Buffer.from(data);
-  const anchor = trustedPublicKeyHex.toLowerCase();
+  const anchor = trustedPublicKeyHex?.toLowerCase();
   const runAnchor = trustedRunPublicKeyHex?.toLowerCase();
   const runtimeAnchor = trustedRuntimePublicKeyHex?.toLowerCase();
   const revocationAnchor = trustedRevocationPublicKeyHex?.toLowerCase();
   const provenanceAnchor = trustedProvenancePublicKeyHex?.toLowerCase();
   const scope = runtimeAnchor !== undefined ? "authenticated_runtime_incident" : runAnchor === undefined ? SCOPES[format] : "authenticated_run_incident";
-  const args = ["verify", "--format", format, "--trusted-key-hex", anchor];
+  const args = ["verify", "--format", format];
+  if (fleetPolicy !== undefined) args.push("--trusted-fleet-policy", fleetPolicy.path);
+  else args.push("--trusted-key-hex", anchor);
   if (runAnchor !== undefined) args.push("--trusted-run-key-hex", runAnchor);
   if (runtimeAnchor !== undefined) args.push("--trusted-runtime-key-hex", runtimeAnchor);
   if (revocationAnchor !== undefined) args.push("--trusted-revocation-key-hex", revocationAnchor,
@@ -516,8 +592,9 @@ export async function verifyArtifact(data, trustedPublicKeyHex, options) {
       if (exitCode !== 0 || !keys(result, ["schema_version", "verdict", "format", "scope", "artifact_sha256", "facts"])
           || result.verdict !== "verified" || result.format !== format || result.scope !== scope
           || result.artifact_sha256 !== createHash("sha256").update(bytes).digest("hex")
-          || !factsValid(result.facts, format, anchor, runAnchor, runtimeAnchor,
-            revocationAnchor, provenanceAnchor, evaluationTime, maxRevocationAgeSecs)
+          || !(fleetPolicy !== undefined ? fleetFactsValid(result.facts, fleetPolicy, bytes)
+            : factsValid(result.facts, format, anchor, runAnchor, runtimeAnchor,
+              revocationAnchor, provenanceAnchor, evaluationTime, maxRevocationAgeSecs))
           || (format === "ltv-evidence" && !ltvPolicyMatches(result.facts, bytes))) {
         return reject(new VerifierError("PROTOCOL_INVALID", "verification response does not match the request"));
       }

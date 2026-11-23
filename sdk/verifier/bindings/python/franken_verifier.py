@@ -17,6 +17,7 @@ import os
 import queue
 import re
 import signal
+import stat
 import subprocess
 import threading
 import time
@@ -25,10 +26,13 @@ from typing import Any, Literal, TypedDict
 PROTOCOL = "franken-verifier-cli/v1"
 MAX_INPUT_BYTES = 64 * 1024 * 1024
 MAX_NATIVE_SESSION_INPUT_BYTES = 96 * 1024 * 1024
+MAX_FLEET_QUIESCENCE_INPUT_BYTES = 8 * 1024 * 1024
+MAX_FLEET_QUIESCENCE_POLICY_BYTES = 1024 * 1024
 MAX_RESPONSE_BYTES = 64 * 1024 + 1
 EvidenceFormat = Literal[
     "incident-bundle", "native-session-forensics", "capsule", "signed-bundle", "signed-session", "resolution-receipt",
     "publisher-source", "publisher-source-trust", "counterfactual-receipt", "ltv-evidence",
+    "fleet-quiescence-observations",
 ]
 _SCOPES = {
     "incident-bundle": "authenticated_recorded_incident",
@@ -41,6 +45,7 @@ _SCOPES = {
     "publisher-source-trust": "authenticated_publisher_source_trust",
     "counterfactual-receipt": "authenticated_counterfactual_receipt",
     "ltv-evidence": "authenticated_ltv_anteriority",
+    "fleet-quiescence-observations": "authenticated_fleet_supervisor_observations",
 }
 
 
@@ -54,7 +59,8 @@ class Verification(TypedDict):
                    "authenticated_verification_session",
                    "authenticated_resolution_decision", "authenticated_publisher_source_content",
                    "authenticated_publisher_source_trust",
-                   "authenticated_counterfactual_receipt", "authenticated_ltv_anteriority"]
+                   "authenticated_counterfactual_receipt", "authenticated_ltv_anteriority",
+                   "authenticated_fleet_supervisor_observations"]
     artifact_sha256: str
     facts: dict[str, Any]
 
@@ -69,6 +75,25 @@ class SignedSessionFacts(TypedDict):
     step_count: int
     transcript_hash: str
     signer_public_key_hex: str
+
+
+class FleetQuiescenceFacts(TypedDict):
+    """Authenticated held local populations, not a signed coordinator commit."""
+
+    schema_version: str
+    evidence_sha256: str
+    trust_policy_sha256: str
+    trusted_policy_input_sha256: str
+    evaluation_time: str
+    observed_at: str
+    participant_count: int
+    admitted_sessions: str
+    terminal_sessions: str
+    supervisor_signatures_verified: Literal[True]
+    expected_population_complete: Literal[True]
+    expected_action_context_matched: Literal[True]
+    epoch_commit_authenticated: Literal[False]
+    current_quiescence_proven: Literal[False]
 
 
 class RunOriginMetadata(TypedDict):
@@ -715,6 +740,62 @@ def _ltv_policy_matches(facts: dict[str, Any], data: bytes) -> bool:
         return False
 
 
+def _read_fleet_policy(path: Any) -> tuple[str, bytes, dict[str, Any]]:
+    """Read a bounded caller-owned policy, independently of candidate evidence."""
+    try:
+        filename = os.fspath(path)
+        if not isinstance(filename, str) or not filename or "\0" in filename:
+            raise ValueError("invalid policy path")
+        if not stat.S_ISREG(os.stat(filename).st_mode):
+            raise ValueError("policy is not a regular file")
+        with open(filename, "rb") as source:
+            if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+                raise ValueError("policy is not a regular file")
+            raw = source.read(MAX_FLEET_QUIESCENCE_POLICY_BYTES + 1)
+        if not raw or len(raw) > MAX_FLEET_QUIESCENCE_POLICY_BYTES:
+            raise ValueError("policy exceeds its byte bound")
+        policy = json.loads(raw.decode("utf-8"), object_pairs_hook=_object)
+        if not isinstance(policy, dict):
+            raise ValueError("policy is not an object")
+        return filename, raw, policy
+    except (OSError, TypeError, UnicodeError, ValueError, RecursionError) as error:
+        raise VerifierError("FLEET_POLICY_INVALID", "cannot read a bounded trusted fleet policy") from error
+
+
+def _fleet_facts_valid(facts: Any, raw_policy: bytes, policy: dict[str, Any], data: bytes) -> bool:
+    fields = {"schema_version", "evidence_sha256", "trust_policy_sha256", "trusted_policy_input_sha256",
+              "evaluation_time", "observed_at", "participant_count", "admitted_sessions", "terminal_sessions",
+              "supervisor_signatures_verified", "expected_population_complete", "expected_action_context_matched",
+              "epoch_commit_authenticated", "current_quiescence_proven"}
+    if not isinstance(facts, dict) or set(facts) != fields:
+        return False
+    evaluated, observed = _instant_ns(facts["evaluation_time"]), _instant_ns(facts["observed_at"])
+    max_age = policy.get("max_observation_age_secs")
+    participants = policy.get("participants")
+    return (
+        facts["schema_version"] == "franken-verifier/fleet-quiescence-observations/v1"
+        and facts["evidence_sha256"] == hashlib.sha256(data).hexdigest()
+        and facts["trusted_policy_input_sha256"] == hashlib.sha256(raw_policy).hexdigest()
+        and isinstance(facts["trust_policy_sha256"], str)
+        and re.fullmatch(r"[0-9a-f]{64}", facts["trust_policy_sha256"]) is not None
+        and evaluated is not None and observed is not None
+        and evaluated == _instant_ns(policy.get("evaluation_time"))
+        and type(max_age) is int and 1 <= max_age <= 300
+        and 0 <= evaluated - observed < max_age * 1_000_000_000
+        and isinstance(participants, list) and 0 < len(participants) <= 1024
+        and type(facts["participant_count"]) is int and facts["participant_count"] == len(participants)
+        and isinstance(facts["admitted_sessions"], str)
+        and re.fullmatch(r"0|[1-9][0-9]{0,19}", facts["admitted_sessions"]) is not None
+        and int(facts["admitted_sessions"]) <= 2**64 - 1
+        and facts["terminal_sessions"] == facts["admitted_sessions"]
+        and facts["supervisor_signatures_verified"] is True
+        and facts["expected_population_complete"] is True
+        and facts["expected_action_context_matched"] is True
+        and facts["epoch_commit_authenticated"] is False
+        and facts["current_quiescence_proven"] is False
+    )
+
+
 def _facts_valid(facts: Any, format: str, anchor: str, run_anchor: str | None,
                  runtime_anchor: str | None, revocation_anchor: str | None = None,
                  provenance_anchor: str | None = None, evaluation_time: str | None = None,
@@ -843,10 +924,11 @@ def _facts_valid(facts: Any, format: str, anchor: str, run_anchor: str | None,
 
 def verify_artifact(
     data: bytes,
-    trusted_public_key_hex: str,
+    trusted_public_key_hex: str | None,
     *,
     verifier: str | os.PathLike[str],
     format: EvidenceFormat = "incident-bundle",
+    trusted_fleet_policy: str | os.PathLike[str] | None = None,
     trusted_run_public_key_hex: str | None = None,
     trusted_runtime_public_key_hex: str | None = None,
     trusted_revocation_public_key_hex: str | None = None,
@@ -887,16 +969,29 @@ def verify_artifact(
     digest. A graph pin matches an authenticated claim without reconstructing it.
     The supplied executable is part of the caller's trusted verifier
     distribution. It is never inferred from an artifact or run through a shell.
+    Fleet observations require ``trusted_public_key_hex=None`` and a separately
+    provisioned ``trusted_fleet_policy`` file containing the enrolled supervisor
+    keys, expected action context, population, and evaluation time. Their signed
+    local observations do not authenticate an epoch commit or present quiescence.
     """
     if not isinstance(data, bytes):
         raise VerifierError("INPUT_INVALID", "data must be the original bytes")
     if not isinstance(format, str) or format not in _SCOPES:
         raise VerifierError("UNSUPPORTED_FORMAT", "unsupported evidence format")
-    input_limit = MAX_NATIVE_SESSION_INPUT_BYTES if format == "native-session-forensics" else MAX_INPUT_BYTES
+    input_limit = (MAX_NATIVE_SESSION_INPUT_BYTES if format == "native-session-forensics" else
+                   MAX_FLEET_QUIESCENCE_INPUT_BYTES if format == "fleet-quiescence-observations" else MAX_INPUT_BYTES)
     if len(data) > input_limit:
         raise VerifierError("INPUT_TOO_LARGE", f"evidence exceeds {input_limit // (1024 * 1024)} MiB")
-    if not _hex(trusted_public_key_hex, 64):
-        raise VerifierError("ANCHOR_INVALID", "expected a 32-byte hexadecimal public key")
+    fleet_policy = None
+    if format == "fleet-quiescence-observations":
+        if trusted_public_key_hex is not None or trusted_fleet_policy is None:
+            raise VerifierError("FLEET_POLICY_INVALID", "fleet observations require a separate enrolled policy and no single-key anchor")
+        fleet_policy = _read_fleet_policy(trusted_fleet_policy)
+    else:
+        if trusted_fleet_policy is not None:
+            raise VerifierError("INPUT_INVALID", "fleet policy applies only to fleet-quiescence-observations")
+        if not _hex(trusted_public_key_hex, 64):
+            raise VerifierError("ANCHOR_INVALID", "expected a 32-byte hexadecimal public key")
     if trusted_run_public_key_hex is not None:
         if format != "incident-bundle":
             raise VerifierError("INPUT_INVALID", "original-run trust applies only to incident-bundle")
@@ -937,14 +1032,18 @@ def verify_artifact(
         raise VerifierError("EXECUTABLE_INVALID", "verifier must be a trusted executable path") from error
     if not isinstance(executable, str) or not executable or "\0" in executable:
         raise VerifierError("EXECUTABLE_INVALID", "verifier must be a trusted executable path")
-    anchor = trusted_public_key_hex.lower()
+    anchor = trusted_public_key_hex.lower() if trusted_public_key_hex is not None else None
     run_anchor = trusted_run_public_key_hex.lower() if trusted_run_public_key_hex is not None else None
     runtime_anchor = trusted_runtime_public_key_hex.lower() if trusted_runtime_public_key_hex is not None else None
     revocation_anchor = trusted_revocation_public_key_hex.lower() if trusted_revocation_public_key_hex is not None else None
     provenance_anchor = trusted_provenance_public_key_hex.lower() if trusted_provenance_public_key_hex is not None else None
     scope = ("authenticated_runtime_incident" if runtime_anchor is not None else
              "authenticated_run_incident" if run_anchor is not None else _SCOPES[format])
-    args = [executable, "verify", "--format", format, "--trusted-key-hex", anchor]
+    args = [executable, "verify", "--format", format]
+    if fleet_policy is not None:
+        args.extend(["--trusted-fleet-policy", fleet_policy[0]])
+    else:
+        args.extend(["--trusted-key-hex", anchor])
     if run_anchor is not None:
         args.extend(["--trusted-run-key-hex", run_anchor])
     if runtime_anchor is not None:
@@ -989,8 +1088,10 @@ def verify_artifact(
             or set(result) != {"schema_version", "verdict", "format", "scope", "artifact_sha256", "facts"}
             or result.get("format") != format or result.get("scope") != scope
             or result.get("artifact_sha256") != hashlib.sha256(data).hexdigest()
-            or not _facts_valid(result.get("facts"), format, anchor, run_anchor, runtime_anchor,
-                                revocation_anchor, provenance_anchor, evaluation_time, max_revocation_age_secs)
+            or not (_fleet_facts_valid(result.get("facts"), fleet_policy[1], fleet_policy[2], data)
+                    if fleet_policy is not None else
+                    _facts_valid(result.get("facts"), format, anchor, run_anchor, runtime_anchor,
+                                 revocation_anchor, provenance_anchor, evaluation_time, max_revocation_age_secs))
             or (format == "ltv-evidence" and not _ltv_policy_matches(result["facts"], data))):
         raise VerifierError("PROTOCOL_INVALID", "verification response does not match the request")
     if expected_manifest_sha256 is not None:

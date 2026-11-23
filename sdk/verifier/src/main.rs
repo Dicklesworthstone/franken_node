@@ -13,6 +13,10 @@ use frankenengine_verifier_sdk::capsule::{self, CapsuleError, CapsuleVerdict, Re
 use frankenengine_verifier_sdk::counterfactual::{
     CounterfactualReceiptError, verify_counterfactual_receipt,
 };
+use frankenengine_verifier_sdk::fleet_quiescence::{
+    FleetQuiescencePolicy, MAX_FLEET_QUIESCENCE_POLICY_BYTES, MAX_FLEET_QUIESCENCE_RESPONSE_BYTES,
+    parse_fleet_quiescence_policy, verify_fleet_quiescence_observations,
+};
 use frankenengine_verifier_sdk::incident_bundle::{
     CapturedNativeTerminalState, IncidentBundleError, MAX_INCIDENT_BUNDLE_BYTES,
     decode_evidence_json, verify_incident_bundle, verify_incident_bundle_with_run_key,
@@ -47,7 +51,7 @@ const COUNTERFACTUAL_INPUT_SCHEMA: &str = "franken-verifier/counterfactual-recei
 const LTV_INPUT_SCHEMA: &str = "franken-verifier/ltv-evidence-input/v1";
 const LTV_WITNESS_ANCHOR_DOMAIN: &[u8] = b"franken-verifier/ltv-witness-anchor/v1:";
 const MAX_LTV_WITNESS_ANCHOR_BYTES: usize = 64 * 1024;
-const USAGE: &str = "franken-verifier verify --format incident-bundle|native-session-forensics|capsule|signed-bundle|signed-session|resolution-receipt|publisher-source|publisher-source-trust|counterfactual-receipt|ltv-evidence --trusted-key-hex HEX [--trusted-run-key-hex HEX [--trusted-runtime-key-hex HEX]] [--signature-hex HEX] [--trusted-revocation-key-hex HEX --evaluation-time RFC3339 --max-revocation-age-secs SECONDS [--trusted-provenance-key-hex HEX]] [--expected-manifest-sha256 sha256:HEX [--expected-source-artifact-sha256 sha256:HEX] [--expected-graph-input-hash sha256:HEX]] < artifact";
+const USAGE: &str = "franken-verifier verify --format incident-bundle|native-session-forensics|capsule|signed-bundle|signed-session|resolution-receipt|publisher-source|publisher-source-trust|counterfactual-receipt|ltv-evidence --trusted-key-hex HEX [--trusted-run-key-hex HEX [--trusted-runtime-key-hex HEX]] [--signature-hex HEX] [--trusted-revocation-key-hex HEX --evaluation-time RFC3339 --max-revocation-age-secs SECONDS [--trusted-provenance-key-hex HEX]] [--expected-manifest-sha256 sha256:HEX [--expected-source-artifact-sha256 sha256:HEX] [--expected-graph-input-hash sha256:HEX]] < artifact; fleet observations: franken-verifier verify --format fleet-quiescence-observations --trusted-fleet-policy FILE < artifact";
 
 #[derive(Debug)]
 struct PublisherTrustRequest {
@@ -60,12 +64,54 @@ struct PublisherTrustRequest {
 #[derive(Debug)]
 struct Request {
     format: String,
-    anchor: VerifyingKey,
+    anchor: Option<VerifyingKey>,
     run_anchor: Option<VerifyingKey>,
     runtime_anchor: Option<VerifyingKey>,
     signature: Option<[u8; 64]>,
     publisher_trust: Option<PublisherTrustRequest>,
     expected_publisher_identity: Option<PublisherSourceExpectedIdentity>,
+    fleet_policy: Option<FleetPolicyRequest>,
+}
+
+// Redact the caller's enrollment policy: it contains private project and
+// participant identities, even though all keys are public keys.
+struct FleetPolicyRequest {
+    policy: FleetQuiescencePolicy,
+    input_sha256: String,
+}
+
+impl std::fmt::Debug for FleetPolicyRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("FleetPolicyRequest { policy: [redacted] }")
+    }
+}
+
+fn read_fleet_policy(path: &str) -> Result<FleetPolicyRequest, Failure> {
+    let io_error = || {
+        failure(
+            "FLEET_POLICY_IO",
+            "cannot read the trusted fleet policy file",
+        )
+    };
+    // Reject existing FIFOs/devices before open, which could otherwise block.
+    // Recheck the opened handle to avoid accepting a replaced non-file.
+    if !std::fs::metadata(path).map_err(|_| io_error())?.is_file() {
+        return Err(io_error());
+    }
+    let file = std::fs::File::open(path).map_err(|_| io_error())?;
+    if !file.metadata().map_err(|_| io_error())?.is_file() {
+        return Err(io_error());
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_FLEET_QUIESCENCE_POLICY_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| io_error())?;
+    let policy = parse_fleet_quiescence_policy(&bytes)
+        .map_err(|error| failure(error.code(), "trusted fleet policy is invalid"))?;
+    Ok(FleetPolicyRequest {
+        policy,
+        input_sha256: hex::encode(Sha256::digest(&bytes)),
+    })
 }
 
 #[derive(Debug)]
@@ -134,6 +180,7 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
         (None, None, None, None);
     let (mut expected_manifest, mut expected_source_artifact, mut expected_graph) =
         (None, None, None);
+    let mut fleet_policy_path = None;
     let (options, remainder) = args[1..].as_chunks::<2>();
     for option in options {
         let slot = match option[0].as_str() {
@@ -149,6 +196,7 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
             "--expected-manifest-sha256" => &mut expected_manifest,
             "--expected-source-artifact-sha256" => &mut expected_source_artifact,
             "--expected-graph-input-hash" => &mut expected_graph,
+            "--trusted-fleet-policy" => &mut fleet_policy_path,
             _ => return Err(usage()),
         };
         if slot.replace(option[1].clone()).is_some() {
@@ -171,18 +219,33 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
             | "publisher-source-trust"
             | "counterfactual-receipt"
             | "ltv-evidence"
+            | "fleet-quiescence-observations"
     ) {
         return Err(failure("UNSUPPORTED_FORMAT", "unsupported evidence format"));
     }
-    let mut key = [0_u8; 32];
-    hex::decode_to_slice(anchor.ok_or_else(usage)?, &mut key).map_err(|_| {
-        failure(
-            "ANCHOR_INVALID",
-            "expected a 32-byte hexadecimal public key",
+    let (anchor, fleet_policy) = if format == "fleet-quiescence-observations" {
+        if anchor.is_some() {
+            return Err(usage());
+        }
+        (
+            None,
+            Some(read_fleet_policy(&fleet_policy_path.ok_or_else(usage)?)?),
         )
-    })?;
-    let anchor = VerifyingKey::from_bytes(&key)
-        .map_err(|_| failure("ANCHOR_INVALID", "invalid Ed25519 public key"))?;
+    } else {
+        if fleet_policy_path.is_some() {
+            return Err(usage());
+        }
+        let mut key = [0_u8; 32];
+        hex::decode_to_slice(anchor.ok_or_else(usage)?, &mut key).map_err(|_| {
+            failure(
+                "ANCHOR_INVALID",
+                "expected a 32-byte hexadecimal public key",
+            )
+        })?;
+        let key = VerifyingKey::from_bytes(&key)
+            .map_err(|_| failure("ANCHOR_INVALID", "invalid Ed25519 public key"))?;
+        (Some(key), None)
+    };
     let run_anchor = match (format.as_str(), run_anchor) {
         ("incident-bundle", Some(text)) => {
             let mut key = [0_u8; 32];
@@ -334,6 +397,7 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
         signature,
         publisher_trust,
         expected_publisher_identity,
+        fleet_policy,
     })
 }
 
@@ -475,6 +539,37 @@ fn counterfactual_failure(error: &CounterfactualReceiptError) -> Failure {
 }
 
 fn verify(request: &Request, bytes: &[u8]) -> Result<Value, Failure> {
+    if request.format == "fleet-quiescence-observations" {
+        let policy = request.fleet_policy.as_ref().ok_or_else(|| {
+            failure(
+                "FLEET_POLICY_INVALID",
+                "independent fleet policy is required",
+            )
+        })?;
+        let verified =
+            verify_fleet_quiescence_observations(bytes, &policy.policy).map_err(|error| {
+                failure(
+                    error.code(),
+                    "fleet supervisor evidence verification failed",
+                )
+            })?;
+        let mut facts = serde_json::to_value(&verified).map_err(|_| {
+            failure(
+                "OUTPUT_INVALID",
+                "cannot encode verified fleet observations",
+            )
+        })?;
+        // Preserve exact u64 populations across JavaScript consumers. The
+        // independent library retains native integer types for Rust callers.
+        facts["admitted_sessions"] = json!(verified.admitted_sessions.to_string());
+        facts["terminal_sessions"] = json!(verified.terminal_sessions.to_string());
+        facts["trusted_policy_input_sha256"] = json!(policy.input_sha256);
+        return Ok(json!({"scope": "authenticated_fleet_supervisor_observations", "facts": facts}));
+    }
+    let trusted_key = request
+        .anchor
+        .as_ref()
+        .ok_or_else(|| failure("ANCHOR_INVALID", "independent public key is required"))?;
     match request.format.as_str() {
         "signed-session" => {
             let value = decode_evidence_json(bytes).map_err(|error| incident_failure(&error))?;
@@ -482,7 +577,7 @@ fn verify(request: &Request, bytes: &[u8]) -> Result<Value, Failure> {
                 .map_err(|_| failure("EVIDENCE_INVALID", "invalid signed session transcript"))?;
             trusted_evaluation_time(&transcript.created_at)
                 .map_err(|_| failure("EVIDENCE_INVALID", "invalid signed session creation time"))?;
-            let anchor = hex::encode(request.anchor.as_bytes());
+            let anchor = hex::encode(trusted_key.as_bytes());
             if transcript.signer_public_key_hex != anchor {
                 return Err(failure(
                     "SIGNER_UNTRUSTED",
@@ -500,7 +595,7 @@ fn verify(request: &Request, bytes: &[u8]) -> Result<Value, Failure> {
                     "expected a lowercase 64-byte session signature",
                 ));
             }
-            VerifierSdk::verify_signed_session(&request.anchor, &transcript).map_err(|error| {
+            VerifierSdk::verify_signed_session(trusted_key, &transcript).map_err(|error| {
                 match error {
                     VerifierSdkError::Bundle(BundleError::Ed25519SignatureInvalid) => {
                         failure("SIGNATURE_INVALID", "session signature does not verify")
@@ -524,7 +619,7 @@ fn verify(request: &Request, bytes: &[u8]) -> Result<Value, Failure> {
             )
         }
         "native-session-forensics" => {
-            let verified = verify_native_session_forensics(bytes, &request.anchor)
+            let verified = verify_native_session_forensics(bytes, trusted_key)
                 .map_err(native_session_failure)?;
             // The result authenticates original supervisor statements only.
             // It contains no private panic text or host-effect request data.
@@ -551,13 +646,13 @@ fn verify(request: &Request, bytes: &[u8]) -> Result<Value, Failure> {
                 Some(expected) => verify_publisher_source_trust_input_with_expected_identity(
                     bytes,
                     signature,
-                    &request.anchor,
+                    trusted_key,
                     &anchors,
                     expected,
                 )
                 .map_err(|error| publisher_identity_failure(&error)),
                 None => {
-                    verify_publisher_source_trust_input(bytes, signature, &request.anchor, &anchors)
+                    verify_publisher_source_trust_input(bytes, signature, trusted_key, &anchors)
                         .map_err(|error| publisher_source_failure(&error))
                 }
             }?;
@@ -572,11 +667,11 @@ fn verify(request: &Request, bytes: &[u8]) -> Result<Value, Failure> {
                 Some(expected) => verify_publisher_source_input_with_expected_identity(
                     bytes,
                     signature,
-                    &request.anchor,
+                    trusted_key,
                     expected,
                 )
                 .map_err(|error| publisher_identity_failure(&error)),
-                None => verify_publisher_source_input(bytes, signature, &request.anchor)
+                None => verify_publisher_source_input(bytes, signature, trusted_key)
                     .map_err(|error| publisher_source_failure(&error)),
             }?;
             // These are authenticated publisher statements and captured bytes.
@@ -588,7 +683,7 @@ fn verify(request: &Request, bytes: &[u8]) -> Result<Value, Failure> {
             }))
         }
         "resolution-receipt" => {
-            let receipt = verify_signed_resolution_receipt(&request.anchor, bytes)
+            let receipt = verify_signed_resolution_receipt(trusted_key, bytes)
                 .map_err(|error| resolution_failure(&error))?;
             // A verified signed rejection is still a rejection of the package.
             // Authenticate the decision without treating it as run authority or
@@ -607,7 +702,7 @@ fn verify(request: &Request, bytes: &[u8]) -> Result<Value, Failure> {
                     "rejected_alternative_count": receipt.rejected_alternative_count,
                     "canonical_hash": receipt.canonical_hash,
                     "signer_key_id": receipt.signer_key_id,
-                    "signer_public_key_hex": hex::encode(request.anchor.as_bytes()),
+                    "signer_public_key_hex": hex::encode(trusted_key.as_bytes()),
                 }}),
             )
         }
@@ -617,7 +712,7 @@ fn verify(request: &Request, bytes: &[u8]) -> Result<Value, Failure> {
                     (Some(run_anchor), Some(runtime_anchor)) => {
                         let verified = verify_incident_bundle_with_runtime_keys(
                             bytes,
-                            &request.anchor,
+                            trusted_key,
                             run_anchor,
                             runtime_anchor,
                         )
@@ -630,12 +725,12 @@ fn verify(request: &Request, bytes: &[u8]) -> Result<Value, Failure> {
                     }
                     (Some(run_anchor), None) => {
                         let verified =
-                            verify_incident_bundle_with_run_key(bytes, &request.anchor, run_anchor)
+                            verify_incident_bundle_with_run_key(bytes, trusted_key, run_anchor)
                                 .map_err(|error| incident_failure(&error))?;
                         (verified.bundle, Some(verified.run_origin), None)
                     }
                     (None, None) => (
-                        verify_incident_bundle(bytes, &request.anchor)
+                        verify_incident_bundle(bytes, trusted_key)
                             .map_err(|error| incident_failure(&error))?,
                         None,
                         None,
@@ -676,7 +771,7 @@ fn verify(request: &Request, bytes: &[u8]) -> Result<Value, Failure> {
             let value = decode_evidence_json(bytes).map_err(|error| incident_failure(&error))?;
             let evidence: ReplayCapsule = serde_json::from_value(value)
                 .map_err(|_| failure("EVIDENCE_INVALID", "invalid signed capsule schema"))?;
-            let result = capsule::replay(&request.anchor, &evidence, "verifier://offline-sdk")
+            let result = capsule::replay(trusted_key, &evidence, "verifier://offline-sdk")
                 .map_err(|error| match error {
                     CapsuleError::Ed25519SignatureInvalid | CapsuleError::SignatureInvalid(_) => {
                         failure("SIGNATURE_INVALID", "capsule signature does not verify")
@@ -694,7 +789,7 @@ fn verify(request: &Request, bytes: &[u8]) -> Result<Value, Failure> {
             }
             Ok(json!({"scope": "authenticated_capsule_content", "facts": {
                 "capsule_id": result.capsule_id, "expected_hash": result.expected_hash,
-                "actual_hash": result.actual_hash, "signer_public_key_hex": hex::encode(request.anchor.as_bytes())}}))
+                "actual_hash": result.actual_hash, "signer_public_key_hex": hex::encode(trusted_key.as_bytes())}}))
         }
         "signed-bundle" => {
             let evidence = bundle::verify(bytes)
@@ -703,19 +798,19 @@ fn verify(request: &Request, bytes: &[u8]) -> Result<Value, Failure> {
                 .signature
                 .as_ref()
                 .ok_or_else(|| failure("SIGNATURE_MALFORMED", "detached signature is required"))?;
-            bundle::verify_signed_bundle(&request.anchor, &evidence, signature).map_err(
-                |error| match error {
+            bundle::verify_signed_bundle(trusted_key, &evidence, signature).map_err(|error| {
+                match error {
                     BundleError::Ed25519SignatureInvalid => {
                         failure("SIGNATURE_INVALID", "detached signature does not verify")
                     }
                     _ => failure("EVIDENCE_INVALID", "signed SDK bundle verification failed"),
-                },
-            )?;
+                }
+            })?;
             Ok(
                 json!({"scope": "authenticated_sdk_replay_bundle", "facts": {
                 "bundle_id": evidence.bundle_id, "incident_id": evidence.incident_id,
                 "event_count": evidence.timeline.len(), "integrity_hash": evidence.integrity_hash,
-                "signer_public_key_hex": hex::encode(request.anchor.as_bytes())}}),
+                "signer_public_key_hex": hex::encode(trusted_key.as_bytes())}}),
             )
         }
         "counterfactual-receipt" => {
@@ -743,7 +838,7 @@ fn verify(request: &Request, bytes: &[u8]) -> Result<Value, Failure> {
             verify_counterfactual_receipt(
                 &json!({ "integrity_hash": &envelope.baseline_integrity_hash }),
                 &envelope.counterfactual_output,
-                &request.anchor,
+                trusted_key,
                 signature,
             )
             .map_err(|error| counterfactual_failure(&error))?;
@@ -763,7 +858,7 @@ fn verify(request: &Request, bytes: &[u8]) -> Result<Value, Failure> {
                     "baseline_integrity_hash": envelope.baseline_integrity_hash,
                     "mode": mode,
                     "result_count": result_count,
-                    "signer_public_key_hex": hex::encode(request.anchor.as_bytes()),
+                    "signer_public_key_hex": hex::encode(trusted_key.as_bytes()),
                 }
             }))
         }
@@ -805,8 +900,7 @@ fn verify(request: &Request, bytes: &[u8]) -> Result<Value, Failure> {
             let mut anchor_sig = [0_u8; 64];
             hex::decode_to_slice(&envelope.witness_anchor_signature_hex, &mut anchor_sig)
                 .map_err(|_| failure("SIGNATURE_MALFORMED", "invalid witness anchor signature"))?;
-            request
-                .anchor
+            trusted_key
                 .verify_strict(
                     &ltv_anchor_signing_payload(&anchor_bytes),
                     &Signature::from_bytes(&anchor_sig),
@@ -875,7 +969,7 @@ fn verify(request: &Request, bytes: &[u8]) -> Result<Value, Failure> {
                     "trust_policy_sha256": hex::encode(Sha256::digest(&anchor_bytes)),
                     "reattestation_count": evidence.reattestation_chain.attestations.len(),
                     "hybrid_survived_algo_death": hybrid_survived,
-                    "signer_public_key_hex": hex::encode(request.anchor.as_bytes()),
+                    "signer_public_key_hex": hex::encode(trusted_key.as_bytes()),
                 }
             }))
         }
@@ -886,6 +980,7 @@ fn verify(request: &Request, bytes: &[u8]) -> Result<Value, Failure> {
 fn run(args: &[String], input: &mut impl Read) -> Result<Value, Failure> {
     let request = arguments(args)?;
     let input_limit = match request.format.as_str() {
+        "fleet-quiescence-observations" => MAX_FLEET_QUIESCENCE_RESPONSE_BYTES,
         "native-session-forensics" => MAX_NATIVE_SESSION_FORENSICS_V3_BYTES,
         "publisher-source" => MAX_PUBLISHER_SOURCE_INPUT_BYTES,
         "publisher-source-trust" => MAX_PUBLISHER_SOURCE_TRUST_INPUT_BYTES,
@@ -905,6 +1000,8 @@ fn run(args: &[String], input: &mut impl Read) -> Result<Value, Failure> {
             "INPUT_TOO_LARGE",
             if request.format == "native-session-forensics" {
                 "native-session forensic evidence exceeds the 96 MiB input limit"
+            } else if request.format == "fleet-quiescence-observations" {
+                "fleet supervisor evidence exceeds the 8 MiB input limit"
             } else if matches!(
                 request.format.as_str(),
                 "publisher-source" | "publisher-source-trust"
@@ -966,6 +1063,76 @@ mod tests {
         ["verify", "--format", format, "--trusted-key-hex", anchor]
             .map(str::to_owned)
             .to_vec()
+    }
+
+    #[test]
+    fn cli_fleet_requires_separate_enrollment_and_a_regular_policy_file() {
+        let base = ["verify", "--format", "fleet-quiescence-observations"]
+            .map(str::to_owned)
+            .to_vec();
+        assert_eq!(arguments(&base).unwrap_err().code, "USAGE");
+        assert_eq!(
+            arguments(&args("fleet-quiescence-observations", ANCHOR))
+                .unwrap_err()
+                .code,
+            "USAGE"
+        );
+        let mut request = args("incident-bundle", ANCHOR);
+        request.extend(["--trusted-fleet-policy".into(), "not-read.json".into()]);
+        assert_eq!(arguments(&request).unwrap_err().code, "USAGE");
+        let mut request = base;
+        request.extend([
+            "--trusted-fleet-policy".into(),
+            env!("CARGO_MANIFEST_DIR").into(),
+        ]);
+        let error = arguments(&request).unwrap_err();
+        assert_eq!(error.code, "FLEET_POLICY_IO");
+        assert!(!error.message.contains(env!("CARGO_MANIFEST_DIR")));
+    }
+
+    #[test]
+    fn cli_fleet_preserves_exact_counts_and_limits_the_authenticated_claim() {
+        let fixture: Value = serde_json::from_slice(include_bytes!(
+            "../tests/fixtures/fleet_quiescence_observations.json"
+        ))
+        .unwrap();
+        let policy_bytes = serde_json::to_vec_pretty(&fixture["policy"]).unwrap();
+        let input_sha256 = hex::encode(Sha256::digest(&policy_bytes));
+        let request = Request {
+            format: "fleet-quiescence-observations".into(),
+            anchor: None,
+            run_anchor: None,
+            runtime_anchor: None,
+            signature: None,
+            publisher_trust: None,
+            expected_publisher_identity: None,
+            fleet_policy: Some(FleetPolicyRequest {
+                policy: parse_fleet_quiescence_policy(&policy_bytes).unwrap(),
+                input_sha256: input_sha256.clone(),
+            }),
+        };
+        let bytes = serde_json::to_vec(&fixture["http_response"]).unwrap();
+        let result = verify(&request, &bytes).unwrap();
+        assert_eq!(
+            result["scope"],
+            "authenticated_fleet_supervisor_observations"
+        );
+        let facts = &result["facts"];
+        assert_eq!(facts["trusted_policy_input_sha256"], input_sha256);
+        assert_eq!(
+            facts["evidence_sha256"],
+            hex::encode(Sha256::digest(&bytes))
+        );
+        assert_eq!(facts["participant_count"], 2);
+        assert_eq!(facts["admitted_sessions"], "5");
+        assert_eq!(facts["terminal_sessions"], "5");
+        assert_eq!(facts["supervisor_signatures_verified"], true);
+        assert_eq!(facts["epoch_commit_authenticated"], false);
+        assert_eq!(facts["current_quiescence_proven"], false);
+        let output = result.to_string();
+        assert!(output.len() < MAX_RESPONSE_BYTES);
+        assert!(!output.contains("node-a") && !output.contains("hold-east"));
+        assert!(!format!("{request:?}").contains("node-a"));
     }
 
     fn native_session_fixture(outcome: bool) -> (Vec<u8>, String) {

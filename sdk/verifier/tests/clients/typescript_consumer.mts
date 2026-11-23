@@ -2,9 +2,9 @@ import { readFileSync } from "node:fs";
 import assert from "node:assert/strict";
 import { resolve } from "node:path";
 import { verifyArtifact, VerifierError } from "./franken_verifier.mjs";
-import type { Verification, EvidenceFormat, PublisherSourceTrustFacts, NativeSessionForensicsFacts, SignedSessionFacts, LtvEvidenceFacts } from "./franken_verifier.mjs";
+import type { Verification, EvidenceFormat, PublisherSourceTrustFacts, NativeSessionForensicsFacts, SignedSessionFacts, LtvEvidenceFacts, FleetQuiescenceFacts } from "./franken_verifier.mjs";
 
-const cases: Array<{ name: string; input_hex: string; anchor: string; format: EvidenceFormat;
+type KeyCase = { name: string; input_hex: string; anchor: string; format: Exclude<EvidenceFormat, "fleet-quiescence-observations">;
   signature_hex?: string; run_anchor?: string; runtime_anchor?: string; event_count?: number;
   revocation_anchor?: string; provenance_anchor?: string | null; evaluation_time?: string;
   max_revocation_age_secs?: string; publisher_trust_facts?: PublisherSourceTrustFacts;
@@ -12,8 +12,12 @@ const cases: Array<{ name: string; input_hex: string; anchor: string; format: Ev
   native_facts?: NativeSessionForensicsFacts;
   session_facts?: SignedSessionFacts;
   ltv_facts?: LtvEvidenceFacts;
-  expected: string; artifact_sha256: string }> =
+  expected: string; artifact_sha256: string };
+type FleetCase = { name: string; input_hex: string; anchor: null; format: "fleet-quiescence-observations";
+  fleet_policy_path: string; fleet_facts?: FleetQuiescenceFacts; expected: string; artifact_sha256: string };
+const allCases: Array<KeyCase | FleetCase> =
   JSON.parse(readFileSync("vectors.json", "utf8"));
+const cases = allCases.filter((item): item is KeyCase => item.format !== "fleet-quiescence-observations");
 const positive = cases.find((item) => item.name === "genuine_cli_incident")!;
 const result: Verification = await verifyArtifact(Buffer.from(positive.input_hex, "hex"), positive.anchor,
   { verifier: resolve("verifier"), format: positive.format });
@@ -255,9 +259,35 @@ for (const candidate of cases.filter((item) => item.format === "ltv-evidence")) 
   }
 }
 assert(ltvPositive >= 4 && ltvNegative >= 16, "LTV authority policy controls must execute");
-console.log(JSON.stringify({ consumer: "typescript", positive: 8 + trustPositive + nativePositive + sessionPositive + identityPositive + ltvPositive,
-  negative: 2 + trustNegative + nativeNegative + sessionNegative + identityNegative + ltvNegative, publisher_trust_cases: trustPositive + trustNegative,
+let fleetPositive = 0;
+let fleetNegative = 0;
+for (const candidate of allCases.filter((item): item is FleetCase => item.format === "fleet-quiescence-observations")) {
+  try {
+    const verified = await verifyArtifact(Buffer.from(candidate.input_hex, "hex"), candidate.anchor, {
+      verifier: resolve("verifier"), format: "fleet-quiescence-observations",
+      trustedFleetPolicy: candidate.fleet_policy_path,
+    });
+    if (candidate.expected !== "verified" || verified.format !== "fleet-quiescence-observations"
+        || verified.scope !== "authenticated_fleet_supervisor_observations") throw new Error("fleet observation scope mismatch");
+    assert.equal(verified.artifact_sha256, candidate.artifact_sha256);
+    assert.deepEqual(verified.facts, candidate.fleet_facts, candidate.name);
+    const admitted: string = verified.facts.admitted_sessions;
+    const terminal: string = verified.facts.terminal_sessions;
+    const committed: false = verified.facts.epoch_commit_authenticated;
+    const current: false = verified.facts.current_quiescence_proven;
+    if (admitted !== terminal || committed || current) throw new Error("fleet observation claim exceeds its scope");
+    fleetPositive += 1;
+  } catch (error: unknown) {
+    if (candidate.expected === "verified" || !(error instanceof VerifierError)
+        || error.code !== candidate.expected) throw error;
+    fleetNegative += 1;
+  }
+}
+assert(fleetPositive >= 5 && fleetNegative >= 25, "fleet authority and observation controls must execute");
+console.log(JSON.stringify({ consumer: "typescript", positive: 8 + trustPositive + nativePositive + sessionPositive + identityPositive + ltvPositive + fleetPositive,
+  negative: 2 + trustNegative + nativeNegative + sessionNegative + identityNegative + ltvNegative + fleetNegative, publisher_trust_cases: trustPositive + trustNegative,
   publisher_identity_cases: identityPositive + identityNegative,
   native_session_cases: nativePositive + nativeNegative, signed_session_cases: sessionPositive + sessionNegative,
   ltv_policy_cases: ltvPositive + ltvNegative,
+  fleet_observation_cases: fleetPositive + fleetNegative,
   passed: true }));
