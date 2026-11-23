@@ -353,8 +353,10 @@ fn expected_routes(report: &SourceGraphReport) -> Result<ExpectedRoutes> {
         }
         if let Some(target) = &edge.target {
             let admitted = (edge.kind == LoadKind::Require && edge.import_attributes.is_empty())
-                || (matches!(edge.kind, LoadKind::StaticImport | LoadKind::Reexport)
-                    && edge.import_attributes.len() == 1
+                || (matches!(
+                    edge.kind,
+                    LoadKind::StaticImport | LoadKind::Reexport | LoadKind::DynamicImport
+                ) && edge.import_attributes.len() == 1
                     && edge.import_attributes.get("type").map(String::as_str) == Some("json"));
             if admitted {
                 required.insert(target.clone());
@@ -825,6 +827,10 @@ mod tests {
             "import value from './data.json' with {type:'json'}; import('./data.json');",
             "import value from './data.json' with {type:'text'};",
             "import value from './data.json' with {type:'json', extra:'unsupported'};",
+            "import('./data.json', {with:{type:'text'}});",
+            "import('./data.json', {with:{type:'json', extra:'unsupported'}});",
+            "import('./data.json', {with:{type:'json'}}); import('./data.json');",
+            "import('./data.json'); import('./data.json', {with:{type:'json'}});",
         ] {
             let root = tempfile::tempdir().unwrap();
             put_json_fixture(root.path(), "app.mjs", source);
@@ -849,7 +855,7 @@ mod tests {
     }
 
     #[test]
-    fn static_json_routes_survive_typescript_normalization_with_exact_attributes() {
+    fn static_and_dynamic_json_routes_survive_typescript_normalization_with_exact_attributes() {
         use super::super::super::{GraphOptions, capture};
         use super::super::CapturedEngineResolver;
         use frankenengine_engine::capability::RuntimeCapability;
@@ -864,6 +870,7 @@ mod tests {
             r#"
 import data from './data.json' with {type:'json'};
 export {default as forwarded} from './data.json' with {'type':'json'};
+const pending = import('./data.json', {with:{type:'json'}});
 const answer: number=data.answer;
 export {answer};
 "#,

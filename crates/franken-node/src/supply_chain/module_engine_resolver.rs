@@ -4611,6 +4611,82 @@ console.log(data.counter, data.answer, data.__proto__.safe, Object.keys(namespac
     }
 
     #[test]
+    fn native_dynamic_json_imports_match_node_in_both_cache_orders_after_replay() {
+        use frankenengine_engine::baseline_interpreter::LaneChoice;
+
+        for lane in [LaneChoice::QuickJs, LaneChoice::V8] {
+            for commonjs_first in [false, true] {
+                let parent = tempfile::tempdir().unwrap();
+                let root = parent.path().join("dynamic json project");
+                let loads = if commonjs_first {
+                    "const common=require('data-kit'); const namespace=await import('data-kit', {with:{type:'json'}});"
+                } else {
+                    "const namespace=await import('data-kit', {with:{type:'json'}}); const common=require('data-kit');"
+                };
+                put(
+                    &root,
+                    "app.mjs",
+                    &format!(
+                        r#"
+import {{createRequire}} from 'node:module';
+const require=createRequire(import.meta.url);
+JSON.parse=function(){{throw Error('guest parser must not run');}};
+{loads}
+common.counter=7;
+const again=await import('./node_modules/data-kit/payload.json', {{'with':{{'type':'json'}}}});
+console.log(namespace.default === common, again.default === common);
+console.log(namespace.default.answer, namespace.default.counter, Object.keys(namespace).join(','));
+"#
+                    ),
+                );
+                put(
+                    &root,
+                    "node_modules/data-kit/package.json",
+                    r#"{"exports":{"import":"./payload.json","require":"./payload.json"}}"#,
+                );
+                put(
+                    &root,
+                    "node_modules/data-kit/payload.json",
+                    r#"{"answer":42}"#,
+                );
+                let reference = node_reference_output(&root, "app.mjs");
+                assert_eq!(reference, "true true\n42 7 default\n");
+                let graph = capture(&root, "app.mjs", GraphOptions::default()).unwrap();
+                assert!(graph.report().fully_resolved, "{:?}", graph.report());
+                let encoded = capsule::encode(&graph).unwrap();
+                std::fs::rename(&root, parent.path().join("original-project")).unwrap();
+                put(&root, "app.mjs", "throw Error('ambient replacement');");
+                put(
+                    &root,
+                    "node_modules/data-kit/payload.json",
+                    r#"{"answer":0}"#,
+                );
+                let replayed = capsule::replay(encoded.bytes(), encoded.digest()).unwrap();
+                assert_eq!(replayed.report(), graph.report());
+                let result = execute_module_graph_with_policy_for_test(
+                    &root,
+                    replayed,
+                    lane,
+                    Arc::new(granted()),
+                    || {},
+                )
+                .expect("dynamic JSON imports execute from the authenticated captured graph");
+                let actual = result
+                    .console_output
+                    .iter()
+                    .map(|line| line.message.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+                    + "\n";
+                assert_eq!(
+                    actual, reference,
+                    "{lane:?}, commonjs first: {commonjs_first}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn native_required_custom_extensions_match_node_after_source_changes() {
         use frankenengine_engine::baseline_interpreter::LaneChoice;
 

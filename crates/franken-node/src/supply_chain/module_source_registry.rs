@@ -358,7 +358,10 @@ impl PinnedModuleRegistry {
         for edge in &report.edges {
             super::import_attributes::validate(&edge.import_attributes)?;
             if !edge.import_attributes.is_empty()
-                && !matches!(edge.kind, LoadKind::StaticImport | LoadKind::Reexport)
+                && !matches!(
+                    edge.kind,
+                    LoadKind::StaticImport | LoadKind::Reexport | LoadKind::DynamicImport
+                )
             {
                 return Err(invalid_graph());
             }
@@ -1237,6 +1240,8 @@ mod tests {
 import first from './dep.mjs' with {color:'red',type:'json'};
 import second from './dep.mjs' with {type:'json',color:'red'};
 import third from './dep.mjs' with {color:'blue',type:'json'};
+import('./dep.mjs', {with:{type:'json',color:'red'}});
+import('./dep.mjs', {with:{color:'blue',type:'json'}});
 "#,
         );
         put(root.path(), "dep.mjs", "export default 42;");

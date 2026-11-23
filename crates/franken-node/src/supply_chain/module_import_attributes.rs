@@ -1,4 +1,4 @@
-//! Bounded static attribute capture, independent of the optional engine crate.
+//! Bounded import attribute capture, independent of the optional engine crate.
 //!
 //! The pinned tree-sitter grammars accept import attributes but not reexport
 //! attributes. Only a validated, literal reexport clause may be replaced with
@@ -75,6 +75,82 @@ pub(super) fn capture(
     if object.kind() != "object" || children.next().is_some() {
         return Err(invalid());
     }
+    capture_object(object, source, budget, false)
+}
+
+/// Capture only fresh literal option/attribute objects. The engine evaluates
+/// the original call and supplies the resulting attributes on every load;
+/// capture does not evaluate getters, follow aliases or grant an untyped route.
+/// Unknown options and prototype setters remain explicit analysis gaps.
+pub(super) fn capture_dynamic(
+    node: Node<'_>,
+    source: &str,
+    budget: &mut Budget,
+) -> Result<ImportAttributes> {
+    let arguments = node.child_by_field_name("arguments").ok_or_else(invalid)?;
+    let mut cursor = arguments.walk();
+    let mut arguments = arguments
+        .named_children(&mut cursor)
+        .filter(|child| child.kind() != "comment");
+    arguments.next().ok_or_else(invalid)?;
+    let Some(options) = arguments.next() else {
+        return Ok(ImportAttributes::new());
+    };
+    if arguments.next().is_some() || options.end_byte() - options.start_byte() > MAX_CLAUSE_BYTES {
+        return Err(invalid());
+    }
+    let options = super::runtime_operand(options);
+    if options.kind() != "object" {
+        return Err(invalid());
+    }
+    let mut cursor = options.walk();
+    let mut properties = options
+        .named_children(&mut cursor)
+        .filter(|child| child.kind() != "comment");
+    let Some(property) = properties.next() else {
+        return Ok(ImportAttributes::new());
+    };
+    charge(budget)?;
+    // An own data property shadows a polluted Object.prototype.with. Reject
+    // spreads, accessors, duplicate with keys and every computed origin.
+    if properties.next().is_some() || property.kind() != "pair" {
+        return Err(invalid());
+    }
+    let key = property.child_by_field_name("key").ok_or_else(invalid)?;
+    let value = property.child_by_field_name("value").ok_or_else(invalid)?;
+    if property_key(key, source)? != "with" {
+        return Err(invalid());
+    }
+    capture_object(super::runtime_operand(value), source, budget, true)
+}
+
+fn property_key(key: Node<'_>, source: &str) -> Result<String> {
+    match key.kind() {
+        "string" => super::literal(key, source).ok_or_else(invalid),
+        "property_identifier" => {
+            let mut units = Vec::new();
+            super::append_string_segment(
+                &source[key.byte_range()],
+                false,
+                &mut units,
+                &mut super::StringExpressionBudget::default(),
+            )
+            .ok_or_else(invalid)?;
+            String::from_utf16(&units).map_err(|_| invalid())
+        }
+        _ => Err(invalid()),
+    }
+}
+
+fn capture_object(
+    object: Node<'_>,
+    source: &str,
+    budget: &mut Budget,
+    dynamic: bool,
+) -> Result<ImportAttributes> {
+    if object.kind() != "object" || object.end_byte() - object.start_byte() > MAX_CLAUSE_BYTES {
+        return Err(invalid());
+    }
     let mut attributes = ImportAttributes::new();
     let mut cursor = object.walk();
     for property in object
@@ -87,21 +163,12 @@ pub(super) fn capture(
         }
         let key = property.child_by_field_name("key").ok_or_else(invalid)?;
         let value = property.child_by_field_name("value").ok_or_else(invalid)?;
-        let key = match key.kind() {
-            "string" => super::literal(key, source).ok_or_else(invalid)?,
-            "property_identifier" => {
-                let mut units = Vec::new();
-                super::append_string_segment(
-                    &source[key.byte_range()],
-                    false,
-                    &mut units,
-                    &mut super::StringExpressionBudget::default(),
-                )
-                .ok_or_else(invalid)?;
-                String::from_utf16(&units).map_err(|_| invalid())?
-            }
-            _ => return Err(invalid()),
-        };
+        let key = property_key(key, source)?;
+        // Unlike static attributes, an object-literal __proto__ pair is a
+        // prototype setter, not an enumerable own attribute. Never relabel it.
+        if dynamic && key == "__proto__" {
+            return Err(invalid());
+        }
         if value.kind() != "string" {
             return Err(invalid());
         }
@@ -428,15 +495,122 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_options_are_explicitly_unsupported_and_never_borrow_static_attributes() {
-        let (loads, notices, _) = scanned("import('./data.json', {with:{type:'json'}});");
-        assert_eq!(loads.len(), 1);
-        assert_eq!(loads[0].kind, LoadKind::DynamicImport);
-        assert!(loads[0].import_attributes.is_empty());
-        assert!(
-            notices
-                .iter()
-                .any(|notice| notice.code == "DYNAMIC_IMPORT_ATTRIBUTES_UNSUPPORTED")
+    fn dynamic_literal_attributes_preserve_decoded_keys_and_exact_load_routes() {
+        for options in [
+            "{with:{type:'json'}}",
+            "({ /* before */ with: ({type:'json',}) })",
+            r#"{'w\u0069th':{t\u0079pe:'j\u0073on'}}"#,
+        ] {
+            let source = format!("import('./data.json', {options});");
+            let (loads, notices, analyzed) = scanned(&source);
+            assert!(analyzed && notices.is_empty(), "{source}: {notices:?}");
+            assert_eq!(loads.len(), 1);
+            assert_eq!(loads[0].kind, LoadKind::DynamicImport);
+            assert_eq!(loads[0].specifier.as_deref(), Some("./data.json"));
+            assert_eq!(
+                loads[0].import_attributes,
+                ImportAttributes::from([("type".into(), "json".into())])
+            );
+            assert_eq!(
+                &source[loads[0].site.start_byte..loads[0].site.end_byte],
+                source.trim_end_matches(';')
+            );
+        }
+        for source in [
+            "import('./plain.mjs');",
+            "import('./plain.mjs', {});",
+            "import('./plain.mjs', {with:{}});",
+        ] {
+            let (loads, notices, analyzed) = scanned(source);
+            assert!(analyzed && notices.is_empty(), "{source}: {notices:?}");
+            assert!(loads[0].import_attributes.is_empty());
+        }
+    }
+
+    #[test]
+    fn dynamic_attribute_objects_cannot_borrow_computed_mutable_or_prototype_authority() {
+        for options in [
+            "options",
+            "undefined",
+            "null",
+            "{with: attributes}",
+            "{with: {type: kind}}",
+            "{with: {type: 'j'+'son'}}",
+            "{with: {type: `json`}}",
+            "{with: {type: 42}}",
+            "{with: {type: 'json', type: 'text'}}",
+            r#"{with: {type:'json', 't\u0079pe':'json'}}"#,
+            "{with: {['type']: 'json'}}",
+            "{with: {get type(){ return 'json'; }}}",
+            "{get with(){ return {type:'json'}; }}",
+            "{['with']: {type:'json'}}",
+            "{with: {type:'json'}, with: {type:'text'}}",
+            "{with: {type:'json'}, ...options}",
+            "{with: {type:'json', ...attributes}}",
+            "{__proto__: {with:{type:'json'}}}",
+            "{with: {__proto__: 'json'}}",
+            r#"{with: {'__pr\u006fto__': 'json'}}"#,
+            "{with: {type:'json'}, ignored: effect()}",
+            "{assert: {type:'json'}}",
+            r#"{with: {type:'\ud800'}}"#,
+        ] {
+            let source = format!("import('./data.json', {options});");
+            let (loads, notices, _) = scanned(&source);
+            assert_eq!(loads.len(), 1, "{source}");
+            assert!(loads[0].import_attributes.is_empty(), "{source}");
+            assert!(
+                notices
+                    .iter()
+                    .any(|notice| notice.code == "DYNAMIC_IMPORT_ATTRIBUTES_UNSUPPORTED"),
+                "accepted {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn dynamic_attribute_capture_preserves_unknown_keys_and_enforces_shared_limits() {
+        let (loads, notices, _) = scanned("import('./data.json', {with:{unknown:'value'}});");
+        assert!(notices.is_empty());
+        assert_eq!(
+            loads[0].import_attributes,
+            ImportAttributes::from([("unknown".into(), "value".into())])
+        );
+        for attributes in [
+            (0..17)
+                .map(|n| format!("key{n}:'value'"))
+                .collect::<Vec<_>>()
+                .join(","),
+            format!("'{}':'value'", "k".repeat(MAX_KEY_BYTES + 1)),
+            format!("type:'{}'", "v".repeat(MAX_VALUE_BYTES + 1)),
+            (0..5)
+                .map(|n| format!("key{n}:'{}'", "v".repeat(1000)))
+                .collect::<Vec<_>>()
+                .join(","),
+        ] {
+            let source = format!("import('./data.json', {{with:{{{attributes}}}}});");
+            let (loads, notices, _) = scanned(&source);
+            assert!(loads[0].import_attributes.is_empty());
+            assert!(
+                notices
+                    .iter()
+                    .any(|n| n.code == "DYNAMIC_IMPORT_ATTRIBUTES_UNSUPPORTED")
+            );
+        }
+        let source = "import('./data.json', {with:{type:'json'}});";
+        let mut budget = Budget {
+            ast_nodes: MAX_AST_NODES - 2,
+            ..Budget::default()
+        };
+        assert_eq!(
+            scan(
+                &mut Parser::new(),
+                source.as_bytes(),
+                SourceLanguage::JavaScript,
+                &mut budget
+            )
+            .unwrap_err()
+            .code,
+            "ERR_MODULE_GRAPH_LIMIT"
         );
     }
 }

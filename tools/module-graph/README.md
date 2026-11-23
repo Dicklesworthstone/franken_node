@@ -527,7 +527,7 @@ JavaScript. TypeScript and TSX use their own grammars and the explicit erasure
 contract below. Native addon and Wasm loads, and other unsupported loaded
 formats, produce explicit diagnostics; resolution-only targets need no grammar.
 
-Static imports and reexports retain their cooked import attributes on each
+Static imports, reexports and supported dynamic imports retain their cooked import attributes on each
 edge, for example `import data from 'settings' with { type: 'json' }` and
 `export { default } from './settings.json' with { type: 'json' }`. Attribute
 keys and values must be literal strings (identifier keys are also accepted).
@@ -545,9 +545,23 @@ select a `.json` file through `exports`, while `type: 'json'` cannot reclassify
 an actual JavaScript or extensionless target as JSON. Attribute maps participate
 in route identity: a typed route does not approve a separate untyped or
 differently attributed request to the same target. Empty maps are omitted from
-the JSON report. Dynamic `import()` options are outside this static increment
-and produce `DYNAMIC_IMPORT_ATTRIBUTES_UNSUPPORTED`; their attributes are never
-inferred from a static import elsewhere in the graph.
+the JSON report.
+
+Dynamic requests such as
+`await import('settings', {with: {type: 'json'}})` capture the same exact map.
+The optional second argument must be a fresh literal object containing only
+one own `with` data property whose value is a literal attribute object; empty
+option and attribute objects are also captured. Parentheses, supported
+TypeScript erasure wrappers, comments, and decoded identifier/string keys retain
+their meaning. Aliases, computed keys or values, getters, spreads, duplicate
+decoded keys, prototype setters, extra options, and non-string attribute values
+produce `DYNAMIC_IMPORT_ATTRIBUTES_UNSUPPORTED`. Capture never executes an
+option expression. The original call still evaluates inside the engine, and
+every actual request must match its complete captured attribute map; attributes
+are never borrowed from another static or dynamic import of the same target.
+Admitted dynamic JSON routes survive TypeScript normalization and source-capsule
+replay. Analysis alone continues to make no engine-execution or compatibility
+certification claim.
 
 One resolver owns the entire graph capture. Sources, manifests, link text and
 negative probes are cached once across all edges, not captured independently

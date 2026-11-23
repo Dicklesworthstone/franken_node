@@ -2131,14 +2131,6 @@ fn scan(
                                     ));
                                 }
                                 None
-                            } else if kind == LoadKind::DynamicImport && args.next().is_some() {
-                                if !erased {
-                                    issue = Some((
-                                        "DYNAMIC_IMPORT_ATTRIBUTES_UNSUPPORTED",
-                                        "dynamic import options require a separate request-attribute contract",
-                                    ));
-                                }
-                                first
                             } else {
                                 first
                             }
@@ -2388,6 +2380,20 @@ fn scan(
                             "INVALID_IMPORT_ATTRIBUTES",
                             "static import attributes are malformed, duplicated or exceed their bounds",
                         ));
+                        ImportAttributes::new()
+                    }
+                    Err(failure) => return Err(failure),
+                }
+            } else if kind == LoadKind::DynamicImport {
+                match import_attributes::capture_dynamic(node, text, budget) {
+                    Ok(attributes) => attributes,
+                    Err(failure) if failure.code == "ERR_MODULE_GRAPH_IMPORT_ATTRIBUTES" => {
+                        if !erased {
+                            issue = Some((
+                                "DYNAMIC_IMPORT_ATTRIBUTES_UNSUPPORTED",
+                                "dynamic import options require bounded literal objects with unique string attributes and no computed, inherited or mutable origins",
+                            ));
+                        }
                         ImportAttributes::new()
                     }
                     Err(failure) => return Err(failure),

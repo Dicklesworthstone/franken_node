@@ -188,7 +188,7 @@ try { await import('./data.json'); } catch (error) { console.log(error.code); }
 }
 
 #[test]
-fn malformed_static_attributes_and_dynamic_options_never_capture_as_typed_routes() {
+fn malformed_static_attributes_and_opaque_dynamic_options_never_capture_as_typed_routes() {
     let root = tempfile::tempdir().unwrap();
     put(root.path(), "data.json", "{}");
     for source in [
@@ -199,7 +199,8 @@ fn malformed_static_attributes_and_dynamic_options_never_capture_as_typed_routes
         "export {default} from './data.json' with {type:'json', ...other};",
         "export {default} from './data.json' with {get type(){return 'json';}};",
         "const text='./data.json' with {type:'json'};",
-        "import('./data.json', {with:{type:'json'}});",
+        "import('./data.json', {with:attributes});",
+        "import('./data.json', {with:{get type(){return 'json';}}});",
     ] {
         put(root.path(), "app.mjs", source);
         let (code, captured) = run(root.path(), "app.mjs", &[]);
@@ -210,6 +211,52 @@ fn malformed_static_attributes_and_dynamic_options_never_capture_as_typed_routes
             assert!(captured["source_graph"]["edges"][0]["import_attributes"].is_null());
         }
     }
+}
+
+#[test]
+fn dynamic_json_attributes_match_node_and_replay_without_live_sources() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("dynamic JSON project");
+    put(&project, "app.mjs", r#"
+import data from 'data-kit' with {type:'json'};
+const namespace = await import('data-kit', {with: {type:'json'}});
+const again = await import('./node_modules/data-kit/payload.json', {'with': {'type':'json'}});
+console.log(namespace.default.answer, namespace.default === data, again.default === data);
+console.log(Object.keys(namespace).join(','));
+"#);
+    put(&project, "node_modules/data-kit/package.json",
+        r#"{"exports":{"import":"./payload.json","require":"./wrong.json"}}"#);
+    put(&project, "node_modules/data-kit/payload.json", r#"{"answer":42}"#);
+    let reference = Command::new("node")
+        .env_remove("NODE_OPTIONS").env_remove("NODE_PATH")
+        .current_dir(&project).arg("app.mjs").output().unwrap();
+    assert!(reference.status.success(), "{reference:?}");
+    assert_eq!(reference.stdout, b"42 true true\ndefault\n");
+    let capsule = temp.path().join("dynamic-json.fnsc");
+    let (code, captured) = export_capsule(&project, "app.mjs", &capsule, &[]);
+    assert_eq!(code, 0, "{captured}");
+    assert_eq!(paths(&captured).len(), 2);
+    let edges = captured["source_graph"]["edges"].as_array().unwrap();
+    assert_eq!(edges.len(), 3);
+    assert_eq!(edges.iter().filter(|edge| edge["kind"] == "dynamic_import").count(), 2);
+    for edge in edges {
+        assert_eq!(edge["import_attributes"], serde_json::json!({"type":"json"}));
+        assert_eq!(edge["target"]["path"], "node_modules/data-kit/payload.json");
+        assert_eq!(edge["conditions"], serde_json::json!(["node","import"]));
+    }
+    assert_node_edges(&project, &captured);
+    assert_eq!(captured["execution_performed"], false);
+
+    std::fs::rename(&project, temp.path().join("original")).unwrap();
+    put(&project, "app.mjs", "throw Error('live source must not run');");
+    put(&project, "node_modules/data-kit/payload.json", r#"{"answer":0}"#);
+    let unrelated = temp.path().join("unrelated");
+    std::fs::create_dir(&unrelated).unwrap();
+    let (code, replayed) = replay_capsule(&capsule,
+        captured["capsule_hash"].as_str().unwrap(), &unrelated);
+    assert_eq!(code, 0, "{replayed}");
+    assert_eq!(replayed["source_graph"], captured["source_graph"]);
+    assert_eq!(std::fs::read_dir(&unrelated).unwrap().count(), 0);
 }
 
 #[test]
