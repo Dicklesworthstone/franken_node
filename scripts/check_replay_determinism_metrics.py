@@ -82,7 +82,7 @@ def _checks():
 
     ok("artifact_completeness_hash_surface",
        all(snippet in src for snippet in [
-           "h.update((completeness.len() as u64).to_le_bytes())",
+           "h.update((u64::try_from(completeness.len()).unwrap_or(u64::MAX)).to_le_bytes())",
            "for entry in &completeness",
            "entry.category.label()",
            "entry.expected",

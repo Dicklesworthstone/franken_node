@@ -255,7 +255,7 @@ def run_checks() -> dict[str, Any]:
             [
                 "generate_replay_bundle",
                 "generate_replay_bundle_from_evidence",
-                "read_incident_evidence_package",
+                "parse_verified_incident_evidence_package",
                 "read_bundle_from_path",
                 "incident bundle written",
                 "evidence=",

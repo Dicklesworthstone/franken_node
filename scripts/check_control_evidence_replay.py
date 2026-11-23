@@ -168,7 +168,7 @@ REQUIRED_CONFORMANCE_TESTS = [
 
 
 def check_file(path, label):
-    ok = path.exists()
+    ok = path.is_file()
     return {
         "check": f"file: {label}",
         "pass": ok,
@@ -178,7 +178,7 @@ def check_file(path, label):
 
 def check_content(path, patterns, category):
     results = []
-    if not path.exists():
+    if not path.is_file():
         for p in patterns:
             results.append({"check": f"{category}: {p}", "pass": False, "detail": "file missing"})
         return results

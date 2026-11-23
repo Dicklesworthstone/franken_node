@@ -138,7 +138,7 @@ REQUIRED_CONFORMANCE_TESTS = [
 
 
 def check_file(path, label):
-    ok = path.exists()
+    ok = path.is_file()
     return {
         "check": f"file: {label}",
         "pass": ok,
@@ -155,7 +155,7 @@ def safe_rel(path):
 
 def check_content(path, patterns, category, *, strip_comments=True):
     results = []
-    if not path.exists():
+    if not path.is_file():
         for p in patterns:
             results.append({"check": f"{category}: {p}", "pass": False, "detail": "file missing"})
         return results

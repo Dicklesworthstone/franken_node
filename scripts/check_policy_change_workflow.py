@@ -123,7 +123,7 @@ def safe_rel(path: Path) -> str:
 
 
 def check_file(path, label):
-    ok = path.exists()
+    ok = path.is_file()
     return {
         "check": f"file: {label}",
         "pass": ok,
@@ -132,7 +132,7 @@ def check_file(path, label):
 
 
 def read_text(path: Path) -> str:
-    return path.read_text(encoding="utf-8") if path.exists() else ""
+    return path.read_text(encoding="utf-8") if path.is_file() else ""
 
 
 def read_rust_source(path: Path) -> str:
@@ -223,7 +223,7 @@ def rust_block_comment_end(text: str, start: int) -> int:
 
 def check_content(path, patterns, category, *, strip_comments=True):
     results = []
-    if not path.exists():
+    if not path.is_file():
         for p in patterns:
             results.append({"check": f"{category}: {p}", "pass": False, "detail": "file missing"})
         return results

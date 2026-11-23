@@ -26,27 +26,27 @@ class TestFixture(TestCase):
 class TestBundleGeneration(TestCase):
     def test_generate_bundle(self):
         vectors = mod.load_fixture_vectors()
-        bundle = mod.generate_sample_bundle("INC-TEST-001", vectors)
+        bundle = mod.generate_fixture_bundle("INC-TEST-001", vectors)
         self.assertEqual(bundle["incident_id"], "INC-TEST-001")
         self.assertIn("timeline", bundle)
         self.assertGreater(len(bundle["timeline"]), 0)
 
     def test_bundle_deterministic(self):
         vectors = mod.load_fixture_vectors()
-        bundle_a = mod.generate_sample_bundle("INC-TEST-DET", vectors)
-        bundle_b = mod.generate_sample_bundle("INC-TEST-DET", vectors)
+        bundle_a = mod.generate_fixture_bundle("INC-TEST-DET", vectors)
+        bundle_b = mod.generate_fixture_bundle("INC-TEST-DET", vectors)
         self.assertEqual(mod.canonical_json(bundle_a), mod.canonical_json(bundle_b))
 
     def test_bundle_integrity(self):
         vectors = mod.load_fixture_vectors()
-        bundle = mod.generate_sample_bundle("INC-TEST-HASH", vectors)
-        self.assertTrue(mod.validate_sample_bundle_integrity(bundle))
+        bundle = mod.generate_fixture_bundle("INC-TEST-HASH", vectors)
+        self.assertTrue(mod.validate_fixture_bundle_integrity(bundle))
 
     def test_bundle_integrity_detects_tamper(self):
         vectors = mod.load_fixture_vectors()
-        bundle = mod.generate_sample_bundle("INC-TEST-TAMPER", vectors)
+        bundle = mod.generate_fixture_bundle("INC-TEST-TAMPER", vectors)
         bundle["timeline"][0]["payload"]["class"] = "tampered"
-        self.assertFalse(mod.validate_sample_bundle_integrity(bundle))
+        self.assertFalse(mod.validate_fixture_bundle_integrity(bundle))
 
 
 class TestCheckHelpers(TestCase):

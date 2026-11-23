@@ -13,6 +13,10 @@ import time
 import unittest
 from unittest.mock import patch
 
+TESTS_DIR = str(Path(__file__).resolve().parent)
+if TESTS_DIR not in sys.path:
+    sys.path.insert(0, TESTS_DIR)
+
 from test_migration_captured_execution import runner
 
 

@@ -67,7 +67,7 @@ DOC_KEYWORDS = [
 
 
 def check_file(path, label):
-    ok = path.exists()
+    ok = path.is_file()
     return {
         "check": f"file: {label}",
         "pass": ok,

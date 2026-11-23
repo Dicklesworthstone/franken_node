@@ -53,7 +53,7 @@ def _check(name: str, passed: bool, detail: str = "") -> dict:
 
 
 def check_file_exists(path: Path, label: str) -> dict:
-    exists = path.exists()
+    exists = path.is_file()
     return _check(
         f"file: {label}",
         exists,
