@@ -67,6 +67,7 @@ pub mod bundle;
 pub mod calibration;
 pub mod capsule;
 pub mod counterfactual;
+pub mod fleet_quiescence;
 pub mod honesty_manifest;
 pub mod incident_bundle;
 pub mod migration_throughput;

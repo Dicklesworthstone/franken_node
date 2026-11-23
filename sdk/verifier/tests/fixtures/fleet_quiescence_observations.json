@@ -1,0 +1,159 @@
+{
+  "fixture_kind": "independent_wire_signatures",
+  "live_execution_performed": false,
+  "signature_generator": "Python cryptography Ed25519 with independently key-sorted compact JSON and the documented domain/length prefixes; seeds 41 and 42 repeated 32 times. Protocol vectors only, not live fleet evidence.",
+  "policy": {
+    "schema_version": "franken-verifier/fleet-quiescence-policy/v1",
+    "evaluation_time": "2026-11-23T01:00:10Z",
+    "max_observation_age_secs": 30,
+    "expected_action_log": {
+      "action_count": 3,
+      "actions_sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+    },
+    "expected_pre_epoch": 7,
+    "expected_trace_id": "trace-maintenance",
+    "participants": [
+      {
+        "zone_id": "east",
+        "node_id": "node-a",
+        "supervisor_public_key_hex": "fa4834147f6e690c3693eff61336046403cd8ae2a14f31b3c407358569239565",
+        "project_root_sha256": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+        "minimum_generation": 7,
+        "expected_applied_actions": {
+          "action_count": 2,
+          "actions_sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+        },
+        "expected_active_hold_ids": ["hold-east"]
+      },
+      {
+        "zone_id": "west",
+        "node_id": "node-b",
+        "supervisor_public_key_hex": "197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d61",
+        "project_root_sha256": "cececececececececececececececececececececececececececececececece",
+        "minimum_generation": 9,
+        "expected_applied_actions": {
+          "action_count": 2,
+          "actions_sha256": "3333333333333333333333333333333333333333333333333333333333333333"
+        },
+        "expected_active_hold_ids": ["hold-west"]
+      }
+    ]
+  },
+  "http_response": {
+    "schema_version": "franken-node/fleet-http-api/v2",
+    "evidence": {
+      "schema_version": "franken-node/fleet-native-drain-evidence/v1",
+      "scope": "enrolled_epoch_barrier_quiescence_certified",
+      "observed_at": "2026-11-23T01:00:05Z",
+      "stale_after": {"secs": 30, "nanos": 0},
+      "action_count": 3,
+      "complete": true,
+      "fleet_quiescence_certified": true,
+      "uncovered_zones": [],
+      "nodes": [
+        {
+          "zone_id": "east",
+          "node_id": "node-a",
+          "expected_actions": {"action_count": 2, "actions_sha256": "2222222222222222222222222222222222222222222222222222222222222222"},
+          "last_seen": "2026-11-23T01:00:04Z",
+          "health": "maintenance",
+          "applied_actions": {"action_count": 2, "actions_sha256": "2222222222222222222222222222222222222222222222222222222222222222"},
+          "native_session_drain": {
+            "applied_actions": {"action_count": 2, "actions_sha256": "2222222222222222222222222222222222222222222222222222222222222222"},
+            "session_set_sha256": "abababababababababababababababababababababababababababababababab",
+            "admitted_sessions": 2,
+            "terminal_sessions": 2,
+            "pending_sessions": 0,
+            "indeterminate_sessions": 0,
+            "fence_held": true,
+            "supervisor_attestation": {
+              "schema_version": "franken-node/native-session-drain-attestation/v1",
+              "node_id": "node-a",
+              "zone_id": "east",
+              "drain_id": "00000000-0000-0000-0000-000000000001",
+              "generation": 7,
+              "project_root_sha256": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+              "observed_at": "2026-11-23T01:00:03Z",
+              "product_root_key_id": "ed25519:fa4834147f6e690c3693eff61336046403cd8ae2a14f31b3c407358569239565",
+              "checkpoint_sha256": "7218e7b74b566df8b7ff7dcc0d196209b316a15e4e9ef41d4c978066d31c6969",
+              "signature_hex": "9686d2ff0adae94068ae6ca68358c788566c5484d2412edf1e8bac3bf7e44117de87e64d9440a195829b34f189896a2538a7bf3b4c3bf6e89b0e61622460c800"
+            }
+          },
+          "ready": true,
+          "reason": "ready"
+        },
+        {
+          "zone_id": "west",
+          "node_id": "node-b",
+          "expected_actions": {"action_count": 2, "actions_sha256": "3333333333333333333333333333333333333333333333333333333333333333"},
+          "last_seen": "2026-11-23T01:00:04Z",
+          "health": "maintenance",
+          "applied_actions": {"action_count": 2, "actions_sha256": "3333333333333333333333333333333333333333333333333333333333333333"},
+          "native_session_drain": {
+            "applied_actions": {"action_count": 2, "actions_sha256": "3333333333333333333333333333333333333333333333333333333333333333"},
+            "session_set_sha256": "acacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacac",
+            "admitted_sessions": 3,
+            "terminal_sessions": 3,
+            "pending_sessions": 0,
+            "indeterminate_sessions": 0,
+            "fence_held": true,
+            "supervisor_attestation": {
+              "schema_version": "franken-node/native-session-drain-attestation/v1",
+              "node_id": "node-b",
+              "zone_id": "west",
+              "drain_id": "00000000-0000-0000-0000-000000000002",
+              "generation": 9,
+              "project_root_sha256": "cececececececececececececececececececececececececececececececece",
+              "observed_at": "2026-11-23T01:00:03Z",
+              "product_root_key_id": "ed25519:197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d61",
+              "checkpoint_sha256": "2013e72f742a75a80ac9fe0a75e8a0bc43e3382a5536beffc3a60724d8e10619",
+              "signature_hex": "da149549caab1fe4b100286d860ae1bc1d59c47534e76bbb8db0458484e9476cbf68ae907e285ac6f40a5a621fcb0157525155274c3f583f94855b993819cb03"
+            }
+          },
+          "ready": true,
+          "reason": "ready"
+        }
+      ]
+    },
+    "certificate": {
+      "schema_version": "franken-node/fleet-epoch-quiescence-certificate/v1",
+      "transition_id": "epoch-transition-7-to-8",
+      "pre_epoch": 7,
+      "committed_epoch": 8,
+      "initiator": "operator",
+      "reason": "maintenance",
+      "trace_id": "trace-maintenance",
+      "certified_at": "2026-11-23T01:00:05Z",
+      "action_log_checkpoint": {"action_count": 3, "actions_sha256": "1111111111111111111111111111111111111111111111111111111111111111"},
+      "fleet_quiescence_certified": true,
+      "participants": [
+        {
+          "zone_id": "east",
+          "node_id": "node-a",
+          "stage": "epoch_barrier_certified",
+          "drain_id": "00000000-0000-0000-0000-000000000001",
+          "generation": 7,
+          "admitted_sessions": 2,
+          "terminal_sessions": 2,
+          "session_set_sha256": "abababababababababababababababababababababababababababababababab",
+          "checkpoint_sha256": "7218e7b74b566df8b7ff7dcc0d196209b316a15e4e9ef41d4c978066d31c6969",
+          "supervisor_key_id": "ed25519:fa4834147f6e690c3693eff61336046403cd8ae2a14f31b3c407358569239565",
+          "active_hold_ids": ["hold-east"]
+        },
+        {
+          "zone_id": "west",
+          "node_id": "node-b",
+          "stage": "epoch_barrier_certified",
+          "drain_id": "00000000-0000-0000-0000-000000000002",
+          "generation": 9,
+          "admitted_sessions": 3,
+          "terminal_sessions": 3,
+          "session_set_sha256": "acacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacac",
+          "checkpoint_sha256": "2013e72f742a75a80ac9fe0a75e8a0bc43e3382a5536beffc3a60724d8e10619",
+          "supervisor_key_id": "ed25519:197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d61",
+          "active_hold_ids": ["hold-west"]
+        }
+      ]
+    }
+  }
+}
