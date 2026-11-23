@@ -97,7 +97,8 @@ pub(crate) fn fleet_policy_observation_digest(
 pub struct NativeSessionControlScope {
     /// A retained canonical operator project, not a guest filesystem grant.
     pub project_root: PathBuf,
-    /// Fence generation captured before the final live authority recheck.
+    /// Checked sum of this scope's and its ancestors' retained drain generations,
+    /// captured before the final live authority recheck.
     pub admission_generation: u64,
     /// Exact additional owner's admitted policy, when one was present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -150,11 +151,11 @@ pub struct NativeSessionAdmission {
 
 impl NativeSessionAdmission {
     fn belongs_to_control_scope(&self, project_root: &Path) -> bool {
-        self.project_root == project_root
+        self.project_root.starts_with(project_root)
             || self.control_scopes.as_ref().is_none_or(|scopes| {
                 scopes
                     .iter()
-                    .any(|scope| scope.project_root == project_root)
+                    .any(|scope| scope.project_root.starts_with(project_root))
             })
     }
 }
@@ -800,6 +801,7 @@ fn validate_admission(admission: &NativeSessionAdmission) -> Result<()> {
     {
         bail!("native-session admission paths are not bound to an absolute project root");
     }
+    project_key(&admission.project_root)?;
     if let Some(scopes) = &admission.control_scopes {
         if scopes.len() > MAX_ADDITIONAL_CONTROL_SCOPES {
             bail!("native-session admission exceeds its additional control-scope bound");
@@ -1835,6 +1837,10 @@ impl NativeSessionInventoryGuard {
         for scope in scopes {
             expected_scopes.insert(scope.project_root.as_path(), scope.admission_generation);
         }
+        let serialization_scopes: BTreeSet<_> = expected_scopes
+            .keys()
+            .flat_map(|project| project.ancestors())
+            .collect();
         verify_admission_capture(protected_root, &admission)?;
         read_retained_native_session_source_capsule(protected_root, &admission)
             .context("native-session sources must be retained before admission")?;
@@ -1850,15 +1856,16 @@ impl NativeSessionInventoryGuard {
         let mut refused_outcome = None;
         let (admitted, recovered_sessions) = retry_snapshot_conflict(|| {
             let mut tx = connection.transaction()?;
-            // Both the release and its independent operator participate in
-            // this same transaction conflict point. Neither can seal a
-            // zero-session census while a supervised worker is being admitted.
+            // Every enclosing owner participates in the same conflict point.
+            // Deduplicate shared ancestors of the release and operator roots;
+            // a parent cannot seal a census concurrently with child admission.
+            for project in &serialization_scopes {
+                serialize_project_admission(&mut tx, project)?;
+            }
             let mut admitted = refused_outcome.is_none();
             for (project, expected_generation) in &expected_scopes {
-                serialize_project_admission(&mut tx, project)?;
-                let drain = latest_drain(&tx, project)?;
-                admitted &= drain.as_ref().is_none_or(|drain| !drain.fence_held)
-                    && drain.as_ref().map_or(0, |drain| drain.generation) == *expected_generation;
+                let (generation, held_fence) = admission_scope_state(&tx, project)?;
+                admitted &= held_fence.is_none() && generation == Some(*expected_generation);
             }
             // A race after identity provisioning must leave a known unspawned
             // outcome, rather than an untracked capture or an apparent worker.
@@ -2150,12 +2157,22 @@ fn project_key(project_root: &Path) -> Result<&str> {
                 std::path::Component::ParentDir | std::path::Component::CurDir
             )
         })
+        || project_root.components().collect::<PathBuf>().as_os_str() != project_root.as_os_str()
     {
-        bail!("native-session drain requires an absolute project identity without traversal");
+        // Component-wise scope membership must use the same spelling as the
+        // SQL conflict key. Do not let aliases split one owner's admission lock.
+        // This is lexical only: retained projects need not still exist on disk.
+        bail!(
+            "native-session drain requires a canonical absolute project identity without traversal"
+        );
     }
-    project_root
+    let key = project_root
         .to_str()
-        .context("native-session drain project must be UTF-8")
+        .context("native-session drain project must be UTF-8")?;
+    if key.len() > 4096 || key.as_bytes().contains(&0) || project_root.components().count() > 128 {
+        bail!("native-session drain project identity exceeds its bounded control scope");
+    }
+    Ok(key)
 }
 
 fn control_hint_path_at(protected_root: &Path, project_root: &Path) -> Result<PathBuf> {
@@ -2319,6 +2336,30 @@ fn require_open_admission(drain: Option<&StoredNativeSessionDrain>) -> Result<u6
     Ok(drain.map_or(0, |drain| drain.generation))
 }
 
+/// Admission revisions cover the selected root and every enclosing owner.
+/// Each retained generation increases monotonically, so their checked sum
+/// detects a drain-and-release cycle even when a child's generation is larger.
+/// The public drain generation remains scoped to its exact control owner.
+/// Return held fences and overflow as data so a raced admission can retain its
+/// authenticated never-spawned outcome instead of an unresolved identity capture.
+fn admission_scope_state(
+    tx: &Transaction<'_>,
+    project_root: &Path,
+) -> Result<(Option<u64>, Option<String>)> {
+    project_key(project_root)?;
+    let mut generation = Some(0_u64);
+    let mut held_fence = None;
+    for scope in project_root.ancestors() {
+        if let Some(drain) = latest_drain(tx, scope)? {
+            generation = generation.and_then(|value| value.checked_add(drain.generation));
+            if drain.fence_held && held_fence.is_none() {
+                held_fence = Some(drain.drain_id);
+            }
+        }
+    }
+    Ok((generation, held_fence))
+}
+
 fn check_retained_drain_byte_budget(tx: &Transaction<'_>) -> Result<()> {
     let sizes = tx.query(
         "SELECT COALESCE(SUM(LENGTH(CAST(state_json AS BLOB))), 0) FROM native_session_drains;",
@@ -2336,15 +2377,19 @@ fn check_retained_drain_byte_budget(tx: &Transaction<'_>) -> Result<()> {
 }
 
 fn admission_ticket_at(protected_root: &Path, project_root: &Path) -> Result<u64> {
+    project_key(project_root)?;
     retry_snapshot_conflict(|| {
         let Some(connection) = open_inventory(protected_root, false)? else {
             return Ok(0);
         };
         let mut tx = connection.transaction()?;
-        let drain = latest_drain(&tx, project_root)?;
+        let (generation, held_fence) = admission_scope_state(&tx, project_root)?;
         tx.commit()?;
         protect_sidecars(protected_root)?;
-        require_open_admission(drain.as_ref())
+        if let Some(drain_id) = held_fence {
+            bail!("native-session admission is fenced by local fleet drain {drain_id}");
+        }
+        generation.context("native-session enclosing admission revision exhausted")
     })
 }
 
@@ -2361,9 +2406,10 @@ fn existing_admission_root() -> Result<Option<PathBuf>> {
 }
 
 /// Capture this before the final policy/trust recheck. Admission compares the
-/// generation in the same transaction that records the worker obligation.
-/// An active fence also makes the existing live observer cancel old workers.
+/// enclosing revision in the same transaction that records the worker obligation.
+/// An active ancestor fence also makes the live observer cancel old workers.
 pub(crate) fn native_session_admission_ticket(project_root: &Path) -> Result<u64> {
+    project_key(project_root)?;
     let Some(root) = existing_admission_root()? else {
         return Ok(0);
     };
@@ -2376,6 +2422,7 @@ pub(crate) fn native_session_admission_ticket(project_root: &Path) -> Result<u64
 /// a reference leg from its operator's maintenance hold. This is an admission
 /// refusal, not a native-session registration or quiescence certificate.
 pub(crate) fn enforce_reference_admission(project_root: &Path) -> Result<()> {
+    project_key(project_root)?;
     let Some(root) = existing_admission_root()? else {
         return Ok(());
     };
@@ -6952,6 +6999,290 @@ mod tests {
     }
 
     #[test]
+    fn admission_scope_keys_reject_aliases_and_unbounded_ancestor_walks() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("absent-evidence");
+        let project = temp.path().join("project");
+        assert_eq!(project_key(&project).unwrap(), project.to_str().unwrap());
+        for suffix in ["/./nested", "//nested", "/nested/", "/../other", "/nul\0"] {
+            let alias = PathBuf::from(format!("{}{suffix}", project.display()));
+            assert!(admission_ticket_at(&root, &alias).is_err(), "{alias:?}");
+        }
+        let deep = (0..129).fold(project, |path, _| path.join("x"));
+        assert!(admission_ticket_at(&root, &deep).is_err());
+        assert!(!root.exists());
+    }
+
+    #[test]
+    fn nested_admission_retains_parent_and_child_maintenance_owners() {
+        for parent_first in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("evidence");
+            let mut admission = fixture(&root, 191);
+            let parent = admission.project_root.clone();
+            let child = parent.join("nested/child");
+            admission.project_root = child.clone();
+            admission.entrypoint = child.join("index.js");
+            let nonce = admission.session_nonce.clone();
+            let mut guard = NativeSessionInventoryGuard::admit(&root, admission, 0).unwrap();
+            guard.worker_started();
+            let parent_history = vec![maintenance_action("parent-held", None)];
+            let child_history = vec![maintenance_action("child-held", None)];
+            let parent_checkpoint = fleet_application_checkpoint(&parent_history, "prod").unwrap();
+            let child_checkpoint = fleet_application_checkpoint(&child_history, "prod").unwrap();
+            for (project, node, checkpoint, history) in [
+                (&parent, "parent-node", &parent_checkpoint, &parent_history),
+                (&child, "child-node", &child_checkpoint, &child_history),
+            ] {
+                let drain =
+                    super::begin_drain_at(&root, project, node, "prod", checkpoint, history)
+                        .unwrap();
+                assert_eq!(drain.session_nonces, vec![nonce.clone()]);
+                assert_eq!(drain.checkpoint.pending_sessions, 1);
+            }
+            assert!(admission_ticket_at(&root, &child).is_err());
+            guard.worker_reaped();
+            guard.finish(
+                NativeSessionOutcomeKind::ControlStopped,
+                successful_ledger_observation(),
+            );
+            for (project, node, checkpoint) in [
+                (&parent, "parent-node", &parent_checkpoint),
+                (&child, "child-node", &child_checkpoint),
+            ] {
+                let held = finish_drain_at(&root, project, node, "prod", checkpoint).unwrap();
+                assert_eq!(held.checkpoint.terminal_sessions, 1);
+                assert!(held.checkpoint.fence_held);
+            }
+            let parent_owner = (&parent, "parent-node", "parent-held", "parent-resumed");
+            let child_owner = (&child, "child-node", "child-held", "child-resumed");
+            let resume_order = if parent_first {
+                [parent_owner, child_owner]
+            } else {
+                [child_owner, parent_owner]
+            };
+            let mut enclosing_revision = 0;
+            for (index, (project, node, hold_id, resume_id)) in resume_order.into_iter().enumerate()
+            {
+                let history = vec![
+                    maintenance_action(hold_id, None),
+                    maintenance_action(resume_id, Some(hold_id)),
+                ];
+                let checkpoint = fleet_application_checkpoint(&history, "prod").unwrap();
+                super::begin_drain_at(&root, project, node, "prod", &checkpoint, &history).unwrap();
+                assert!(
+                    admission_ticket_at(&root, &child).is_err(),
+                    "publishing {node}'s resume must not skip successful action application"
+                );
+                let resumed = finish_drain_at(&root, project, node, "prod", &checkpoint).unwrap();
+                assert!(resumed.checkpoint.is_complete());
+                assert!(resumed.maintenance_hold_ids.is_empty());
+                enclosing_revision += resumed.generation;
+                if index == 0 {
+                    assert!(
+                        admission_ticket_at(&root, &child).is_err(),
+                        "resuming {node} first must retain the other owner's independent hold"
+                    );
+                }
+            }
+            let ticket = admission_ticket_at(&root, &child).unwrap();
+            assert_eq!(ticket, enclosing_revision);
+            let mut fresh = fixture(&root, 192);
+            fresh.project_root = child.clone();
+            fresh.entrypoint = child.join("index.js");
+            let mut fresh_guard = NativeSessionInventoryGuard::admit(&root, fresh, ticket).unwrap();
+            fresh_guard.worker_started();
+            assert_eq!(
+                read_inventory_at(&root, Some(&child))
+                    .unwrap()
+                    .pending_sessions,
+                1
+            );
+            fresh_guard.worker_reaped();
+            fresh_guard.finish(
+                NativeSessionOutcomeKind::Completed,
+                successful_ledger_observation(),
+            );
+        }
+    }
+
+    #[test]
+    fn nested_admission_rejects_parent_fence_and_completed_cycle() {
+        for finish_parent_before_admission in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("evidence");
+            let mut initial = fixture(&root, 193);
+            let parent = initial.project_root.clone();
+            let child = parent.join("nested");
+            initial.project_root = child.clone();
+            initial.entrypoint = child.join("index.js");
+            drop(NativeSessionInventoryGuard::admit(&root, initial, 0).unwrap());
+            // A max-generation ticket would miss the parent's later 0 -> 1.
+            for action_count in 1..=3 {
+                begin_drain_at(&root, &child, "child-node", "prod", &actions(action_count))
+                    .unwrap();
+                finish_drain_at(&root, &child, "child-node", "prod", &actions(action_count))
+                    .unwrap();
+            }
+            let old_ticket = admission_ticket_at(&root, &child).unwrap();
+            assert_eq!(old_ticket, 3);
+            let parent_drain =
+                begin_drain_at(&root, &parent, "parent-node", "prod", &actions(1)).unwrap();
+            assert_eq!(parent_drain.checkpoint.admitted_sessions, 1);
+            if finish_parent_before_admission {
+                assert!(
+                    finish_drain_at(&root, &parent, "parent-node", "prod", &actions(1))
+                        .unwrap()
+                        .checkpoint
+                        .is_complete()
+                );
+                assert_eq!(admission_ticket_at(&root, &child).unwrap(), 4);
+            } else {
+                assert!(admission_ticket_at(&root, &child).is_err());
+            }
+            let mut stale = fixture(&root, 194);
+            stale.project_root = child.clone();
+            stale.entrypoint = child.join("index.js");
+            let error = NativeSessionInventoryGuard::admit(&root, stale.clone(), old_ticket)
+                .err()
+                .unwrap();
+            assert!(format!("{error:#}").contains("drain fence"));
+            let key = ed25519_dalek::SigningKey::from_bytes(&[17; 32]).verifying_key();
+            let refused = read_outcome_receipt(&root, &stale, &key).unwrap().unwrap();
+            assert_eq!(
+                refused.outcome.process,
+                NativeSessionProcessObservation::NotSpawned
+            );
+            assert_eq!(
+                refused.outcome.effects,
+                NativeSessionEffectObservation::NotStarted
+            );
+            let finished =
+                finish_drain_at(&root, &parent, "parent-node", "prod", &actions(1)).unwrap();
+            assert!(
+                finished.checkpoint.is_complete(),
+                "a signed never-spawned refusal must not poison the parent's original census"
+            );
+            assert_eq!(finished.session_nonces, parent_drain.session_nonces);
+            let ticket = admission_ticket_at(&root, &child).unwrap();
+            assert_eq!(ticket, 4);
+            let mut fresh = fixture(&root, 195);
+            fresh.project_root = child.clone();
+            fresh.entrypoint = child.join("index.js");
+            drop(NativeSessionInventoryGuard::admit(&root, fresh, ticket).unwrap());
+        }
+    }
+
+    #[test]
+    fn ancestor_census_retains_operator_descendants_without_prefix_siblings() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("evidence");
+        let parent = temp.path().join("operator");
+        let operator = parent.join("tenant");
+        let admission = operator_fixture(&root, 196, &operator, 0);
+        let nonce = admission.session_nonce.clone();
+        let mut guard = NativeSessionInventoryGuard::admit(&root, admission, 0).unwrap();
+        guard.worker_started();
+        let sibling = temp.path().join("operator-other");
+        let mut unrelated = fixture(&root, 197);
+        unrelated.project_root = sibling.clone();
+        unrelated.entrypoint = sibling.join("index.js");
+        let mut unrelated_guard = NativeSessionInventoryGuard::admit(&root, unrelated, 0).unwrap();
+        unrelated_guard.worker_started();
+        for scope in [&parent, &operator] {
+            let inventory = read_inventory_at(&root, Some(scope)).unwrap();
+            assert_eq!(inventory.pending_sessions, 1);
+            assert_eq!(inventory.records[0].admission.session_nonce, nonce);
+        }
+        let started = begin_drain_at(&root, &parent, "operator-node", "prod", &actions(1)).unwrap();
+        assert_eq!(started.session_nonces, vec![nonce]);
+        assert_eq!(started.checkpoint.pending_sessions, 1);
+        assert!(admission_ticket_at(&root, &operator).is_err());
+        assert_eq!(admission_ticket_at(&root, &sibling).unwrap(), 0);
+        guard.worker_reaped();
+        guard.finish(
+            NativeSessionOutcomeKind::ControlStopped,
+            successful_ledger_observation(),
+        );
+        let completed =
+            finish_drain_at(&root, &parent, "operator-node", "prod", &actions(1)).unwrap();
+        assert!(completed.checkpoint.is_complete());
+        assert_eq!(completed.checkpoint.terminal_sessions, 1);
+        assert_eq!(
+            read_inventory_at(&root, Some(&sibling))
+                .unwrap()
+                .pending_sessions,
+            1
+        );
+        let stale = operator_fixture(&root, 198, &operator, 0);
+        assert!(NativeSessionInventoryGuard::admit(&root, stale.clone(), 0).is_err());
+        let key = ed25519_dalek::SigningKey::from_bytes(&[17; 32]).verifying_key();
+        let refused = read_outcome_receipt(&root, &stale, &key).unwrap().unwrap();
+        assert_eq!(
+            refused.outcome.process,
+            NativeSessionProcessObservation::NotSpawned
+        );
+        let fresh = operator_fixture(&root, 199, &operator, completed.generation);
+        drop(NativeSessionInventoryGuard::admit(&root, fresh, 0).unwrap());
+        unrelated_guard.worker_reaped();
+        unrelated_guard.finish(
+            NativeSessionOutcomeKind::ControlStopped,
+            successful_ledger_observation(),
+        );
+    }
+
+    #[test]
+    fn held_ancestor_census_cannot_hide_a_previously_omitted_descendant() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("evidence");
+        drop(NativeSessionInventoryGuard::admit(&root, fixture(&root, 200), 0).unwrap());
+        let parent = temp.path().join("held-parent");
+        let history = vec![maintenance_action("ancestor-held", None)];
+        let checkpoint = fleet_application_checkpoint(&history, "prod").unwrap();
+        super::begin_drain_at(&root, &parent, "parent-node", "prod", &checkpoint, &history)
+            .unwrap();
+        finish_drain_at(&root, &parent, "parent-node", "prod", &checkpoint).unwrap();
+        let original = attest_drain_at(&root, &parent, "parent-node", "prod", &checkpoint).unwrap();
+        assert_eq!(original.checkpoint.admitted_sessions, 0);
+        // Model an authenticated pre-upgrade admission omitted by the old
+        // exact-root census. Never use new admission to bypass a held fence.
+        let mut omitted = fixture(&root, 201);
+        omitted.project_root = parent.join("nested");
+        omitted.entrypoint = omitted.project_root.join("index.js");
+        retain_admission_receipt(&root, &omitted).unwrap();
+        let connection = open_inventory(&root, false).unwrap().unwrap();
+        let mut tx = connection.transaction().unwrap();
+        tx.execute_with_params(
+            "INSERT INTO native_sessions(session_nonce, admission_json, outcome_json)
+             VALUES (?1, ?2, NULL);",
+            &[
+                SqliteValue::Text(omitted.session_nonce.clone().into()),
+                SqliteValue::Text(serde_json::to_string(&omitted).unwrap().into()),
+            ],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        assert_eq!(
+            read_inventory_at(&root, Some(&parent))
+                .unwrap()
+                .pending_sessions,
+            1
+        );
+        assert!(
+            super::begin_drain_at(&root, &parent, "parent-node", "prod", &checkpoint, &history,)
+                .is_err()
+        );
+        assert!(finish_drain_at(&root, &parent, "parent-node", "prod", &checkpoint).is_err());
+        assert!(attest_drain_at(&root, &parent, "parent-node", "prod", &checkpoint).is_err());
+        assert!(admission_ticket_at(&root, &omitted.project_root).is_err());
+        let mut tx = connection.transaction().unwrap();
+        let retained = latest_drain(&tx, &parent).unwrap().unwrap();
+        assert_eq!(retained.session_nonces, original.session_nonces);
+        assert_eq!(retained.attested_checkpoint, Some(original.checkpoint));
+        tx.commit().unwrap();
+    }
+
+    #[test]
     fn reference_admission_checks_ancestor_holds_until_every_owner_resumes() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("evidence");
@@ -6978,9 +7309,9 @@ mod tests {
         let held = finish_drain_at(&root, &project, "node-a", "prod", &checkpoint).unwrap();
         assert!(held.checkpoint.fence_held);
         assert_eq!(held.maintenance_hold_ids.len(), 2);
-        // A nested input has no exact native-session row of its own. The
-        // reference guard must still retain the ancestor's operator fence.
-        assert_eq!(admission_ticket_at(&root, &nested).unwrap(), 0);
+        // A nested input has no exact drain row of its own. Both native and
+        // reference admission must retain the ancestor's operator fences.
+        assert!(admission_ticket_at(&root, &nested).is_err());
         assert!(enforce_reference_admission_at(&root, &project).is_err());
         assert!(enforce_reference_admission_at(&root, &nested).is_err());
         enforce_reference_admission_at(&root, &unrelated).unwrap();
@@ -7009,6 +7340,10 @@ mod tests {
         assert!(resumed.checkpoint.is_complete());
         enforce_reference_admission_at(&root, &project).unwrap();
         enforce_reference_admission_at(&root, &nested).unwrap();
+        assert_eq!(
+            admission_ticket_at(&root, &nested).unwrap(),
+            resumed.generation
+        );
         assert!(!resumed.fleet_quiescence_certified);
     }
 
@@ -7036,6 +7371,8 @@ mod tests {
         tx.commit().unwrap();
         let error = enforce_reference_admission_at(&root, &project.join("nested")).unwrap_err();
         assert!(format!("{error:#}").contains("decode native-session inventory record"));
+        let error = admission_ticket_at(&root, &project.join("nested")).unwrap_err();
+        assert!(format!("{error:#}").contains("decode native-session inventory record"));
     }
 
     #[test]
@@ -7043,8 +7380,14 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("absent-evidence");
         enforce_reference_admission_at(&root, &temp.path().join("project")).unwrap();
+        assert_eq!(
+            admission_ticket_at(&root, &temp.path().join("project")).unwrap(),
+            0
+        );
         assert!(!root.exists());
         assert!(enforce_reference_admission_at(&root, Path::new("relative/project")).is_err());
+        assert!(admission_ticket_at(&root, Path::new("relative/project")).is_err());
+        assert!(admission_ticket_at(&root, &temp.path().join("project/../other")).is_err());
     }
 
     #[test]
