@@ -324,7 +324,14 @@ class ReportDependencyAssessmentTests(unittest.TestCase):
         self.rewriter = Mock()
         self.rewriter.produce_report.side_effect = lambda _scan: {
             "suggestions": [], "summary": {"by_category": {}}}
+        class ExecutionCancelled(RuntimeError):
+            pass
+
         self.runner = SimpleNamespace(raise_walk_error=raise_walk_error,
+                                      CancellationState=object,
+                                      ExecutionCancelled=ExecutionCancelled,
+                                      check_cancellation=lambda _cancellation=None: None,
+                                      record_cancellation=lambda _report, _cancellation=None: None,
                                       DEFAULT_BASELINE_COMMAND=("node",),
                                       DEFAULT_MIGRATION_COMMAND=("franken-node",))
         self.replay = SimpleNamespace(unique_object=inventory._unique, reject_constant=inventory._constant)
@@ -336,7 +343,8 @@ class ReportDependencyAssessmentTests(unittest.TestCase):
                           "MAX_SCAN_SOURCE_BYTES": 10 * 1024 * 1024}
         path = ROOT / "scripts/migrate_report.py"
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        names = {"assess_snapshot", "dependency_review_reasons", "generate_full_report", "preflight_destinations"}
+        names = {"assess_snapshot", "dependency_review_reasons", "generate_full_report",
+                 "preflight_destinations", "record_cancellation"}
         functions = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names]
         self.assertEqual({node.name for node in functions}, names)
         exec(compile(ast.Module(body=functions, type_ignores=[]), str(path), "exec"), self.namespace)
@@ -419,9 +427,9 @@ class ReportDependencyAssessmentTests(unittest.TestCase):
         # No native process is executed or claimed to pass by this test.
         self.replay.LEGS = ("baseline", "migration")
         self.replay.checked_options = lambda _options: {"total_timeout_seconds": 30}
-        self.replay.runtime_bindings = lambda *_args: ({"baseline": ["node"], "migration": ["franken-node"]}, {})
-        self.runner.capture_project = lambda *_args: ({}, "captured-input")
-        self.runner.stage_project = lambda _snapshot, path, _deadline: path.mkdir()
+        self.replay.runtime_bindings = lambda *_args, **_kwargs: ({"baseline": ["node"], "migration": ["franken-node"]}, {})
+        self.runner.capture_project = lambda *_args, **_kwargs: ({}, "captured-input")
+        self.runner.stage_project = lambda _snapshot, path, _deadline, **_kwargs: path.mkdir()
         self.runner.validate_project = lambda *_args, **_kwargs: {
             "summary": {"verdict": "PASS"},
             "inputs": {"baseline_sha256": "captured-input", "migration_sha256": "captured-input"},
@@ -437,7 +445,7 @@ class ReportDependencyAssessmentTests(unittest.TestCase):
                                        "dependencies": [{"name": "package", "risk_level": level}]},
                               "risk_assessment": {"risk_score": 0, "difficulty": {"level": "low"}},
                               "rewrite_suggestions": {"suggestions": [], "summary": {"by_category": {}}}}
-                self.namespace["assess_snapshot"] = lambda *_args: copy.deepcopy(assessment)
+                self.namespace["assess_snapshot"] = lambda *_args, **_kwargs: copy.deepcopy(assessment)
                 with patch.object(scanner, "load_registry", return_value={"present": True}):
                     report = self.namespace["generate_full_report"](self.root, execute=True)
                 blocked = level != "low"

@@ -113,7 +113,9 @@ def test_profile_fixture_aggregate_invariants_are_realistic():
 def test_integration_test_inventory_names_all_8_required_tests():
     data = static_json()
     integration_check = next(check for check in data["checks"] if check["name"] == "integration_tests")
-    assert integration_check["details"]["total_tests"] == 8
+    assert integration_check["passed"]
+    assert "all 8 required integration tests are present" in integration_check["message"]
+    assert integration_check["details"]["total_tests"] >= 8
 
 
 def test_full_gate_command_uses_rch_for_cargo():
