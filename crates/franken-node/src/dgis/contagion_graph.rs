@@ -68,7 +68,7 @@ pub fn validate_node_id(node: &str) -> Result<(), GraphError> {
         return Err(overlong_node_id_error());
     }
     let trimmed = node.trim();
-    if trimmed.is_empty() || node != trimmed || node.chars().any(char::is_control) {
+    if trimmed.is_empty() || trimmed.len() != node.len() || node.chars().any(char::is_control) {
         return Err(GraphError::InvalidNodeId(node.to_string()));
     }
     Ok(())
@@ -281,7 +281,7 @@ impl ContagionGraph {
         if self.nodes.len() >= max_nodes {
             return;
         }
-        let Ok(node_id) = self.interner.intern(&node) else {
+        let Ok(node_id) = self.interner.intern_prevalidated(&node) else {
             return;
         };
         if self.nodes_internal.insert(node_id) {

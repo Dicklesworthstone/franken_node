@@ -23,7 +23,7 @@
 //! assert_eq!(interner.resolve(id_a), Some("npm:@scope/pkg"));
 //! ```
 
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::fmt;
 
 /// Maximum distinct node ids a single `NodeInterner` will accept. Matches
@@ -78,7 +78,9 @@ pub enum InternError {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NodeInterner {
     to_str: Vec<String>,
-    from_str: BTreeMap<String, u32>,
+    // Point-lookup index only; never iterated. Deterministic insertion-order
+    // iteration is owned solely by `to_str`.
+    from_str: HashMap<String, u32>,
 }
 
 impl NodeInterner {
@@ -87,7 +89,7 @@ impl NodeInterner {
     pub fn new() -> Self {
         Self {
             to_str: Vec::new(),
-            from_str: BTreeMap::new(),
+            from_str: HashMap::new(),
         }
     }
 
@@ -103,6 +105,11 @@ impl NodeInterner {
     /// cap.
     pub fn intern(&mut self, s: &str) -> Result<NodeId, InternError> {
         validate_intern_node_id(s)?;
+        self.intern_prevalidated(s)
+    }
+
+    /// Intern a node id string already validated by `validate_node_id`.
+    pub(crate) fn intern_prevalidated(&mut self, s: &str) -> Result<NodeId, InternError> {
         if let Some(&existing) = self.from_str.get(s) {
             return Ok(NodeId::from_raw(existing));
         }
@@ -158,7 +165,8 @@ impl NodeInterner {
 }
 
 fn validate_intern_node_id(s: &str) -> Result<(), InternError> {
-    if s.trim().is_empty() || s != s.trim() || s.chars().any(char::is_control) {
+    let trimmed = s.trim();
+    if trimmed.is_empty() || trimmed.len() != s.len() || s.chars().any(char::is_control) {
         return Err(InternError::InvalidNodeId);
     }
     Ok(())
