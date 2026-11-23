@@ -1167,7 +1167,6 @@ class TestReleaseEvidenceBinding:
             "--expected-franken-engine-revision",
             "--expected-release-run-url",
             "--max-age-hours",
-            "FRANKEN_ENGINE_REVISION: 6d204d13c710cb6e8d279f93b629ba6588add106",
             "NODE_VERSION: 22.14.0",
             "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
             '--engine-ref "$FRANKEN_ENGINE_REVISION"',
@@ -1179,6 +1178,29 @@ class TestReleaseEvidenceBinding:
         ]
         for token in required:
             assert token in workflow, f"dist workflow missing release gate token: {token}"
+        dist_engine_match = re.search(
+            r"^\s*FRANKEN_ENGINE_REVISION:\s*([0-9a-f]{40})\s*$",
+            workflow,
+            flags=re.MULTILINE,
+        )
+        assert dist_engine_match is not None, (
+            "dist workflow must pin FRANKEN_ENGINE_REVISION to a full 40-hex commit SHA"
+        )
+        siblings_action = (
+            ROOT / ".github" / "actions" / "franken-siblings" / "action.yml"
+        ).read_text()
+        siblings_engine_match = re.search(
+            r"--engine-ref\s+([0-9a-f]{40})\b",
+            siblings_action,
+        )
+        assert siblings_engine_match is not None, (
+            "franken-siblings action must pin --engine-ref to a full 40-hex commit SHA"
+        )
+        assert dist_engine_match.group(1) == siblings_engine_match.group(1), (
+            "dist.yml FRANKEN_ENGINE_REVISION must stay synchronized with "
+            "franken-siblings --engine-ref "
+            f"({dist_engine_match.group(1)} != {siblings_engine_match.group(1)})"
+        )
         corpus_run_index = workflow.index("ops compat-corpus-run")
         semantic_verify_index = workflow.index(
             "./target/release/franken-node verify corpus"

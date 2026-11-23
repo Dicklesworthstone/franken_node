@@ -1,6 +1,6 @@
 # Module Disposition Table (`bd-reality-20260923-26n9r.14`)
 
-This document records the authoritative product disposition (`WIRE`, `GATE`, or `RETAIN-NON-AUTHORITY`) for trust, control-plane, runtime, replay, migration, and frontier modules under `crates/franken-node/src/`, enforced on every push by `scripts/check_reachability.py` and `scripts/reachability_ceiling.json` (`island_line_ceiling = 14084`).
+This document records the authoritative product disposition (`WIRE`, `GATE`, or `RETAIN-NON-AUTHORITY`) for trust, control-plane, runtime, replay, migration, and frontier modules under `crates/franken-node/src/`, enforced on every push by `scripts/check_reachability.py` and `scripts/reachability_ceiling.json` (`island_line_ceiling = 12237`).
 
 Per `AGENTS.md` Rule 1, zero files are deleted without explicit written owner authorization.
 

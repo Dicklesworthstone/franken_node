@@ -20,6 +20,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 README_PATH = ROOT / "README.md"
 DIST_YML_PATH = ROOT / ".github" / "workflows" / "dist.yml"
 INSTALL_SH_PATH = ROOT / "install.sh"
