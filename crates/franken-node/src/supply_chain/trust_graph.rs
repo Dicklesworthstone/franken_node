@@ -24,7 +24,10 @@ use serde::{Deserialize, Serialize};
 use super::module_resolution_graph::dependency_topology::{
     CapturedLockfileSource, TrustGraphProjection, TrustPackagePlacement, TrustTopologyCoverage,
 };
-use super::trust_card::{RevocationStatus, TrustCard};
+use super::trust_card::{
+    CapturedDependencyArtifact, DependencyArtifactMatch, RevocationStatus, TrustCard,
+    match_trust_card_artifact,
+};
 
 /// Schema tag for [`TrustGraph`] and the CLI report built on it.
 pub const TRUST_GRAPH_SCHEMA: &str = "franken-node/trust-graph/v1";
@@ -56,6 +59,8 @@ pub const RULE_WEAK_DEPENDENCY: &str = "R3_WEAK_DEPENDENCY";
 pub const RULE_PUBLISHER_INCIDENT: &str = "R4_PUBLISHER_INCIDENT";
 pub const RULE_PUBLISHER_CAP: &str = "R4_PUBLISHER_CAP";
 pub const RULE_UNTRACKED_DEPENDENCY: &str = "COVERAGE_UNTRACKED_DEPENDENCY";
+pub const RULE_ARTIFACT_MISMATCH: &str = "COVERAGE_ARTIFACT_MISMATCH";
+pub const RULE_ARTIFACT_UNVERIFIED: &str = "COVERAGE_ARTIFACT_UNVERIFIED";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -87,6 +92,31 @@ pub struct TrustExplanation {
     pub cap: Option<u16>,
 }
 
+/// Whether a registry card binds every captured placement of its package.
+/// Matching metadata does not authenticate installed source bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrustArtifactStatus {
+    Matched,
+    Unverified,
+    Mismatch,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrustArtifactCoverage {
+    pub status: TrustArtifactStatus,
+    pub placement_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+impl TrustArtifactCoverage {
+    #[must_use]
+    pub fn is_mismatch(&self) -> bool {
+        self.status == TrustArtifactStatus::Mismatch
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrustGraphNode {
     pub node_id: String,
@@ -95,8 +125,11 @@ pub struct TrustGraphNode {
     /// The node's own score: the card's reputation (extensions) or the mean
     /// of its extensions' scores (publishers). `None` for untracked nodes.
     pub base_score: Option<u16>,
-    /// Score after propagation; never above `base_score`.
+    /// Score after propagation; never above `base_score`. A mismatched
+    /// healthy card has no current-artifact score; known containment remains.
     pub effective_score: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_coverage: Option<TrustArtifactCoverage>,
     pub quarantined: bool,
     pub revoked: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -167,6 +200,8 @@ pub struct TrustGraphSummary {
     /// Complete captured metadata, separate from installed-content or runtime proof.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dependency_metadata_complete: Option<bool>,
+    #[serde(default)]
+    pub artifact_mismatches: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -480,6 +515,54 @@ fn label<T: Serialize>(value: &T) -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
+/// Bind cards to all placements once, without reopening project metadata or
+/// selecting an arbitrary installation when multiple versions share a name.
+/// Missing pins remain explicitly unverified inventory, not artifact proof.
+#[must_use]
+pub fn trust_artifact_coverages(
+    cards: &[TrustCard],
+    lockfile: &LockfileDependencyGraph,
+) -> BTreeMap<String, TrustArtifactCoverage> {
+    let Some(capture) = &lockfile.capture else {
+        return BTreeMap::new();
+    };
+    let mut by_package: BTreeMap<&str, Vec<CapturedDependencyArtifact>> = BTreeMap::new();
+    for placement in &capture.placements {
+        by_package
+            .entry(&placement.package_name)
+            .or_default()
+            .push(CapturedDependencyArtifact {
+                location: Some(placement.location.clone()),
+                version: placement.version.clone(),
+                integrity: placement.integrity.clone(),
+            });
+    }
+    cards
+        .iter()
+        .filter_map(|card| {
+            let package = card.extension.extension_id.strip_prefix("npm:")?;
+            let expected = by_package.get(package).map_or(&[][..], Vec::as_slice);
+            let (status, detail) = match match_trust_card_artifact(card, expected) {
+                DependencyArtifactMatch::Matched => (TrustArtifactStatus::Matched, None),
+                DependencyArtifactMatch::Unverified(detail) => {
+                    (TrustArtifactStatus::Unverified, Some(detail))
+                }
+                DependencyArtifactMatch::Mismatch(detail) => {
+                    (TrustArtifactStatus::Mismatch, Some(detail))
+                }
+            };
+            Some((
+                card.extension.extension_id.clone(),
+                TrustArtifactCoverage {
+                    status,
+                    placement_count: expected.len(),
+                    detail,
+                },
+            ))
+        })
+        .collect()
+}
+
 /// Build the graph from the latest cards, their version histories (oldest
 /// first; may omit extensions with a single version) and the project's
 /// lockfile dependency relation.
@@ -491,6 +574,7 @@ pub fn build_trust_graph(
 ) -> TrustGraph {
     let mut nodes: BTreeMap<String, TrustGraphNode> = BTreeMap::new();
     let mut edges: BTreeSet<TrustGraphEdge> = BTreeSet::new();
+    let mut artifact_coverages = trust_artifact_coverages(cards, lockfile);
 
     // Extensions, with their own-state rules (R1, R2).
     for card in cards {
@@ -514,6 +598,24 @@ pub fn build_trust_graph(
                 cap: Some(QUARANTINE_CAP),
             });
         }
+        let artifact_coverage = artifact_coverages.remove(&card.extension.extension_id);
+        let artifact_mismatch = artifact_coverage
+            .as_ref()
+            .is_some_and(TrustArtifactCoverage::is_mismatch);
+        if let Some(coverage) = &artifact_coverage
+            && let Some(detail) = &coverage.detail
+        {
+            explanation.push(TrustExplanation {
+                rule: if artifact_mismatch {
+                    RULE_ARTIFACT_MISMATCH
+                } else {
+                    RULE_ARTIFACT_UNVERIFIED
+                }
+                .to_string(),
+                detail: detail.clone(),
+                cap: None,
+            });
+        }
         nodes.insert(
             card.extension.extension_id.clone(),
             TrustGraphNode {
@@ -521,7 +623,12 @@ pub fn build_trust_graph(
                 kind: TrustNodeKind::Extension,
                 display_name: format!("{}@{}", card.extension.extension_id, card.extension.version),
                 base_score: Some(base),
-                effective_score: Some(effective),
+                effective_score: if artifact_mismatch && !revoked && !card.active_quarantine {
+                    None
+                } else {
+                    Some(effective)
+                },
+                artifact_coverage,
                 quarantined: card.active_quarantine,
                 revoked,
                 risk_level: Some(label(&card.user_facing_risk_assessment.level)),
@@ -589,6 +696,7 @@ pub fn build_trust_graph(
                 display_name,
                 base_score: Some(base),
                 effective_score: Some(effective),
+                artifact_coverage: None,
                 quarantined: false,
                 revoked: false,
                 risk_level: None,
@@ -676,6 +784,7 @@ pub fn build_trust_graph(
                 display_name: node_id.clone(),
                 base_score: None,
                 effective_score: None,
+                artifact_coverage: None,
                 quarantined: false,
                 revoked: false,
                 risk_level: None,
@@ -776,6 +885,14 @@ pub fn build_trust_graph(
             .capture
             .as_ref()
             .map(DependencyGraphCapture::metadata_complete),
+        artifact_mismatches: nodes
+            .iter()
+            .filter(|node| {
+                node.artifact_coverage
+                    .as_ref()
+                    .is_some_and(TrustArtifactCoverage::is_mismatch)
+            })
+            .count(),
     };
     TrustGraph {
         schema_version: TRUST_GRAPH_SCHEMA.to_string(),
@@ -1853,4 +1970,310 @@ mod tests {
         let second = build_trust_graph(&reversed, &BTreeMap::new(), &lock);
         assert_eq!(first, second);
     }
+
+    fn captured_artifact_dependencies(
+        roots: serde_json::Value,
+        packages: serde_json::Value,
+    ) -> LockfileDependencyGraph {
+        let root = tempfile::tempdir().expect("artifact capture project");
+        std::fs::write(
+            root.path().join("package.json"),
+            serde_json::json!({
+                "name": "artifact-graph-fixture",
+                "version": "1.0.0",
+                "dependencies": roots,
+            })
+            .to_string(),
+        )
+        .expect("root manifest");
+        std::fs::write(
+            root.path().join("package-lock.json"),
+            serde_json::json!({"lockfileVersion": 3, "packages": packages}).to_string(),
+        )
+        .expect("captured lockfile");
+        let topology =
+            super::super::module_resolution_graph::dependency_topology::build(root.path())
+                .expect("canonical capture");
+        LockfileDependencyGraph::from_captured_topology(
+            topology.trust_graph_projection().expect("trust projection"),
+        )
+        .expect("bounded trust graph")
+    }
+
+    fn artifact_integrity(byte: u8) -> String {
+        use base64::Engine as _;
+        format!(
+            "sha512-{}",
+            base64::engine::general_purpose::STANDARD.encode([byte; 64])
+        )
+    }
+
+    fn artifact_card(extension: &str, version: &str, byte: u8) -> TrustCard {
+        let mut result = named(
+            &card("npm:@acme/auth-guard"),
+            extension,
+            "artifact-publisher",
+            900,
+        );
+        result.extension.version = version.to_owned();
+        result.provenance_summary.artifact_hashes =
+            vec![format!("sha512:{}", hex::encode([byte; 64]))];
+        result
+    }
+
+    #[test]
+    fn artifact_matching_uses_actual_alias_identity_and_captured_metadata() {
+        let dependencies = captured_artifact_dependencies(
+            serde_json::json!({"shortcut": "npm:actual@1.0.0"}),
+            serde_json::json!({
+                "node_modules/shortcut": {
+                    "name": "actual",
+                    "version": "1.0.0",
+                    "integrity": artifact_integrity(7),
+                },
+            }),
+        );
+        let current = artifact_card("npm:actual", "1.0.0", 7);
+        let graph = build_trust_graph(&[current], &BTreeMap::new(), &dependencies);
+        let actual = node(&graph, "npm:actual");
+        let coverage = actual.artifact_coverage.as_ref().expect("artifact coverage");
+        assert_eq!(coverage.status, TrustArtifactStatus::Matched);
+        assert_eq!(coverage.placement_count, 1);
+        assert!(coverage.detail.is_none());
+        assert_eq!(actual.base_score, Some(900));
+        assert_eq!(actual.effective_score, Some(900));
+        assert_eq!(graph.summary.artifact_mismatches, 0);
+        assert!(!graph.nodes.iter().any(|item| item.node_id == "npm:shortcut"));
+        let capture = dependencies.capture.as_ref().expect("retained capture");
+        assert_eq!(capture.placements[0].location, "node_modules/shortcut");
+        assert_eq!(capture.placements[0].package_name, "actual");
+    }
+
+    #[test]
+    fn one_matching_placement_cannot_hide_another_version_mismatch() {
+        let dependencies = captured_artifact_dependencies(
+            serde_json::json!({"parent": "1.0.0", "leaf": "1.0.0"}),
+            serde_json::json!({
+                "node_modules/parent": {
+                    "version": "1.0.0",
+                    "integrity": artifact_integrity(8),
+                    "dependencies": {"leaf": "2.0.0"},
+                },
+                "node_modules/leaf": {
+                    "version": "1.0.0",
+                    "integrity": artifact_integrity(7),
+                },
+                "node_modules/parent/node_modules/leaf": {
+                    "version": "2.0.0",
+                    "integrity": artifact_integrity(9),
+                },
+            }),
+        );
+        let cards = [
+            artifact_card("npm:parent", "1.0.0", 8),
+            artifact_card("npm:leaf", "1.0.0", 7),
+        ];
+        let graph = build_trust_graph(&cards, &BTreeMap::new(), &dependencies);
+        let leaf = node(&graph, "npm:leaf");
+        let coverage = leaf.artifact_coverage.as_ref().expect("artifact coverage");
+        assert!(coverage.is_mismatch());
+        assert_eq!(coverage.placement_count, 2);
+        assert_eq!(leaf.base_score, Some(900));
+        assert_eq!(leaf.effective_score, None);
+        assert!(leaf.explanation.iter().any(|reason| {
+            reason.rule == RULE_ARTIFACT_MISMATCH && reason.detail.contains("2.0.0")
+        }));
+        assert_eq!(graph.summary.artifact_mismatches, 1);
+        assert_eq!(
+            blast_radius(&graph, "npm:leaf"),
+            vec![BlastRadiusEntry {
+                extension_id: "npm:parent".to_owned(),
+                depth: 1,
+            }]
+        );
+        assert_eq!(
+            node(&graph, "npm:parent")
+                .artifact_coverage
+                .as_ref()
+                .expect("parent artifact")
+                .status,
+            TrustArtifactStatus::Matched
+        );
+    }
+
+    #[test]
+    fn matching_multiple_placements_keep_the_score_without_merging_digest_pairs() {
+        let dependencies = captured_artifact_dependencies(
+            serde_json::json!({"parent": "1.0.0", "leaf": "1.0.0"}),
+            serde_json::json!({
+                "node_modules/parent": {
+                    "version": "1.0.0",
+                    "dependencies": {"leaf": "1.0.0"},
+                },
+                "node_modules/leaf": {
+                    "version": "1.0.0",
+                    "integrity": artifact_integrity(7),
+                },
+                "node_modules/parent/node_modules/leaf": {
+                    "version": "1.0.0",
+                    "integrity": artifact_integrity(7),
+                },
+            }),
+        );
+        let cards = [artifact_card("npm:leaf", "1.0.0", 7)];
+        let coverage = trust_artifact_coverages(&cards, &dependencies);
+        assert_eq!(coverage["npm:leaf"].status, TrustArtifactStatus::Matched);
+        assert_eq!(coverage["npm:leaf"].placement_count, 2);
+        let graph = build_trust_graph(&cards, &BTreeMap::new(), &dependencies);
+        assert_eq!(node(&graph, "npm:leaf").effective_score, Some(900));
+        assert_eq!(graph.summary.artifact_mismatches, 0);
+    }
+
+    #[test]
+    fn same_version_with_one_changed_digest_is_a_current_artifact_mismatch() {
+        let dependencies = captured_artifact_dependencies(
+            serde_json::json!({"parent": "1.0.0", "leaf": "1.0.0"}),
+            serde_json::json!({
+                "node_modules/parent": {
+                    "version": "1.0.0",
+                    "dependencies": {"leaf": "1.0.0"},
+                },
+                "node_modules/leaf": {
+                    "version": "1.0.0",
+                    "integrity": artifact_integrity(7),
+                },
+                "node_modules/parent/node_modules/leaf": {
+                    "version": "1.0.0",
+                    "integrity": artifact_integrity(8),
+                },
+            }),
+        );
+        let graph = build_trust_graph(
+            &[artifact_card("npm:leaf", "1.0.0", 7)],
+            &BTreeMap::new(),
+            &dependencies,
+        );
+        let leaf = node(&graph, "npm:leaf");
+        assert_eq!(leaf.effective_score, None);
+        let coverage = leaf.artifact_coverage.as_ref().expect("artifact coverage");
+        assert_eq!(coverage.status, TrustArtifactStatus::Mismatch);
+        assert_eq!(coverage.placement_count, 2);
+        assert!(
+            coverage
+                .detail
+                .as_deref()
+                .expect("mismatch explanation")
+                .contains("integrity")
+        );
+    }
+
+    #[test]
+    fn stronger_integrity_contradiction_cannot_be_hidden_by_matching_weak_digest() {
+        use base64::Engine as _;
+        let weak = base64::engine::general_purpose::STANDARD.encode([5_u8; 32]);
+        let dependencies = captured_artifact_dependencies(
+            serde_json::json!({"leaf": "1.0.0"}),
+            serde_json::json!({
+                "node_modules/leaf": {
+                    "version": "1.0.0",
+                    "integrity": format!("sha256-{weak} {}", artifact_integrity(8)),
+                },
+            }),
+        );
+        let mut current = artifact_card("npm:leaf", "1.0.0", 7);
+        current
+            .provenance_summary
+            .artifact_hashes
+            .push(format!("sha256:{}", hex::encode([5_u8; 32])));
+        let graph = build_trust_graph(&[current], &BTreeMap::new(), &dependencies);
+        let leaf = node(&graph, "npm:leaf");
+        assert_eq!(leaf.effective_score, None);
+        let coverage = leaf.artifact_coverage.as_ref().expect("artifact coverage");
+        assert_eq!(coverage.status, TrustArtifactStatus::Mismatch);
+        assert!(
+            coverage
+                .detail
+                .as_deref()
+                .expect("strong-digest explanation")
+                .contains("sha512")
+        );
+    }
+
+    #[test]
+    fn incomplete_inventory_and_registry_only_views_do_not_claim_artifact_matches() {
+        let dependencies = captured_artifact_dependencies(
+            serde_json::json!({"leaf": "1.0.0"}),
+            serde_json::json!({"node_modules/leaf": {"version": "1.0.0"}}),
+        );
+        let cards = [
+            artifact_card("npm:leaf", "1.0.0", 7),
+            artifact_card("npm:outside-project", "1.0.0", 7),
+        ];
+        let graph = build_trust_graph(&cards, &BTreeMap::new(), &dependencies);
+        for (identity, placements) in [("npm:leaf", 1), ("npm:outside-project", 0)] {
+            let item = node(&graph, identity);
+            let coverage = item.artifact_coverage.as_ref().expect("explicit inventory state");
+            assert_eq!(coverage.status, TrustArtifactStatus::Unverified);
+            assert_eq!(coverage.placement_count, placements);
+            assert!(coverage.detail.is_some());
+            assert_eq!(item.effective_score, Some(900));
+            assert!(item.explanation.iter().any(|reason| {
+                reason.rule == RULE_ARTIFACT_UNVERIFIED
+            }));
+        }
+        assert_eq!(graph.summary.artifact_mismatches, 0);
+
+        let registry_only = build_trust_graph(
+            &cards,
+            &BTreeMap::new(),
+            &LockfileDependencyGraph::default(),
+        );
+        assert!(
+            registry_only
+                .nodes
+                .iter()
+                .all(|item| item.artifact_coverage.is_none())
+        );
+        assert_eq!(node(&registry_only, "npm:leaf").effective_score, Some(900));
+    }
+
+    #[test]
+    fn artifact_mismatch_never_lifts_existing_quarantine_or_revocation() {
+        let dependencies = captured_artifact_dependencies(
+            serde_json::json!({"leaf": "2.0.0"}),
+            serde_json::json!({
+                "node_modules/leaf": {
+                    "version": "2.0.0",
+                    "integrity": artifact_integrity(8),
+                },
+            }),
+        );
+        for (quarantined, revoked, expected, rule) in [
+            (true, false, QUARANTINE_CAP, RULE_QUARANTINED),
+            (false, true, 0, RULE_REVOKED),
+        ] {
+            let mut current = artifact_card("npm:leaf", "1.0.0", 7);
+            current.active_quarantine = quarantined;
+            if revoked {
+                current.revocation_status = RevocationStatus::Revoked {
+                    reason: "existing package revocation".to_owned(),
+                    revoked_at: "2026-01-01T00:00:00Z".to_owned(),
+                };
+            }
+            let graph = build_trust_graph(&[current], &BTreeMap::new(), &dependencies);
+            let leaf = node(&graph, "npm:leaf");
+            assert!(
+                leaf.artifact_coverage
+                    .as_ref()
+                    .expect("artifact coverage")
+                    .is_mismatch()
+            );
+            assert_eq!(leaf.effective_score, Some(expected));
+            assert_eq!(leaf.quarantined, quarantined);
+            assert_eq!(leaf.revoked, revoked);
+            assert!(leaf.explanation.iter().any(|reason| reason.rule == rule));
+            assert_eq!(graph.summary.artifact_mismatches, 1);
+        }
+    }
+
 }

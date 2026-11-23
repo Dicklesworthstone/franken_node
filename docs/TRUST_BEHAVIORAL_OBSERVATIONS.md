@@ -249,7 +249,11 @@ must match the current verified card before that stream contributes behavioral
 severity to current-artifact prioritization. A matching final observation
 does not mean the entire trajectory came from that artifact: a stream may
 include earlier versions under the same measurement contract. Historical
-streams remain visible in the report.
+streams remain visible in the report. If any captured project placement
+contradicts the card's version or comparable strong integrity, the stream is
+reported with `current_artifact: false` and coverage status
+`project_artifact_mismatch`. Its admitted history remains intact, but it does
+not supply BPET priorities for the newly selected artifact.
 
 Assessment reads are bounded to 64 MiB of journal data and 65,536 samples,
 in addition to the existing per-stream limits. Exceeding a bound fails
@@ -278,6 +282,28 @@ JSON reports include `dependency_capture`
 integrity and workspace-link target. `coverage` reports missing metadata
 explicitly. These observations do not authenticate installed source bytes,
 prove live JavaScript resolution, or authorize a runtime effect.
+
+Each captured npm card also reports `artifact_coverage`: `matched`,
+`unverified`, or `mismatch`, its placement count, and an explanation when
+coverage is incomplete. A match requires an exact version and comparable
+strong integrity for **every** captured placement of that actual package
+identity. One matching installation cannot mask another locked version or
+digest. The comparison uses the runtime admission matcher, including its
+strongest-SRI rule.
+
+The graph keeps the signed card's historical `base_score` visible. For a healthy
+mismatched card, `effective_score` is `null`, and the card supplies neither a
+trust ceiling nor an immunization candidate for that new artifact. Existing
+quarantine and revocation restrictions remain active and propagate to
+dependents. Missing versions or integrity produce `unverified` inventory;
+their displayed registry scores do not establish artifact authentication.
+Reading these reports does not refresh or mutate signed trust cards.
+
+`trust-card reputation` exposes the same coverage on its score entries. Its
+numeric API represents a healthy mismatch with a zero base/composite score,
+below threshold, and omits stale publisher, verifier, and dependency
+endorsements. Known containment evidence remains effective. Re-scan and verify
+the newly selected artifact before treating its previous card as current.
 
 The dependency graph retains untracked packages, including bridges between
 packages with trust cards. Known downstream trust ceilings propagate through

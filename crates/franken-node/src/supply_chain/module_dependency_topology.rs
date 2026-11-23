@@ -730,6 +730,15 @@ impl DependencyTopology {
                         detail: format!("workspace link at {:?} has an unnamed target", node.location),
                     }
                 })?;
+                if let Some(captured_name) = node.name.as_deref() {
+                    let installed_as = super::package_name_from_lock_path(&node.location);
+                    if captured_name != name && installed_as.as_deref() != Some(captured_name) {
+                        return invalid_metadata(format!(
+                            "workspace link at {:?} names {captured_name:?}, but its captured target names {name:?}",
+                            node.location,
+                        ));
+                    }
+                }
                 bind_trust_identity(&mut names, index, name, &node.location)?;
             }
         }
@@ -1158,6 +1167,62 @@ mod tests {
         assert!(topology.trust_dependencies(".", false).is_ok());
         let error = topology.trust_graph_projection().unwrap_err().to_string();
         assert!(error.contains("conflicting trust identities"), "{error}");
+    }
+
+    #[test]
+    fn trust_projection_validates_unreferenced_workspace_link_identities() {
+        let root = fixture(json!({
+            "node_modules/alias":{"name":"impostor","link":true,"resolved":"packages/actual"}
+        }));
+        put(
+            root.path(),
+            "package.json",
+            json!({"workspaces":["packages/*"]}),
+        );
+        put(
+            root.path(),
+            "packages/actual/package.json",
+            json!({"name":"actual","version":"1.0.0"}),
+        );
+        let topology = build(root.path()).unwrap();
+        assert!(topology.trust_dependencies(".", false).unwrap().is_empty());
+        let error = topology.trust_graph_projection().unwrap_err().to_string();
+        assert!(error.contains("captured target names"), "{error}");
+
+        for record in [
+            json!({"link":true,"resolved":"packages/actual"}),
+            json!({"name":"actual","link":true,"resolved":"packages/actual"}),
+        ] {
+            put(
+                root.path(),
+                "package-lock.json",
+                json!({"lockfileVersion":3,"packages":{"node_modules/alias":record}}),
+            );
+            let projection = build(root.path())
+                .unwrap()
+                .trust_graph_projection()
+                .unwrap();
+            assert_eq!(
+                projection
+                    .dependencies
+                    .keys()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+                ["actual"]
+            );
+            assert!(projection.root_dependencies.is_empty());
+            assert!(projection.placements.iter().all(|placement| {
+                placement.package_name == "actual"
+                    && placement.version.as_deref() == Some("1.0.0")
+            }));
+        }
+        put(root.path(), "packages/actual/package.json", json!({}));
+        let error = build(root.path())
+            .unwrap()
+            .trust_graph_projection()
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unnamed target"), "{error}");
     }
 
     #[test]

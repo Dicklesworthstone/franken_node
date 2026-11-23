@@ -15807,7 +15807,7 @@ struct TrustGraphCliReport {
 fn build_trust_graph_immunization(
     graph: &supply_chain::trust_graph::TrustGraph,
     lockfile_available: bool,
-    behavioral_streams: Vec<supply_chain::behavioral_observation::BehavioralStreamAssessment>,
+    mut behavioral_streams: Vec<supply_chain::behavioral_observation::BehavioralStreamAssessment>,
     trace_id: &str,
 ) -> Result<TrustGraphImmunizationReport> {
     use lib_bpet::dgis_fusion::{BpetDgisFusionInput, BpetDgisFusionPolicy, prioritize_with_dgis};
@@ -15820,6 +15820,25 @@ fn build_trust_graph_immunization(
 
     const MAX_PLANNER_NODES: usize = 18;
     const SCENARIO_LOSS_PER_AFFECTED_PACKAGE_USD: f64 = 50_000.0;
+
+    // History admission binds the latest observation to the registry card.
+    // A project may have selected a different artifact since that admission;
+    // keep its history visible without treating it as current project evidence.
+    let mismatched_packages: BTreeSet<&str> = graph
+        .nodes
+        .iter()
+        .filter(|node| {
+            node.artifact_coverage
+                .as_ref()
+                .is_some_and(supply_chain::trust_graph::TrustArtifactCoverage::is_mismatch)
+        })
+        .map(|node| node.node_id.as_str())
+        .collect();
+    for stream in &mut behavioral_streams {
+        if mismatched_packages.contains(stream.extension_id.as_str()) {
+            stream.current_artifact = false;
+        }
+    }
 
     let mut critical_nodes = Vec::new();
     let mut risk_surfaces = Vec::new();
@@ -15861,7 +15880,9 @@ fn build_trust_graph_immunization(
             .max_by(f64::total_cmp);
         behavioral_coverage.push(TrustGraphBehavioralCoverage {
             extension_id: node.node_id.clone(),
-            status: if current_streams.is_empty() {
+            status: if mismatched_packages.contains(node.node_id.as_str()) {
+                "project_artifact_mismatch"
+            } else if current_streams.is_empty() {
                 "no_current_artifact_observations"
             } else if assessed_streams == 0 {
                 "insufficient_comparable_observations"
@@ -15880,10 +15901,15 @@ fn build_trust_graph_immunization(
         let Some(structural) = topology.as_ref().and_then(|all| all.get(&node.node_id)) else {
             continue;
         };
-        let effective_score_1000 = node
-            .effective_score
-            .context("trust graph extension lacks an observed trust score")?
-            .min(supply_chain::trust_graph::TRUST_SCORE_SCALE);
+        let Some(effective_score) = node.effective_score else {
+            anyhow::ensure!(
+                mismatched_packages.contains(node.node_id.as_str()),
+                "trust graph extension lacks an observed trust score"
+            );
+            continue;
+        };
+        let effective_score_1000 =
+            effective_score.min(supply_chain::trust_graph::TRUST_SCORE_SCALE);
         let trust_deficit = (1.0
             - (f64::from(effective_score_1000)
                 / f64::from(supply_chain::trust_graph::TRUST_SCORE_SCALE)))
@@ -16020,7 +16046,7 @@ fn build_trust_graph_immunization(
             "Trust deficit is 1 minus the registry score divided by 1000; it is not an observed compromise probability.",
             "The trust bottleneck combines 0.6 trust deficit and 0.4 dependent fraction; structural graph metrics are computed separately.",
             "Risk-model transitive_dependency_count and max_depth_in_graph describe reverse dependency reach and maximum shortest-path dependent depth, excluding publisher nodes.",
-            "A behavioral severity describes one authenticated collector/workload trajectory, potentially spanning historical package versions; current_artifact means its latest measured version and digest match the current registry card.",
+            "A behavioral severity describes one authenticated collector/workload trajectory, potentially spanning historical package versions; current_artifact means its latest measured version and digest match the registry card and no captured project placement contradicts that card. Missing integrity remains unverified inventory, not installed-byte authentication.",
             "Planner loss is clamp(0.28 + 0.45 * max(trust deficit, independently assessed stream severity) + 0.25 * dependent fraction, 0.05, 0.99). Missing behavioral evidence is not a zero observation.",
             "Candidate ranking multiplies modeled loss by one plus transitive dependents; the bounded catalog covers only the selected nodes.",
             "BPET-DGIS uses a hypothetical USD 50000 loss per affected package. Numeric confidence zero records absent calibration; it is not a measured confidence level.",
@@ -16155,10 +16181,11 @@ fn render_trust_graph_human(report: &TrustGraphCliReport) -> String {
             summary.transitions
         ),
         format!(
-            "  quarantined={} revoked={} degraded_by_propagation={} lockfile={}",
+            "  quarantined={} revoked={} degraded_by_propagation={} artifact_mismatches={} lockfile={}",
             summary.quarantined,
             summary.revoked,
             summary.degraded_by_propagation,
+            summary.artifact_mismatches,
             report.lockfile.as_deref().unwrap_or("none")
         ),
     ];
@@ -40053,6 +40080,8 @@ struct TrustCardReputationNodeEntry {
     node_id: String,
     node_type: reputation_graph_apis::NodeType,
     display_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    artifact_coverage: Option<supply_chain::trust_graph::TrustArtifactCoverage>,
     base_score: f64,
     composite_score: f64,
     meets_threshold: bool,
@@ -40100,6 +40129,21 @@ fn handle_trust_card_reputation(
         .list(&TrustCardListFilter::empty(), trace_id, now_secs)
         .map_err(|err| anyhow::anyhow!(err.to_string()))?;
     let (lockfile_path, lockfile_graph) = load_project_lockfile_graph(Path::new("."))?;
+    let artifact_coverages =
+        supply_chain::trust_graph::trust_artifact_coverages(&cards, &lockfile_graph);
+    let mismatched_packages: BTreeSet<&str> = artifact_coverages
+        .iter()
+        .filter(|(_, coverage)| coverage.is_mismatch())
+        .map(|(id, _)| id.as_str())
+        .collect();
+    let incident_packages: BTreeSet<&str> = cards
+        .iter()
+        .filter(|card| {
+            card.active_quarantine
+                || matches!(card.revocation_status, RevocationStatus::Revoked { .. })
+        })
+        .map(|card| card.extension.extension_id.as_str())
+        .collect();
 
     let mut engine = reputation_graph_apis::ReputationGraphApis::default();
     let created_now = Utc::now().to_rfc3339();
@@ -40164,10 +40208,14 @@ fn handle_trust_card_reputation(
 
     for card in &cards {
         let ext_id = &card.extension.extension_id;
+        let artifact_mismatch = mismatched_packages.contains(ext_id.as_str());
         let is_revoked = matches!(card.revocation_status, RevocationStatus::Revoked { .. });
         let normalized_bps =
             (f64::from(card.reputation_score_basis_points.min(1_000)) / 1_000.0).clamp(0.0, 1.0);
-        let ext_base = if is_revoked {
+        // This reputation API uses numeric scores. Zero plus explicit
+        // mismatch coverage represents absent current-artifact trust; it is
+        // not a new registry observation or a mutation of the signed card.
+        let ext_base = if is_revoked || (artifact_mismatch && !card.active_quarantine) {
             0.0
         } else if card.active_quarantine {
             normalized_bps.min(0.1)
@@ -40191,6 +40239,12 @@ fn handle_trust_card_reputation(
                 trace_id,
             )
             .map_err(|err| anyhow::anyhow!(err))?;
+
+        // A publisher or verifier's statement about another artifact cannot
+        // lend positive evidence to this one. Known containment still applies.
+        if artifact_mismatch && !incident_packages.contains(ext_id.as_str()) {
+            continue;
+        }
 
         let pub_edge_weight = if is_revoked {
             -1.0
@@ -40258,12 +40312,17 @@ fn handle_trust_card_reputation(
 
     for (pkg, deps) in &lockfile_graph.dependencies {
         let parent_id = supply_chain::trust_graph::npm_extension_id(pkg);
-        if !engine.nodes().contains_key(&parent_id) {
+        if !engine.nodes().contains_key(&parent_id)
+            || mismatched_packages.contains(parent_id.as_str())
+        {
             continue;
         }
         for dep in deps {
             let dep_id = supply_chain::trust_graph::npm_extension_id(dep);
-            if dep_id == parent_id {
+            if dep_id == parent_id
+                || (mismatched_packages.contains(dep_id.as_str())
+                    && !incident_packages.contains(dep_id.as_str()))
+            {
                 continue;
             }
             let Some(dep_node) = engine.nodes().get(&dep_id) else {
@@ -40328,6 +40387,7 @@ fn handle_trust_card_reputation(
             });
         }
         scores.push(TrustCardReputationNodeEntry {
+            artifact_coverage: artifact_coverages.get(node_id).cloned(),
             node_id: node_meta.node_id,
             node_type: node_meta.node_type,
             display_name: node_meta.display_name,
@@ -40383,6 +40443,14 @@ fn handle_trust_card_reputation(
                 entry.edge_count,
                 entry.neighbors.len()
             ));
+            if let Some(coverage) = &entry.artifact_coverage
+                && let Some(detail) = &coverage.detail
+            {
+                lines.push(format!(
+                    "    artifact coverage {:?} ({} placements): {detail}",
+                    coverage.status, coverage.placement_count
+                ));
+            }
         }
         println!("{}", lines.join("\n"));
     }

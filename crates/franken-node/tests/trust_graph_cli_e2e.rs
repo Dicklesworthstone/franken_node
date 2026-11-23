@@ -467,6 +467,39 @@ fn immunization_uses_admitted_measurements_and_keeps_artifact_scope() {
         base64::engine::general_purpose::STANDARD.encode([0xb2_u8; 32])
     ));
     std::fs::write(&lock_path, serde_json::to_vec(&lock).unwrap()).unwrap();
+    // Until the registry is refreshed, its latest card still authenticates
+    // the old artifact. Its measurements remain inspectable but cannot rank
+    // the different artifact now selected by the project's dependency capture.
+    let stale = json_ok(root, &["trust", "graph", "--immunize", "--json"]);
+    assert_eq!(
+        node(&stale["graph"], "npm:lib-core")["artifact_coverage"]["status"],
+        "mismatch"
+    );
+    assert_eq!(
+        coverage(&stale, "npm:lib-core")["status"],
+        "project_artifact_mismatch"
+    );
+    assert_eq!(
+        stale["immunization"]["behavioral_streams"][0]["current_artifact"],
+        false
+    );
+    assert_eq!(
+        stale["immunization"]["behavioral_streams"][0]["sample_count"],
+        8
+    );
+    assert!(
+        stale["immunization"]["bpet_dgis_priorities"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        stale["immunization"]["planner_selected_nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|id| id != "npm:lib-core")
+    );
     json_ok(root, &["trust", "scan", ".", "--refresh", "--json"]);
     let upgraded = json_ok(root, &["trust", "graph", "--immunize", "--json"]);
     assert_eq!(
@@ -936,4 +969,204 @@ fn selected_metadata_errors_cannot_downgrade_the_trust_graph_authority() {
         String::from_utf8_lossy(&ambiguous.stderr)
     );
     assert!(diagnostic.contains("Bun and npm lockfiles"), "{diagnostic}");
+}
+
+fn fixture_integrity(byte: u8) -> String {
+    format!(
+        "sha256-{}",
+        base64::engine::general_purpose::STANDARD.encode([byte; 32])
+    )
+}
+
+fn project_with_artifact_pin() -> (tempfile::TempDir, Value) {
+    let workspace = project();
+    let root = workspace.path();
+    let mut lock: Value =
+        serde_json::from_slice(&std::fs::read(root.join("package-lock.json")).unwrap()).unwrap();
+    lock["packages"]["node_modules/lib-core"]["integrity"] =
+        serde_json::json!(fixture_integrity(0xa1));
+    write_json(root, "package-lock.json", &lock);
+    json_ok(root, &["trust", "scan", ".", "--refresh", "--json"]);
+    (workspace, lock)
+}
+
+#[test]
+fn changed_artifact_pins_do_not_inherit_a_current_trust_score() {
+    let (workspace, lock) = project_with_artifact_pin();
+    let root = workspace.path();
+    let signed_card = json_ok(root, &["trust-card", "show", "npm:lib-core", "--json"]);
+    assert!(
+        signed_card["card_hash"]
+            .as_str()
+            .is_some_and(|hash| !hash.is_empty())
+    );
+    let original = json_ok(root, &["trust", "graph", "--json"]);
+    let original_node = node(&original["graph"], "npm:lib-core");
+    assert_eq!(original_node["artifact_coverage"]["status"], "matched");
+    assert_eq!(original_node["artifact_coverage"]["placement_count"], 1);
+    let original_score = original_node["effective_score"].as_u64().unwrap();
+    assert_eq!(original["graph"]["summary"]["artifact_mismatches"], 0);
+    // Missing hashes are incomplete inventory, not contradictory evidence.
+    assert_eq!(
+        node(&original["graph"], "npm:web-kit")["artifact_coverage"]["status"],
+        "unverified"
+    );
+
+    for (field, changed) in [
+        ("version", serde_json::json!("2.0.8")),
+        ("integrity", serde_json::json!(fixture_integrity(0xb2))),
+    ] {
+        let mut changed_lock = lock.clone();
+        changed_lock["packages"]["node_modules/lib-core"][field] = changed;
+        write_json(root, "package-lock.json", &changed_lock);
+        let report = json_ok(root, &["trust", "graph", "--json"]);
+        let selected = node(&report["graph"], "npm:lib-core");
+        assert_eq!(selected["kind"], "extension");
+        assert_eq!(selected["artifact_coverage"]["status"], "mismatch");
+        assert_eq!(selected["artifact_coverage"]["placement_count"], 1);
+        assert!(
+            selected["artifact_coverage"]["detail"]
+                .as_str()
+                .is_some_and(|detail| !detail.is_empty()),
+            "{field}: {selected}"
+        );
+        assert!(selected["effective_score"].is_null(), "{field}: {selected}");
+        assert_eq!(report["graph"]["summary"]["artifact_mismatches"], 1);
+
+        // The weighted reputation API must not restore positive trust from
+        // publisher, verifier or dependency edges for a different artifact.
+        let reputation = json_ok(
+            root,
+            &[
+                "trust-card", "reputation", "--extension", "npm:lib-core", "--json",
+            ],
+        );
+        let scores = reputation["scores"].as_array().unwrap();
+        assert_eq!(scores.len(), 1, "{reputation}");
+        let score = &scores[0];
+        assert_eq!(score["node_id"], "npm:lib-core");
+        assert_eq!(score["artifact_coverage"]["status"], "mismatch");
+        assert_eq!(score["base_score"].as_f64(), Some(0.0), "{reputation}");
+        assert_eq!(score["composite_score"].as_f64(), Some(0.0), "{reputation}");
+        assert_eq!(score["meets_threshold"], false);
+        assert_eq!(score["edge_count"], 0);
+        assert!(score["neighbors"].as_array().unwrap().is_empty());
+        assert!(
+            reputation["focused_subgraph"]["edges"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            json_ok(root, &["trust-card", "show", "npm:lib-core", "--json"]),
+            signed_card,
+            "graph and reputation inspection must not rewrite the signed card"
+        );
+    }
+
+    // Graph inspection never rewrites the authenticated card to bless a new
+    // pin or permanently demote the historical artifact it actually describes.
+    write_json(root, "package-lock.json", &lock);
+    let restored = json_ok(root, &["trust", "graph", "--json"]);
+    let restored_node = node(&restored["graph"], "npm:lib-core");
+    assert_eq!(restored_node["artifact_coverage"]["status"], "matched");
+    assert_eq!(restored_node["effective_score"].as_u64(), Some(original_score));
+    assert_eq!(restored["graph"]["summary"]["artifact_mismatches"], 0);
+    let reputation = json_ok(
+        root,
+        &[
+            "trust-card", "reputation", "--extension", "npm:lib-core", "--json",
+        ],
+    );
+    assert_eq!(reputation["scores"][0]["artifact_coverage"]["status"], "matched");
+    assert!(
+        reputation["scores"][0]["base_score"]
+            .as_f64()
+            .is_some_and(|score| score > 0.0),
+        "{reputation}"
+    );
+    assert_eq!(
+        json_ok(root, &["trust-card", "show", "npm:lib-core", "--json"]),
+        signed_card
+    );
+}
+
+#[test]
+fn every_captured_placement_must_match_before_package_trust_is_propagated() {
+    let (workspace, lock) = project_with_artifact_pin();
+    let root = workspace.path();
+    for (version, digest) in [("2.0.8", 0xa1), ("2.0.7", 0xb2), ("2.0.7", 0xa1)] {
+        let mut nested = lock.clone();
+        nested["packages"]["node_modules/web-kit/node_modules/lib-core"] = serde_json::json!({
+            "version": version,
+            "integrity": fixture_integrity(digest)
+        });
+        write_json(root, "package-lock.json", &nested);
+        let report = json_ok(root, &["trust", "graph", "--json"]);
+        let selected = node(&report["graph"], "npm:lib-core");
+        let all_match = version == "2.0.7" && digest == 0xa1;
+        assert_eq!(
+            selected["artifact_coverage"]["status"],
+            if all_match { "matched" } else { "mismatch" },
+            "{report}"
+        );
+        assert_eq!(selected["artifact_coverage"]["placement_count"], 2);
+        assert_eq!(selected["effective_score"].is_number(), all_match, "{report}");
+        let placements = report["dependency_capture"]["placements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|placement| placement["package_name"] == "lib-core")
+            .collect::<Vec<_>>();
+        assert_eq!(placements.len(), 2);
+        assert!(placements.iter().any(|placement| {
+            placement["location"] == "node_modules/lib-core"
+                && placement["version"] == "2.0.7"
+        }));
+        assert!(placements.iter().any(|placement| {
+            placement["location"] == "node_modules/web-kit/node_modules/lib-core"
+                && placement["version"] == version
+        }));
+    }
+}
+
+#[test]
+fn mismatched_artifacts_keep_known_quarantine_and_revocation_effective() {
+    let (workspace, mut lock) = project_with_artifact_pin();
+    let root = workspace.path();
+    json_ok(
+        root,
+        &["trust", "quarantine", "--artifact", "npm:lib-core", "--json"],
+    );
+    lock["packages"]["node_modules/lib-core"]["version"] = serde_json::json!("2.0.8");
+    write_json(root, "package-lock.json", &lock);
+    let quarantined = json_ok(root, &["trust", "graph", "--json"]);
+    let selected = node(&quarantined["graph"], "npm:lib-core");
+    assert_eq!(selected["artifact_coverage"]["status"], "mismatch");
+    assert_eq!(selected["quarantined"], true);
+    assert!(
+        selected["effective_score"]
+            .as_u64()
+            .is_some_and(|score| score <= 100),
+        "{selected}"
+    );
+    assert!(
+        node(&quarantined["graph"], "npm:web-kit")["effective_score"]
+            .as_u64()
+            .is_some_and(|score| score <= 300),
+        "{quarantined}"
+    );
+
+    json_ok(root, &["trust", "revoke", "npm:lib-core", "--json"]);
+    let revoked = json_ok(root, &["trust", "graph", "--json"]);
+    let selected = node(&revoked["graph"], "npm:lib-core");
+    assert_eq!(selected["artifact_coverage"]["status"], "mismatch");
+    assert_eq!(selected["revoked"], true);
+    assert_eq!(selected["effective_score"], 0);
+    assert!(
+        node(&revoked["graph"], "npm:web-kit")["effective_score"]
+            .as_u64()
+            .is_some_and(|score| score <= 200),
+        "{revoked}"
+    );
 }
