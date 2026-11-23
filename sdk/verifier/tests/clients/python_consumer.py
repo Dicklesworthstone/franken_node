@@ -3,8 +3,77 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import sys
+import tempfile
+import time
 
 from franken_verifier import MAX_INPUT_BYTES, MAX_NATIVE_SESSION_INPUT_BYTES, VerifierError, verify_artifact
+
+
+def check_bounded_transport() -> int:
+    """Exercise actual child pipes; these controls make no signature claims."""
+    controls = [
+        ("stdout_overflow", "PROTOCOL_INVALID"),
+        ("stderr_overflow", "PROTOCOL_INVALID"),
+        ("stdout_boundary", "TRANSPORT_CONTROL"),
+        ("stderr_boundary", "TRANSPORT_CONTROL"),
+        ("duplex", "TRANSPORT_CONTROL"),
+        ("early_refusal", "TRANSPORT_CONTROL"),
+        ("blocked_stdin", "PROCESS_TIMEOUT"),
+        ("closed_streams_running", "PROCESS_TIMEOUT"),
+    ]
+    if os.name == "posix":
+        controls.append(("inherited_pipes", "PROCESS_TIMEOUT"))
+    data = bytes(range(256)) * 8192
+    evidence = Path(tempfile.mkdtemp(prefix="franken-verifier-transport-"))
+    failures = []
+    for mode, expected in controls:
+        pid_file = evidence / (mode + ".pid")
+        old_mode = os.environ.get("FRANKEN_VERIFIER_TEST_TRANSPORT_CONTROL")
+        old_pid_file = os.environ.get("FRANKEN_VERIFIER_TEST_PID_FILE")
+        os.environ["FRANKEN_VERIFIER_TEST_TRANSPORT_CONTROL"] = mode
+        os.environ["FRANKEN_VERIFIER_TEST_PID_FILE"] = str(pid_file)
+        started = time.monotonic()
+        try:
+            try:
+                verify_artifact(data, "11" * 32, verifier=str(Path.cwd() / "fake_verifier"), timeout=1)
+            except VerifierError as error:
+                assert error.code == expected, (mode, error.code, expected)
+                if mode in ("stderr_boundary", "duplex"):
+                    assert error.stderr == b"e" * (64 * 1024 + 1), mode
+                if mode == "duplex":
+                    assert str(error) == hashlib.sha256(data).hexdigest(), mode
+                if mode == "early_refusal":
+                    assert error.exit_code == 2 and error.stderr == b"\xff\x00private diagnostic\n", mode
+            else:
+                raise AssertionError((mode, "unexpected successful verification"))
+            elapsed = time.monotonic() - started
+            assert elapsed < 3, (mode, "deadline exceeded during pipe cleanup", elapsed)
+            if os.name == "posix":
+                pid = int(pid_file.read_text())
+                try:
+                    os.waitpid(pid, os.WNOHANG)
+                except ChildProcessError:
+                    pass
+                else:
+                    raise AssertionError((mode, "verifier child was not reaped"))
+            print(json.dumps({"case": "transport_" + mode, "result": expected}), flush=True)
+        except AssertionError as error:
+            failures.append(str(error))
+        finally:
+            for key, previous in (("FRANKEN_VERIFIER_TEST_TRANSPORT_CONTROL", old_mode),
+                                  ("FRANKEN_VERIFIER_TEST_PID_FILE", old_pid_file)):
+                if previous is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = previous
+    assert not failures, "bounded transport regressions: " + "; ".join(failures)
+    return len(controls)
+
+
+if sys.argv[1:] == ["--transport-only"]:
+    print(json.dumps({"transport_cases": check_bounded_transport(), "passed": True}), flush=True)
+    raise SystemExit(0)
 
 root = Path.cwd()
 executable = os.environ.get("VERIFIER_EXECUTABLE", str(root / "verifier"))
@@ -510,6 +579,7 @@ for mode in ltv_controls:
     else:
         raise AssertionError(f"protocol_{mode}")
 print(json.dumps({"consumer": "python", "matrix_cases": len(cases),
+                  "transport_cases": check_bounded_transport(),
                   "client_cases": len(client_controls) + len(publisher_trust_inputs) + identity_client_cases,
                   "protocol_cases": len(controls) + len(run_controls) + len(runtime_controls)
                   + len(resolution_controls) + len(publisher_controls) + len(publisher_host_positives)

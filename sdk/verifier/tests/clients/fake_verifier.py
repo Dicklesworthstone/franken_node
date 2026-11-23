@@ -6,8 +6,51 @@ It does not authenticate anything. The normal consumer matrix must fail on it.
 """
 import hashlib
 import json
+import os
 import sys
 import time
+
+transport_control = os.environ.get("FRANKEN_VERIFIER_TEST_TRANSPORT_CONTROL")
+if transport_control:
+    # Real pipe/deadline controls, isolated from the signature/protocol matrix.
+    # The parent records this PID to verify that it reaped its direct child.
+    with open(os.environ["FRANKEN_VERIFIER_TEST_PID_FILE"], "w") as pid_file:
+        pid_file.write(str(os.getpid()))
+    response_limit = 64 * 1024 + 1
+    rejection = {"schema_version": "franken-verifier-cli/v1", "verdict": "rejected",
+                 "error": {"code": "TRANSPORT_CONTROL", "message": "bounded refusal"}}
+    if transport_control in ("stdout_overflow", "stderr_overflow"):
+        stream = sys.stdout.buffer if transport_control == "stdout_overflow" else sys.stderr.buffer
+        stream.write(b"x" * (response_limit + 1))
+        stream.flush()
+        time.sleep(5)
+    elif transport_control == "blocked_stdin":
+        time.sleep(5)
+    elif transport_control == "closed_streams_running":
+        os.close(1)
+        os.close(2)
+        time.sleep(5)
+    elif transport_control == "inherited_pipes":
+        if os.fork() == 0:
+            time.sleep(5)
+            os._exit(0)
+        os._exit(0)
+    elif transport_control == "early_refusal":
+        sys.stdin.close()
+        sys.stderr.buffer.write(b"\xff\x00private diagnostic\n")
+    else:
+        if transport_control in ("stderr_boundary", "duplex"):
+            sys.stderr.buffer.write(b"e" * response_limit)
+            sys.stderr.buffer.flush()
+        data = sys.stdin.buffer.read()
+        if transport_control == "duplex":
+            rejection["error"]["message"] = hashlib.sha256(data).hexdigest()
+    encoded = json.dumps(rejection, separators=(",", ":")).encode()
+    if transport_control == "stdout_boundary":
+        encoded += b" " * (response_limit - len(encoded))
+    sys.stdout.buffer.write(encoded)
+    sys.stdout.buffer.flush()
+    sys.exit(2)
 
 data = sys.stdin.buffer.read()
 try:

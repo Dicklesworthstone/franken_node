@@ -8,13 +8,18 @@ execute a captured guest. Only Python's standard library is required.
 from __future__ import annotations
 
 import base64
+import errno
 import hashlib
 import ipaddress
 import json
 import math
 import os
+import queue
 import re
+import signal
 import subprocess
+import threading
+import time
 from typing import Any, Literal, TypedDict
 
 PROTOCOL = "franken-verifier-cli/v1"
@@ -170,6 +175,119 @@ class VerifierError(Exception):
         self.code = code
         self.exit_code = exit_code
         self.stderr = stderr
+
+
+def _run_bounded(args: list[str], data: bytes, timeout: float) -> subprocess.CompletedProcess[bytes]:
+    """Bound both pipes while feeding stdin, using one execution deadline.
+
+    Reader threads are needed because Windows selectors cannot monitor pipes.
+    Unbuffered streams avoid buffered-I/O locks during exceptional cleanup;
+    each reader retains at most MAX_RESPONSE_BYTES + 1 bytes. On POSIX an owned
+    process group also prevents inherited pipes from holding cleanup open.
+    """
+    deadline = time.monotonic() + timeout
+    process = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, bufsize=0, shell=False,
+                               start_new_session=os.name == "posix")
+    stopped = threading.Event()
+    finished: queue.Queue[tuple[str, bytes | None, OSError | str | None]] = queue.Queue(maxsize=3)
+    workers: list[threading.Thread] = []
+
+    def read_pipe(name: str, stream: Any) -> None:
+        captured = bytearray()
+        try:
+            while not stopped.is_set():
+                block = stream.read(min(16 * 1024, MAX_RESPONSE_BYTES + 1 - len(captured)))
+                if not block:
+                    break
+                captured.extend(block)
+                if len(captured) > MAX_RESPONSE_BYTES:
+                    finished.put((name, None, "overflow"))
+                    return
+            finished.put((name, bytes(captured), None))
+        except (OSError, ValueError) as error:
+            # A concurrently closed unbuffered stream may raise ValueError.
+            failure = error if isinstance(error, OSError) else OSError("verifier output pipe closed")
+            finished.put((name, None, failure))
+        finally:
+            stream.close()
+
+    def write_input() -> None:
+        error = None
+        try:
+            view = memoryview(data)
+            offset = 0
+            while offset < len(view) and not stopped.is_set():
+                written = process.stdin.write(view[offset:offset + 16 * 1024])
+                if not written:
+                    raise OSError("verifier input pipe made no progress")
+                offset += written
+        except BrokenPipeError:
+            # An early CLI rejection may close stdin before consuming input.
+            # Its exit status and bounded response remain authoritative.
+            pass
+        except OSError as caught:
+            # Windows can report EINVAL when a child closes its read handle;
+            # subprocess communication treats this like BrokenPipeError.
+            if os.name != "nt" or caught.errno != errno.EINVAL:
+                error = caught
+        except ValueError:
+            if not stopped.is_set():
+                error = OSError("verifier input pipe closed")
+        finally:
+            process.stdin.close()
+            finished.put(("stdin", None, error))
+
+    failed = True
+    try:
+        for target, arguments in ((read_pipe, ("stdout", process.stdout)),
+                                  (read_pipe, ("stderr", process.stderr)),
+                                  (write_input, ())):
+            worker = threading.Thread(target=target, args=arguments, daemon=True,
+                                      name="franken-verifier-pipe")
+            worker.start()
+            workers.append(worker)
+        output: dict[str, bytes] = {}
+        for _ in workers:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise queue.Empty
+            name, captured, error = finished.get(timeout=remaining)
+            if error == "overflow":
+                raise VerifierError("PROTOCOL_INVALID", "verifier response exceeds its size bound")
+            if isinstance(error, OSError):
+                raise error
+            if captured is not None:
+                output[name] = captured
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise queue.Empty
+        returncode = process.wait(timeout=remaining)
+        failed = False
+        return subprocess.CompletedProcess(args, returncode, output["stdout"], output["stderr"])
+    except (queue.Empty, subprocess.TimeoutExpired) as error:
+        raise VerifierError("PROCESS_TIMEOUT", "verifier exceeded its execution timeout") from error
+    finally:
+        stopped.set()
+        cleanup_deadline = time.monotonic() + 1
+        if failed:
+            try:
+                if os.name == "posix":
+                    os.killpg(process.pid, signal.SIGKILL)
+                elif process.poll() is None:
+                    process.kill()
+            except ProcessLookupError:
+                pass
+            for stream in (process.stdin, process.stdout, process.stderr):
+                stream.close()
+            try:
+                process.wait(timeout=max(0, cleanup_deadline - time.monotonic()))
+            except subprocess.TimeoutExpired as error:
+                raise VerifierError("PROCESS_UNAVAILABLE", "cannot confirm verifier termination") from error
+        for worker in workers:
+            worker.join(timeout=max(0, cleanup_deadline - time.monotonic()))
+        if any(worker.is_alive() for worker in workers):
+            raise VerifierError("PROCESS_UNAVAILABLE", "cannot confirm verifier pipe cleanup")
 
 
 def _object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -849,14 +967,9 @@ def verify_artifact(
     elif signature_hex is not None:
         raise VerifierError("INPUT_INVALID", "detached signatures require a signed-bundle, publisher-source format, or counterfactual-receipt")
     try:
-        process = subprocess.run(args, input=data, capture_output=True, timeout=timeout,
-                                 check=False, shell=False)
-    except subprocess.TimeoutExpired as error:
-        raise VerifierError("PROCESS_TIMEOUT", "verifier exceeded its execution timeout") from error
+        process = _run_bounded(args, data, timeout)
     except OSError as error:
         raise VerifierError("PROCESS_UNAVAILABLE", "cannot execute the trusted verifier") from error
-    if len(process.stdout) > MAX_RESPONSE_BYTES or len(process.stderr) > MAX_RESPONSE_BYTES:
-        raise VerifierError("PROTOCOL_INVALID", "verifier response exceeds its size bound")
     try:
         result = json.loads(process.stdout.decode("utf-8"), object_pairs_hook=_object)
     except (UnicodeError, ValueError, RecursionError) as error:
