@@ -1317,6 +1317,14 @@ report `health: maintenance`, distinct from ordinary healthy/open admission.
 Unknown effects and missing or stale nodes continue to block readiness. A held
 fence also keeps `fleet reconcile --require-native-drain` pending.
 
+Native admission and the live control observer honor holds on the selected
+project and every enclosing project, including the ancestry of an independent
+deployment operator. An absolute nested entrypoint or a launch from a child
+directory therefore remains covered by its parent's hold and native-session
+census. Overlapping parent and child holds must each be explicitly resumed;
+releasing one owner cannot reopen the other's scope. A stale launch captured
+before a parent drain is refused even if that drain has already completed.
+
 In the default engine-enabled product, migration validation and lockstep
 reference processes also consult this protected admission fence. Private staging
 retains the original project's control ancestry; capsule execution uses its

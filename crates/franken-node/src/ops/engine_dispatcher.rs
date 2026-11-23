@@ -5474,11 +5474,16 @@ impl NativeRunControlWakeup {
     }
 
     fn for_projects(project: &Path, operator: Option<&Path>) -> Self {
-        let paths = std::iter::once(project)
-            .chain(operator.filter(|operator| *operator != project))
-            .filter_map(|project| {
-                crate::ops::native_session_inventory::native_session_control_hint_path(project).ok()
-            });
+        // A nested entrypoint remains controlled by every enclosing owner.
+        // Shared ancestors need one hint read even when the deployment's
+        // operator project and release have overlapping ancestry.
+        let projects = std::iter::once(project)
+            .chain(operator)
+            .flat_map(Path::ancestors)
+            .collect::<std::collections::BTreeSet<_>>();
+        let paths = projects.into_iter().filter_map(|project| {
+            crate::ops::native_session_inventory::native_session_control_hint_path(project).ok()
+        });
         Self::new(paths)
     }
 
@@ -11715,9 +11720,9 @@ impl EngineDispatcher {
         trust_requirements
             .verify_dependency_capture(project_paths.project_root())
             .context("dependency metadata changed before native-session launch")?;
-        // A drain generation is captured before rechecking live authority and
-        // compared atomically with the admission record. A completed fence
-        // cannot let an older preflight launch after its population was sealed.
+        // The enclosing owners' revision is captured before rechecking live
+        // authority and compared atomically with the admission record. A
+        // completed parent fence cannot admit a preflight predating its census.
         let admission_generation =
             crate::ops::native_session_inventory::native_session_admission_ticket(
                 project_paths.project_root(),
@@ -18455,6 +18460,52 @@ mod tests {
         assert!(wakeup.recheck_due(checked, early));
         assert!(!wakeup.recheck_due(checked, early));
         assert!(wakeup.recheck_due(checked, checked + NATIVE_RUN_CONTROL_POLL_INTERVAL));
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn live_control_hints_include_enclosing_owners_without_duplicate_pages() {
+        let directory = tempfile::tempdir().unwrap();
+        let project_parent = directory.path().join("releases");
+        let project = project_parent.join("current");
+        let operator_parent = directory.path().join("operators");
+        let operator = operator_parent.join("tenant");
+        let wakeup = NativeRunControlWakeup::for_projects(&project, Some(&operator));
+        let paths: std::collections::BTreeSet<_> =
+            wakeup.hints.iter().map(|(path, _)| path).collect();
+        assert_eq!(paths.len(), wakeup.hints.len());
+        for scope in [
+            project.as_path(),
+            project_parent.as_path(),
+            operator.as_path(),
+            operator_parent.as_path(),
+            directory.path(),
+        ] {
+            let hint =
+                crate::ops::native_session_inventory::native_session_control_hint_path(scope)
+                    .unwrap();
+            assert!(paths.contains(&hint), "missing ancestor hint for {scope:?}");
+        }
+        let sibling = crate::ops::native_session_inventory::native_session_control_hint_path(
+            &directory.path().join("releases-other"),
+        )
+        .unwrap();
+        assert!(!paths.contains(&sibling));
+
+        let single = NativeRunControlWakeup::for_projects(&project, None);
+        let repeated = NativeRunControlWakeup::for_projects(&project, Some(&project));
+        assert_eq!(
+            single
+                .hints
+                .iter()
+                .map(|(path, _)| path)
+                .collect::<Vec<_>>(),
+            repeated
+                .hints
+                .iter()
+                .map(|(path, _)| path)
+                .collect::<Vec<_>>()
+        );
     }
 
     #[cfg(feature = "engine")]

@@ -1680,6 +1680,10 @@ struct MaintenanceCliFixture {
 
 impl MaintenanceCliFixture {
     fn new() -> Self {
+        Self::with_profile("balanced")
+    }
+
+    fn with_profile(profile: &str) -> Self {
         let project = tempdir().expect("maintenance project");
         let fleet_state_dir = project.path().join("fleet-state");
         let state_home = runtime_state_home_for_fleet(project.path(), &fleet_state_dir);
@@ -1692,7 +1696,7 @@ impl MaintenanceCliFixture {
             signing_key_path,
             signing_key,
         };
-        fixture.success(&["init", "--profile", "balanced", "--out-dir", ".", "--json"]);
+        fixture.success(&["init", "--profile", profile, "--out-dir", ".", "--json"]);
         std::fs::write(
             fixture.project.path().join("app.cjs"),
             "console.log('MAINTENANCE_NATIVE_ADMISSION');\n",
@@ -1702,8 +1706,17 @@ impl MaintenanceCliFixture {
     }
 
     fn run(&self, args: &[&str], timeout_seconds: &str) -> Output {
+        self.run_in_dir(self.project.path(), args, timeout_seconds)
+    }
+
+    fn run_in_dir(
+        &self,
+        current_dir: &std::path::Path,
+        args: &[&str],
+        timeout_seconds: &str,
+    ) -> Output {
         run_cli_in_dir_with_fleet_state_and_env(
-            self.project.path(),
+            current_dir,
             args,
             &self.fleet_state_dir,
             &[
@@ -1730,6 +1743,116 @@ impl MaintenanceCliFixture {
             String::from_utf8_lossy(&output.stderr)
         );
         json_stdout(&output, "maintenance CLI")
+    }
+
+    #[cfg(all(feature = "engine", target_os = "linux"))]
+    fn run_bounded(&self, args: &[&str], timeout: Duration) -> Output {
+        use std::io::{Read, Seek};
+
+        fn process_start(pid: u32) -> Option<String> {
+            let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+            stat.rsplit_once(") ")?
+                .1
+                .split_whitespace()
+                .nth(19)
+                .map(str::to_string)
+        }
+
+        struct ProductChild(Child, Option<(u32, String)>);
+        impl Drop for ProductChild {
+            fn drop(&mut self) {
+                if let Some((pid, start)) = &self.1
+                    && process_start(*pid).as_deref() == Some(start.as_str())
+                    && let Ok(raw) = i32::try_from(*pid)
+                    && let Some(pid) = rustix::process::Pid::from_raw(raw)
+                {
+                    let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+                }
+                let _ = self.0.kill();
+                let deadline = Instant::now() + Duration::from_secs(2);
+                while matches!(self.0.try_wait(), Ok(None)) && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }
+        }
+
+        // Regular files keep an orphan's inherited output handles from making
+        // EOF collection defeat the independent test-side process deadline.
+        let mut stdout = tempfile::tempfile().expect("bounded CLI stdout");
+        let mut stderr = tempfile::tempfile().expect("bounded CLI stderr");
+        let mut command = franken_node_command();
+        command
+            .current_dir(self.project.path())
+            .args(args)
+            .env("FRANKEN_NODE_FLEET_STATE_DIR", &self.fleet_state_dir)
+            .env(
+                "XDG_STATE_HOME",
+                runtime_state_home_for_fleet(self.project.path(), &self.fleet_state_dir),
+            )
+            .env("XDG_CONFIG_HOME", &self.config_home)
+            .env(
+                "FRANKEN_NODE_SECURITY_DECISION_RECEIPT_SIGNING_KEY_PATH",
+                &self.signing_key_path,
+            )
+            .env("FRANKEN_ENGINE_TIMEOUT_SECS", "120")
+            .env("FRANKEN_NODE_FLEET_CONVERGENCE_TIMEOUT_SECONDS", "30")
+            .env_remove("FRANKEN_NODE_PROFILE")
+            .stdin(Stdio::null())
+            .stdout(stdout.try_clone().unwrap())
+            .stderr(stderr.try_clone().unwrap());
+        let mut child = ProductChild(command.spawn().expect("spawn bounded CLI"), None);
+        let deadline = Instant::now() + timeout;
+        let status = loop {
+            if child.1.is_none()
+                && let Ok(children) = std::fs::read_to_string(format!(
+                    "/proc/{}/task/{}/children",
+                    child.0.id(),
+                    child.0.id()
+                ))
+            {
+                child.1 = children.split_whitespace().find_map(|pid| {
+                    let pid = pid.parse::<u32>().ok()?;
+                    process_start(pid).map(|start| (pid, start))
+                });
+            }
+            if let Some(status) = child.0.try_wait().expect("poll bounded CLI") {
+                break status;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "CLI exceeded independent {timeout:?} deadline: {args:?}"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        if let Some((pid, start)) = &child.1 {
+            assert_ne!(
+                process_start(*pid).as_deref(),
+                Some(start.as_str()),
+                "CLI completed before reaping its native worker"
+            );
+        }
+        stdout.rewind().unwrap();
+        stderr.rewind().unwrap();
+        let mut output = Output {
+            status,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        };
+        stdout.read_to_end(&mut output.stdout).unwrap();
+        stderr.read_to_end(&mut output.stderr).unwrap();
+        output
+    }
+
+    #[cfg(all(feature = "engine", target_os = "linux"))]
+    fn success_bounded(&self, args: &[&str]) -> serde_json::Value {
+        let output = self.run_bounded(args, Duration::from_secs(30));
+        assert!(
+            output.status.success(),
+            "{args:?} failed: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        json_stdout(&output, "bounded maintenance CLI")
     }
 
     fn actions(&self) -> Vec<FleetActionRecord> {
@@ -1767,12 +1890,28 @@ impl MaintenanceCliFixture {
 
     #[cfg(all(feature = "engine", unix))]
     fn assert_native_admission(&self, allowed: bool) {
-        let output = self.run(
+        self.assert_native_admission_in_dir(
+            self.project.path(),
+            std::path::Path::new("app.cjs"),
+            allowed,
+        );
+    }
+
+    #[cfg(all(feature = "engine", unix))]
+    fn assert_native_admission_in_dir(
+        &self,
+        current_dir: &std::path::Path,
+        entrypoint: &std::path::Path,
+        allowed: bool,
+    ) {
+        let config_path = self.project.path().join("franken_node.toml");
+        let output = self.run_in_dir(
+            current_dir,
             &[
                 "run",
-                "app.cjs",
+                entrypoint.to_str().unwrap(),
                 "--config",
-                "franken_node.toml",
+                config_path.to_str().unwrap(),
                 "--runtime",
                 "franken-engine",
                 "--json",
@@ -1803,6 +1942,248 @@ impl MaintenanceCliFixture {
             );
         }
     }
+}
+
+#[test]
+#[cfg(all(feature = "engine", unix))]
+fn fleet_parent_hold_counts_nested_workers_and_fences_every_entry_form_until_resume() {
+    let fixture = MaintenanceCliFixture::new();
+    let project = fixture.project.path();
+    let nested = project.join("nested");
+    std::fs::create_dir(&nested).expect("nested native project");
+    let entrypoint = nested.join("app.cjs");
+    std::fs::write(
+        &entrypoint,
+        "console.log('MAINTENANCE_NATIVE_ADMISSION');\n",
+    )
+    .expect("nested native entrypoint");
+
+    // Both forms select the nested project as the native admission root.
+    // Keep their completed obligations so the parent must account for them.
+    fixture.assert_native_admission_in_dir(project, &entrypoint, true);
+    fixture.assert_native_admission_in_dir(&nested, std::path::Path::new("app.cjs"), true);
+    let retained = fixture.success(&[
+        "fleet",
+        "sessions",
+        "--project",
+        nested.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(retained["terminal_sessions"], 2, "{retained}");
+    let records = retained["records"].as_array().unwrap();
+    assert_eq!(records.len(), 2);
+    for record in records {
+        assert_eq!(
+            record["admission"]["project_root"],
+            serde_json::json!(nested.canonicalize().unwrap())
+        );
+        assert_eq!(record["outcome"]["kind"], "completed");
+        assert_eq!(record["outcome"]["process"], "worker_reaped");
+    }
+
+    fixture.success(&[
+        "fleet",
+        "hold",
+        "--zone",
+        "east",
+        "--reason",
+        "parent project maintenance",
+        "--id",
+        "parent-maintenance",
+        "--json",
+    ]);
+    fixture.restart_agent("maintenance", true, 2);
+    fixture.assert_native_admission_in_dir(project, &entrypoint, false);
+    fixture.assert_native_admission_in_dir(&nested, std::path::Path::new("app.cjs"), false);
+    // Neither restarting the agent nor rejected nested entrypoints may erase
+    // or enlarge the parent's retained census or silently release its hold.
+    fixture.restart_agent("maintenance", true, 2);
+
+    fixture.success(&["fleet", "resume", "--hold", "parent-maintenance", "--json"]);
+    fixture.restart_agent("healthy", false, 2);
+    fixture.assert_native_admission_in_dir(project, &entrypoint, true);
+    fixture.assert_native_admission_in_dir(&nested, std::path::Path::new("app.cjs"), true);
+}
+
+#[test]
+#[cfg(all(feature = "engine", target_os = "linux"))]
+fn fleet_parent_hold_stops_a_running_nested_native_worker_and_retains_its_effect() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::mpsc;
+
+    let fixture = MaintenanceCliFixture::with_profile("legacy-risky");
+    let project = fixture.project.path();
+    let nested = project.join("nested");
+    std::fs::create_dir(&nested).expect("nested live native project");
+    let listener = TcpListener::bind("127.0.0.1:0").expect("live native HTTP sink");
+    listener.set_nonblocking(true).unwrap();
+    let address = listener.local_addr().unwrap();
+    let entrypoint = nested.join("app.cjs");
+    std::fs::write(
+        &entrypoint,
+        format!(
+            "require('http').get('http://{address}/', (res) => {{\n\
+               require('fs').writeFileSync('after.marker', res.body);\n\
+             }});\n"
+        ),
+    )
+    .unwrap();
+    let config_path = project.join("franken_node.toml");
+    let mut config: frankenengine_node::config::Config =
+        toml::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+    config.security.network_policy.allowlist.push(
+        frankenengine_node::config::NetworkAllowlistEntry {
+            host: "127.0.0.1".to_string(),
+            port: Some(address.port()),
+            reason: "live ancestor hold regression HTTP sink".to_string(),
+        },
+    );
+    std::fs::write(&config_path, config.to_toml().unwrap()).unwrap();
+
+    let (release_tx, release_rx) = mpsc::sync_channel(1);
+    let (output, control_elapsed, first_drain) = std::thread::scope(|threads| {
+        let fixture = &fixture;
+        let operator = threads.spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(30);
+            let (mut stream, _) = loop {
+                match listener.accept() {
+                    Ok(connection) => break connection,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(
+                            Instant::now() < deadline,
+                            "nested native worker did not reach the real HTTP boundary"
+                        );
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("native HTTP sink accept failed: {error}"),
+                }
+            };
+            stream.set_nonblocking(false).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(30)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut request = Vec::new();
+            stream.read_to_end(&mut request).unwrap();
+            assert!(request.starts_with(b"GET / HTTP/1.1\r\n"));
+            fixture.success_bounded(&[
+                "fleet",
+                "hold",
+                "--zone",
+                "east",
+                "--reason",
+                "stop nested native work",
+                "--id",
+                "live-parent-maintenance",
+                "--json",
+            ]);
+            let control_started = Instant::now();
+            let poll = fixture.success_bounded(&[
+                "fleet",
+                "agent",
+                "--node-id",
+                "maintenance-node",
+                "--zone",
+                "east",
+                "--fallback-file-transport",
+                "--once",
+                "--json",
+            ]);
+            let drain = poll["native_session_drain"].clone();
+            assert_eq!(drain["fence_held"], true, "{poll}");
+            assert_eq!(drain["admitted_sessions"], 1, "{poll}");
+            assert_eq!(drain["terminal_sessions"], 0, "{poll}");
+            assert_eq!(
+                drain["pending_sessions"].as_u64().unwrap()
+                    + drain["indeterminate_sessions"].as_u64().unwrap(),
+                1,
+                "the ancestor must retain the actual in-flight native obligation"
+            );
+            // Withhold the real reply until the CLI completes. The timeout
+            // bounds a broken observer without leaving a blocked test worker.
+            let _ = release_rx.recv_timeout(Duration::from_secs(20));
+            let _ = stream.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\ntoo-late",
+            );
+            (control_started, drain)
+        });
+        let output = fixture.run_bounded(
+            &[
+                "run",
+                entrypoint.to_str().unwrap(),
+                "--config",
+                config_path.to_str().unwrap(),
+                "--policy",
+                "legacy-risky",
+                "--runtime",
+                "franken-engine",
+                "--json",
+            ],
+            Duration::from_secs(60),
+        );
+        let finished = Instant::now();
+        let _ = release_tx.send(());
+        let (control_started, drain) = operator.join().expect("ancestor fleet operator");
+        (output, finished.duration_since(control_started), drain)
+    });
+    assert!(
+        control_elapsed < Duration::from_secs(15),
+        "ancestor hold exceeded its independent control deadline: {control_elapsed:?}"
+    );
+    assert!(!output.status.success(), "{output:?}");
+    let evidence = json_stdout(&output, "live ancestor native containment");
+    assert_eq!(
+        evidence["schema_version"],
+        "franken-node/native-effect-interruption-evidence/v1"
+    );
+    assert_eq!(evidence["terminal_state"], "control_indeterminate");
+    assert_eq!(evidence["control_trigger"]["kind"], "fleet_drain");
+    assert!(!nested.join("after.marker").exists());
+
+    let retained = fixture.success_bounded(&[
+        "fleet",
+        "sessions",
+        "--project",
+        project.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(retained["records"].as_array().unwrap().len(), 1);
+    assert_eq!(retained["unknown_effect_sessions"], 1);
+    let record = &retained["records"][0];
+    assert_eq!(
+        record["admission"]["project_root"],
+        serde_json::json!(nested.canonicalize().unwrap())
+    );
+    assert_eq!(
+        record["admission"]["session_nonce"],
+        evidence["session_nonce"]
+    );
+    assert_eq!(record["outcome"]["kind"], "control_stopped");
+    assert_eq!(record["outcome"]["process"], "worker_reaped");
+    let restarted = fixture.success_bounded(&[
+        "fleet",
+        "agent",
+        "--node-id",
+        "maintenance-node",
+        "--zone",
+        "east",
+        "--fallback-file-transport",
+        "--once",
+        "--json",
+    ]);
+    let drain = &restarted["native_session_drain"];
+    assert_eq!(
+        drain["session_set_sha256"],
+        first_drain["session_set_sha256"]
+    );
+    assert_eq!(drain["fence_held"], true);
+    assert_eq!(drain["admitted_sessions"], 1);
+    assert_eq!(drain["terminal_sessions"], 0);
+    assert_eq!(drain["pending_sessions"], 0);
+    assert_eq!(drain["indeterminate_sessions"], 1);
 }
 
 #[test]
