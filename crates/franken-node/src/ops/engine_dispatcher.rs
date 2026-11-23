@@ -13343,6 +13343,7 @@ impl EngineDispatcher {
 
         Ok(ProcessSpawnPolicy {
             allowed_executables,
+            trusted_system_executables: std::collections::BTreeSet::new(),
             executable_aliases,
             allow_shell: source.allow_shell,
             shell_executable_alias: source.shell_executable_alias.clone(),

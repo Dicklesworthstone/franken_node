@@ -45,20 +45,20 @@ version = "0.3.10"
 
 [[package]]
 name = "asupersync"
-version = "0.5.0"
-
-[[package]]
-name = "asupersync"
 version = "0.6.2"
 
 [[package]]
+name = "asupersync"
+version = "0.7.0"
+
+[[package]]
 name = "fastapi-core"
-version = "0.5.0"
+version = "0.6.0"
 
 [[package]]
 name = "fastapi-http"
-version = "0.5.0"
-dependencies = ["asupersync 0.6.2"]
+version = "0.6.0"
+dependencies = ["asupersync 0.7.0"]
 
 [[package]]
 name = "franken-kernel"
@@ -79,14 +79,14 @@ version = "0.4.1"
 [[package]]
 name = "frankenengine-node"
 version = "0.2.0"
-dependencies = ["asupersync 0.5.0"]
+dependencies = ["asupersync 0.6.2"]
 """.lstrip(),
                 encoding="utf-8",
             )
             report = mod.run_checks(cargo_lock=lock_path, check_local_git=False)
         self.assertFalse(report["overall_pass"])
         failed = {c["check"] for c in report["checks"] if not c["pass"]}
-        self.assertIn("cargo_lock:frankenengine_node_asupersync_0_6", failed)
+        self.assertIn("cargo_lock:frankenengine_node_asupersync_0_7", failed)
         self.assertIn("cargo_lock:node_and_fastapi_share_asupersync", failed)
         self.assertIn("cargo_lock:generation_bound:asupersync", failed)
 
@@ -135,32 +135,32 @@ version = 4
 
 [[package]]
 name = "asupersync"
-version = "0.6.2"
-
-[[package]]
-name = "fastapi-core"
-version = "0.4.4"
+version = "0.7.0"
 
 [[package]]
 name = "fastapi-core"
 version = "0.5.0"
+
+[[package]]
+name = "fastapi-core"
+version = "0.6.0"
 
 [[package]]
 name = "fastapi-http"
-version = "0.5.0"
-dependencies = ["asupersync 0.6.2"]
+version = "0.6.0"
+dependencies = ["asupersync 0.7.0"]
 
 [[package]]
 name = "franken-kernel"
-version = "0.6.0"
+version = "0.7.0"
 
 [[package]]
 name = "franken-decision"
-version = "0.6.0"
+version = "0.7.0"
 
 [[package]]
 name = "franken-evidence"
-version = "0.6.0"
+version = "0.7.0"
 
 [[package]]
 name = "fsqlite-error"
@@ -173,7 +173,7 @@ version = "0.4.1"
 [[package]]
 name = "frankenengine-node"
 version = "0.2.0"
-dependencies = ["asupersync 0.6.2"]
+dependencies = ["asupersync 0.7.0"]
 """.lstrip(),
                 encoding="utf-8",
             )

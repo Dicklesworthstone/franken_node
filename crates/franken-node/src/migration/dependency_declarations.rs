@@ -589,6 +589,7 @@ impl Overrides {
         Ok(selected.and_then(|rule| rule.replacement.as_deref()))
     }
 
+    #[cfg(test)]
     pub(super) fn apply<'a>(&'a self, installed_as: &str, request: &'a str) -> Result<&'a str> {
         Ok(self.replacement(installed_as, request)?.unwrap_or(request))
     }

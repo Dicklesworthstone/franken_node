@@ -27,10 +27,11 @@ ENGINE_REF_FLAG_RE = re.compile(
 )
 
 MAX_CRATE_GENERATIONS = {
-    # 0.3.x (transitive fsqlite 0.1.19), 0.5.0 (sqlmodel dev-deps only; zero normal edges),
-    # 0.6.2 (converged frankenengine-node + fastapi-rust). Must never sprawl to 4+.
+    # 0.3.x (transitive fsqlite 0.1.19), 0.6.2 (sqlmodel 0.6.0 dev-deps only; zero normal edges),
+    # 0.7.0 (converged frankenengine-node + fastapi-rust 0.6.0). Must never sprawl to 4+.
     "asupersync": 3,
     "fastapi-core": 1,
+    "fastapi-http": 1,
     "franken-kernel": 3,
     "franken-decision": 3,
     "franken-evidence": 3,
@@ -118,7 +119,7 @@ def check_cargo_lock(cargo_lock: Path) -> list[dict[str, Any]]:
     packages = parsed.get("package", [])
     versions_by_name: dict[str, set[str]] = {}
     node_deps: list[str] = []
-    fastapi_http_deps: list[str] = []
+    fastapi_http_entries: list[list[str]] = []
     for pkg in packages:
         name = pkg.get("name")
         ver = pkg.get("version")
@@ -126,29 +127,39 @@ def check_cargo_lock(cargo_lock: Path) -> list[dict[str, Any]]:
             versions_by_name.setdefault(name, set()).add(ver)
         if name == "frankenengine-node":
             node_deps = [d for d in pkg.get("dependencies", []) if isinstance(d, str)]
-        elif name == "fastapi-http" and ver == "0.5.0":
-            fastapi_http_deps = [d for d in pkg.get("dependencies", []) if isinstance(d, str)]
+        elif name == "fastapi-http":
+            fastapi_http_entries.append(
+                [d for d in pkg.get("dependencies", []) if isinstance(d, str)]
+            )
 
     asupersync_versions = sorted(versions_by_name.get("asupersync", set()))
     node_asupersync = [d for d in node_deps if d == "asupersync" or d.startswith("asupersync ")]
-    fastapi_asupersync = [
-        d for d in fastapi_http_deps if d == "asupersync" or d.startswith("asupersync ")
-    ]
-    node_uses_06 = any("0.6." in d for d in node_asupersync) or (
+    fastapi_asupersync = sorted(
+        {
+            d
+            for deps in fastapi_http_entries
+            for d in deps
+            if d == "asupersync" or d.startswith("asupersync ")
+        }
+    )
+    node_uses_07 = any("0.7." in d for d in node_asupersync) or (
         node_asupersync == ["asupersync"]
         and len(asupersync_versions) == 1
-        and asupersync_versions[0].startswith("0.6.")
+        and asupersync_versions[0].startswith("0.7.")
     )
     checks.append(
         {
-            "check": "cargo_lock:frankenengine_node_asupersync_0_6",
-            "pass": node_uses_06,
+            "check": "cargo_lock:frankenengine_node_asupersync_0_7",
+            "pass": node_uses_07,
             "detail": f"node_dep={node_asupersync} all_versions={asupersync_versions}",
         }
     )
 
-    same_asupersync_as_fastapi = bool(node_asupersync) and (
-        not fastapi_asupersync or node_asupersync == fastapi_asupersync
+    same_asupersync_as_fastapi = (
+        bool(node_asupersync)
+        and len(fastapi_http_entries) == 1
+        and bool(fastapi_asupersync)
+        and node_asupersync == fastapi_asupersync
     )
     checks.append(
         {

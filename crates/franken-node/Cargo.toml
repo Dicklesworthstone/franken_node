@@ -160,7 +160,7 @@ rand = "0.8.5"
 # default-features = false: asupersync's defaults enable `nightly-outcome-try`
 # (`#![feature(try_trait_v2)]`); nothing here needs its proc-macros or `?` on
 # outcomes, so stable toolchains keep building. Aligned with sibling fastapi_rust.
-asupersync = { version = "0.6.2", optional = true, default-features = false }
+asupersync = { version = "0.7.0", optional = true, default-features = false }
 # The fleet coordinator's HTTP listener (`fleet-control-plane-server`). The
 # same sibling checkout is also a dev-dependency (with `testing`) below.
 fastapi_rust = { package = "fastapi-rust", path = "../../../fastapi_rust/crates/fastapi", default-features = false, optional = true }

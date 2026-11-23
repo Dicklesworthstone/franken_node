@@ -327,7 +327,7 @@ dependencies = [
  "smallvec",
  "socket2",
  "subtle",
- "sysinfo",
+ "sysinfo 0.39.5",
  "tempfile",
  "thiserror",
  "unicode-normalization",
@@ -379,7 +379,59 @@ dependencies = [
  "smallvec",
  "socket2",
  "subtle",
- "sysinfo",
+ "sysinfo 0.39.5",
+ "tempfile",
+ "thiserror",
+ "unicode-normalization",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+ "windows-sys 0.61.2",
+ "xattr",
+ "zeroize",
+]
+
+[[package]]
+name = "asupersync"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dd9be531765145b804069bc42322f736ef5b03e73717f0ff139110126eca7bf2"
+dependencies = [
+ "aes-gcm 0.11.0",
+ "base64 0.23.1",
+ "bincode-next",
+ "chacha20poly1305 0.11.0",
+ "crc32fast",
+ "crossbeam-queue",
+ "franken-decision 0.7.0",
+ "franken-evidence 0.7.0",
+ "franken-kernel 0.7.0",
+ "futures-lite",
+ "getrandom 0.4.3",
+ "hashbrown 0.17.0",
+ "hex",
+ "hmac 0.13.0",
+ "js-sys",
+ "libc",
+ "memchr",
+ "nix",
+ "nkeys",
+ "parking_lot 0.12.5",
+ "pin-project",
+ "polling",
+ "portable-atomic",
+ "prost",
+ "rmp-serde",
+ "serde",
+ "serde_json",
+ "sha1 0.11.0",
+ "sha2 0.11.0",
+ "signal-hook",
+ "slab",
+ "smallvec",
+ "socket2",
+ "subtle",
+ "sysinfo 0.40.4",
  "tempfile",
  "thiserror",
  "tracing",
@@ -565,9 +617,9 @@ dependencies = [
 
 [[package]]
 name = "bumpalo"
-version = "3.20.3"
+version = "3.20.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
+checksum = "87a0cf66fd1eb2fb7b822cb78370d82303750809bc6ba855f3f58e517d3238db"
 
 [[package]]
 name = "byteorder"
@@ -1239,9 +1291,9 @@ dependencies = [
 
 [[package]]
 name = "fastapi-core"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
- "asupersync 0.6.2",
+ "asupersync 0.7.0",
  "fastapi-openapi",
  "fastapi-router",
  "fastapi-types",
@@ -1253,15 +1305,15 @@ dependencies = [
 
 [[package]]
 name = "fastapi-http"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
- "asupersync 0.6.2",
+ "asupersync 0.7.0",
  "fastapi-core",
 ]
 
 [[package]]
 name = "fastapi-macros"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1272,7 +1324,7 @@ dependencies = [
 
 [[package]]
 name = "fastapi-openapi"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "fastapi-router",
  "fastapi-types",
@@ -1282,7 +1334,7 @@ dependencies = [
 
 [[package]]
 name = "fastapi-router"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "fastapi-types",
  "serde_json",
@@ -1290,7 +1342,7 @@ dependencies = [
 
 [[package]]
 name = "fastapi-rust"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "fastapi-core",
  "fastapi-http",
@@ -1303,7 +1355,7 @@ dependencies = [
 
 [[package]]
 name = "fastapi-types"
-version = "0.5.0"
+version = "0.6.0"
 
 [[package]]
 name = "fastrand"
@@ -1387,6 +1439,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "franken-decision"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "890e526005830aa9e8421e0bff6d5ff5c9b373670717d8d3144d993f31a1dff1"
+dependencies = [
+ "franken-evidence 0.7.0",
+ "franken-kernel 0.7.0",
+ "serde",
+]
+
+[[package]]
 name = "franken-engine-deterministic-derive"
 version = "0.1.0"
 dependencies = [
@@ -1431,6 +1494,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "franken-evidence"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a39a2796f4da0f2b58a9102f6418e5f910f6bb4db6f1a74094ba90d0ca2d9504"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "franken-kernel"
 version = "0.3.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1444,6 +1517,15 @@ name = "franken-kernel"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "613cf2a909466f1d8964018860814c64e959f2bef28289b0e6f56b247aeaaaed"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "franken-kernel"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e5f87b64b45bc3951dc602ec21e0f9f92c8a924ee9db8a97730030a743386947"
 dependencies = [
  "serde",
 ]
@@ -1554,7 +1636,7 @@ dependencies = [
  "arbitrary",
  "assert2",
  "assert_cmd",
- "asupersync 0.6.2",
+ "asupersync 0.7.0",
  "base64 0.22.1",
  "blake3",
  "chrono",
@@ -1979,7 +2061,7 @@ dependencies = [
 
 [[package]]
 name = "ftui"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "ftui-a11y",
  "ftui-core",
@@ -1993,7 +2075,7 @@ dependencies = [
 
 [[package]]
 name = "ftui-a11y"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "ahash",
  "ftui-core",
@@ -2001,7 +2083,7 @@ dependencies = [
 
 [[package]]
 name = "ftui-backend"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "ftui-core",
  "ftui-render",
@@ -2009,7 +2091,7 @@ dependencies = [
 
 [[package]]
 name = "ftui-core"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "ahash",
  "arc-swap",
@@ -2028,11 +2110,11 @@ dependencies = [
 
 [[package]]
 name = "ftui-i18n"
-version = "0.10.0"
+version = "0.11.0"
 
 [[package]]
 name = "ftui-layout"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "ftui-core",
  "rustc-hash",
@@ -2043,7 +2125,7 @@ dependencies = [
 
 [[package]]
 name = "ftui-render"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "ahash",
  "bitflags",
@@ -2058,7 +2140,7 @@ dependencies = [
 
 [[package]]
 name = "ftui-runtime"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "arc-swap",
  "ftui-a11y",
@@ -2078,7 +2160,7 @@ dependencies = [
 
 [[package]]
 name = "ftui-style"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "ahash",
  "arc-swap",
@@ -2088,13 +2170,13 @@ dependencies = [
 
 [[package]]
 name = "ftui-text"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "ftui-core",
  "ftui-layout",
  "ftui-render",
  "ftui-style",
- "lru 0.19.0",
+ "lru 0.19.1",
  "ropey",
  "rustc-hash",
  "smallvec",
@@ -2105,7 +2187,7 @@ dependencies = [
 
 [[package]]
 name = "ftui-widgets"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "ahash",
  "bitflags",
@@ -2688,9 +2770,9 @@ dependencies = [
 
 [[package]]
 name = "lru"
-version = "0.19.0"
+version = "0.19.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4a9f71e3591c7ec44d3e563e87bf14ddc2bada8519dca046e5b0e560cd004e2d"
+checksum = "83be4da409554841af087163ad187608824ad8ca8713d8e124c8e0f704a2f92f"
 dependencies = [
  "hashbrown 0.17.0",
 ]
@@ -3197,6 +3279,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "portable-atomic"
+version = "1.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "05c8b63e8d9609db387f0324918f81d68fe27748f084ef092fb35954d0539a85"
+
+[[package]]
 name = "potential_utf"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3254,6 +3342,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "353e1ca18966c16d9deb1c69278edbc5f194139612772bd9537af60ac231e1e6"
 dependencies = [
  "elliptic-curve",
+]
+
+[[package]]
+name = "proc-macro-crate"
+version = "3.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e67ba7e9b2b56446f1d419b1d807906278ffa1a658a8a5d8a39dcb1f5a78614f"
+dependencies = [
+ "toml_edit",
 ]
 
 [[package]]
@@ -3903,9 +4000,9 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
 name = "smallvec"
-version = "1.16.1"
+version = "1.16.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba467056f1b547ed52077911161fc86985becbc60e8e1857c8a144dab0def891"
+checksum = "3244542535d5de959d90ec55d1b5ff0fd2bb7b1310223907d5f11932847f7b59"
 
 [[package]]
 name = "socket2"
@@ -3929,7 +4026,7 @@ dependencies = [
 
 [[package]]
 name = "sqlmodel"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "asupersync 0.6.2",
  "serde",
@@ -3944,7 +4041,7 @@ dependencies = [
 
 [[package]]
 name = "sqlmodel-core"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "asupersync 0.6.2",
  "regex",
@@ -3955,8 +4052,9 @@ dependencies = [
 
 [[package]]
 name = "sqlmodel-macros"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
+ "proc-macro-crate",
  "proc-macro2",
  "quote",
  "regex",
@@ -3965,7 +4063,7 @@ dependencies = [
 
 [[package]]
 name = "sqlmodel-pool"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "asupersync 0.6.2",
  "sqlmodel-core",
@@ -3974,7 +4072,7 @@ dependencies = [
 
 [[package]]
 name = "sqlmodel-query"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "asupersync 0.6.2",
  "serde",
@@ -3984,7 +4082,7 @@ dependencies = [
 
 [[package]]
 name = "sqlmodel-schema"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "asupersync 0.6.2",
  "serde",
@@ -3995,7 +4093,7 @@ dependencies = [
 
 [[package]]
 name = "sqlmodel-session"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "asupersync 0.6.2",
  "serde",
@@ -4073,6 +4171,21 @@ name = "sysinfo"
 version = "0.39.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2c8bd2130a9b60bee2581bf82cfe89ee836424d1f37dcfa4ce21509611684673"
+dependencies = [
+ "libc",
+ "memchr",
+ "ntapi",
+ "objc2-core-foundation",
+ "objc2-io-kit",
+ "objc2-open-directory",
+ "windows",
+]
+
+[[package]]
+name = "sysinfo"
+version = "0.40.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3e80749408e2d8bec0ffa303012cf4e1b3b355f4a09087b4fdf7473680f6a2de"
 dependencies = [
  "libc",
  "memchr",
@@ -4238,6 +4351,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3165f65f62e28e0115a00b2ebdd37eb6f3b641855f9d636d3cd4103767159ad7"
 dependencies = [
  "serde_core",
+]
+
+[[package]]
+name = "toml_edit"
+version = "0.25.13+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6975367e4d2ef766d86af01ffad14b622fecc8d4357a998fbc4deb6e9bacaf9b"
+dependencies = [
+ "indexmap",
+ "toml_datetime",
+ "toml_parser",
+ "winnow",
 ]
 
 [[package]]
@@ -4925,6 +5050,9 @@ name = "winnow"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2ee1708bef14716a11bae175f579062d4554d95be2c6829f518df847b7b3fdd0"
+dependencies = [
+ "memchr",
+]
 
 [[package]]
 name = "wit-bindgen"
