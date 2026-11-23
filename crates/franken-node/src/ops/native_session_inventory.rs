@@ -23,8 +23,9 @@ use sha2::{Digest, Sha256};
 use crate::control_plane::fleet_transport::{
     FleetActionRecord, FleetApplicationCheckpoint, MAX_NATIVE_SESSION_MAINTENANCE_HOLDS,
     NATIVE_SESSION_DRAIN_ATTESTATION_SCHEMA, NativeSessionDrainAttestation,
-    NativeSessionDrainCheckpoint, fleet_action_snapshot_prefix, fleet_application_checkpoint,
-    fleet_native_session_holds, validate_action_id, validate_node_id, validate_zone_id,
+    NativeSessionDrainCheckpoint, SeqlockControlPage, SeqlockControlSnapshot,
+    fleet_action_snapshot_prefix, fleet_application_checkpoint, fleet_native_session_holds,
+    validate_action_id, validate_node_id, validate_zone_id,
 };
 
 use super::engine_dispatcher::{
@@ -2157,6 +2158,72 @@ fn project_key(project_root: &Path) -> Result<&str> {
         .context("native-session drain project must be UTF-8")
 }
 
+fn control_hint_path_at(protected_root: &Path, project_root: &Path) -> Result<PathBuf> {
+    let mut hash = Sha256::new();
+    hash.update(b"franken-node/local-native-session-control-hint/v1\0");
+    hash.update(project_key(project_root)?.as_bytes());
+    Ok(protected_root.join(format!(
+        "session-control-{}.page",
+        hex::encode(hash.finalize())
+    )))
+}
+
+/// The local inventory owner supplies this exact project-keyed hint path.
+/// It is unrelated to a remote coordinator's configurable fleet state directory.
+/// Absence or corruption is handled by periodic authoritative control rechecks.
+pub(crate) fn native_session_control_hint_path(project_root: &Path) -> Result<PathBuf> {
+    control_hint_path_at(&inventory_root()?, project_root)
+}
+
+/// Best-effort wakeup after a committed local fence transition. This cache is
+/// never an admission ticket, a policy decision, or a quiescence certificate.
+/// Failed publication must not turn an already committed mutation into an
+/// ambiguous error; unchanged/missing pages leave the periodic check in force.
+fn publish_control_hint(protected_root: &Path, report: &NativeSessionDrainReport) {
+    let published = (|| -> Result<()> {
+        validate_existing_forensic_directory(protected_root)?;
+        let path = control_hint_path_at(protected_root, &report.project_root)?;
+        // Do not leave a new temporary page on every reconciliation when a
+        // persistent directory/device/symlink occupies this optional cache.
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if !metadata.is_file() || metadata.file_type().is_symlink() => {
+                bail!("native-session control hint must be a regular non-symlink file");
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("inspect native-session control hint"),
+        }
+        let sequence = report
+            .generation
+            .checked_mul(2)
+            .context("native-session control hint generation overflowed")?;
+        let mut digest = [0_u8; 32];
+        hex::decode_to_slice(
+            &report.checkpoint.applied_actions.actions_sha256,
+            &mut digest,
+        )?;
+        let snapshot = SeqlockControlSnapshot {
+            // A local drain generation is only a change token, never a
+            // distributed control epoch. Compare the complete snapshot: a
+            // fence can be released without changing its generation.
+            sequence,
+            control_epoch: 0,
+            quarantine_version: 0,
+            active_hold_count: u64::from(report.checkpoint.fence_held),
+            action_count: report.checkpoint.applied_actions.action_count,
+            action_log_digest_prefix: digest,
+        };
+        if SeqlockControlPage::read_shared_page(&path).ok() != Some(snapshot) {
+            SeqlockControlPage::write_shared_snapshot(&path, snapshot)?;
+        }
+        Ok(())
+    })();
+    if let Err(error) = published {
+        tracing::warn!(error = %error,
+            "native-session control hint unavailable; periodic authoritative checks remain active");
+    }
+}
+
 /// Force a write conflict between admission and fence transitions, even if the
 /// storage backend supplies snapshot rather than predicate serializability.
 /// Reading different tables then writing disjoint rows would permit write
@@ -2669,7 +2736,7 @@ fn begin_drain_at(
         &protected_root.join(RUNTIME_EVIDENCE_ROOT_KEY_RELATIVE_PATH),
     )?;
     let _write_lock = lock_inventory_file(protected_root, true)?;
-    retry_snapshot_conflict(|| {
+    let report = retry_snapshot_conflict(|| {
         let fresh = open_inventory_unlocked(protected_root, true)?;
         let active_conn = fresh.as_ref().unwrap_or(&connection);
         let mut tx = active_conn.transaction()?;
@@ -2781,7 +2848,9 @@ fn begin_drain_at(
         check_retained_drain_byte_budget(&tx)?;
         tx.commit()?;
         Ok(report)
-    })
+    })?;
+    publish_control_hint(protected_root, &report);
+    Ok(report)
 }
 
 /// Poll the exact retained population after successful action application.
@@ -2821,7 +2890,7 @@ fn finish_drain_at(
         &protected_root.join(RUNTIME_EVIDENCE_ROOT_KEY_RELATIVE_PATH),
     )?;
     let _write_lock = lock_inventory_file(protected_root, false)?;
-    retry_snapshot_conflict(|| {
+    let report = retry_snapshot_conflict(|| {
         let fresh = open_inventory_unlocked(protected_root, false)?;
         let active_conn = fresh.as_ref().unwrap_or(&connection);
         let mut tx = active_conn.transaction()?;
@@ -2862,7 +2931,9 @@ fn finish_drain_at(
         tx.commit()?;
         protect_sidecars(protected_root)?;
         Ok(report)
-    })
+    })?;
+    publish_control_hint(protected_root, &report);
+    Ok(report)
 }
 
 /// Authenticate a source-free supervisor observation from the retained
@@ -6659,6 +6730,100 @@ mod tests {
 
     fn actions(count: u64) -> FleetApplicationCheckpoint {
         fleet_application_checkpoint(&action_history(count), "prod").unwrap()
+    }
+
+    #[test]
+    fn local_control_hint_tracks_committed_fence_generations_and_release() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("runtime-evidence");
+        let admission = fixture(&root, 153);
+        let project = admission.project_root.clone();
+        let guard = NativeSessionInventoryGuard::admit(&root, admission, 0).unwrap();
+        let path = control_hint_path_at(&root, &project).unwrap();
+        assert!(!path.exists());
+        assert_ne!(
+            path,
+            control_hint_path_at(&root, &project.join("nested-release")).unwrap()
+        );
+
+        let checkpoint = actions(1);
+        let held = begin_drain_at(&root, &project, "node-a", "prod", &checkpoint).unwrap();
+        let first = SeqlockControlPage::read_shared_page(&path).unwrap();
+        assert_eq!(first.sequence, held.generation * 2);
+        assert_eq!(first.active_hold_count, 1);
+        assert_eq!(first.action_count, 1);
+        assert!(admission_ticket_at(&root, &project).is_err());
+
+        // An operator-writable hint cannot release the real database fence.
+        let forged = SeqlockControlPage::new();
+        forged.publish(u64::MAX, 0, 0, 0, [0; 32]);
+        forged.write_shared_page(&path).unwrap();
+        assert!(admission_ticket_at(&root, &project).is_err());
+        begin_drain_at(&root, &project, "node-a", "prod", &checkpoint).unwrap();
+        assert_eq!(SeqlockControlPage::read_shared_page(&path).unwrap(), first);
+
+        // The unspawned admission has no worker/effect obligation. Releasing
+        // this exact census changes the hint even within the same generation.
+        drop(guard);
+        let released = finish_drain_at(&root, &project, "node-a", "prod", &checkpoint).unwrap();
+        let second = SeqlockControlPage::read_shared_page(&path).unwrap();
+        assert!(released.checkpoint.is_complete());
+        assert_eq!(second.sequence, first.sequence);
+        assert_eq!(second.active_hold_count, 0);
+        assert_ne!(second, first);
+        assert_eq!(
+            admission_ticket_at(&root, &project).unwrap(),
+            held.generation
+        );
+
+        let unchanged = std::fs::read(&path).unwrap();
+        assert!(begin_drain_at(&root, &project, "node-a", "prod", &actions(0)).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), unchanged);
+        let newer = begin_drain_at(&root, &project, "node-a", "prod", &actions(2)).unwrap();
+        let third = SeqlockControlPage::read_shared_page(&path).unwrap();
+        assert!(newer.generation > held.generation);
+        assert!(third.sequence > second.sequence);
+        assert_eq!(third.action_count, 2);
+        assert_eq!(third.active_hold_count, 1);
+    }
+
+    #[test]
+    fn local_control_hint_failure_never_undoes_or_ambiguates_committed_fences() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("runtime-evidence");
+        let admission = fixture(&root, 154);
+        let project = admission.project_root.clone();
+        let guard = NativeSessionInventoryGuard::admit(&root, admission, 0).unwrap();
+        let path = control_hint_path_at(&root, &project).unwrap();
+        // A directory cannot be atomically replaced by a page. Publication is
+        // unavailable, but the already durable state transition still succeeds.
+        std::fs::create_dir(&path).unwrap();
+        let checkpoint = actions(1);
+        let held = begin_drain_at(&root, &project, "node-a", "prod", &checkpoint).unwrap();
+        assert!(held.checkpoint.fence_held);
+        assert!(admission_ticket_at(&root, &project).is_err());
+        assert!(SeqlockControlPage::read_shared_page(&path).is_err());
+        drop(guard);
+        let released = finish_drain_at(&root, &project, "node-a", "prod", &checkpoint).unwrap();
+        assert!(released.checkpoint.is_complete());
+        assert_eq!(
+            admission_ticket_at(&root, &project).unwrap(),
+            held.generation
+        );
+        assert!(path.is_dir());
+        assert_eq!(
+            std::fs::read_dir(&root)
+                .unwrap()
+                .filter(|entry| entry
+                    .as_ref()
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("session-control-"))
+                .count(),
+            1,
+            "an unavailable optional hint must not accumulate temporary pages"
+        );
     }
 
     #[test]

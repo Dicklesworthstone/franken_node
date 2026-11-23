@@ -4314,7 +4314,7 @@ pub struct SeqlockControlSnapshot {
 }
 
 /// Safe lock-free Seqlock control page using odd/even sequence fencing in-process
-/// plus a fixed-size header/trailer-framed binary file page for cross-process readers.
+/// plus a fixed-size, atomically published binary page for cross-process readers.
 pub struct SeqlockControlPage {
     sequence: std::sync::atomic::AtomicU64,
     control_epoch: std::sync::atomic::AtomicU64,
@@ -4428,12 +4428,27 @@ impl SeqlockControlPage {
         }
     }
 
-    /// Persist a binary Seqlock page with leading/trailing even sequence markers for cross-process readers.
+    /// Publish a complete binary page with an even sequence for cross-process readers.
     pub fn write_shared_page(
         &self,
         path: &Path,
     ) -> Result<SeqlockControlSnapshot, FleetTransportError> {
         let snapshot = self.read_safepoint();
+        Self::write_shared_snapshot(path, snapshot)?;
+        Ok(snapshot)
+    }
+
+    /// Publish one already assembled advisory snapshot. Callers must retain
+    /// their authoritative state separately; this page supplies no authority.
+    pub(crate) fn write_shared_snapshot(
+        path: &Path,
+        snapshot: SeqlockControlSnapshot,
+    ) -> Result<(), FleetTransportError> {
+        if snapshot.sequence & 1 != 0 {
+            return Err(FleetTransportError::serialization(
+                "cannot publish an incomplete seqlock control snapshot",
+            ));
+        }
         let mut buf = [0_u8; SEQLOCK_PAGE_BYTES];
         buf[0..8].copy_from_slice(SEQLOCK_PAGE_MAGIC);
         buf[8..16].copy_from_slice(&snapshot.sequence.to_le_bytes());
@@ -4459,14 +4474,58 @@ impl SeqlockControlPage {
         fs::rename(&tmp_path, path).map_err(|err| {
             FleetTransportError::io(format!("publish seqlock page {}: {err}", path.display()))
         })?;
-        Ok(snapshot)
+        Ok(())
     }
 
     pub fn read_shared_page(path: &Path) -> Result<SeqlockControlSnapshot, FleetTransportError> {
-        let bytes = fs::read(path).map_err(|err| {
+        let mut options = OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            // An advisory page must not turn an observer into a FIFO/device
+            // reader or follow a substituted final-component symlink.
+            options.custom_flags(
+                (rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32,
+            );
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt as _;
+            options.custom_flags(0x0020_0000);
+        }
+        let mut file = options.open(path).map_err(|err| {
             FleetTransportError::io(format!("read seqlock page {}: {err}", path.display()))
         })?;
-        if bytes.len() != SEQLOCK_PAGE_BYTES || &bytes[0..8] != SEQLOCK_PAGE_MAGIC {
+        let metadata = file.metadata().map_err(|err| {
+            FleetTransportError::io(format!("inspect seqlock page {}: {err}", path.display()))
+        })?;
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt as _;
+            if metadata.file_attributes() & 0x0000_0400 != 0 {
+                return Err(FleetTransportError::serialization(
+                    "seqlock control page must not be a reparse point",
+                ));
+            }
+        }
+        if !metadata.is_file() || metadata.len() != SEQLOCK_PAGE_BYTES as u64 {
+            return Err(FleetTransportError::serialization(
+                "seqlock control page must be a regular file of the exact page length",
+            ));
+        }
+        // The bound applies before any read or allocation, including when a
+        // concurrent writer grows the file after the metadata observation.
+        let mut bytes = [0_u8; SEQLOCK_PAGE_BYTES];
+        file.read_exact(&mut bytes).map_err(|err| {
+            FleetTransportError::io(format!("read seqlock page {}: {err}", path.display()))
+        })?;
+        let mut suffix = [0_u8; 1];
+        if file.read(&mut suffix).map_err(|err| {
+            FleetTransportError::io(format!("finish seqlock page {}: {err}", path.display()))
+        })? != 0
+            || &bytes[0..8] != SEQLOCK_PAGE_MAGIC
+        {
             return Err(FleetTransportError::serialization(
                 "invalid seqlock control page header or byte length",
             ));
@@ -8121,6 +8180,47 @@ mod tests {
         raw[8..16].copy_from_slice(&3_u64.to_le_bytes());
         std::fs::write(&page_path, raw).expect("tamper odd sequence");
         assert!(super::SeqlockControlPage::read_shared_page(&page_path).is_err());
+    }
+
+    #[test]
+    fn seqlock_shared_reader_rejects_wrong_lengths_and_nonregular_files() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("bounded.page");
+        let page = super::SeqlockControlPage::new();
+        page.publish(1, 0, 1, 2, [3; 32]);
+        page.write_shared_page(&path).unwrap();
+        let valid = std::fs::read(&path).unwrap();
+        std::fs::write(&path, &valid[..valid.len() - 1]).unwrap();
+        assert!(super::SeqlockControlPage::read_shared_page(&path).is_err());
+        // Sparse oversized input is rejected from the open descriptor's
+        // metadata before allocating or reading its claimed size.
+        OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(1024 * 1024 * 1024)
+            .unwrap();
+        assert!(super::SeqlockControlPage::read_shared_page(&path).is_err());
+        assert!(super::SeqlockControlPage::read_shared_page(directory.path()).is_err());
+        page.write_shared_page(&path).unwrap();
+        assert_eq!(
+            super::SeqlockControlPage::read_shared_page(&path).unwrap(),
+            page.read_safepoint()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn seqlock_shared_reader_refuses_a_symlink_to_an_otherwise_valid_page() {
+        let directory = tempdir().unwrap();
+        let original = directory.path().join("original.page");
+        let alias = directory.path().join("alias.page");
+        let page = super::SeqlockControlPage::new();
+        page.publish(1, 0, 0, 1, [1; 32]);
+        page.write_shared_page(&original).unwrap();
+        std::os::unix::fs::symlink(&original, &alias).unwrap();
+        assert!(super::SeqlockControlPage::read_shared_page(&alias).is_err());
+        assert!(super::SeqlockControlPage::read_shared_page(&original).is_ok());
     }
 
     #[test]

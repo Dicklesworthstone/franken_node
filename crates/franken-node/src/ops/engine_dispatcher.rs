@@ -3,6 +3,8 @@ use crate::control_plane::fleet_transport::{
     validate_fleet_policy_project_root_with_operator,
 };
 #[cfg(feature = "engine")]
+use crate::control_plane::fleet_transport::{SeqlockControlPage, SeqlockControlSnapshot};
+#[cfg(feature = "engine")]
 use crate::ops::native_session_control::{NativeEffectAdmissionAcks, NativeSessionControlFrame};
 #[cfg(feature = "engine")]
 use crate::ops::native_session_inventory::{
@@ -159,6 +161,11 @@ const NATIVE_SESSION_POLL_INTERVAL: std::time::Duration = std::time::Duration::f
 const NATIVE_SESSION_CONTROL_DRAIN_BUDGET: std::time::Duration = std::time::Duration::from_secs(1);
 #[cfg(feature = "engine")]
 const NATIVE_RUN_CONTROL_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+/// Fixed-size local hints can wake the authoritative observer sooner without
+/// parsing trust/policy state at this cadence. This is not a propagation SLO.
+#[cfg(feature = "engine")]
+const NATIVE_RUN_CONTROL_HINT_POLL_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(25);
 /// Bound the time a guest can run without a completed local control check.
 /// Store lock waits happen on one owned monitor, never on the worker's deadline
 /// loop. A stalled monitor fails closed even before those reads return.
@@ -5443,6 +5450,75 @@ enum NativeSessionPoll {
     },
 }
 
+/// Advisory local change tokens only. No page field grants authority, records
+/// a successful observation, or postpones the periodic full control check.
+/// Remember an unavailable page as one state so repeated corruption cannot
+/// cause a busy loop. A valid-to-missing transition still prompts a recheck.
+#[cfg(feature = "engine")]
+struct NativeRunControlWakeup {
+    hints: Vec<(PathBuf, Option<SeqlockControlSnapshot>)>,
+}
+
+#[cfg(feature = "engine")]
+impl NativeRunControlWakeup {
+    fn new(paths: impl IntoIterator<Item = PathBuf>) -> Self {
+        Self {
+            hints: paths
+                .into_iter()
+                .map(|path| {
+                    let observed = SeqlockControlPage::read_shared_page(&path).ok();
+                    (path, observed)
+                })
+                .collect(),
+        }
+    }
+
+    fn for_projects(project: &Path, operator: Option<&Path>) -> Self {
+        let paths = std::iter::once(project)
+            .chain(operator.filter(|operator| *operator != project))
+            .filter_map(|project| {
+                crate::ops::native_session_inventory::native_session_control_hint_path(project).ok()
+            });
+        Self::new(paths)
+    }
+
+    fn recheck_due(&mut self, last_checked: Instant, now: Instant) -> bool {
+        let mut changed = false;
+        for (path, previous) in &mut self.hints {
+            let current = SeqlockControlPage::read_shared_page(path).ok();
+            changed |= current != *previous;
+            *previous = current;
+        }
+        changed || now.saturating_duration_since(last_checked) >= NATIVE_RUN_CONTROL_POLL_INTERVAL
+    }
+
+    /// True requests the ordinary complete recheck; false ends the owned
+    /// observer. Cancellation remains interruptible even with absent hints.
+    fn wait(&mut self, stop: &std::sync::mpsc::Receiver<()>, last_checked: Instant) -> bool {
+        loop {
+            match stop.try_recv() {
+                Ok(()) | Err(std::sync::mpsc::TryRecvError::Disconnected) => return false,
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+            if self.recheck_due(last_checked, Instant::now()) {
+                return true;
+            }
+            let remaining = NATIVE_RUN_CONTROL_POLL_INTERVAL.saturating_sub(last_checked.elapsed());
+            let interval = if self.hints.is_empty() {
+                remaining
+            } else {
+                remaining.min(NATIVE_RUN_CONTROL_HINT_POLL_INTERVAL)
+            };
+            if !matches!(
+                stop.recv_timeout(interval),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            ) {
+                return false;
+            }
+        }
+    }
+}
+
 /// One owned observer per native session. Potentially contended store reads
 /// never run in the process supervisor. Cancellation wakes the between-check
 /// wait and skips remaining stores; Drop closes the bounded result channel and
@@ -5475,6 +5551,12 @@ impl NativeRunControlMonitor {
         let worker = thread::Builder::new()
             .name("franken-node-live-control".to_string())
             .spawn(move || {
+                // Observe hints before the full check: reading them afterward
+                // could swallow a fence committed during that check.
+                let mut wakeup = NativeRunControlWakeup::for_projects(
+                    project_paths.project_root(),
+                    requirements.operator_fleet_project_root.as_deref(),
+                );
                 while !worker_cancelled.load(Ordering::Acquire) {
                     let result = recheck_native_run_controls(
                         &project_paths,
@@ -5485,16 +5567,14 @@ impl NativeRunControlMonitor {
                         &worker_cancelled,
                     );
                     let denied = result.is_err();
+                    let checked_at = Instant::now();
                     if worker_cancelled.load(Ordering::Acquire)
-                        || update_sender.send((Instant::now(), result)).is_err()
+                        || update_sender.send((checked_at, result)).is_err()
                         || denied
                     {
                         return;
                     }
-                    if !matches!(
-                        stop_receiver.recv_timeout(NATIVE_RUN_CONTROL_POLL_INTERVAL),
-                        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
-                    ) {
+                    if !wakeup.wait(&stop_receiver, checked_at) {
                         return;
                     }
                 }
@@ -18315,6 +18395,92 @@ mod tests {
             },
             sender,
         )
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn live_control_hints_prompt_rechecks_without_renewing_authority() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("local.page");
+        let page = SeqlockControlPage::new();
+        page.publish(0, 0, 0, 0, [0; 32]);
+        page.write_shared_page(&path).unwrap();
+        let mut wakeup = NativeRunControlWakeup::new([path.clone()]);
+        let checked = Instant::now();
+        let early = checked + NATIVE_RUN_CONTROL_HINT_POLL_INTERVAL;
+        assert!(!wakeup.recheck_due(checked, early));
+
+        // Any changed token requests the complete authoritative check, even
+        // when an untrusted writer claims no active hold or a future epoch.
+        page.publish(u64::MAX, 0, 0, 1, [1; 32]);
+        page.write_shared_page(&path).unwrap();
+        assert!(wakeup.recheck_due(checked, early));
+        assert!(!wakeup.recheck_due(checked, early));
+        assert!(wakeup.recheck_due(checked, checked + NATIVE_RUN_CONTROL_POLL_INTERVAL));
+
+        // Reading a fresh or forged hint does not count as a completed control
+        // check. Only the observer's authoritative result renews this deadline.
+        let stale = Instant::now() - NATIVE_RUN_CONTROL_OBSERVATION_DEADLINE;
+        let (mut monitor, _sender) = live_control_test_monitor(stale);
+        assert_eq!(
+            monitor.violation().unwrap().kind,
+            NativeRunControlKind::MonitorUnavailable
+        );
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn live_control_hints_preserve_fallback_for_missing_corrupt_and_replaced_pages() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("local.page");
+        let mut wakeup = NativeRunControlWakeup::new([path.clone()]);
+        let checked = Instant::now();
+        let early = checked + NATIVE_RUN_CONTROL_HINT_POLL_INTERVAL;
+        assert!(!wakeup.recheck_due(checked, early));
+        assert!(wakeup.recheck_due(checked, checked + NATIVE_RUN_CONTROL_POLL_INTERVAL));
+
+        let page = SeqlockControlPage::new();
+        page.publish(0, 0, 1, 1, [1; 32]);
+        page.write_shared_page(&path).unwrap();
+        assert!(wakeup.recheck_due(checked, early));
+        std::fs::write(&path, b"corrupt hint").unwrap();
+        assert!(wakeup.recheck_due(checked, early));
+        assert!(!wakeup.recheck_due(checked, early));
+        assert!(wakeup.recheck_due(checked, checked + NATIVE_RUN_CONTROL_POLL_INTERVAL));
+
+        page.write_shared_page(&path).unwrap();
+        assert!(wakeup.recheck_due(checked, early));
+        std::fs::rename(&path, path.with_extension("retained")).unwrap();
+        assert!(wakeup.recheck_due(checked, early));
+        assert!(!wakeup.recheck_due(checked, early));
+        assert!(wakeup.recheck_due(checked, checked + NATIVE_RUN_CONTROL_POLL_INTERVAL));
+    }
+
+    #[cfg(feature = "engine")]
+    #[test]
+    fn live_control_hints_watch_both_owners_and_keep_cancellation_interruptible() {
+        let directory = tempfile::tempdir().unwrap();
+        let project = directory.path().join("release.page");
+        let operator = directory.path().join("operator.page");
+        let unrelated = directory.path().join("unrelated.page");
+        let mut wakeup = NativeRunControlWakeup::new([project.clone(), operator.clone()]);
+        let checked = Instant::now();
+        let early = checked + NATIVE_RUN_CONTROL_HINT_POLL_INTERVAL;
+        let page = SeqlockControlPage::new();
+        page.publish(0, 0, 1, 1, [1; 32]);
+        page.write_shared_page(&unrelated).unwrap();
+        assert!(!wakeup.recheck_due(checked, early));
+        for path in [project, operator] {
+            page.write_shared_page(&path).unwrap();
+            assert!(wakeup.recheck_due(checked, early));
+            assert!(!wakeup.recheck_due(checked, early));
+        }
+
+        let (stop, stopped) = std::sync::mpsc::channel();
+        stop.send(()).unwrap();
+        assert!(!wakeup.wait(&stopped, checked));
+        drop(stop);
+        assert!(!wakeup.wait(&stopped, checked));
     }
 
     #[cfg(all(feature = "engine", unix))]
