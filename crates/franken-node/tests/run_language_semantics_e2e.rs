@@ -929,3 +929,88 @@ fn modern_inspect_promise_and_json_esm_semantics_match_node_or_fail_closed() {
         );
     }
 }
+
+/// bd-reality-20260923-26n9r.6 / bd-sul35: regression probes for native
+/// `node:net`/`node:tls` ESM + CJS providers (`franken_engine@ed33d8b56`),
+/// `util.inspect` getters & `formatWithOptions` (`73a8272fa`), `Function.bind`
+/// null-prototype preservation (`0d5030526`/`373e9498d`), `Uint8Array.from`
+/// mappers (`373e9498d`), and adjacent `await` operands (`cdd908114`).
+/// Enforces exact Node v26 reference parity on exit 0 (never silent miscompile).
+#[test]
+fn native_net_tls_esm_and_recent_engine_semantics_match_node_or_fail_closed() {
+    for (source, expected) in &[
+        (
+            "const net = require('net'); console.log('net:', net.isIP('127.0.0.1'), net.isIPv4('10.0.0.1'), net.isIPv6('::1'));",
+            "net: 4 true true\n",
+        ),
+        (
+            "const tls = require('tls'); console.log('tls:', Array.isArray(tls.rootCertificates), typeof tls.TLSSocket);",
+            "tls: true function\n",
+        ),
+        (
+            "const util = require('util'); const g = { get x() { return 42; } }; console.log('inspect-getters:', util.inspect(g, { getters: true }));",
+            "inspect-getters: { x: [Getter: 42] }\n",
+        ),
+        (
+            "const util = require('util'); console.log('formatWithOptions:', util.formatWithOptions({ depth: 2 }, '%O', { a: { b: 1 } }));",
+            "formatWithOptions: { a: { b: 1 } }\n",
+        ),
+        (
+            "function f() { return 7; } Object.setPrototypeOf(f, null); const bf = Function.prototype.bind.call(f, null); console.log('bind-null-proto:', Object.getPrototypeOf(bf) === null, bf());",
+            "bind-null-proto: true 7\n",
+        ),
+        (
+            "console.log('ta-from:', Uint8Array.from([1, 2, 3], (x) => x * 10).join(','));",
+            "ta-from: 10,20,30\n",
+        ),
+        (
+            "(async () => { const sum = (await 2) + (await 3); console.log('await-adj:', sum); })();",
+            "await-adj: 5\n",
+        ),
+    ] {
+        let (exit, stdout) = run_snippet(source);
+        if exit == Some(0) {
+            assert_eq!(
+                stdout, *expected,
+                "SILENT MISCOMPILE: franken exited 0 with output differing from Node for {source:?} (expected {expected:?}, got {stdout:?})"
+            );
+        }
+    }
+
+    // Native `node:net` and `node:tls` via ESM `--frozen-modules`.
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let init = Command::new(franken_node_bin())
+        .args(["init", "--profile", "balanced", "--out-dir", "."])
+        .current_dir(dir.path())
+        .output()
+        .expect("init");
+    assert!(init.status.success());
+    std::fs::write(
+        dir.path().join("net_tls.mjs"),
+        concat!(
+            "import net from 'node:net';\n",
+            "import tls from 'node:tls';\n",
+            "console.log('esm:', net.isIP('127.0.0.1'), Array.isArray(tls.rootCertificates));\n",
+        ),
+    )
+    .expect("write net_tls.mjs");
+    let esm_out = Command::new(franken_node_bin())
+        .args([
+            "run",
+            "net_tls.mjs",
+            "--policy",
+            "balanced",
+            "--frozen-modules",
+            "--console-only",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .expect("run net_tls.mjs");
+    if esm_out.status.success() {
+        assert_eq!(
+            String::from_utf8_lossy(&esm_out.stdout),
+            "esm: 4 true\n",
+            "SILENT MISCOMPILE on ESM node:net / node:tls import"
+        );
+    }
+}

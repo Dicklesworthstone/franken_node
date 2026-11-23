@@ -205,12 +205,14 @@ impl CapturedEngineResolver {
     /// Return `Ok(true)` iff the sealed graph consists solely of a single
     /// CommonJS entrypoint plus `Require` edges to `ModuleKind::NativeBuiltin`
     /// targets, at least one of those targets is a lowering-only core builtin
-    /// (`node:net`, `node:tls`, `node:cluster`), no file/URL metadata routes
-    /// are present, and every builtin dependency is authorized by `policy`.
+    /// (`node:cluster`; `node:net` and `node:tls` graduated to first-class
+    /// `NativeBuiltinModule` providers in sibling `franken_engine@ed33d8b56`),
+    /// no file/URL metadata routes are present, and every builtin dependency is
+    /// authorized by `policy`.
     ///
     /// When `Ok(true)` is returned, `EngineDispatcher` can execute the
     /// pre-captured entry source with `module_root = None` and
-    /// `module_resolver = None` so `lowering_pipeline` lowers `net`/`tls`/`cluster`
+    /// `module_resolver = None` so `lowering_pipeline` lowers `cluster`
     /// inline without exposing any live disk module loader.
     pub fn authorize_closed_world_lowering_only_entry(
         &self,
@@ -799,10 +801,11 @@ impl ModuleResolver for CapturedEngineResolver {
 }
 
 fn lowering_only_cjs_builtin_specifier(specifier: &str) -> Option<&'static str> {
+    // `net`/`node:net` and `tls`/`node:tls` graduated to first-class
+    // `NativeBuiltinModule::{Net, Tls}` providers in `franken_engine@ed33d8b56`.
+    // Only `cluster` remains lowering-only for single-file closed-world CJS.
     match specifier {
         "cluster" | "node:cluster" => Some("node:cluster"),
-        "net" | "node:net" => Some("node:net"),
-        "tls" | "node:tls" => Some("node:tls"),
         _ => None,
     }
 }
@@ -4161,6 +4164,8 @@ module.exports = { State, Label, offset: require('./offset.cjs') };
             .current_dir(root)
             .env_remove("NODE_OPTIONS")
             .env_remove("NODE_PATH")
+            .env_remove("FORCE_COLOR")
+            .env("NO_COLOR", "1")
             .output()
             .expect("Node is required for the independent runtime oracle");
         assert!(reference.status.success(), "{reference:?}");
@@ -4984,6 +4989,8 @@ console.log((<{{value:number}}>raw).value, typeof (<number><unknown>'7'),
                     .current_dir(root.path())
                     .env_remove("NODE_OPTIONS")
                     .env_remove("NODE_PATH")
+                    .env_remove("FORCE_COLOR")
+                    .env("NO_COLOR", "1")
                     .output()
                     .unwrap();
                 if !reference.status.success()
@@ -4995,6 +5002,8 @@ console.log((<{{value:number}}>raw).value, typeof (<number><unknown>'7'),
                         .current_dir(root.path())
                         .env_remove("NODE_OPTIONS")
                         .env_remove("NODE_PATH")
+                        .env_remove("FORCE_COLOR")
+                        .env("NO_COLOR", "1")
                         .output()
                         .expect(
                             "Bun fallback required when Node lacks --experimental-transform-types",
@@ -7086,6 +7095,8 @@ import('node:buffer').then(
                 .current_dir(root.path())
                 .env_remove("NODE_OPTIONS")
                 .env_remove("NODE_PATH")
+                .env_remove("FORCE_COLOR")
+                .env("NO_COLOR", "1")
                 .output()
                 .expect("Node is required for the independent runtime oracle");
             assert!(reference.status.success(), "{reference:?}");
@@ -7169,16 +7180,12 @@ import('node:buffer').then(
         ]));
         for (specifier, source) in [
             (
-                "net",
-                "const net = require('net'); console.log(net.isIP('127.0.0.1'));",
-            ),
-            (
-                "node:tls",
-                "const tls = require('node:tls'); console.log(Array.isArray(tls.rootCertificates));",
-            ),
-            (
                 "cluster",
                 "const cluster = require('cluster'); console.log(cluster.isPrimary);",
+            ),
+            (
+                "node:cluster",
+                "const cluster = require('node:cluster'); console.log(cluster.isPrimary);",
             ),
         ] {
             let root = tempfile::tempdir().unwrap();
@@ -7216,13 +7223,13 @@ import('node:buffer').then(
             );
         }
 
-        // A multi-file project combining a relative module with require('net')
+        // A multi-file project combining a relative module with require('cluster')
         // must NOT qualify for the single-module lowering-only fast path.
         let multi_root = tempfile::tempdir().unwrap();
         put(
             multi_root.path(),
             "app.cjs",
-            "const helper = require('./helper.cjs'); const net = require('net'); console.log(helper, net.isIP('127.0.0.1'));",
+            "const helper = require('./helper.cjs'); const cluster = require('cluster'); console.log(helper, cluster.isPrimary);",
         );
         put(multi_root.path(), "helper.cjs", "module.exports = 1;");
         let multi_graph = capture(multi_root.path(), "app.cjs", GraphOptions::default()).unwrap();
@@ -7234,19 +7241,111 @@ import('node:buffer').then(
                 .unwrap()
         );
 
-        for esm_source in [
-            "import 'node:net';",
-            "import 'node:tls';",
-            "import 'node:cluster';",
+        let esm_root = tempfile::tempdir().unwrap();
+        put(esm_root.path(), "app.mjs", "import 'node:cluster';");
+        let esm_graph = capture(esm_root.path(), "app.mjs", GraphOptions::default()).unwrap();
+        let esm_pin = esm_graph.report().input_hash.clone();
+        assert_eq!(
+            CapturedEngineResolver::new(esm_graph, &esm_pin)
+                .err()
+                .unwrap()
+                .code,
+            "ERR_MODULE_REGISTRY_INCOMPLETE",
+            "node:cluster remains lowering-only and must refuse ESM import"
+        );
+    }
+
+    #[test]
+    fn native_net_and_tls_builtins_resolve_in_cjs_multifile_and_esm() {
+        let builtin_granted = CapabilityPolicyHook::new(BTreeSet::from([
+            RuntimeCapability::ModuleLoad,
+            RuntimeCapability::Builtin,
+        ]));
+        for (specifier, canonical, expected_builtin, source) in [
+            (
+                "net",
+                "node:net",
+                NativeBuiltinModule::Net,
+                "const net = require('net'); console.log(net.isIP('127.0.0.1'));",
+            ),
+            (
+                "node:tls",
+                "node:tls",
+                NativeBuiltinModule::Tls,
+                "const tls = require('node:tls'); console.log(Array.isArray(tls.rootCertificates));",
+            ),
         ] {
             let root = tempfile::tempdir().unwrap();
-            put(root.path(), "app.mjs", esm_source);
+            put(root.path(), "app.cjs", source);
+            let graph = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
+            let pin = graph.report().input_hash.clone();
+            let resolver = CapturedEngineResolver::new(graph, &pin).unwrap();
+            // Native builtins bypass the single-file lowering-only fallback and
+            // execute directly through the engine's ExecutionModuleResolver.
+            assert!(
+                !resolver
+                    .authorize_closed_world_lowering_only_entry(&context(), &builtin_granted)
+                    .unwrap(),
+                "{specifier} should route through native NativeBuiltinModule, not lowering-only"
+            );
+            let entry = resolver
+                .resolve(&resolver.entry_request(), &context(), &granted())
+                .unwrap();
+            let mut runtime_req = ModuleRequest::new(specifier, ImportStyle::Require)
+                .with_compatibility_mode(CompatibilityMode::NodeCompat);
+            runtime_req.referrer = Some(entry.module.record.id);
+            assert_eq!(
+                resolver
+                    .resolve_shared(&runtime_req, &context(), &granted())
+                    .unwrap_err()
+                    .code,
+                ResolutionErrorCode::PolicyDenied,
+                "{specifier} must fail closed without RuntimeCapability::Builtin"
+            );
+            let resolved = resolver
+                .resolve_shared(&runtime_req, &context(), &builtin_granted)
+                .unwrap();
+            assert_eq!(
+                NativeBuiltinModule::from_record(resolved.module.record.record()),
+                Some(expected_builtin)
+            );
+            assert_eq!(
+                resolved.module.record.record().provenance.origin,
+                format!("franken-engine/native-builtin/v1:{canonical}")
+            );
+        }
+
+        // ESM `import 'node:net'` and `import 'node:tls'` now capture and
+        // resolve natively as first-class `NativeBuiltinModule` records.
+        for (specifier, canonical, expected_builtin) in [
+            ("node:net", "node:net", NativeBuiltinModule::Net),
+            ("node:tls", "node:tls", NativeBuiltinModule::Tls),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            put(
+                root.path(),
+                "app.mjs",
+                &format!("import m from '{specifier}'; console.log(typeof m);"),
+            );
             let graph = capture(root.path(), "app.mjs", GraphOptions::default()).unwrap();
             let pin = graph.report().input_hash.clone();
+            let resolver = CapturedEngineResolver::new(graph, &pin).unwrap();
+            let entry = resolver
+                .resolve(&resolver.entry_request(), &context(), &granted())
+                .unwrap();
+            let mut esm_req = ModuleRequest::new(specifier, ImportStyle::Import)
+                .with_compatibility_mode(CompatibilityMode::NodeCompat);
+            esm_req.referrer = Some(entry.module.record.id);
+            let resolved = resolver
+                .resolve_shared(&esm_req, &context(), &builtin_granted)
+                .unwrap();
             assert_eq!(
-                CapturedEngineResolver::new(graph, &pin).err().unwrap().code,
-                "ERR_MODULE_REGISTRY_INCOMPLETE",
-                "{esm_source}"
+                NativeBuiltinModule::from_record(resolved.module.record.record()),
+                Some(expected_builtin)
+            );
+            assert_eq!(
+                resolved.module.record.record().provenance.origin,
+                format!("franken-engine/native-builtin/v1:{canonical}")
             );
         }
     }
