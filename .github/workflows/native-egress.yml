@@ -36,7 +36,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: Dicklesworthstone/franken_engine
-          ref: 763389e24a84171abf381cb85ccf7aec2c0e2ff9
+          ref: ed33d8b563bba2a445cc12439ee3b7de960a87c9
           path: franken_engine
           persist-credentials: false
       - name: Install Rust and identify both source revisions

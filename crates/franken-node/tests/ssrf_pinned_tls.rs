@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use frankenengine_extension_host::host_io::{
     HostIoCapability, HostIoError, HostIoOutcome, HostIoProvider, HostIoRequest, HostIoResponse,
-    SandboxedHostIo,
+    SandboxedHostIo, TlsTrustFailure,
 };
 use frankenengine_node::config::{NetworkAllowlistEntry, NetworkPolicyConfig};
 use frankenengine_node::ops::flow_gated_host_io::FlowGatedHostIo;
@@ -225,7 +225,10 @@ fn configured_production_constructor_enables_hostname_tls_without_an_opt_in() {
 
 #[test]
 fn certificate_trust_and_hostname_failures_never_send_http_or_retry() {
-    for (name, trust) in [(AUTHORITY, false), ("wrong-name.invalid", true)] {
+    for (name, trust, expected_reason) in [
+        (AUTHORITY, false, TlsTrustFailure::UnknownIssuer),
+        ("wrong-name.invalid", true, TlsTrustFailure::NameMismatch),
+    ] {
         let root = tempfile::tempdir().unwrap();
         let key = rcgen::generate_simple_self_signed(vec![name.into()]).unwrap();
         let mut inner = SandboxedHostIo::with_root(root.path()).unwrap();
@@ -253,7 +256,7 @@ fn certificate_trust_and_hostname_failures_never_send_http_or_retry() {
         );
         let peer = server.join().unwrap();
         assert!(
-            matches!(result, Err(HostIoError::Io { .. })),
+            matches!(&result, Err(HostIoError::TlsTrust { reason, .. }) if *reason == expected_reason),
             "{name}: {result:?}"
         );
         assert_eq!(peer.sni.as_deref(), Some(AUTHORITY));

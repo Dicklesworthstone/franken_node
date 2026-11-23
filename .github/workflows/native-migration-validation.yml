@@ -281,7 +281,7 @@ jobs:
           mkdir -p evidence
           bash franken_node/scripts/bootstrap_source.sh \
             --workspace "$GITHUB_WORKSPACE/franken_node" \
-            --engine-ref 763389e24a84171abf381cb85ccf7aec2c0e2ff9 \
+            --engine-ref ed33d8b563bba2a445cc12439ee3b7de960a87c9 \
             --receipt "$GITHUB_WORKSPACE/evidence/source-inputs.tsv"
           for repo in franken_node franken_engine frankentui fastapi_rust sqlmodel_rust; do
             git -C "$repo" rev-parse HEAD > "evidence/$repo.revision"
