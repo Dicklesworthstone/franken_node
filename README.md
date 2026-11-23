@@ -2447,7 +2447,8 @@ accept this acknowledgment contract.
 The retained supervisor evidence can be exported separately, including after
 the original application or project has been moved. Select a session UUID from
 `incident sessions --json`, which also reports verified durable-journal counts,
-then choose an operator-controlled destination:
+or retain the UUID from the original run's identity capture, then choose an
+operator-controlled destination:
 
 ```bash
 franken-node incident capture --from-session SESSION_UUID \
@@ -2474,6 +2475,23 @@ verifier authenticates each journal record, its hash-chain predecessor and its
 binding to the admission, and checks agreement with any signed terminal
 observation. A final incomplete line can leave a verified prefix with
 `trailing_partial_record: true`; a malformed complete record is rejected.
+
+Before admitting a new worker, the supervisor also atomically retains the full
+canonical admission body alongside its signed commitment. Retention is bounded
+to 16,384 files and 256 MiB, including abandoned publications; exhaustion refuses
+admission without discarding evidence. This independent body lets session export
+survive a missing inventory database, a missing session row, or an unreadable
+SQLite database. The original product-root identity, admission signature, signed
+outcome, journal and frozen sources are still authenticated. A readable
+contradictory or malformed row, damaged retained evidence, or an unsafe database
+path or permission refuses export.
+
+The CLI reports `inventory_projection` as `matched`, `missing_database`,
+`missing_admission`, or `unreadable_database`; the last includes a bounded
+`inventory_diagnostic`. Preserve the session UUID and independently trusted
+public key with the original run: recovery does not rebuild the inventory or
+its session listing. Older sessions without a retained admission body still
+require their original valid database row.
 
 Session export opens existing protected evidence read-only. It does not create
 replacement authority, repair the inventory or retry an effect. Publication uses

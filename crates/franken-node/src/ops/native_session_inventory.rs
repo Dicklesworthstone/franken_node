@@ -46,6 +46,7 @@ use super::engine_dispatcher::{
 
 const INVENTORY_SCHEMA: &str = "franken-node/native-session-inventory/v1";
 const FORENSIC_INVENTORY_SCHEMA: &str = "franken-node/native-session-forensic-inventory/v1";
+const MAX_FORENSIC_DIAGNOSTIC_BYTES: usize = 4096;
 const INVENTORY_FILE: &str = "native-sessions.db";
 const MAX_STORED_SESSIONS: usize = crate::capacity_defaults::base::STANDARD;
 const MAX_IDENTITY_CAPTURES: usize = crate::capacity_defaults::base::LARGE;
@@ -3710,19 +3711,48 @@ fn read_native_session_forensics_at(
     Ok(report)
 }
 
+/// Availability of the selected admission in the mutable inventory. A matching
+/// admission says nothing about live processes, complete history or whether an
+/// unsigned outcome projection is authoritative.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeSessionForensicProjection {
+    Matched,
+    MissingDatabase,
+    MissingAdmission,
+    UnreadableDatabase,
+}
+
+impl NativeSessionForensicProjection {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Matched => "matched",
+            Self::MissingDatabase => "missing_database",
+            Self::MissingAdmission => "missing_admission",
+            Self::UnreadableDatabase => "unreadable_database",
+        }
+    }
+}
+
 /// Portable evidence plus the SDK verdict established against the existing
 /// local product root. The bundle does not provide its own trust anchor.
 pub struct NativeSessionForensicExport {
     pub bundle: frankenengine_verifier_sdk::native_session::NativeSessionForensicBundle,
     pub verification: frankenengine_verifier_sdk::native_session::VerifiedNativeSessionForensics,
+    pub inventory_projection: NativeSessionForensicProjection,
+    /// Present only for an unreadable SQLite projection, bounded to 4096 UTF-8
+    /// bytes. This local diagnostic is not signed evidence or a recovery claim.
+    pub inventory_diagnostic: Option<String>,
 }
 
 /// Export one retained signed admission and its optional signed supervisor
 /// observation. Missing terminal evidence remains explicitly pending, even if
 /// an unsigned database projection claims completion. This operation neither
 /// recovers the database nor creates or signs authority, and does not require
-/// the original project to remain on disk. It establishes no native replay,
-/// fleet quiescence, external-effect commit status or historical completeness.
+/// the original project to remain on disk. A missing/unreadable projection may
+/// use the original immutable admission body; present contradictions are fatal.
+/// It establishes no native replay, fleet quiescence, external-effect commit
+/// status or historical completeness.
 pub fn export_local_native_session_forensics(nonce: &str) -> Result<NativeSessionForensicExport> {
     validate_forensic_session_nonce(nonce)?;
     export_native_session_forensics_at(&inventory_root()?, nonce)
@@ -3767,9 +3797,70 @@ fn validate_existing_forensic_directory(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn validate_forensic_inventory_paths(protected_root: &Path) -> Result<bool> {
+    let present = validate_private_path_if_present(&protected_root.join(INVENTORY_FILE))?;
+    // Unsafe orphaned sidecars remain errors even when the main file is gone.
+    for suffix in ["-wal", "-shm", "-journal"] {
+        validate_private_path_if_present(
+            &protected_root.join(format!("{INVENTORY_FILE}{suffix}")),
+        )?;
+    }
+    Ok(present)
+}
+
+/// Only a SQLite read failure may enable immutable-evidence fallback. Filesystem
+/// safety failures and readable contradictory rows never receive this type.
+#[derive(Debug)]
+struct NativeSessionForensicInventoryUnavailable {
+    detail: String,
+}
+
+impl NativeSessionForensicInventoryUnavailable {
+    fn new(detail: impl std::fmt::Display) -> Self {
+        Self {
+            detail: bounded_forensic_diagnostic(detail),
+        }
+    }
+}
+
+impl std::fmt::Display for NativeSessionForensicInventoryUnavailable {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.detail)
+    }
+}
+
+impl std::error::Error for NativeSessionForensicInventoryUnavailable {}
+
+fn classify_forensic_inventory_read_error(
+    context: &'static str,
+    error: fsqlite::FrankenError,
+) -> anyhow::Error {
+    use fsqlite::FrankenError;
+
+    // CannotOpen includes an expected-descriptor identity mismatch. Generic
+    // I/O, access, locking, limit and internal failures likewise remain fatal;
+    // they cannot be assumed to mean safely readable-but-corrupt evidence.
+    if matches!(
+        &error,
+        FrankenError::DatabaseCorrupt { .. }
+            | FrankenError::NotADatabase { .. }
+            | FrankenError::WalCorrupt { .. }
+            | FrankenError::ShortRead { .. }
+            | FrankenError::IoRead { .. }
+            | FrankenError::NoSuchTable { .. }
+            | FrankenError::NoSuchColumn { .. }
+            | FrankenError::ParseError { .. }
+            | FrankenError::SyntaxError { .. }
+    ) {
+        NativeSessionForensicInventoryUnavailable::new(format!("{context}: {error}")).into()
+    } else {
+        anyhow::Error::new(error).context(context)
+    }
+}
+
 fn open_forensic_inventory(protected_root: &Path) -> Result<Connection> {
     let path = protected_root.join(INVENTORY_FILE);
-    if !validate_private_path_if_present(&path)? {
+    if !validate_forensic_inventory_paths(protected_root)? {
         bail!("native-session forensic export requires an existing admission database");
     }
     let name = path
@@ -3815,15 +3906,32 @@ fn open_forensic_inventory(protected_root: &Path) -> Result<Connection> {
     }
     let identity = fsqlite::FileIdentity::from_file(&file)?
         .context("native-session forensic database identity is unavailable")?;
-    for suffix in ["-wal", "-shm", "-journal"] {
-        validate_private_path_if_present(
-            &protected_root.join(format!("{INVENTORY_FILE}{suffix}")),
-        )?;
-    }
-    let connection = Connection::open_schema_only_with_expected_identity(name, identity)
-        .context("open retained native-session inventory read-only")?;
+    let connection = match Connection::open_schema_only_with_expected_identity(name, identity) {
+        Ok(connection) => connection,
+        Err(error) => {
+            if !validate_forensic_inventory_paths(protected_root)? {
+                bail!("native-session forensic database disappeared while opening");
+            }
+            return Err(classify_forensic_inventory_read_error(
+                "open retained native-session inventory read-only",
+                error,
+            ));
+        }
+    };
     drop(file);
     Ok(connection)
+}
+
+fn bounded_forensic_diagnostic(detail: impl std::fmt::Display) -> String {
+    let mut detail = detail.to_string();
+    if detail.len() > MAX_FORENSIC_DIAGNOSTIC_BYTES {
+        let mut end = MAX_FORENSIC_DIAGNOSTIC_BYTES;
+        while !detail.is_char_boundary(end) {
+            end -= 1;
+        }
+        detail.truncate(end);
+    }
+    detail
 }
 
 fn forensic_source_error(
@@ -3835,19 +3943,11 @@ fn forensic_source_error(
     let session_nonce = nonce
         .filter(|value| value.len() <= 128 && uuid::Uuid::parse_str(value).is_ok())
         .map(str::to_owned);
-    let mut detail = detail.to_string();
-    if detail.len() > MAX_PANIC_MESSAGE_BYTES {
-        let mut end = MAX_PANIC_MESSAGE_BYTES;
-        while !detail.is_char_boundary(end) {
-            end -= 1;
-        }
-        detail.truncate(end);
-    }
     NativeSessionForensicSourceError {
         session_nonce,
         path,
         kind,
-        detail,
+        detail: bounded_forensic_diagnostic(detail),
     }
 }
 
@@ -3857,8 +3957,17 @@ fn read_forensic_projection(
     connection: &Connection,
     nonce: &str,
 ) -> Result<(SqliteValue, SqliteValue, bool)> {
-    let rows = connection.query_with_params(
-        "SELECT
+    read_optional_forensic_projection(connection, nonce)?
+        .context("native-session forensic nonce has no unique retained admission")
+}
+
+fn read_optional_forensic_projection(
+    connection: &Connection,
+    nonce: &str,
+) -> Result<Option<(SqliteValue, SqliteValue, bool)>> {
+    let rows = connection
+        .query_with_params(
+            "SELECT
             CASE WHEN typeof(admission_json) = 'text'
                   AND LENGTH(CAST(admission_json AS BLOB)) <= ?2
                  THEN admission_json ELSE NULL END,
@@ -3870,23 +3979,32 @@ fn read_forensic_projection(
                        AND LENGTH(CAST(outcome_json AS BLOB)) <= ?3)
                  THEN 1 ELSE 0 END
          FROM native_sessions WHERE session_nonce = ?1 LIMIT 2;",
-        &[
-            SqliteValue::Text(nonce.to_owned().into()),
-            SqliteValue::Integer(i64::try_from(MAX_ADMISSION_BYTES)?),
-            SqliteValue::Integer(i64::try_from(MAX_OUTCOME_BYTES)?),
-        ],
-    )?;
+            &[
+                SqliteValue::Text(nonce.to_owned().into()),
+                SqliteValue::Integer(i64::try_from(MAX_ADMISSION_BYTES)?),
+                SqliteValue::Integer(i64::try_from(MAX_OUTCOME_BYTES)?),
+            ],
+        )
+        .map_err(|error| {
+            classify_forensic_inventory_read_error(
+                "read retained native-session inventory projection",
+                error,
+            )
+        })?;
+    if rows.is_empty() {
+        return Ok(None);
+    }
     let [row] = rows.as_slice() else {
         bail!("native-session forensic nonce has no unique retained admission");
     };
     let [admission, projected_outcome, outcome_within_bound] = row.values() else {
         bail!("native-session forensic inventory row shape is invalid");
     };
-    Ok((
+    Ok(Some((
         admission.clone(),
         projected_outcome.clone(),
         matches!(outcome_within_bound, SqliteValue::Integer(1)),
-    ))
+    )))
 }
 
 fn authenticate_forensic_admission(
@@ -4129,16 +4247,61 @@ fn export_native_session_forensics_at(
     )?;
     let key = root.verifying_key();
     drop(root);
-    let connection = open_forensic_inventory(protected_root)?;
-    let (admission_value, projected_outcome, outcome_within_bound) =
-        read_forensic_projection(&connection, nonce)?;
-    if !matches!(admission_value, SqliteValue::Text(_)) || !outcome_within_bound {
-        bail!(
-            "native-session forensic inventory JSON column has invalid type or exceeds its byte bound"
-        );
-    }
-    let (admission, receipt) =
-        authenticate_forensic_admission(protected_root, nonce, &admission_value, &key)?;
+    let (projection, inventory_projection, inventory_diagnostic) =
+        if !validate_forensic_inventory_paths(protected_root)? {
+            (None, NativeSessionForensicProjection::MissingDatabase, None)
+        } else {
+            let projection = (|| -> Result<_> {
+                let connection = open_forensic_inventory(protected_root)?;
+                read_optional_forensic_projection(&connection, nonce)
+            })();
+            match projection {
+                Ok(Some(values)) => (Some(values), NativeSessionForensicProjection::Matched, None),
+                Ok(None) => (
+                    None,
+                    NativeSessionForensicProjection::MissingAdmission,
+                    None,
+                ),
+                Err(error) => {
+                    let Some(unavailable) =
+                        error.downcast_ref::<NativeSessionForensicInventoryUnavailable>()
+                    else {
+                        return Err(error);
+                    };
+                    if !validate_forensic_inventory_paths(protected_root)? {
+                        bail!("native-session forensic database disappeared while reading");
+                    }
+                    (
+                        None,
+                        NativeSessionForensicProjection::UnreadableDatabase,
+                        Some(unavailable.detail.clone()),
+                    )
+                }
+            }
+        };
+    let (admission, receipt, projected_outcome, outcome_within_bound) = match projection {
+        Some((admission_value, projected_outcome, outcome_within_bound)) => {
+            if !matches!(admission_value, SqliteValue::Text(_)) || !outcome_within_bound {
+                bail!(
+                    "native-session forensic inventory JSON column has invalid type or exceeds its byte bound"
+                );
+            }
+            let (admission, receipt) =
+                authenticate_forensic_admission(protected_root, nonce, &admission_value, &key)?;
+            (admission, receipt, projected_outcome, outcome_within_bound)
+        }
+        None => {
+            let (admission, receipt) = read_retained_admission_record(protected_root, nonce, &key)?
+                .context(
+                    "native-session forensic export requires a retained authenticated admission \
+                     record when the inventory projection is unavailable",
+                )?;
+            // No projected outcome can be inferred from a lost row. Only the
+            // independently authenticated original supervisor receipt may be
+            // exported; its absence remains pending with unknown liveness.
+            (admission, receipt, SqliteValue::Null, true)
+        }
+    };
     let outcome = authenticate_forensic_outcome(
         protected_root,
         &admission,
@@ -4168,6 +4331,8 @@ fn export_native_session_forensics_at(
     Ok(NativeSessionForensicExport {
         bundle,
         verification,
+        inventory_projection,
+        inventory_diagnostic,
     })
 }
 
@@ -4610,6 +4775,17 @@ mod tests {
         files
     }
 
+    fn retire_forensic_inventory(root: &Path, destination: &Path) {
+        std::fs::create_dir(destination).unwrap();
+        for suffix in ["", "-wal", "-shm", "-journal"] {
+            let name = format!("{INVENTORY_FILE}{suffix}");
+            let path = root.join(&name);
+            if path.try_exists().unwrap() {
+                std::fs::rename(path, destination.join(name)).unwrap();
+            }
+        }
+    }
+
     #[test]
     fn admission_record_is_retained_and_authenticated_before_worker_start() {
         let temp = tempfile::tempdir().unwrap();
@@ -4629,6 +4805,11 @@ mod tests {
         assert_eq!(retained, admission);
         receipt.verify(&retained, &key).unwrap();
         let export = export_native_session_forensics_at(&root, &admission.session_nonce).unwrap();
+        assert_eq!(
+            export.inventory_projection,
+            NativeSessionForensicProjection::Matched
+        );
+        assert!(export.inventory_diagnostic.is_none());
         assert_eq!(export.verification.outcome_kind, "pending");
         assert!(!export.verification.quiescence_certified);
         assert!(!export.verification.historical_completeness);
@@ -4780,6 +4961,279 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn forensic_export_recovers_retained_admissions_without_repairing_unavailable_inventory() {
+        for with_outcome in [false, true] {
+            for fault in 0..4 {
+                let temp = tempfile::tempdir().unwrap();
+                let root = temp.path().join("evidence");
+                let admission = fixture(&root, 165);
+                let mut guard =
+                    NativeSessionInventoryGuard::admit(&root, admission.clone(), 0).unwrap();
+                if with_outcome {
+                    abandon_after_receipt(&root, guard, &terminal_outcome());
+                } else {
+                    guard.finished = true;
+                    drop(guard);
+                }
+                let expected_projection = match fault {
+                    0 | 2 => {
+                        retire_forensic_inventory(&root, &temp.path().join("retired-inventory"));
+                        if fault == 2 {
+                            create_new_runtime_evidence_private_file(
+                                &root.join(INVENTORY_FILE),
+                                &[b'x'; 4096],
+                            )
+                            .unwrap();
+                            NativeSessionForensicProjection::UnreadableDatabase
+                        } else {
+                            NativeSessionForensicProjection::MissingDatabase
+                        }
+                    }
+                    1 | 3 => {
+                        let connection = open_inventory(&root, false).unwrap().unwrap();
+                        let mut tx = connection.transaction().unwrap();
+                        tx.execute(
+                            "ALTER TABLE native_sessions RENAME TO retained_native_sessions;",
+                        )
+                        .unwrap();
+                        if fault == 1 {
+                            tx.execute("CREATE TABLE native_sessions (session_nonce TEXT NOT NULL, admission_json TEXT NOT NULL, outcome_json TEXT);")
+                                .unwrap();
+                        }
+                        tx.commit().unwrap();
+                        drop(tx);
+                        drop(connection);
+                        protect_sidecars(&root).unwrap();
+                        if fault == 1 {
+                            NativeSessionForensicProjection::MissingAdmission
+                        } else {
+                            NativeSessionForensicProjection::UnreadableDatabase
+                        }
+                    }
+                    _ => unreachable!(),
+                };
+                let before = forensic_state_snapshot(&root);
+                let export = export_native_session_forensics_at(&root, &admission.session_nonce)
+                    .unwrap_or_else(|error| {
+                        panic!("fault {fault}, signed outcome {with_outcome}: {error:#}")
+                    });
+                assert_eq!(export.inventory_projection, expected_projection);
+                assert_eq!(
+                    export.inventory_diagnostic.is_some(),
+                    expected_projection == NativeSessionForensicProjection::UnreadableDatabase
+                );
+                if let Some(diagnostic) = &export.inventory_diagnostic {
+                    assert!(!diagnostic.is_empty());
+                    assert!(diagnostic.len() <= MAX_FORENSIC_DIAGNOSTIC_BYTES);
+                }
+                assert_eq!(
+                    export.bundle.admission_json,
+                    serde_json::to_string(&admission).unwrap()
+                );
+                assert_eq!(export.bundle.outcome.is_some(), with_outcome);
+                assert_eq!(
+                    export.verification.outcome_kind,
+                    if with_outcome {
+                        "control_stopped"
+                    } else {
+                        "pending"
+                    }
+                );
+                assert!(!export.verification.replay_certified);
+                assert!(!export.verification.quiescence_certified);
+                assert!(!export.verification.historical_completeness);
+                assert_eq!(forensic_state_snapshot(&root), before);
+                if fault == 0 {
+                    assert!(!root.join(INVENTORY_FILE).exists());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn forensic_export_fallback_requires_complete_original_admission_authority() {
+        for mutation in 0..5 {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("evidence");
+            let admission = fixture(&root, 166);
+            let guard = NativeSessionInventoryGuard::admit(&root, admission.clone(), 0).unwrap();
+            abandon_after_receipt(&root, guard, &terminal_outcome());
+            retire_forensic_inventory(&root, &temp.path().join("retired-inventory"));
+            let path = admission_record_path(&root, &admission.session_nonce);
+            match mutation {
+                0 => std::fs::rename(&path, temp.path().join("retained-admission.json")).unwrap(),
+                1 => std::fs::write(&path, b"{").unwrap(),
+                2 => {
+                    let mut changed = admission.clone();
+                    changed
+                        .dependency_ids
+                        .push("unsigned-dependency".to_owned());
+                    std::fs::write(&path, serde_json::to_vec(&changed).unwrap()).unwrap();
+                }
+                3 => std::fs::rename(
+                    admission_receipt_path(&root, &admission.session_nonce),
+                    temp.path().join("retained-receipt.json"),
+                )
+                .unwrap(),
+                4 => std::fs::rename(
+                    &admission.identity_capture_path,
+                    temp.path().join("retained-identity.json"),
+                )
+                .unwrap(),
+                _ => unreachable!(),
+            }
+            let before = forensic_state_snapshot(&root);
+            assert!(
+                export_native_session_forensics_at(&root, &admission.session_nonce).is_err(),
+                "mutation {mutation}"
+            );
+            assert_eq!(forensic_state_snapshot(&root), before);
+            assert!(!root.join(INVENTORY_FILE).exists());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn forensic_export_fallback_refuses_unsafe_inventory_and_orphaned_sidecars() {
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+
+        for mutation in 0..4 {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("evidence");
+            let admission = fixture(&root, 167);
+            let mut guard =
+                NativeSessionInventoryGuard::admit(&root, admission.clone(), 0).unwrap();
+            guard.finished = true;
+            drop(guard);
+            let retired = temp.path().join("retired-inventory");
+            retire_forensic_inventory(&root, &retired);
+            let database = root.join(INVENTORY_FILE);
+            match mutation {
+                0 => {
+                    create_new_runtime_evidence_private_file(&database, &[b'x'; 4096]).unwrap();
+                    std::fs::set_permissions(&database, std::fs::Permissions::from_mode(0o644))
+                        .unwrap();
+                }
+                1 => symlink(retired.join(INVENTORY_FILE), &database).unwrap(),
+                2 => symlink(
+                    retired.join(INVENTORY_FILE),
+                    root.join(format!("{INVENTORY_FILE}-wal")),
+                )
+                .unwrap(),
+                3 => std::fs::hard_link(retired.join(INVENTORY_FILE), &database).unwrap(),
+                _ => unreachable!(),
+            }
+            let before = forensic_state_snapshot(&root);
+            assert!(
+                export_native_session_forensics_at(&root, &admission.session_nonce).is_err(),
+                "mutation {mutation}"
+            );
+            assert_eq!(forensic_state_snapshot(&root), before);
+            if mutation == 0 {
+                assert_eq!(
+                    std::fs::metadata(&database).unwrap().permissions().mode() & 0o777,
+                    0o644
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn forensic_inventory_fallback_keeps_identity_access_and_limit_failures_fatal() {
+        use fsqlite::FrankenError;
+
+        for error in [
+            FrankenError::CannotOpen {
+                path: PathBuf::from("replaced.db"),
+            },
+            FrankenError::DatabaseNotFound {
+                path: PathBuf::from("disappeared.db"),
+            },
+            FrankenError::Io(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+            FrankenError::AuthDenied,
+            FrankenError::TooBig,
+            FrankenError::QueryReturnedMultipleRows,
+            FrankenError::Internal("unclassified failure".to_owned()),
+        ] {
+            let classified = classify_forensic_inventory_read_error("test read", error);
+            assert!(
+                classified
+                    .downcast_ref::<NativeSessionForensicInventoryUnavailable>()
+                    .is_none(),
+                "{classified:#}"
+            );
+        }
+        let classified = classify_forensic_inventory_read_error(
+            "test read",
+            FrankenError::DatabaseCorrupt {
+                detail: "☃".repeat(MAX_FORENSIC_DIAGNOSTIC_BYTES),
+            },
+        );
+        let unavailable = classified
+            .downcast_ref::<NativeSessionForensicInventoryUnavailable>()
+            .unwrap();
+        assert!(unavailable.detail.starts_with("test read: "));
+        assert!(unavailable.detail.len() <= MAX_FORENSIC_DIAGNOSTIC_BYTES);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn forensic_export_recovers_original_sources_and_effect_journal_after_inventory_loss() {
+        use base64::Engine as _;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("evidence");
+        let (admission, original_sources) = frozen_source_fixture(&root, 168);
+        let mut guard = NativeSessionInventoryGuard::admit(&root, admission.clone(), 0).unwrap();
+        let mut journal = guard.prepare_effect_journal().unwrap();
+        let request_hash = format!("sha256:{}", "ef".repeat(32));
+        journal.admit(0, "fs_write", &request_hash).unwrap();
+        journal.complete(0).unwrap();
+        journal.admit(1, "network_request", &request_hash).unwrap();
+        drop(journal);
+        guard.finished = true;
+        drop(guard);
+        let original_journal =
+            read_retained_native_session_effect_journal(&root, &admission.session_nonce)
+                .unwrap()
+                .unwrap();
+        retire_forensic_inventory(&root, &temp.path().join("retired-inventory"));
+        std::fs::rename(&admission.project_root, temp.path().join("retired-source")).unwrap();
+        let before = forensic_state_snapshot(&root);
+        let export = export_native_session_forensics_at(&root, &admission.session_nonce).unwrap();
+        assert_eq!(
+            export.inventory_projection,
+            NativeSessionForensicProjection::MissingDatabase
+        );
+        assert_eq!(
+            export.bundle.schema_version,
+            "franken-node/native-session-forensics/v3"
+        );
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(export.bundle.source_capsule_base64.as_ref().unwrap())
+                .unwrap(),
+            original_sources
+        );
+        assert_eq!(
+            export.bundle.journal_jsonl.as_ref(),
+            Some(&original_journal)
+        );
+        assert!(export.bundle.outcome.is_none());
+        assert_eq!(export.verification.outcome_kind, "pending");
+        let journal = export.verification.durable_journal.as_ref().unwrap();
+        assert_eq!(journal.admitted_provider_calls, 2);
+        assert_eq!(journal.returned_provider_calls, 1);
+        assert_eq!(journal.indeterminate_provider_calls, 1);
+        assert!(!export.verification.replay_certified);
+        assert!(!export.verification.quiescence_certified);
+        assert!(!export.verification.historical_completeness);
+        assert_eq!(forensic_state_snapshot(&root), before);
+        assert!(!admission.project_root.exists());
+        assert!(!root.join(INVENTORY_FILE).exists());
     }
 
     #[cfg(unix)]

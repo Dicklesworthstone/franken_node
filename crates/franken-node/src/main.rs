@@ -14383,6 +14383,8 @@ fn handle_incident_session_forensics(
             "session_nonce": session_nonce,
             "bundle_path": bundle_path.display().to_string(),
             "bundle_sha256": bundle_sha256,
+            "inventory_projection": export.inventory_projection,
+            "inventory_diagnostic": export.inventory_diagnostic,
             "verification": export.verification,
         });
         if args.json {
@@ -14391,6 +14393,10 @@ fn handle_incident_session_forensics(
             println!("Exported authenticated native-session forensics for {session_nonce}");
             println!("  bundle: {}", bundle_path.display());
             println!("  sha256: {bundle_sha256}");
+            println!("  inventory: {}", export.inventory_projection.as_str());
+            if let Some(diagnostic) = &export.inventory_diagnostic {
+                println!("  inventory diagnostic: {diagnostic}");
+            }
             println!("  scope: signed supervisor observations; replay and quiescence uncertified");
             println!(
                 "  offline verification: franken-verifier verify --format native-session-forensics --trusted-key-hex TRUSTED_PRODUCT_ROOT_HEX < BUNDLE_PATH"

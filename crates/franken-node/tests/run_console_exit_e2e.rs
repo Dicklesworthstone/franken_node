@@ -315,6 +315,269 @@ fn frozen_source_retention_refuses_tamper_and_pin_drift_before_guest_entry() {
     }
 }
 
+/// Recover a real signed native run after losing its mutable projection. The
+/// offline verifier keeps the root captured before the fault; recovery must
+/// preserve every original evidence byte and must not repair local state.
+#[cfg(unix)]
+#[test]
+fn native_session_forensics_recovers_inventory_loss_and_refuses_conflicting_evidence() {
+    use std::collections::BTreeMap;
+    use std::io::Write as _;
+    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+    use std::path::{Path, PathBuf};
+
+    use frankenengine_node::ops::native_session_inventory::NativeSessionAdmission;
+    use frankenengine_verifier_sdk::native_session::{
+        NativeSessionForensicBundle, verify_native_session_forensics,
+    };
+    use fsqlite::compat::TransactionExt as _;
+    use fsqlite::{Connection, SqliteValue};
+    use sha2::{Digest as _, Sha256};
+
+    fn snapshot(root: &Path) -> BTreeMap<PathBuf, (bool, u32, Vec<u8>)> {
+        fn visit(
+            root: &Path,
+            directory: &Path,
+            files: &mut BTreeMap<PathBuf, (bool, u32, Vec<u8>)>,
+        ) {
+            for entry in std::fs::read_dir(directory).unwrap() {
+                let path = entry.unwrap().path();
+                let metadata = std::fs::symlink_metadata(&path).unwrap();
+                assert!(!metadata.file_type().is_symlink());
+                let bytes = if metadata.is_dir() {
+                    visit(root, &path, files);
+                    Vec::new()
+                } else {
+                    assert!(metadata.is_file());
+                    std::fs::read(&path).unwrap()
+                };
+                files.insert(
+                    path.strip_prefix(root).unwrap().to_path_buf(),
+                    (metadata.is_dir(), metadata.permissions().mode(), bytes),
+                );
+            }
+        }
+        let mut files = BTreeMap::new();
+        visit(root, root, &mut files);
+        files
+    }
+
+    for fault in [
+        "missing_database",
+        "missing_admission",
+        "unreadable_database",
+        "conflicting_admission",
+    ] {
+        let state_home = tempfile::tempdir().unwrap();
+        let (project, run) = run_app_with_policy_and_env(
+            "require('fs').writeFileSync('forensic-effect.marker', 'completed');\n",
+            "legacy-risky",
+            &["--frozen-modules", "--json"],
+            &[("XDG_STATE_HOME", state_home.path().to_str().unwrap())],
+        );
+        assert_eq!(run.exit_code, Some(0), "{fault}: {}", run.stderr);
+        assert_eq!(
+            std::fs::read(project.path().join("forensic-effect.marker")).unwrap(),
+            b"completed"
+        );
+        let report: Value = serde_json::from_str(&run.stdout).unwrap();
+        let capture = &report["dispatch"]["runtime_evidence_identity_capture"];
+        let nonce = capture["session_nonce"].as_str().unwrap();
+        let root_bytes: [u8; 32] = hex::decode(
+            capture["product_root_verification_key_hex"]
+                .as_str()
+                .expect("root independently retained from original run"),
+        )
+        .unwrap()
+        .try_into()
+        .unwrap();
+        let trusted_root = ed25519_dalek::VerifyingKey::from_bytes(&root_bytes).unwrap();
+        let destination = tempfile::tempdir().unwrap();
+        let export = |filename: &str| {
+            Command::new(franken_node_bin())
+                .args([
+                    "incident",
+                    "capture",
+                    "--from-session",
+                    nonce,
+                    "--out",
+                    filename,
+                    "--json",
+                ])
+                .env("XDG_STATE_HOME", state_home.path())
+                .current_dir(destination.path())
+                .output()
+                .expect("capture native-session forensic evidence")
+        };
+        let baseline = export("baseline.json");
+        assert!(
+            baseline.status.success(),
+            "{fault}: {}",
+            String::from_utf8_lossy(&baseline.stderr)
+        );
+        let baseline_report: Value = serde_json::from_slice(&baseline.stdout).unwrap();
+        assert_eq!(baseline_report["inventory_projection"], "matched");
+        assert!(baseline_report["inventory_diagnostic"].is_null());
+        let original = std::fs::read(destination.path().join("baseline.json")).unwrap();
+        let verified = verify_native_session_forensics(&original, &trusted_root).unwrap();
+        assert!(verified.source_capsule.is_some());
+        assert!(verified.durable_journal.is_some());
+        assert!(!verified.replay_certified);
+        assert!(!verified.quiescence_certified);
+        assert!(!verified.historical_completeness);
+        let bundle: NativeSessionForensicBundle = serde_json::from_slice(&original).unwrap();
+        assert!(bundle.outcome.is_some());
+        let admission: NativeSessionAdmission =
+            serde_json::from_str(&bundle.admission_json).unwrap();
+        let protected_root = admission
+            .identity_capture_path
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap();
+        let record = protected_root
+            .join("session-admission-records")
+            .join(format!(
+                "{}.json",
+                hex::encode(Sha256::digest(nonce.as_bytes()))
+            ));
+        assert_eq!(
+            std::fs::read(&record).unwrap(),
+            bundle.admission_json.as_bytes()
+        );
+        std::fs::rename(
+            project.path().join("app.js"),
+            project.path().join("retained-original-app.js"),
+        )
+        .unwrap();
+
+        let database = protected_root.join("native-sessions.db");
+        let database_backup = tempfile::tempdir().unwrap();
+        if fault == "missing_database" || fault == "unreadable_database" {
+            for name in [
+                "native-sessions.db",
+                "native-sessions.db-wal",
+                "native-sessions.db-shm",
+                "native-sessions.db-journal",
+            ] {
+                let path = protected_root.join(name);
+                if path.exists() {
+                    std::fs::rename(&path, database_backup.path().join(name)).unwrap();
+                }
+            }
+            if fault == "unreadable_database" {
+                let mut damaged = std::fs::OpenOptions::new()
+                    .create_new(true)
+                    .write(true)
+                    .mode(0o600)
+                    .open(&database)
+                    .unwrap();
+                damaged.write_all(b"invalid SQLite database\n").unwrap();
+                damaged.sync_all().unwrap();
+            }
+        } else {
+            let connection = Connection::open(database.to_str().unwrap()).unwrap();
+            let mut transaction = connection.transaction().unwrap();
+            let nonce_value = SqliteValue::Text(nonce.to_owned().into());
+            if fault == "missing_admission" {
+                transaction
+                    .execute_with_params(
+                        "DELETE FROM native_sessions WHERE session_nonce = ?1;",
+                        &[nonce_value],
+                    )
+                    .unwrap();
+            } else {
+                let mut changed = admission.clone();
+                changed
+                    .dependency_ids
+                    .push("unsigned-dependency".to_owned());
+                transaction
+                    .execute_with_params(
+                        "UPDATE native_sessions SET admission_json = ?1 WHERE session_nonce = ?2;",
+                        &[
+                            SqliteValue::Text(serde_json::to_string(&changed).unwrap().into()),
+                            nonce_value,
+                        ],
+                    )
+                    .unwrap();
+            }
+            transaction.commit().unwrap();
+        }
+        // Direct fixture writes can create SQLite sidecars with the process
+        // umask. Keep these private before measuring the read-only export so
+        // this test exercises projection loss/conflict, not unsafe metadata.
+        for name in [
+            "native-sessions.db-wal",
+            "native-sessions.db-shm",
+            "native-sessions.db-journal",
+        ] {
+            let path = protected_root.join(name);
+            match std::fs::symlink_metadata(&path) {
+                Ok(metadata) => {
+                    assert!(metadata.is_file() && !metadata.file_type().is_symlink());
+                    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                        .unwrap();
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => panic!("inspect fixture sidecar {}: {error}", path.display()),
+            }
+        }
+        let before = snapshot(protected_root);
+        let recovered = export("recovered.json");
+        assert_eq!(
+            snapshot(protected_root),
+            before,
+            "{fault}: read-only export"
+        );
+        if fault == "conflicting_admission" {
+            assert!(!recovered.status.success());
+            assert!(!destination.path().join("recovered.json").exists());
+            continue;
+        }
+        assert!(
+            recovered.status.success(),
+            "{fault}: {}",
+            String::from_utf8_lossy(&recovered.stderr)
+        );
+        let recovered_report: Value = serde_json::from_slice(&recovered.stdout).unwrap();
+        assert_eq!(recovered_report["inventory_projection"], fault);
+        if fault == "unreadable_database" {
+            let diagnostic = recovered_report["inventory_diagnostic"].as_str().unwrap();
+            assert!(!diagnostic.is_empty() && diagnostic.len() <= 4096);
+        } else {
+            assert!(recovered_report["inventory_diagnostic"].is_null());
+        }
+        let recovered_bytes = std::fs::read(destination.path().join("recovered.json")).unwrap();
+        assert_eq!(
+            recovered_bytes, original,
+            "{fault}: original signed evidence"
+        );
+        assert_eq!(
+            verify_native_session_forensics(&recovered_bytes, &trusted_root).unwrap(),
+            verified
+        );
+
+        // A missing projection must never make the archive self-authenticating.
+        let mut changed = admission.clone();
+        changed
+            .dependency_ids
+            .push("unsigned-dependency".to_owned());
+        std::fs::write(&record, serde_json::to_vec(&changed).unwrap()).unwrap();
+        let before = snapshot(protected_root);
+        let tampered = export("tampered.json");
+        assert!(
+            !tampered.status.success(),
+            "{fault}: unsigned body accepted"
+        );
+        assert!(!destination.path().join("tampered.json").exists());
+        assert_eq!(
+            snapshot(protected_root),
+            before,
+            "{fault}: no evidence repair"
+        );
+    }
+}
+
 /// Exercise the product argv -> engine process shape -> native util factory
 /// path, not a Node/Bun fallback or a standalone JavaScript reference shim.
 #[test]
