@@ -330,6 +330,150 @@ pub const POLICY_EQUIVALENCE_UNAVAILABLE_DIVERGENCE: &str = "original-policy equ
 pub const POLICY_GUEST_EXECUTION_DIVERGENCE: &str =
     "original-policy equivalence requires a fully matched completed native execution";
 
+/// The parent derives these expectations from the authenticated request, never
+/// from the child's claimed result. This projection skips private source and
+/// host outcomes without linking the engine or constructing their value trees.
+#[cfg(any(test, all(feature = "engine", target_os = "linux")))]
+struct NativeReplayWorkerExpectation {
+    capture_payload_sha256: String,
+    trace_id: String,
+    terminal_state: NativeReplayTerminalState,
+    module_load_disabled: bool,
+    failure_context: bool,
+}
+
+#[cfg(any(test, all(feature = "engine", target_os = "linux")))]
+impl NativeReplayWorkerExpectation {
+    fn from_capture(capture: &NativeReplayCapture) -> Result<Self, String> {
+        #[derive(Deserialize)]
+        struct Expected {
+            trace_id: String,
+            terminal_state: NativeReplayTerminalState,
+            #[serde(default)]
+            failure_context: Option<serde::de::IgnoredAny>,
+        }
+        #[derive(Deserialize)]
+        struct Payload {
+            expected: Expected,
+            #[serde(default)]
+            module_sources: Option<serde::de::IgnoredAny>,
+        }
+
+        capture.validate()?;
+        let payload: Payload = serde_json::from_str(&capture.payload_json)
+            .map_err(|_| "native replay request has invalid verification context".to_string())?;
+        if payload.expected.trace_id.trim().is_empty()
+            || (payload.expected.terminal_state == NativeReplayTerminalState::Completed
+                && payload.expected.failure_context.is_some())
+        {
+            return Err("native replay request has invalid verification context".to_string());
+        }
+        Ok(Self {
+            capture_payload_sha256: capture.payload_sha256.clone(),
+            trace_id: payload.expected.trace_id,
+            terminal_state: payload.expected.terminal_state,
+            module_load_disabled: payload.module_sources.is_none(),
+            failure_context: payload.expected.failure_context.is_some(),
+        })
+    }
+
+    fn validate_outcome(
+        &self,
+        outcome: &NativeReplayOutcome,
+        completed_scope: &str,
+    ) -> Result<(), String> {
+        let invalid =
+            || "native replay worker returned an invalid verification outcome".to_string();
+        if outcome.schema_version != NATIVE_REPLAY_OUTCOME_SCHEMA
+            || outcome.replay_kind != "native_reexecution"
+            || outcome.captured_trace_id != self.trace_id
+            || outcome.captured_terminal_state != self.terminal_state
+            || outcome.module_load_disabled != self.module_load_disabled
+            || outcome.replay_trace_id.trim().is_empty()
+            || outcome.terminal_state_match
+                != (outcome.captured_terminal_state == outcome.replay_terminal_state)
+            || outcome.matched != outcome.divergences.is_empty()
+            || outcome
+                .divergences
+                .iter()
+                .any(|reason| reason.trim().is_empty())
+        {
+            return Err(invalid());
+        }
+        let expected_scope = match self.terminal_state {
+            NativeReplayTerminalState::Completed => completed_scope,
+            NativeReplayTerminalState::UncaughtException => "guest_failure_prefix",
+            NativeReplayTerminalState::EngineFailure => "engine_failure_prefix",
+        };
+        if outcome.verification_scope != expected_scope {
+            return Err(invalid());
+        }
+        let completed = self.terminal_state == NativeReplayTerminalState::Completed;
+        if completed {
+            // The completed producer has a full result. If replay itself
+            // failed, it returns an error instead of a completed comparison.
+            if outcome.replay_terminal_state != NativeReplayTerminalState::Completed
+                || outcome.ir3_hash_match.is_none()
+                || outcome.ir4_witness_match.is_none()
+                || outcome.execution_value_match.is_none()
+                || outcome.instruction_count_match.is_none()
+                || outcome.nondeterminism_trace_match.is_none()
+                || outcome.lane_match.is_none()
+                || outcome.exit_code_match.is_none()
+                || outcome.decisions_match.is_none()
+                || outcome.exception_value_match.is_some()
+            {
+                return Err(invalid());
+            }
+        } else if outcome.ir4_witness_match.is_some()
+            || outcome.execution_value_match.is_some()
+            || outcome.lane_match.is_some()
+            || outcome.exit_code_match.is_some()
+            || outcome.decisions_match.is_some()
+            || outcome.ir3_hash_match.is_some() != self.failure_context
+            || outcome.instruction_count_match.is_some() != self.failure_context
+            || outcome.nondeterminism_trace_match.is_some() != self.failure_context
+            || outcome.exception_value_match.is_some()
+                != (self.terminal_state == NativeReplayTerminalState::UncaughtException)
+        {
+            // Legacy failed prefixes have no VM failure context. A child may
+            // neither manufacture completion witnesses nor erase context that
+            // the authenticated capture actually requires it to compare.
+            return Err(invalid());
+        }
+
+        let comparisons_match = outcome.terminal_state_match
+            && outcome.captured_trace_id == outcome.replay_trace_id
+            && outcome.console_match
+            && outcome.host_effects_match
+            && [
+                outcome.ir3_hash_match,
+                outcome.ir4_witness_match,
+                outcome.execution_value_match,
+                outcome.instruction_count_match,
+                outcome.nondeterminism_trace_match,
+                outcome.lane_match,
+                outcome.exit_code_match,
+                outcome.exception_value_match,
+            ]
+            .into_iter()
+            .all(|comparison| comparison != Some(false))
+            && (expected_scope != POLICY_EQUIVALENCE_SCOPE
+                || (!outcome.module_load_disabled && outcome.decisions_match == Some(true)));
+        if outcome.matched && !comparisons_match {
+            return Err(invalid());
+        }
+        // Completed outcomes expose every comparison contributing to their
+        // verdict. Failure prefixes additionally compare typed diagnostics,
+        // dropped console counts and consumed modules, so their valid negative
+        // verdict can have only those explanatory divergences.
+        if completed && !outcome.matched && comparisons_match {
+            return Err(invalid());
+        }
+        Ok(())
+    }
+}
+
 impl NativeReplayOutcome {
     fn completed_guest_execution_matches(&self) -> bool {
         self.schema_version == NATIVE_REPLAY_OUTCOME_SCHEMA
@@ -554,9 +698,9 @@ pub fn maybe_run_internal_native_replay_worker() -> Result<bool, String> {
 #[cfg(all(feature = "engine", target_os = "linux"))]
 mod supervised {
     use super::{
-        MAX_NATIVE_REPLAY_PAYLOAD_BYTES, MAX_NATIVE_REPLAY_TIMEOUT_MS,
-        NATIVE_REPLAY_OUTCOME_SCHEMA, NativeCounterfactualOutcome, NativeCounterfactualRequest,
-        NativeReplayCapture, NativeReplayOutcome,
+        MAX_NATIVE_REPLAY_PAYLOAD_BYTES, MAX_NATIVE_REPLAY_TIMEOUT_MS, NativeCounterfactualOutcome,
+        NativeCounterfactualRequest, NativeReplayCapture, NativeReplayOutcome,
+        NativeReplayWorkerExpectation,
     };
     use crate::migration::smoke_supervisor::{StopReason, Stream, supervise_with_redirected_input};
     use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -762,7 +906,7 @@ mod supervised {
         let deadline = Instant::now()
             .checked_add(timeout)
             .ok_or_else(|| "native replay deadline overflow".to_string())?;
-        capture.validate()?;
+        let expectation = NativeReplayWorkerExpectation::from_capture(capture)?;
         let request_id = uuid::Uuid::now_v7().to_string();
         let request = Request {
             schema_version: REQUEST_SCHEMA.to_string(),
@@ -791,7 +935,7 @@ mod supervised {
             &request_id,
             &request_sha256,
             &operation,
-            &capture.payload_sha256,
+            &expectation,
             deadline,
         )
     }
@@ -802,7 +946,7 @@ mod supervised {
         request_id: &str,
         request_sha256: &str,
         operation: &Operation,
-        capture_payload_sha256: &str,
+        expectation: &NativeReplayWorkerExpectation,
         deadline: Instant,
     ) -> Result<WorkerOutcome, String> {
         let mut stdout = Vec::new();
@@ -868,16 +1012,12 @@ mod supervised {
         let outcome = response.outcome?;
         match (operation, &outcome) {
             (Operation::Replay, WorkerOutcome::Replay(replayed)) => {
-                if replayed.schema_version != NATIVE_REPLAY_OUTCOME_SCHEMA
-                    || replayed.matched != replayed.divergences.is_empty()
-                {
-                    return Err(
-                        "native replay worker returned an invalid verification outcome".to_string(),
-                    );
-                }
+                expectation.validate_outcome(replayed, "guest_execution")?;
             }
             (Operation::Counterfactual(request), WorkerOutcome::Counterfactual(branched)) => {
-                branched.validate_for_request(capture_payload_sha256, request)?;
+                expectation
+                    .validate_outcome(&branched.baseline, super::POLICY_EQUIVALENCE_SCOPE)?;
+                branched.validate_for_request(&expectation.capture_payload_sha256, request)?;
             }
             _ => {
                 return Err("native replay worker returned another operation's result".to_string());
@@ -953,6 +1093,7 @@ mod supervised {
 
     #[cfg(test)]
     mod tests {
+        use super::super::NATIVE_REPLAY_OUTCOME_SCHEMA;
         use super::*;
 
         const REQUEST_ID: &str = "019a0000-0000-7000-8000-000000000001";
@@ -1007,7 +1148,13 @@ mod supervised {
                 REQUEST_ID,
                 REQUEST_DIGEST,
                 operation,
-                REQUEST_DIGEST,
+                &NativeReplayWorkerExpectation {
+                    capture_payload_sha256: REQUEST_DIGEST.to_string(),
+                    trace_id: "captured-protocol-fixture".to_string(),
+                    terminal_state: super::super::NativeReplayTerminalState::Completed,
+                    module_load_disabled: matches!(operation, Operation::Replay),
+                    failure_context: false,
+                },
                 Instant::now() + timeout,
             );
             let pid = std::fs::read_to_string(pid_path)
@@ -1040,7 +1187,7 @@ mod supervised {
                 lane_match: Some(true),
                 exit_code_match: Some(true),
                 exception_value_match: None,
-                decisions_match: None,
+                decisions_match: Some(true),
                 policy_comparison_note: "protocol acceptance fixture".to_string(),
             }
         }
@@ -1162,12 +1309,38 @@ mod supervised {
             assert_eq!(outcome.unwrap(), expected);
             assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists());
 
-            for invalid in ["schema", "matched", "divergences"] {
+            for invalid in [
+                "schema",
+                "matched",
+                "divergences",
+                "kind",
+                "scope",
+                "capture-trace",
+                "replay-trace",
+                "terminal",
+                "module-authority",
+                "missing-witness",
+                "false-witness",
+                "host-effects",
+                "console",
+                "invented-exception",
+            ] {
                 let mut outcome = expected.clone();
                 match invalid {
                     "schema" => outcome.schema_version.push_str("-other"),
                     "matched" => outcome.matched = false,
                     "divergences" => outcome.divergences.push("console".to_string()),
+                    "kind" => outcome.replay_kind = "recorded_trace".to_string(),
+                    "scope" => outcome.verification_scope = "guest_failure_prefix".to_string(),
+                    "capture-trace" => outcome.captured_trace_id.push_str("-other"),
+                    "replay-trace" => outcome.replay_trace_id.push_str("-other"),
+                    "terminal" => outcome.terminal_state_match = false,
+                    "module-authority" => outcome.module_load_disabled = false,
+                    "missing-witness" => outcome.ir4_witness_match = None,
+                    "false-witness" => outcome.ir3_hash_match = Some(false),
+                    "host-effects" => outcome.host_effects_match = false,
+                    "console" => outcome.console_match = false,
+                    "invented-exception" => outcome.exception_value_match = Some(true),
                     _ => unreachable!(),
                 }
                 response.outcome = Ok(WorkerOutcome::Replay(Box::new(outcome)));
@@ -1180,6 +1353,21 @@ mod supervised {
                 );
                 assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists());
             }
+
+            let mut divergent = expected;
+            divergent.matched = false;
+            divergent.host_effects_match = false;
+            divergent.divergences.push(
+                "re-executed host-effect transcript differs from the captured run".to_string(),
+            );
+            response.outcome = Ok(WorkerOutcome::Replay(Box::new(divergent.clone())));
+            let (result, pid) = shell_fixture(
+                script,
+                &encode_frame(&response).unwrap(),
+                Duration::from_secs(2),
+            );
+            assert_eq!(result.unwrap(), divergent);
+            assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists());
         }
 
         #[test]
@@ -7890,6 +8078,271 @@ mod tests {
         assert_eq!(refused.verification_scope, POLICY_EQUIVALENCE_SCOPE);
         assert!(!refused.matched, "scope promotion must preserve {label}");
         assert!(!refused.divergences.is_empty(), "{label}");
+    }
+
+    fn worker_expectation(
+        state: NativeReplayTerminalState,
+        frozen_modules: bool,
+        failure_context: bool,
+    ) -> NativeReplayWorkerExpectation {
+        let mut payload = serde_json::json!({
+            "package": {"source": "PRIVATE_SOURCE"},
+            "host_effect_transcript": [{"value": "PRIVATE_HOST_VALUE"}],
+            "expected": {
+                "trace_id": "policy-scope-test",
+                "terminal_state": state,
+            },
+        });
+        if frozen_modules {
+            payload["module_sources"] = serde_json::json!({"capsule": "PRIVATE_CAPSULE"});
+        }
+        if failure_context {
+            payload["expected"]["failure_context"] = serde_json::json!({"ir3_hash": "captured"});
+        }
+        let capture = envelope(&payload.to_string());
+        let expected = NativeReplayWorkerExpectation::from_capture(&capture).unwrap();
+        assert_eq!(expected.capture_payload_sha256, capture.payload_sha256);
+        expected
+    }
+
+    fn failed_worker_outcome(
+        state: NativeReplayTerminalState,
+        failure_context: bool,
+    ) -> NativeReplayOutcome {
+        let mut outcome = completed_policy_candidate();
+        outcome.captured_terminal_state = state;
+        outcome.replay_terminal_state = state;
+        outcome.verification_scope = match state {
+            NativeReplayTerminalState::UncaughtException => "guest_failure_prefix",
+            NativeReplayTerminalState::EngineFailure => "engine_failure_prefix",
+            NativeReplayTerminalState::Completed => panic!("failure fixture requires a failure"),
+        }
+        .to_string();
+        outcome.ir3_hash_match = failure_context.then_some(true);
+        outcome.instruction_count_match = failure_context.then_some(true);
+        outcome.nondeterminism_trace_match = failure_context.then_some(true);
+        outcome.ir4_witness_match = None;
+        outcome.execution_value_match = None;
+        outcome.lane_match = None;
+        outcome.exit_code_match = None;
+        outcome.decisions_match = None;
+        outcome.exception_value_match =
+            (state == NativeReplayTerminalState::UncaughtException).then_some(true);
+        outcome
+    }
+
+    #[test]
+    fn worker_outcome_requires_complete_witnesses_and_truthful_guest_comparisons() {
+        let expected = worker_expectation(NativeReplayTerminalState::Completed, true, false);
+        let original = serde_json::to_value(completed_policy_candidate()).unwrap();
+        expected
+            .validate_outcome(&completed_policy_candidate(), "guest_execution")
+            .unwrap();
+        for field in [
+            "ir3_hash_match",
+            "ir4_witness_match",
+            "execution_value_match",
+            "instruction_count_match",
+            "nondeterminism_trace_match",
+            "lane_match",
+            "exit_code_match",
+        ] {
+            for value in [serde_json::json!(false), serde_json::Value::Null] {
+                let mut changed = original.clone();
+                changed[field] = value;
+                let outcome: NativeReplayOutcome = serde_json::from_value(changed).unwrap();
+                assert!(
+                    expected
+                        .validate_outcome(&outcome, "guest_execution")
+                        .is_err(),
+                    "{field}"
+                );
+            }
+            let mut changed = original.clone();
+            changed[field] = serde_json::json!(false);
+            changed["matched"] = serde_json::json!(false);
+            changed["divergences"] = serde_json::json!([format!("mismatched {field}")]);
+            let outcome = serde_json::from_value(changed).unwrap();
+            expected
+                .validate_outcome(&outcome, "guest_execution")
+                .unwrap();
+        }
+        for (field, value) in [
+            ("replay_kind", serde_json::json!("recorded_trace")),
+            (
+                "verification_scope",
+                serde_json::json!(POLICY_EQUIVALENCE_SCOPE),
+            ),
+            ("captured_trace_id", serde_json::json!("other-capture")),
+            ("replay_trace_id", serde_json::json!("other-replay")),
+            (
+                "captured_terminal_state",
+                serde_json::json!("engine_failure"),
+            ),
+            (
+                "replay_terminal_state",
+                serde_json::json!("uncaught_exception"),
+            ),
+            ("terminal_state_match", serde_json::json!(false)),
+            ("module_load_disabled", serde_json::json!(true)),
+            ("console_match", serde_json::json!(false)),
+            ("host_effects_match", serde_json::json!(false)),
+            ("exception_value_match", serde_json::json!(true)),
+            ("decisions_match", serde_json::Value::Null),
+        ] {
+            let mut changed = original.clone();
+            changed[field] = value;
+            let outcome = serde_json::from_value(changed).unwrap();
+            assert!(
+                expected
+                    .validate_outcome(&outcome, "guest_execution")
+                    .is_err(),
+                "{field}"
+            );
+        }
+        let mut informational_policy_difference = completed_policy_candidate();
+        informational_policy_difference.decisions_match = Some(false);
+        expected
+            .validate_outcome(&informational_policy_difference, "guest_execution")
+            .unwrap();
+        informational_policy_difference.verification_scope = POLICY_EQUIVALENCE_SCOPE.to_string();
+        assert!(
+            expected
+                .validate_outcome(&informational_policy_difference, POLICY_EQUIVALENCE_SCOPE)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn worker_outcome_preserves_failed_prefixes_without_inventing_or_erasing_context() {
+        for state in [
+            NativeReplayTerminalState::UncaughtException,
+            NativeReplayTerminalState::EngineFailure,
+        ] {
+            for context in [false, true] {
+                let expected = worker_expectation(state, true, context);
+                let original = failed_worker_outcome(state, context);
+                expected
+                    .validate_outcome(&original, "guest_execution")
+                    .unwrap();
+                let encoded = serde_json::to_value(&original).unwrap();
+                for field in [
+                    "ir4_witness_match",
+                    "execution_value_match",
+                    "lane_match",
+                    "exit_code_match",
+                    "decisions_match",
+                ] {
+                    let mut changed = encoded.clone();
+                    changed[field] = serde_json::json!(true);
+                    let outcome = serde_json::from_value(changed).unwrap();
+                    assert!(
+                        expected
+                            .validate_outcome(&outcome, "guest_execution")
+                            .is_err(),
+                        "{state:?} {context} {field}"
+                    );
+                }
+                for field in [
+                    "ir3_hash_match",
+                    "instruction_count_match",
+                    "nondeterminism_trace_match",
+                ] {
+                    let mut changed = encoded.clone();
+                    changed[field] = if context {
+                        serde_json::Value::Null
+                    } else {
+                        serde_json::json!(true)
+                    };
+                    let outcome = serde_json::from_value(changed).unwrap();
+                    assert!(
+                        expected
+                            .validate_outcome(&outcome, "guest_execution")
+                            .is_err(),
+                        "{state:?} {context} {field}"
+                    );
+                }
+                let mut wrong_exception = original.clone();
+                wrong_exception.exception_value_match =
+                    if state == NativeReplayTerminalState::UncaughtException {
+                        None
+                    } else {
+                        Some(true)
+                    };
+                assert!(
+                    expected
+                        .validate_outcome(&wrong_exception, "guest_execution")
+                        .is_err()
+                );
+
+                let mut hidden_comparison_failed = original.clone();
+                hidden_comparison_failed.matched = false;
+                hidden_comparison_failed.divergences.push(
+                    "re-executed consumed module hashes differ from the captured failure"
+                        .to_string(),
+                );
+                expected
+                    .validate_outcome(&hidden_comparison_failed, "guest_execution")
+                    .unwrap();
+
+                let mut changed_terminal = original;
+                changed_terminal.replay_terminal_state = NativeReplayTerminalState::Completed;
+                changed_terminal.terminal_state_match = false;
+                changed_terminal.matched = false;
+                changed_terminal.divergences.push(
+                    "re-executed terminal state differs from the captured failure".to_string(),
+                );
+                if state == NativeReplayTerminalState::UncaughtException {
+                    changed_terminal.exception_value_match = Some(false);
+                }
+                if context {
+                    changed_terminal.ir3_hash_match = Some(false);
+                    changed_terminal.instruction_count_match = Some(false);
+                    changed_terminal.nondeterminism_trace_match = Some(false);
+                }
+                expected
+                    .validate_outcome(&changed_terminal, "guest_execution")
+                    .unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn worker_expectation_binds_trace_scope_and_context_to_the_exact_capture() {
+        for invalid in [
+            r#"{"expected":{"terminal_state":"completed"}}"#,
+            r#"{"expected":{"trace_id":" ","terminal_state":"completed"}}"#,
+            r#"{"expected":{"trace_id":"x","trace_id":"y","terminal_state":"completed"}}"#,
+            r#"{"expected":{"trace_id":"x","terminal_state":"completed","failure_context":{}}}"#,
+            r#"{"expected":{"trace_id":"x","terminal_state":"completed"},"module_sources":{},"module_sources":null}"#,
+        ] {
+            assert!(NativeReplayWorkerExpectation::from_capture(&envelope(invalid)).is_err());
+        }
+        let mut capture = envelope(r#"{"expected":{"trace_id":"x","terminal_state":"completed"}}"#);
+        capture.payload_json.push(' ');
+        assert!(NativeReplayWorkerExpectation::from_capture(&capture).is_err());
+        let mut same_false_trace = completed_policy_candidate();
+        same_false_trace.captured_trace_id = "another-valid-trace".to_string();
+        same_false_trace.replay_trace_id = same_false_trace.captured_trace_id.clone();
+        let expected = worker_expectation(NativeReplayTerminalState::Completed, true, false);
+        assert!(
+            expected
+                .validate_outcome(&same_false_trace, "guest_execution")
+                .is_err()
+        );
+
+        let missing_modules =
+            worker_expectation(NativeReplayTerminalState::Completed, false, false);
+        let mut outcome = completed_policy_candidate();
+        assert!(
+            missing_modules
+                .validate_outcome(&outcome, "guest_execution")
+                .is_err()
+        );
+        outcome.module_load_disabled = true;
+        missing_modules
+            .validate_outcome(&outcome, "guest_execution")
+            .unwrap();
     }
 
     #[test]
