@@ -1770,6 +1770,7 @@ struct Lockfile {
 
 #[derive(Default)]
 struct LockfileDetails {
+    lockfile_source: Option<dependency_topology::CapturedLockfileSource>,
     links: BTreeMap<String, String>,
     requirements: BTreeMap<String, Vec<DependencySpec>>,
     dependency_kinds_complete: bool,
@@ -2012,7 +2013,27 @@ fn read_package_lock(
     {
         return invalid_metadata("unsupported lockfileVersion; supported versions are 1, 2 and 3");
     }
+    let supported_shape = value.get("packages").is_some_and(Value::is_object)
+        || value.get("dependencies").is_some_and(Value::is_object)
+        || (value.get("lockfileVersion").and_then(Value::as_u64) == Some(1)
+            && value.get("packages").is_none()
+            && value.get("dependencies").is_none());
+    if !supported_shape {
+        return invalid_metadata(
+            "unsupported lockfile dependency shape: expected a packages or dependencies object, or an empty version 1 lockfile",
+        );
+    }
     let mut lockfile = Lockfile::default();
+    lockfile.details.lockfile_source = Some(dependency_topology::CapturedLockfileSource {
+        path: lockfile_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| ModuleResolutionGraphError::InvalidMetadata {
+                detail: "captured lockfile name is not UTF-8".into(),
+            })?
+            .to_owned(),
+        sha256: format!("sha256:{}", hex::encode(Sha256::digest(raw.as_bytes()))),
+    });
     #[cfg(target_os = "linux")]
     if let Some(manifests) = captured_manifests {
         lockfile.details.overrides =

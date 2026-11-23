@@ -255,9 +255,33 @@ Assessment reads are bounded to 64 MiB of journal data and 65,536 samples,
 in addition to the existing per-stream limits. Exceeding a bound fails
 explicitly instead of returning a partial assessment.
 
-The dependency graph retains untracked lockfile packages, including bridges
-between packages with trust cards. Known downstream trust ceilings propagate
-through those bridges without assigning untracked packages an invented score.
+The trust graph and `trust-card reputation` consume the same bounded dependency
+capture as runtime trust admission. Under the repository's npm <=11 contract,
+`npm-shrinkwrap.json` takes precedence over `package-lock.json`; a malformed
+selected file is an error, and a losing package-lock is not parsed. On Linux,
+Bun text locks use the existing v1/v2 registry/workspace/catalog projection.
+Mixed npm/Bun authorities and binary `bun.lockb` inputs require an explicit
+project selection instead of silently falling back to incomplete metadata.
+
+The projection resolves npm aliases to actual package identities, retains
+transitive requirements and workspace links, and includes present peers and
+optional dependencies. Absent optional requirements remain visible in coverage
+without inventing installed package nodes. Required unresolved requirements,
+workspace intent without a selected installation, incomplete legacy dependency
+kinds, and unnamed packages prevent a complete-topology claim.
+
+JSON reports include `dependency_capture`
+(`franken-node/trust-dependency-capture/v1`). Its `source_graph_hash` and
+`topology_hash` identify the semantic capture; `lockfile_source.path` and
+`lockfile_source.sha256` identify the exact selected raw lockfile.
+`placements` preserves each observed location, actual package name, version,
+integrity and workspace-link target. `coverage` reports missing metadata
+explicitly. These observations do not authenticate installed source bytes,
+prove live JavaScript resolution, or authorize a runtime effect.
+
+The dependency graph retains untracked packages, including bridges between
+packages with trust cards. Known downstream trust ceilings propagate through
+those bridges without assigning untracked packages an invented score.
 Topology measurements count distinct dependency edges and transitive
 dependents, compute directed shortest-path betweenness, and identify
 articulation points in the undirected package graph. Publisher relations do
@@ -265,8 +289,9 @@ not contribute to those package metrics. The graph remains name-based:
 installed versions or locations sharing a package name are merged.
 
 Exact topology analysis is limited to 1,024 package nodes and 8,000,000
-estimated work units. Missing topology, truncated input, and exceeded analysis
-budgets produce an explicit unavailable status rather than measured zeros.
+estimated work units. Missing topology, truncated input, exceeded analysis
+budgets, and incomplete captured dependency metadata produce an explicit
+unavailable status rather than measured zeros.
 Invalid JSON and unsupported lockfile shapes are rejected. The planner ranks candidates by
 estimated impact before applying its 18-node analysis limit, so alphabetical
 ordering cannot discard a more consequential candidate.

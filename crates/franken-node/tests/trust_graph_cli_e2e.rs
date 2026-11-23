@@ -517,7 +517,11 @@ fn immunization_reports_missing_topology_and_rejects_unsupported_lockfile_shape(
     assert_eq!(imm["behavioral_coverage"].as_array().unwrap().len(), 3);
 
     for unsupported_shape in ["{}", r#"{"lockfileVersion":1,"packages":false}"#] {
-        std::fs::write(workspace.path().join("package-lock.json"), unsupported_shape).unwrap();
+        std::fs::write(
+            workspace.path().join("package-lock.json"),
+            unsupported_shape,
+        )
+        .unwrap();
         let unsupported = cli(
             workspace.path(),
             &["trust", "graph", "--immunize", "--json"],
@@ -534,12 +538,31 @@ fn immunization_reports_missing_topology_and_rejects_unsupported_lockfile_shape(
         );
     }
 
-    // npm v1 legitimately omits its dependency map for an empty project.
+    // npm v1 legitimately omits its dependency map, but it cannot certify
+    // topology while the captured manifest still requires absent packages.
     std::fs::write(
         workspace.path().join("package-lock.json"),
         r#"{"lockfileVersion":1}"#,
     )
     .unwrap();
+    let incomplete = json_ok(
+        workspace.path(),
+        &["trust", "graph", "--immunize", "--json"],
+    );
+    assert_eq!(incomplete["immunization"]["topology_status"], "unavailable");
+    assert_eq!(
+        incomplete["dependency_capture"]["coverage"]["unresolved_required_edges"],
+        2
+    );
+    assert!(incomplete["immunization"]["topology_metrics"].is_null());
+    assert!(incomplete["immunization"]["planner_catalog"].is_null());
+
+    // The same valid empty v1 lock remains useful for a truly empty project.
+    write_json(
+        workspace.path(),
+        "package.json",
+        &serde_json::json!({"name": "empty-app", "version": "1.0.0"}),
+    );
     let empty = json_ok(
         workspace.path(),
         &["trust", "graph", "--immunize", "--json"],
@@ -588,4 +611,329 @@ fn planner_budget_prioritizes_shared_dependency_before_alphabetical_leaves() {
         20
     );
     assert_eq!(imm["risk_surfaces"].as_array().unwrap().len(), 24);
+}
+
+fn write_json(workspace: &Path, relative_path: &str, value: &Value) {
+    let path = workspace.join(relative_path);
+    std::fs::create_dir_all(path.parent().expect("fixture parent")).unwrap();
+    std::fs::write(path, serde_json::to_vec_pretty(value).unwrap()).unwrap();
+}
+
+fn initialize_and_scan(workspace: &Path) {
+    let init = cli(
+        workspace,
+        &["init", "--profile", "balanced", "--out-dir", "."],
+    );
+    assert!(
+        init.status.success(),
+        "init: {}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+    json_ok(workspace, &["trust", "scan", ".", "--json"]);
+}
+
+#[test]
+fn graph_uses_shrinkwrap_authority_before_conflicting_package_lock() {
+    let workspace = project();
+    let root = workspace.path();
+    let mut shrinkwrap: Value =
+        serde_json::from_slice(&std::fs::read(root.join("package-lock.json")).unwrap()).unwrap();
+    shrinkwrap["packages"]["node_modules/web-kit"]["dependencies"] =
+        serde_json::json!({"tiny-helper": "^1.0.0"});
+    shrinkwrap["packages"]["node_modules/lib-core"]["dependencies"] =
+        serde_json::json!({"shrinkwrap-only": "^1.0.0"});
+    shrinkwrap["packages"]["node_modules/shrinkwrap-only"] =
+        serde_json::json!({"version": "1.0.3"});
+    write_json(root, "npm-shrinkwrap.json", &shrinkwrap);
+
+    let report = json_ok(root, &["trust", "graph", "--json"]);
+    assert_eq!(report["lockfile"], "npm-shrinkwrap.json");
+    let graph = &report["graph"];
+    assert!(has_edge(
+        graph,
+        "npm:web-kit",
+        "npm:tiny-helper",
+        "depends_on"
+    ));
+    assert!(!has_edge(
+        graph,
+        "npm:web-kit",
+        "npm:lib-core",
+        "depends_on"
+    ));
+    assert!(has_edge(
+        graph,
+        "npm:lib-core",
+        "npm:shrinkwrap-only",
+        "depends_on"
+    ));
+    assert_eq!(
+        node(graph, "npm:shrinkwrap-only")["kind"],
+        "untracked_dependency"
+    );
+    assert_eq!(
+        report["dependency_capture"]["lockfile_source"]["path"],
+        "npm-shrinkwrap.json"
+    );
+    assert!(
+        report["dependency_capture"]["topology_hash"]
+            .as_str()
+            .is_some_and(|hash| hash.starts_with("sha256:")),
+        "{report}"
+    );
+
+    // npm ignores the losing lockfile entirely. Its invalid JSON must neither
+    // break the selected graph nor replace the selected dependency authority.
+    std::fs::write(root.join("package-lock.json"), "{").unwrap();
+    let unchanged = json_ok(root, &["trust", "graph", "--json"]);
+    assert_eq!(unchanged["lockfile"], "npm-shrinkwrap.json");
+    assert_eq!(unchanged["graph"], report["graph"]);
+    assert_eq!(
+        unchanged["dependency_capture"],
+        report["dependency_capture"]
+    );
+}
+
+#[test]
+fn aliases_preserve_actual_identity_transitive_edges_and_quarantine_blast_radius() {
+    let manifest = serde_json::json!({
+        "name": "alias-app",
+        "version": "1.0.0",
+        "dependencies": {"web-kit": "^3.1.0"}
+    });
+    for lock in [
+        serde_json::json!({
+            "lockfileVersion": 3,
+            "packages": {
+                "": manifest.clone(),
+                "node_modules/web-kit": {
+                    "version": "3.1.4",
+                    "dependencies": {"renamed": "npm:@scope/actual@^2"}
+                },
+                "node_modules/renamed": {
+                    "name": "@scope/actual", "version": "2.0.7",
+                    "dependencies": {"leaf": "^1"}
+                },
+                "node_modules/leaf": {"version": "1.0.2"}
+            }
+        }),
+        serde_json::json!({
+            "lockfileVersion": 1,
+            "dependencies": {
+                "web-kit": {
+                    "version": "3.1.4",
+                    "requires": {"renamed": "npm:@scope/actual@^2"},
+                    "dependencies": {
+                        "renamed": {
+                            "version": "npm:@scope/actual@2.0.7",
+                            "requires": {"leaf": "^1"}
+                        }
+                    }
+                },
+                "leaf": {"version": "1.0.2"}
+            }
+        }),
+    ] {
+        let workspace = tempfile::tempdir().unwrap();
+        let root = workspace.path();
+        write_json(root, "package.json", &manifest);
+        write_json(root, "package-lock.json", &lock);
+        initialize_and_scan(root);
+
+        let before = json_ok(root, &["trust", "graph", "--json"]);
+        let graph = &before["graph"];
+        assert_eq!(node(graph, "npm:@scope/actual")["kind"], "extension");
+        assert!(has_edge(
+            graph,
+            "npm:web-kit",
+            "npm:@scope/actual",
+            "depends_on"
+        ));
+        assert!(has_edge(
+            graph,
+            "npm:@scope/actual",
+            "npm:leaf",
+            "depends_on"
+        ));
+        assert!(
+            graph["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|entry| entry["node_id"] != "npm:renamed"),
+            "an installation alias is not a second registry identity: {graph}"
+        );
+        let original_score = node(graph, "npm:web-kit")["effective_score"]
+            .as_u64()
+            .unwrap();
+
+        json_ok(
+            root,
+            &[
+                "trust",
+                "quarantine",
+                "--artifact",
+                "npm:@scope/actual",
+                "--json",
+            ],
+        );
+        let after = json_ok(
+            root,
+            &[
+                "trust",
+                "graph",
+                "--extension",
+                "npm:@scope/actual",
+                "--json",
+            ],
+        );
+        assert_eq!(after["focus"]["node"]["quarantined"], true);
+        assert!(
+            node(&after["graph"], "npm:web-kit")["effective_score"]
+                .as_u64()
+                .is_some_and(|score| score < original_score),
+            "alias containment must lower its real dependent's trust: {after}"
+        );
+        assert!(
+            after["focus"]["blast_radius"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["extension_id"] == "npm:web-kit" && entry["depth"] == 1),
+            "{after}"
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn bun_workspaces_aliases_peers_and_optional_dependencies_feed_the_same_graph() {
+    let workspace = tempfile::tempdir().unwrap();
+    let root = workspace.path();
+    let manifest = serde_json::json!({
+        "name": "bun-graph-app", "version": "1.0.0",
+        "workspaces": ["packages/*"],
+        "dependencies": {"app": "workspace:*"}
+    });
+    let member = serde_json::json!({
+        "name": "app", "version": "1.0.0",
+        "dependencies": {"renamed": "npm:@scope/actual@^2"},
+        "peerDependencies": {"host": "^1"},
+        "optionalDependencies": {"present": "^1", "not-installed": "^1"}
+    });
+    write_json(root, "package.json", &manifest);
+    write_json(root, "packages/app/package.json", &member);
+    write_json(
+        root,
+        "bun.lock",
+        &serde_json::json!({
+            "lockfileVersion": 1,
+            "workspaces": {
+                "": {"dependencies": {"app": "workspace:*"}},
+                "packages/app": member
+            },
+            "packages": {
+                "app": ["app@workspace:packages/app"],
+                "renamed": ["@scope/actual@2.4.0", "", {"dependencies": {"leaf": "^1"}}, ""],
+                "leaf": ["leaf@1.0.2", "", {}, ""],
+                "host": ["host@1.0.0", "", {}, ""],
+                "present": ["present@1.0.0", "", {}, ""]
+            }
+        }),
+    );
+    initialize_and_scan(root);
+
+    let report = json_ok(root, &["trust", "graph", "--json"]);
+    assert_eq!(report["lockfile"], "bun.lock");
+    assert_eq!(
+        report["dependency_capture"]["lockfile_source"]["path"],
+        "bun.lock"
+    );
+    let graph = &report["graph"];
+    for target in ["npm:@scope/actual", "npm:host", "npm:present"] {
+        assert!(has_edge(graph, "npm:app", target, "depends_on"), "{report}");
+    }
+    assert!(has_edge(
+        graph,
+        "npm:@scope/actual",
+        "npm:leaf",
+        "depends_on"
+    ));
+    assert!(!has_edge(
+        graph,
+        "npm:app",
+        "npm:not-installed",
+        "depends_on"
+    ));
+    assert!(!has_edge(graph, "npm:app", "npm:app", "depends_on"));
+    assert_eq!(
+        report["dependency_capture"]["coverage"]["unresolved_optional_edges"],
+        1
+    );
+    assert_eq!(
+        report["dependency_capture"]["coverage"]["unresolved_required_edges"],
+        0
+    );
+    assert!(
+        report["dependency_capture"]["placements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|placement| placement["location"] == "node_modules/renamed"
+                && placement["package_name"] == "@scope/actual"
+                && placement["version"] == "2.4.0"),
+        "{report}"
+    );
+    assert!(
+        graph["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|entry| entry["node_id"] != "npm:renamed"),
+        "{report}"
+    );
+    let focus = json_ok(
+        root,
+        &["trust", "graph", "--extension", "npm:leaf", "--json"],
+    );
+    assert!(
+        focus["focus"]["blast_radius"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["extension_id"] == "npm:app" && entry["depth"] == 2),
+        "{focus}"
+    );
+}
+
+#[test]
+fn selected_metadata_errors_cannot_downgrade_the_trust_graph_authority() {
+    let workspace = project();
+    let root = workspace.path();
+    std::fs::write(root.join("npm-shrinkwrap.json"), "{").unwrap();
+    let malformed = cli(root, &["trust", "graph", "--json"]);
+    assert!(!malformed.status.success());
+    let diagnostic = format!(
+        "{}{}",
+        String::from_utf8_lossy(&malformed.stdout),
+        String::from_utf8_lossy(&malformed.stderr)
+    );
+    assert!(diagnostic.contains("npm-shrinkwrap.json"), "{diagnostic}");
+
+    // Two different lockfile ecosystems cannot both be the authority for a
+    // graph, even if the npm side alone is valid and previously scanned.
+    std::fs::rename(
+        root.join("npm-shrinkwrap.json"),
+        root.join("npm-shrinkwrap.invalid"),
+    )
+    .unwrap();
+    write_json(root, "bun.lock", &serde_json::json!({}));
+    let ambiguous = cli(root, &["trust", "graph", "--json"]);
+    assert!(!ambiguous.status.success());
+    let diagnostic = format!(
+        "{}{}",
+        String::from_utf8_lossy(&ambiguous.stdout),
+        String::from_utf8_lossy(&ambiguous.stderr)
+    );
+    assert!(diagnostic.contains("Bun and npm lockfiles"), "{diagnostic}");
 }

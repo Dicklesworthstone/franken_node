@@ -75,9 +75,57 @@ pub struct TrustDependency {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub override_request: Option<String>,
     pub dependency_kind: Option<DependencyKind>,
+    pub optional: bool,
+    pub selection: Selection,
     pub target: Option<String>,
     pub pinned_version: Option<String>,
     pub integrity: Option<String>,
+}
+
+/// Exact lockfile authority selected during the metadata capture. The raw-byte
+/// digest is separate from the formatting-insensitive semantic graph hashes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CapturedLockfileSource {
+    pub path: String,
+    pub sha256: String,
+}
+
+/// A captured installation or workspace identity. Multiple versions and
+/// locations remain distinct even when their names share one visual graph node.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TrustPackagePlacement {
+    pub location: String,
+    pub package_name: String,
+    pub version: Option<String>,
+    pub integrity: Option<String>,
+    pub source: PackageSource,
+    pub link_target: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TrustTopologyCoverage {
+    /// Whether all captured package records preserve dependency kinds.
+    pub metadata_complete: bool,
+    pub unresolved_required_edges: usize,
+    pub unresolved_optional_edges: usize,
+    pub intent_only_edges: usize,
+    pub unnamed_packages: usize,
+}
+
+/// A bounded union by actual registry package name for trust visualization.
+/// It includes every captured package and declared requirement, including
+/// development dependencies. It is not an exact installed-location impact
+/// graph; use `impact` for that. Missing optional requirements are counted but
+/// do not create package edges, and workspace intent is reported separately.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TrustGraphProjection {
+    pub root_dependencies: BTreeSet<String>,
+    pub dependencies: BTreeMap<String, BTreeSet<String>>,
+    pub placements: Vec<TrustPackagePlacement>,
+    pub source_graph_hash: String,
+    pub canonical_hash: String,
+    pub lockfile_source: Option<CapturedLockfileSource>,
+    pub coverage: TrustTopologyCoverage,
 }
 
 #[derive(Debug)]
@@ -107,6 +155,48 @@ fn requested_package_name<'a>(
     Ok(name)
 }
 
+fn normalized_pin_version(version: &str) -> Option<&str> {
+    if let Some(alias) = version.strip_prefix("npm:") {
+        alias
+            .rfind('@')
+            .filter(|index| *index > 0)
+            .map(|index| &alias[index + 1..])
+    } else {
+        Some(version)
+    }
+}
+
+fn bind_trust_identity<'a>(
+    names: &mut [Option<&'a str>],
+    index: usize,
+    name: &'a str,
+    location: &str,
+) -> ModuleResolutionGraphResult<()> {
+    super::validate_package_name(name)?;
+    if let Some(previous) = names[index]
+        && previous != name
+    {
+        return invalid_metadata(format!(
+            "captured package at {location:?} has conflicting trust identities {previous:?} and {name:?}",
+        ));
+    }
+    names[index] = Some(name);
+    Ok(())
+}
+
+fn add_trust_package(
+    dependencies: &mut BTreeMap<String, BTreeSet<String>>,
+    name: &str,
+    text_bytes: &mut usize,
+) -> ModuleResolutionGraphResult<()> {
+    if !dependencies.contains_key(name) {
+        enforce_len("trust projection packages", dependencies.len() + 1, MAX_NODES)?;
+        reserve_text(text_bytes, name.len())?;
+        dependencies.insert(name.to_owned(), BTreeSet::new());
+    }
+    Ok(())
+}
+
 /// Constructed only by the bounded metadata builder. No unsigned JSON-import
 /// approval path: private graph storage keeps query indices consistent.
 #[derive(Debug, Serialize)]
@@ -129,6 +219,9 @@ pub struct DependencyTopology {
     // exact pins. Queries never reopen a lockfile or select by name alone.
     #[serde(skip)]
     trust_pins: BTreeMap<String, TrustPin>,
+    // Raw capture provenance does not change the semantic topology hash.
+    #[serde(skip)]
+    lockfile_source: Option<CapturedLockfileSource>,
 }
 
 #[derive(Debug, Serialize)]
@@ -384,6 +477,7 @@ fn from_parts(
         edges,
         #[cfg(target_os = "linux")]
         override_authority: details.overrides.clone(),
+        lockfile_source: details.lockfile_source.clone(),
         locations,
         forward: forward
             .into_iter()
@@ -444,7 +538,14 @@ impl DependencyTopology {
         start: &str,
         include_development: bool,
     ) -> ModuleResolutionGraphResult<Vec<TrustDependency>> {
-        let start = self.index(start)?;
+        self.trust_dependencies_from(std::iter::once(self.index(start)?), include_development)
+    }
+
+    fn trust_dependencies_from(
+        &self,
+        starts: impl IntoIterator<Item = usize>,
+        include_development: bool,
+    ) -> ModuleResolutionGraphResult<Vec<TrustDependency>> {
         let mut outgoing = vec![Vec::new(); self.nodes.len()];
         for (index, edge) in self.edges.iter().enumerate() {
             if include_development || edge.dependency_kind != Some(DependencyKind::Development) {
@@ -452,8 +553,13 @@ impl DependencyTopology {
             }
         }
         let mut visited = vec![false; self.nodes.len()];
-        let mut pending = VecDeque::from([start]);
-        visited[start] = true;
+        let mut pending = VecDeque::new();
+        for start in starts {
+            if !visited[start] {
+                visited[start] = true;
+                pending.push_back(start);
+            }
+        }
         let mut result = Vec::new();
         let mut text_bytes = 0;
         while let Some(index) = pending.pop_front() {
@@ -547,18 +653,9 @@ impl DependencyTopology {
                     .target
                     .as_ref()
                     .and_then(|target| self.trust_pins.get(target));
-                let pinned_version =
-                    pin.and_then(|pin| pin.version.as_deref())
-                        .and_then(|version| {
-                            if let Some(alias) = version.strip_prefix("npm:") {
-                                alias
-                                    .rfind('@')
-                                    .filter(|index| *index > 0)
-                                    .map(|index| &alias[index + 1..])
-                            } else {
-                                Some(version)
-                            }
-                        });
+                let pinned_version = pin
+                    .and_then(|pin| pin.version.as_deref())
+                    .and_then(normalized_pin_version);
                 let integrity = pin.and_then(|pin| pin.integrity.as_deref());
                 reserve_text(
                     &mut text_bytes,
@@ -578,6 +675,8 @@ impl DependencyTopology {
                     requested_range: edge.requested_range.clone(),
                     override_request: replacement.map(str::to_owned),
                     dependency_kind: edge.dependency_kind,
+                    optional: edge.optional,
+                    selection: edge.selection,
                     target: edge.target.clone(),
                     pinned_version: pinned_version.map(str::to_owned),
                     integrity: integrity.map(str::to_owned),
@@ -594,6 +693,189 @@ impl DependencyTopology {
             ))
         });
         Ok(result)
+    }
+
+    /// Project one immutable capture for name-level trust and reputation views.
+    /// Every exact placement is validated before names are merged. Root
+    /// declarations are separate from package edges, and link placeholders do
+    /// not create self-edges. All output shares the topology's count/text limits.
+    pub fn trust_graph_projection(&self) -> ModuleResolutionGraphResult<TrustGraphProjection> {
+        // Visit each captured location exactly once, including workspaces and
+        // installed packages that are not reachable from the root manifest.
+        let requirements = self.trust_dependencies_from(0..self.nodes.len(), true)?;
+        let mut names = vec![None; self.nodes.len()];
+        for (index, node) in self.nodes.iter().enumerate() {
+            if node.location != "."
+                && node.source == PackageSource::Manifest
+                && let Some(name) = node.name.as_deref()
+            {
+                bind_trust_identity(&mut names, index, name, &node.location)?;
+            }
+        }
+        for requirement in &requirements {
+            if let Some(target) = &requirement.target {
+                bind_trust_identity(
+                    &mut names,
+                    self.index(target)?,
+                    &requirement.package_name,
+                    target,
+                )?;
+            }
+        }
+        for (index, node) in self.nodes.iter().enumerate() {
+            if let Some(target) = &node.link_target {
+                let manifest = &self.nodes[self.index(target)?];
+                let name = manifest.name.as_deref().ok_or_else(|| {
+                    ModuleResolutionGraphError::InvalidMetadata {
+                        detail: format!("workspace link at {:?} has an unnamed target", node.location),
+                    }
+                })?;
+                bind_trust_identity(&mut names, index, name, &node.location)?;
+            }
+        }
+        for (index, node) in self.nodes.iter().enumerate() {
+            if node.location == "." || names[index].is_some() {
+                continue;
+            }
+            if let Some(name) = node.name.as_deref() {
+                let actual = match node.version.as_deref() {
+                    Some(version)
+                        if node.source == PackageSource::Lockfile
+                            && version.starts_with("npm:") =>
+                    {
+                        let actual = requested_package_name(name, version)?;
+                        let installed_as = super::package_name_from_lock_path(&node.location);
+                        if actual != name && installed_as.as_deref() != Some(name) {
+                            return invalid_metadata(format!(
+                                "captured package at {:?} has a conflicting npm alias identity",
+                                node.location,
+                            ));
+                        }
+                        actual
+                    }
+                    _ => name,
+                };
+                bind_trust_identity(&mut names, index, actual, &node.location)?;
+            }
+        }
+
+        let mut coverage = TrustTopologyCoverage {
+            metadata_complete: self.nodes.iter().all(|node| node.dependency_kinds_complete),
+            unresolved_required_edges: 0,
+            unresolved_optional_edges: 0,
+            intent_only_edges: 0,
+            unnamed_packages: self
+                .nodes
+                .iter()
+                .enumerate()
+                .filter(|(index, node)| node.location != "." && names[*index].is_none())
+                .count(),
+        };
+        let mut text_bytes = 0;
+        reserve_text(
+            &mut text_bytes,
+            self.source_graph_hash.len()
+                + self.canonical_hash.len()
+                + self
+                    .lockfile_source
+                    .as_ref()
+                    .map_or(0, |source| source.path.len() + source.sha256.len()),
+        )?;
+        let mut dependencies = BTreeMap::new();
+        let mut placements = Vec::new();
+        for (index, node) in self.nodes.iter().enumerate() {
+            if node.location == "." {
+                continue;
+            }
+            let Some(name) = names[index] else {
+                continue;
+            };
+            add_trust_package(&mut dependencies, name, &mut text_bytes)?;
+            let identity = match &node.link_target {
+                Some(target) => &self.nodes[self.index(target)?],
+                None => node,
+            };
+            let version = match node.source {
+                PackageSource::Lockfile => {
+                    identity.version.as_deref().and_then(normalized_pin_version)
+                }
+                PackageSource::Manifest | PackageSource::WorkspaceLink => identity.version.as_deref(),
+            };
+            let integrity = self
+                .trust_pins
+                .get(&node.location)
+                .and_then(|pin| pin.integrity.as_deref());
+            enforce_len("trust projection placements", placements.len() + 1, MAX_NODES)?;
+            reserve_text(
+                &mut text_bytes,
+                node.location.len()
+                    + name.len()
+                    + version.map_or(0, str::len)
+                    + integrity.map_or(0, str::len)
+                    + node.link_target.as_ref().map_or(0, String::len),
+            )?;
+            placements.push(TrustPackagePlacement {
+                location: node.location.clone(),
+                package_name: name.to_owned(),
+                version: version.map(str::to_owned),
+                integrity: integrity.map(str::to_owned),
+                source: node.source,
+                link_target: node.link_target.clone(),
+            });
+        }
+
+        let mut root_dependencies = BTreeSet::new();
+        let mut projected_edges = 0;
+        for requirement in &requirements {
+            match requirement.selection {
+                Selection::Unresolved if requirement.optional => {
+                    coverage.unresolved_optional_edges += 1;
+                }
+                Selection::Unresolved => coverage.unresolved_required_edges += 1,
+                Selection::WorkspaceIntent => coverage.intent_only_edges += 1,
+                Selection::Lockfile => {}
+            }
+            if requirement.optional && requirement.target.is_none() {
+                continue;
+            }
+            let target = requirement.package_name.as_str();
+            add_trust_package(&mut dependencies, target, &mut text_bytes)?;
+            if requirement.importer == "." {
+                if !root_dependencies.contains(target) {
+                    reserve_text(&mut text_bytes, target.len())?;
+                    root_dependencies.insert(target.to_owned());
+                }
+                continue;
+            }
+            let Some(importer) = names[self.index(&requirement.importer)?] else {
+                continue;
+            };
+            // Distinct installations can depend on the same registry name.
+            // Preserve them in placements without inventing a visual self-edge.
+            if importer == target {
+                continue;
+            }
+            let outgoing = dependencies.get_mut(importer).ok_or_else(|| {
+                ModuleResolutionGraphError::InvalidMetadata {
+                    detail: "trust projection importer is missing".into(),
+                }
+            })?;
+            if !outgoing.contains(target) {
+                enforce_len("trust projection edges", projected_edges + 1, MAX_EDGES)?;
+                reserve_text(&mut text_bytes, target.len())?;
+                outgoing.insert(target.to_owned());
+                projected_edges += 1;
+            }
+        }
+        Ok(TrustGraphProjection {
+            root_dependencies,
+            dependencies,
+            placements,
+            source_graph_hash: self.source_graph_hash.clone(),
+            canonical_hash: self.canonical_hash.clone(),
+            lockfile_source: self.lockfile_source.clone(),
+            coverage,
+        })
     }
 
     fn index(&self, location: &str) -> ModuleResolutionGraphResult<usize> {
@@ -754,6 +1036,205 @@ mod tests {
     }
 
     #[test]
+    fn trust_projection_preserves_aliases_nested_pins_leaves_and_coverage() {
+        let root = fixture(json!({
+            "node_modules/a":{"name":"actual", "version":"1.2.3", "integrity":"sha512-YQ==",
+                "dependencies":{"b":"2"}, "peerDependencies":{"host":"*"},
+                "optionalDependencies":{"missing":"1"}},
+            "node_modules/a/node_modules/b":{"version":"2.0.0", "integrity":"sha512-bmVzdGVk"},
+            "node_modules/b":{"version":"9.0.0", "integrity":"sha512-aG9pc3RlZA=="},
+            "node_modules/dev":{"version":"1.0.0"},
+            "node_modules/orphan":{"version":"1.0.0"}
+        }));
+        put(
+            root.path(),
+            "package.json",
+            json!({"name":"root-app", "dependencies":{"a":"npm:actual@^1"},
+                "devDependencies":{"dev":"1"}}),
+        );
+        let topology = build(root.path()).unwrap();
+        let projection = topology.trust_graph_projection().unwrap();
+        assert_eq!(
+            projection.root_dependencies,
+            BTreeSet::from(["actual".into(), "dev".into()])
+        );
+        assert_eq!(
+            projection.dependencies["actual"],
+            BTreeSet::from(["b".into(), "host".into()])
+        );
+        for absent in ["a", "missing", "root-app"] {
+            assert!(!projection.dependencies.contains_key(absent), "{absent}");
+        }
+        assert!(projection.dependencies["orphan"].is_empty());
+        assert!(projection.dependencies["host"].is_empty());
+        assert_eq!(projection.coverage.unresolved_required_edges, 1);
+        assert_eq!(projection.coverage.unresolved_optional_edges, 1);
+        assert_eq!(projection.coverage.intent_only_edges, 0);
+        assert_eq!(projection.coverage.unnamed_packages, 0);
+        assert!(projection.coverage.metadata_complete);
+        let versions: BTreeSet<_> = projection
+            .placements
+            .iter()
+            .filter(|placement| placement.package_name == "b")
+            .map(|placement| {
+                (
+                    placement.location.as_str(),
+                    placement.version.as_deref(),
+                    placement.integrity.as_deref(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            versions,
+            BTreeSet::from([
+                (
+                    "node_modules/a/node_modules/b",
+                    Some("2.0.0"),
+                    Some("sha512-bmVzdGVk"),
+                ),
+                (
+                    "node_modules/b",
+                    Some("9.0.0"),
+                    Some("sha512-aG9pc3RlZA=="),
+                ),
+            ])
+        );
+        assert!(projection.placements.iter().any(|placement| {
+            placement.location == "node_modules/a" && placement.package_name == "actual"
+        }));
+        assert!(
+            !projection
+                .placements
+                .iter()
+                .any(|placement| placement.package_name == "host")
+        );
+        put(root.path(), "package.json", json!({}));
+        put(root.path(), "package-lock.json", json!({"packages":{}}));
+        assert_eq!(projection, topology.trust_graph_projection().unwrap());
+    }
+
+    #[test]
+    fn trust_projection_binds_selected_raw_lockfile_without_changing_semantic_hashes() {
+        let root = fixture(json!({"node_modules/a":{"version":"9.0.0"}}));
+        let lock =
+            json!({"lockfileVersion":3,"packages":{"node_modules/a":{"version":"1.0.0"}}});
+        let raw = serde_json::to_string(&lock).unwrap();
+        fs::write(root.path().join("npm-shrinkwrap.json"), &raw).unwrap();
+        let captured = build(root.path()).unwrap();
+        let first = captured.trust_graph_projection().unwrap();
+        assert_eq!(
+            first.lockfile_source,
+            Some(CapturedLockfileSource {
+                path: "npm-shrinkwrap.json".into(),
+                sha256: format!("sha256:{}", hex::encode(Sha256::digest(raw.as_bytes()))),
+            })
+        );
+        assert_eq!(first.placements[0].version.as_deref(), Some("1.0.0"));
+        fs::write(
+            root.path().join("npm-shrinkwrap.json"),
+            serde_json::to_string_pretty(&lock).unwrap(),
+        )
+        .unwrap();
+        let reformatted = build(root.path())
+            .unwrap()
+            .trust_graph_projection()
+            .unwrap();
+        assert_eq!(first.source_graph_hash, reformatted.source_graph_hash);
+        assert_eq!(first.canonical_hash, reformatted.canonical_hash);
+        assert_ne!(first.lockfile_source, reformatted.lockfile_source);
+        fs::write(root.path().join("npm-shrinkwrap.json"), "{").unwrap();
+        assert!(build(root.path()).is_err());
+        assert_eq!(first, captured.trust_graph_projection().unwrap());
+    }
+
+    #[test]
+    fn trust_projection_rejects_conflicting_aliases_even_in_unreachable_installations() {
+        let root = fixture(json!({
+            "node_modules/a":{"dependencies":{"alias":"npm:actual@1"}},
+            "node_modules/unreachable":{"dependencies":{"alias":"npm:impostor@1"}},
+            "node_modules/alias":{"version":"1.0.0"}
+        }));
+        let topology = build(root.path()).unwrap();
+        assert!(topology.trust_dependencies(".", false).is_ok());
+        let error = topology.trust_graph_projection().unwrap_err().to_string();
+        assert!(error.contains("conflicting trust identities"), "{error}");
+    }
+
+    #[test]
+    fn trust_projection_distinguishes_workspace_intent_and_missing_required_packages() {
+        let root = tempfile::tempdir().unwrap();
+        put(
+            root.path(),
+            "package.json",
+            json!({
+                "name":"root-app", "workspaces":["packages/*"],
+                "dependencies":{"app":"workspace:*", "missing":"1"}
+            }),
+        );
+        put(
+            root.path(),
+            "packages/app/package.json",
+            json!({"name":"app", "version":"1.0.0", "dependencies":{"leaf":"1"}}),
+        );
+        put(
+            root.path(),
+            "packages/anonymous/package.json",
+            json!({"version":"1.0.0"}),
+        );
+        let projection = build(root.path())
+            .unwrap()
+            .trust_graph_projection()
+            .unwrap();
+        assert_eq!(
+            projection.root_dependencies,
+            BTreeSet::from(["app".into(), "missing".into()])
+        );
+        assert_eq!(
+            projection.dependencies["app"],
+            BTreeSet::from(["leaf".into()])
+        );
+        assert_eq!(projection.coverage.intent_only_edges, 1);
+        assert_eq!(projection.coverage.unresolved_required_edges, 2);
+        assert_eq!(projection.coverage.unnamed_packages, 1);
+        assert!(projection.coverage.metadata_complete);
+        assert!(projection.lockfile_source.is_none());
+        assert_eq!(projection.placements.len(), 1);
+        assert_eq!(projection.placements[0].source, PackageSource::Manifest);
+        assert!(!projection.dependencies.contains_key("root-app"));
+    }
+
+    #[test]
+    fn unsupported_lockfile_shapes_never_become_empty_trust_projections() {
+        let root = fixture(json!({}));
+        for invalid in [
+            json!({}),
+            json!({"lockfileVersion":1,"packages":false}),
+            json!({"dependencies":null}),
+        ] {
+            put(root.path(), "package-lock.json", invalid);
+            let error = build(root.path()).unwrap_err().to_string();
+            assert!(
+                error.contains("unsupported lockfile dependency shape"),
+                "{error}"
+            );
+        }
+        for valid in [
+            json!({"lockfileVersion":1}),
+            json!({"packages":{}}),
+            json!({"dependencies":{}}),
+        ] {
+            put(root.path(), "package-lock.json", valid);
+            let projection = build(root.path())
+                .unwrap()
+                .trust_graph_projection()
+                .unwrap();
+            assert_eq!(projection.coverage.unresolved_required_edges, 1);
+            assert!(projection.dependencies.contains_key("a"));
+            assert!(projection.placements.is_empty());
+        }
+    }
+
+    #[test]
     fn trust_walk_tracks_nested_pins_cycles_and_optional_peers_but_excludes_development() {
         let root = fixture(json!({
             "node_modules/a":{"version":"1", "dependencies":{"b":"2"},
@@ -873,6 +1354,24 @@ mod tests {
                 .iter()
                 .any(|entry| entry.package_name == "dev")
         );
+
+        let projection = topology.trust_graph_projection().unwrap();
+        assert_eq!(projection.lockfile_source.as_ref().unwrap().path, "bun.lock");
+        assert_eq!(
+            projection.dependencies["app"],
+            BTreeSet::from(["private".into(), "real".into()])
+        );
+        assert_eq!(
+            projection.dependencies["real"],
+            BTreeSet::from(["leaf".into()])
+        );
+        assert!(!projection.dependencies.contains_key("alias"));
+        assert!(projection.dependencies.contains_key("dev"));
+        assert!(projection.placements.iter().any(|placement| {
+            placement.location == "node_modules/alias"
+                && placement.package_name == "real"
+                && placement.version.as_deref() == Some("2.4.0")
+        }));
 
         // A lock tuple cannot silently replace the catalog's registry identity.
         lock["packages"]["alias"][0] = json!("other@2.4.0");
@@ -1673,6 +2172,17 @@ mod tests {
         );
         let graph = build(root.path()).unwrap();
         assert!(graph.closure(".").unwrap().fully_resolved);
+        let projection = graph.trust_graph_projection().unwrap();
+        assert_eq!(
+            projection.dependencies["a"],
+            BTreeSet::from(["dep".into()])
+        );
+        assert_eq!(projection.coverage.intent_only_edges, 0);
+        assert!(projection.placements.iter().any(|placement| {
+            placement.location == "node_modules/a"
+                && placement.source == PackageSource::WorkspaceLink
+                && placement.link_target.as_deref() == Some("packages/a")
+        }));
         assert_eq!(
             graph.closure("node_modules/a").unwrap().reachable,
             [
@@ -1748,6 +2258,13 @@ mod tests {
         assert!(closure.unresolved_edges.is_empty());
         assert!(!closure.metadata_complete);
         assert!(!closure.fully_resolved);
+        let projection = graph.trust_graph_projection().unwrap();
+        assert!(!projection.coverage.metadata_complete);
+        assert_eq!(
+            projection.dependencies["a"],
+            BTreeSet::from(["b".into()])
+        );
+        assert_eq!(projection.coverage.unresolved_required_edges, 0);
         assert!(
             graph
                 .edges

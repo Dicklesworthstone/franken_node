@@ -15793,9 +15793,10 @@ struct TrustGraphBehavioralPriority {
 struct TrustGraphCliReport {
     schema_version: &'static str,
     command: &'static str,
-    /// Lockfile the `depends_on` edges came from; `None` means the project
-    /// has none and the graph holds publisher edges only.
+    /// Selected dependency authority; absent for manifest-only observations.
     lockfile: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dependency_capture: Option<supply_chain::trust_graph::DependencyGraphCapture>,
     graph: supply_chain::trust_graph::TrustGraph,
     #[serde(skip_serializing_if = "Option::is_none")]
     focus: Option<TrustGraphFocus>,
@@ -16034,40 +16035,44 @@ fn load_project_lockfile_graph(
     Option<String>,
     supply_chain::trust_graph::LockfileDependencyGraph,
 )> {
-    for candidate in ["package-lock.json", "npm-shrinkwrap.json"] {
-        let path = project_root.join(candidate);
-        if !path.is_file() {
-            continue;
+    use supply_chain::module_resolution_graph::{
+        ModuleResolutionGraphError, dependency_topology, read_project_metadata,
+    };
+    use supply_chain::trust_graph::LockfileDependencyGraph;
+
+    let topology = match dependency_topology::build(project_root) {
+        Ok(topology) => topology,
+        Err(ModuleResolutionGraphError::MissingRootManifest { .. }) => {
+            // Registry-only inspection remains useful outside an npm project.
+            // A present lockfile cannot silently lose its graph merely because
+            // its root manifest is missing. Zero-byte probes retain the shared
+            // reader's no-follow and nonregular-file refusal.
+            for candidate in [
+                "npm-shrinkwrap.json",
+                "package-lock.json",
+                "bun.lock",
+                "bun.lockb",
+            ] {
+                match read_project_metadata(project_root, Path::new(candidate), 0) {
+                    Err(ModuleResolutionGraphError::Io { source, .. })
+                        if source.kind() == std::io::ErrorKind::NotFound => {}
+                    _ => anyhow::bail!(
+                        "trust graph requires package.json to interpret dependency authority {candidate}"
+                    ),
+                }
+            }
+            return Ok((None, LockfileDependencyGraph::default()));
         }
-        let raw = bounded_read_to_string(&path, MAX_LOCKFILE_BYTES)
-            .with_context(|| format!("failed reading lockfile {}", path.display()))?;
-        let value: serde_json::Value = serde_json::from_str(&raw)
-            .with_context(|| format!("invalid lockfile JSON: {}", path.display()))?;
-        let supported_shape = value
-            .get("packages")
-            .is_some_and(serde_json::Value::is_object)
-            || value
-                .get("dependencies")
-                .is_some_and(serde_json::Value::is_object)
-            || (value
-                .get("lockfileVersion")
-                .and_then(serde_json::Value::as_u64)
-                == Some(1)
-                && value.get("dependencies").is_none()
-                && value.get("packages").is_none());
-        anyhow::ensure!(
-            supported_shape,
-            "unsupported lockfile dependency shape in {}: expected a packages or dependencies object",
-            path.display()
-        );
-        return Ok((
-            Some(candidate.to_string()),
-            supply_chain::trust_graph::LockfileDependencyGraph::from_lockfile_json(&value),
-        ));
-    }
+        Err(error) => return Err(error.into()),
+    };
+    let projection = topology.trust_graph_projection()?;
+    let lockfile = projection
+        .lockfile_source
+        .as_ref()
+        .map(|source| source.path.clone());
     Ok((
-        None,
-        supply_chain::trust_graph::LockfileDependencyGraph::default(),
+        lockfile,
+        LockfileDependencyGraph::from_captured_topology(projection)?,
     ))
 }
 
@@ -16131,6 +16136,7 @@ fn trust_graph_report(extension: Option<&str>, immunize: bool) -> Result<TrustGr
         schema_version: TRUST_GRAPH_CLI_SCHEMA_VERSION,
         command: "trust.graph",
         lockfile,
+        dependency_capture: dependencies.capture,
         graph,
         focus,
         immunization,
@@ -16156,6 +16162,21 @@ fn render_trust_graph_human(report: &TrustGraphCliReport) -> String {
             report.lockfile.as_deref().unwrap_or("none")
         ),
     ];
+    if let Some(capture) = &report.dependency_capture {
+        lines.push(format!(
+            "  dependency capture: topology={} metadata_complete={} unresolved_required={} absent_optional={} workspace_intent={} placements={}",
+            capture.topology_hash,
+            capture.metadata_complete(),
+            capture.coverage.unresolved_required_edges,
+            capture.coverage.unresolved_optional_edges,
+            capture.coverage.intent_only_edges,
+            capture.placements.len(),
+        ));
+        lines.push(
+            "  Edges aggregate captured package identities across installations; installed source bytes are not authenticated."
+                .to_string(),
+        );
+    }
     let render_score =
         |score: Option<u16>| score.map_or_else(|| "-".to_string(), |score| score.to_string());
     for node in &report.graph.nodes {
@@ -40055,6 +40076,8 @@ struct TrustCardReputationCliReport {
     decay_steps: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     lockfile: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dependency_capture: Option<supply_chain::trust_graph::DependencyGraphCapture>,
     snapshot: reputation_graph_apis::GraphSnapshot,
     scores: Vec<TrustCardReputationNodeEntry>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -40326,6 +40349,7 @@ fn handle_trust_card_reputation(
         min_trust_score: reputation_graph_apis::MIN_TRUST_SCORE,
         decay_steps: args.decay_steps,
         lockfile: lockfile_path,
+        dependency_capture: lockfile_graph.capture,
         snapshot,
         scores,
         focused_subgraph,

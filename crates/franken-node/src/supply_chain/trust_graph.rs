@@ -21,6 +21,9 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use serde::{Deserialize, Serialize};
 
+use super::module_resolution_graph::dependency_topology::{
+    CapturedLockfileSource, TrustGraphProjection, TrustPackagePlacement, TrustTopologyCoverage,
+};
 use super::trust_card::{RevocationStatus, TrustCard};
 
 /// Schema tag for [`TrustGraph`] and the CLI report built on it.
@@ -161,6 +164,9 @@ pub struct TrustGraphSummary {
     /// only describes these parser limits, not trust or resolution completeness.
     #[serde(default)]
     pub lockfile_truncated: bool,
+    /// Complete captured metadata, separate from installed-content or runtime proof.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dependency_metadata_complete: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -202,6 +208,7 @@ pub struct DependencyTopologyMetrics {
 #[serde(tag = "reason", rename_all = "snake_case")]
 pub enum DependencyTopologyError {
     TruncatedLockfile,
+    IncompleteCapture,
     NodeLimit {
         nodes: usize,
         limit: usize,
@@ -223,6 +230,10 @@ impl std::fmt::Display for DependencyTopologyError {
             Self::TruncatedLockfile => write!(
                 formatter,
                 "lockfile ingestion was truncated; exact dependency topology is unavailable"
+            ),
+            Self::IncompleteCapture => write!(
+                formatter,
+                "captured dependency metadata has unresolved requirements, workspace intent, or incomplete identities; complete dependency topology is unavailable"
             ),
             Self::NodeLimit { nodes, limit } => write!(
                 formatter,
@@ -246,7 +257,32 @@ impl std::fmt::Display for DependencyTopologyError {
 
 impl std::error::Error for DependencyTopologyError {}
 
-/// Direct dependency relation of an npm lockfile, keyed by package name.
+/// Provenance of the dependency projection consumed by trust and reputation.
+/// Name-level edges union multiple installations. Placements retain distinct
+/// version/digest pairs; all observations come from the same bounded capture.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DependencyGraphCapture {
+    pub schema_version: &'static str,
+    pub scope: &'static str,
+    pub source_graph_hash: String,
+    pub topology_hash: String,
+    pub lockfile_source: Option<CapturedLockfileSource>,
+    pub coverage: TrustTopologyCoverage,
+    pub placements: Vec<TrustPackagePlacement>,
+}
+
+impl DependencyGraphCapture {
+    #[must_use]
+    pub fn metadata_complete(&self) -> bool {
+        self.coverage.metadata_complete
+            && self.coverage.unresolved_required_edges == 0
+            && self.coverage.intent_only_edges == 0
+            && self.coverage.unnamed_packages == 0
+    }
+}
+
+/// Direct relation of captured project metadata, keyed by actual package name.
+/// CLI callers use the canonical runtime topology projection.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LockfileDependencyGraph {
     /// Packages the project itself depends on directly.
@@ -255,9 +291,49 @@ pub struct LockfileDependencyGraph {
     pub dependencies: BTreeMap<String, BTreeSet<String>>,
     /// At least one entry or dependency name was omitted at an ingestion bound.
     pub truncated: bool,
+    /// Absent for legacy in-memory JSON inputs; never inferred from mutable paths.
+    pub capture: Option<DependencyGraphCapture>,
 }
 
 impl LockfileDependencyGraph {
+    /// Consume an already captured npm/Bun topology without reopening metadata
+    /// or implementing another package-manager selection algorithm.
+    pub fn from_captured_topology(projection: TrustGraphProjection) -> anyhow::Result<Self> {
+        let packages: BTreeSet<&str> = projection
+            .root_dependencies
+            .iter()
+            .chain(projection.dependencies.keys())
+            .chain(projection.dependencies.values().flatten())
+            .map(String::as_str)
+            .collect();
+        anyhow::ensure!(
+            packages.len() <= MAX_GRAPH_PACKAGES,
+            "captured trust graph exceeds its package limit"
+        );
+        let observations = projection.dependencies.values().try_fold(
+            projection.root_dependencies.len(),
+            |count, dependencies| count.checked_add(dependencies.len()),
+        );
+        anyhow::ensure!(
+            observations.is_some_and(|count| count <= MAX_GRAPH_DEPENDENCY_NAMES),
+            "captured trust graph exceeds its dependency observation limit"
+        );
+        Ok(Self {
+            root_dependencies: projection.root_dependencies,
+            dependencies: projection.dependencies,
+            truncated: false,
+            capture: Some(DependencyGraphCapture {
+                schema_version: "franken-node/trust-dependency-capture/v1",
+                scope: "captured_metadata_name_projection_not_installed_content_authentication",
+                source_graph_hash: projection.source_graph_hash,
+                topology_hash: projection.canonical_hash,
+                lockfile_source: projection.lockfile_source,
+                coverage: projection.coverage,
+                placements: projection.placements,
+            }),
+        })
+    }
+
     /// Parse `package-lock.json` / `npm-shrinkwrap.json` (lockfile v1, v2
     /// and v3). Nested installs (`node_modules/a/node_modules/b`) are keyed
     /// by the innermost package name; the graph is name-level.
@@ -696,6 +772,10 @@ pub fn build_trust_graph(
             .count(),
         transitions: transitions.len(),
         lockfile_truncated: lockfile.truncated,
+        dependency_metadata_complete: lockfile
+            .capture
+            .as_ref()
+            .map(DependencyGraphCapture::metadata_complete),
     };
     TrustGraph {
         schema_version: TRUST_GRAPH_SCHEMA.to_string(),
@@ -850,6 +930,9 @@ pub fn dependency_topology_metrics(
 ) -> Result<BTreeMap<String, DependencyTopologyMetrics>, DependencyTopologyError> {
     if graph.summary.lockfile_truncated {
         return Err(DependencyTopologyError::TruncatedLockfile);
+    }
+    if graph.summary.dependency_metadata_complete == Some(false) {
+        return Err(DependencyTopologyError::IncompleteCapture);
     }
     let node_count = graph
         .nodes
