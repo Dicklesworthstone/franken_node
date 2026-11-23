@@ -75,6 +75,72 @@ impl NativeCounterfactualRequest {
     }
 }
 
+/// Derive the branch's exact declared grants from the authenticated original.
+/// The engine owns capability identities and aliases; both the parent verifier
+/// and branch executor use that same mapping. Preserve every retained spelling
+/// and its order so a worker cannot add, remove, or rewrite unrelated grants.
+#[cfg(feature = "engine")]
+fn attenuated_declared_capabilities(
+    original: &[String],
+    denied_capabilities: &[String],
+) -> Result<Vec<String>, String> {
+    use frankenengine_engine::capability::RuntimeCapability;
+    use std::collections::BTreeSet;
+
+    NativeCounterfactualRequest {
+        denied_capabilities: denied_capabilities.to_vec(),
+    }
+    .validate()?;
+    let granted: BTreeSet<_> = original
+        .iter()
+        .map(|tag| {
+            RuntimeCapability::from_tag_str(tag).ok_or_else(|| {
+                "native counterfactual captured an unrecognized declared capability".to_string()
+            })
+        })
+        .collect::<Result<_, _>>()?;
+    let mut denied = BTreeSet::new();
+    for tag in denied_capabilities {
+        let capability = RuntimeCapability::from_tag_str(tag)
+            .ok_or_else(|| format!("native counterfactual cannot deny unknown capability {tag}"))?;
+        if capability.to_string() != *tag {
+            return Err(format!(
+                "native counterfactual requires canonical capability name {capability}"
+            ));
+        }
+        if matches!(
+            capability,
+            RuntimeCapability::VmDispatch
+                | RuntimeCapability::HeapAllocate
+                | RuntimeCapability::Console
+        ) {
+            return Err(format!(
+                "native counterfactual cannot deny engine-intrinsic capability {tag}"
+            ));
+        }
+        if !granted.contains(&capability) {
+            return Err(format!(
+                "native counterfactual capability {tag} was not granted by the captured run"
+            ));
+        }
+        if capability == RuntimeCapability::ModuleLoad {
+            return Err(
+                "native counterfactual cannot deny module_load before frozen entrypoint admission"
+                    .to_string(),
+            );
+        }
+        denied.insert(capability);
+    }
+    Ok(original
+        .iter()
+        .filter(|tag| {
+            RuntimeCapability::from_tag_str(tag)
+                .is_some_and(|capability| !denied.contains(&capability))
+        })
+        .cloned()
+        .collect())
+}
+
 /// Actual console observation from the restricted native branch. Messages may
 /// contain private captured data; they are omitted from diagnostic Debug output.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -143,12 +209,14 @@ impl std::fmt::Debug for NativeCounterfactualOutcome {
     }
 }
 
-#[cfg(all(feature = "engine", target_os = "linux"))]
+#[cfg(any(test, all(feature = "engine", target_os = "linux")))]
 impl NativeCounterfactualOutcome {
     fn validate_for_request(
         &self,
         capture_payload_sha256: &str,
         request: &NativeCounterfactualRequest,
+        retained_declared_capabilities: &[String],
+        captured_host_effects: usize,
     ) -> Result<(), String> {
         request.validate()?;
         if self.schema_version != NATIVE_COUNTERFACTUAL_OUTCOME_SCHEMA
@@ -160,6 +228,8 @@ impl NativeCounterfactualOutcome {
             || !self.baseline.satisfies_policy_equivalence()
             || self.replay_certified
             || self.policy_equivalence_certified
+            || self.retained_declared_capabilities != retained_declared_capabilities
+            || self.captured_host_effects != captured_host_effects
             || self
                 .consumed_host_effects
                 .checked_add(self.unused_original_host_effects)
@@ -340,6 +410,9 @@ struct NativeReplayWorkerExpectation {
     terminal_state: NativeReplayTerminalState,
     module_load_disabled: bool,
     failure_context: bool,
+    declared_capabilities: Vec<String>,
+    captured_host_effects: usize,
+    process_capture: bool,
 }
 
 #[cfg(any(test, all(feature = "engine", target_os = "linux")))]
@@ -353,10 +426,20 @@ impl NativeReplayWorkerExpectation {
             failure_context: Option<serde::de::IgnoredAny>,
         }
         #[derive(Deserialize)]
+        struct Package {
+            capabilities: Vec<String>,
+        }
+        #[derive(Deserialize)]
         struct Payload {
+            package: Package,
+            // IgnoredAny is zero-sized: count the authenticated tape without
+            // retaining private request/outcome values or building their trees.
+            host_effect_transcript: Vec<serde::de::IgnoredAny>,
             expected: Expected,
             #[serde(default)]
             module_sources: Option<serde::de::IgnoredAny>,
+            #[serde(default)]
+            process: Option<serde::de::IgnoredAny>,
         }
 
         capture.validate()?;
@@ -374,7 +457,36 @@ impl NativeReplayWorkerExpectation {
             terminal_state: payload.expected.terminal_state,
             module_load_disabled: payload.module_sources.is_none(),
             failure_context: payload.expected.failure_context.is_some(),
+            declared_capabilities: payload.package.capabilities,
+            captured_host_effects: payload.host_effect_transcript.len(),
+            process_capture: payload.process.is_some(),
         })
+    }
+
+    #[cfg(all(feature = "engine", target_os = "linux"))]
+    fn counterfactual_capabilities(
+        &self,
+        request: &NativeCounterfactualRequest,
+    ) -> Result<Vec<String>, String> {
+        use frankenengine_engine::capability::RuntimeCapability;
+
+        if self.terminal_state != NativeReplayTerminalState::Completed || self.module_load_disabled
+        {
+            return Err(
+                "native counterfactual requires a completed original run with frozen module sources"
+                    .to_string(),
+            );
+        }
+        if self.process_capture
+            || self.declared_capabilities.iter().any(|tag| {
+                RuntimeCapability::from_tag_str(tag) == Some(RuntimeCapability::ProcessSpawn)
+            })
+        {
+            return Err(
+                "native counterfactual does not support process-authorized captures".to_string(),
+            );
+        }
+        attenuated_declared_capabilities(&self.declared_capabilities, &request.denied_capabilities)
     }
 
     fn validate_outcome(
@@ -949,6 +1061,15 @@ mod supervised {
         expectation: &NativeReplayWorkerExpectation,
         deadline: Instant,
     ) -> Result<WorkerOutcome, String> {
+        // Derive authority and eligibility before starting the untrusted
+        // workload. The worker's returned grants or tape length cannot define
+        // the expected attenuation or the denominator of its observation.
+        let counterfactual_capabilities = match operation {
+            Operation::Replay => None,
+            Operation::Counterfactual(request) => {
+                Some(expectation.counterfactual_capabilities(request)?)
+            }
+        };
         let mut stdout = Vec::new();
         let mut diagnostics = 0_usize;
         let completion = supervise_with_redirected_input(
@@ -1017,7 +1138,16 @@ mod supervised {
             (Operation::Counterfactual(request), WorkerOutcome::Counterfactual(branched)) => {
                 expectation
                     .validate_outcome(&branched.baseline, super::POLICY_EQUIVALENCE_SCOPE)?;
-                branched.validate_for_request(&expectation.capture_payload_sha256, request)?;
+                let retained = counterfactual_capabilities.as_deref().ok_or_else(|| {
+                    "native counterfactual request has no authenticated authority projection"
+                        .to_string()
+                })?;
+                branched.validate_for_request(
+                    &expectation.capture_payload_sha256,
+                    request,
+                    retained,
+                    expectation.captured_host_effects,
+                )?;
             }
             _ => {
                 return Err("native replay worker returned another operation's result".to_string());
@@ -1154,6 +1284,13 @@ mod supervised {
                     terminal_state: super::super::NativeReplayTerminalState::Completed,
                     module_load_disabled: matches!(operation, Operation::Replay),
                     failure_context: false,
+                    declared_capabilities: vec![
+                        "fs_read".to_string(),
+                        "fs_write".to_string(),
+                        "module_load".to_string(),
+                    ],
+                    captured_host_effects: 2,
+                    process_capture: false,
                 },
                 Instant::now() + timeout,
             );
@@ -1415,7 +1552,7 @@ mod supervised {
                 denied_capabilities: expected.denied_capabilities.clone(),
             });
             let script = "printf '%s' \"$$\" > \"$2\"; /bin/cat \"$1\"";
-            for mutation in 0..14 {
+            for mutation in 0..21 {
                 let mut observation = expected.clone();
                 match mutation {
                     0 => {}
@@ -1434,6 +1571,26 @@ mod supervised {
                         .retained_declared_capabilities
                         .push("fs_write".to_string()),
                     13 => observation.terminal_state_matches_original = false,
+                    14 => observation
+                        .retained_declared_capabilities
+                        .push("network_egress".to_string()),
+                    15 => {
+                        observation.retained_declared_capabilities.remove(0);
+                    }
+                    16 => observation
+                        .retained_declared_capabilities
+                        .push("fs_read".to_string()),
+                    17 => observation.retained_declared_capabilities[0] = "fs:read".to_string(),
+                    18 => {
+                        observation.captured_host_effects += 1;
+                        observation.unused_original_host_effects += 1;
+                    }
+                    19 => {
+                        observation.captured_host_effects = 0;
+                        observation.consumed_host_effects = 0;
+                        observation.unused_original_host_effects = 0;
+                    }
+                    20 => observation.retained_declared_capabilities.reverse(),
                     _ => unreachable!(),
                 }
                 let mut response = refusal_response();
@@ -4211,55 +4368,12 @@ mod engine {
         original: &ExtensionPackage,
         denied_capabilities: &[String],
     ) -> Result<ExtensionPackage, String> {
-        NativeCounterfactualRequest {
-            denied_capabilities: denied_capabilities.to_vec(),
-        }
-        .validate()?;
-        let granted: BTreeSet<_> = original
-            .capabilities
-            .iter()
-            .filter_map(|tag| RuntimeCapability::from_tag_str(tag))
-            .collect();
-        let mut denied = BTreeSet::new();
-        for tag in denied_capabilities {
-            let capability = RuntimeCapability::from_tag_str(tag).ok_or_else(|| {
-                format!("native counterfactual cannot deny unknown capability {tag}")
-            })?;
-            if capability.to_string() != *tag {
-                return Err(format!(
-                    "native counterfactual requires canonical capability name {capability}"
-                ));
-            }
-            if matches!(
-                capability,
-                RuntimeCapability::VmDispatch
-                    | RuntimeCapability::HeapAllocate
-                    | RuntimeCapability::Console
-            ) {
-                return Err(format!(
-                    "native counterfactual cannot deny engine-intrinsic capability {tag}"
-                ));
-            }
-            if !granted.contains(&capability) {
-                return Err(format!(
-                    "native counterfactual capability {tag} was not granted by the captured run"
-                ));
-            }
-            if capability == RuntimeCapability::ModuleLoad {
-                return Err(
-                    "native counterfactual cannot deny module_load before frozen entrypoint admission"
-                        .to_string(),
-                );
-            }
-            denied.insert(capability);
-        }
+        let capabilities =
+            attenuated_declared_capabilities(&original.capabilities, denied_capabilities)?;
         let mut package = original.clone();
         // Remove every spelling of the denied authority. String-only removal
         // would leave aliases such as fs:write authorized in older captures.
-        package.capabilities.retain(|tag| {
-            RuntimeCapability::from_tag_str(tag)
-                .is_none_or(|capability| !denied.contains(&capability))
-        });
+        package.capabilities = capabilities;
         Ok(package)
     }
 
@@ -8086,7 +8200,10 @@ mod tests {
         failure_context: bool,
     ) -> NativeReplayWorkerExpectation {
         let mut payload = serde_json::json!({
-            "package": {"source": "PRIVATE_SOURCE"},
+            "package": {
+                "source": "PRIVATE_SOURCE",
+                "capabilities": ["fs_read", "fs_write", "module_load"],
+            },
             "host_effect_transcript": [{"value": "PRIVATE_HOST_VALUE"}],
             "expected": {
                 "trace_id": "policy-scope-test",
@@ -8102,6 +8219,12 @@ mod tests {
         let capture = envelope(&payload.to_string());
         let expected = NativeReplayWorkerExpectation::from_capture(&capture).unwrap();
         assert_eq!(expected.capture_payload_sha256, capture.payload_sha256);
+        assert_eq!(
+            expected.declared_capabilities,
+            ["fs_read", "fs_write", "module_load"]
+        );
+        assert_eq!(expected.captured_host_effects, 1);
+        assert!(!expected.process_capture);
         expected
     }
 
@@ -8129,6 +8252,225 @@ mod tests {
         outcome.exception_value_match =
             (state == NativeReplayTerminalState::UncaughtException).then_some(true);
         outcome
+    }
+
+    #[test]
+    fn counterfactual_worker_verdict_binds_exact_grants_and_original_effect_population() {
+        let expectation = worker_expectation(NativeReplayTerminalState::Completed, true, false);
+        let request = NativeCounterfactualRequest {
+            denied_capabilities: vec!["fs_write".to_string()],
+        };
+        // The pure validator consumes the parent's derived projection. Alias
+        // resolution is separately exercised against the engine's capability
+        // registry; no engine is needed to reject a forged response here.
+        let retained = vec!["fs_read".to_string(), "module_load".to_string()];
+        let original = NativeCounterfactualOutcome {
+            schema_version: NATIVE_COUNTERFACTUAL_OUTCOME_SCHEMA.to_string(),
+            execution_kind: "native_counterfactual".to_string(),
+            verification_scope: NATIVE_COUNTERFACTUAL_SCOPE.to_string(),
+            capture_payload_sha256: expectation.capture_payload_sha256.clone(),
+            baseline: completed_policy_candidate().into_policy_equivalence_outcome(),
+            denied_capabilities: request.denied_capabilities.clone(),
+            retained_declared_capabilities: retained.clone(),
+            terminal_state: NativeReplayTerminalState::Completed,
+            execution_value: Some("branch result".to_string()),
+            exception_value: None,
+            engine_failure: None,
+            exit_code: None,
+            instructions_executed: Some(10),
+            console_output: Vec::new(),
+            captured_host_effects: expectation.captured_host_effects,
+            consumed_host_effects: 0,
+            unused_original_host_effects: expectation.captured_host_effects,
+            console_matches_original: true,
+            execution_value_matches_original: Some(false),
+            terminal_state_matches_original: true,
+            replay_certified: false,
+            policy_equivalence_certified: false,
+        };
+        let validate = |outcome: &NativeCounterfactualOutcome| {
+            outcome.validate_for_request(
+                &expectation.capture_payload_sha256,
+                &request,
+                &retained,
+                expectation.captured_host_effects,
+            )
+        };
+        validate(&original).unwrap();
+
+        for mutation in [
+            "added-authority",
+            "erased-authority",
+            "duplicated-authority",
+            "rewritten-authority",
+            "reordered-authority",
+            "inflated-effect-population",
+            "erased-effect-population",
+        ] {
+            let mut outcome = original.clone();
+            match mutation {
+                "added-authority" => outcome
+                    .retained_declared_capabilities
+                    .push("network_egress".to_string()),
+                "erased-authority" => {
+                    outcome.retained_declared_capabilities.remove(0);
+                }
+                "duplicated-authority" => outcome
+                    .retained_declared_capabilities
+                    .push("fs_read".to_string()),
+                "rewritten-authority" => {
+                    outcome.retained_declared_capabilities[0] = "fs:read".to_string();
+                }
+                "reordered-authority" => outcome.retained_declared_capabilities.reverse(),
+                "inflated-effect-population" => {
+                    outcome.captured_host_effects += 1;
+                    outcome.unused_original_host_effects += 1;
+                }
+                "erased-effect-population" => {
+                    outcome.captured_host_effects = 0;
+                    outcome.unused_original_host_effects = 0;
+                }
+                _ => unreachable!(),
+            }
+            // All seven forgeries pass the old checks: the denied tag is
+            // absent and the worker's own arithmetic balances. Those facts
+            // cannot replace comparison with the authenticated original.
+            assert!(
+                !outcome
+                    .retained_declared_capabilities
+                    .contains(&"fs_write".to_string())
+            );
+            assert_eq!(
+                outcome
+                    .consumed_host_effects
+                    .checked_add(outcome.unused_original_host_effects),
+                Some(outcome.captured_host_effects),
+            );
+            assert!(validate(&outcome).is_err(), "{mutation}");
+        }
+
+        // An honest stopped branch can consume none of the original tape.
+        // It must retain the original population rather than rewriting it to
+        // zero, and must not acquire completion or policy proof claims.
+        let mut stopped = original;
+        stopped.terminal_state = NativeReplayTerminalState::EngineFailure;
+        stopped.engine_failure = Some("captured capability denial".to_string());
+        stopped.execution_value = None;
+        stopped.instructions_executed = None;
+        stopped.execution_value_matches_original = None;
+        stopped.terminal_state_matches_original = false;
+        validate(&stopped).unwrap();
+    }
+
+    #[test]
+    fn worker_expectation_requires_authenticated_grants_and_an_actual_input_sequence() {
+        let original = serde_json::json!({
+            "package": {
+                "source": "PRIVATE_SOURCE",
+                "capabilities": ["fs:read", "fs_write", "fs:write", "module_load"],
+            },
+            "host_effect_transcript": [
+                [{"private_path": "PRIVATE_PATH"}, {"private_value": "PRIVATE_VALUE"}],
+                [{"another_private_path": "PRIVATE_PATH"}, {"value": [1, 2, 3]}],
+            ],
+            "process": {"private_process_outcome": "PRIVATE_VALUE"},
+            "expected": {"trace_id": "projection-test", "terminal_state": "completed"},
+        });
+        let expectation =
+            NativeReplayWorkerExpectation::from_capture(&envelope(&original.to_string()))
+                .expect("project only the bounded input sequence and original grants");
+        assert_eq!(
+            expectation.declared_capabilities,
+            ["fs:read", "fs_write", "fs:write", "module_load"],
+        );
+        assert_eq!(expectation.captured_host_effects, 2);
+        assert!(expectation.process_capture);
+        for (field, value) in [
+            ("capabilities", serde_json::Value::Null),
+            ("capabilities", serde_json::json!("fs_read")),
+            ("capabilities", serde_json::json!(["fs_read", 7])),
+            ("host_effect_transcript", serde_json::Value::Null),
+            ("host_effect_transcript", serde_json::json!({"count": 2})),
+        ] {
+            let mut changed = original.clone();
+            if field == "capabilities" {
+                changed["package"][field] = value;
+            } else {
+                changed[field] = value;
+            }
+            assert!(
+                NativeReplayWorkerExpectation::from_capture(&envelope(&changed.to_string()))
+                    .is_err(),
+                "{field}",
+            );
+        }
+        for field in ["package", "host_effect_transcript"] {
+            let mut changed = original.clone();
+            changed.as_object_mut().unwrap().remove(field);
+            assert!(
+                NativeReplayWorkerExpectation::from_capture(&envelope(&changed.to_string()))
+                    .is_err()
+            );
+        }
+    }
+
+    #[cfg(all(feature = "engine", target_os = "linux"))]
+    #[test]
+    fn counterfactual_worker_projection_preserves_aliases_and_refuses_ineligible_captures() {
+        let original = serde_json::json!({
+            "package": {
+                "capabilities": ["fs:read", "fs_write", "module_load", "fs:write", "timer", "fs:read"],
+            },
+            "host_effect_transcript": [],
+            "module_sources": {},
+            "expected": {"trace_id": "attenuation-test", "terminal_state": "completed"},
+        });
+        let request = NativeCounterfactualRequest {
+            denied_capabilities: vec!["fs_write".to_string()],
+        };
+        let project = |payload: &serde_json::Value| {
+            NativeReplayWorkerExpectation::from_capture(&envelope(&payload.to_string()))
+                .unwrap()
+                .counterfactual_capabilities(&request)
+        };
+        assert_eq!(
+            project(&original).unwrap(),
+            ["fs:read", "module_load", "timer", "fs:read"],
+            "remove all aliases of denied authority, preserving every other original declaration",
+        );
+        for (field, value) in [
+            ("module_sources", serde_json::Value::Null),
+            ("process", serde_json::json!({})),
+        ] {
+            let mut changed = original.clone();
+            changed[field] = value;
+            assert!(project(&changed).is_err(), "{field}");
+        }
+        for state in ["uncaught_exception", "engine_failure"] {
+            let mut changed = original.clone();
+            changed["expected"]["terminal_state"] = serde_json::json!(state);
+            assert!(project(&changed).is_err(), "{state}");
+        }
+        for capability in ["process_spawn", "unknown_captured_authority"] {
+            let mut changed = original.clone();
+            changed["package"]["capabilities"]
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::json!(capability));
+            assert!(project(&changed).is_err(), "{capability}");
+        }
+        let expected =
+            NativeReplayWorkerExpectation::from_capture(&envelope(&original.to_string())).unwrap();
+        for denied in ["network_egress", "module_load", "fs:write"] {
+            assert!(
+                expected
+                    .counterfactual_capabilities(&NativeCounterfactualRequest {
+                        denied_capabilities: vec![denied.to_string()],
+                    })
+                    .is_err(),
+                "{denied}",
+            );
+        }
     }
 
     #[test]
@@ -8310,11 +8652,14 @@ mod tests {
     #[test]
     fn worker_expectation_binds_trace_scope_and_context_to_the_exact_capture() {
         for invalid in [
-            r#"{"expected":{"terminal_state":"completed"}}"#,
-            r#"{"expected":{"trace_id":" ","terminal_state":"completed"}}"#,
-            r#"{"expected":{"trace_id":"x","trace_id":"y","terminal_state":"completed"}}"#,
-            r#"{"expected":{"trace_id":"x","terminal_state":"completed","failure_context":{}}}"#,
-            r#"{"expected":{"trace_id":"x","terminal_state":"completed"},"module_sources":{},"module_sources":null}"#,
+            r#"{"package":{"capabilities":[]},"host_effect_transcript":[],"expected":{"terminal_state":"completed"}}"#,
+            r#"{"package":{"capabilities":[]},"host_effect_transcript":[],"expected":{"trace_id":" ","terminal_state":"completed"}}"#,
+            r#"{"package":{"capabilities":[]},"host_effect_transcript":[],"expected":{"trace_id":"x","trace_id":"y","terminal_state":"completed"}}"#,
+            r#"{"package":{"capabilities":[]},"host_effect_transcript":[],"expected":{"trace_id":"x","terminal_state":"completed","failure_context":{}}}"#,
+            r#"{"package":{"capabilities":[]},"host_effect_transcript":[],"expected":{"trace_id":"x","terminal_state":"completed"},"module_sources":{},"module_sources":null}"#,
+            r#"{"package":{"capabilities":[],"capabilities":["fs_write"]},"host_effect_transcript":[],"expected":{"trace_id":"x","terminal_state":"completed"}}"#,
+            r#"{"package":{"capabilities":[]},"host_effect_transcript":[],"host_effect_transcript":[null],"expected":{"trace_id":"x","terminal_state":"completed"}}"#,
+            r#"{"package":{"capabilities":[]},"host_effect_transcript":[],"process":{},"process":null,"expected":{"trace_id":"x","terminal_state":"completed"}}"#,
         ] {
             assert!(NativeReplayWorkerExpectation::from_capture(&envelope(invalid)).is_err());
         }
