@@ -25,6 +25,7 @@ pub mod ecosystem_registry;
 pub mod ecosystem_reputation;
 pub mod error_code_registry;
 pub mod error_surface;
+#[cfg(any(test, feature = "remote-ops"))]
 pub mod eviction_saga;
 #[cfg(any(test, feature = "control-plane"))]
 pub mod execution_scorer;

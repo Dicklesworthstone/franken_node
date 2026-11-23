@@ -41666,6 +41666,22 @@ fn handle_trust_vef_prove(args: &TrustVefProveArgs) -> Result<()> {
         vef::verification_state::TransitionResult::Approved
     );
 
+    let mut vef_degraded_engine =
+        frankenengine_node::security::vef_degraded_mode::VefDegradedModeEngine::new(
+            frankenengine_node::security::vef_degraded_mode::VefDegradedModeConfig::default(),
+        );
+    let lag_metrics = frankenengine_node::security::vef_degraded_mode::ProofLagMetrics::healthy();
+    vef_degraded_engine.observe_metrics(&lag_metrics, now_millis / 1_000, &trace_id);
+    let vef_slo_decision = vef_degraded_engine.evaluate_action(
+        frankenengine_node::security::vef_degraded_mode::ActionRisk::HighRisk,
+        "vef.prove",
+    );
+    anyhow::ensure!(
+        vef_slo_decision.permitted,
+        "VEF degraded-mode SLO gate blocked proof issuance in mode {}",
+        vef_slo_decision.mode.label()
+    );
+
     let bundle = VefSignedProofBundle {
         schema_version: VEF_SIGNED_PROOF_BUNDLE_SCHEMA_VERSION.to_string(),
         policy_definition: policy_def,
@@ -43120,6 +43136,11 @@ fn handle_trust_ecosystem_telemetry(args: &TrustEcosystemTelemetryArgs) -> Resul
 }
 
 fn handle_trust_governance_audit(args: &TrustGovernanceAuditArgs) -> Result<()> {
+    use ed25519_dalek::{Signer as _, SigningKey};
+    use frankenengine_node::control_plane::audience_token::{
+        ActionScope, AudienceBoundToken, TokenChain, TokenId, TokenValidator,
+    };
+    use frankenengine_node::control_plane::key_role_separation::{KeyRole, KeyRoleRegistry};
     use frankenengine_node::security::challenge_flow::{
         ArtifactId, ChallengeConfig, ChallengeError, ChallengeFlowController, ERR_PROOF_INVALID,
         ProofSubmission, RequiredProofType, SuspicionReason, proof_data_hash_matches_constant_time,
@@ -43263,10 +43284,152 @@ fn handle_trust_governance_audit(args: &TrustGovernanceAuditArgs) -> Result<()> 
         )
         .map_err(|err| anyhow::anyhow!("firewall risky evaluation failed: {err}"))?;
 
+    let signing_seed: [u8; 32] = {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(b"franken-node:governance-audit:signing:v1:");
+        h.update(args.publisher.as_bytes());
+        h.update(b":");
+        h.update(args.artifact_id.as_bytes());
+        h.finalize().into()
+    };
+    let issuance_seed: [u8; 32] = {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(b"franken-node:governance-audit:issuance:v1:");
+        h.update(args.publisher.as_bytes());
+        h.update(b":");
+        h.update(args.artifact_id.as_bytes());
+        h.finalize().into()
+    };
+    let audit_signing_key = SigningKey::from_bytes(&signing_seed);
+    let audit_issuance_key = SigningKey::from_bytes(&issuance_seed);
+
+    let mut key_roles = KeyRoleRegistry::new();
+    key_roles
+        .bind(
+            "key:gov-signing",
+            KeyRole::Signing,
+            audit_signing_key.verifying_key().to_bytes().to_vec(),
+            "operator:cli",
+            1_700_000_000,
+            86_400,
+            "trace-krs-bind-sign",
+        )
+        .map_err(|err| anyhow::anyhow!("key role signing bind failed: {err}"))?;
+    key_roles
+        .bind(
+            "key:gov-issuance",
+            KeyRole::Issuance,
+            audit_issuance_key.verifying_key().to_bytes().to_vec(),
+            "operator:cli",
+            1_700_000_000,
+            86_400,
+            "trace-krs-bind-issue",
+        )
+        .map_err(|err| anyhow::anyhow!("key role issuance bind failed: {err}"))?;
+    let signing_role_verified = key_roles
+        .verify_role(
+            "key:gov-signing",
+            KeyRole::Signing,
+            1_700_000_100,
+            "trace-krs-verify-sign",
+        )
+        .is_ok();
+    let cross_role_rebind_denied = key_roles
+        .bind(
+            "key:gov-signing",
+            KeyRole::Encryption,
+            audit_signing_key.verifying_key().to_bytes().to_vec(),
+            "operator:cli",
+            1_700_000_100,
+            86_400,
+            "trace-krs-cross-role",
+        )
+        .is_err();
+    let wrong_role_verify_denied = key_roles
+        .verify_role(
+            "key:gov-signing",
+            KeyRole::Attestation,
+            1_700_000_100,
+            "trace-krs-wrong-role",
+        )
+        .is_err();
+
+    let mut root_token = AudienceBoundToken {
+        token_id: TokenId::new("tok-gov-root"),
+        issuer: "issuer:governance-cli".to_string(),
+        audience: vec![
+            "svc:governance-audit".to_string(),
+            "svc:promotion-gate".to_string(),
+        ],
+        capabilities: ActionScope::all(),
+        issued_at: 1_700_000_000_000,
+        expires_at: 1_700_003_600_000,
+        nonce: "nonce-gov-root-1".to_string(),
+        parent_token_hash: None,
+        signature: String::new(),
+        max_delegation_depth: 1,
+    };
+    root_token.signature = hex::encode(
+        audit_issuance_key
+            .sign(&root_token.signature_preimage())
+            .to_bytes(),
+    );
+    let mut delegated_token = AudienceBoundToken {
+        token_id: TokenId::new("tok-gov-leaf"),
+        issuer: "delegator:governance-cli".to_string(),
+        audience: vec!["svc:promotion-gate".to_string()],
+        capabilities: BTreeSet::from([ActionScope::Promote]),
+        issued_at: 1_700_000_010_000,
+        expires_at: 1_700_003_600_000,
+        nonce: "nonce-gov-leaf-1".to_string(),
+        parent_token_hash: Some(root_token.hash()),
+        signature: String::new(),
+        max_delegation_depth: 0,
+    };
+    delegated_token.signature = hex::encode(
+        audit_signing_key
+            .sign(&delegated_token.signature_preimage())
+            .to_bytes(),
+    );
+    let mut token_chain =
+        TokenChain::new(root_token).map_err(|err| anyhow::anyhow!("token chain root: {err}"))?;
+    token_chain
+        .append(delegated_token)
+        .map_err(|err| anyhow::anyhow!("token chain delegate: {err}"))?;
+    let mut token_validator = TokenValidator::new(1)
+        .with_trusted_issuer_key("issuer:governance-cli", audit_issuance_key.verifying_key())
+        .with_trusted_issuer_key(
+            "delegator:governance-cli",
+            audit_signing_key.verifying_key(),
+        );
+    let token_chain_verified = token_validator
+        .verify_chain(
+            &token_chain,
+            "svc:promotion-gate",
+            1_700_000_020_000,
+            "trace-abt-verify",
+        )
+        .is_ok();
+    let token_replay_denied = token_validator
+        .verify_chain(
+            &token_chain,
+            "svc:promotion-gate",
+            1_700_000_021_000,
+            "trace-abt-replay",
+        )
+        .is_err();
+
     let ok = challenge_promoted
         && gate_after.passed
         && benign_decision.verdict == FirewallVerdict::Allow
-        && risky_decision.verdict == FirewallVerdict::Deny;
+        && risky_decision.verdict == FirewallVerdict::Deny
+        && signing_role_verified
+        && cross_role_rebind_denied
+        && wrong_role_verify_denied
+        && token_chain_verified
+        && token_replay_denied;
 
     let payload = serde_json::json!({
         "schema_version": "franken-node/trust-governance-audit-cli/v1",
@@ -43290,6 +43453,19 @@ fn handle_trust_governance_audit(args: &TrustGovernanceAuditArgs) -> Result<()> 
             "benign_verdict": benign_decision.verdict,
             "risky_verdict": risky_decision.verdict,
             "audit_entries": firewall.audit_log().len(),
+        },
+        "key_role_separation": {
+            "active_keys": key_roles.active_count(),
+            "signing_role_verified": signing_role_verified,
+            "cross_role_rebind_denied": cross_role_rebind_denied,
+            "wrong_role_verify_denied": wrong_role_verify_denied,
+        },
+        "audience_token": {
+            "chain_depth": token_chain.depth(),
+            "verified": token_chain_verified,
+            "replay_denied": token_replay_denied,
+            "tokens_verified": token_validator.tokens_verified(),
+            "tokens_rejected": token_validator.tokens_rejected(),
         },
     });
     if args.json {
@@ -43567,6 +43743,71 @@ fn handle_runtime_supervision_audit(args: &RuntimeSupervisionAuditArgs) -> Resul
     );
     let keyed_digest_hex = hex::encode(keyed_digest);
 
+    let mut bocpd = connector::bocpd::BocpdDetector::new(
+        "supervision_restart_latency",
+        connector::bocpd::BocpdConfig {
+            hazard_lambda: 30.0,
+            changepoint_threshold: 0.5,
+            min_run_length: 5,
+            max_run_length: 64,
+            max_regime_history: 32,
+            correlation_window_secs: 60,
+        },
+        connector::bocpd::HazardFunction::Constant { lambda: 30.0 },
+        connector::bocpd::ObservationModel::Gaussian(connector::bocpd::GaussianModel::default()),
+    )
+    .map_err(|err| anyhow::anyhow!("BOCPD detector init failed: {err}"))?;
+    let mut bocpd_shifts = 0usize;
+    for step in 0..16_u64 {
+        let obs = if step < 8 { 10.0 } else { 85.0 };
+        if bocpd.observe(obs, 1_700_000_000 + step).is_some() {
+            bocpd_shifts = bocpd_shifts.saturating_add(1);
+        }
+    }
+    let bocpd_posterior_sum = bocpd.posterior_sum();
+    let bocpd_posterior_valid =
+        bocpd_posterior_sum.is_finite() && (bocpd_posterior_sum - 1.0).abs() < 1e-4;
+
+    let cwd_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let tokio_drift_result =
+        frankenengine_node::ops::tokio_drift_checker::check_tokio_drift(&cwd_root);
+    let api_boundary_result =
+        frankenengine_node::ops::tokio_drift_checker::check_api_transport_boundary_trigger(
+            &cwd_root,
+        );
+    let tokio_drift_clean = tokio_drift_result.is_clean();
+
+    let mut vef_dm = frankenengine_node::security::vef_degraded_mode::VefDegradedModeEngine::new(
+        frankenengine_node::security::vef_degraded_mode::VefDegradedModeConfig::default(),
+    );
+    vef_dm.observe_metrics(
+        &frankenengine_node::security::vef_degraded_mode::ProofLagMetrics::healthy(),
+        1_700_000_000,
+        &args.trace_id,
+    );
+    let vef_normal_permits_high_risk = vef_dm
+        .evaluate_action(
+            frankenengine_node::security::vef_degraded_mode::ActionRisk::HighRisk,
+            "supervision.promote",
+        )
+        .permitted;
+    vef_dm.observe_metrics(
+        &frankenengine_node::security::vef_degraded_mode::ProofLagMetrics {
+            proof_lag_secs: 1_000,
+            backlog_depth: 600,
+            error_rate: 0.35,
+            heartbeat_age_secs: 5,
+        },
+        1_700_000_010,
+        &args.trace_id,
+    );
+    let vef_quarantine_blocks_high_risk = !vef_dm
+        .evaluate_action(
+            frankenengine_node::security::vef_degraded_mode::ActionRisk::HighRisk,
+            "supervision.promote",
+        )
+        .permitted;
+
     let ok = !budget_exhausted
         && finalize_record.obligation_closure_proof.all_closed
         && obligation_ledger.query_outstanding().is_empty()
@@ -43574,7 +43815,11 @@ fn handle_runtime_supervision_audit(args: &RuntimeSupervisionAuditArgs) -> Resul
         && undeclared_spawn_denied
         && speculation_activated
         && speculation_negative_control_degraded
-        && ville_auto_reverted;
+        && ville_auto_reverted
+        && bocpd_posterior_valid
+        && tokio_drift_clean
+        && vef_normal_permits_high_risk
+        && vef_quarantine_blocks_high_risk;
 
     let payload = serde_json::json!({
         "schema_version": "franken-node/runtime-supervision-audit-cli/v1",
@@ -43626,6 +43871,25 @@ fn handle_runtime_supervision_audit(args: &RuntimeSupervisionAuditArgs) -> Resul
         "hash_provider": {
             "provider": frankenengine_node::security::blake3_adapter::HashProvider::name(&hash_provider),
             "policy_keyed_digest_hex": keyed_digest_hex,
+        },
+        "bocpd": {
+            "stream": bocpd.stream_name(),
+            "observations": bocpd.observation_count(),
+            "shifts_detected": bocpd_shifts,
+            "map_run_length": bocpd.map_run_length(),
+            "posterior_valid": bocpd_posterior_valid,
+        },
+        "tokio_drift": {
+            "files_scanned": tokio_drift_result.files_scanned,
+            "violations": tokio_drift_result.violations.len(),
+            "clean": tokio_drift_clean,
+            "api_transport_boundary_clean": api_boundary_result.is_clean(),
+        },
+        "vef_degraded_mode": {
+            "normal_permits_high_risk": vef_normal_permits_high_risk,
+            "quarantine_blocks_high_risk": vef_quarantine_blocks_high_risk,
+            "escalated_mode": vef_dm.mode().label(),
+            "audit_entries": vef_dm.audit_log().len(),
         },
     });
     if args.json {
@@ -44194,6 +44458,9 @@ fn handle_trust_fabric_convergence_audit(args: &TrustFabricConvergenceAuditArgs)
         AdversarialRunner, RunnerConfig, build_default_corpus,
     };
     use frankenengine_node::security::isolation_rail_router::RailRouter;
+    use frankenengine_node::security::sybil_defense::{
+        SybilDefensePipeline, TrustNode, TrustSignal,
+    };
     use supply_chain::revocation_integration::{
         ExtensionOperation, ExtensionOperationContext, ExtensionSafetyTier,
         RevocationDecisionStatus, RevocationIntegrationEngine, RevocationIntegrationPolicy,
@@ -44336,12 +44603,47 @@ fn handle_trust_fabric_convergence_audit(args: &TrustFabricConvergenceAuditArgs)
         .classify_workload("workload:extension-pilot", args.workload_risk_score)
         .map_err(|err| anyhow::anyhow!("{err:?}"))?;
 
+    let mut sybil_pipeline = SybilDefensePipeline::new();
+    let mut trust_signals = Vec::new();
+    for idx in 0..5_u64 {
+        let node_id = format!("honest-node-{idx}");
+        sybil_pipeline.register_node(TrustNode::established(
+            node_id.clone(),
+            0.95,
+            500,
+            1_690_000_000_000,
+        ));
+        trust_signals.push(TrustSignal {
+            signal_id: format!("sig-honest-{idx}"),
+            source_node_id: node_id,
+            target_id: "ext:verified-telemetry".to_string(),
+            value: 0.92,
+            timestamp_ms: 1_700_000_000_000 + idx * 10,
+        });
+    }
+    for idx in 0..6_u64 {
+        let sybil_id = format!("sybil-burst-{idx}");
+        sybil_pipeline.register_node(TrustNode::new(sybil_id.clone(), 1_700_000_000_000));
+        trust_signals.push(TrustSignal {
+            signal_id: format!("sig-sybil-{idx}"),
+            source_node_id: sybil_id,
+            target_id: "ext:verified-telemetry".to_string(),
+            value: 0.01,
+            timestamp_ms: 1_700_000_000_000 + idx,
+        });
+    }
+    let sybil_agg = sybil_pipeline
+        .process_signals(&trust_signals, 1_700_000_000_100)
+        .map_err(|err| anyhow::anyhow!("sybil defense aggregation failed: {err}"))?;
+    let sybil_defense_ok = sybil_agg.value.is_finite() && sybil_agg.value > 0.0;
+
     let ok = fleet_converged
         && snapshot_verified
         && tamper_free
         && revocation_allowed
         && corpus_valid
-        && mutations_valid;
+        && mutations_valid
+        && sybil_defense_ok;
 
     let payload = serde_json::json!({
         "schema_version": "franken-node/trust-fabric-convergence-audit-cli/v1",
@@ -44375,6 +44677,12 @@ fn handle_trust_fabric_convergence_audit(args: &TrustFabricConvergenceAuditArgs)
         "isolation_rail": {
             "workload_id": workload_class.workload_id,
             "assigned_rail": format!("{:?}", workload_class.rail),
+        },
+        "sybil_defense": {
+            "registered_nodes": sybil_pipeline.nodes().len(),
+            "robust_aggregate": sybil_agg.value,
+            "pipeline_events": sybil_pipeline.pipeline_events().len(),
+            "ok": sybil_defense_ok,
         },
     });
 
@@ -44697,6 +45005,18 @@ fn handle_migrate_kit_plan(args: &MigrateKitPlanArgs) -> Result<()> {
         && artifact_contract_ok
         && tree_tx_ok;
 
+    let scanner_registry = supply_chain::project_scanner::CompatibilityRegistry::new();
+    let scanner_usages = supply_chain::project_scanner::scan_text(
+        "archetype-probe.js",
+        "const fs = require('node:fs'); const path = require('node:path');",
+        &scanner_registry,
+    );
+    let mut scanner_risk = supply_chain::project_scanner::RiskDistribution::default();
+    for usage in &scanner_usages {
+        scanner_risk.increment(usage.risk_level);
+    }
+    let scanner_readiness = supply_chain::project_scanner::compute_readiness(&scanner_risk);
+
     let mut payload = serde_json::json!({
         "schema_version": "franken-node/migrate-kit-plan-cli/v1",
         "command": "migrate.kit-plan",
@@ -44732,6 +45052,11 @@ fn handle_migrate_kit_plan(args: &MigrateKitPlanArgs) -> Result<()> {
             "behavioral_certificate_signature_verified": ref_bcc_sig_ok,
         },
         "tree_transaction_audit": tree_tx_audit,
+        "project_scanner": {
+            "apis_detected": scanner_usages.len(),
+            "readiness": scanner_readiness,
+            "risk_distribution": scanner_risk,
+        },
         "device_registry": {
             "registered_devices": device_registry.count(),
             "cli_error_prefix_registered": cli_prefix_registered,

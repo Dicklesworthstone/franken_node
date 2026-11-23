@@ -569,6 +569,17 @@ fn trust_ecosystem_telemetry_and_governance_audit_enforce_contracts() {
     assert_eq!(gov_ok["staking_governance"]["gate_after"]["passed"], true);
     assert_eq!(gov_ok["intent_firewall"]["benign_verdict"], "allow");
     assert_eq!(gov_ok["intent_firewall"]["risky_verdict"], "deny");
+    assert_eq!(gov_ok["key_role_separation"]["signing_role_verified"], true);
+    assert_eq!(
+        gov_ok["key_role_separation"]["cross_role_rebind_denied"],
+        true
+    );
+    assert_eq!(
+        gov_ok["key_role_separation"]["wrong_role_verify_denied"],
+        true
+    );
+    assert_eq!(gov_ok["audience_token"]["verified"], true);
+    assert_eq!(gov_ok["audience_token"]["replay_denied"], true);
 
     // Mismatched proof hash must fail closed.
     let gov_bad_proof = json_err(
@@ -646,6 +657,12 @@ fn runtime_supervision_audit_verifies_lifecycle_and_fails_on_budget_exhaustion()
             .len(),
         64
     );
+    assert_eq!(ok["bocpd"]["posterior_valid"], true);
+    assert_eq!(ok["bocpd"]["observations"], 16);
+    assert_eq!(ok["tokio_drift"]["clean"], true);
+    assert_eq!(ok["vef_degraded_mode"]["normal_permits_high_risk"], true);
+    assert_eq!(ok["vef_degraded_mode"]["quarantine_blocks_high_risk"], true);
+    assert_eq!(ok["vef_degraded_mode"]["escalated_mode"], "quarantine");
 
     let exhausted = json_err(
         dir.path(),
@@ -802,6 +819,12 @@ fn ops_dgis_fixture_suite_and_migrate_kit_plan_cli_e2e() {
     assert_eq!(kit["ok"], true);
     assert_eq!(kit["kit"]["archetype"], "fastify");
     assert_eq!(kit["kit"]["step_count"], 5);
+    assert!(
+        kit["project_scanner"]["apis_detected"]
+            .as_u64()
+            .unwrap_or(0)
+            >= 2
+    );
     assert_eq!(kit["activation_preview"]["live_execution"], false);
     assert_eq!(
         kit["activation_preview"]["default_executor_fails_closed"],
@@ -976,6 +999,8 @@ fn runtime_region_quiescence_and_trust_fabric_convergence_cli_e2e() {
     assert_eq!(fabric_ok["trust_fabric"]["converged"], true);
     assert_eq!(fabric_ok["claim_scoreboard"]["digest_verified"], true);
     assert_eq!(fabric_ok["ecosystem"]["tamper_free"], true);
+    assert_eq!(fabric_ok["sybil_defense"]["ok"], true);
+    assert_eq!(fabric_ok["sybil_defense"]["registered_nodes"], 11);
 
     let stale_revocation = json_err(
         dir.path(),
