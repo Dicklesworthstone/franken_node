@@ -8,7 +8,9 @@
 //! Before updating the inventory, a supervisor durably retains its signed
 //! outcome. Fleet reconciliation and capacity-constrained admission may recover
 //! that exact observation after a crash or failed database write; ordinary
-//! inventory inspection stays read-only.
+//! inventory inspection stays read-only. New admissions also retain their exact
+//! signed body outside the mutable database, so forensic evidence survives a
+//! lost projection without changing admission or liveness authority.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -53,6 +55,10 @@ const MAX_ADMISSION_BYTES: usize = NATIVE_SESSION_MAX_REQUEST_BYTES;
 const ADMISSION_RECEIPT_SCHEMA: &str = "franken-node/native-session-admission-receipt/v1";
 const ADMISSION_RECEIPT_DIRECTORY: &str = "session-admissions";
 const MAX_ADMISSION_RECEIPT_BYTES: usize = 4 * 1024;
+const ADMISSION_RECORD_DIRECTORY: &str = "session-admission-records";
+// Charge orphaned/partial publications too: a refused database insertion must
+// not allow repeated admissions to grow the immutable evidence without bound.
+const MAX_RETAINED_ADMISSION_BYTES: usize = crate::capacity_defaults::base::SMALL * 1024 * 1024;
 const SOURCE_CAPSULE_DIRECTORY: &str = "session-source-capsules";
 // Source retention has its own bounded allocation. Duplicate source capsules
 // share one immutable object; orphaned/partial files still consume this budget.
@@ -740,6 +746,7 @@ impl From<frankenengine_verifier_sdk::native_session::VerifiedNativeSessionEffec
 pub enum NativeSessionForensicErrorKind {
     InventoryUnreadable,
     AdmissionInvalid,
+    AdmissionRecordInvalid,
     IdentityInvalid,
     AdmissionReceiptMissing,
     AdmissionReceiptInvalid,
@@ -1503,6 +1510,139 @@ fn admission_receipt_path(protected_root: &Path, nonce: &str) -> PathBuf {
         ))
 }
 
+fn admission_record_path(protected_root: &Path, nonce: &str) -> PathBuf {
+    protected_root
+        .join(ADMISSION_RECORD_DIRECTORY)
+        .join(format!(
+            "{}.json",
+            hex::encode(Sha256::digest(nonce.as_bytes()))
+        ))
+}
+
+/// Read the exact admitted body through the original receipt and identity
+/// capture. Older admissions may lack this object; no forensic reader creates
+/// it from the database or repairs an invalid retained object.
+fn read_retained_admission_record(
+    protected_root: &Path,
+    nonce: &str,
+    trusted_root: &ed25519_dalek::VerifyingKey,
+) -> Result<Option<(NativeSessionAdmission, NativeSessionAdmissionReceipt)>> {
+    let directory = protected_root.join(ADMISSION_RECORD_DIRECTORY);
+    match std::fs::symlink_metadata(&directory) {
+        Ok(_) => validate_existing_forensic_directory(&directory)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).context("inspect retained native-session admissions"),
+    }
+    let path = admission_record_path(protected_root, nonce);
+    if !validate_private_path_if_present(&path)? {
+        return Ok(None);
+    }
+    let bytes = read_runtime_evidence_private_file(&path, MAX_ADMISSION_BYTES)?;
+    let admission: NativeSessionAdmission = serde_json::from_slice(&bytes)
+        .context("decode retained native-session admission record")?;
+    validate_admission(&admission)?;
+    if admission.session_nonce != nonce {
+        bail!("retained native-session admission record has a different nonce");
+    }
+    if bounded_json(&admission, MAX_ADMISSION_BYTES)?.as_bytes() != bytes.as_slice() {
+        bail!("retained native-session admission record is not the exact canonical body");
+    }
+    validate_existing_forensic_directory(
+        &protected_root.join(RUNTIME_EVIDENCE_CAPTURE_DIR_RELATIVE_PATH),
+    )?;
+    validate_existing_forensic_directory(&protected_root.join(ADMISSION_RECEIPT_DIRECTORY))?;
+    verify_admission_capture_with_root(protected_root, &admission, trusted_root)?;
+    let receipt = read_admission_receipt(protected_root, &admission, trusted_root)?
+        .context("retained native-session admission record has no authenticated receipt")?;
+    Ok(Some((admission, receipt)))
+}
+
+fn check_admission_record_capacity(
+    directory: &Path,
+    additional_files: usize,
+    additional_bytes: usize,
+    max_files: usize,
+    max_bytes: usize,
+) -> Result<()> {
+    let mut files = additional_files;
+    let mut bytes = additional_bytes;
+    for entry in
+        std::fs::read_dir(directory).context("enumerate retained native-session admissions")?
+    {
+        let path = entry?.path();
+        if !validate_private_path_if_present(&path)? {
+            bail!("retained native-session admission disappeared during capacity accounting");
+        }
+        files = files.saturating_add(1);
+        bytes = bytes.saturating_add(usize::try_from(std::fs::symlink_metadata(&path)?.len())?);
+        if files > max_files || bytes > max_bytes {
+            bail!(
+                "native-session admission record capacity exceeded: {files}/{max_files} retained \
+                 files, {bytes}/{max_bytes} bytes; refusing to discard retained admissions"
+            );
+        }
+    }
+    if files > max_files || bytes > max_bytes {
+        bail!("native-session admission record capacity exceeded before retention");
+    }
+    Ok(())
+}
+
+/// Publish while holding the inventory writer lock, after the original signed
+/// receipt and before worker admission. Repeated publication verifies the
+/// existing object; immutable evidence is never overwritten or re-signed here.
+fn retain_admission_record(
+    protected_root: &Path,
+    admission: &NativeSessionAdmission,
+) -> Result<()> {
+    use std::io::Write as _;
+
+    let root = load_runtime_evidence_product_root(
+        &protected_root.join(RUNTIME_EVIDENCE_ROOT_KEY_RELATIVE_PATH),
+    )?;
+    let key = root.verifying_key();
+    drop(root);
+    read_admission_receipt(protected_root, admission, &key)?
+        .context("native-session admission record requires its original signed receipt")?;
+    let bytes = bounded_json(admission, MAX_ADMISSION_BYTES)?;
+    let directory = protected_root.join(ADMISSION_RECORD_DIRECTORY);
+    ensure_runtime_evidence_directory(&directory, true)?;
+    let path = admission_record_path(protected_root, &admission.session_nonce);
+    let exists = validate_private_path_if_present(&path)?;
+    check_admission_record_capacity(
+        &directory,
+        usize::from(!exists),
+        if exists { 0 } else { bytes.len() },
+        MAX_STORED_SESSIONS,
+        MAX_RETAINED_ADMISSION_BYTES,
+    )?;
+    if !exists {
+        let mut staged = tempfile::NamedTempFile::new_in(&directory)
+            .context("stage private native-session admission record")?;
+        staged.write_all(bytes.as_bytes())?;
+        staged.as_file().sync_all()?;
+        match staged.persist_noclobber(&path) {
+            Ok(_) => {}
+            Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => {
+                return Err(error.error).context("publish native-session admission record");
+            }
+        }
+    }
+    let (retained, _) =
+        read_retained_admission_record(protected_root, &admission.session_nonce, &key)?
+            .context("retained native-session admission record disappeared during publication")?;
+    if &retained != admission {
+        bail!("retained native-session admission record conflicts with the admitted body");
+    }
+    #[cfg(unix)]
+    {
+        std::fs::File::open(&directory)?.sync_all()?;
+        std::fs::File::open(protected_root)?.sync_all()?;
+    }
+    Ok(())
+}
+
 fn read_admission_receipt(
     protected_root: &Path,
     admission: &NativeSessionAdmission,
@@ -1849,6 +1989,7 @@ impl NativeSessionInventoryGuard {
         let connection = retry_snapshot_conflict(|| open_inventory_unlocked(protected_root, true))?
             .context("native-session inventory was not created")?;
         retain_admission_receipt(protected_root, &admission)?;
+        retain_admission_record(protected_root, &admission)?;
         // A refused attempt keeps the same decision and timestamp through
         // transaction retries. Its receipt is issued only after this unique
         // insertion commits, so a duplicate/losing admission cannot create a
@@ -3801,6 +3942,27 @@ fn authenticate_forensic_admission(
                 "native-session forensic admission has no authenticated receipt",
             )
         })?;
+    // Historical exact database rows remain usable without a retained body.
+    // When both sources exist, neither a damaged object nor disagreement may
+    // be hidden by choosing the more convenient source.
+    let retained = read_retained_admission_record(protected_root, nonce, key).map_err(|error| {
+        forensic_source_error(
+            Some(nonce),
+            admission_record_path(protected_root, nonce),
+            NativeSessionForensicErrorKind::AdmissionRecordInvalid,
+            format!("{error:#}"),
+        )
+    })?;
+    if let Some((retained, _)) = retained
+        && retained != admission
+    {
+        return Err(forensic_source_error(
+            Some(nonce),
+            admission_record_path(protected_root, nonce),
+            NativeSessionForensicErrorKind::AdmissionRecordInvalid,
+            "native-session database admission disagrees with its retained body",
+        ));
+    }
     Ok((admission, receipt))
 }
 
@@ -4446,6 +4608,178 @@ mod tests {
         let mut files = BTreeMap::new();
         visit(root, root, &mut files);
         files
+    }
+
+    #[test]
+    fn admission_record_is_retained_and_authenticated_before_worker_start() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("evidence");
+        let admission = fixture(&root, 160);
+        let mut guard = NativeSessionInventoryGuard::admit(&root, admission.clone(), 0).unwrap();
+        let path = admission_record_path(&root, &admission.session_nonce);
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            serde_json::to_vec(&admission).unwrap()
+        );
+        let key = ed25519_dalek::SigningKey::from_bytes(&[17; 32]).verifying_key();
+        let (retained, receipt) =
+            read_retained_admission_record(&root, &admission.session_nonce, &key)
+                .unwrap()
+                .unwrap();
+        assert_eq!(retained, admission);
+        receipt.verify(&retained, &key).unwrap();
+        let export = export_native_session_forensics_at(&root, &admission.session_nonce).unwrap();
+        assert_eq!(export.verification.outcome_kind, "pending");
+        assert!(!export.verification.quiescence_certified);
+        assert!(!export.verification.historical_completeness);
+        // Retention is not a worker-start or completion observation.
+        guard.finished = true;
+    }
+
+    #[test]
+    fn admission_record_retention_reuses_exact_bytes_and_bounds_orphaned_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("evidence");
+        let admission = fixture(&root, 161);
+        let mut guard = NativeSessionInventoryGuard::admit(&root, admission.clone(), 0).unwrap();
+        guard.finished = true;
+        drop(guard);
+        let _write_lock = lock_inventory_file(&root, true).unwrap();
+        let before = forensic_state_snapshot(&root);
+        retain_admission_record(&root, &admission).unwrap();
+        assert_eq!(forensic_state_snapshot(&root), before);
+        let directory = root.join(ADMISSION_RECORD_DIRECTORY);
+        let path = admission_record_path(&root, &admission.session_nonce);
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(check_admission_record_capacity(&directory, 0, 0, 1, bytes.len()).is_ok());
+        assert!(check_admission_record_capacity(&directory, 1, 0, 1, bytes.len()).is_err());
+        assert!(check_admission_record_capacity(&directory, 0, 1, 1, bytes.len()).is_err());
+        create_new_runtime_evidence_private_file(&directory.join("orphaned-publication"), b"{")
+            .unwrap();
+        assert!(check_admission_record_capacity(&directory, 0, 0, 1, bytes.len() + 1).is_err());
+        assert!(check_admission_record_capacity(&directory, 0, 0, 2, bytes.len()).is_err());
+        assert!(check_admission_record_capacity(&directory, 0, 0, 2, bytes.len() + 1).is_ok());
+        let mut changed = admission.clone();
+        changed
+            .dependency_ids
+            .push("different-dependency".to_owned());
+        assert!(retain_admission_record(&root, &changed).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        // Incomplete evidence is retained for diagnosis and never repaired.
+        std::fs::write(&path, b"{").unwrap();
+        assert!(retain_admission_record(&root, &admission).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"{");
+    }
+
+    #[test]
+    fn forensic_export_accepts_legacy_admission_record_absence_without_backfilling() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("evidence");
+        let admission = fixture(&root, 162);
+        let mut guard = NativeSessionInventoryGuard::admit(&root, admission.clone(), 0).unwrap();
+        guard.finished = true;
+        drop(guard);
+        let directory = root.join(ADMISSION_RECORD_DIRECTORY);
+        std::fs::rename(&directory, temp.path().join("retained-admissions")).unwrap();
+        let before = forensic_state_snapshot(&root);
+        let export = export_native_session_forensics_at(&root, &admission.session_nonce).unwrap();
+        assert_eq!(
+            export.bundle.admission_json,
+            serde_json::to_string(&admission).unwrap()
+        );
+        assert_eq!(export.verification.outcome_kind, "pending");
+        assert!(!directory.exists());
+        assert_eq!(forensic_state_snapshot(&root), before);
+    }
+
+    #[test]
+    fn forensic_export_refuses_invalid_admission_records_without_repair() {
+        for mutation in 0..5 {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("evidence");
+            let admission = fixture(&root, 163);
+            let mut guard =
+                NativeSessionInventoryGuard::admit(&root, admission.clone(), 0).unwrap();
+            guard.finished = true;
+            drop(guard);
+            let path = admission_record_path(&root, &admission.session_nonce);
+            let bytes = match mutation {
+                0 => {
+                    let mut changed = admission.clone();
+                    changed
+                        .dependency_ids
+                        .push("unsigned-dependency".to_owned());
+                    serde_json::to_vec(&changed).unwrap()
+                }
+                1 => format!("{}\n", serde_json::to_string(&admission).unwrap()).into_bytes(),
+                2 => b"{".to_vec(),
+                3 => vec![b'x'; MAX_ADMISSION_BYTES + 1],
+                4 => {
+                    let mut changed = admission.clone();
+                    changed.session_nonce = uuid::Uuid::now_v7().to_string();
+                    serde_json::to_vec(&changed).unwrap()
+                }
+                _ => unreachable!(),
+            };
+            std::fs::write(&path, bytes).unwrap();
+            let before = forensic_state_snapshot(&root);
+            assert!(
+                export_native_session_forensics_at(&root, &admission.session_nonce).is_err(),
+                "mutation {mutation}"
+            );
+            let discovery = read_native_session_forensics_at(&root, None).unwrap();
+            assert!(discovery.records.is_empty());
+            assert!(discovery.source_errors.iter().any(|error| {
+                error.kind == NativeSessionForensicErrorKind::AdmissionRecordInvalid
+            }));
+            assert_eq!(forensic_state_snapshot(&root), before);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn forensic_admission_record_reads_refuse_unsafe_paths_and_permissions() {
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+
+        for mutation in 0..3 {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("evidence");
+            let admission = fixture(&root, 164);
+            let mut guard =
+                NativeSessionInventoryGuard::admit(&root, admission.clone(), 0).unwrap();
+            guard.finished = true;
+            drop(guard);
+            let directory = root.join(ADMISSION_RECORD_DIRECTORY);
+            let path = admission_record_path(&root, &admission.session_nonce);
+            match mutation {
+                0 => {
+                    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap()
+                }
+                1 => {
+                    let retained = temp.path().join("retained-admission.json");
+                    std::fs::rename(&path, &retained).unwrap();
+                    symlink(&retained, &path).unwrap();
+                }
+                2 => std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o755))
+                    .unwrap(),
+                _ => unreachable!(),
+            }
+            let before = forensic_state_snapshot(&root);
+            assert!(export_native_session_forensics_at(&root, &admission.session_nonce).is_err());
+            assert_eq!(forensic_state_snapshot(&root), before);
+            if mutation == 0 {
+                assert_eq!(
+                    std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                    0o644
+                );
+            }
+            if mutation == 2 {
+                assert_eq!(
+                    std::fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
+                    0o755
+                );
+            }
+        }
     }
 
     #[cfg(unix)]
