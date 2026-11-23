@@ -22,6 +22,7 @@ const SCOPES = Object.freeze({
   "counterfactual-receipt": "authenticated_counterfactual_receipt",
   "ltv-evidence": "authenticated_ltv_anteriority",
   "fleet-quiescence-observations": "authenticated_fleet_supervisor_observations",
+  "fleet-epoch-commit": "authenticated_fleet_epoch_commit",
 });
 
 export class VerifierError extends Error {
@@ -357,26 +358,81 @@ async function readFleetPolicy(path) {
     }
     if (offset === 0 || offset > MAX_FLEET_QUIESCENCE_POLICY_BYTES) throw new Error("invalid policy length");
     const bytes = buffer.subarray(0, offset);
-    const policy = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+    let source, policy;
+    try {
+      source = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+      policy = JSON.parse(source);
+    } catch {
+      throw new VerifierError("FLEET_JSON_INVALID", "trusted fleet policy contains invalid or ambiguous JSON");
+    }
     if (!object(policy)) throw new Error("invalid policy object");
+    // Retain the top-level integer token before JSON.parse's number rounding.
+    // The document is already valid JSON, so this bounded scan only needs to
+    // distinguish nesting and quoted strings, including escaped property names.
+    let expectedPreEpoch;
+    let depth = 0;
+    for (let index = 0; index < source.length; index++) {
+      const character = source[index];
+      if (character === '"') {
+        const start = index;
+        for (index++; index < source.length; index++) {
+          if (source[index] === "\\") index++;
+          else if (source[index] === '"') break;
+        }
+        if (depth !== 1) continue;
+        let colon = index + 1;
+        while (/[ \t\r\n]/u.test(source[colon] ?? "")) colon++;
+        if (source[colon] !== ":" || JSON.parse(source.slice(start, index + 1)) !== "expected_pre_epoch") continue;
+        if (expectedPreEpoch !== undefined) {
+          throw new VerifierError("FLEET_JSON_INVALID", "trusted fleet policy contains ambiguous JSON");
+        }
+        let numberStart = colon + 1;
+        while (/[ \t\r\n]/u.test(source[numberStart] ?? "")) numberStart++;
+        let numberEnd = numberStart;
+        while (/[0-9]/u.test(source[numberEnd] ?? "")) numberEnd++;
+        const token = source.slice(numberStart, numberEnd);
+        let delimiter = numberEnd;
+        while (/[ \t\r\n]/u.test(source[delimiter] ?? "")) delimiter++;
+        if (!/^(0|[1-9][0-9]{0,19})$/u.test(token) || ![",", "}"].includes(source[delimiter])) {
+          throw new Error("invalid policy epoch");
+        }
+        expectedPreEpoch = BigInt(token);
+        if (expectedPreEpoch >= 18_446_744_073_709_551_615n) throw new Error("invalid policy epoch");
+      } else if (character === "{" || character === "[") {
+        depth++;
+      } else if (character === "}" || character === "]") {
+        depth--;
+      }
+    }
+    if (expectedPreEpoch === undefined) throw new Error("missing policy epoch");
     // Never reserialize policy input: exact u64 numbers must reach the Rust
     // verifier unchanged, and its duplicate-field parser remains authoritative.
-    return { path, bytes, policy };
-  } catch {
+    return { path, bytes, policy, expectedPreEpoch };
+  } catch (error) {
+    if (error instanceof VerifierError) throw error;
     throw new VerifierError("FLEET_POLICY_INVALID", "cannot read a bounded trusted fleet policy");
   } finally {
     if (file !== undefined) await file.close();
   }
 }
 
-function fleetFactsValid(facts, trusted, bytes) {
-  if (!keys(facts, ["schema_version", "evidence_sha256", "trust_policy_sha256", "trusted_policy_input_sha256",
+function fleetFactsValid(facts, trusted, bytes, coordinator) {
+  const fields = ["schema_version", "evidence_sha256", "trust_policy_sha256", "trusted_policy_input_sha256",
     "evaluation_time", "observed_at", "participant_count", "admitted_sessions", "terminal_sessions",
     "supervisor_signatures_verified", "expected_population_complete", "expected_action_context_matched",
-    "epoch_commit_authenticated", "current_quiescence_proven"])) return false;
+    "epoch_commit_authenticated", "current_quiescence_proven"];
+  if (coordinator !== undefined) fields.push("coordinator_id", "coordinator_key_id", "committed_epoch", "transition_id", "statement_sha256");
+  if (!keys(facts, fields)) return false;
   const evaluated = instantNs(facts.evaluation_time), observed = instantNs(facts.observed_at);
   const { policy } = trusted;
-  return facts.schema_version === "franken-verifier/fleet-quiescence-observations/v1"
+  if (coordinator !== undefined && (facts.coordinator_id !== coordinator.id
+      || facts.coordinator_key_id !== `ed25519:${coordinator.key}`
+      || !decimalLimit(facts.committed_epoch, 18_446_744_073_709_551_615n)
+      || BigInt(facts.committed_epoch) !== trusted.expectedPreEpoch + 1n
+      || !boundedText(facts.transition_id) || /[\u0000-\u001f\u007f-\u009f]/u.test(facts.transition_id)
+      || typeof facts.statement_sha256 !== "string" || !/^[0-9a-f]{64}$/u.test(facts.statement_sha256))) return false;
+  return facts.schema_version === (coordinator !== undefined ? "franken-verifier/fleet-epoch-commit/v1"
+    : "franken-verifier/fleet-quiescence-observations/v1")
     && facts.evidence_sha256 === createHash("sha256").update(bytes).digest("hex")
     && facts.trusted_policy_input_sha256 === createHash("sha256").update(trusted.bytes).digest("hex")
     && typeof facts.trust_policy_sha256 === "string" && /^[0-9a-f]{64}$/u.test(facts.trust_policy_sha256)
@@ -390,7 +446,7 @@ function fleetFactsValid(facts, trusted, bytes) {
     && BigInt(facts.admitted_sessions) <= 18_446_744_073_709_551_615n
     && facts.terminal_sessions === facts.admitted_sessions
     && facts.supervisor_signatures_verified === true && facts.expected_population_complete === true
-    && facts.expected_action_context_matched === true && facts.epoch_commit_authenticated === false
+    && facts.expected_action_context_matched === true && facts.epoch_commit_authenticated === (coordinator !== undefined)
     && facts.current_quiescence_proven === false;
 }
 
@@ -490,29 +546,44 @@ function factsValid(facts, format, anchor, runAnchor, runtimeAnchor,
  * Fleet observations require a null single-key anchor and trustedFleetPolicy,
  * a separately provisioned file with enrolled roots, population, action context
  * and evaluation time. They do not certify an epoch commit or current quiescence.
+ * fleet-epoch-commit also requires independently enrolled trustedCoordinatorId
+ * and trustedCoordinatorPublicKeyHex. It authenticates the retained commit and
+ * local observations at the policy evaluation time, without proving current
+ * quiescence or a complete history.
  */
 export async function verifyArtifact(data, trustedPublicKeyHex, options) {
   const { verifier, format = "incident-bundle", trustedRunPublicKeyHex, trustedRuntimePublicKeyHex,
-    trustedFleetPolicy,
+    trustedFleetPolicy, trustedCoordinatorId, trustedCoordinatorPublicKeyHex,
     trustedRevocationPublicKeyHex, trustedProvenancePublicKeyHex, evaluationTime, maxRevocationAgeSecs,
     expectedManifestSha256, expectedSourceArtifactSha256, expectedGraphInputHash,
     signatureHex, timeoutMs = 10_000 } = options ?? {};
   if (!(data instanceof Uint8Array)) throw new VerifierError("INPUT_INVALID", "data must contain the original bytes");
   if (typeof format !== "string" || !Object.hasOwn(SCOPES, format)) throw new VerifierError("UNSUPPORTED_FORMAT", "unsupported evidence format");
   const inputLimit = format === "native-session-forensics" ? MAX_NATIVE_SESSION_INPUT_BYTES
-    : format === "fleet-quiescence-observations" ? MAX_FLEET_QUIESCENCE_INPUT_BYTES : MAX_INPUT_BYTES;
+    : ["fleet-quiescence-observations", "fleet-epoch-commit"].includes(format) ? MAX_FLEET_QUIESCENCE_INPUT_BYTES : MAX_INPUT_BYTES;
   if (data.byteLength > inputLimit) throw new VerifierError("INPUT_TOO_LARGE", `evidence exceeds ${inputLimit / (1024 * 1024)} MiB`);
   // Retain the invocation's bytes before policy I/O yields to the caller,
   // which may reuse or mutate its original Uint8Array in the meantime.
   const bytes = Buffer.from(data);
   let fleetPolicy;
-  if (format === "fleet-quiescence-observations") {
+  let coordinator;
+  if (format === "fleet-epoch-commit") {
+    if (typeof trustedCoordinatorId !== "string" || !/^[a-zA-Z0-9._-]{1,128}$/u.test(trustedCoordinatorId)
+        || trustedCoordinatorId === "." || trustedCoordinatorId.includes("..")
+        || !hex(trustedCoordinatorPublicKeyHex, 64)) {
+      throw new VerifierError("FLEET_COORDINATOR_TRUST_INVALID", "an independently enrolled coordinator ID and public key are required");
+    }
+    coordinator = { id: trustedCoordinatorId, key: trustedCoordinatorPublicKeyHex.toLowerCase() };
+  } else if (trustedCoordinatorId !== undefined || trustedCoordinatorPublicKeyHex !== undefined) {
+    throw new VerifierError("INPUT_INVALID", "coordinator trust applies only to fleet-epoch-commit");
+  }
+  if (["fleet-quiescence-observations", "fleet-epoch-commit"].includes(format)) {
     if (trustedPublicKeyHex !== null || trustedFleetPolicy === undefined) {
-      throw new VerifierError("FLEET_POLICY_INVALID", "fleet observations require a separate enrolled policy and no single-key anchor");
+      throw new VerifierError("FLEET_POLICY_INVALID", "fleet verification requires a separate enrolled policy and no single-key anchor");
     }
     fleetPolicy = await readFleetPolicy(trustedFleetPolicy);
   } else {
-    if (trustedFleetPolicy !== undefined) throw new VerifierError("INPUT_INVALID", "fleet policy applies only to fleet-quiescence-observations");
+    if (trustedFleetPolicy !== undefined) throw new VerifierError("INPUT_INVALID", "fleet policy applies only to fleet verification formats");
     if (!hex(trustedPublicKeyHex, 64)) throw new VerifierError("ANCHOR_INVALID", "expected a 32-byte hexadecimal public key");
   }
   if (trustedRunPublicKeyHex !== undefined) {
@@ -551,6 +622,7 @@ export async function verifyArtifact(data, trustedPublicKeyHex, options) {
   const args = ["verify", "--format", format];
   if (fleetPolicy !== undefined) args.push("--trusted-fleet-policy", fleetPolicy.path);
   else args.push("--trusted-key-hex", anchor);
+  if (coordinator !== undefined) args.push("--trusted-coordinator-id", coordinator.id, "--trusted-coordinator-key-hex", coordinator.key);
   if (runAnchor !== undefined) args.push("--trusted-run-key-hex", runAnchor);
   if (runtimeAnchor !== undefined) args.push("--trusted-runtime-key-hex", runtimeAnchor);
   if (revocationAnchor !== undefined) args.push("--trusted-revocation-key-hex", revocationAnchor,
@@ -592,7 +664,7 @@ export async function verifyArtifact(data, trustedPublicKeyHex, options) {
       if (exitCode !== 0 || !keys(result, ["schema_version", "verdict", "format", "scope", "artifact_sha256", "facts"])
           || result.verdict !== "verified" || result.format !== format || result.scope !== scope
           || result.artifact_sha256 !== createHash("sha256").update(bytes).digest("hex")
-          || !(fleetPolicy !== undefined ? fleetFactsValid(result.facts, fleetPolicy, bytes)
+          || !(fleetPolicy !== undefined ? fleetFactsValid(result.facts, fleetPolicy, bytes, coordinator)
             : factsValid(result.facts, format, anchor, runAnchor, runtimeAnchor,
               revocationAnchor, provenanceAnchor, evaluationTime, maxRevocationAgeSecs))
           || (format === "ltv-evidence" && !ltvPolicyMatches(result.facts, bytes))) {

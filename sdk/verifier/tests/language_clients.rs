@@ -104,7 +104,8 @@ fn external_python_and_javascript_consumers_verify_signed_evidence() {
         .arg(sdk.join("tests/fixtures/run_origin_protocol/bundle-authority.pub"))
         .arg(sdk.join("tests/fixtures/run_origin_protocol/run-authority.pub"))
         .arg(sdk.join("tests/fixtures/module_source_capsules.json"))
-        .arg(sdk.join("tests/fixtures/fleet_quiescence_observations.json"));
+        .arg(sdk.join("tests/fixtures/fleet_quiescence_observations.json"))
+        .arg(sdk.join("tests/fixtures/fleet_epoch_commit.json"));
     checked(&mut vectors);
     let cases: Vec<serde_json::Value> =
         serde_json::from_slice(&fs::read(root.join("vectors.json")).unwrap()).unwrap();
@@ -133,6 +134,14 @@ fn external_python_and_javascript_consumers_verify_signed_evidence() {
             >= 30,
         "independent fleet policy, signature, freshness and population controls must execute",
     );
+    assert!(
+        cases
+            .iter()
+            .filter(|case| case["format"] == "fleet-epoch-commit")
+            .count()
+            >= 35,
+        "independent coordinator authority, dual-domain commit and supervisor controls must execute",
+    );
     for case in &cases {
         let mut verifier = Command::new(root.join("verifier"));
         verifier
@@ -154,6 +163,8 @@ fn external_python_and_javascript_consumers_verify_signed_evidence() {
             verifier.args(["--trusted-runtime-key-hex", runtime_anchor]);
         }
         for (field, option) in [
+            ("coordinator_id", "--trusted-coordinator-id"),
+            ("coordinator_key_hex", "--trusted-coordinator-key-hex"),
             ("revocation_anchor", "--trusted-revocation-key-hex"),
             ("provenance_anchor", "--trusted-provenance-key-hex"),
             ("evaluation_time", "--evaluation-time"),
@@ -204,6 +215,16 @@ fn external_python_and_javascript_consumers_verify_signed_evidence() {
                 assert_eq!(response["facts"], case["fleet_facts"]);
                 assert_eq!(response["facts"]["epoch_commit_authenticated"], false);
                 assert_eq!(response["facts"]["current_quiescence_proven"], false);
+                assert!(response["facts"]["admitted_sessions"].is_string());
+                assert!(response["facts"]["terminal_sessions"].is_string());
+                assert!(!response.to_string().contains("trace-maintenance"));
+            }
+            if case["format"] == "fleet-epoch-commit" {
+                assert_eq!(response["scope"], "authenticated_fleet_epoch_commit");
+                assert_eq!(response["facts"], case["epoch_facts"]);
+                assert_eq!(response["facts"]["epoch_commit_authenticated"], true);
+                assert_eq!(response["facts"]["current_quiescence_proven"], false);
+                assert!(response["facts"]["committed_epoch"].is_string());
                 assert!(response["facts"]["admitted_sessions"].is_string());
                 assert!(response["facts"]["terminal_sessions"].is_string());
                 assert!(!response.to_string().contains("trace-maintenance"));

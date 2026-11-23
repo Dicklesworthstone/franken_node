@@ -18,6 +18,8 @@ for (const test of cases) {
       trustedProvenancePublicKeyHex: test.provenance_anchor ?? undefined,
       evaluationTime: test.evaluation_time, maxRevocationAgeSecs: test.max_revocation_age_secs,
       trustedFleetPolicy: test.fleet_policy_path,
+      trustedCoordinatorId: test.coordinator_id,
+      trustedCoordinatorPublicKeyHex: test.coordinator_key_hex,
       expectedManifestSha256: test.expected_manifest_sha256,
       expectedSourceArtifactSha256: test.expected_source_artifact_sha256,
       expectedGraphInputHash: test.expected_graph_input_hash });
@@ -90,6 +92,17 @@ for (const test of cases) {
         createHash("sha256").update(readFileSync(test.fleet_policy_path)).digest("hex"));
       assert.equal(JSON.stringify(result).includes("trace-maintenance"), false);
     }
+    if (test.format === "fleet-epoch-commit") {
+      assert.equal(result.scope, "authenticated_fleet_epoch_commit");
+      assert.deepEqual(result.facts, test.epoch_facts, test.name);
+      assert.equal(result.facts.epoch_commit_authenticated, true);
+      assert.equal(result.facts.current_quiescence_proven, false);
+      assert.equal(typeof result.facts.committed_epoch, "string");
+      assert.equal(typeof result.facts.admitted_sessions, "string");
+      assert.equal(result.facts.trusted_policy_input_sha256,
+        createHash("sha256").update(readFileSync(test.fleet_policy_path)).digest("hex"));
+      assert.equal(JSON.stringify(result).includes("trace-maintenance"), false);
+    }
     assert.equal(JSON.stringify(result).includes("PRIVATE-"), false);
     console.log(JSON.stringify({ case: test.name, result: "verified", scope: result.scope }));
   } catch (error) {
@@ -100,6 +113,36 @@ for (const test of cases) {
   }
 }
 const fleetCase = cases.find((test) => test.name === "fleet_independent_http_observations");
+const epochCase = cases.find((test) => test.name === "epoch_independent_http_commit");
+const epochControls = [
+  "epoch_wrong_scope", "epoch_wrong_format", "epoch_wrong_schema", "epoch_missing_field",
+  "epoch_unknown_field", "epoch_wrong_coordinator", "epoch_wrong_key", "epoch_missing_commit_claim",
+  "epoch_current_quiescence_claim", "epoch_numeric_epoch", "epoch_noncanonical_epoch",
+  "epoch_overflow_epoch", "epoch_wrong_committed_epoch", "epoch_bad_statement_hash",
+  "epoch_uppercase_statement_hash", "epoch_empty_transition", "epoch_transition_control",
+  "epoch_wrong_policy_input", "epoch_wrong_evidence_input", "epoch_unverified_supervisors",
+];
+const epochOptions = { verifier: resolve("fake_verifier"), format: "fleet-epoch-commit",
+  trustedFleetPolicy: epochCase.fleet_policy_path, trustedCoordinatorId: epochCase.coordinator_id,
+  trustedCoordinatorPublicKeyHex: epochCase.coordinator_key_hex };
+for (const mode of epochControls) {
+  await assert.rejects(verifyArtifact(Buffer.from(JSON.stringify({ protocol_control: mode })), null, epochOptions),
+    (error) => error instanceof VerifierError && error.code === "PROTOCOL_INVALID", "protocol_" + mode);
+  console.log(JSON.stringify({ case: "protocol_" + mode, result: "PROTOCOL_INVALID" }));
+}
+for (const name of ["epoch_independent_http_commit", "epoch_exact_u64_maximum_commit"]) {
+  const candidate = cases.find((test) => test.name === name);
+  const result = await verifyArtifact(Buffer.from(JSON.stringify({ protocol_control: "epoch_valid" })), null,
+    { ...epochOptions, trustedFleetPolicy: candidate.fleet_policy_path });
+  assert.equal(result.facts.committed_epoch, candidate.epoch_facts.committed_epoch);
+  assert.equal(result.facts.epoch_commit_authenticated, true);
+  assert.equal(result.facts.current_quiescence_proven, false);
+  console.log(JSON.stringify({ case: "protocol_" + name, result: "verified" }));
+  await assert.rejects(verifyArtifact(Buffer.from(JSON.stringify({ protocol_control: "epoch_wrong_committed_epoch" })), null,
+    { ...epochOptions, trustedFleetPolicy: candidate.fleet_policy_path }),
+  (error) => error instanceof VerifierError && error.code === "PROTOCOL_INVALID", "protocol_wrong_epoch_" + name);
+  console.log(JSON.stringify({ case: "protocol_wrong_epoch_" + name, result: "PROTOCOL_INVALID" }));
+}
 const fleetControls = [
   "fleet_wrong_scope", "fleet_wrong_format", "fleet_unknown_field", "fleet_missing_field",
   "fleet_wrong_policy_input", "fleet_canonical_hash_as_input_hash", "fleet_malformed_policy_hash",

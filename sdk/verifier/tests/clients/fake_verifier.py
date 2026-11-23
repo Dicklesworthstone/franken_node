@@ -219,7 +219,7 @@ if mode.startswith("ltv_"):
         "hybrid_survived_algo_death": False,
         "signer_public_key_hex": anchor,
     }
-if mode.startswith("fleet_"):
+if mode.startswith(("fleet_", "epoch_")):
     # An explicitly fake child can make protocol claims without authenticating
     # anything. Test consumers must bind the claims to both retained inputs and
     # refuse broader proof scopes, even when the process exits successfully.
@@ -247,6 +247,20 @@ if mode.startswith("fleet_"):
     }
     if "--trusted-key-hex" in sys.argv:
         raise AssertionError("fleet policy must be forwarded without a single-key anchor")
+    if mode.startswith("epoch_"):
+        coordinator_id = sys.argv[sys.argv.index("--trusted-coordinator-id") + 1]
+        coordinator_key = sys.argv[sys.argv.index("--trusted-coordinator-key-hex") + 1]
+        response["format"] = "fleet-epoch-commit"
+        response["scope"] = "authenticated_fleet_epoch_commit"
+        response["facts"].update({
+            "schema_version": "franken-verifier/fleet-epoch-commit/v1",
+            "epoch_commit_authenticated": True,
+            "coordinator_id": coordinator_id,
+            "coordinator_key_id": "ed25519:" + coordinator_key,
+            "committed_epoch": str(policy["expected_pre_epoch"] + 1),
+            "transition_id": "epoch-protocol-control",
+            "statement_sha256": "a" * 64,
+        })
 exit_code = 0
 if mode in ("publisher_identity_forwarded", "publisher_trust_identity_forwarded"):
     for option, expected in (
@@ -729,6 +743,46 @@ elif mode == "fleet_current_quiescence_claim":
 elif mode == "fleet_valid_empty_session_set":
     response["facts"]["admitted_sessions"] = "0"
     response["facts"]["terminal_sessions"] = "0"
+elif mode == "epoch_wrong_scope":
+    response["scope"] = "authenticated_fleet_supervisor_observations"
+elif mode == "epoch_wrong_format":
+    response["format"] = "fleet-quiescence-observations"
+elif mode == "epoch_wrong_schema":
+    response["facts"]["schema_version"] = "franken-verifier/fleet-quiescence-observations/v1"
+elif mode == "epoch_missing_field":
+    del response["facts"]["statement_sha256"]
+elif mode == "epoch_unknown_field":
+    response["facts"]["execution_authorized"] = True
+elif mode == "epoch_wrong_coordinator":
+    response["facts"]["coordinator_id"] = "coordinator-other"
+elif mode == "epoch_wrong_key":
+    response["facts"]["coordinator_key_id"] = "ed25519:" + "33" * 32
+elif mode == "epoch_missing_commit_claim":
+    response["facts"]["epoch_commit_authenticated"] = False
+elif mode == "epoch_current_quiescence_claim":
+    response["facts"]["current_quiescence_proven"] = True
+elif mode == "epoch_numeric_epoch":
+    response["facts"]["committed_epoch"] = 8
+elif mode == "epoch_noncanonical_epoch":
+    response["facts"]["committed_epoch"] = "08"
+elif mode == "epoch_overflow_epoch":
+    response["facts"]["committed_epoch"] = str(2**64)
+elif mode == "epoch_wrong_committed_epoch":
+    response["facts"]["committed_epoch"] = "9"
+elif mode == "epoch_bad_statement_hash":
+    response["facts"]["statement_sha256"] = "sha256:" + "a" * 64
+elif mode == "epoch_uppercase_statement_hash":
+    response["facts"]["statement_sha256"] = "A" * 64
+elif mode == "epoch_empty_transition":
+    response["facts"]["transition_id"] = ""
+elif mode == "epoch_transition_control":
+    response["facts"]["transition_id"] = "epoch-protocol\ncontrol"
+elif mode == "epoch_wrong_policy_input":
+    response["facts"]["trusted_policy_input_sha256"] = "a" * 64
+elif mode == "epoch_wrong_evidence_input":
+    response["facts"]["evidence_sha256"] = "a" * 64
+elif mode == "epoch_unverified_supervisors":
+    response["facts"]["supervisor_signatures_verified"] = False
 elif mode == "session_fail":
     response["facts"]["final_verdict"] = "fail"
 elif mode == "session_empty":

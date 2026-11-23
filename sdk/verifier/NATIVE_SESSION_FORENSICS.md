@@ -315,12 +315,13 @@ observation times, and these explicit facts:
 - `epoch_commit_authenticated: false`
 - `current_quiescence_proven: false`
 
-The last two limits are essential to the public wire contract. The response
-contains signed supervisor observations but no coordinator signature over its
-epoch certificate. Its durable HMAC-authenticated epoch state is not part of
-this public artifact. The verifier therefore does not authenticate an epoch
-commit, prove the action log's history, independently inventory all processes
-or remote effects, or show that holds remain active after the signed instant.
+The last two limits are essential to this observations-only wire contract.
+Legacy responses contain no public coordinator signature over the epoch
+certificate; their durable HMAC-authenticated state is not a public trust anchor.
+This format also accepts signed commit envelopes, but deliberately keeps its
+observations-only scope. It does not authenticate the coordinator, prove the
+action log's history, independently inventory all processes or remote effects,
+or show that holds remain active after the signed instant.
 `expected_population_complete` refers to the caller's supplied enrollment.
 The JSON CLI emits aggregate session counts as decimal strings to preserve
 full `u64` precision in JavaScript, and includes
@@ -335,3 +336,86 @@ The protocol-only fixture in
 `tests/fixtures/fleet_quiescence_observations.json` contains independently
 generated signatures for two supervisors; it is not evidence of live fleet
 execution or a completed distributed acceptance campaign.
+
+## Independently authenticated coordinator epoch commits
+
+The `fleet-epoch-commit` format verifies the retained coordinator commit in
+addition to all supervisor, enrollment, action, count and freshness checks above.
+It accepts `franken-node/fleet-epoch-commit-response/v1` from the HTTP API and
+`franken-node/fleet-quiescence-cli/v2` from either `fleet certify-quiescence --json`
+or `fleet export-epoch --epoch N --json`. Legacy unsigned responses fail with
+`FLEET_EPOCH_PROOF_MISSING`; this format never falls back to observations-only
+verification.
+
+Supply the coordinator's identity and Ed25519 public key from independent
+enrollment, alongside the existing supervisor policy:
+
+```sh
+franken-verifier verify --format fleet-epoch-commit \
+  --trusted-fleet-policy /auditor/fleet-policy.json \
+  --trusted-coordinator-id production-east \
+  --trusted-coordinator-key-hex "$ENROLLED_COORDINATOR_PUBLIC_KEY" \
+  < fleet-epoch.json
+```
+
+The coordinator key is separate from HTTP bearer credentials and supervisor
+roots. Do not accept the candidate artifact's advertised key as enrollment.
+The policy's `expected_pre_epoch` and `expected_trace_id` must match the signed
+certificate; the committed epoch must be exactly the expected predecessor plus
+one, without overflow. Rust callers pass a `FleetCoordinatorTrust` to
+`fleet_quiescence::verify_fleet_epoch_commit(response, &policy, &coordinator)`.
+
+```python
+verified = verify_artifact(
+    Path("fleet-epoch.json").read_bytes(),
+    None,
+    verifier="/opt/franken-verifier/bin/franken-verifier",
+    format="fleet-epoch-commit",
+    trusted_fleet_policy="/auditor/fleet-policy.json",
+    trusted_coordinator_id="production-east",
+    trusted_coordinator_public_key_hex=enrolled_coordinator_public_key,
+)
+assert verified["facts"]["epoch_commit_authenticated"] is True
+assert verified["facts"]["current_quiescence_proven"] is False
+```
+
+```javascript
+const committed = await verifyArtifact(await readFile("fleet-epoch.json"), null, {
+  verifier: "/opt/franken-verifier/bin/franken-verifier",
+  format: "fleet-epoch-commit",
+  trustedFleetPolicy: "/auditor/fleet-policy.json",
+  trustedCoordinatorId: "production-east",
+  trustedCoordinatorPublicKeyHex: enrolledCoordinatorPublicKey,
+});
+```
+
+Successful results use scope `authenticated_fleet_epoch_commit` and facts schema
+`franken-verifier/fleet-epoch-commit/v1`. They retain the observation facts, set
+`epoch_commit_authenticated: true`, and add the independently pinned
+`coordinator_id`, `coordinator_key_id`, exact decimal-string `committed_epoch`,
+`transition_id`, and `statement_sha256`. The last field hashes the canonical
+signed statement. Aggregate counts and the committed epoch preserve all 64 bits
+in the CLI and language bindings; Rust returns native `u64` values.
+
+The proof carries two Ed25519 signatures over the same canonical statement:
+authorization retained inside the durable epoch transaction, and a separate
+commit signature issued only after the committed row is read back. The domains
+are `franken-node/fleet-epoch-authorization-signature/v1\0` and
+`franken-node/fleet-epoch-commit-signature/v1\0`. Each signs its domain bytes,
+the eight-byte big-endian statement length, and the compact recursively
+key-sorted statement JSON. An authorization signature cannot serve as a commit
+signature. The statement binds the coordinator identity/key, predecessor and
+committed epochs, transition and trace IDs, and a domain-separated SHA-256 of
+the exact canonical JSON array `[evidence, certificate]`. Duplicate members are
+rejected before canonicalization, and timestamp spellings are committed before
+typed timestamp normalization.
+
+Export preserves the original evidence and certification time. Evaluate a
+historical export at a separately trusted historical time appropriate to the
+policy; exporting or re-signing cannot make stale supervisor observations fresh.
+`current_quiescence_proven` remains false. The authenticated coordinator attests
+that the retained epoch committed; this does not independently audit its storage,
+reconstruct the full epoch/action history, or prove that admission holds remain
+active now. The fixture `tests/fixtures/fleet_epoch_commit.json` was signed
+independently using Node's Ed25519 implementation and includes canonical digest
+expectations. It exercises the wire protocol, not a live multi-node campaign.

@@ -1,8 +1,8 @@
-export type EvidenceFormat = "incident-bundle" | "native-session-forensics" | "capsule" | "signed-bundle" | "signed-session" | "resolution-receipt" | "publisher-source" | "publisher-source-trust" | "counterfactual-receipt" | "ltv-evidence" | "fleet-quiescence-observations";
+export type EvidenceFormat = "incident-bundle" | "native-session-forensics" | "capsule" | "signed-bundle" | "signed-session" | "resolution-receipt" | "publisher-source" | "publisher-source-trust" | "counterfactual-receipt" | "ltv-evidence" | "fleet-quiescence-observations" | "fleet-epoch-commit";
 export interface VerifierOptions {
   /** Trusted SDK executable, installed separately; never supplied by evidence. */
   verifier: string;
-  format?: Exclude<EvidenceFormat, "fleet-quiescence-observations">;
+  format?: Exclude<EvidenceFormat, "fleet-quiescence-observations" | "fleet-epoch-commit">;
   /** Independent original receipt authority, only for incident-bundle. Missing proof fails. */
   trustedRunPublicKeyHex?: string;
   /** Independent product root; requires original-run trust and portable session evidence. */
@@ -33,6 +33,18 @@ export interface FleetQuiescenceOptions {
   trustedFleetPolicy: string;
   timeoutMs?: number;
 }
+export interface FleetEpochCommitOptions {
+  /** Trusted SDK executable, installed separately from the evidence. */
+  verifier: string;
+  format: "fleet-epoch-commit";
+  /** Independently provisioned enrolled keys, complete population, expected action context and evaluation time. */
+  trustedFleetPolicy: string;
+  /** Independently enrolled coordinator identity; never learned from the candidate. */
+  trustedCoordinatorId: string;
+  /** Independent Ed25519 coordinator key, separate from HTTP bearer tokens and supervisor roots. */
+  trustedCoordinatorPublicKeyHex: string;
+  timeoutMs?: number;
+}
 /** Verified local supervisor observations; the coordinator commit remains unauthenticated. */
 export interface FleetQuiescenceFacts {
   schema_version: "franken-verifier/fleet-quiescence-observations/v1";
@@ -50,6 +62,18 @@ export interface FleetQuiescenceFacts {
   expected_action_context_matched: true;
   epoch_commit_authenticated: false;
   current_quiescence_proven: false;
+}
+/** Authenticated retained coordinator commit and local observations, evaluated historically. */
+export interface FleetEpochCommitFacts extends Omit<FleetQuiescenceFacts, "schema_version" | "epoch_commit_authenticated"> {
+  schema_version: "franken-verifier/fleet-epoch-commit/v1";
+  epoch_commit_authenticated: true;
+  coordinator_id: string;
+  coordinator_key_id: string;
+  /** Exact decimal u64, never rounded to a JavaScript number. */
+  committed_epoch: string;
+  transition_id: string;
+  /** SHA-256 of the canonical, independently authenticated commit statement. */
+  statement_sha256: string;
 }
 export interface NativeCaptureMetadata {
   payload_sha256: string;
@@ -303,6 +327,7 @@ export type Verification = {
   | { format: "incident-bundle"; scope: "authenticated_runtime_incident"; facts: RuntimeIncidentFacts }
   | { format: "native-session-forensics"; scope: "authenticated_supervisor_observations"; facts: NativeSessionForensicsFacts }
   | { format: "fleet-quiescence-observations"; scope: "authenticated_fleet_supervisor_observations"; facts: FleetQuiescenceFacts }
+  | { format: "fleet-epoch-commit"; scope: "authenticated_fleet_epoch_commit"; facts: FleetEpochCommitFacts }
   | { format: "capsule"; scope: "authenticated_capsule_content"; facts: CapsuleFacts }
   | { format: "signed-bundle"; scope: "authenticated_sdk_replay_bundle"; facts: SignedBundleFacts }
   | { format: "signed-session"; scope: "authenticated_verification_session"; facts: SignedSessionFacts }
@@ -326,3 +351,4 @@ export const MAX_FLEET_QUIESCENCE_INPUT_BYTES: number;
 export const MAX_FLEET_QUIESCENCE_POLICY_BYTES: number;
 export function verifyArtifact(data: Uint8Array, trustedPublicKeyHex: string, options: VerifierOptions): Promise<Verification>;
 export function verifyArtifact(data: Uint8Array, trustedPublicKeyHex: null, options: FleetQuiescenceOptions): Promise<Verification>;
+export function verifyArtifact(data: Uint8Array, trustedPublicKeyHex: null, options: FleetEpochCommitOptions): Promise<Verification>;

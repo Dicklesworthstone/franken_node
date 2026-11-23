@@ -94,6 +94,8 @@ for case in cases:
                                  evaluation_time=case.get("evaluation_time"),
                                  max_revocation_age_secs=case.get("max_revocation_age_secs"),
                                  trusted_fleet_policy=case.get("fleet_policy_path"),
+                                 trusted_coordinator_id=case.get("coordinator_id"),
+                                 trusted_coordinator_public_key_hex=case.get("coordinator_key_hex"),
                                  expected_manifest_sha256=case.get("expected_manifest_sha256"),
                                  expected_source_artifact_sha256=case.get("expected_source_artifact_sha256"),
                                  expected_graph_input_hash=case.get("expected_graph_input_hash"))
@@ -164,10 +166,63 @@ for case in cases:
             assert result["facts"]["trusted_policy_input_sha256"] == hashlib.sha256(
                 Path(case["fleet_policy_path"]).read_bytes()).hexdigest()
             assert "trace-maintenance" not in json.dumps(result)
+        if case["format"] == "fleet-epoch-commit":
+            assert result["scope"] == "authenticated_fleet_epoch_commit"
+            assert result["facts"] == case["epoch_facts"], case["name"]
+            assert result["facts"]["epoch_commit_authenticated"] is True
+            assert result["facts"]["current_quiescence_proven"] is False
+            assert isinstance(result["facts"]["committed_epoch"], str)
+            assert isinstance(result["facts"]["admitted_sessions"], str)
+            assert result["facts"]["trusted_policy_input_sha256"] == hashlib.sha256(
+                Path(case["fleet_policy_path"]).read_bytes()).hexdigest()
+            assert "trace-maintenance" not in json.dumps(result)
         assert "PRIVATE-" not in json.dumps(result)
         print(json.dumps({"case": case["name"], "result": "verified", "scope": result["scope"]}), flush=True)
 
 fleet_case = next(case for case in cases if case["name"] == "fleet_independent_http_observations")
+epoch_case = next(case for case in cases if case["name"] == "epoch_independent_http_commit")
+epoch_controls = [
+    "epoch_wrong_scope", "epoch_wrong_format", "epoch_wrong_schema", "epoch_missing_field",
+    "epoch_unknown_field", "epoch_wrong_coordinator", "epoch_wrong_key", "epoch_missing_commit_claim",
+    "epoch_current_quiescence_claim", "epoch_numeric_epoch", "epoch_noncanonical_epoch",
+    "epoch_overflow_epoch", "epoch_wrong_committed_epoch", "epoch_bad_statement_hash",
+    "epoch_uppercase_statement_hash", "epoch_empty_transition", "epoch_transition_control",
+    "epoch_wrong_policy_input", "epoch_wrong_evidence_input", "epoch_unverified_supervisors",
+]
+for mode in epoch_controls:
+    try:
+        verify_artifact(json.dumps({"protocol_control": mode}).encode(), None,
+                        verifier=str(root / "fake_verifier"), format="fleet-epoch-commit",
+                        trusted_fleet_policy=epoch_case["fleet_policy_path"],
+                        trusted_coordinator_id=epoch_case["coordinator_id"],
+                        trusted_coordinator_public_key_hex=epoch_case["coordinator_key_hex"])
+    except VerifierError as error:
+        assert error.code == "PROTOCOL_INVALID", (mode, error.code)
+        print(json.dumps({"case": f"protocol_{mode}", "result": error.code}), flush=True)
+    else:
+        raise AssertionError(f"protocol_{mode}")
+for name in ("epoch_independent_http_commit", "epoch_exact_u64_maximum_commit"):
+    candidate = next(case for case in cases if case["name"] == name)
+    result = verify_artifact(json.dumps({"protocol_control": "epoch_valid"}).encode(), None,
+                             verifier=str(root / "fake_verifier"), format="fleet-epoch-commit",
+                             trusted_fleet_policy=candidate["fleet_policy_path"],
+                             trusted_coordinator_id=epoch_case["coordinator_id"],
+                             trusted_coordinator_public_key_hex=epoch_case["coordinator_key_hex"])
+    assert result["facts"]["committed_epoch"] == candidate["epoch_facts"]["committed_epoch"]
+    assert result["facts"]["epoch_commit_authenticated"] is True
+    assert result["facts"]["current_quiescence_proven"] is False
+    print(json.dumps({"case": f"protocol_{name}", "result": "verified"}), flush=True)
+    try:
+        verify_artifact(json.dumps({"protocol_control": "epoch_wrong_committed_epoch"}).encode(), None,
+                        verifier=str(root / "fake_verifier"), format="fleet-epoch-commit",
+                        trusted_fleet_policy=candidate["fleet_policy_path"],
+                        trusted_coordinator_id=epoch_case["coordinator_id"],
+                        trusted_coordinator_public_key_hex=epoch_case["coordinator_key_hex"])
+    except VerifierError as error:
+        assert error.code == "PROTOCOL_INVALID", (name, error.code)
+        print(json.dumps({"case": f"protocol_wrong_epoch_{name}", "result": error.code}), flush=True)
+    else:
+        raise AssertionError(f"protocol_wrong_epoch_{name}")
 fleet_controls = [
     "fleet_wrong_scope", "fleet_wrong_format", "fleet_unknown_field", "fleet_missing_field",
     "fleet_wrong_policy_input", "fleet_canonical_hash_as_input_hash", "fleet_malformed_policy_hash",

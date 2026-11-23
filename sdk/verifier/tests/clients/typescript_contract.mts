@@ -8,6 +8,7 @@ export async function audit(data: Uint8Array, anchor: string, executable: string
     if (verified.format === "incident-bundle") return verified.facts.incident_id;
     if (verified.format === "native-session-forensics") return verified.facts.session_nonce;
     if (verified.format === "fleet-quiescence-observations") return verified.facts.evidence_sha256;
+    if (verified.format === "fleet-epoch-commit") return verified.facts.statement_sha256;
     if (verified.format === "capsule") return verified.facts.capsule_id;
     if (verified.format === "signed-session") return verified.facts.session_id;
     if (verified.format === "resolution-receipt") return verified.facts.receipt_id;
@@ -40,6 +41,23 @@ export async function auditFleetObservations(
   return `${verified.facts.trusted_policy_input_sha256}:${admitted}:${terminal}`;
 }
 
+export async function auditFleetEpochCommit(
+  data: Uint8Array, policyPath: string, coordinatorId: string, coordinatorKey: string, executable: string,
+): Promise<string> {
+  const verified = await verifyArtifact(data, null, {
+    verifier: executable, format: "fleet-epoch-commit", trustedFleetPolicy: policyPath,
+    trustedCoordinatorId: coordinatorId, trustedCoordinatorPublicKeyHex: coordinatorKey,
+  });
+  if (verified.format !== "fleet-epoch-commit" || verified.scope !== "authenticated_fleet_epoch_commit") {
+    throw new Error("independently anchored historical epoch commit required");
+  }
+  const epoch: string = verified.facts.committed_epoch;
+  const committed: true = verified.facts.epoch_commit_authenticated;
+  const current: false = verified.facts.current_quiescence_proven;
+  if (!committed || current) throw new Error("historical commit cannot prove current quiescence");
+  return `${verified.facts.coordinator_id}:${epoch}:${verified.facts.statement_sha256}`;
+}
+
 // Invalid trust models must fail at the public declaration boundary too. This
 // function is type-checked, never executed by the consumer distribution.
 export async function refuseFleetTrustSubstitutions(data: Uint8Array, anchor: string, policyPath: string, executable: string): Promise<void> {
@@ -49,6 +67,16 @@ export async function refuseFleetTrustSubstitutions(data: Uint8Array, anchor: st
   await verifyArtifact(data, anchor, { verifier: executable, format: "fleet-quiescence-observations", trustedFleetPolicy: policyPath });
   // @ts-expect-error Non-fleet formats still require their signing authority.
   await verifyArtifact(data, null, { verifier: executable, format: "incident-bundle" });
+  // @ts-expect-error A supervisor policy alone cannot authenticate coordinator commits.
+  await verifyArtifact(data, null, { verifier: executable, format: "fleet-epoch-commit", trustedFleetPolicy: policyPath });
+  // @ts-expect-error Coordinator authority also requires an independently retained identifier.
+  await verifyArtifact(data, null, { verifier: executable, format: "fleet-epoch-commit", trustedFleetPolicy: policyPath, trustedCoordinatorPublicKeyHex: anchor });
+  // @ts-expect-error Coordinator authority also requires an independently retained key.
+  await verifyArtifact(data, null, { verifier: executable, format: "fleet-epoch-commit", trustedFleetPolicy: policyPath, trustedCoordinatorId: "coordinator" });
+  // @ts-expect-error Coordinator enrollment cannot substitute for the complete supervisor policy.
+  await verifyArtifact(data, null, { verifier: executable, format: "fleet-epoch-commit", trustedCoordinatorId: "coordinator", trustedCoordinatorPublicKeyHex: anchor });
+  // @ts-expect-error Strong fleet verification never uses the single-artifact signing-key overload.
+  await verifyArtifact(data, anchor, { verifier: executable, format: "fleet-epoch-commit", trustedFleetPolicy: policyPath, trustedCoordinatorId: "coordinator", trustedCoordinatorPublicKeyHex: anchor });
 }
 
 export async function auditSignedSession(

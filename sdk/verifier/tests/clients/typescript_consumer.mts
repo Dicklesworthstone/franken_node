@@ -2,9 +2,9 @@ import { readFileSync } from "node:fs";
 import assert from "node:assert/strict";
 import { resolve } from "node:path";
 import { verifyArtifact, VerifierError } from "./franken_verifier.mjs";
-import type { Verification, EvidenceFormat, PublisherSourceTrustFacts, NativeSessionForensicsFacts, SignedSessionFacts, LtvEvidenceFacts, FleetQuiescenceFacts } from "./franken_verifier.mjs";
+import type { Verification, EvidenceFormat, PublisherSourceTrustFacts, NativeSessionForensicsFacts, SignedSessionFacts, LtvEvidenceFacts, FleetQuiescenceFacts, FleetEpochCommitFacts } from "./franken_verifier.mjs";
 
-type KeyCase = { name: string; input_hex: string; anchor: string; format: Exclude<EvidenceFormat, "fleet-quiescence-observations">;
+type KeyCase = { name: string; input_hex: string; anchor: string; format: Exclude<EvidenceFormat, "fleet-quiescence-observations" | "fleet-epoch-commit">;
   signature_hex?: string; run_anchor?: string; runtime_anchor?: string; event_count?: number;
   revocation_anchor?: string; provenance_anchor?: string | null; evaluation_time?: string;
   max_revocation_age_secs?: string; publisher_trust_facts?: PublisherSourceTrustFacts;
@@ -15,9 +15,12 @@ type KeyCase = { name: string; input_hex: string; anchor: string; format: Exclud
   expected: string; artifact_sha256: string };
 type FleetCase = { name: string; input_hex: string; anchor: null; format: "fleet-quiescence-observations";
   fleet_policy_path: string; fleet_facts?: FleetQuiescenceFacts; expected: string; artifact_sha256: string };
-const allCases: Array<KeyCase | FleetCase> =
+type EpochCase = { name: string; input_hex: string; anchor: null; format: "fleet-epoch-commit";
+  fleet_policy_path: string; coordinator_id: string; coordinator_key_hex: string;
+  epoch_facts?: FleetEpochCommitFacts; expected: string; artifact_sha256: string };
+const allCases: Array<KeyCase | FleetCase | EpochCase> =
   JSON.parse(readFileSync("vectors.json", "utf8"));
-const cases = allCases.filter((item): item is KeyCase => item.format !== "fleet-quiescence-observations");
+const cases = allCases.filter((item): item is KeyCase => item.format !== "fleet-quiescence-observations" && item.format !== "fleet-epoch-commit");
 const positive = cases.find((item) => item.name === "genuine_cli_incident")!;
 const result: Verification = await verifyArtifact(Buffer.from(positive.input_hex, "hex"), positive.anchor,
   { verifier: resolve("verifier"), format: positive.format });
@@ -284,10 +287,35 @@ for (const candidate of allCases.filter((item): item is FleetCase => item.format
   }
 }
 assert(fleetPositive >= 5 && fleetNegative >= 25, "fleet authority and observation controls must execute");
-console.log(JSON.stringify({ consumer: "typescript", positive: 8 + trustPositive + nativePositive + sessionPositive + identityPositive + ltvPositive + fleetPositive,
-  negative: 2 + trustNegative + nativeNegative + sessionNegative + identityNegative + ltvNegative + fleetNegative, publisher_trust_cases: trustPositive + trustNegative,
+let epochPositive = 0;
+let epochNegative = 0;
+for (const candidate of allCases.filter((item): item is EpochCase => item.format === "fleet-epoch-commit")) {
+  try {
+    const verified = await verifyArtifact(Buffer.from(candidate.input_hex, "hex"), candidate.anchor, {
+      verifier: resolve("verifier"), format: "fleet-epoch-commit", trustedFleetPolicy: candidate.fleet_policy_path,
+      trustedCoordinatorId: candidate.coordinator_id, trustedCoordinatorPublicKeyHex: candidate.coordinator_key_hex,
+    });
+    if (candidate.expected !== "verified" || verified.format !== "fleet-epoch-commit"
+        || verified.scope !== "authenticated_fleet_epoch_commit") throw new Error("fleet epoch commit scope mismatch");
+    assert.equal(verified.artifact_sha256, candidate.artifact_sha256);
+    assert.deepEqual(verified.facts, candidate.epoch_facts, candidate.name);
+    const epoch: string = verified.facts.committed_epoch;
+    const committed: true = verified.facts.epoch_commit_authenticated;
+    const current: false = verified.facts.current_quiescence_proven;
+    if (epoch !== candidate.epoch_facts!.committed_epoch || !committed || current) throw new Error("fleet epoch claim exceeds its scope");
+    epochPositive += 1;
+  } catch (error: unknown) {
+    if (candidate.expected === "verified" || !(error instanceof VerifierError)
+        || error.code !== candidate.expected) throw error;
+    epochNegative += 1;
+  }
+}
+assert(epochPositive >= 6 && epochNegative >= 30, "independent epoch commit and authority controls must execute");
+console.log(JSON.stringify({ consumer: "typescript", positive: 8 + trustPositive + nativePositive + sessionPositive + identityPositive + ltvPositive + fleetPositive + epochPositive,
+  negative: 2 + trustNegative + nativeNegative + sessionNegative + identityNegative + ltvNegative + fleetNegative + epochNegative, publisher_trust_cases: trustPositive + trustNegative,
   publisher_identity_cases: identityPositive + identityNegative,
   native_session_cases: nativePositive + nativeNegative, signed_session_cases: sessionPositive + sessionNegative,
   ltv_policy_cases: ltvPositive + ltvNegative,
   fleet_observation_cases: fleetPositive + fleetNegative,
+  fleet_epoch_commit_cases: epochPositive + epochNegative,
   passed: true }));

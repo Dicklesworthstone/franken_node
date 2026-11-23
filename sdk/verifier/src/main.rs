@@ -14,8 +14,9 @@ use frankenengine_verifier_sdk::counterfactual::{
     CounterfactualReceiptError, verify_counterfactual_receipt,
 };
 use frankenengine_verifier_sdk::fleet_quiescence::{
-    FleetQuiescencePolicy, MAX_FLEET_QUIESCENCE_POLICY_BYTES, MAX_FLEET_QUIESCENCE_RESPONSE_BYTES,
-    parse_fleet_quiescence_policy, verify_fleet_quiescence_observations,
+    FleetCoordinatorTrust, FleetQuiescencePolicy, MAX_FLEET_QUIESCENCE_POLICY_BYTES,
+    MAX_FLEET_QUIESCENCE_RESPONSE_BYTES, parse_fleet_quiescence_policy, verify_fleet_epoch_commit,
+    verify_fleet_quiescence_observations,
 };
 use frankenengine_verifier_sdk::incident_bundle::{
     CapturedNativeTerminalState, IncidentBundleError, MAX_INCIDENT_BUNDLE_BYTES,
@@ -51,7 +52,7 @@ const COUNTERFACTUAL_INPUT_SCHEMA: &str = "franken-verifier/counterfactual-recei
 const LTV_INPUT_SCHEMA: &str = "franken-verifier/ltv-evidence-input/v1";
 const LTV_WITNESS_ANCHOR_DOMAIN: &[u8] = b"franken-verifier/ltv-witness-anchor/v1:";
 const MAX_LTV_WITNESS_ANCHOR_BYTES: usize = 64 * 1024;
-const USAGE: &str = "franken-verifier verify --format incident-bundle|native-session-forensics|capsule|signed-bundle|signed-session|resolution-receipt|publisher-source|publisher-source-trust|counterfactual-receipt|ltv-evidence --trusted-key-hex HEX [--trusted-run-key-hex HEX [--trusted-runtime-key-hex HEX]] [--signature-hex HEX] [--trusted-revocation-key-hex HEX --evaluation-time RFC3339 --max-revocation-age-secs SECONDS [--trusted-provenance-key-hex HEX]] [--expected-manifest-sha256 sha256:HEX [--expected-source-artifact-sha256 sha256:HEX] [--expected-graph-input-hash sha256:HEX]] < artifact; fleet observations: franken-verifier verify --format fleet-quiescence-observations --trusted-fleet-policy FILE < artifact";
+const USAGE: &str = "franken-verifier verify --format incident-bundle|native-session-forensics|capsule|signed-bundle|signed-session|resolution-receipt|publisher-source|publisher-source-trust|counterfactual-receipt|ltv-evidence --trusted-key-hex HEX [--trusted-run-key-hex HEX [--trusted-runtime-key-hex HEX]] [--signature-hex HEX] [--trusted-revocation-key-hex HEX --evaluation-time RFC3339 --max-revocation-age-secs SECONDS [--trusted-provenance-key-hex HEX]] [--expected-manifest-sha256 sha256:HEX [--expected-source-artifact-sha256 sha256:HEX] [--expected-graph-input-hash sha256:HEX]] < artifact; fleet observations: franken-verifier verify --format fleet-quiescence-observations --trusted-fleet-policy FILE < artifact; committed fleet epoch: franken-verifier verify --format fleet-epoch-commit --trusted-fleet-policy FILE --trusted-coordinator-id ID --trusted-coordinator-key-hex HEX < artifact";
 
 #[derive(Debug)]
 struct PublisherTrustRequest {
@@ -78,6 +79,7 @@ struct Request {
 struct FleetPolicyRequest {
     policy: FleetQuiescencePolicy,
     input_sha256: String,
+    coordinator: Option<FleetCoordinatorTrust>,
 }
 
 impl std::fmt::Debug for FleetPolicyRequest {
@@ -111,6 +113,7 @@ fn read_fleet_policy(path: &str) -> Result<FleetPolicyRequest, Failure> {
     Ok(FleetPolicyRequest {
         policy,
         input_sha256: hex::encode(Sha256::digest(&bytes)),
+        coordinator: None,
     })
 }
 
@@ -181,6 +184,7 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
     let (mut expected_manifest, mut expected_source_artifact, mut expected_graph) =
         (None, None, None);
     let mut fleet_policy_path = None;
+    let (mut coordinator_id, mut coordinator_key) = (None, None);
     let (options, remainder) = args[1..].as_chunks::<2>();
     for option in options {
         let slot = match option[0].as_str() {
@@ -197,6 +201,8 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
             "--expected-source-artifact-sha256" => &mut expected_source_artifact,
             "--expected-graph-input-hash" => &mut expected_graph,
             "--trusted-fleet-policy" => &mut fleet_policy_path,
+            "--trusted-coordinator-id" => &mut coordinator_id,
+            "--trusted-coordinator-key-hex" => &mut coordinator_key,
             _ => return Err(usage()),
         };
         if slot.replace(option[1].clone()).is_some() {
@@ -220,19 +226,55 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
             | "counterfactual-receipt"
             | "ltv-evidence"
             | "fleet-quiescence-observations"
+            | "fleet-epoch-commit"
     ) {
         return Err(failure("UNSUPPORTED_FORMAT", "unsupported evidence format"));
     }
-    let (anchor, fleet_policy) = if format == "fleet-quiescence-observations" {
+    let (anchor, fleet_policy) = if matches!(
+        format.as_str(),
+        "fleet-quiescence-observations" | "fleet-epoch-commit"
+    ) {
         if anchor.is_some() {
             return Err(usage());
         }
-        (
-            None,
-            Some(read_fleet_policy(&fleet_policy_path.ok_or_else(usage)?)?),
-        )
+        let coordinator = if format == "fleet-epoch-commit" {
+            let identity = coordinator_id.ok_or_else(usage)?;
+            let encoded = coordinator_key.ok_or_else(usage)?;
+            let invalid = || {
+                failure(
+                    "FLEET_COORDINATOR_TRUST_INVALID",
+                    "expected an independently enrolled coordinator identity and Ed25519 public key",
+                )
+            };
+            let mut bytes = [0_u8; 32];
+            hex::decode_to_slice(&encoded, &mut bytes).map_err(|_| invalid())?;
+            let key = VerifyingKey::from_bytes(&bytes).map_err(|_| invalid())?;
+            if key.is_weak()
+                || identity.is_empty()
+                || identity.len() > 128
+                || identity == "."
+                || identity.contains("..")
+                || !identity
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+            {
+                return Err(invalid());
+            }
+            Some(FleetCoordinatorTrust {
+                coordinator_id: identity,
+                coordinator_public_key_hex: hex::encode(key.as_bytes()),
+            })
+        } else {
+            if coordinator_id.is_some() || coordinator_key.is_some() {
+                return Err(usage());
+            }
+            None
+        };
+        let mut policy = read_fleet_policy(&fleet_policy_path.ok_or_else(usage)?)?;
+        policy.coordinator = coordinator;
+        (None, Some(policy))
     } else {
-        if fleet_policy_path.is_some() {
+        if fleet_policy_path.is_some() || coordinator_id.is_some() || coordinator_key.is_some() {
             return Err(usage());
         }
         let mut key = [0_u8; 32];
@@ -539,6 +581,33 @@ fn counterfactual_failure(error: &CounterfactualReceiptError) -> Failure {
 }
 
 fn verify(request: &Request, bytes: &[u8]) -> Result<Value, Failure> {
+    if request.format == "fleet-epoch-commit" {
+        let policy = request.fleet_policy.as_ref().ok_or_else(|| {
+            failure(
+                "FLEET_POLICY_INVALID",
+                "independent fleet policy is required",
+            )
+        })?;
+        let trust = policy.coordinator.as_ref().ok_or_else(|| {
+            failure(
+                "FLEET_COORDINATOR_TRUST_INVALID",
+                "independent coordinator trust is required",
+            )
+        })?;
+        let verified = verify_fleet_epoch_commit(bytes, &policy.policy, trust)
+            .map_err(|error| failure(error.code(), "fleet epoch commit verification failed"))?;
+        let mut facts = serde_json::to_value(&verified).map_err(|_| {
+            failure(
+                "OUTPUT_INVALID",
+                "cannot encode verified fleet epoch commit",
+            )
+        })?;
+        facts["admitted_sessions"] = json!(verified.admitted_sessions.to_string());
+        facts["terminal_sessions"] = json!(verified.terminal_sessions.to_string());
+        facts["committed_epoch"] = json!(verified.committed_epoch.to_string());
+        facts["trusted_policy_input_sha256"] = json!(policy.input_sha256);
+        return Ok(json!({"scope": "authenticated_fleet_epoch_commit", "facts": facts}));
+    }
     if request.format == "fleet-quiescence-observations" {
         let policy = request.fleet_policy.as_ref().ok_or_else(|| {
             failure(
@@ -980,7 +1049,9 @@ fn verify(request: &Request, bytes: &[u8]) -> Result<Value, Failure> {
 fn run(args: &[String], input: &mut impl Read) -> Result<Value, Failure> {
     let request = arguments(args)?;
     let input_limit = match request.format.as_str() {
-        "fleet-quiescence-observations" => MAX_FLEET_QUIESCENCE_RESPONSE_BYTES,
+        "fleet-quiescence-observations" | "fleet-epoch-commit" => {
+            MAX_FLEET_QUIESCENCE_RESPONSE_BYTES
+        }
         "native-session-forensics" => MAX_NATIVE_SESSION_FORENSICS_V3_BYTES,
         "publisher-source" => MAX_PUBLISHER_SOURCE_INPUT_BYTES,
         "publisher-source-trust" => MAX_PUBLISHER_SOURCE_TRUST_INPUT_BYTES,
@@ -1000,7 +1071,10 @@ fn run(args: &[String], input: &mut impl Read) -> Result<Value, Failure> {
             "INPUT_TOO_LARGE",
             if request.format == "native-session-forensics" {
                 "native-session forensic evidence exceeds the 96 MiB input limit"
-            } else if request.format == "fleet-quiescence-observations" {
+            } else if matches!(
+                request.format.as_str(),
+                "fleet-quiescence-observations" | "fleet-epoch-commit"
+            ) {
                 "fleet supervisor evidence exceeds the 8 MiB input limit"
             } else if matches!(
                 request.format.as_str(),
@@ -1109,6 +1183,7 @@ mod tests {
             fleet_policy: Some(FleetPolicyRequest {
                 policy: parse_fleet_quiescence_policy(&policy_bytes).unwrap(),
                 input_sha256: input_sha256.clone(),
+                coordinator: None,
             }),
         };
         let bytes = serde_json::to_vec(&fixture["http_response"]).unwrap();

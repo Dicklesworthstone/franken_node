@@ -6,7 +6,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import assert from "node:assert/strict";
 
-const [incidentPath, sdkBundlePath, seedPath, output, originalRunPath, exporterAnchorPath, runAnchorPath, sourceCapsulesPath, fleetObservationsPath] = process.argv.slice(2);
+const [incidentPath, sdkBundlePath, seedPath, output, originalRunPath, exporterAnchorPath, runAnchorPath, sourceCapsulesPath, fleetObservationsPath, fleetEpochCommitPath] = process.argv.slice(2);
 const anchor = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a";
 const foreign = "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c";
 const seed = Buffer.from(readFileSync(seedPath, "utf8").trim(), "hex");
@@ -1560,6 +1560,155 @@ addFleet("fleet_exact_u64_maximum_aggregate", fleetMaximum);
 const fleetOverflow = clone(fleetResponse);
 fleetCounts(fleetOverflow, 0, (1n << 64n) - 1n);
 addFleet("fleet_signed_aggregate_overflow", fleetOverflow, "FLEET_COUNT_OVERFLOW");
+
+// Historical epoch commits require two independently anchored coordinator
+// signatures over the exact supervisor evidence/certificate manifest. Neither
+// a durable-looking envelope nor a prepare authorization proves a commit.
+const epochFixture = JSON.parse(readFileSync(fleetEpochCommitPath, "utf8"));
+assert.equal(epochFixture.live_execution_performed, false);
+assert.deepEqual(epochFixture.policy, fleetPolicy);
+const epochResponse = epochFixture.http_response;
+const epochTrust = epochFixture.coordinator_trust;
+const epochKey = seedKey(43);
+assert.equal(publicBytes(epochKey).toString("hex"), epochTrust.coordinator_public_key_hex);
+const epochAuthorizationDomain = "franken-node/fleet-epoch-authorization-signature/v1\0";
+const epochCommitDomain = "franken-node/fleet-epoch-commit-signature/v1\0";
+function resignEpoch(value, privateKey = epochKey) {
+  const proof = value.commit_proof;
+  proof.statement.evidence_certificate_sha256 = hash(fleetPayload(
+    "franken-node/fleet-epoch-quiescence-manifest/v1\0", [value.evidence, value.certificate]));
+  for (const field of ["pre_epoch", "committed_epoch", "transition_id", "trace_id"]) {
+    proof.statement[field] = value.certificate[field];
+  }
+  proof.authorization_signature_hex = sign(null, fleetPayload(epochAuthorizationDomain, proof.statement), privateKey).toString("hex");
+  proof.commit_signature_hex = sign(null, fleetPayload(epochCommitDomain, proof.statement), privateKey).toString("hex");
+}
+const epochEncodingControl = clone(epochResponse);
+resignEpoch(epochEncodingControl);
+assert.deepEqual(epochEncodingControl, epochResponse, "coordinator domain and canonical encodings must agree");
+assert.equal(epochResponse.commit_proof.statement.evidence_certificate_sha256, epochFixture.expected.manifest_sha256);
+assert.equal(hash(Buffer.from(canonical(epochResponse.commit_proof.statement))), epochFixture.expected.statement_sha256);
+function addEpoch(name, value, expected = "verified", policy = fleetPolicy, trust = epochTrust, compactPolicy = false, rawPolicy) {
+  const bytes = Buffer.from(typeof value === "string" ? value : canonical(value));
+  // Whitespace changes the retained input commitment without rounding u64s.
+  const policyBytes = Buffer.from(rawPolicy ?? canonical(policy) + (compactPolicy ? "" : "\n"));
+  const policyPath = `${name}.policy.json`;
+  writeFileSync(join(dirname(output), policyPath), policyBytes);
+  const options = { anchor: null, fleet_policy_path: policyPath,
+    coordinator_id: trust.coordinator_id, coordinator_key_hex: trust.coordinator_public_key_hex };
+  if (expected === "verified") {
+    const total = (field) => value.evidence.nodes.reduce((sum, node) => sum + BigInt(node.native_session_drain[field]), 0n).toString();
+    const statement = value.commit_proof.statement;
+    options.epoch_facts = {
+      schema_version: "franken-verifier/fleet-epoch-commit/v1",
+      evidence_sha256: hash(bytes), trust_policy_sha256: hash(Buffer.from(canonical(policy))),
+      trusted_policy_input_sha256: hash(policyBytes), evaluation_time: policy.evaluation_time,
+      observed_at: value.evidence.observed_at, participant_count: policy.participants.length,
+      admitted_sessions: total("admitted_sessions"), terminal_sessions: total("terminal_sessions"),
+      supervisor_signatures_verified: true, expected_population_complete: true,
+      expected_action_context_matched: true, epoch_commit_authenticated: true,
+      current_quiescence_proven: false, coordinator_id: trust.coordinator_id,
+      coordinator_key_id: `ed25519:${trust.coordinator_public_key_hex}`,
+      committed_epoch: BigInt(statement.committed_epoch).toString(),
+      transition_id: statement.transition_id, statement_sha256: hash(Buffer.from(canonical(statement))),
+    };
+  }
+  add(name, "fleet-epoch-commit", bytes, expected, options);
+}
+addEpoch("epoch_independent_http_commit", epochResponse);
+addEpoch("epoch_same_policy_different_raw_bytes", epochResponse, "verified", fleetPolicy, epochTrust, true);
+addFleet("fleet_signed_commit_does_not_upgrade_observation_api", epochResponse);
+const epochCli = { ...clone(fleetCli), schema_version: "franken-node/fleet-quiescence-cli/v2",
+  commit_proof: clone(epochResponse.commit_proof) };
+addEpoch("epoch_independent_cli_commit", epochCli);
+addEpoch("epoch_durable_export_commit", { ...clone(epochCli), command: "fleet.export-epoch" });
+addEpoch("epoch_legacy_http_cannot_upgrade", fleetResponse, "FLEET_EPOCH_PROOF_MISSING");
+addEpoch("epoch_legacy_cli_cannot_upgrade", fleetCli, "FLEET_EPOCH_PROOF_MISSING");
+addEpoch("epoch_wrong_enrolled_coordinator", epochResponse, "FLEET_COORDINATOR_UNTRUSTED", fleetPolicy,
+  { ...epochTrust, coordinator_id: "coordinator-other" });
+addEpoch("epoch_wrong_enrolled_key", epochResponse, "FLEET_COORDINATOR_UNTRUSTED", fleetPolicy,
+  { ...epochTrust, coordinator_public_key_hex: foreign });
+addEpoch("epoch_weak_coordinator_key", epochResponse, "FLEET_COORDINATOR_TRUST_INVALID", fleetPolicy,
+  { ...epochTrust, coordinator_public_key_hex: "00".repeat(32) });
+for (const [name, mutate, expected] of [
+  ["epoch_missing_proof", (value) => { delete value.commit_proof; }, "FLEET_EPOCH_PROOF_MISSING"],
+  ["epoch_null_proof", (value) => { value.commit_proof = null; }, "FLEET_EPOCH_PROOF_INVALID"],
+  ["epoch_authorization_without_commit", (value) => { delete value.commit_proof.commit_signature_hex; }, "FLEET_EPOCH_PROOF_INVALID"],
+  ["epoch_commit_without_authorization", (value) => { delete value.commit_proof.authorization_signature_hex; }, "FLEET_EPOCH_PROOF_INVALID"],
+  ["epoch_prepare_signature_is_not_commit", (value) => { value.commit_proof.commit_signature_hex = value.commit_proof.authorization_signature_hex; }, "FLEET_EPOCH_SIGNATURE_INVALID"],
+  ["epoch_commit_signature_is_not_prepare", (value) => { value.commit_proof.authorization_signature_hex = value.commit_proof.commit_signature_hex; }, "FLEET_EPOCH_SIGNATURE_INVALID"],
+  ["epoch_invalid_commit_signature", (value) => { value.commit_proof.commit_signature_hex = "00".repeat(64); }, "FLEET_EPOCH_SIGNATURE_INVALID"],
+  ["epoch_invalid_authorization_signature", (value) => { value.commit_proof.authorization_signature_hex = "00".repeat(64); }, "FLEET_EPOCH_SIGNATURE_INVALID"],
+  ["epoch_truncated_commit_signature", (value) => { value.commit_proof.commit_signature_hex = "ab".repeat(63); }, "FLEET_EPOCH_PROOF_INVALID"],
+  ["epoch_uppercase_commit_signature", (value) => { value.commit_proof.commit_signature_hex = value.commit_proof.commit_signature_hex.toUpperCase(); }, "FLEET_EPOCH_PROOF_INVALID"],
+  ["epoch_unknown_proof_claim", (value) => { value.commit_proof.current_quiescence_proven = true; }, "FLEET_EPOCH_PROOF_INVALID"],
+  ["epoch_unknown_statement_claim", (value) => { value.commit_proof.statement.execution_authorized = true; }, "FLEET_EPOCH_PROOF_INVALID"],
+  ["epoch_wrong_proof_schema", (value) => { value.commit_proof.schema_version += "/other"; }, "FLEET_EPOCH_PROOF_INVALID"],
+  ["epoch_changed_manifest", (value) => { value.commit_proof.statement.evidence_certificate_sha256 = "99".repeat(32); }, "FLEET_EPOCH_PROOF_INVALID"],
+  ["epoch_changed_epoch", (value) => { value.commit_proof.statement.committed_epoch += 1; }, "FLEET_EPOCH_PROOF_INVALID"],
+  ["epoch_changed_transition", (value) => { value.commit_proof.statement.transition_id = "other-transition"; }, "FLEET_EPOCH_PROOF_INVALID"],
+  ["epoch_changed_trace", (value) => { value.commit_proof.statement.trace_id = "other-trace"; }, "FLEET_EPOCH_PROOF_INVALID"],
+  ["epoch_changed_evidence", (value) => { value.evidence.nodes[0].reason = "another observation"; }, "FLEET_EPOCH_PROOF_INVALID"],
+  ["epoch_reformatted_timestamp_without_signature", (value) => { value.evidence.observed_at = "2026-11-23T01:00:05+00:00"; }, "FLEET_EPOCH_PROOF_INVALID"],
+]) {
+  const value = clone(epochResponse);
+  mutate(value);
+  addEpoch(name, value, expected);
+}
+const epochForeignSigner = clone(epochResponse);
+const epochForeignKey = seedKey(44);
+epochForeignSigner.commit_proof.statement.coordinator_key_id = `ed25519:${publicBytes(epochForeignKey).toString("hex")}`;
+resignEpoch(epochForeignSigner, epochForeignKey);
+addEpoch("epoch_self_selected_coordinator_key", epochForeignSigner, "FLEET_COORDINATOR_UNTRUSTED");
+const epochDisguisedSigner = clone(epochResponse);
+resignEpoch(epochDisguisedSigner, epochForeignKey);
+addEpoch("epoch_foreign_signature_disguised_as_enrolled", epochDisguisedSigner, "FLEET_EPOCH_SIGNATURE_INVALID");
+for (const [name, mutate, expected] of [
+  ["epoch_signed_missing_supervisor", (value) => { value.evidence.nodes.pop(); value.certificate.participants.pop(); }, "FLEET_POPULATION_MISMATCH"],
+  ["epoch_coordinator_cannot_replace_supervisor_signature", (value) => { value.evidence.nodes[0].native_session_drain.supervisor_attestation.signature_hex = "00".repeat(64); }, "FLEET_SIGNATURE_INVALID"],
+  ["epoch_signed_unreviewed_actions", (value) => { value.certificate.action_log_checkpoint.actions_sha256 = "99".repeat(32); }, "FLEET_CONTEXT_MISMATCH"],
+  ["epoch_signed_wrong_trace", (value) => { value.certificate.trace_id = "other-trace"; }, "FLEET_CONTEXT_MISMATCH"],
+  ["epoch_signed_skipped_epoch", (value) => { value.certificate.committed_epoch += 1; }, "FLEET_CONTEXT_MISMATCH"],
+]) {
+  const value = clone(epochResponse);
+  mutate(value);
+  resignEpoch(value);
+  addEpoch(name, value, expected);
+}
+addEpoch("epoch_commit_does_not_refresh_observations", epochResponse, "FLEET_OBSERVATION_STALE", fleetExpiredPolicy);
+const epochMaximum = clone(epochResponse);
+const epochMaximumPolicy = clone(fleetPolicy);
+epochMaximumPolicy.expected_pre_epoch = (1n << 64n) - 2n;
+epochMaximum.certificate.pre_epoch = epochMaximumPolicy.expected_pre_epoch;
+epochMaximum.certificate.committed_epoch = (1n << 64n) - 1n;
+resignEpoch(epochMaximum);
+addEpoch("epoch_exact_u64_maximum_commit", epochMaximum, "verified", epochMaximumPolicy);
+const escapedEpochPolicy = canonical(epochMaximumPolicy).replace('"expected_pre_epoch":', '"\\u0065xpected_pre_epoch":');
+assert.notEqual(escapedEpochPolicy, canonical(epochMaximumPolicy));
+addEpoch("epoch_exact_u64_escaped_policy_key", epochMaximum, "verified", epochMaximumPolicy, epochTrust, false, escapedEpochPolicy);
+const epochDecoyPolicy = clone(fleetPolicy);
+epochDecoyPolicy.expected_trace_id = 'trace with a quoted "expected_pre_epoch":99999999999999999999 decoy';
+const epochDecoy = clone(epochResponse);
+epochDecoy.certificate.trace_id = epochDecoyPolicy.expected_trace_id;
+resignEpoch(epochDecoy);
+addEpoch("epoch_policy_string_cannot_supply_epoch", epochDecoy, "verified", epochDecoyPolicy);
+const duplicateEpochPolicy = canonical(fleetPolicy).replace('"expected_pre_epoch":7', '"expected_pre_epoch":7,"\\u0065xpected_pre_epoch":8');
+assert.notEqual(duplicateEpochPolicy, canonical(fleetPolicy));
+addEpoch("epoch_escaped_duplicate_policy_epoch", epochResponse, "FLEET_JSON_INVALID", fleetPolicy, epochTrust, false, duplicateEpochPolicy);
+const missingEpochPolicy = clone(epochDecoyPolicy);
+delete missingEpochPolicy.expected_pre_epoch;
+addEpoch("epoch_missing_policy_epoch_with_string_decoy", epochResponse, "FLEET_POLICY_INVALID", missingEpochPolicy);
+const epochMaximumCounts = clone(epochResponse);
+fleetCounts(epochMaximumCounts, 0, (1n << 64n) - 4n);
+resignEpoch(epochMaximumCounts);
+addEpoch("epoch_exact_u64_maximum_session_count", epochMaximumCounts);
+const epochOverflow = clone(epochResponse);
+fleetCounts(epochOverflow, 0, (1n << 64n) - 1n);
+resignEpoch(epochOverflow);
+addEpoch("epoch_signed_session_count_overflow", epochOverflow, "FLEET_COUNT_OVERFLOW");
+const epochDuplicate = canonical(epochResponse).replace('"committed_epoch":8', '"committed_epoch":8,"committed_epoch":9');
+assert.notEqual(epochDuplicate, canonical(epochResponse));
+addEpoch("epoch_duplicate_committed_epoch", epochDuplicate, "FLEET_JSON_INVALID");
 
 writeFileSync(output, JSON.stringify(cases));
 console.log(JSON.stringify({ vectors: cases.length, incident_sha256: hash(incidentBytes), capsule_expected_hash: capsule.manifest.expected_output_hash, sdk_integrity: sdk.integrity_hash }));

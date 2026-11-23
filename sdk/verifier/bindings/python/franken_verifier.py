@@ -32,7 +32,7 @@ MAX_RESPONSE_BYTES = 64 * 1024 + 1
 EvidenceFormat = Literal[
     "incident-bundle", "native-session-forensics", "capsule", "signed-bundle", "signed-session", "resolution-receipt",
     "publisher-source", "publisher-source-trust", "counterfactual-receipt", "ltv-evidence",
-    "fleet-quiescence-observations",
+    "fleet-quiescence-observations", "fleet-epoch-commit",
 ]
 _SCOPES = {
     "incident-bundle": "authenticated_recorded_incident",
@@ -46,6 +46,7 @@ _SCOPES = {
     "counterfactual-receipt": "authenticated_counterfactual_receipt",
     "ltv-evidence": "authenticated_ltv_anteriority",
     "fleet-quiescence-observations": "authenticated_fleet_supervisor_observations",
+    "fleet-epoch-commit": "authenticated_fleet_epoch_commit",
 }
 
 
@@ -60,7 +61,7 @@ class Verification(TypedDict):
                    "authenticated_resolution_decision", "authenticated_publisher_source_content",
                    "authenticated_publisher_source_trust",
                    "authenticated_counterfactual_receipt", "authenticated_ltv_anteriority",
-                   "authenticated_fleet_supervisor_observations"]
+                   "authenticated_fleet_supervisor_observations", "authenticated_fleet_epoch_commit"]
     artifact_sha256: str
     facts: dict[str, Any]
 
@@ -94,6 +95,30 @@ class FleetQuiescenceFacts(TypedDict):
     expected_action_context_matched: Literal[True]
     epoch_commit_authenticated: Literal[False]
     current_quiescence_proven: Literal[False]
+
+
+class FleetEpochCommitFacts(TypedDict):
+    """Authenticated historical coordinator commit and enrolled observations."""
+
+    schema_version: Literal["franken-verifier/fleet-epoch-commit/v1"]
+    evidence_sha256: str
+    trust_policy_sha256: str
+    trusted_policy_input_sha256: str
+    evaluation_time: str
+    observed_at: str
+    participant_count: int
+    admitted_sessions: str
+    terminal_sessions: str
+    supervisor_signatures_verified: Literal[True]
+    expected_population_complete: Literal[True]
+    expected_action_context_matched: Literal[True]
+    epoch_commit_authenticated: Literal[True]
+    current_quiescence_proven: Literal[False]
+    coordinator_id: str
+    coordinator_key_id: str
+    committed_epoch: str
+    transition_id: str
+    statement_sha256: str
 
 
 class RunOriginMetadata(TypedDict):
@@ -754,7 +779,10 @@ def _read_fleet_policy(path: Any) -> tuple[str, bytes, dict[str, Any]]:
             raw = source.read(MAX_FLEET_QUIESCENCE_POLICY_BYTES + 1)
         if not raw or len(raw) > MAX_FLEET_QUIESCENCE_POLICY_BYTES:
             raise ValueError("policy exceeds its byte bound")
-        policy = json.loads(raw.decode("utf-8"), object_pairs_hook=_object)
+        try:
+            policy = json.loads(raw.decode("utf-8"), object_pairs_hook=_object)
+        except (UnicodeError, ValueError, RecursionError) as error:
+            raise VerifierError("FLEET_JSON_INVALID", "trusted fleet policy contains invalid or ambiguous JSON") from error
         if not isinstance(policy, dict):
             raise ValueError("policy is not an object")
         return filename, raw, policy
@@ -762,18 +790,34 @@ def _read_fleet_policy(path: Any) -> tuple[str, bytes, dict[str, Any]]:
         raise VerifierError("FLEET_POLICY_INVALID", "cannot read a bounded trusted fleet policy") from error
 
 
-def _fleet_facts_valid(facts: Any, raw_policy: bytes, policy: dict[str, Any], data: bytes) -> bool:
+def _fleet_facts_valid(facts: Any, raw_policy: bytes, policy: dict[str, Any], data: bytes,
+                      coordinator: tuple[str, str] | None = None) -> bool:
     fields = {"schema_version", "evidence_sha256", "trust_policy_sha256", "trusted_policy_input_sha256",
               "evaluation_time", "observed_at", "participant_count", "admitted_sessions", "terminal_sessions",
               "supervisor_signatures_verified", "expected_population_complete", "expected_action_context_matched",
               "epoch_commit_authenticated", "current_quiescence_proven"}
+    if coordinator is not None:
+        fields.update({"coordinator_id", "coordinator_key_id", "committed_epoch", "transition_id", "statement_sha256"})
     if not isinstance(facts, dict) or set(facts) != fields:
         return False
+    if coordinator is not None:
+        pre_epoch = policy.get("expected_pre_epoch")
+        if (facts["coordinator_id"] != coordinator[0]
+                or facts["coordinator_key_id"] != "ed25519:" + coordinator[1]
+                or not _decimal_limit(facts["committed_epoch"], 2**64 - 1)
+                or type(pre_epoch) is not int or not 0 <= pre_epoch < 2**64 - 1
+                or int(facts["committed_epoch"]) != pre_epoch + 1
+                or not _bounded_text(facts["transition_id"])
+                or re.search(r"[\x00-\x1f\x7f-\x9f]", facts["transition_id"]) is not None
+                or not isinstance(facts["statement_sha256"], str)
+                or re.fullmatch(r"[0-9a-f]{64}", facts["statement_sha256"]) is None):
+            return False
     evaluated, observed = _instant_ns(facts["evaluation_time"]), _instant_ns(facts["observed_at"])
     max_age = policy.get("max_observation_age_secs")
     participants = policy.get("participants")
     return (
-        facts["schema_version"] == "franken-verifier/fleet-quiescence-observations/v1"
+        facts["schema_version"] == ("franken-verifier/fleet-epoch-commit/v1" if coordinator is not None
+                                    else "franken-verifier/fleet-quiescence-observations/v1")
         and facts["evidence_sha256"] == hashlib.sha256(data).hexdigest()
         and facts["trusted_policy_input_sha256"] == hashlib.sha256(raw_policy).hexdigest()
         and isinstance(facts["trust_policy_sha256"], str)
@@ -791,7 +835,7 @@ def _fleet_facts_valid(facts: Any, raw_policy: bytes, policy: dict[str, Any], da
         and facts["supervisor_signatures_verified"] is True
         and facts["expected_population_complete"] is True
         and facts["expected_action_context_matched"] is True
-        and facts["epoch_commit_authenticated"] is False
+        and facts["epoch_commit_authenticated"] is (coordinator is not None)
         and facts["current_quiescence_proven"] is False
     )
 
@@ -929,6 +973,8 @@ def verify_artifact(
     verifier: str | os.PathLike[str],
     format: EvidenceFormat = "incident-bundle",
     trusted_fleet_policy: str | os.PathLike[str] | None = None,
+    trusted_coordinator_id: str | None = None,
+    trusted_coordinator_public_key_hex: str | None = None,
     trusted_run_public_key_hex: str | None = None,
     trusted_runtime_public_key_hex: str | None = None,
     trusted_revocation_public_key_hex: str | None = None,
@@ -973,23 +1019,37 @@ def verify_artifact(
     provisioned ``trusted_fleet_policy`` file containing the enrolled supervisor
     keys, expected action context, population, and evaluation time. Their signed
     local observations do not authenticate an epoch commit or present quiescence.
+    ``fleet-epoch-commit`` additionally requires ``trusted_coordinator_id`` and
+    ``trusted_coordinator_public_key_hex`` from independent enrollment. It
+    authenticates the retained commit and local observations at the policy's
+    evaluation time, without establishing current quiescence or a full history.
     """
     if not isinstance(data, bytes):
         raise VerifierError("INPUT_INVALID", "data must be the original bytes")
     if not isinstance(format, str) or format not in _SCOPES:
         raise VerifierError("UNSUPPORTED_FORMAT", "unsupported evidence format")
     input_limit = (MAX_NATIVE_SESSION_INPUT_BYTES if format == "native-session-forensics" else
-                   MAX_FLEET_QUIESCENCE_INPUT_BYTES if format == "fleet-quiescence-observations" else MAX_INPUT_BYTES)
+                   MAX_FLEET_QUIESCENCE_INPUT_BYTES if format in ("fleet-quiescence-observations", "fleet-epoch-commit") else MAX_INPUT_BYTES)
     if len(data) > input_limit:
         raise VerifierError("INPUT_TOO_LARGE", f"evidence exceeds {input_limit // (1024 * 1024)} MiB")
     fleet_policy = None
-    if format == "fleet-quiescence-observations":
+    coordinator = None
+    if format == "fleet-epoch-commit":
+        if (not isinstance(trusted_coordinator_id, str)
+                or re.fullmatch(r"[a-zA-Z0-9._-]{1,128}", trusted_coordinator_id) is None
+                or trusted_coordinator_id == "." or ".." in trusted_coordinator_id
+                or not _hex(trusted_coordinator_public_key_hex, 64)):
+            raise VerifierError("FLEET_COORDINATOR_TRUST_INVALID", "an independently enrolled coordinator ID and public key are required")
+        coordinator = (trusted_coordinator_id, trusted_coordinator_public_key_hex.lower())
+    elif trusted_coordinator_id is not None or trusted_coordinator_public_key_hex is not None:
+        raise VerifierError("INPUT_INVALID", "coordinator trust applies only to fleet-epoch-commit")
+    if format in ("fleet-quiescence-observations", "fleet-epoch-commit"):
         if trusted_public_key_hex is not None or trusted_fleet_policy is None:
-            raise VerifierError("FLEET_POLICY_INVALID", "fleet observations require a separate enrolled policy and no single-key anchor")
+            raise VerifierError("FLEET_POLICY_INVALID", "fleet verification requires a separate enrolled policy and no single-key anchor")
         fleet_policy = _read_fleet_policy(trusted_fleet_policy)
     else:
         if trusted_fleet_policy is not None:
-            raise VerifierError("INPUT_INVALID", "fleet policy applies only to fleet-quiescence-observations")
+            raise VerifierError("INPUT_INVALID", "fleet policy applies only to fleet verification formats")
         if not _hex(trusted_public_key_hex, 64):
             raise VerifierError("ANCHOR_INVALID", "expected a 32-byte hexadecimal public key")
     if trusted_run_public_key_hex is not None:
@@ -1042,6 +1102,8 @@ def verify_artifact(
     args = [executable, "verify", "--format", format]
     if fleet_policy is not None:
         args.extend(["--trusted-fleet-policy", fleet_policy[0]])
+        if coordinator is not None:
+            args.extend(["--trusted-coordinator-id", coordinator[0], "--trusted-coordinator-key-hex", coordinator[1]])
     else:
         args.extend(["--trusted-key-hex", anchor])
     if run_anchor is not None:
@@ -1088,7 +1150,7 @@ def verify_artifact(
             or set(result) != {"schema_version", "verdict", "format", "scope", "artifact_sha256", "facts"}
             or result.get("format") != format or result.get("scope") != scope
             or result.get("artifact_sha256") != hashlib.sha256(data).hexdigest()
-            or not (_fleet_facts_valid(result.get("facts"), fleet_policy[1], fleet_policy[2], data)
+            or not (_fleet_facts_valid(result.get("facts"), fleet_policy[1], fleet_policy[2], data, coordinator)
                     if fleet_policy is not None else
                     _facts_valid(result.get("facts"), format, anchor, run_anchor, runtime_anchor,
                                  revocation_anchor, provenance_anchor, evaluation_time, max_revocation_age_secs))
