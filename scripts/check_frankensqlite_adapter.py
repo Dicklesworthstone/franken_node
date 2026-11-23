@@ -153,12 +153,19 @@ REQUIRED_TESTS = [
 ]
 
 
+def safe_rel(path):
+    try:
+        return str(path.relative_to(ROOT))
+    except ValueError:
+        return str(path)
+
+
 def check_file(path, label):
     ok = path.is_file()
     return {
         "check": f"file: {label}",
         "pass": ok,
-        "detail": f"exists: {path.relative_to(ROOT)}" if ok else f"MISSING: {path}",
+        "detail": f"exists: {safe_rel(path)}" if ok else f"MISSING: {path}",
     }
 
 
@@ -180,7 +187,7 @@ def check_content(path, patterns, category):
 
 
 def check_impl_test_count():
-    if not IMPL.exists():
+    if not IMPL.is_file():
         return _result("conformance test count", False, "impl missing")
     text = _read_text(IMPL)
     count = len(re.findall(r"#\[test\]", text))
@@ -193,7 +200,7 @@ def check_impl_test_count():
 
 
 def check_serde_derives():
-    if not IMPL.exists():
+    if not IMPL.is_file():
         return _result("Serialize/Deserialize derives", False, "impl missing")
     text = _read_text(IMPL)
     has_ser = "Serialize" in text and "Deserialize" in text
@@ -206,7 +213,7 @@ def check_serde_derives():
 
 def check_report():
     results = []
-    if not REPORT.exists():
+    if not REPORT.is_file():
         results.append(_result("report: exists", False, "MISSING"))
         return results
     results.append(_result("report: exists", True, "found"))
@@ -287,7 +294,7 @@ def check_report():
 
 def check_spec():
     results = []
-    if not SPEC.exists():
+    if not SPEC.is_file():
         results.append(_result("spec doc: exists", False, "MISSING"))
         return results
     results.append(_result("spec doc: exists", True, "found"))
@@ -305,7 +312,7 @@ def check_spec():
 def check_persistence_domains():
     """Verify all matrix persistence domains appear in the impl."""
     results = []
-    if not IMPL.exists():
+    if not IMPL.is_file():
         for d in PERSISTENCE_DOMAINS:
             results.append(_result(f"domain: {d}", False, "impl missing"))
         return results
@@ -360,7 +367,7 @@ def run_checks():
         "section": "10.16",
         "overall_pass": failing == 0,
         "verdict": "PASS" if failing == 0 else "FAIL",
-        "test_count": check_impl_test_count()["detail"].split()[0] if IMPL.exists() else 0,
+        "test_count": check_impl_test_count()["detail"].split()[0] if IMPL.is_file() else 0,
         "summary": {"passing": passing, "failing": failing, "total": passing + failing},
         "checks": checks,
     }

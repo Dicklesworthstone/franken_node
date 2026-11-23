@@ -158,12 +158,19 @@ REQUIRED_CONFORMANCE_TESTS = [
 ]
 
 
+def safe_rel(path):
+    try:
+        return str(path.relative_to(ROOT))
+    except ValueError:
+        return str(path)
+
+
 def check_file(path, label):
     ok = path.is_file()
     return {
         "check": f"file: {label}",
         "pass": ok,
-        "detail": f"exists: {path.relative_to(ROOT)}" if ok else f"MISSING: {path}",
+        "detail": f"exists: {safe_rel(path)}" if ok else f"MISSING: {path}",
     }
 
 
@@ -185,7 +192,7 @@ def check_content(path, patterns, category):
 
 
 def check_module_registered():
-    if not MOD_RS.exists():
+    if not MOD_RS.is_file():
         return {"check": "module registered in mod.rs", "pass": False, "detail": "mod.rs missing"}
     text = MOD_RS.read_text()
     found = "pub mod perf_budget_guard;" in text
@@ -197,7 +204,7 @@ def check_module_registered():
 
 
 def check_impl_test_count():
-    if not IMPL.exists():
+    if not IMPL.is_file():
         return {"check": "impl unit test count", "pass": False, "detail": "impl missing"}
     text = IMPL.read_text()
     count = len(re.findall(r"#\[test\]", text))
@@ -210,7 +217,7 @@ def check_impl_test_count():
 
 
 def check_conformance_test_count():
-    if not CONFORMANCE_TEST.exists():
+    if not CONFORMANCE_TEST.is_file():
         return {"check": "conformance test count", "pass": False, "detail": "test file missing"}
     text = CONFORMANCE_TEST.read_text()
     count = len(re.findall(r"#\[test\]", text))
@@ -223,7 +230,7 @@ def check_conformance_test_count():
 
 
 def check_serde_derives():
-    if not IMPL.exists():
+    if not IMPL.is_file():
         return {"check": "Serialize/Deserialize derives", "pass": False, "detail": "impl missing"}
     text = IMPL.read_text()
     has_ser = "Serialize" in text and "Deserialize" in text
@@ -236,7 +243,7 @@ def check_serde_derives():
 
 def check_overhead_csv():
     results = []
-    if not OVERHEAD_CSV.exists():
+    if not OVERHEAD_CSV.is_file():
         results.append({"check": "overhead CSV: exists", "pass": False, "detail": "MISSING"})
         return results
     results.append({"check": "overhead CSV: exists", "pass": True, "detail": "found"})
@@ -276,7 +283,7 @@ def check_overhead_csv():
 
 def check_spec_content():
     results = []
-    if not SPEC.exists():
+    if not SPEC.is_file():
         results.append({"check": "spec: exists", "pass": False, "detail": "spec missing"})
         return results
     text = SPEC.read_text()
@@ -349,7 +356,7 @@ def run_checks():
         "section": "10.15",
         "overall_pass": failing == 0,
         "verdict": "PASS" if failing == 0 else "FAIL",
-        "test_count": check_impl_test_count()["detail"].split()[0] if IMPL.exists() else 0,
+        "test_count": check_impl_test_count()["detail"].split()[0] if IMPL.is_file() else 0,
         "summary": {"passing": passing, "failing": failing, "total": passing + failing},
         "checks": checks,
     }

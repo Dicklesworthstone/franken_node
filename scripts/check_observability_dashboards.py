@@ -66,18 +66,25 @@ DOC_KEYWORDS = [
 ]
 
 
+def safe_rel(path):
+    try:
+        return str(path.relative_to(ROOT))
+    except ValueError:
+        return str(path)
+
+
 def check_file(path, label):
     ok = path.is_file()
     return {
         "check": f"file: {label}",
         "pass": ok,
-        "detail": f"exists: {path.relative_to(ROOT)}" if ok else f"MISSING: {path}",
+        "detail": f"exists: {safe_rel(path)}" if ok else f"MISSING: {path}",
     }
 
 
 def check_doc_content():
     results = []
-    if not DOC.exists():
+    if not DOC.is_file():
         for kw in DOC_KEYWORDS:
             results.append({"check": f"doc: {kw}", "pass": False, "detail": "doc missing"})
         return results
@@ -110,7 +117,7 @@ def check_doc_content():
 
 def check_dashboard_snapshot():
     results = []
-    if not SNAPSHOT.exists():
+    if not SNAPSHOT.is_file():
         results.append({"check": "snapshot: exists", "pass": False, "detail": "MISSING"})
         return results
 
@@ -181,7 +188,7 @@ def check_dashboard_snapshot():
 
 def check_alert_policy_map():
     results = []
-    if not ALERT_MAP.exists():
+    if not ALERT_MAP.is_file():
         results.append({"check": "alert map: exists", "pass": False, "detail": "MISSING"})
         return results
 

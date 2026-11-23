@@ -1,6 +1,6 @@
 # Module Disposition Table (`bd-reality-20260923-26n9r.14`)
 
-This document records the authoritative product disposition (`WIRE`, `GATE`, or `RETAIN-NON-AUTHORITY`) for trust, control-plane, runtime, replay, migration, and frontier modules under `crates/franken-node/src/`, enforced on every push by `scripts/check_reachability.py` and `scripts/reachability_ceiling.json` (`island_line_ceiling = 12237`).
+This document records the authoritative product disposition (`WIRE`, `GATE`, or `RETAIN-NON-AUTHORITY`) for trust, control-plane, runtime, replay, migration, and frontier modules under `crates/franken-node/src/`, enforced on every push by `scripts/check_reachability.py` and `scripts/reachability_ceiling.json` (`island_line_ceiling = 7826`, 9 default-compiled unreachable modules after fixing module-tree `#[cfg(...)]` propagation and disallowing opt-in/`#[cfg(test)]` files from rescuing default-compiled islands).
 
 Per `AGENTS.md` Rule 1, zero files are deleted without explicit written owner authorization.
 
@@ -17,10 +17,10 @@ Per `AGENTS.md` Rule 1, zero files are deleted without explicit written owner au
 | `security::copilot_engine` (IBD-8) + `VilleMartingaleMonitor` | `franken-node doctor expected-loss-actions` | `vef_and_ops_cli_e2e` |
 | `tools::reputation_graph_apis` (IBD-9), `supply_chain::trust_graph` | `franken-node trust-card reputation`, `franken-node trust graph` | `trust_cli_e2e` |
 | `security::zk_attestation` (`zka-ristretto255-v3.0`) | `franken-node trust zk-attest`, `franken-node verify zk-attestation` | `zk_attestation_e2e` |
-| `security::staking_governance`, `security::intent_firewall`, `supply_chain::artifact_Pipeline` | `franken-node trust governance-audit` | `vef_and_ops_cli_e2e` |
+| `security::staking_governance`, `security::intent_firewall`, `security::challenge_flow` | `franken-node trust governance-audit` | `vef_and_ops_cli_e2e` |
 | `runtime::optimization_governor` (`VilleMartingaleMonitor`), `runtime::speculation::proof_executor`, `security::blake3_adapter` | `franken-node runtime supervision-audit` | `vef_and_ops_cli_e2e` |
 | `runtime::region_tree`, `connector::cancel_injection_gate`, `connector::saga` | `franken-node runtime region-quiescence-audit` | `vef_and_ops_cli_e2e` |
-| `runtime::anti_entropy`, `control_plane::fork_detection`, `security::revocation_freshness_gate`, `security::sybil_defense` | `franken-node trust fabric-convergence-audit` | `vef_and_ops_cli_e2e` |
+| `runtime::anti_entropy`, `control_plane::fork_detection`, `security::revocation_freshness_gate` | `franken-node trust fabric-convergence-audit` | `vef_and_ops_cli_e2e` |
 | `extensions::artifact_contract` (`MacaroonCapabilityEnvelope`) | `franken-node registry publish`, `franken-node run --registry-artifact`, `franken-node deploy` | `extension_admission_execution_e2e` |
 
 ## 2. `GATE` — Opt-In Experimental / Feature-Scoped Surfaces (Excluded from Default Release Binary)
@@ -45,3 +45,19 @@ Per `AGENTS.md` Rule 1, zero files are deleted without explicit written owner au
 | `connector/capability_artifact.rs` | Retained for artifact-schema conformance tests only; **never** wired as an execution-authority gate (`extensions::artifact_contract` + `supply_chain::extension_registry` own live signed capability enforcement). |
 | `migration/rewrite_tree_transaction.rs` | Active inherent `impl RewriteTransaction` methods (`apply_with_trees_receipt`, `apply_with_trees_for_request`) compiled into `migration::rewrite_transaction` on Linux. |
 | `test_strategies/mod.rs`, `tools/replay_bundle_adversarial_fuzz.rs` | Shared `proptest` / fuzz generators consumed by crate integration and metamorphic suites. |
+
+## 4. Tracked Remaining Default-Compiled Library Islands (`7,826` lines across `9` modules)
+
+After strengthening `scripts/check_reachability.py` to propagate parent `#[cfg(...)]` gates and disallow opt-in/`#[cfg(test)]` modules from rescuing default-compiled files (removing 15 already-gated false positives = 10,802 lines while surfacing 8 real hidden islands = 6,391 lines), the 9 remaining default-compiled islands under the `7,826`-line ceiling are:
+
+| Module | Non-Test Lines | Current Non-Default Consumers / Status |
+|---|---|---|
+| `connector/capability_artifact.rs` | 1,435 | Intentionally `RETAIN-NON-AUTHORITY` (artifact-schema conformance tests only; never an execution-authority gate) |
+| `control_plane/audience_token.rs` | 1,410 | Consumed by opt-in `api::mcp` (`feature = "control-plane"`) |
+| `connector/bocpd.rs` | 982 | Consumed by `#[cfg(test)]` `connector::{bocpd_conformance_tests,test_bocpd_hardening}` |
+| `supply_chain/project_scanner.rs` | 767 | Consumed by opt-in `migration::rewrite_suggestion_engine` (`feature = "admin-tools"`) |
+| `security/sybil_defense.rs` | 750 | Consumed by opt-in `registry::staking_governance` (`feature = "admin-tools"`) |
+| `ops/tokio_drift_checker.rs` | 663 | Consumed by `#[cfg(test)]` `ops::ops_conformance_tests` and `ops::tests` |
+| `connector/eviction_saga.rs` | 638 | Consumed by opt-in `remote::remote_bulkhead` (`feature = "remote-ops"`) |
+| `security/vef_degraded_mode.rs` | 600 | Consumed by opt-in `connector::vef_perf_budget` (`feature = "control-plane"`) |
+| `control_plane/key_role_separation.rs` | 581 | Consumed by opt-in `api::session_auth` (`feature = "control-plane"`) |

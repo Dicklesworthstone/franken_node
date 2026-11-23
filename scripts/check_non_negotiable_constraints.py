@@ -59,18 +59,25 @@ REQUIRED_DOC_SECTIONS = [
 SEVERITIES = ["HARD", "SOFT"]
 
 
+def safe_rel(path):
+    try:
+        return str(path.relative_to(ROOT))
+    except ValueError:
+        return str(path)
+
+
 def check_file(path, label):
     ok = path.is_file()
     return {
         "check": f"file: {label}",
         "pass": ok,
-        "detail": f"exists: {path.relative_to(ROOT)}" if ok else f"MISSING: {path}",
+        "detail": f"exists: {safe_rel(path)}" if ok else f"MISSING: {path}",
     }
 
 
 def check_constraint_doc():
     results = []
-    if not CONSTRAINT_DOC.exists():
+    if not CONSTRAINT_DOC.is_file():
         results.append({"check": "constraint doc: exists", "pass": False, "detail": "MISSING"})
         return results
     text = CONSTRAINT_DOC.read_text()
@@ -149,7 +156,7 @@ def check_constraint_doc():
 
 def check_waiver_registry():
     results = []
-    if not WAIVER_REGISTRY.exists():
+    if not WAIVER_REGISTRY.is_file():
         results.append({"check": "waiver registry: exists", "pass": False, "detail": "MISSING"})
         return results
     results.append({"check": "waiver registry: exists", "pass": True, "detail": "found"})
@@ -179,7 +186,7 @@ def check_waiver_registry():
 
 def check_spec_content():
     results = []
-    if not SPEC.exists():
+    if not SPEC.is_file():
         results.append({"check": "spec: exists", "pass": False, "detail": "MISSING"})
         return results
     text = SPEC.read_text()

@@ -52,18 +52,25 @@ def _check(name: str, passed: bool, detail: str = "") -> dict:
     }
 
 
+def safe_rel(path: Path) -> str:
+    try:
+        return str(path.relative_to(ROOT))
+    except ValueError:
+        return str(path)
+
+
 def check_file_exists(path: Path, label: str) -> dict:
     exists = path.is_file()
     return _check(
         f"file: {label}",
         exists,
-        f"exists: {path.relative_to(ROOT)}" if exists else f"MISSING: {path}",
+        f"exists: {safe_rel(path)}" if exists else f"MISSING: {path}",
     )
 
 
 def check_module_types() -> list[dict]:
     checks = []
-    if not REGION_MODULE.exists():
+    if not REGION_MODULE.is_file():
         return [_check("module types", False, "module file missing")]
 
     content = REGION_MODULE.read_text(encoding="utf-8")
@@ -79,7 +86,7 @@ def check_module_types() -> list[dict]:
 
 def check_event_codes_in_module() -> list[dict]:
     checks = []
-    if not REGION_MODULE.exists():
+    if not REGION_MODULE.is_file():
         return [_check("event codes in module", False, "module file missing")]
 
     content = REGION_MODULE.read_text(encoding="utf-8")
@@ -95,7 +102,7 @@ def check_event_codes_in_module() -> list[dict]:
 
 def check_region_kinds_in_module() -> list[dict]:
     checks = []
-    if not REGION_MODULE.exists():
+    if not REGION_MODULE.is_file():
         return [_check("region kinds", False, "module file missing")]
 
     content = REGION_MODULE.read_text(encoding="utf-8")
@@ -113,7 +120,7 @@ def check_region_kinds_in_module() -> list[dict]:
 
 def check_quiescence_trace() -> list[dict]:
     checks = []
-    if not QUIESCENCE_TRACE.exists():
+    if not QUIESCENCE_TRACE.is_file():
         return [_check("quiescence trace", False, "trace file missing")]
 
     lines = QUIESCENCE_TRACE.read_text(encoding="utf-8").strip().splitlines()
@@ -150,7 +157,7 @@ def check_quiescence_trace() -> list[dict]:
 
 def check_spec_doc_sections() -> list[dict]:
     checks = []
-    if not SPEC_DOC.exists():
+    if not SPEC_DOC.is_file():
         return [_check("spec doc sections", False, "spec doc missing")]
 
     content = SPEC_DOC.read_text(encoding="utf-8")

@@ -1000,6 +1000,10 @@ fn native_net_tls_esm_and_recent_engine_semantics_match_node_or_fail_closed() {
             "net_tls.mjs",
             "--policy",
             "balanced",
+            "--runtime",
+            "franken-engine",
+            "--engine-bin",
+            franken_node_bin(),
             "--frozen-modules",
             "--console-only",
         ])

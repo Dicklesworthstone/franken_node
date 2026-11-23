@@ -15,18 +15,17 @@ false-flag live code, so the gate never blocks legitimate work):
 
   1. Enumerate every module file under `src/**` (a `foo.rs`, or a `foo/mod.rs`
      whose module name is the directory `foo`).
-  2. Parse every `(pub) mod NAME;` / `(pub) mod NAME {` declaration across the
-     tree, carrying the `#[cfg(...)]` attributes above it, to learn which
-     modules are gated behind an OPT-IN feature (anything other than the three
-     default features engine/http-client/external-commands). Opt-in-gated
-     modules are EXEMPT by construction: the feature exists to hold code that is
-     deliberately not wired into the default binary (the bead's "GATE"
-     disposition).
-  3. A module is REACHABLE when some NON-TEST file other than its own
-     file/directory references its name in a module/use/path position
-     (`mod NAME`, `use ..::NAME`, `NAME::`, `::NAME`). `#[cfg(test)]` regions
-     are blanked (brace-matched) before scanning, so a module reached only from
-     tests still counts as an island.
+  2. Parse every external `(pub) mod NAME;` declaration across the tree (ignoring
+     inline `mod NAME { ... }` blocks) and `[[bin]]` entries in `Cargo.toml`,
+     carrying `#[cfg(...)]` attributes down the Rust module tree from crate roots
+     to classify every file as default-compiled, opt-in-exempt (gated by
+     `cfg(test)`, `cfg(any())`, or a feature outside the default set in
+     `Cargo.toml`), or undeclared dead code.
+  3. A default-compiled module is REACHABLE only when some OTHER default-compiled
+     NON-TEST file outside its own subtree references its name in a path
+     position (`NAME::`, `::NAME`). `#[cfg(test)]` regions are blanked
+     (brace-matched) before scanning, and opt-in / `#[cfg(test)]` modules cannot
+     rescue default-compiled islands.
   4. A DEFAULT-compiled module that is reachable from nothing is an island; its
      non-test lines are summed. The total must stay at or below the registered
      ceiling in `scripts/reachability_ceiling.json`.
@@ -50,19 +49,30 @@ import json
 import os
 import re
 import sys
+import tomllib
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
 
 SCHEMA = "franken-node/reachability-census/v1"
 
-# The only features in the default build (crates/franken-node/Cargo.toml
-# `default = ["engine", "http-client", "external-commands"]`). A module gated by
-# ANY other feature is opt-in -> exempt (deliberately not in the default binary).
-DEFAULT_FEATURES = {"engine", "http-client", "external-commands"}
+# The features enabled in the default build (crates/franken-node/Cargo.toml
+# `default = ["engine", "http-client", "external-commands",
+#             "fleet-control-plane-server", "asupersync-transport"]`).
+# A module gated by ANY other feature is opt-in -> exempt (deliberately not in
+# the default binary).
+DEFAULT_FEATURES = {
+    "engine",
+    "http-client",
+    "external-commands",
+    "fleet-control-plane-server",
+    "asupersync-transport",
+}
 
-# `(pub) mod name;` or `(pub) mod name {`, optionally `pub(crate)`/`pub(...)`.
+# External module declarations only: `(pub) mod name;` (with optional visibility).
+# Inline `mod name { ... }` blocks never load a sibling `.rs` file in Rust and
+# must not register a file declaration.
 MOD_DECL_RE = re.compile(
-    r"^[ \t]*(?:pub(?:\([^)]*\))?[ \t]+)?mod[ \t]+(?P<name>[a-z0-9_]+)[ \t]*[;{]"
+    r"^[ \t]*(?:pub(?:\([^)]*\))?[ \t]+)?mod[ \t]+(?P<name>[a-z0-9_]+)[ \t]*;"
 )
 ATTR_RE = re.compile(r"^[ \t]*#!?\[(?P<body>.+)\][ \t]*$")
 FEATURE_RE = re.compile(r'feature[ \t]*=[ \t]*"(?P<feat>[^"]+)"')
@@ -228,19 +238,23 @@ def module_name_for(rel_path: str) -> Optional[str]:
 
 # A `cfg(test)` predicate (the built-in test flag, not a Cargo feature).
 _CFG_TEST_RE = re.compile(r"\btest\b")
+_CFG_NOT_TEST_RE = re.compile(r"\bnot\s*\(\s*test\s*\)")
+_CFG_ANY_EMPTY_RE = re.compile(r"\bany\s*\(\s*\)")
 
 
 def opt_in_feature_gated(attrs: List[str]) -> bool:
     """True if any carried `#[cfg(...)]` keeps the module OUT of the default
-    release binary: a `cfg(test)` (test-only), or a feature outside the default
-    set (engine/http-client/external-commands). A cfg naming only default
-    features, or no cfg, is not exempt."""
+    release binary: `cfg(any())` (always disabled), a `cfg(test)` (test-only),
+    or a feature outside the default set. A cfg naming only default features,
+    `cfg(not(test))`, or no cfg is not exempt."""
     for body in attrs:
         if "cfg" not in body:
             continue
+        if _CFG_ANY_EMPTY_RE.search(body):
+            return True
         feats = FEATURE_RE.findall(body)
-        # Strip the feature="..." strings before looking for a bare `test` token.
-        residual = FEATURE_RE.sub("", body)
+        # Strip feature="..." strings and `not(test)` before looking for bare `test`.
+        residual = _CFG_NOT_TEST_RE.sub("", FEATURE_RE.sub("", body))
         if _CFG_TEST_RE.search(residual):
             return True
         if feats and all(f in DEFAULT_FEATURES for f in feats):
@@ -366,57 +380,132 @@ def _resolve_mod_target(decl_dir: str, name: str, all_rels: Set[str]) -> Optiona
     return None
 
 
+def parse_cargo_bin_targets(crate_toml_path: str) -> Tuple[Set[str], Set[str]]:
+    """Return `(default_bin_rels, opt_in_bin_rels)` relative to `src/` for all
+    `[[bin]]` targets declared in `Cargo.toml`."""
+    if not os.path.isfile(crate_toml_path):
+        return set(), set()
+    try:
+        with open(crate_toml_path, "rb") as fh:
+            manifest = tomllib.load(fh)
+    except (OSError, tomllib.TOMLDecodeError):
+        return set(), set()
+    default_bins: Set[str] = set()
+    opt_in_bins: Set[str] = set()
+    for entry in manifest.get("bin", []):
+        if not isinstance(entry, dict):
+            continue
+        path = entry.get("path", "")
+        if not isinstance(path, str) or not path.startswith("src/"):
+            continue
+        rel = os.path.normpath(path[4:])
+        req = entry.get("required-features", [])
+        if req and not all(f in DEFAULT_FEATURES for f in req):
+            opt_in_bins.add(rel)
+        else:
+            default_bins.add(rel)
+    return default_bins, opt_in_bins
+
+
+def _child_mod_dir(decl_rel: str, bin_roots: Set[str]) -> str:
+    """Directory where Rust searches for child `mod NAME;` files declared by
+    `decl_rel`: sibling dir for crate roots and `mod.rs`, or `<stem>/` for
+    non-root `<stem>.rs` files."""
+    base = os.path.basename(decl_rel)
+    if base in ROOT_FILES or base == "mod.rs" or decl_rel in bin_roots:
+        return os.path.dirname(decl_rel)
+    return _subtree_of(decl_rel)
+
+
 def run_census(repo_root: str, crate_dir: str) -> Tuple[Census, Dict[str, str]]:
     src_dir = os.path.join(repo_root, crate_dir, "src")
+    crate_toml = os.path.join(repo_root, crate_dir, "Cargo.toml")
+    default_bins, opt_in_bins = parse_cargo_bin_targets(crate_toml)
+    all_bin_roots = default_bins | opt_in_bins
     abs_files = collect_src_files(src_dir)
 
     raw_by_rel: Dict[str, str] = {}
     refs_by_rel: Dict[str, Set[str]] = {}
-    decls_by_rel: Dict[str, List[Tuple[str, Optional[str], bool]]] = {}
+    prod_decls_by_rel: Dict[str, List[Tuple[str, Optional[str], bool]]] = {}
+    all_decls_by_rel: Dict[str, List[Tuple[str, Optional[str], bool]]] = {}
     for ap in abs_files:
         with open(ap, "r", encoding="utf-8", errors="replace") as fh:
             raw = fh.read()
         rel = os.path.relpath(ap, src_dir)
         raw_by_rel[rel] = raw
+        stripped = strip_test_regions(raw)
         # Path references are collected from TEST-STRIPPED text so a module used
         # only by #[cfg(test)] code still reads as an island.
-        refs_by_rel[rel] = path_referenced_idents(strip_test_regions(raw))
-        decls_by_rel[rel] = parse_declarations(raw)
+        refs_by_rel[rel] = path_referenced_idents(stripped)
+        prod_decls_by_rel[rel] = parse_declarations(stripped)
+        all_decls_by_rel[rel] = parse_declarations(raw)
 
     all_rels = set(raw_by_rel)
 
-    # Resolve every declaration to the file it compiles, learning each file's
-    # reference-name(s) (the alias it is reached by: `mod NAME` -> NAME; a
-    # `#[path="x.rs"] mod ALIAS` -> ALIAS) and whether it is opt-in gated.
-    names_for_file: Dict[str, Set[str]] = {}
-    gate_for_file: Dict[str, bool] = {}
-    for decl_rel, decls in decls_by_rel.items():
-        decl_dir = os.path.dirname(decl_rel)
-        for ref_name, path_rel, gated in decls:
-            if path_rel is not None:
-                target = os.path.normpath(os.path.join(decl_dir, path_rel))
-            else:
-                target = _resolve_mod_target(decl_dir, ref_name, all_rels)
-            if target is None or target not in all_rels:
+    def _resolve_edges(
+        decls_map: Dict[str, List[Tuple[str, Optional[str], bool]]],
+    ) -> Dict[str, List[Tuple[str, str, bool]]]:
+        edges: Dict[str, List[Tuple[str, str, bool]]] = {}
+        for decl_rel, decls in decls_map.items():
+            decl_dir = os.path.dirname(decl_rel)
+            child_dir = _child_mod_dir(decl_rel, all_bin_roots)
+            for ref_name, path_rel, gated in decls:
+                if path_rel is not None:
+                    target = os.path.normpath(os.path.join(decl_dir, path_rel))
+                else:
+                    target = _resolve_mod_target(child_dir, ref_name, all_rels)
+                    if target is None and child_dir != decl_dir:
+                        target = _resolve_mod_target(decl_dir, ref_name, all_rels)
+                if target is None or target not in all_rels:
+                    continue
+                edges.setdefault(decl_rel, []).append((target, ref_name, gated))
+        return edges
+
+    prod_edges = _resolve_edges(prod_decls_by_rel)
+    all_edges = _resolve_edges(all_decls_by_rel)
+
+    # Propagate compilation reachability faithfully through the Rust module tree:
+    # a child declared inside an opt-in parent (`#[cfg(feature = "...")] pub mod
+    # repair;`) is never compiled in default builds, and references from opt-in
+    # or `#[cfg(test)]` modules must NOT rescue default-compiled library islands.
+    default_roots = (ROOT_FILES | default_bins) & all_rels
+    opt_in_roots = (opt_in_bins - default_roots) & all_rels
+
+    default_compiled: Set[str] = set(default_roots)
+    default_names_for_file: Dict[str, Set[str]] = {}
+    queue = sorted(default_roots)
+    while queue:
+        cur = queue.pop(0)
+        for target, ref_name, gated in prod_edges.get(cur, []):
+            if gated:
                 continue
-            names_for_file.setdefault(target, set()).add(ref_name)
-            # Opt-in only if EVERY declaration of the file is gated (a single
-            # default-compiled declaration makes the file live by default).
-            gate_for_file[target] = (
-                gate_for_file.get(target, True) and gated
-                if target in gate_for_file
-                else gated
-            )
+            default_names_for_file.setdefault(target, set()).add(ref_name)
+            if target not in default_compiled:
+                default_compiled.add(target)
+                queue.append(target)
+
+    any_compiled: Set[str] = set(default_roots | opt_in_roots)
+    queue = sorted(any_compiled)
+    while queue:
+        cur = queue.pop(0)
+        for target, _ref_name, _gated in all_edges.get(cur, []):
+            if target not in any_compiled:
+                any_compiled.add(target)
+                queue.append(target)
 
     census = Census()
     for rel in sorted(raw_by_rel):
         census.scanned_files += 1
+        if rel in default_roots:
+            continue
+        if rel in opt_in_roots:
+            census.exempt_opt_in += 1
+            continue
         name = module_name_for(rel)
         if name is None:
             continue
-        ref_names = names_for_file.get(rel)
-        if not ref_names:
-            # No declaration anywhere resolves to this file -> never compiled.
+        if rel not in any_compiled:
+            # No declaration from any crate root resolves to this file -> never compiled.
             mf = ModuleFile(
                 rel_path=rel,
                 name=name,
@@ -427,31 +516,31 @@ def run_census(repo_root: str, crate_dir: str) -> Tuple[Census, Dict[str, str]]:
             census.undeclared.append(mf)
             census.undeclared_lines += mf.lines
             continue
+        if rel not in default_compiled:
+            census.exempt_opt_in += 1
+            continue
+        ref_names = default_names_for_file.get(rel, set())
         own_subtree = _subtree_of(rel)
-        # Reachable if some file OUTSIDE this module's own subtree path-references
-        # ANY of the names it is reached by.
+        # Reachable ONLY if some OTHER default-compiled non-test file outside
+        # this module's own subtree path-references ANY of its default names.
         reachable = False
-        for other_rel, ids in refs_by_rel.items():
+        for other_rel in default_compiled:
             if other_rel == rel:
                 continue
             if other_rel == own_subtree + ".rs" or other_rel.startswith(own_subtree + os.sep):
                 continue  # self-reference within the module's own subtree
-            if ids & ref_names:
+            if refs_by_rel[other_rel] & ref_names:
                 reachable = True
                 break
         if reachable:
             continue
-        opt_in = gate_for_file.get(rel, False)
         mf = ModuleFile(
             rel_path=rel,
             name=name,
             lines=non_test_line_count(raw_by_rel[rel]),
-            opt_in=opt_in,
+            opt_in=False,
             own_dir=os.path.dirname(rel),
         )
-        if opt_in:
-            census.exempt_opt_in += 1
-            continue
         census.islands.append(mf)
         census.island_lines += mf.lines
 

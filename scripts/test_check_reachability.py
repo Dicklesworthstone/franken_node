@@ -75,8 +75,12 @@ def test_opt_in_feature_gated():
     assert g.opt_in_feature_gated(['cfg(feature = "advanced-features")']) is True
     assert g.opt_in_feature_gated(['cfg(test)']) is True
     assert g.opt_in_feature_gated(['cfg(all(test, feature = "engine"))']) is True
-    # Default features are NOT opt-in.
+    assert g.opt_in_feature_gated(['cfg(any())']) is True
+    # Default features and cfg(not(test)) are NOT opt-in.
     assert g.opt_in_feature_gated(['cfg(feature = "engine")']) is False
+    assert g.opt_in_feature_gated(['cfg(feature = "fleet-control-plane-server")']) is False
+    assert g.opt_in_feature_gated(['cfg(feature = "asupersync-transport")']) is False
+    assert g.opt_in_feature_gated(['cfg(not(test))']) is False
     assert g.opt_in_feature_gated(['derive(Debug)']) is False
     assert g.opt_in_feature_gated([]) is False
 
@@ -184,6 +188,87 @@ def test_json_envelope_shape():
         g.main(["--repo-root", repo, "--crate-dir", crate, "--update-ceiling"])
         census, _ = g.run_census(repo, crate)
         assert census.island_lines == 1
+
+
+def test_opt_in_parent_propagates_and_cannot_rescue_default_island():
+    with tempfile.TemporaryDirectory() as repo:
+        crate = "crate"
+        _write(
+            repo,
+            f"{crate}/Cargo.toml",
+            '[[bin]]\nname = "default-bin"\npath = "src/bin/default_bin.rs"\n'
+            '[[bin]]\nname = "opt-bin"\npath = "src/bin/opt_bin.rs"\n'
+            'required-features = ["advanced-features"]\n',
+        )
+        _write(
+            repo,
+            f"{crate}/src/lib.rs",
+            '#[cfg(feature = "advanced-features")]\n'
+            "pub mod opt_parent;\n"
+            "pub mod default_only_used_by_opt_in;\n"
+            "pub mod default_only_used_by_test_mod;\n"
+            "pub mod used_by_default_bin;\n"
+            "#[cfg(test)]\n"
+            "mod external_test_mod;\n",
+        )
+        # Child declared inside an opt-in parent inherits opt-in exemption.
+        _write(repo, f"{crate}/src/opt_parent/mod.rs", "pub mod child;\n")
+        _write(
+            repo,
+            f"{crate}/src/opt_parent/child.rs",
+            "use crate::default_only_used_by_opt_in::secret;\n"
+            "pub fn run() { secret(); }\n",
+        )
+        # Default-compiled islands referenced ONLY by opt-in or #[cfg(test)] modules
+        # must still be caught as islands (never rescued by non-default code).
+        _write(
+            repo,
+            f"{crate}/src/default_only_used_by_opt_in.rs",
+            "pub fn secret() {}\n",
+        )
+        _write(
+            repo,
+            f"{crate}/src/default_only_used_by_test_mod.rs",
+            "pub fn helper() {}\n",
+        )
+        _write(
+            repo,
+            f"{crate}/src/external_test_mod.rs",
+            "use crate::default_only_used_by_test_mod::helper;\n"
+            "pub fn check() { helper(); }\n",
+        )
+        # Module referenced by a default [[bin]] IS genuinely reachable.
+        _write(
+            repo,
+            f"{crate}/src/used_by_default_bin.rs",
+            "pub fn metric() {}\n",
+        )
+        _write(
+            repo,
+            f"{crate}/src/bin/default_bin.rs",
+            "use crate_name::used_by_default_bin::metric;\nfn main() { metric(); }\n",
+        )
+        # Opt-in [[bin]] with an inline `mod opt_bin { ... }` must neither self-declare
+        # as a default island nor rescue default-compiled islands.
+        _write(
+            repo,
+            f"{crate}/src/bin/opt_bin.rs",
+            "#[cfg(any())]\nmod opt_bin { use crate::default_only_used_by_opt_in::secret; }\n"
+            "fn main() {}\n",
+        )
+
+        census, _ = g.run_census(repo, crate)
+        island_names = {m.name for m in census.islands}
+        assert island_names == {
+            "default_only_used_by_opt_in",
+            "default_only_used_by_test_mod",
+        }, island_names
+        assert "child" not in island_names
+        assert "opt_parent" not in island_names
+        assert "opt_bin" not in island_names
+        assert "used_by_default_bin" not in island_names
+        assert census.undeclared == []
+        assert census.exempt_opt_in == 4  # opt_parent, child, external_test_mod, opt_bin
 
 
 def _run_all() -> int:

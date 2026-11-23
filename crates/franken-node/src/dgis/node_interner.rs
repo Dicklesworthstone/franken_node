@@ -369,6 +369,45 @@ mod tests {
         );
     }
 
+    #[test]
+    fn intern_rejects_multibyte_unicode_whitespace_padding() {
+        let mut interner = NodeInterner::new();
+        for bad in [
+            "\u{00A0}pkg",
+            "pkg\u{00A0}",
+            "\u{3000}pkg",
+            "pkg\u{3000}",
+            "\u{2003}",
+        ] {
+            assert_eq!(
+                interner.intern(bad).unwrap_err(),
+                InternError::InvalidNodeId,
+                "must reject Unicode whitespace-padded id {bad:?}"
+            );
+        }
+        assert!(interner.is_empty());
+    }
+
+    #[test]
+    fn intern_prevalidated_dedups_and_enforces_capacity() {
+        let mut interner = NodeInterner::new();
+        let first = interner.intern_prevalidated("node-0").unwrap();
+        let dup = interner.intern_prevalidated("node-0").unwrap();
+        assert_eq!(first, dup);
+        for i in 1..NODE_INTERNER_MAX_NODES {
+            interner
+                .intern_prevalidated(&format!("node-{i}"))
+                .expect("under cap must succeed");
+        }
+        assert_eq!(
+            interner.intern_prevalidated("overflow").unwrap_err(),
+            InternError::CapacityExceeded {
+                max: NODE_INTERNER_MAX_NODES,
+            }
+        );
+        assert_eq!(interner.intern_prevalidated("node-0").unwrap(), first);
+    }
+
     /// Lockstep check: the interner cap matches the simulator cap.
     /// If a future change drifts them apart, the migration in
     /// bd-98xo5.5.2 will break in subtle ways (interner accepts what

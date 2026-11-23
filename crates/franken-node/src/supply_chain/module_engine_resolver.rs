@@ -7315,10 +7315,13 @@ import('node:buffer').then(
             );
         }
 
-        // ESM `import 'node:net'` and `import 'node:tls'` now capture and
-        // resolve natively as first-class `NativeBuiltinModule` records.
+        // ESM `import` for both bare (`net`/`tls`) and `node:`-prefixed
+        // (`node:net`/`node:tls`) specifiers captures, enforces the builtin
+        // capability gate, and resolves natively as `NativeBuiltinModule`.
         for (specifier, canonical, expected_builtin) in [
+            ("net", "node:net", NativeBuiltinModule::Net),
             ("node:net", "node:net", NativeBuiltinModule::Net),
+            ("tls", "node:tls", NativeBuiltinModule::Tls),
             ("node:tls", "node:tls", NativeBuiltinModule::Tls),
         ] {
             let root = tempfile::tempdir().unwrap();
@@ -7336,6 +7339,14 @@ import('node:buffer').then(
             let mut esm_req = ModuleRequest::new(specifier, ImportStyle::Import)
                 .with_compatibility_mode(CompatibilityMode::NodeCompat);
             esm_req.referrer = Some(entry.module.record.id);
+            assert_eq!(
+                resolver
+                    .resolve_shared(&esm_req, &context(), &granted())
+                    .unwrap_err()
+                    .code,
+                ResolutionErrorCode::PolicyDenied,
+                "ESM {specifier} must fail closed without RuntimeCapability::Builtin"
+            );
             let resolved = resolver
                 .resolve_shared(&esm_req, &context(), &builtin_granted)
                 .unwrap();
