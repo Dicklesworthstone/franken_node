@@ -14648,15 +14648,214 @@ fn verify_run_ledger_record(
     )
 }
 
-const OPS_INCIDENT_COVERAGE_CLI_SCHEMA_VERSION: &str = "franken-node/ops-incident-coverage-cli/v2";
+const OPS_INCIDENT_COVERAGE_CLI_SCHEMA_VERSION: &str = "franken-node/ops-incident-coverage-cli/v3";
 
-/// Empty or unauthenticated populations cannot establish a coverage target.
+/// Empty, unauthenticated or unreconciled populations cannot establish a target.
 fn incident_coverage_meets_minimum(
     replay_coverage: Option<f64>,
     minimum: f64,
     source_error_count: usize,
+    unresolved_session_count: usize,
 ) -> bool {
-    source_error_count == 0 && replay_coverage.is_some_and(|coverage| coverage >= minimum)
+    source_error_count == 0
+        && unresolved_session_count == 0
+        && replay_coverage.is_some_and(|coverage| coverage >= minimum)
+}
+
+/// A run's identity is admitted only after both the product-signed record and
+/// the original session's effect signature verify. Receipt JSON alone must not
+/// claim an admission, and a matching chain head alone is not a session join.
+#[cfg(feature = "engine")]
+struct IncidentCoverageRunSession {
+    receipt_id: String,
+    product_root_key_id: String,
+    security_epoch: u64,
+    ledger_sha256: String,
+    execution_failed: bool,
+}
+
+#[cfg(feature = "engine")]
+fn incident_coverage_run_session(
+    authenticated: &AuthenticatedRunLedgerRecord,
+) -> Result<(String, IncidentCoverageRunSession)> {
+    let capture: ops::engine_dispatcher::RuntimeEvidenceIdentityCapture =
+        serde_json::from_value(authenticated.runtime_evidence_identity_capture.clone())?;
+    let record = &authenticated.record;
+    Ok((
+        capture.session_nonce,
+        IncidentCoverageRunSession {
+            receipt_id: record.receipt_id.clone(),
+            product_root_key_id: capture.product_root_key_id,
+            security_epoch: capture
+                .evidence_verification_identity
+                .key_provenance
+                .activation_epoch
+                .as_u64(),
+            ledger_sha256: hex::encode(sha2::Sha256::digest(serde_json::to_vec(
+                &record.host_effect_ledger,
+            )?)),
+            execution_failed: record.receipt_snapshot.as_ref().is_some_and(|receipt| {
+                receipt["execution_failure"]
+                    .as_str()
+                    .is_some_and(|failure| !failure.is_empty())
+            }),
+        },
+    ))
+}
+
+/// Reconcile the protected admission population with completed run evidence.
+/// A crash can precede every project receipt/decision write, so those files
+/// cannot be the only population source. This remains a bounded inspection of
+/// retained records, not an atomic census or deletion-resistant history.
+#[cfg(feature = "engine")]
+fn reconcile_incident_coverage_sessions(
+    project_root: &Path,
+    runs: &BTreeMap<String, IncidentCoverageRunSession>,
+    observed: &mut BTreeMap<String, Option<(String, String, String)>>,
+    source_errors: &mut Vec<serde_json::Value>,
+) -> (serde_json::Value, usize) {
+    use ops::native_session_inventory::{
+        NativeSessionEffectObservation as Effects, NativeSessionOutcomeKind as Kind,
+        NativeSessionProcessObservation as Process, read_local_native_session_forensics,
+    };
+
+    let report = match read_local_native_session_forensics(Some(project_root)) {
+        Ok(report) => report,
+        Err(error) => {
+            source_errors.push(serde_json::json!({
+                "scope": "operator_protected_state",
+                "error": format!("native-session coverage inspection failed: {error:#}"),
+            }));
+            return (
+                serde_json::json!({
+                    "status": "unavailable",
+                    "replay_certified": false,
+                    "quiescence_certified": false,
+                    "historical_completeness": false,
+                }),
+                0,
+            );
+        }
+    };
+    for error in &report.source_errors {
+        source_errors.push(serde_json::json!({
+            "scope": "operator_protected_state",
+            "session_nonce": error.session_nonce,
+            "path": error.path,
+            "kind": error.kind,
+            "error": error.detail,
+        }));
+    }
+    let mut reconciled = BTreeSet::new();
+    let mut admitted_sessions = BTreeSet::new();
+    let mut unresolved = Vec::new();
+    let mut denied_sessions = 0_usize;
+    for record in &report.records {
+        let admission = &record.admission;
+        let nonce = &admission.session_nonce;
+        admitted_sessions.insert(nonce.as_str());
+        // Historical absence of control scopes is conservatively included by
+        // the forensic reader. It does not authenticate attribution to this
+        // project, or justify importing another project's incident numerator.
+        let project_attributed = report.project_root.as_ref().is_some_and(|project| {
+            admission.project_root == *project
+                || admission
+                    .control_scopes
+                    .as_ref()
+                    .is_some_and(|scopes| scopes.iter().any(|scope| scope.project_root == *project))
+        });
+        let run = runs.get(nonce);
+        let matches_run = project_attributed
+            && run.is_some_and(|run| {
+                run.product_root_key_id == admission.product_root_key_id
+                    && run.security_epoch == admission.security_epoch
+                    && record.outcome.as_ref().is_some_and(|outcome| {
+                        outcome.process == Process::WorkerReaped
+                            && outcome.kind
+                                == if run.execution_failed {
+                                    Kind::ExecutionFailed
+                                } else {
+                                    Kind::Completed
+                                }
+                            && matches!(
+                                &outcome.effects,
+                                Effects::FinalLedgerObserved { ledger_sha256, .. }
+                                    if ledger_sha256 == &run.ledger_sha256
+                            )
+                    })
+            });
+        if project_attributed
+            && let Some(Effects::FinalLedgerObserved {
+                denied_count,
+                chain_head_hash,
+                ..
+            }) = record.outcome.as_ref().map(|outcome| &outcome.effects)
+            && *denied_count > 0
+        {
+            denied_sessions = denied_sessions.saturating_add(1);
+            // Preserve the product's canonical incident identity, including
+            // when only a signed supervisor summary survived. No run binding
+            // means no captured/bundled/replayable credit. A chain-head join
+            // never resolves the distinct session obligation below.
+            observed
+                .entry(run_incident_id(chain_head_hash))
+                .or_insert(None);
+        }
+        if matches_run {
+            reconciled.insert(nonce.clone());
+        } else {
+            unresolved.push(serde_json::json!({
+                "session_nonce": nonce,
+                "status": record.status,
+                "project_attribution": if project_attributed { "authenticated" } else { "unknown_legacy_control_scope" },
+                "run_receipt_id": run.map(|run| &run.receipt_id),
+                "reason": if !project_attributed {
+                    "legacy admission does not authenticate this project's control scope"
+                } else if run.is_some() {
+                    "authenticated run and supervisor outcome do not establish the same completed session"
+                } else {
+                    "admitted session has no authenticated completed run record"
+                },
+                "observation": native_session_forensic_status(record),
+                "durable_journal": &record.durable_journal,
+                "replay_certified": false,
+            }));
+        }
+    }
+    for (nonce, run) in runs {
+        if !admitted_sessions.contains(nonce.as_str()) {
+            source_errors.push(serde_json::json!({
+                "scope": "operator_protected_state",
+                "session_nonce": nonce,
+                "receipt_id": &run.receipt_id,
+                "error": "authenticated run has no discoverable authenticated native-session admission",
+            }));
+        }
+    }
+    // Identity-only captures have no authenticated project attribution. Keep
+    // them separate, but do not allow a project filter to silently erase the
+    // unresolved population from a coverage gate.
+    let unresolved_count = unresolved
+        .len()
+        .saturating_add(report.untracked_identity_captures.len());
+    (
+        serde_json::json!({
+            "status": "inspected",
+            "scope": &report.scope,
+            "coverage": &report.coverage,
+            "store_present": report.store_present,
+            "authenticated_admissions": report.records.len(),
+            "reconciled_run_sessions": reconciled.len(),
+            "denied_effect_sessions": denied_sessions,
+            "unresolved_sessions": unresolved,
+            "untracked_identity_captures_scope": "unknown_project",
+            "untracked_identity_captures": &report.untracked_identity_captures,
+            "replay_certified": false,
+            "quiescence_certified": false,
+            "historical_completeness": false,
+        }),
+        unresolved_count,
+    )
 }
 
 /// Authenticate every retained durable decision before using it as an
@@ -14727,7 +14926,9 @@ fn handle_ops_incident_coverage(args: &cli::OpsIncidentCoverageArgs) -> Result<(
         anyhow::bail!("--min-coverage must be within 0.0..=1.0 (got {min})");
     }
     let receipts = list_all_run_receipts(&project_root)?;
-    let mut observed: BTreeMap<String, (String, String, String)> = BTreeMap::new();
+    let mut observed: BTreeMap<String, Option<(String, String, String)>> = BTreeMap::new();
+    #[cfg(feature = "engine")]
+    let mut session_runs = BTreeMap::new();
     // Only a replay payload authenticated against its original run receipt
     // can make a retained bundle eligible for native re-execution.
     let mut native_replay_payloads = BTreeMap::new();
@@ -14813,6 +15014,25 @@ fn handle_ops_incident_coverage(args: &cli::OpsIncidentCoverageArgs) -> Result<(
         }
         match load_authenticated_run_ledger_record(&project_root, &receipt) {
             Ok(authenticated) => {
+                #[cfg(feature = "engine")]
+                match incident_coverage_run_session(&authenticated) {
+                    Ok((nonce, binding)) => match session_runs.entry(nonce.clone()) {
+                        std::collections::btree_map::Entry::Vacant(entry) => {
+                            entry.insert(binding);
+                        }
+                        std::collections::btree_map::Entry::Occupied(_) => {
+                            source_errors.push(serde_json::json!({
+                                    "session_nonce": nonce,
+                                    "receipt_id": binding.receipt_id,
+                                    "error": "multiple run receipts claim the same authenticated native session",
+                                }));
+                        }
+                    },
+                    Err(error) => source_errors.push(serde_json::json!({
+                        "path": project_relative_display(&project_root, path),
+                        "error": format!("native run session binding failed: {error:#}"),
+                    })),
+                }
                 let record = authenticated.record;
                 authenticated_receipts = authenticated_receipts.saturating_add(1);
                 let ledger = &record.host_effect_ledger;
@@ -14828,11 +15048,11 @@ fn handle_ops_incident_coverage(args: &cli::OpsIncidentCoverageArgs) -> Result<(
                 if tripped_control {
                     observed.insert(
                         incident_id,
-                        (
+                        Some((
                             record.receipt_id,
                             record.receipt_hash,
                             ledger.chain_head_hash.clone(),
-                        ),
+                        )),
                     );
                 }
             }
@@ -14879,11 +15099,11 @@ fn handle_ops_incident_coverage(args: &cli::OpsIncidentCoverageArgs) -> Result<(
                             observed
                                 .entry(run_execution_incident_id(chain_head, &run.decision_id))
                                 .or_insert_with(|| {
-                                    (
+                                    Some((
                                         run.decision_id.clone(),
                                         receipt_hash.to_string(),
                                         chain_head.to_string(),
-                                    )
+                                    ))
                                 });
                         }
                         _ => {
@@ -14903,6 +15123,26 @@ fn handle_ops_incident_coverage(args: &cli::OpsIncidentCoverageArgs) -> Result<(
             }));
         }
     }
+    #[cfg(feature = "engine")]
+    let (native_session_inventory, unresolved_native_sessions) =
+        reconcile_incident_coverage_sessions(
+            &project_root,
+            &session_runs,
+            &mut observed,
+            &mut source_errors,
+        );
+    #[cfg(not(feature = "engine"))]
+    let (native_session_inventory, unresolved_native_sessions) = (
+        serde_json::json!({
+            "status": "unavailable_without_engine_feature",
+            "replay_certified": false,
+            "quiescence_certified": false,
+            "historical_completeness": false,
+        }),
+        0_usize,
+    );
+    let retained_population_complete =
+        cfg!(feature = "engine") && source_errors.is_empty() && unresolved_native_sessions == 0;
     let trusted_key_id = signing
         .ok()
         .flatten()
@@ -14921,18 +15161,25 @@ fn handle_ops_incident_coverage(args: &cli::OpsIncidentCoverageArgs) -> Result<(
     let mut unbundled = Vec::new();
     let mut replayable = Vec::new();
     let mut unreplayable = Vec::new();
-    for (incident_id, (receipt_id, receipt_hash, chain_head)) in &observed {
+    for (incident_id, run_binding) in &observed {
         let evidence_path = project_root.join(run_incident_evidence_relative_path(incident_id));
-        let expected_bundle = read_captured_incident_evidence(&evidence_path)
-            .ok()
-            .filter(|package| {
-                &package.incident_id == incident_id
-                    && package.initial_state_snapshot["run_receipt_id"] == receipt_id.as_str()
-                    && package.initial_state_snapshot["run_receipt_hash"] == receipt_hash.as_str()
-                    && package.initial_state_snapshot["host_effect_chain_head"]
-                        == chain_head.as_str()
-            })
-            .and_then(|package| generate_replay_bundle_from_evidence(&package).ok());
+        let expected_bundle =
+            run_binding
+                .as_ref()
+                .and_then(|(receipt_id, receipt_hash, chain_head)| {
+                    read_captured_incident_evidence(&evidence_path)
+                        .ok()
+                        .filter(|package| {
+                            &package.incident_id == incident_id
+                                && package.initial_state_snapshot["run_receipt_id"]
+                                    == receipt_id.as_str()
+                                && package.initial_state_snapshot["run_receipt_hash"]
+                                    == receipt_hash.as_str()
+                                && package.initial_state_snapshot["host_effect_chain_head"]
+                                    == chain_head.as_str()
+                        })
+                        .and_then(|package| generate_replay_bundle_from_evidence(&package).ok())
+                });
         let is_captured = expected_bundle.is_some();
         let is_bundled = expected_bundle.as_ref().is_some_and(|expected| {
             verified_bundles.iter().any(|bundle| {
@@ -14989,8 +15236,12 @@ fn handle_ops_incident_coverage(args: &cli::OpsIncidentCoverageArgs) -> Result<(
         "authenticated_receipts": authenticated_receipts,
         "excluded_non_native_receipts": excluded_non_native_receipts,
         "inventory_runs": inventory_runs,
-        "population_scope": "retained_durable_run_decisions_and_discoverable_run_records",
+        "population_scope": "retained_run_decisions_records_and_protected_native_sessions",
         "population_authenticated": source_errors.is_empty(),
+        "retained_population_complete": retained_population_complete,
+        "historical_completeness": false,
+        "unresolved_native_sessions": unresolved_native_sessions,
+        "native_session_inventory": native_session_inventory,
         "source_errors": source_errors,
         "high_severity_events": observed.len(),
         "captured": captured.len(),
@@ -15016,7 +15267,7 @@ fn handle_ops_incident_coverage(args: &cli::OpsIncidentCoverageArgs) -> Result<(
             )
         };
         println!(
-            "incident coverage: high_severity_events={} captured={} ({}) bundled={} ({}) native_replay_inputs={} ({}) receipts_scanned={} source_errors={}",
+            "incident coverage: high_severity_events={} captured={} ({}) bundled={} ({}) native_replay_inputs={} ({}) receipts_scanned={} source_errors={} unresolved_native_sessions={} retained_population_complete={}",
             observed.len(),
             captured.len(),
             percent(capture_coverage),
@@ -15025,8 +15276,15 @@ fn handle_ops_incident_coverage(args: &cli::OpsIncidentCoverageArgs) -> Result<(
             replayable.len(),
             percent(replay_coverage),
             receipts.len(),
-            source_errors.len()
+            source_errors.len(),
+            unresolved_native_sessions,
+            retained_population_complete,
         );
+        if unresolved_native_sessions > 0 {
+            println!(
+                "  unresolved native admissions remain outside completed-run replay evidence; inspect with `franken-node incident sessions`"
+            );
+        }
         for incident_id in &unbundled {
             println!(
                 "  bundle missing: {incident_id} (franken-node incident bundle --id {incident_id} --verify)"
@@ -15041,13 +15299,19 @@ fn handle_ops_incident_coverage(args: &cli::OpsIncidentCoverageArgs) -> Result<(
         }
     }
     if let Some(min) = args.min_coverage
-        && !incident_coverage_meets_minimum(replay_coverage, min, source_errors.len())
+        && (!retained_population_complete
+            || !incident_coverage_meets_minimum(
+                replay_coverage,
+                min,
+                source_errors.len(),
+                unresolved_native_sessions,
+            ))
     {
         if args.json {
             fail_closed_after_json();
         }
         anyhow::bail!(
-            "cannot establish --min-coverage {min}: native replay input coverage {} with {} unauthenticated source(s)",
+            "cannot establish --min-coverage {min}: native replay input coverage {} with {} unauthenticated source(s) and {unresolved_native_sessions} unresolved native session(s); retained population complete={retained_population_complete}",
             replay_coverage.map_or_else(|| "n/a".to_string(), |value| format!("{value:.3}")),
             source_errors.len()
         );

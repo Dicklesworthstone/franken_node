@@ -1248,6 +1248,28 @@ fn assert_native_interruption_retains_admitted_http_io(fault: NativeInterruption
         );
         assert!(!after.quiescence_certified && !after.replay_certified);
         assert!(!app_path.exists() && !dir.path().join("after.marker").exists());
+        let (coverage, report) = run_workspace_json(
+            dir.path(),
+            &["ops", "incident-coverage", "--min-coverage", "1", "--json"],
+        );
+        assert_ne!(coverage.exit_code, Some(0), "{report}");
+        assert_eq!(report["retained_population_complete"], false);
+        assert_eq!(report["historical_completeness"], false);
+        assert!(
+            report["native_session_inventory"]["unresolved_sessions"]
+                .as_array()
+                .expect("coverage retains supervisor-loss admissions")
+                .iter()
+                .any(|session| {
+                    session["session_nonce"] == admission.session_nonce
+                        && session["status"] == "pending_liveness_unknown"
+                        && session["replay_certified"] == false
+                        && session["durable_journal"]["indeterminate_provider_calls"] == 1
+                }),
+            "a supervisor lost before every run receipt must remain in coverage: {report}"
+        );
+        assert_eq!(report["high_severity_events"], 0);
+        assert!(report["replay_coverage"].is_null());
         return;
     }
 
@@ -3124,7 +3146,7 @@ fn a_failed_run_still_surfaces_the_denied_effect_receipt_bd_muy9u() {
     );
     assert_eq!(
         covered["schema_version"],
-        "franken-node/ops-incident-coverage-cli/v2"
+        "franken-node/ops-incident-coverage-cli/v3"
     );
     assert_eq!(covered["authenticated_receipts"], 1);
     assert_eq!(covered["inventory_runs"], 1);
@@ -3173,10 +3195,28 @@ fn a_failed_run_still_surfaces_the_denied_effect_receipt_bd_muy9u() {
 
 #[test]
 fn incident_coverage_accepts_only_native_inputs_bound_to_the_authenticated_run() {
-    let (dir, outcome) = run_app(
+    let state_home = tempfile::tempdir().expect("independent protected session population");
+    let (dir, outcome) = run_app_with_policy_and_env(
         "const http = require('http'); http.get('http://169.254.169.254/latest/meta-data/', (res) => { console.log('unexpected', res.statusCode); });\n",
+        "balanced",
         &["--capture-replay", "--json"],
+        &[("XDG_STATE_HOME", state_home.path().to_str().unwrap())],
     );
+    let invoke = |args: &[&str]| {
+        let output = Command::new(franken_node_bin())
+            .args(args)
+            .env("XDG_STATE_HOME", state_home.path())
+            .current_dir(dir.path())
+            .output()
+            .expect("inspect the original private session population");
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+            panic!(
+                "coverage operation must emit JSON: {error}; stderr={}",
+                String::from_utf8_lossy(&output.stderr)
+            )
+        });
+        (output, report)
+    };
     assert_eq!(outcome.exit_code, Some(1), "{}", outcome.stderr);
     let evidence: Value = serde_json::from_str(&outcome.stdout).expect("captured failed-run JSON");
     let capture = &evidence["dispatch"]["native_replay"];
@@ -3192,29 +3232,49 @@ fn incident_coverage_accepts_only_native_inputs_bound_to_the_authenticated_run()
     let incident_id = receipt["incident_capture"]["incident_id"]
         .as_str()
         .expect("captured security incident");
-    let (export, _) = run_workspace_json(
-        dir.path(),
-        &[
-            "incident",
-            "bundle",
-            "--id",
-            incident_id,
-            "--verify",
-            "--json",
-        ],
+    let nonce = evidence["dispatch"]["runtime_evidence_identity_capture"]["session_nonce"]
+        .as_str()
+        .expect("authenticated session identity");
+    let (export, _) = invoke(&[
+        "incident",
+        "bundle",
+        "--id",
+        incident_id,
+        "--verify",
+        "--json",
+    ]);
+    assert!(
+        export.status.success(),
+        "{}",
+        String::from_utf8_lossy(&export.stderr)
     );
-    assert_eq!(export.exit_code, Some(0), "{}", export.stderr);
 
-    let (coverage, report) = run_workspace_json(
-        dir.path(),
-        &["ops", "incident-coverage", "--min-coverage", "1", "--json"],
+    let (coverage, report) = invoke(&["ops", "incident-coverage", "--min-coverage", "1", "--json"]);
+    assert!(
+        coverage.status.success(),
+        "{}: {report}",
+        String::from_utf8_lossy(&coverage.stderr)
     );
-    assert_eq!(coverage.exit_code, Some(0), "{}: {report}", coverage.stderr);
     assert_eq!(
         report["schema_version"],
-        "franken-node/ops-incident-coverage-cli/v2"
+        "franken-node/ops-incident-coverage-cli/v3"
     );
     assert_eq!(report["population_authenticated"], true);
+    assert_eq!(report["retained_population_complete"], true);
+    assert_eq!(report["historical_completeness"], false);
+    assert_eq!(report["unresolved_native_sessions"], 0);
+    assert_eq!(
+        report["native_session_inventory"]["authenticated_admissions"],
+        1
+    );
+    assert_eq!(
+        report["native_session_inventory"]["reconciled_run_sessions"],
+        1
+    );
+    assert_eq!(
+        report["native_session_inventory"]["denied_effect_sessions"],
+        1
+    );
     assert_eq!(report["high_severity_events"], 1);
     assert_eq!(report["captured"], 1);
     assert_eq!(report["bundled"], 1);
@@ -3229,17 +3289,51 @@ fn incident_coverage_accepts_only_native_inputs_bound_to_the_authenticated_run()
     assert_eq!(report["unreplayable_incidents"], serde_json::json!([]));
     assert_eq!(report["source_errors"], serde_json::json!([]));
 
+    // The original run and exported native replay inputs are still valid.
+    // An altered independent supervisor outcome must nevertheless prevent a
+    // false 100% claim; the old project-file-only census ignored this source.
+    let (inspection, sessions) = invoke(&["incident", "sessions", "--session", nonce, "--json"]);
+    assert!(inspection.status.success(), "{sessions}");
+    let outcome_path = std::path::PathBuf::from(
+        sessions["records"][0]["outcome_receipt_path"]
+            .as_str()
+            .expect("original signed supervisor outcome"),
+    );
+    let original_outcome = std::fs::read(&outcome_path).expect("retain original outcome bytes");
+    let mut altered_outcome: Value = serde_json::from_slice(&original_outcome).unwrap();
+    altered_outcome["outcome"]["effects"]["ledger_sha256"] = Value::from("00".repeat(32));
+    std::fs::write(&outcome_path, serde_json::to_vec(&altered_outcome).unwrap())
+        .expect("simulate altered supervisor evidence");
+    let (rejected, incomplete) =
+        invoke(&["ops", "incident-coverage", "--min-coverage", "1", "--json"]);
+    assert!(!rejected.status.success(), "{incomplete}");
+    assert_eq!(incomplete["replay_coverage"], 1.0);
+    assert_eq!(incomplete["population_authenticated"], false);
+    assert_eq!(incomplete["retained_population_complete"], false);
+    assert_eq!(
+        incomplete["native_session_inventory"]["reconciled_run_sessions"],
+        0
+    );
+    assert!(
+        incomplete["source_errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| {
+                error["session_nonce"] == nonce && error["scope"] == "operator_protected_state"
+            }),
+        "coverage must authenticate supervisor evidence independently: {incomplete}"
+    );
+    std::fs::write(&outcome_path, &original_outcome).expect("restore retained genuine outcome");
+
     // A still-valid exported bundle cannot replace the original run binding.
     // Retain the signed record and bundle while altering the receipt selector.
     let mut altered = receipt.clone();
     altered["native_replay_payload_sha256"] = Value::from("00".repeat(32));
     std::fs::write(&receipt_path, serde_json::to_vec_pretty(&altered).unwrap())
         .expect("alter receipt replay binding");
-    let (rejected, report) = run_workspace_json(
-        dir.path(),
-        &["ops", "incident-coverage", "--min-coverage", "1", "--json"],
-    );
-    assert_ne!(rejected.exit_code, Some(0), "{report}");
+    let (rejected, report) = invoke(&["ops", "incident-coverage", "--min-coverage", "1", "--json"]);
+    assert!(!rejected.status.success(), "{report}");
     assert_eq!(report["population_authenticated"], false);
     assert_eq!(report["high_severity_events"], 1);
     assert_eq!(report["bundled"], 1);
@@ -3251,6 +3345,39 @@ fn incident_coverage_accepts_only_native_inputs_bound_to_the_authenticated_run()
             .expect("source errors")
             .is_empty(),
         "a retained bundle must not conceal a broken original run binding"
+    );
+
+    // Losing every project run file must not also lose the denied session
+    // from the denominator. Preserve the files elsewhere to model loss from
+    // discovery without deleting evidence; the protected population survives.
+    std::fs::rename(
+        dir.path().join(".franken-node/state"),
+        dir.path().join(".franken-node/retained-state"),
+    )
+    .expect("preserve project evidence away from the discovery location");
+    let (rejected, missing) =
+        invoke(&["ops", "incident-coverage", "--min-coverage", "1", "--json"]);
+    assert!(!rejected.status.success(), "{missing}");
+    assert_eq!(missing["receipts_scanned"], 0);
+    assert_eq!(missing["inventory_runs"], 0);
+    assert_eq!(missing["high_severity_events"], 1);
+    assert_eq!(missing["captured"], 0);
+    assert_eq!(missing["bundled"], 0);
+    assert_eq!(missing["replayable"], 0);
+    assert_eq!(missing["replay_coverage"], 0.0);
+    assert_eq!(missing["retained_population_complete"], false);
+    assert_eq!(missing["unresolved_native_sessions"], 1);
+    assert_eq!(
+        missing["unreplayable_incidents"],
+        serde_json::json!([incident_id])
+    );
+    assert_eq!(
+        missing["native_session_inventory"]["unresolved_sessions"][0]["session_nonce"],
+        nonce
+    );
+    assert_eq!(
+        missing["native_session_inventory"]["unresolved_sessions"][0]["replay_certified"],
+        false
     );
 }
 
