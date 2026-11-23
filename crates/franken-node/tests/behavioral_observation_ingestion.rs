@@ -11,7 +11,7 @@ use frankenengine_node::config::{Config, Profile, TrustConfig};
 use frankenengine_node::security::trajectory_gaming::CamouflageKind;
 use frankenengine_node::supply_chain::behavioral_observation::{
     BehavioralIngestionStatus, BehavioralObservation, SignedBehavioralObservation,
-    ingest_observation,
+    BehavioralStreamAssessment, assess_observation_history, ingest_observation,
 };
 use frankenengine_node::supply_chain::certification::{EvidenceType, VerifiedEvidenceRef};
 use frankenengine_node::supply_chain::trust_card::{
@@ -66,6 +66,15 @@ impl Fixture {
             SnapshotSourceContext::TrustedFile,
         )
         .expect("reload authentic registry")
+    }
+
+    fn assess(&self) -> anyhow::Result<Vec<BehavioralStreamAssessment>> {
+        assess_observation_history(
+            &self.snapshot,
+            &self.trust,
+            &self.registry().snapshot()?,
+            NOW,
+        )
     }
 
     fn card(&self) -> TrustCard {
@@ -748,4 +757,194 @@ fn more_detector_findings_than_card_capacity_still_commit_with_full_evidence_and
     let duplicate = fixture.ingest(previous.as_ref().unwrap()).unwrap();
     assert_eq!(duplicate.status, BehavioralIngestionStatus::Duplicate);
     assert_eq!(duplicate.hints, report.hints);
+}
+
+#[test]
+fn graph_assessment_rederives_authenticated_observations_without_mutating_registry() {
+    let fixture = Fixture::new();
+    let mut previous = None;
+    let mut last_report = None;
+    for sequence in 0..4 {
+        let signed = SignedBehavioralObservation::sign(
+            observation(sequence, previous.as_ref(), 100 + sequence * 5),
+            &fixture.collector,
+        )
+        .unwrap();
+        last_report = Some(fixture.ingest(&signed).unwrap());
+        previous = Some(signed);
+    }
+    let before = fixture.state();
+    let report = last_report.unwrap();
+    let assessments = fixture.assess().unwrap();
+    assert_eq!(assessments.len(), 1);
+    let assessment = &assessments[0];
+    assert_eq!(assessment.stream_id, report.stream_id);
+    assert_eq!(assessment.last_observation_id, report.observation_id);
+    assert_eq!(assessment.collector_key_id, report.collector_key_id);
+    assert_eq!(assessment.extension_id, EXTENSION);
+    assert_eq!(assessment.sample_count, 4);
+    assert_eq!(assessment.measurement_scope, "isolated_package");
+    assert!(assessment.current_artifact);
+    assert!(assessment.detector_ready);
+    assert_eq!(assessment.hints, report.hints);
+    assert_eq!(
+        assessment.max_severity,
+        report.hints.iter().map(|hint| hint.severity).max_by(f64::total_cmp)
+    );
+    assert_eq!(fixture.state(), before, "assessment must not mutate trust state");
+}
+
+#[test]
+fn graph_assessment_distinguishes_missing_insufficient_clean_and_historical_evidence() {
+    let fixture = Fixture::new();
+    assert!(fixture.assess().unwrap().is_empty());
+    let mut previous = None;
+    for sequence in 0..4 {
+        let signed = SignedBehavioralObservation::sign(
+            observation(sequence, previous.as_ref(), 100),
+            &fixture.collector,
+        )
+        .unwrap();
+        fixture.ingest(&signed).unwrap();
+        previous = Some(signed);
+        let assessments = fixture.assess().unwrap();
+        assert_eq!(assessments[0].detector_ready, sequence == 3);
+        assert_eq!(
+            assessments[0].max_severity,
+            if sequence == 3 { Some(0.0) } else { None }
+        );
+        assert!(assessments[0].hints.is_empty());
+    }
+    let mut registry = fixture.registry();
+    registry
+        .create(card_input("2.0.0", &artifact(2)), NOW, "fixture-new-artifact")
+        .unwrap();
+    registry.persist_authoritative_state(&fixture.snapshot).unwrap();
+    let historical = fixture.assess().unwrap();
+    assert!(!historical[0].current_artifact);
+    assert_eq!(historical[0].package_version, "1.0.0");
+    assert_eq!(historical[0].artifact_hash, artifact(1));
+    assert_eq!(historical[0].sample_count, 4);
+}
+
+#[test]
+fn graph_assessment_rejects_deleted_rolled_back_and_tampered_journals() {
+    let fixture = Fixture::new();
+    let first =
+        SignedBehavioralObservation::sign(observation(0, None, 100), &fixture.collector).unwrap();
+    let first_report = fixture.ingest(&first).unwrap();
+    let old_journal = fixture.journal(&first_report.stream_id);
+    let second =
+        SignedBehavioralObservation::sign(observation(1, Some(&first), 105), &fixture.collector)
+            .unwrap();
+    fixture.ingest(&second).unwrap();
+    let current_journal = fixture.journal(&first_report.stream_id);
+    let before = fixture.state();
+
+    fixture.replace_journal(&first_report.stream_id, None);
+    assert!(fixture.assess().unwrap_err().to_string().contains("missing"));
+    fixture.replace_journal(&first_report.stream_id, Some(&old_journal));
+    assert!(
+        fixture.assess().unwrap_err().to_string().contains("retained signed registry head"),
+        "a valid old MAC must not make a rolled-back journal current"
+    );
+    let mut tampered: serde_json::Value = serde_json::from_str(&current_journal).unwrap();
+    tampered["entries"][1]["report"]["extension_id"] = serde_json::json!("npm:other-package");
+    fixture.replace_journal(&first_report.stream_id, Some(&tampered.to_string()));
+    assert!(fixture.assess().unwrap_err().to_string().contains("authentication"));
+    assert_eq!(fixture.state(), before);
+    fixture.replace_journal(&first_report.stream_id, Some(&current_journal));
+    assert_eq!(fixture.assess().unwrap()[0].sample_count, 2);
+}
+
+#[test]
+fn graph_assessment_refuses_stale_or_forged_snapshot_instead_of_reporting_no_data() {
+    let fixture = Fixture::new();
+    let stale = fixture.registry().snapshot().unwrap();
+    let first =
+        SignedBehavioralObservation::sign(observation(0, None, 100), &fixture.collector).unwrap();
+    fixture.ingest(&first).unwrap();
+    assert!(
+        assess_observation_history(&fixture.snapshot, &fixture.trust, &stale, NOW).is_err(),
+        "the graph must be reloaded after a concurrent observation changes the signed snapshot"
+    );
+    let mut forged = fixture.registry().snapshot().unwrap();
+    forged.behavioral_observation_heads.clear();
+    assert!(
+        assess_observation_history(&fixture.snapshot, &fixture.trust, &forged, NOW).is_err(),
+        "an unauthenticated empty head set must not conceal behavioral evidence"
+    );
+    assert_eq!(fixture.assess().unwrap().len(), 1);
+}
+
+#[test]
+fn graph_assessment_keeps_collectors_and_workloads_separate() {
+    let fixture = Fixture::new();
+    let second_collector = SigningKey::from_bytes(&[0x73; 32]);
+    for (key, workload) in [
+        (&fixture.collector, "repeatable-a"),
+        (&fixture.collector, "repeatable-b"),
+        (&second_collector, "repeatable-a"),
+    ] {
+        let mut previous = None;
+        for sequence in 0..2 {
+            let mut measured = observation(sequence, previous.as_ref(), 100);
+            measured.workload_id = workload.to_string();
+            let signed = SignedBehavioralObservation::sign(measured, key).unwrap();
+            ingest_observation(
+                &fixture.snapshot,
+                &fixture.trust,
+                &serde_json::to_vec(&signed).unwrap(),
+                &key.verifying_key(),
+                NOW,
+            )
+            .unwrap();
+            previous = Some(signed);
+        }
+    }
+    let assessments = fixture.assess().unwrap();
+    assert_eq!(assessments.len(), 3);
+    assert!(assessments.iter().all(|stream| {
+        stream.sample_count == 2 && !stream.detector_ready && stream.max_severity.is_none()
+    }), "six incomparable samples must not become one detector-ready trajectory");
+    assert_eq!(
+        assessments.iter().map(|stream| &stream.stream_id).collect::<std::collections::BTreeSet<_>>().len(),
+        3
+    );
+}
+
+#[test]
+fn graph_assessment_allows_configured_cache_ttl_without_ignoring_trust_state() {
+    let mut fixture = Fixture::new();
+    let signed =
+        SignedBehavioralObservation::sign(observation(0, None, 100), &fixture.collector).unwrap();
+    let admitted = fixture.ingest(&signed).unwrap();
+    let before = fixture.state();
+    fixture.trust.card_cache_ttl_secs = Some(1);
+    let configured = fixture.registry().snapshot().unwrap();
+    assert_eq!(configured.cache_ttl_secs, 1);
+    let assessed = assess_observation_history(
+        &fixture.snapshot,
+        &fixture.trust,
+        &configured,
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(assessed.len(), 1);
+    assert_eq!(assessed[0].last_observation_id, admitted.observation_id);
+    assert_eq!(fixture.state(), before, "a local cache TTL must not rewrite trust state");
+}
+
+#[test]
+fn graph_assessment_bounds_journal_bytes_before_json_parsing() {
+    let fixture = Fixture::new();
+    let signed =
+        SignedBehavioralObservation::sign(observation(0, None, 100), &fixture.collector).unwrap();
+    let report = fixture.ingest(&signed).unwrap();
+    let oversized = " ".repeat(16 * 1024 * 1024 + 1);
+    fixture.replace_journal(&report.stream_id, Some(&oversized));
+    assert!(
+        fixture.assess().unwrap_err().to_string().contains("assessment budget"),
+        "oversized evidence must be rejected by its stored byte length"
+    );
 }
