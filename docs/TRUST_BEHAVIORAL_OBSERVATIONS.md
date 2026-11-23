@@ -226,3 +226,54 @@ This command supplies the missing ingestion path for collector-attributed
 measurements. It does not implement automatic per-dependency native
 collection, fleet enforcement of these observations, or the separate BPET
 migration admission gate.
+
+## Assess observed history and dependency exposure
+
+Run `franken-node trust graph --immunize --json` to combine the current trust
+graph with the registry's admitted observation history. The immunization
+section uses `franken-node/trust-graph-immunization/v2`.
+
+The assessment authenticates the supplied registry snapshot and its durable
+counterpart, validates each retained journal's admission MAC and stream-head
+commitment, and reruns the detector on that stream's actual measurements.
+Each collector/workload stream remains separate. Reading history authenticates
+the registry's prior admission; it does not independently retrieve or
+reauthorize the external collector key. Missing, rolled-back, or modified
+journals and changed registry trust state cause an error.
+
+Coverage distinguishes packages with no admitted observations, streams with
+fewer than four comparable samples, and detector-ready streams. A clean
+detector-ready stream can report zero severity; absent or insufficient
+measurements cannot. The latest observation's version and artifact digest
+must match the current verified card before that stream contributes behavioral
+severity to current-artifact prioritization. A matching final observation
+does not mean the entire trajectory came from that artifact: a stream may
+include earlier versions under the same measurement contract. Historical
+streams remain visible in the report.
+
+Assessment reads are bounded to 64 MiB of journal data and 65,536 samples,
+in addition to the existing per-stream limits. Exceeding a bound fails
+explicitly instead of returning a partial assessment.
+
+The dependency graph retains untracked lockfile packages, including bridges
+between packages with trust cards. Known downstream trust ceilings propagate
+through those bridges without assigning untracked packages an invented score.
+Topology measurements count distinct dependency edges and transitive
+dependents, compute directed shortest-path betweenness, and identify
+articulation points in the undirected package graph. Publisher relations do
+not contribute to those package metrics. The graph remains name-based:
+installed versions or locations sharing a package name are merged.
+
+Exact topology analysis is limited to 1,024 package nodes and 8,000,000
+estimated work units. Missing topology, truncated input, and exceeded analysis
+budgets produce an explicit unavailable status rather than measured zeros.
+Invalid JSON and unsupported lockfile shapes are rejected. The planner ranks candidates by
+estimated impact before applying its 18-node analysis limit, so alphabetical
+ordering cannot discard a more consequential candidate.
+
+Risk surfaces describe the current graph. The report does not invent
+maintainer activity, proposed package updates, or post-update risk reductions.
+Its trust-derived risk values, loss scenario, and candidate priorities are
+documented model assumptions, not calibrated compromise probabilities or
+measured financial loss. No quarantine, dependency update, migration gate, or
+barrier enforcement is performed by this assessment command.

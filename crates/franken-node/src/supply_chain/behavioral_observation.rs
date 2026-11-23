@@ -263,7 +263,9 @@ impl ObservationJournal {
                 "admitted behavioral observation is in the future"
             );
             ensure!(
-                envelope.collector_key_id.strip_prefix("ed25519:")
+                envelope
+                    .collector_key_id
+                    .strip_prefix("ed25519:")
                     .is_some_and(|digest| is_lower_hex(digest, 64))
                     && is_lower_hex(&envelope.signature, 128),
                 "invalid admitted behavioral collector or signature encoding"
@@ -287,10 +289,11 @@ impl ObservationJournal {
                     && entry.report.artifact_hash == observation.artifact_hash
                     && entry.report.collector_key_id == envelope.collector_key_id
                     && entry.report.workload_id == observation.workload_id
-                    && entry.report.evidence_ref == format!(
-                        "behavioral-observation:{}",
-                        entry.report.observation_id.trim_start_matches("sha256:")
-                    ),
+                    && entry.report.evidence_ref
+                        == format!(
+                            "behavioral-observation:{}",
+                            entry.report.observation_id.trim_start_matches("sha256:")
+                        ),
                 "behavioral journal admission record mismatch"
             );
             prior = Some(&entry.envelope);
@@ -348,7 +351,8 @@ pub fn assess_observation_history(
     // Configuration may override the cache TTL on load. It is not trust-state
     // identity; allow enough byte slack for any u64 TTL before authenticating.
     let snapshot_byte_budget = super::trust_card::to_canonical_json(snapshot)?
-        .len().saturating_add(64);
+        .len()
+        .saturating_add(64);
     let store = TrustCardRegistryStore::open(snapshot_path)?;
     let journals = store.with_immediate_transaction(|connection, _| {
         let stored = read_assessment_slot(
@@ -356,11 +360,14 @@ pub fn assess_observation_history(
             SLOT_SNAPSHOT,
             snapshot_byte_budget,
             snapshot_path,
-        )?.ok_or_else(|| TrustCardError::InvalidSnapshot(
-            "behavioral assessment requires its durable registry snapshot".to_string(),
-        ))?;
-        let mut current: TrustCardRegistrySnapshot = serde_json::from_str(&stored)
-            .map_err(|error| TrustCardError::SnapshotParse {
+        )?
+        .ok_or_else(|| {
+            TrustCardError::InvalidSnapshot(
+                "behavioral assessment requires its durable registry snapshot".to_string(),
+            )
+        })?;
+        let mut current: TrustCardRegistrySnapshot =
+            serde_json::from_str(&stored).map_err(|error| TrustCardError::SnapshotParse {
                 path: snapshot_path.to_path_buf(),
                 detail: format!("behavioral assessment registry: {error}"),
             })?;
@@ -369,7 +376,9 @@ pub fn assess_observation_history(
         // TTL and its derived hash/signature; compare every trust-state field.
         current.cache_ttl_secs = snapshot.cache_ttl_secs;
         current.snapshot_hash.clone_from(&snapshot.snapshot_hash);
-        current.registry_signature.clone_from(&snapshot.registry_signature);
+        current
+            .registry_signature
+            .clone_from(&snapshot.registry_signature);
         if current != *snapshot {
             return Err(TrustCardError::InvalidSnapshot(
                 "behavioral assessment registry changed; reload the graph and retry".to_string(),
@@ -385,9 +394,11 @@ pub fn assess_observation_history(
                 remaining_bytes.min(MAX_JOURNAL_BYTES),
                 snapshot_path,
             )?
-            .ok_or_else(|| TrustCardError::InvalidSnapshot(
-                "behavioral journal is missing for a retained signed registry head".to_string(),
-            ))?;
+            .ok_or_else(|| {
+                TrustCardError::InvalidSnapshot(
+                    "behavioral journal is missing for a retained signed registry head".to_string(),
+                )
+            })?;
             remaining_bytes = remaining_bytes.saturating_sub(encoded.len());
             journals.push((stream.clone(), encoded));
         }
@@ -405,11 +416,12 @@ pub fn assess_observation_history(
         );
         remaining_samples = remaining_samples.saturating_sub(journal.entries.len());
         journal.validate_admitted(&stream, &registry_key, now_secs)?;
-        let last = journal.entries.last()
+        let last = journal
+            .entries
+            .last()
             .context("behavioral history requires an admitted observation")?;
         ensure!(
-            snapshot.behavioral_observation_heads.get(&stream)
-                == Some(&last.report.observation_id),
+            snapshot.behavioral_observation_heads.get(&stream) == Some(&last.report.observation_id),
             "behavioral journal does not match its retained signed registry head"
         );
         let series = measured_trajectory(journal.entries.iter().map(|entry| &entry.envelope))?;
@@ -420,15 +432,22 @@ pub fn assess_observation_history(
             Vec::new()
         };
         let max_severity = detector_ready.then(|| {
-            hints.iter().map(|hint| hint.severity).fold(0.0_f64, f64::max)
+            hints
+                .iter()
+                .map(|hint| hint.severity)
+                .fold(0.0_f64, f64::max)
         });
         let observation = &last.envelope.observation;
-        let current_artifact = snapshot.cards_by_extension
+        let current_artifact = snapshot
+            .cards_by_extension
             .get(&observation.extension_id)
             .and_then(|history| history.last())
             .is_some_and(|card| {
                 card.extension.version == observation.package_version
-                    && card.provenance_summary.artifact_hashes.contains(&observation.artifact_hash)
+                    && card
+                        .provenance_summary
+                        .artifact_hashes
+                        .contains(&observation.artifact_hash)
             });
         assessments.push(BehavioralStreamAssessment {
             stream_id: stream,
@@ -458,13 +477,15 @@ fn read_assessment_slot(
     max_bytes: usize,
     snapshot_path: &Path,
 ) -> std::result::Result<Option<String>, TrustCardError> {
-    let rows = connection.query_with_params(
-        "SELECT length(CAST(canonical_json AS BLOB)) FROM registry_state WHERE slot = ?1;",
-        &[fsqlite::SqliteValue::Text(slot.into())],
-    ).map_err(|error| TrustCardError::SnapshotRead {
-        path: snapshot_path.to_path_buf(),
-        detail: format!("measure behavioral history slot: {error}"),
-    })?;
+    let rows = connection
+        .query_with_params(
+            "SELECT length(CAST(canonical_json AS BLOB)) FROM registry_state WHERE slot = ?1;",
+            &[fsqlite::SqliteValue::Text(slot.into())],
+        )
+        .map_err(|error| TrustCardError::SnapshotRead {
+            path: snapshot_path.to_path_buf(),
+            detail: format!("measure behavioral history slot: {error}"),
+        })?;
     let Some(row) = rows.first() else {
         return Ok(None);
     };
@@ -479,7 +500,10 @@ fn read_assessment_slot(
         )));
     }
     let encoded = read_slot(connection, slot)?;
-    if encoded.as_ref().is_some_and(|value| value.len() > max_bytes) {
+    if encoded
+        .as_ref()
+        .is_some_and(|value| value.len() > max_bytes)
+    {
         return Err(TrustCardError::InvalidSnapshot(
             "behavioral history changed during bounded read".to_string(),
         ));
@@ -495,8 +519,14 @@ fn measured_trajectory<'a>(
         let observed = &signed.observation;
         let sample = TrajectorySample::new(
             i64::try_from(observed.observed_at_epoch_secs)?,
-            measured_vector(&observed.observed_capabilities, observed.workload_iterations)?,
-            measured_vector(&observed.declared_capabilities, observed.workload_iterations)?,
+            measured_vector(
+                &observed.observed_capabilities,
+                observed.workload_iterations,
+            )?,
+            measured_vector(
+                &observed.declared_capabilities,
+                observed.workload_iterations,
+            )?,
         )?;
         crate::security::trajectory_gaming::append_sample(&mut series, sample)?;
     }
@@ -596,7 +626,10 @@ pub fn ingest_observation(
     );
 
     let series = measured_trajectory(
-        journal.entries.iter().map(|entry| &entry.envelope)
+        journal
+            .entries
+            .iter()
+            .map(|entry| &entry.envelope)
             .chain(std::iter::once(&envelope)),
     )?;
     let config = DetectorConfig::default();

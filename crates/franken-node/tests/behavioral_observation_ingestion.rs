@@ -10,8 +10,8 @@ use ed25519_dalek::SigningKey;
 use frankenengine_node::config::{Config, Profile, TrustConfig};
 use frankenengine_node::security::trajectory_gaming::CamouflageKind;
 use frankenengine_node::supply_chain::behavioral_observation::{
-    BehavioralIngestionStatus, BehavioralObservation, SignedBehavioralObservation,
-    BehavioralStreamAssessment, assess_observation_history, ingest_observation,
+    BehavioralIngestionStatus, BehavioralObservation, BehavioralStreamAssessment,
+    SignedBehavioralObservation, assess_observation_history, ingest_observation,
 };
 use frankenengine_node::supply_chain::certification::{EvidenceType, VerifiedEvidenceRef};
 use frankenengine_node::supply_chain::trust_card::{
@@ -789,9 +789,17 @@ fn graph_assessment_rederives_authenticated_observations_without_mutating_regist
     assert_eq!(assessment.hints, report.hints);
     assert_eq!(
         assessment.max_severity,
-        report.hints.iter().map(|hint| hint.severity).max_by(f64::total_cmp)
+        report
+            .hints
+            .iter()
+            .map(|hint| hint.severity)
+            .max_by(f64::total_cmp)
     );
-    assert_eq!(fixture.state(), before, "assessment must not mutate trust state");
+    assert_eq!(
+        fixture.state(),
+        before,
+        "assessment must not mutate trust state"
+    );
 }
 
 #[test]
@@ -817,9 +825,15 @@ fn graph_assessment_distinguishes_missing_insufficient_clean_and_historical_evid
     }
     let mut registry = fixture.registry();
     registry
-        .create(card_input("2.0.0", &artifact(2)), NOW, "fixture-new-artifact")
+        .create(
+            card_input("2.0.0", &artifact(2)),
+            NOW,
+            "fixture-new-artifact",
+        )
         .unwrap();
-    registry.persist_authoritative_state(&fixture.snapshot).unwrap();
+    registry
+        .persist_authoritative_state(&fixture.snapshot)
+        .unwrap();
     let historical = fixture.assess().unwrap();
     assert!(!historical[0].current_artifact);
     assert_eq!(historical[0].package_version, "1.0.0");
@@ -842,16 +856,32 @@ fn graph_assessment_rejects_deleted_rolled_back_and_tampered_journals() {
     let before = fixture.state();
 
     fixture.replace_journal(&first_report.stream_id, None);
-    assert!(fixture.assess().unwrap_err().to_string().contains("missing"));
+    assert!(
+        fixture
+            .assess()
+            .unwrap_err()
+            .to_string()
+            .contains("missing")
+    );
     fixture.replace_journal(&first_report.stream_id, Some(&old_journal));
     assert!(
-        fixture.assess().unwrap_err().to_string().contains("retained signed registry head"),
+        fixture
+            .assess()
+            .unwrap_err()
+            .to_string()
+            .contains("retained signed registry head"),
         "a valid old MAC must not make a rolled-back journal current"
     );
     let mut tampered: serde_json::Value = serde_json::from_str(&current_journal).unwrap();
     tampered["entries"][1]["report"]["extension_id"] = serde_json::json!("npm:other-package");
     fixture.replace_journal(&first_report.stream_id, Some(&tampered.to_string()));
-    assert!(fixture.assess().unwrap_err().to_string().contains("authentication"));
+    assert!(
+        fixture
+            .assess()
+            .unwrap_err()
+            .to_string()
+            .contains("authentication")
+    );
     assert_eq!(fixture.state(), before);
     fixture.replace_journal(&first_report.stream_id, Some(&current_journal));
     assert_eq!(fixture.assess().unwrap()[0].sample_count, 2);
@@ -904,11 +934,18 @@ fn graph_assessment_keeps_collectors_and_workloads_separate() {
     }
     let assessments = fixture.assess().unwrap();
     assert_eq!(assessments.len(), 3);
-    assert!(assessments.iter().all(|stream| {
-        stream.sample_count == 2 && !stream.detector_ready && stream.max_severity.is_none()
-    }), "six incomparable samples must not become one detector-ready trajectory");
+    assert!(
+        assessments.iter().all(|stream| {
+            stream.sample_count == 2 && !stream.detector_ready && stream.max_severity.is_none()
+        }),
+        "six incomparable samples must not become one detector-ready trajectory"
+    );
     assert_eq!(
-        assessments.iter().map(|stream| &stream.stream_id).collect::<std::collections::BTreeSet<_>>().len(),
+        assessments
+            .iter()
+            .map(|stream| &stream.stream_id)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
         3
     );
 }
@@ -923,16 +960,15 @@ fn graph_assessment_allows_configured_cache_ttl_without_ignoring_trust_state() {
     fixture.trust.card_cache_ttl_secs = Some(1);
     let configured = fixture.registry().snapshot().unwrap();
     assert_eq!(configured.cache_ttl_secs, 1);
-    let assessed = assess_observation_history(
-        &fixture.snapshot,
-        &fixture.trust,
-        &configured,
-        NOW,
-    )
-    .unwrap();
+    let assessed =
+        assess_observation_history(&fixture.snapshot, &fixture.trust, &configured, NOW).unwrap();
     assert_eq!(assessed.len(), 1);
     assert_eq!(assessed[0].last_observation_id, admitted.observation_id);
-    assert_eq!(fixture.state(), before, "a local cache TTL must not rewrite trust state");
+    assert_eq!(
+        fixture.state(),
+        before,
+        "a local cache TTL must not rewrite trust state"
+    );
 }
 
 #[test]
@@ -944,7 +980,11 @@ fn graph_assessment_bounds_journal_bytes_before_json_parsing() {
     let oversized = " ".repeat(16 * 1024 * 1024 + 1);
     fixture.replace_journal(&report.stream_id, Some(&oversized));
     assert!(
-        fixture.assess().unwrap_err().to_string().contains("assessment budget"),
+        fixture
+            .assess()
+            .unwrap_err()
+            .to_string()
+            .contains("assessment budget"),
         "oversized evidence must be rejected by its stored byte length"
     );
 }

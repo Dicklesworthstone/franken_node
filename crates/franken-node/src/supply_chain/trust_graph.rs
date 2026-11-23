@@ -41,6 +41,11 @@ pub const MAX_GRAPH_PACKAGES: usize = 20_000;
 /// This includes declared root dependencies and conservatively counts repeated
 /// observations from nested installs or overlapping lockfile representations.
 pub const MAX_GRAPH_DEPENDENCY_NAMES: usize = 100_000;
+/// Maximum packages for exact all-source topology analysis. Keeping this
+/// bounded also keeps shortest-path multiplicities within finite f64 values.
+pub const MAX_TOPOLOGY_NODES: usize = 1_024;
+/// Conservative n * (n + dependency observations) budget for exact analysis.
+pub const MAX_TOPOLOGY_WORK: usize = 8_000_000;
 
 pub const RULE_REVOKED: &str = "R1_REVOKED";
 pub const RULE_QUARANTINED: &str = "R2_QUARANTINED";
@@ -174,6 +179,72 @@ pub struct BlastRadiusEntry {
     /// Dependency hops from the dependent to the root (1 = direct).
     pub depth: usize,
 }
+
+/// Structural measurements of the observed, name-level dependency graph.
+/// Publisher relations and package self edges are excluded.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DependencyTopologyMetrics {
+    /// Directed shortest-path betweenness, normalized by (n - 1) * (n - 2).
+    /// Endpoints do not contribute; graphs with fewer than three packages use 0.
+    pub betweenness_centrality: f64,
+    /// Whether removal increases components in the undirected package skeleton.
+    pub is_articulation_point: bool,
+    /// Number of distinct direct dependencies, not reverse dependents.
+    pub direct_dependencies: usize,
+    /// Distinct packages that transitively depend on this node, excluding itself.
+    pub transitive_dependents: usize,
+    /// Largest shortest-path distance from a dependent to this node.
+    pub max_dependent_depth: usize,
+}
+
+/// Why exact dependency topology measurements are unavailable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "reason", rename_all = "snake_case")]
+pub enum DependencyTopologyError {
+    TruncatedLockfile,
+    NodeLimit {
+        nodes: usize,
+        limit: usize,
+    },
+    WorkLimit {
+        nodes: usize,
+        edge_observations: usize,
+        estimated_work: usize,
+        limit: usize,
+    },
+    InvalidGraph {
+        detail: String,
+    },
+}
+
+impl std::fmt::Display for DependencyTopologyError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TruncatedLockfile => write!(
+                formatter,
+                "lockfile ingestion was truncated; exact dependency topology is unavailable"
+            ),
+            Self::NodeLimit { nodes, limit } => write!(
+                formatter,
+                "dependency topology has {nodes} packages, exceeding the exact-analysis limit {limit}"
+            ),
+            Self::WorkLimit {
+                nodes,
+                edge_observations,
+                estimated_work,
+                limit,
+            } => write!(
+                formatter,
+                "dependency topology with {nodes} packages and {edge_observations} dependency observations requires {estimated_work} work units, exceeding the limit {limit}"
+            ),
+            Self::InvalidGraph { detail } => {
+                write!(formatter, "invalid dependency topology: {detail}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for DependencyTopologyError {}
 
 /// Direct dependency relation of an npm lockfile, keyed by package name.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -765,6 +836,202 @@ pub fn blast_radius(graph: &TrustGraph, root: &str) -> Vec<BlastRadiusEntry> {
     out
 }
 
+/// Measure dependency topology without substituting heuristic values when
+/// exact analysis is unavailable. Uses directed Brandes betweenness and an
+/// undirected articulation analysis on all scored and untracked package nodes.
+/// The graph is name-level: multiple installed versions share one package node.
+///
+/// Work is bounded before adjacency allocation by package count and the
+/// conservative n * (n + dependency observations) estimate. Duplicate evidence
+/// counts toward this work bound but never changes the resulting measurements.
+/// A truncated lockfile cannot provide exact measurements and is rejected.
+pub fn dependency_topology_metrics(
+    graph: &TrustGraph,
+) -> Result<BTreeMap<String, DependencyTopologyMetrics>, DependencyTopologyError> {
+    if graph.summary.lockfile_truncated {
+        return Err(DependencyTopologyError::TruncatedLockfile);
+    }
+    let node_count = graph
+        .nodes
+        .iter()
+        .filter(|node| node.kind != TrustNodeKind::Publisher)
+        .count();
+    if node_count > MAX_TOPOLOGY_NODES {
+        return Err(DependencyTopologyError::NodeLimit {
+            nodes: node_count,
+            limit: MAX_TOPOLOGY_NODES,
+        });
+    }
+    let edge_observations = graph
+        .edges
+        .iter()
+        .filter(|edge| edge.relation == TrustRelation::DependsOn && edge.source != edge.target)
+        .count();
+    let estimated_work = node_count.saturating_mul(node_count.saturating_add(edge_observations));
+    if estimated_work > MAX_TOPOLOGY_WORK {
+        return Err(DependencyTopologyError::WorkLimit {
+            nodes: node_count,
+            edge_observations,
+            estimated_work,
+            limit: MAX_TOPOLOGY_WORK,
+        });
+    }
+    let mut node_ids: Vec<&str> = graph
+        .nodes
+        .iter()
+        .filter(|node| node.kind != TrustNodeKind::Publisher)
+        .map(|node| node.node_id.as_str())
+        .collect();
+    node_ids.sort_unstable();
+    if node_ids.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(DependencyTopologyError::InvalidGraph {
+            detail: "duplicate package node identifiers".to_string(),
+        });
+    }
+    let indices: BTreeMap<&str, usize> = node_ids
+        .iter()
+        .enumerate()
+        .map(|(index, id)| (*id, index))
+        .collect();
+    let mut directed = vec![BTreeSet::new(); node_count];
+    let mut undirected = vec![BTreeSet::new(); node_count];
+    for edge in &graph.edges {
+        if edge.relation != TrustRelation::DependsOn || edge.source == edge.target {
+            continue;
+        }
+        let Some(&source) = indices.get(edge.source.as_str()) else {
+            return Err(DependencyTopologyError::InvalidGraph {
+                detail: format!("dependency source '{}' is not a package node", edge.source),
+            });
+        };
+        let Some(&target) = indices.get(edge.target.as_str()) else {
+            return Err(DependencyTopologyError::InvalidGraph {
+                detail: format!("dependency target '{}' is not a package node", edge.target),
+            });
+        };
+        directed[source].insert(target);
+        undirected[source].insert(target);
+        undirected[target].insert(source);
+    }
+    let directed: Vec<Vec<usize>> = directed
+        .into_iter()
+        .map(|neighbors| neighbors.into_iter().collect())
+        .collect();
+    let undirected: Vec<Vec<usize>> = undirected
+        .into_iter()
+        .map(|neighbors| neighbors.into_iter().collect())
+        .collect();
+
+    let mut betweenness = vec![0.0_f64; node_count];
+    let mut transitive_dependents = vec![0_usize; node_count];
+    let mut max_dependent_depth = vec![0_usize; node_count];
+    for source in 0..node_count {
+        let mut predecessors = vec![Vec::new(); node_count];
+        let mut shortest_paths = vec![0.0_f64; node_count];
+        let mut distances = vec![usize::MAX; node_count];
+        let mut order = Vec::with_capacity(node_count);
+        let mut queue = VecDeque::from([source]);
+        shortest_paths[source] = 1.0;
+        distances[source] = 0;
+        while let Some(current) = queue.pop_front() {
+            order.push(current);
+            for &target in &directed[current] {
+                if distances[target] == usize::MAX {
+                    distances[target] = distances[current] + 1;
+                    queue.push_back(target);
+                }
+                if distances[target] == distances[current] + 1 {
+                    shortest_paths[target] += shortest_paths[current];
+                    predecessors[target].push(current);
+                }
+            }
+        }
+        // source -> target means source depends on target. Counting each BFS
+        // reach once therefore gives the target's reverse dependency closure.
+        for &target in &order {
+            if target != source {
+                transitive_dependents[target] += 1;
+                max_dependent_depth[target] = max_dependent_depth[target].max(distances[target]);
+            }
+        }
+        let mut contribution = vec![0.0_f64; node_count];
+        while let Some(target) = order.pop() {
+            for &predecessor in &predecessors[target] {
+                contribution[predecessor] += (shortest_paths[predecessor] / shortest_paths[target])
+                    * (1.0 + contribution[target]);
+            }
+            if target != source {
+                betweenness[target] += contribution[target];
+            }
+        }
+    }
+
+    let articulation = undirected_articulation_points(&undirected);
+    let normalization = if node_count > 2 {
+        ((node_count - 1) * (node_count - 2)) as f64
+    } else {
+        1.0
+    };
+    Ok(node_ids
+        .into_iter()
+        .enumerate()
+        .map(|(index, node_id)| {
+            (
+                node_id.to_string(),
+                DependencyTopologyMetrics {
+                    betweenness_centrality: (betweenness[index] / normalization).clamp(0.0, 1.0),
+                    is_articulation_point: articulation[index],
+                    direct_dependencies: directed[index].len(),
+                    transitive_dependents: transitive_dependents[index],
+                    max_dependent_depth: max_dependent_depth[index],
+                },
+            )
+        })
+        .collect())
+}
+
+/// Iterative depth-first low-link analysis avoids recursion even for long chains.
+fn undirected_articulation_points(adjacency: &[Vec<usize>]) -> Vec<bool> {
+    let mut discovery = vec![usize::MAX; adjacency.len()];
+    let mut low = vec![0_usize; adjacency.len()];
+    let mut parents = vec![None; adjacency.len()];
+    let mut children = vec![0_usize; adjacency.len()];
+    let mut articulation = vec![false; adjacency.len()];
+    let mut clock = 0_usize;
+    for root in 0..adjacency.len() {
+        if discovery[root] != usize::MAX {
+            continue;
+        }
+        discovery[root] = clock;
+        low[root] = clock;
+        clock += 1;
+        let mut stack = vec![(root, 0_usize)];
+        while let Some((current, next_neighbor)) = stack.pop() {
+            if let Some(&neighbor) = adjacency[current].get(next_neighbor) {
+                stack.push((current, next_neighbor + 1));
+                if discovery[neighbor] == usize::MAX {
+                    parents[neighbor] = Some(current);
+                    children[current] += 1;
+                    discovery[neighbor] = clock;
+                    low[neighbor] = clock;
+                    clock += 1;
+                    stack.push((neighbor, 0));
+                } else if parents[current] != Some(neighbor) {
+                    low[current] = low[current].min(discovery[neighbor]);
+                }
+            } else if let Some(parent) = parents[current] {
+                low[parent] = low[parent].min(low[current]);
+                if parents[parent].is_some() && low[current] >= discovery[parent] {
+                    articulation[parent] = true;
+                }
+            } else {
+                articulation[current] = children[current] > 1;
+            }
+        }
+    }
+    articulation
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1281,6 +1548,212 @@ mod tests {
         assert_eq!(fields, vec!["reputation_score", "active_quarantine"]);
         assert_eq!(transition.causes.len(), 1);
         assert_eq!(transition.causes[0].event_code, "TRUST_CARD_QUARANTINED");
+    }
+
+    fn topology_graph(edges: &[(&str, &[&str])], cards: &[TrustCard]) -> TrustGraph {
+        let lockfile = LockfileDependencyGraph {
+            dependencies: edges
+                .iter()
+                .map(|(source, targets)| {
+                    (
+                        (*source).to_string(),
+                        targets.iter().map(|target| (*target).to_string()).collect(),
+                    )
+                })
+                .collect(),
+            ..LockfileDependencyGraph::default()
+        };
+        build_trust_graph(cards, &BTreeMap::new(), &lockfile)
+    }
+
+    #[test]
+    fn directed_chain_has_exact_centrality_articulation_and_reverse_depth() {
+        let graph = topology_graph(
+            &[("a", &["b"]), ("b", &["c"]), ("c", &["d"]), ("d", &[])],
+            &[],
+        );
+        let metrics = dependency_topology_metrics(&graph).expect("bounded complete graph");
+        assert_eq!(metrics.len(), 4);
+        for id in ["npm:b", "npm:c"] {
+            assert!((metrics[id].betweenness_centrality - 1.0 / 3.0).abs() < 1e-12);
+            assert!(metrics[id].is_articulation_point);
+        }
+        for id in ["npm:a", "npm:d"] {
+            assert_eq!(metrics[id].betweenness_centrality, 0.0);
+            assert!(!metrics[id].is_articulation_point);
+        }
+        assert_eq!(metrics["npm:a"].direct_dependencies, 1);
+        assert_eq!(metrics["npm:a"].transitive_dependents, 0);
+        assert_eq!(metrics["npm:b"].transitive_dependents, 1);
+        assert_eq!(metrics["npm:c"].transitive_dependents, 2);
+        assert_eq!(metrics["npm:d"].transitive_dependents, 3);
+        assert_eq!(metrics["npm:d"].direct_dependencies, 0);
+        assert_eq!(metrics["npm:d"].max_dependent_depth, 3);
+        assert!(
+            graph
+                .nodes
+                .iter()
+                .all(|node| node.effective_score.is_none())
+        );
+    }
+
+    #[test]
+    fn diamond_splits_shortest_paths_and_excludes_publisher_relations() {
+        let base = card("npm:@acme/auth-guard");
+        let graph = topology_graph(
+            &[("a", &["b", "c"]), ("b", &["d"]), ("c", &["d"])],
+            &[named(&base, "npm:a", "pub-a", 900)],
+        );
+        assert_eq!(graph.summary.publishers, 1);
+        let metrics = dependency_topology_metrics(&graph).expect("bounded diamond");
+        assert_eq!(metrics.len(), 4);
+        assert!(!metrics.contains_key("publisher:pub-a"));
+        assert!((metrics["npm:b"].betweenness_centrality - 1.0 / 12.0).abs() < 1e-12);
+        assert!((metrics["npm:c"].betweenness_centrality - 1.0 / 12.0).abs() < 1e-12);
+        assert!(metrics.values().all(|node| !node.is_articulation_point));
+        assert_eq!(metrics["npm:a"].direct_dependencies, 2);
+        assert_eq!(metrics["npm:d"].transitive_dependents, 3);
+        assert_eq!(metrics["npm:d"].max_dependent_depth, 2);
+    }
+
+    #[test]
+    fn topology_cycles_and_duplicate_evidence_are_deterministic() {
+        let mut graph = topology_graph(
+            &[
+                ("a", &["b"]),
+                ("b", &["c"]),
+                ("c", &["a"]),
+                ("isolated", &[]),
+            ],
+            &[],
+        );
+        let expected = dependency_topology_metrics(&graph).expect("bounded cycle");
+        for id in ["npm:a", "npm:b", "npm:c"] {
+            assert!((expected[id].betweenness_centrality - 1.0 / 6.0).abs() < 1e-12);
+            assert_eq!(expected[id].transitive_dependents, 2);
+            assert_eq!(expected[id].max_dependent_depth, 2);
+            assert_eq!(expected[id].direct_dependencies, 1);
+            assert!(!expected[id].is_articulation_point);
+        }
+        assert_eq!(expected["npm:isolated"].betweenness_centrality, 0.0);
+        assert_eq!(expected["npm:isolated"].transitive_dependents, 0);
+        assert_eq!(expected["npm:isolated"].max_dependent_depth, 0);
+        let mut duplicate = graph.edges[0].clone();
+        duplicate.evidence = "another observation of the same relation".to_string();
+        graph.edges.push(duplicate);
+        graph.edges.push(TrustGraphEdge {
+            source: "npm:a".to_string(),
+            target: "npm:a".to_string(),
+            relation: TrustRelation::DependsOn,
+            evidence: "self edge is ignored".to_string(),
+        });
+        graph.nodes.reverse();
+        graph.edges.reverse();
+        assert_eq!(
+            dependency_topology_metrics(&graph).expect("same topology"),
+            expected
+        );
+    }
+
+    #[test]
+    fn undirected_articulation_does_not_require_directed_dependents() {
+        let graph = topology_graph(
+            &[
+                ("center", &["left", "right", "third"]),
+                ("elsewhere", &["other"]),
+            ],
+            &[],
+        );
+        let metrics = dependency_topology_metrics(&graph).expect("disconnected star");
+        assert!(metrics["npm:center"].is_articulation_point);
+        assert_eq!(metrics["npm:center"].betweenness_centrality, 0.0);
+        assert_eq!(metrics["npm:center"].transitive_dependents, 0);
+        assert_eq!(metrics["npm:center"].direct_dependencies, 3);
+        assert!(!metrics["npm:elsewhere"].is_articulation_point);
+        assert!(!metrics["npm:left"].is_articulation_point);
+    }
+
+    #[test]
+    fn empty_and_small_topologies_have_measured_zero_centrality() {
+        assert!(
+            dependency_topology_metrics(&topology_graph(&[], &[]))
+                .expect("empty graph")
+                .is_empty()
+        );
+        for edges in [vec![("alone", &[][..])], vec![("a", &["b"][..])]] {
+            let metrics =
+                dependency_topology_metrics(&topology_graph(&edges, &[])).expect("small graph");
+            assert!(
+                metrics
+                    .values()
+                    .all(|node| node.betweenness_centrality == 0.0)
+            );
+            assert!(metrics.values().all(|node| !node.is_articulation_point));
+        }
+        let metrics =
+            dependency_topology_metrics(&topology_graph(&[("a", &["b"])], &[])).expect("two nodes");
+        assert_eq!(metrics["npm:b"].transitive_dependents, 1);
+        assert_eq!(metrics["npm:b"].max_dependent_depth, 1);
+    }
+
+    #[test]
+    fn topology_refuses_truncated_and_invalid_input() {
+        let mut graph = topology_graph(&[("a", &["b"])], &[]);
+        graph.summary.lockfile_truncated = true;
+        assert_eq!(
+            dependency_topology_metrics(&graph),
+            Err(DependencyTopologyError::TruncatedLockfile)
+        );
+        graph.summary.lockfile_truncated = false;
+        graph.nodes.retain(|node| node.node_id != "npm:b");
+        assert!(matches!(
+            dependency_topology_metrics(&graph),
+            Err(DependencyTopologyError::InvalidGraph { .. })
+        ));
+        let mut graph = topology_graph(&[("a", &[])], &[]);
+        graph.nodes.push(graph.nodes[0].clone());
+        assert!(matches!(
+            dependency_topology_metrics(&graph),
+            Err(DependencyTopologyError::InvalidGraph { .. })
+        ));
+    }
+
+    #[test]
+    fn topology_budgets_refuse_analysis_without_returning_placeholder_metrics() {
+        let lockfile = LockfileDependencyGraph {
+            dependencies: (0..=MAX_TOPOLOGY_NODES)
+                .map(|index| (format!("pkg-{index:04}"), BTreeSet::new()))
+                .collect(),
+            ..LockfileDependencyGraph::default()
+        };
+        let graph = build_trust_graph(&[], &BTreeMap::new(), &lockfile);
+        assert_eq!(
+            dependency_topology_metrics(&graph),
+            Err(DependencyTopologyError::NodeLimit {
+                nodes: MAX_TOPOLOGY_NODES + 1,
+                limit: MAX_TOPOLOGY_NODES,
+            })
+        );
+
+        let lockfile = LockfileDependencyGraph {
+            dependencies: (0..MAX_TOPOLOGY_NODES)
+                .map(|index| {
+                    (
+                        format!("pkg-{index:04}"),
+                        (1..=7)
+                            .map(|offset| {
+                                format!("pkg-{:04}", (index + offset) % MAX_TOPOLOGY_NODES)
+                            })
+                            .collect(),
+                    )
+                })
+                .collect(),
+            ..LockfileDependencyGraph::default()
+        };
+        let graph = build_trust_graph(&[], &BTreeMap::new(), &lockfile);
+        let error = dependency_topology_metrics(&graph).expect_err("work exceeds budget");
+        assert!(matches!(error, DependencyTopologyError::WorkLimit { .. }));
+        assert!(error.to_string().contains("work units"));
     }
 
     #[test]

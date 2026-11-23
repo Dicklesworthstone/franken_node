@@ -146,11 +146,42 @@ pub struct RiskSurfaceSnapshot {
 pub fn build_risk_surface_snapshot(
     input: RiskSurfaceInput,
 ) -> Result<RiskSurfaceSnapshot, RiskSurfaceError> {
+    build_snapshot(input, true)
+}
+
+/// Describe the currently observed topology without inventing an update.
+///
+/// The supplied posterior and risk weights remain model inputs. This surface
+/// neither estimates the result of an unspecified intervention nor claims
+/// that any barrier has been enforced. Callers with a concrete proposed graph
+/// use `build_risk_surface_snapshot` to obtain before/after deltas.
+pub fn build_current_risk_surface_snapshot(
+    extension_id: &str,
+    trace_id: &str,
+    base_adversary_posterior: f64,
+    current_metrics: TopologyRiskMetrics,
+) -> Result<RiskSurfaceSnapshot, RiskSurfaceError> {
+    build_snapshot(
+        RiskSurfaceInput {
+            extension_id: extension_id.to_string(),
+            trace_id: trace_id.to_string(),
+            base_adversary_posterior,
+            current_metrics,
+            planned_changes: Vec::new(),
+        },
+        false,
+    )
+}
+
+fn build_snapshot(
+    input: RiskSurfaceInput,
+    require_planned_changes: bool,
+) -> Result<RiskSurfaceSnapshot, RiskSurfaceError> {
     validate_identifier("extension_id", &input.extension_id)?;
     validate_identifier("trace_id", &input.trace_id)?;
     validate_posterior(input.base_adversary_posterior)?;
     validate_metrics("current", &input.current_metrics)?;
-    if input.planned_changes.is_empty() {
+    if require_planned_changes && input.planned_changes.is_empty() {
         return Err(RiskSurfaceError::EmptyPlannedChanges);
     }
 
@@ -322,6 +353,12 @@ fn build_risk_ui_snapshot(
         "topology_attribution".to_string(),
         attribution_summary(&posterior_update.attribution_percentages),
     );
+    if planned_update_deltas.is_empty() {
+        overlays.insert(
+            "planned_changes".to_string(),
+            "No proposed topology changes; no risk reduction is projected".to_string(),
+        );
+    }
 
     let mut delta_heatmap = BTreeMap::new();
     for delta in planned_update_deltas {
@@ -635,6 +672,45 @@ mod tests {
                 field: "current.betweenness_centrality",
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn current_topology_does_not_invent_risk_reduction() {
+        let input = sample_input();
+        let current = build_current_risk_surface_snapshot(
+            &input.extension_id,
+            &input.trace_id,
+            input.base_adversary_posterior,
+            input.current_metrics.clone(),
+        )
+        .expect("current topology");
+        let projected = build_risk_surface_snapshot(input).expect("specified proposals");
+        assert_eq!(current.trust_card_context, projected.trust_card_context);
+        assert_eq!(current.posterior_update, projected.posterior_update);
+        assert!(current.planned_update_deltas.is_empty());
+        assert!(current.risk_ui.delta_heatmap.is_empty());
+        assert!(current.risk_ui.overlays["planned_changes"].contains("no risk reduction"));
+        assert_ne!(current.replay_fingerprint, projected.replay_fingerprint);
+    }
+
+    #[test]
+    fn current_topology_retains_validation_and_projected_api_requires_proposals() {
+        let mut input = sample_input();
+        input.planned_changes.clear();
+        assert!(matches!(
+            build_risk_surface_snapshot(input.clone()),
+            Err(RiskSurfaceError::EmptyPlannedChanges)
+        ));
+        input.current_metrics.betweenness_centrality = f64::NAN;
+        assert!(matches!(
+            build_current_risk_surface_snapshot(
+                &input.extension_id,
+                &input.trace_id,
+                input.base_adversary_posterior,
+                input.current_metrics,
+            ),
+            Err(RiskSurfaceError::InvalidMetric { .. })
         ));
     }
 }

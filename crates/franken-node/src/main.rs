@@ -190,7 +190,7 @@ use frankenengine_node::{
         revocation_freshness::{
             FreshnessPolicy, SafetyTier, registry_revocation_freshness_denial, snapshot_age_secs,
         },
-        trust_complexity, zk_attestation,
+        zk_attestation,
     },
     supply_chain::category_shift::validate_benchmark_thresholds_with_config,
     supply_chain::{
@@ -15750,12 +15750,43 @@ struct TrustGraphFocus {
 
 #[derive(Debug, Serialize)]
 struct TrustGraphImmunizationReport {
+    schema_version: &'static str,
+    verification_scope: &'static str,
+    topology_status: &'static str,
+    topology_unavailable_reason: Option<String>,
+    topology_metrics:
+        Option<BTreeMap<String, supply_chain::trust_graph::DependencyTopologyMetrics>>,
     planner_catalog: Option<lib_dgis::immunization_planner::BarrierPlanCatalog>,
+    planner_status: &'static str,
+    planner_unavailable_reason: Option<String>,
+    planner_candidate_limit: usize,
+    planner_selected_nodes: Vec<String>,
+    planner_omitted_nodes: usize,
     risk_surfaces: Vec<lib_dgis::risk_surface_integration::RiskSurfaceSnapshot>,
-    bpet_dgis_priorities: Vec<lib_bpet::dgis_fusion::BpetDgisPriorityEscalation>,
-    bpet_trust_surfaces: Vec<lib_bpet::trust_surface_integration::BpetTrustSurfaceAssessment>,
-    complexity_gate_pass: bool,
-    complexity_replay_deterministic: bool,
+    behavioral_streams: Vec<supply_chain::behavioral_observation::BehavioralStreamAssessment>,
+    behavioral_coverage: Vec<TrustGraphBehavioralCoverage>,
+    bpet_dgis_priorities: Vec<TrustGraphBehavioralPriority>,
+    economic_trajectory_status: &'static str,
+    barrier_enforcement_performed: bool,
+    risk_estimates_calibrated: bool,
+    model_assumptions: Vec<&'static str>,
+}
+
+#[derive(Debug, Serialize)]
+struct TrustGraphBehavioralCoverage {
+    extension_id: String,
+    status: &'static str,
+    current_artifact_streams: usize,
+    assessed_streams: usize,
+    other_artifact_streams: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct TrustGraphBehavioralPriority {
+    stream_id: String,
+    observation_id: String,
+    confidence_status: &'static str,
+    priority: lib_bpet::dgis_fusion::BpetDgisPriorityEscalation,
 }
 
 #[derive(Debug, Serialize)]
@@ -15774,168 +15805,176 @@ struct TrustGraphCliReport {
 
 fn build_trust_graph_immunization(
     graph: &supply_chain::trust_graph::TrustGraph,
+    lockfile_available: bool,
+    behavioral_streams: Vec<supply_chain::behavioral_observation::BehavioralStreamAssessment>,
     trace_id: &str,
 ) -> Result<TrustGraphImmunizationReport> {
     use lib_bpet::dgis_fusion::{BpetDgisFusionInput, BpetDgisFusionPolicy, prioritize_with_dgis};
-    use lib_bpet::economic_integration::{
-        BpetEconomicEngine, PhenotypeObservation, PhenotypeTrajectory,
-    };
-    use lib_bpet::trust_surface_integration::assess_guidance_for_trust_surface;
     use lib_dgis::immunization_planner::{
         CriticalNodeInput, ImmunizationPlanner, ImmunizationPlannerConfig,
         ImmunizationPlannerError, PlanningInput,
     };
-    use lib_dgis::risk_surface_integration::{
-        PlannedChangeKind, PlannedTopologyChange, RiskSurfaceInput, build_risk_surface_snapshot,
-    };
+    use lib_dgis::risk_surface_integration::build_current_risk_surface_snapshot;
     use lib_dgis::update_copilot::TopologyRiskMetrics;
+
+    const MAX_PLANNER_NODES: usize = 18;
+    const SCENARIO_LOSS_PER_AFFECTED_PACKAGE_USD: f64 = 50_000.0;
 
     let mut critical_nodes = Vec::new();
     let mut risk_surfaces = Vec::new();
+    let mut behavioral_coverage = Vec::new();
     let mut bpet_dgis_priorities = Vec::new();
-    let mut bpet_trust_surfaces = Vec::new();
-    let mut complexity_gate = trust_complexity::TrustComplexityGate::new(
-        trust_complexity::ComplexityBudget::default(),
-        300,
-    );
-    let mut complexity_replay_deterministic = true;
+    let (topology, topology_unavailable_reason) = if lockfile_available {
+        match supply_chain::trust_graph::dependency_topology_metrics(graph) {
+            Ok(metrics) => (Some(metrics), None),
+            Err(error) => (None, Some(error.to_string())),
+        }
+    } else {
+        (
+            None,
+            Some("No project lockfile supplies dependency topology evidence".to_string()),
+        )
+    };
 
-    let total_extensions = graph.summary.extensions.max(1) as f64;
     for node in &graph.nodes {
         if node.kind != supply_chain::trust_graph::TrustNodeKind::Extension {
             continue;
         }
-        let dependents = supply_chain::trust_graph::blast_radius(graph, &node.node_id);
-        let direct_deps = graph
-            .edges
+        let streams = behavioral_streams
             .iter()
-            .filter(|edge| {
-                edge.source == node.node_id
-                    && edge.relation == supply_chain::trust_graph::TrustRelation::DependsOn
-            })
+            .filter(|stream| stream.extension_id == node.node_id)
+            .collect::<Vec<_>>();
+        let current_streams = streams
+            .iter()
+            .filter(|stream| stream.current_artifact)
+            .copied()
+            .collect::<Vec<_>>();
+        let assessed_streams = current_streams
+            .iter()
+            .filter(|stream| stream.detector_ready && stream.max_severity.is_some())
             .count();
-        let max_depth = dependents
+        let observed_severity = current_streams
             .iter()
-            .map(|entry| u32::try_from(entry.depth).unwrap_or(u32::MAX))
-            .max()
-            .unwrap_or(0);
+            .filter(|stream| stream.detector_ready)
+            .filter_map(|stream| stream.max_severity)
+            .max_by(f64::total_cmp);
+        behavioral_coverage.push(TrustGraphBehavioralCoverage {
+            extension_id: node.node_id.clone(),
+            status: if current_streams.is_empty() {
+                "no_current_artifact_observations"
+            } else if assessed_streams == 0 {
+                "insufficient_comparable_observations"
+            } else if assessed_streams < current_streams.len() {
+                "partially_assessed"
+            } else {
+                "assessed"
+            },
+            current_artifact_streams: current_streams.len(),
+            assessed_streams,
+            other_artifact_streams: streams.len().saturating_sub(current_streams.len()),
+        });
+
+        // Resource-bound topology failure must not become a set of measured
+        // zeros, nor hide the independently authenticated observation coverage.
+        let Some(structural) = topology.as_ref().and_then(|all| all.get(&node.node_id)) else {
+            continue;
+        };
         let effective_score_1000 = node
             .effective_score
-            .unwrap_or(500)
+            .context("trust graph extension lacks an observed trust score")?
             .min(supply_chain::trust_graph::TRUST_SCORE_SCALE);
         let trust_deficit = (1.0
             - (f64::from(effective_score_1000)
                 / f64::from(supply_chain::trust_graph::TRUST_SCORE_SCALE)))
         .clamp(0.0, 1.0);
-        let effective_bps = effective_score_1000.saturating_mul(10);
-        let centrality = ((dependents.len() as f64) / total_extensions).clamp(0.0, 1.0);
-        let bottleneck = ((trust_deficit * 0.6) + (centrality * 0.4)).clamp(0.0, 1.0);
+        let package_count = topology.as_ref().map_or(0, BTreeMap::len);
+        let dependent_fraction = ((structural.transitive_dependents as f64)
+            / (package_count.max(1) as f64))
+            .clamp(0.0, 1.0);
         let metrics = TopologyRiskMetrics {
-            fan_out: direct_deps as f64,
-            betweenness_centrality: centrality,
-            articulation_point: !dependents.is_empty() && direct_deps > 0,
-            trust_bottleneck_score: bottleneck,
-            transitive_dependency_count: u32::try_from(dependents.len()).unwrap_or(u32::MAX),
-            max_depth_in_graph: max_depth,
+            fan_out: structural.direct_dependencies as f64,
+            betweenness_centrality: structural.betweenness_centrality,
+            articulation_point: structural.is_articulation_point,
+            trust_bottleneck_score: (0.6 * trust_deficit + 0.4 * dependent_fraction)
+                .clamp(0.0, 1.0),
+            // The canonical risk-surface model uses this field for downstream
+            // dependents. It is deliberately reverse reachability, not the
+            // dependencies the selected package itself imports.
+            transitive_dependency_count: u32::try_from(structural.transitive_dependents)
+                .context("trust graph dependent count exceeds the risk model bound")?,
+            max_depth_in_graph: u32::try_from(structural.max_dependent_depth)
+                .context("trust graph dependent depth exceeds the risk model bound")?,
         };
+        // These are disclosed prioritization assumptions, not a measured
+        // compromise probability. Each stream was evaluated independently;
+        // its strongest finding can only increase the planner's risk floor.
+        let risk_signal = observed_severity.map_or(trust_deficit, |score| score.max(trust_deficit));
         let expected_cascade_loss =
-            (0.28 + (trust_deficit * 0.45) + (centrality * 0.25)).clamp(0.05, 0.99);
+            (0.28 + (risk_signal * 0.45) + (dependent_fraction * 0.25)).clamp(0.05, 0.99);
         critical_nodes.push(CriticalNodeInput::new(
             node.node_id.clone(),
             metrics.clone(),
             expected_cascade_loss,
         ));
 
-        let post_metrics = TopologyRiskMetrics {
-            trust_bottleneck_score: (metrics.trust_bottleneck_score * 0.5).clamp(0.0, 1.0),
-            ..metrics.clone()
-        };
-        let surface = build_risk_surface_snapshot(RiskSurfaceInput {
-            extension_id: node.node_id.clone(),
-            trace_id: trace_id.to_string(),
-            base_adversary_posterior: trust_deficit.clamp(0.01, 0.99),
-            current_metrics: metrics.clone(),
-            planned_changes: vec![PlannedTopologyChange {
-                change_kind: PlannedChangeKind::UpdateVersion,
-                package_name: node.node_id.clone(),
-                from_version: "current".to_string(),
-                to_version: "immunized".to_string(),
-                post_update_metrics: post_metrics,
-            }],
-        })
+        let surface = build_current_risk_surface_snapshot(
+            &node.node_id,
+            trace_id,
+            trust_deficit,
+            metrics.clone(),
+        )
         .map_err(|err| anyhow::anyhow!(err.to_string()))?;
         risk_surfaces.push(surface);
 
-        let priority = prioritize_with_dgis(
-            &BpetDgisFusionInput {
-                package_id: node.node_id.clone(),
-                bpet_risk_score: trust_deficit,
-                bpet_confidence: 0.90,
-                expected_loss_if_compromised_usd: 50_000.0 * (1.0 + (dependents.len() as f64)),
-                topology_metrics: metrics,
-                trace_id: trace_id.to_string(),
-            },
-            &BpetDgisFusionPolicy::default(),
-        )
-        .map_err(|err| anyhow::anyhow!(err.to_string()))?;
-        bpet_dgis_priorities.push(priority);
-
-        let trajectory = PhenotypeTrajectory {
-            package_name: node.node_id.clone(),
-            observations: vec![PhenotypeObservation {
-                timestamp: "2026-01-01T00:00:00Z".to_string(),
-                maintainer_activity_score: (1.0 - trust_deficit * 0.5).clamp(0.05, 1.0),
-                commit_velocity: 6.0,
-                issue_response_time_hours: 12.0 + trust_deficit * 36.0,
-                dependency_churn_rate: (0.04 + trust_deficit * 0.25).clamp(0.0, 1.0),
-                security_patch_latency_hours: 24.0 + trust_deficit * 72.0,
-                contributor_diversity_index: (0.85 - trust_deficit * 0.4).clamp(0.05, 1.0),
-            }],
-        };
-        let mut econ_engine = BpetEconomicEngine::new(Vec::new());
-        let guidance = econ_engine
-            .generate_guidance(
-                &trajectory,
-                50_000.0 * (1.0 + (dependents.len() as f64)),
-                0.85,
-                trace_id,
+        for stream in current_streams {
+            let Some(severity) = stream.max_severity.filter(|_| stream.detector_ready) else {
+                continue;
+            };
+            let priority = prioritize_with_dgis(
+                &BpetDgisFusionInput {
+                    package_id: node.node_id.clone(),
+                    bpet_risk_score: severity,
+                    // No calibration evidence accompanies these observations.
+                    // Supply no confidence boost to this uncalibrated model;
+                    // the enclosing status distinguishes missing calibration.
+                    bpet_confidence: 0.0,
+                    expected_loss_if_compromised_usd: SCENARIO_LOSS_PER_AFFECTED_PACKAGE_USD
+                        * (1.0 + f64::from(metrics.transitive_dependency_count)),
+                    topology_metrics: metrics.clone(),
+                    trace_id: trace_id.to_string(),
+                },
+                &BpetDgisFusionPolicy::default(),
             )
             .map_err(|err| anyhow::anyhow!(err.to_string()))?;
-        let bpet_surface = assess_guidance_for_trust_surface(&guidance, effective_bps, None)
-            .map_err(|err| anyhow::anyhow!(err.to_string()))?;
-        bpet_trust_surfaces.push(bpet_surface);
-
-        let chain_depth = max_depth.min(5);
-        let outcome = if node.revoked || node.quarantined {
-            trust_complexity::TrustOutcome::Deny
-        } else {
-            trust_complexity::TrustOutcome::Grant
-        };
-        let ctx = trust_complexity::TrustDecisionContext {
-            decision_id: format!("dgis-{}", node.node_id),
-            endpoint_group: "trust.graph".to_string(),
-            token: "local-cli".to_string(),
-            epoch: 1,
-            capability_set: vec!["trust.graph.immunize".to_string()],
-            clock_value: "2026-01-01T00:00:00Z".to_string(),
-            chain_depth,
-        };
-        complexity_gate
-            .record_decision(trust_complexity::TrustDecision {
-                context: ctx.clone(),
-                outcome,
-                reason: format!("effective_score={effective_bps}"),
-                decided_at: "2026-01-01T00:00:00Z".to_string(),
-            })
-            .map_err(|err| anyhow::anyhow!(err.to_string()))?;
-        let replay = complexity_gate.verify_replay(&ctx, |_| outcome);
-        if !replay.deterministic {
-            complexity_replay_deterministic = false;
+            bpet_dgis_priorities.push(TrustGraphBehavioralPriority {
+                stream_id: stream.stream_id.clone(),
+                observation_id: stream.last_observation_id.clone(),
+                confidence_status: "uncalibrated",
+                priority,
+            });
         }
     }
 
-    let planner_catalog = if critical_nodes.is_empty() {
-        None
+    // The search budget is finite. Rank by modeled consequence before taking
+    // the budget, so lexical names cannot hide the highest-impact dependency.
+    critical_nodes.sort_by(|left, right| {
+        let consequence = |node: &CriticalNodeInput| {
+            node.expected_cascade_loss * (1.0 + f64::from(node.metrics.transitive_dependency_count))
+        };
+        consequence(right)
+            .total_cmp(&consequence(left))
+            .then_with(|| left.node_id.cmp(&right.node_id))
+    });
+    let planner_omitted_nodes = critical_nodes.len().saturating_sub(MAX_PLANNER_NODES);
+    critical_nodes.truncate(MAX_PLANNER_NODES);
+    let planner_selected_nodes = critical_nodes
+        .iter()
+        .map(|node| node.node_id.clone())
+        .collect();
+    let (planner_catalog, planner_status, planner_unavailable_reason) = if topology.is_none() {
+        (None, "topology_unavailable", None)
+    } else if critical_nodes.is_empty() {
+        (None, "no_eligible_extensions", None)
     } else {
         let planner_cfg = ImmunizationPlannerConfig {
             max_total_overhead_ms: 240,
@@ -15943,21 +15982,49 @@ fn build_trust_graph_immunization(
         };
         let planner = ImmunizationPlanner::new(planner_cfg)
             .map_err(|err| anyhow::anyhow!(err.to_string()))?;
-        let planning_input = PlanningInput::new(critical_nodes.into_iter().take(18).collect());
+        let planning_input = PlanningInput::new(critical_nodes);
         match planner.plan_catalog(&planning_input) {
-            Ok(catalog) => Some(catalog),
-            Err(ImmunizationPlannerError::NoFeasiblePlan { .. }) => None,
+            Ok(catalog) => (Some(catalog), "planned", None),
+            Err(error @ ImmunizationPlannerError::NoFeasiblePlan { .. }) => {
+                (None, "no_feasible_plan", Some(error.to_string()))
+            }
             Err(err) => return Err(anyhow::anyhow!(err.to_string())),
         }
     };
 
     Ok(TrustGraphImmunizationReport {
+        schema_version: "franken-node/trust-graph-immunization/v2",
+        verification_scope: "observed_topology_and_registry_authenticated_behavioral_history",
+        topology_status: if topology.is_some() {
+            "computed"
+        } else {
+            "unavailable"
+        },
+        topology_unavailable_reason,
+        topology_metrics: topology,
         planner_catalog,
+        planner_status,
+        planner_unavailable_reason,
+        planner_candidate_limit: MAX_PLANNER_NODES,
+        planner_selected_nodes,
+        planner_omitted_nodes,
         risk_surfaces,
+        behavioral_streams,
+        behavioral_coverage,
         bpet_dgis_priorities,
-        bpet_trust_surfaces,
-        complexity_gate_pass: complexity_gate.gate_pass(),
-        complexity_replay_deterministic,
+        economic_trajectory_status: "unavailable_no_measured_maintainer_trajectory",
+        barrier_enforcement_performed: false,
+        risk_estimates_calibrated: false,
+        model_assumptions: vec![
+            "Trust deficit is 1 minus the registry score divided by 1000; it is not an observed compromise probability.",
+            "The trust bottleneck combines 0.6 trust deficit and 0.4 dependent fraction; structural graph metrics are computed separately.",
+            "Risk-model transitive_dependency_count and max_depth_in_graph describe reverse dependency reach and maximum shortest-path dependent depth, excluding publisher nodes.",
+            "A behavioral severity describes one authenticated collector/workload trajectory, potentially spanning historical package versions; current_artifact means its latest measured version and digest match the current registry card.",
+            "Planner loss is clamp(0.28 + 0.45 * max(trust deficit, independently assessed stream severity) + 0.25 * dependent fraction, 0.05, 0.99). Missing behavioral evidence is not a zero observation.",
+            "Candidate ranking multiplies modeled loss by one plus transitive dependents; the bounded catalog covers only the selected nodes.",
+            "BPET-DGIS uses a hypothetical USD 50000 loss per affected package. Numeric confidence zero records absent calibration; it is not a measured confidence level.",
+            "Planner costs and risk reductions are model assumptions. No proposed source update or barrier enforcement is measured by this report.",
+        ],
     })
 }
 
@@ -15976,6 +16043,23 @@ fn load_project_lockfile_graph(
             .with_context(|| format!("failed reading lockfile {}", path.display()))?;
         let value: serde_json::Value = serde_json::from_str(&raw)
             .with_context(|| format!("invalid lockfile JSON: {}", path.display()))?;
+        let supported_shape = value
+            .get("packages")
+            .is_some_and(serde_json::Value::is_object)
+            || value
+                .get("dependencies")
+                .is_some_and(serde_json::Value::is_object)
+            || (value
+                .get("lockfileVersion")
+                .and_then(serde_json::Value::as_u64)
+                == Some(1)
+                && value.get("dependencies").is_none()
+                && value.get("packages").is_none());
+        anyhow::ensure!(
+            supported_shape,
+            "unsupported lockfile dependency shape in {}: expected a packages or dependencies object",
+            path.display()
+        );
         return Ok((
             Some(candidate.to_string()),
             supply_chain::trust_graph::LockfileDependencyGraph::from_lockfile_json(&value),
@@ -16000,13 +16084,12 @@ fn trust_graph_report(extension: Option<&str>, immunize: bool) -> Result<TrustGr
             now_secs,
         )
         .map_err(|err| anyhow::anyhow!(err.to_string()))?;
-    let histories = state
+    let snapshot = state
         .registry
         .snapshot()
-        .map_err(|err| anyhow::anyhow!(err.to_string()))?
-        .cards_by_extension;
+        .map_err(|err| anyhow::anyhow!(err.to_string()))?;
     let (lockfile, dependencies) = load_project_lockfile_graph(Path::new("."))?;
-    let graph = build_trust_graph(&cards, &histories, &dependencies);
+    let graph = build_trust_graph(&cards, &snapshot.cards_by_extension, &dependencies);
     let focus = match extension.map(str::trim).filter(|id| !id.is_empty()) {
         None => None,
         Some(extension_id) => {
@@ -16029,8 +16112,16 @@ fn trust_graph_report(extension: Option<&str>, immunize: bool) -> Result<TrustGr
         }
     };
     let immunization = if immunize {
+        let behavioral_streams = supply_chain::behavioral_observation::assess_observation_history(
+            &state.path,
+            &state.trust_config,
+            &snapshot,
+            now_secs,
+        )?;
         Some(build_trust_graph_immunization(
             &graph,
+            lockfile.is_some(),
+            behavioral_streams,
             "trace-cli-trust-graph-immunize",
         )?)
     } else {
@@ -16142,11 +16233,33 @@ fn render_trust_graph_human(report: &TrustGraphCliReport) -> String {
             .as_ref()
             .map_or(0, |catalog| catalog.plans.len());
         lines.push(format!(
-            "immunization: plans={plan_count} risk_surfaces={} bpet_priorities={} complexity_gate_pass={}",
+            "immunization: topology={} planner={} plans={plan_count} risk_surfaces={} observed_bpet_priorities={} omitted_candidates={}",
+            immunization.topology_status,
+            immunization.planner_status,
             immunization.risk_surfaces.len(),
             immunization.bpet_dgis_priorities.len(),
-            immunization.complexity_gate_pass
+            immunization.planner_omitted_nodes,
         ));
+        lines.push(
+            "  Risk and loss estimates are uncalibrated planning assumptions; no barriers have been applied."
+                .to_string(),
+        );
+        for coverage in &immunization.behavioral_coverage {
+            lines.push(format!(
+                "  behavior {}: {} current_streams={} assessed={} historical_only={}",
+                coverage.extension_id,
+                coverage.status,
+                coverage.current_artifact_streams,
+                coverage.assessed_streams,
+                coverage.other_artifact_streams,
+            ));
+        }
+        if let Some(reason) = &immunization.topology_unavailable_reason {
+            lines.push(format!("  topology unavailable: {reason}"));
+        }
+        if let Some(reason) = &immunization.planner_unavailable_reason {
+            lines.push(format!("  planner unavailable: {reason}"));
+        }
     }
     lines.join("\n")
 }
