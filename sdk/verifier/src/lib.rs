@@ -1152,7 +1152,14 @@ impl VerifierSdk {
         )
     }
 
-    /// Verify a signed migration artifact with Ed25519 cryptographic verification.
+    /// Verify migration capsule evidence and its producer's Ed25519 signature.
+    ///
+    /// Authenticates the bundle before applying the same capsule checks as
+    /// [`Self::verify_migration_artifact`], with the same evidence binding. A
+    /// valid signature with missing or inconsistent migration evidence yields
+    /// a signed [`VerificationVerdict::Fail`] result. Invalid signatures remain
+    /// errors. These checks verify evidence consistency; they do not execute
+    /// the migrated program to establish behavioral equivalence.
     ///
     /// # Examples
     ///
@@ -1181,8 +1188,15 @@ impl VerifierSdk {
         // Then do cryptographic Ed25519 signature verification
         bundle::verify_signed_bundle(verifying_key, &verified, signature_bytes)?;
 
-        // Success: bundle is both structurally valid and cryptographically signed
-        let assertions = vec![
+        // Authenticating the producer does not make missing or inconsistent
+        // migration evidence valid. Use the same checks as the unsigned API.
+        let equivalence = verify_migration_equivalence_capsule(&verified);
+        let verdict = if equivalence.all_passed() {
+            VerificationVerdict::Pass
+        } else {
+            VerificationVerdict::Fail
+        };
+        let mut assertions = vec![
             AssertionResult {
                 assertion: "migration_artifact_structural_verified".to_string(),
                 passed: true,
@@ -1194,12 +1208,13 @@ impl VerifierSdk {
                 detail: "Ed25519 signature verification passed".to_string(),
             },
         ];
+        assertions.extend(equivalence.checked_assertions);
 
         self.build_result(
             VerificationOperation::MigrationArtifact,
-            VerificationVerdict::Pass,
+            verdict,
             assertions,
-            verified.integrity_hash,
+            equivalence.artifact_binding_hash,
         )
     }
 
@@ -5868,6 +5883,163 @@ mod tests {
         assert!(result.checked_assertions.iter().any(|assertion| {
             assertion.assertion == "migration_lockstep_verdict_hash_recomputed" && !assertion.passed
         }));
+    }
+
+    #[test]
+    fn verify_signed_migration_artifact_rejects_structural_only_bundle_and_seals_failure() {
+        let sdk = create_verifier_sdk("verifier://alpha");
+        let publisher = SigningKey::from_bytes(&[77; 32]);
+        let artifact = make_replay_bundle_bytes("verifier://alpha");
+        let bundle = bundle::verify(&artifact).unwrap();
+        let signature = bundle::sign_bundle(&publisher, &bundle).to_bytes();
+
+        let result = sdk
+            .verify_signed_migration_artifact(&publisher.verifying_key(), &artifact, &signature)
+            .unwrap();
+        assert_eq!(result.operation, VerificationOperation::MigrationArtifact);
+        assert_eq!(result.verdict, VerificationVerdict::Fail);
+        assert!(result.checked_assertions.iter().any(|assertion| {
+            assertion.assertion == "migration_artifact_signature_verified" && assertion.passed
+        }));
+        assert!(result.checked_assertions.iter().any(|assertion| {
+            assertion.assertion == "migration_equivalence_capsule_present" && !assertion.passed
+        }));
+        sdk.verify_result(&sdk.verifying_key(), &result).unwrap();
+
+        // An authenticated producer statement without equivalence evidence
+        // must remain a failure through the public signed-session API.
+        let mut session = sdk
+            .create_session("signed-migration-without-evidence")
+            .unwrap();
+        sdk.record_session_step(&mut session, &result).unwrap();
+        assert_eq!(
+            sdk.seal_session(&mut session).unwrap(),
+            VerificationVerdict::Fail
+        );
+        let transcript = sdk.export_signed_session(&session).unwrap();
+        assert_eq!(transcript.final_verdict, VerificationVerdict::Fail);
+        VerifierSdk::verify_signed_session(&sdk.verifying_key(), &transcript).unwrap();
+    }
+
+    #[test]
+    fn verify_signed_migration_artifact_authenticates_recomputed_equivalence() {
+        let sdk = create_verifier_sdk("verifier://alpha");
+        let publisher = SigningKey::from_bytes(&[78; 32]);
+        let artifact = make_migration_equivalence_bundle_bytes(
+            "verifier://alpha",
+            &reference_migration_equivalence_capsule(),
+        );
+        let bundle = bundle::verify(&artifact).unwrap();
+        let signature = bundle::sign_bundle(&publisher, &bundle).to_bytes();
+        let unsigned = sdk.verify_migration_artifact(&artifact).unwrap();
+        let signed = sdk
+            .verify_signed_migration_artifact(&publisher.verifying_key(), &artifact, &signature)
+            .unwrap();
+
+        assert_eq!(unsigned.verdict, VerificationVerdict::Pass);
+        assert_eq!(signed.verdict, unsigned.verdict);
+        assert_eq!(signed.artifact_binding_hash, unsigned.artifact_binding_hash);
+        for assertion in unsigned.checked_assertions {
+            assert!(signed.checked_assertions.contains(&assertion));
+        }
+        assert!(signed.checked_assertions.iter().any(|assertion| {
+            assertion.assertion == "migration_artifact_signature_verified" && assertion.passed
+        }));
+        sdk.verify_result(&sdk.verifying_key(), &signed).unwrap();
+    }
+
+    #[test]
+    fn verify_signed_migration_artifact_rechecks_signed_evidence_instead_of_trusting_producer() {
+        let sdk = create_verifier_sdk("verifier://alpha");
+        let publisher = SigningKey::from_bytes(&[79; 32]);
+        for case in [
+            "source drift",
+            "target drift",
+            "false precondition",
+            "empty fixture population",
+            "divergent lockstep",
+            "missing effect receipt",
+            "wrong witness commitment",
+        ] {
+            let mut capsule = reference_migration_equivalence_capsule();
+            match case {
+                "source drift" => capsule.source.source_text.push_str("throw 'changed';"),
+                "target drift" => capsule.target.source_text.push_str("throw 'changed';"),
+                "false precondition" => {
+                    capsule.precondition.target_contains = vec!["not-in-target".into()];
+                }
+                "empty fixture population" => capsule.lockstep_witness.fixture_cases = 0,
+                "divergent lockstep" => {
+                    capsule.lockstep_witness.divergence_count = 1;
+                    capsule.lockstep_witness.verdict = "fail".into();
+                }
+                "missing effect receipt" => {
+                    capsule.lockstep_witness.effect_receipt_ids = vec!["absent-effect".into()];
+                }
+                "wrong witness commitment" => {}
+                _ => unreachable!("enumerated negative fixture"),
+            }
+            // A producer can validly sign bad evidence and refresh all outer
+            // commitments. Capsule verification must still expose it.
+            capsule.lockstep_witness.lockstep_verdict_hash =
+                compute_migration_lockstep_verdict_hash(
+                    &capsule,
+                    &capsule.source.source_hash,
+                    &capsule.target.source_hash,
+                    &capsule.source.ast_hash,
+                    &capsule.target.ast_hash,
+                );
+            if case == "wrong witness commitment" {
+                capsule.lockstep_witness.lockstep_verdict_hash = "bb".repeat(32);
+            }
+            let artifact = make_migration_equivalence_bundle_bytes("verifier://alpha", &capsule);
+            let bundle = bundle::verify(&artifact).unwrap();
+            let signature = bundle::sign_bundle(&publisher, &bundle).to_bytes();
+            let unsigned = sdk.verify_migration_artifact(&artifact).unwrap();
+            let signed = sdk
+                .verify_signed_migration_artifact(&publisher.verifying_key(), &artifact, &signature)
+                .unwrap();
+
+            assert_eq!(unsigned.verdict, VerificationVerdict::Fail, "{case}");
+            assert_eq!(signed.verdict, VerificationVerdict::Fail, "{case}");
+            assert_eq!(
+                signed.artifact_binding_hash, unsigned.artifact_binding_hash,
+                "{case}"
+            );
+            for assertion in unsigned.checked_assertions {
+                assert!(signed.checked_assertions.contains(&assertion), "{case}");
+            }
+            sdk.verify_result(&sdk.verifying_key(), &signed).unwrap();
+        }
+    }
+
+    #[test]
+    fn verify_signed_migration_artifact_rejects_invalid_signatures_before_semantic_verdict() {
+        let sdk = create_verifier_sdk("verifier://alpha");
+        let publisher = SigningKey::from_bytes(&[80; 32]);
+        let foreign = SigningKey::from_bytes(&[81; 32]);
+        for artifact in [
+            make_replay_bundle_bytes("verifier://alpha"),
+            make_migration_equivalence_bundle_bytes(
+                "verifier://alpha",
+                &reference_migration_equivalence_capsule(),
+            ),
+        ] {
+            let bundle = bundle::verify(&artifact).unwrap();
+            let signature = bundle::sign_bundle(&publisher, &bundle).to_bytes();
+            let mut altered = signature;
+            altered[0] ^= 1;
+            for (key, bytes) in [
+                (foreign.verifying_key(), signature.as_slice()),
+                (publisher.verifying_key(), altered.as_slice()),
+                (publisher.verifying_key(), &signature[..63]),
+            ] {
+                assert!(matches!(
+                    sdk.verify_signed_migration_artifact(&key, &artifact, bytes),
+                    Err(VerifierSdkError::Bundle(_))
+                ));
+            }
+        }
     }
 
     #[test]

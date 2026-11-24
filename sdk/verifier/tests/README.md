@@ -72,6 +72,27 @@ the session or claim independent verification of private keyed step tags.
 cargo test -p frankenengine-verifier-sdk --test signed_session_cli
 ```
 
+### Signed Migration Evidence
+
+`VerifierSdk::verify_signed_migration_artifact` authenticates the bundle and
+applies the same migration capsule verification as the unsigned API: source
+and AST identities, preconditions, lockstep witness commitments and evidence
+requirements. A valid producer signature cannot turn missing or inconsistent
+migration evidence into a passing result. Authentication errors remain errors;
+authenticated bundles with invalid migration evidence produce signed `Fail`
+results that also fail a recorded and exported verification session.
+
+The regression tests include validly signed structural-only bundles, source
+and target drift, false preconditions, empty or divergent witness populations,
+missing effect receipts, and invalid witness commitments. The passing fixture
+contains parsed JavaScript source and target snapshots with synthetic witness
+metadata. These checks verify the capsule's evidence consistency; they do not
+execute Node or the native runtime to establish behavioral equivalence.
+
+```bash
+cargo test -p frankenengine-verifier-sdk --lib verify_signed_migration_artifact
+```
+
 ### Embedded Native Module Sources
 
 `verify_incident_bundle` independently checks any embedded FNSGCAP1 source
