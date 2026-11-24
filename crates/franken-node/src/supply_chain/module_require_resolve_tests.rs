@@ -76,8 +76,8 @@ fn direct_resolve_spellings_and_typed_wrappers_capture_resolution_only_requests(
 fn resolve_options_are_not_silently_resolved_from_the_importer_directory() {
     let root = tempfile::tempdir().unwrap();
     for source in [
-        "require.resolve('./dep.cjs', { paths: ['elsewhere'] });",
-        "require.resolve('./dep.cjs', {});",
+        "require.resolve('./dep.cjs', { paths: roots });",
+        "require.resolve('./dep.cjs', { get paths() { return ['elsewhere']; } });",
         "require.resolve('./dep.cjs', undefined);",
         "require.resolve('./dep.cjs', ...options);",
     ] {
@@ -126,7 +126,7 @@ fn indirect_or_mutated_resolve_members_and_shadowed_loaders_stay_incomplete() {
         "require[name]('./dep.cjs');",
         "require['res' + name]('./dep.cjs');",
         "require.resolve.call(null, './dep.cjs');",
-        "require.resolve.paths('pkg');",
+        "const paths=require.resolve.paths; paths('pkg');",
         "(0, require.resolve)('./dep.cjs');",
         "module.require.resolve('./dep.cjs');",
         "function f(require) { return require.resolve('./dep.cjs'); }",
@@ -559,6 +559,239 @@ fn metadata_and_loaded_targets_share_the_existing_module_bound() {
     }
 }
 
+
+#[test]
+fn commonjs_search_capture_keeps_order_singleton_probes_and_lookup_purpose() {
+    let source = r#"
+const second = 'two';
+require.resolve('pkg', {paths: ['one', second]});
+require.resolve('./asset.cjs', {paths: ['one', second]});
+require.resolve('pkg', {paths: []});
+require.resolve('pkg', {});
+require.resolve.paths('pkg');
+"#;
+    let (loads, notices, analyzed) = scan_source(source, SourceLanguage::JavaScript);
+    assert!(analyzed && notices.is_empty(), "{notices:?}");
+    assert_eq!(loads.len(), 6);
+    let roots = |load: &Load| load.search_paths.as_ref().map(|roots| {
+        roots.iter().map(|root| root.text.clone()).collect::<Vec<_>>()
+    });
+    assert_eq!(roots(&loads[0]), Some(vec!["one".into(), "two".into()]));
+    assert_eq!(roots(&loads[1]), Some(vec!["one".into()]));
+    assert_eq!(roots(&loads[2]), Some(vec!["two".into()]));
+    assert_eq!(roots(&loads[3]), Some(Vec::new()));
+    assert_eq!(roots(&loads[4]), None);
+    assert!(loads[5].lookup_paths);
+    assert!(loads.iter().all(|load| load.kind == LoadKind::RequireResolve));
+}
+
+#[test]
+fn commonjs_search_refuses_mutable_ambiguous_or_excessive_option_authority() {
+    for source in [
+        "const roots=['one']; require.resolve('pkg',{paths:roots});",
+        "require.resolve('pkg',{paths:['one',,'two']});",
+        "require.resolve('pkg',{paths:[...roots]});",
+        "require.resolve('pkg',{paths:['one'],paths:['two']});",
+        "require.resolve('pkg',{['paths']:['one']});",
+        "require.resolve('pkg',{paths:['one'],extra:true});",
+        "function f(__dirname){return require.resolve('pkg',{paths:[__dirname]});}",
+        "__dirname='elsewhere'; require.resolve('pkg',{paths:[__dirname]});",
+        "arguments[4]='elsewhere'; require.resolve('pkg',{paths:[__dirname]});",
+        "require.resolve('pkg',{paths:[__dirname+'suffix']});",
+        "import.meta.dirname='elsewhere'; require.resolve('pkg',{paths:[import.meta.dirname]});",
+    ] {
+        let (_, notices, analyzed) = scan_source(source, SourceLanguage::JavaScript);
+        assert!(analyzed && !notices.is_empty(), "unproved paths admitted: {source}");
+    }
+    let source = format!(
+        "require.resolve('pkg',{{paths:[{}]}});",
+        vec!["'root'"; super::super::MAX_COMMONJS_SEARCH_PATHS + 1].join(","),
+    );
+    assert!(scan_source(&source, SourceLanguage::JavaScript).1
+        .iter().any(|notice| notice.code == "REQUIRE_RESOLVE_OPTIONS"));
+}
+
+#[test]
+fn commonjs_search_routes_are_pinned_relocatable_and_never_load_authority() {
+    let root = tempfile::tempdir().unwrap();
+    put(root.path(), "app.cjs", r#"
+require.resolve('pkg',{paths:['one','two']});
+require.resolve('pkg',{paths:['two','one']});
+require.resolve('ancestor',{paths:['one','two']});
+require.resolve('./asset.cjs',{paths:['missing','two']});
+require.resolve('pkg',{paths:[]});
+require.resolve('./asset.cjs',{paths:[]});
+require.resolve.paths('pkg');
+require.resolve.paths('./asset.cjs');
+"#);
+    for directory in ["one", "two", ""] {
+        let prefix = if directory.is_empty() { String::new() } else { format!("{directory}/") };
+        put(root.path(), &format!("{prefix}node_modules/pkg/package.json"),
+            r#"{"exports":"./index.cjs"}"#);
+        put(root.path(), &format!("{prefix}node_modules/pkg/index.cjs"),
+            "throw new Error('metadata must not evaluate');");
+    }
+    put(root.path(), "node_modules/ancestor/index.js", "first-root ancestor wins");
+    put(root.path(), "two/node_modules/ancestor/index.js", "later-root candidate must not win");
+    put(root.path(), "two/asset.cjs", "throw new Error('asset must not evaluate');");
+    put(root.path(), "asset.cjs", "throw new Error('empty roots must not use default');");
+    let graph = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
+    assert!(graph.report().diagnostics.is_empty());
+    assert_eq!(graph.report().modules.len(), 1);
+    let pin = graph.report().input_hash.clone();
+    let encoded = capsule::encode(&graph).unwrap();
+    put(root.path(), "two/asset.cjs", "live mutation");
+    put(root.path(), "missing/asset.cjs", "new file after capture");
+    let replayed = capsule::replay(encoded.bytes(), encoded.digest()).unwrap();
+    assert_eq!(graph.report(), replayed.report());
+    let registry = PinnedModuleRegistry::new(replayed, &pin).ok().unwrap();
+    let caller = Some(registry.entrypoint());
+    for (paths, expected) in [
+        (vec!["one".into(), "two".into()], "one/node_modules/pkg/index.cjs"),
+        (vec!["two".into(), "one".into()], "two/node_modules/pkg/index.cjs"),
+    ] {
+        assert_eq!(registry.lookup_resolution_from_paths(caller, "pkg", &paths)
+            .unwrap().origin().path, expected);
+    }
+    assert_eq!(registry.lookup_resolution_from_paths(caller, "./asset.cjs", &["two".into()])
+        .unwrap().origin().path, "two/asset.cjs");
+    assert_eq!(registry.lookup_resolution_from_paths(caller, "ancestor", &["one".into(), "two".into()])
+        .unwrap().origin().path, "node_modules/ancestor/index.js");
+    for (request, paths) in [
+        ("pkg", Vec::new()),
+        ("./asset.cjs", Vec::new()),
+        ("./asset.cjs", vec!["missing".into()]),
+    ] {
+        assert_eq!(registry.lookup_resolution_from_paths(caller, request, &paths)
+            .err().unwrap().code, "MODULE_NOT_FOUND");
+    }
+    for paths in [vec!["one".into()], vec!["two".into(), "one".into(), "two".into()]] {
+        assert_eq!(registry.lookup_resolution_from_paths(caller, "pkg", &paths)
+            .err().unwrap().code, "ERR_MODULE_REGISTRY_ROUTE");
+    }
+    assert_eq!(registry.lookup_resolution(caller, "pkg").err().unwrap().code,
+        "ERR_MODULE_REGISTRY_ROUTE");
+    assert_eq!(registry.lookup(caller, "pkg", RequestStyle::Require).err().unwrap().code,
+        "ERR_MODULE_REGISTRY_ROUTE");
+    match registry.lookup_paths(caller, "pkg").unwrap() {
+        registry::RegisteredLookupPaths::Directories(paths) => assert_eq!(paths, ["node_modules"]),
+        _ => panic!("package lookup directories are not builtin null"),
+    }
+    match registry.lookup_paths(caller, "./asset.cjs").unwrap() {
+        registry::RegisteredLookupPaths::Directories(paths) => assert_eq!(paths, [""]),
+        _ => panic!("relative lookup requires the caller directory"),
+    }
+    assert!(registry.lookup_paths(caller, "uncaptured").is_err());
+    assert!(registry.lookup_paths(Some("foreign-referrer"), "pkg").is_err());
+}
+
+#[test]
+fn commonjs_search_keeps_original_package_imports_and_self_scope_with_empty_roots() {
+    let root = tempfile::tempdir().unwrap();
+    put(root.path(), "owner/app.cjs", r#"
+require.resolve('#local',{paths:['other']});
+require.resolve('owner',{paths:['other']});
+require.resolve('#local',{paths:[]});
+require.resolve('owner',{paths:[]});
+"#);
+    put(root.path(), "owner/package.json",
+        r##"{"name":"owner","imports":{"#local":"./private.cjs"},"exports":"./self.cjs"}"##);
+    put(root.path(), "owner/private.cjs", "private asset");
+    put(root.path(), "owner/self.cjs", "self asset");
+    put(root.path(), "other/package.json",
+        r##"{"name":"owner","imports":{"#local":"./wrong.cjs"},"exports":"./wrong.cjs"}"##);
+    put(root.path(), "other/wrong.cjs", "must never select");
+    let graph = capture(root.path(), "owner/app.cjs", GraphOptions::default()).unwrap();
+    assert!(graph.report().fully_resolved);
+    assert_eq!(graph.report().edges.iter().map(|edge| edge.target.as_ref().unwrap().path.as_str())
+        .collect::<Vec<_>>(),
+        ["owner/private.cjs", "owner/self.cjs", "owner/private.cjs", "owner/self.cjs"]);
+}
+
+#[test]
+fn commonjs_search_selected_export_or_main_failure_cannot_fall_through() {
+    for manifest in [
+        r#"{"exports":"./missing.cjs"}"#,
+        r#"{"main":"./missing.cjs"}"#,
+        r#"{"exports":{"./other":"./index.cjs"}}"#,
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "app.cjs", "require.resolve('broken',{paths:['one','two']});");
+        put(root.path(), "one/node_modules/broken/package.json", manifest);
+        put(root.path(), "two/node_modules/broken/index.js", "alternate must not win");
+        let graph = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
+        assert_eq!(graph.report().edges[0].state, EdgeState::Unresolved);
+        assert!(matches!(graph.report().edges[0].error.as_ref().unwrap().code,
+            "MODULE_NOT_FOUND" | "ERR_PACKAGE_PATH_NOT_EXPORTED"));
+        assert!(!graph.report().probes.iter()
+            .any(|probe| probe.path.starts_with("two/node_modules")));
+        let pin = graph.report().input_hash.clone();
+        let registry = PinnedModuleRegistry::new(graph, &pin).ok().unwrap();
+        assert!(registry.lookup_resolution_from_paths(Some(registry.entrypoint()),
+            "broken", &["one".into(), "two".into()]).is_err());
+    }
+    let root = tempfile::tempdir().unwrap();
+    put(root.path(), "app.cjs", "require.resolve('./broken',{paths:['one','two']});");
+    put(root.path(), "one/broken/package.json", r#"{"main":"./missing.cjs"}"#);
+    put(root.path(), "two/broken/index.js", "alternate must not win");
+    let graph = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
+    assert!(graph.report().edges.iter().any(|edge| edge.error.as_ref()
+        .is_some_and(|error| error.code == "ERR_REQUIRE_RESOLVE_SEARCH_TERMINAL")));
+    let pin = graph.report().input_hash.clone();
+    assert_eq!(PinnedModuleRegistry::new(graph, &pin).err().unwrap().code,
+        "ERR_MODULE_REGISTRY_INCOMPLETE");
+}
+
+#[test]
+fn commonjs_search_roots_cannot_escape_or_enter_operator_state() {
+    let root = tempfile::tempdir().unwrap();
+    for path in ["../outside", "/outside", ".franken-node", ".git", ".beads"] {
+        put(root.path(), "app.cjs", &format!(
+            "require.resolve('pkg',{{paths:[{path:?}]}});"
+        ));
+        let failure = capture(root.path(), "app.cjs", GraphOptions::default()).err().unwrap();
+        assert!(matches!(failure.code,
+            "ERR_MODULE_OUTSIDE_PROJECT" | "ERR_INVALID_MODULE_SPECIFIER"), "{path}: {failure:?}");
+    }
+}
+
+#[test]
+fn commonjs_lookup_builtin_classification_requires_the_engine_inventory() {
+    let root = tempfile::tempdir().unwrap();
+    for request in ["fs", "node:fs", "node:franken_missing"] {
+        put(root.path(), "app.cjs", &format!("require.resolve.paths({request:?});"));
+        let graph = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
+        let pin = graph.report().input_hash.clone();
+        assert_eq!(PinnedModuleRegistry::new(graph, &pin).err().unwrap().code,
+            "ERR_MODULE_REGISTRY_INCOMPLETE");
+    }
+}
+
+#[test]
+fn commonjs_lookup_directories_stop_at_project_root_and_skip_node_modules_parent() {
+    let root = tempfile::tempdir().unwrap();
+    put(root.path(), "node_modules/pkg/lib/app.cjs",
+        "require.resolve.paths('absent'); require.resolve.paths('.hidden-package'); require.resolve.paths('..');");
+    let graph = capture(root.path(), "node_modules/pkg/lib/app.cjs", GraphOptions::default()).unwrap();
+    assert!(graph.report().fully_resolved);
+    assert!(graph.report().resolution_targets.is_empty());
+    let pin = graph.report().input_hash.clone();
+    let registry = PinnedModuleRegistry::new(graph, &pin).ok().unwrap();
+    for request in ["absent", ".hidden-package"] {
+        match registry.lookup_paths(Some(registry.entrypoint()), request).unwrap() {
+            registry::RegisteredLookupPaths::Directories(paths) => assert_eq!(paths, [
+                "node_modules/pkg/lib/node_modules", "node_modules/pkg/node_modules", "node_modules",
+            ]),
+            _ => panic!("ordinary package lookup cannot be null"),
+        }
+    }
+    match registry.lookup_paths(Some(registry.entrypoint()), "..").unwrap() {
+        registry::RegisteredLookupPaths::Directories(paths) =>
+            assert_eq!(paths, ["node_modules/pkg/lib"]),
+        _ => panic!("relative lookup cannot be null"),
+    }
+}
+
 #[cfg(feature = "engine")]
 mod native {
     use super::super::engine_resolver::CapturedEngineResolver;
@@ -612,6 +845,190 @@ mod native {
             version: "1.0.0".into(),
             metadata: BTreeMap::new(),
         }
+    }
+
+
+    #[test]
+    fn native_commonjs_search_matches_node_and_replays_under_independent_roots() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("captured project");
+        put(&root, "app.cjs", r#"
+console.log('one',require.resolve('pkg',{paths:[__dirname+'/one',__dirname+'/two']}));
+console.log('two',require.resolve('pkg',{paths:[__dirname+'/two',__dirname+'/one']}));
+console.log('literal',require.resolve('pkg',{paths:['two']}));
+console.log('ancestor',require.resolve('ancestor',{paths:[__dirname+'/one',__dirname+'/two']}));
+console.log('relative',require.resolve('./asset.cjs',{paths:[__dirname+'/absent',__dirname+'/two']}));
+console.log('relative-dir',require.resolve.paths('./asset.cjs')[0]===__dirname);
+console.log('builtins',require.resolve.paths('fs')===null,require.resolve.paths('node:fs')===null);
+console.log('package-dir',require.resolve.paths('pkg')[0]===__dirname+'/node_modules');
+console.log('reserved-dir',require.resolve.paths('node:franken_missing')[0]===__dirname+'/node_modules');
+try { require.resolve('pkg',{paths:[]}); } catch(e) { console.log('empty-package',e.code); }
+try { require.resolve('./asset.cjs',{paths:[]}); } catch(e) { console.log('empty-relative',e.code); }
+try { require.resolve('node:franken_missing',{paths:[]}); } catch(e) { console.log('reserved',e.code); }
+try { require.resolve('broken',{paths:[__dirname+'/one',__dirname+'/two']}); } catch(e) { console.log('terminal-main',e.code); }
+const {createRequire}=require('node:module');
+const local=createRequire(__filename);
+const lookup=local.resolve;
+console.log('alias',lookup('pkg',{paths:[__dirname+'/two']}));
+console.log('alias-dir',lookup.paths('./asset.cjs')[0]===__dirname);
+"#);
+        for directory in ["one", "two"] {
+            put(&root, &format!("{directory}/node_modules/pkg/package.json"),
+                r#"{"exports":"./index.cjs"}"#);
+            put(&root, &format!("{directory}/node_modules/pkg/index.cjs"),
+                "throw new Error('resolved asset evaluated');");
+        }
+        put(&root, "node_modules/ancestor/index.js", "first-root ancestor wins");
+        put(&root, "two/node_modules/ancestor/index.js", "later-root candidate must not win");
+        put(&root, "two/asset.cjs", "throw new Error('resolved asset evaluated');");
+        put(&root, "one/node_modules/broken/package.json", r#"{"main":"./missing.cjs"}"#);
+        put(&root, "two/node_modules/broken/index.js", "throw new Error('terminal bypass');");
+        let reference = std::process::Command::new("node")
+            .arg("app.cjs").current_dir(&root).output().expect("Node reference executable");
+        assert!(reference.status.success(), "{}", String::from_utf8_lossy(&reference.stderr));
+        let expected = String::from_utf8(reference.stdout).unwrap();
+        assert!(expected.contains("relative-dir true\nbuiltins true true\n"));
+        assert!(expected.contains("empty-package MODULE_NOT_FOUND\nempty-relative MODULE_NOT_FOUND\n"));
+        assert!(expected.contains("reserved MODULE_NOT_FOUND\n"));
+        assert!(expected.contains("terminal-main MODULE_NOT_FOUND\n"));
+        let graph = capture(&root, "app.cjs", GraphOptions::default()).unwrap();
+        assert!(graph.report().diagnostics.is_empty(), "{:?}", graph.report().diagnostics);
+        let pin = graph.report().input_hash.clone();
+        let encoded = capsule::encode(&graph).unwrap();
+        std::fs::rename(&root, parent.path().join("retired input")).unwrap();
+        let replayed = capsule::replay(encoded.bytes(), encoded.digest()).unwrap();
+        assert_eq!(graph.report(), replayed.report());
+        let resolver = Arc::new(CapturedEngineResolver::new(replayed, &pin).ok().unwrap());
+        // The same immutable resolver must support two independently relocated
+        // roots; neither destination exists and no source may be reopened.
+        for destination in ["relocated one", "relocated two"] {
+            let destination = parent.path().join(destination);
+            assert!(!destination.exists());
+            let expected = expected.replace(root.to_str().unwrap(), destination.to_str().unwrap());
+            for lane in [LaneChoice::QuickJs, LaneChoice::V8] {
+                let policy = Arc::new(policy());
+                let entry = resolver.resolve(&resolver.entry_request(), &context(), policy.as_ref())
+                    .unwrap();
+                let installed = resolver.execution_resolver(&destination, policy).unwrap();
+                let output = engine(lane)
+                    .execute_resolved_entry_with_resolver(&package(), &entry, installed)
+                    .expect("captured CommonJS search executes through the real engine hooks");
+                let output = output.console_output.iter().map(|line| line.message.as_str())
+                    .collect::<Vec<_>>().join("\n") + "\n";
+                assert_eq!(output, expected, "{lane:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn native_create_require_search_uses_read_only_esm_dirname_origin() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("esm");
+        put(&root, "app.mjs", r#"
+import {createRequire} from 'node:module';
+const load=createRequire(import.meta.url);
+const lookup=load.resolve;
+console.log('resolved',lookup('pkg',{paths:[import.meta.dirname+'/plugins']}));
+console.log('directory',lookup.paths('./asset')[0]===import.meta.dirname);
+"#);
+        put(&root, "plugins/node_modules/pkg/index.js", "throw new Error('metadata evaluated');");
+        let graph = capture(&root, "app.mjs", GraphOptions::default()).unwrap();
+        assert!(graph.report().diagnostics.is_empty(), "{:?}", graph.report().diagnostics);
+        let pin = graph.report().input_hash.clone();
+        let resolver = Arc::new(CapturedEngineResolver::new(graph, &pin).ok().unwrap());
+        let destination = parent.path().join("unopened relocation");
+        for lane in [LaneChoice::QuickJs, LaneChoice::V8] {
+            let mut engine = ExecutionOrchestrator::try_new_lab_with_runtime_config(
+                OrchestratorConfig {
+                    force_lane: Some(lane),
+                    parse_goal: ParseGoal::Module,
+                    commonjs_entry: false,
+                    ..OrchestratorConfig::default()
+                },
+                RuntimeConfig::default(),
+            ).unwrap();
+            let policy = Arc::new(policy());
+            let entry = resolver.resolve(&resolver.entry_request(), &context(), policy.as_ref()).unwrap();
+            let installed = resolver.execution_resolver(&destination, policy).unwrap();
+            let result = engine.execute_resolved_entry_with_resolver(&package(), &entry, installed)
+                .expect("current-module createRequire and lexical import.meta.dirname retain their origins");
+            assert_eq!(result.console_output.iter().map(|line| line.message.clone()).collect::<Vec<_>>(),
+                [format!("resolved {}", destination.join("plugins/node_modules/pkg/index.js").display()),
+                 "directory true".into()], "{lane:?}");
+        }
+    }
+
+    #[test]
+    fn native_commonjs_search_policy_denial_is_fresh_and_not_a_search_miss() {
+        for source in [
+            "console.log(require.resolve('./dep.cjs',{paths:[__dirname]})); try {require.resolve('./dep.cjs',{paths:[__dirname]});} catch(e) {console.log('bypass');}",
+            "console.log(require.resolve.paths('./dep.cjs')[0]); try {require.resolve.paths('./dep.cjs');} catch(e) {console.log('bypass');}",
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            put(root.path(), "app.cjs", source);
+            put(root.path(), "dep.cjs", "throw new Error('metadata must not evaluate');");
+            let graph = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
+            let pin = graph.report().input_hash.clone();
+            let resolver = Arc::new(CapturedEngineResolver::new(graph, &pin).ok().unwrap());
+            for lane in [LaneChoice::QuickJs, LaneChoice::V8] {
+                let changing = Arc::new(RevokeSecondResolve(AtomicUsize::new(0)));
+                let entry = resolver.resolve(&resolver.entry_request(), &context(), &policy()).unwrap();
+                let installed = resolver.execution_resolver(root.path(), changing.clone()).unwrap();
+                let mut engine = engine(lane);
+                let failure = engine.execute_resolved_entry_with_resolver(&package(), &entry, installed)
+                    .expect_err("metadata policy denial cannot select another root or be caught");
+                assert!(failure.to_string().contains("closed-world module resolution refused"),
+                    "{lane:?}: {failure}");
+                assert_eq!(changing.0.load(Ordering::SeqCst), 2);
+                assert_eq!(engine.last_failed_console_output().len(), 1);
+                assert!(!engine.last_failed_console_output().iter().any(|line| line.message == "bypass"));
+            }
+        }
+    }
+
+    #[test]
+    fn commonjs_search_engine_hooks_reject_uncaptured_purposes_roots_and_referrers() {
+        use frankenengine_engine::module_compatibility_matrix::CompatibilityMode;
+        use frankenengine_engine::module_resolver::{ImportStyle, ResolutionErrorCode};
+
+        let root = tempfile::tempdir().unwrap();
+        put(root.path(), "app.cjs", r#"
+require.resolve('pkg',{paths:['one','two']});
+require.resolve.paths('pkg');
+require.resolve.paths('node:fs');
+require.resolve('node:buffer');
+"#);
+        put(root.path(), "one/node_modules/pkg/index.js", "metadata only");
+        let graph = capture(root.path(), "app.cjs", GraphOptions::default()).unwrap();
+        let pin = graph.report().input_hash.clone();
+        let resolver = Arc::new(CapturedEngineResolver::new(graph, &pin).ok().unwrap());
+        let request = ModuleRequest::new("pkg", ImportStyle::Require)
+            .with_referrer(resolver.entry_request().specifier)
+            .with_compatibility_mode(CompatibilityMode::NodeCompat);
+        let roots = vec!["one".into(), "two".into()];
+        resolver.resolve_require_metadata_from_paths(&request, &roots, &context(), &policy()).unwrap();
+        assert!(resolver.resolve_metadata(&request, &context(), &policy()).is_err());
+        assert!(resolver.resolve(&request, &context(), &policy()).is_err());
+        for paths in [vec![], vec!["two".into(), "one".into()], vec!["../outside".into()]] {
+            assert!(resolver.resolve_require_metadata_from_paths(&request, &paths, &context(), &policy()).is_err());
+        }
+        let mut foreign = request.clone();
+        foreign.referrer = Some("foreign".into());
+        assert!(resolver.resolve_require_metadata_from_paths(&foreign, &roots, &context(), &policy()).is_err());
+        assert!(resolver.require_lookup_paths(&foreign, &context(), &policy()).is_err());
+        let mut denied = policy();
+        denied.denied_specifiers.insert("pkg".into());
+        assert_eq!(resolver.resolve_require_metadata_from_paths(&request, &roots, &context(), &denied)
+            .unwrap_err().code, ResolutionErrorCode::PolicyDenied);
+        assert_eq!(resolver.require_lookup_paths(&request, &context(), &denied)
+            .unwrap_err().code, ResolutionErrorCode::PolicyDenied);
+        let mut builtin = request.clone();
+        builtin.specifier = "node:fs".into();
+        assert_eq!(resolver.require_lookup_paths(&builtin, &context(), &policy()).unwrap(), None);
+        assert!(resolver.resolve_metadata(&builtin, &context(), &policy()).is_err());
+        builtin.specifier = "node:buffer".into();
+        resolver.resolve_metadata(&builtin, &context(), &policy()).unwrap();
+        assert!(resolver.require_lookup_paths(&builtin, &context(), &policy()).is_err());
     }
 
     const ENTRY: &str = r#"

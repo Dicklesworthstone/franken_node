@@ -164,6 +164,15 @@ impl SourceLanguage {
     }
 }
 
+/// Extra CommonJS metadata authority, distinct from ordinary filename lookup
+/// and from executable require. Roots are canonical and project-relative.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CommonJsSearch {
+    Paths { paths: Vec<String> },
+    LookupPaths,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SourceEdge {
     pub importer: ModuleId,
@@ -172,6 +181,8 @@ pub struct SourceEdge {
     /// Potential loads only; the scanner does not evaluate control flow.
     pub deferred_or_conditional: bool,
     pub specifier: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commonjs_search: Option<CommonJsSearch>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub import_attributes: ImportAttributes,
     pub conditions: Vec<String>,
@@ -379,6 +390,7 @@ struct Budget {
     sites: usize,
     ast_nodes: usize,
     evidence_bytes: usize,
+    search_path_bytes: usize,
 }
 
 fn limit() -> ResolutionError {
@@ -445,6 +457,18 @@ impl Budget {
         }
         Ok(())
     }
+    fn search_paths(&mut self, roots: Option<&[SearchRoot]>) -> Result<()> {
+        let bytes = roots.unwrap_or_default().iter().try_fold(0_usize, |bytes, root| {
+            bytes.checked_add(root.text.len() + std::mem::size_of::<SearchRoot>()).ok_or_else(limit)
+        })?;
+        let total = self.search_path_bytes.checked_add(bytes).ok_or_else(limit)?;
+        if total > MAX_EVIDENCE_BYTES {
+            return Err(limit());
+        }
+        self.search_path_bytes = total;
+        Ok(())
+    }
+
     fn retain(&mut self, value: &impl Serialize) -> Result<()> {
         let remaining = MAX_EVIDENCE_BYTES
             .checked_sub(self.evidence_bytes)
@@ -572,6 +596,7 @@ fn build(
             };
             resolver.conditions = conditions.clone();
             resolver.mappings.clear();
+            let commonjs_search = load.commonjs_search(&id)?;
             let mut edge = SourceEdge {
                 importer: id.clone(),
                 site: load.site,
@@ -585,6 +610,7 @@ fn build(
                             | LoadKind::DynamicImport
                     ),
                 specifier: load.specifier,
+                commonjs_search,
                 import_attributes: load.import_attributes,
                 conditions,
                 state: if load.type_only {
@@ -600,6 +626,21 @@ fn build(
             // Type-only references grant no filesystem authority. In particular,
             // an erased outside-root path or runtime name must not be resolved.
             if let Some(request) = edge.specifier.as_ref().filter(|_| !load.type_only) {
+                if matches!(edge.commonjs_search, Some(CommonJsSearch::LookupPaths)) {
+                    if request.starts_with("node:") || super::bare_builtin(request) {
+                        edge.state = EdgeState::RuntimeRequired;
+                        edge.error = Some(error(
+                            "ERR_RUNTIME_MODULE_REQUIRED",
+                            "builtin lookup paths require the engine's exact builtin inventory",
+                        ));
+                    } else {
+                        super::commonjs_lookup_paths(parent(&id.path), request)?;
+                        edge.state = EdgeState::Resolved;
+                    }
+                    budget.retain(&edge)?;
+                    edges.push(edge);
+                    continue;
+                }
                 if load.kind == LoadKind::ImportMetaResolve {
                     match resolver.resolve_url(parent(&id.path), request) {
                         Ok(url) => {
@@ -639,7 +680,13 @@ fn build(
                     edges.push(edge);
                     continue;
                 }
-                match resolver.request(parent(&id.path), request, mode, 0) {
+                let selected = match &edge.commonjs_search {
+                    Some(CommonJsSearch::Paths { paths }) => {
+                        resolver.request_from_paths(parent(&id.path), request, paths)
+                    }
+                    _ => resolver.request(parent(&id.path), request, mode, 0),
+                };
+                match selected {
                     Ok((path, url_suffix)) => {
                         let (path, source) = resolver.locate(&path)?;
                         if !source.is_file() {
@@ -797,6 +844,35 @@ struct Load {
     specifier: Option<String>,
     import_attributes: ImportAttributes,
     type_only: bool,
+    search_paths: Option<Vec<SearchRoot>>,
+    lookup_paths: bool,
+}
+
+impl Load {
+    fn commonjs_search(&self, importer: &ModuleId) -> Result<Option<CommonJsSearch>> {
+        if self.type_only {
+            return Ok(None);
+        }
+        if self.lookup_paths {
+            return Ok(Some(CommonJsSearch::LookupPaths));
+        }
+        self.search_paths.as_ref().map(|roots| {
+            let paths = roots.iter().map(|root| {
+                super::normalize(
+                    if root.importer_relative { parent(&importer.path) } else { "" },
+                    &root.text,
+                )
+            }).collect::<Result<Vec<_>>>()?;
+            super::validate_search_paths(&paths)?;
+            Ok(CommonJsSearch::Paths { paths })
+        }).transpose()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SearchRoot {
+    importer_relative: bool,
+    text: String,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Notice {
@@ -1700,6 +1776,15 @@ impl<'source> CreateRequireBindings<'source> {
                 .is_some_and(|object| self.is_loader(object, source))
     }
 
+    fn is_lookup_paths(&self, node: Node<'_>, source: &str) -> bool {
+        let node = runtime_operand(node);
+        named_member(node, "paths", source)
+            && node.child_by_field_name("object").is_some_and(|object| {
+                self.is_resolve(object, source)
+                    || self.metadata_resolver_kind(object, source) == Some(LoadKind::RequireResolve)
+            })
+    }
+
     fn direct_loader_use(&self, mut node: Node<'_>, source: &str) -> bool {
         while let Some(parent) = node.parent() {
             if parent.kind() == "call_expression" {
@@ -1708,7 +1793,7 @@ impl<'source> CreateRequireBindings<'source> {
                     .is_some_and(|function| function.id() == node.id());
             }
             if wrapper_operand(parent).is_some_and(|operand| operand.id() == node.id())
-                || (self.is_resolve(parent, source)
+                || ((self.is_resolve(parent, source) || self.is_lookup_paths(parent, source))
                     && parent
                         .child_by_field_name("object")
                         .is_some_and(|object| object.id() == node.id()))
@@ -2054,6 +2139,7 @@ fn scan(
     let bindings = CreateRequireBindings::discover(tree.root_node(), text)?;
     let mut strings = ConstStringBindings::default();
     let mut strings_discovered = false;
+    let mut directory_origin_stable = None;
     let mut loads = Vec::new();
     let mut notices = Vec::new();
     let mut cursor = tree.walk();
@@ -2072,6 +2158,7 @@ fn scan(
         let in_enum =
             *enum_context.last().expect("root context") || node.kind() == "enum_declaration";
         let mut issue = None;
+        let mut lookup_paths = false;
         let request = match node.kind() {
             "import_statement" => node
                 .child_by_field_name("source")
@@ -2094,7 +2181,10 @@ fn scan(
                     .child_by_field_name("function")
                     .is_some_and(|f| is_require_resolve(f, text) || bindings.is_resolve(f, text));
                 let kind = node.child_by_field_name("function").and_then(|f| {
-                    if bindings.factory_identifier(f, text).is_some() {
+                    if is_require_lookup_paths(f, text) || bindings.is_lookup_paths(f, text) {
+                        lookup_paths = true;
+                        Some(LoadKind::RequireResolve)
+                    } else if bindings.factory_identifier(f, text).is_some() {
                         // A factory alias may itself be named `require`.
                         // The origin argument is not a module request.
                         None
@@ -2120,20 +2210,7 @@ fn scan(
                             let mut args = a
                                 .named_children(&mut walk)
                                 .filter(|n| n.kind() != "comment");
-                            let first = args.next();
-                            if kind == LoadKind::RequireResolve && args.next().is_some() {
-                                // `paths` changes the lookup origin. Do not
-                                // guess a route from just the first argument.
-                                if !erased {
-                                    issue = Some((
-                                        "REQUIRE_RESOLVE_OPTIONS",
-                                        "require.resolve options need a captured search-path contract",
-                                    ));
-                                }
-                                None
-                            } else {
-                                first
-                            }
+                            args.next()
                         })
                         .unwrap_or(node);
                     (kind, arg)
@@ -2217,7 +2294,9 @@ fn scan(
                         "createRequire factory must initialize a proved top-level binding from this module's unchanged origin",
                     ));
                 } else if bindings.metadata_resolvers.contains_key(spelling) {
-                    if !direct_callee(node, text) && !loader_typeof_probe(node) {
+                    if !direct_callee(node, text)
+                        && !bindings.direct_loader_use(node, text)
+                        && !loader_typeof_probe(node) {
                         issue = Some((
                             "INDIRECT_METADATA_RESOLVER",
                             "metadata resolver is shadowed, mutated or escapes its captured direct calls",
@@ -2410,6 +2489,45 @@ fn scan(
                 strings_discovered = true;
                 specifiers = request_literals(argument, text, &strings);
             }
+            let mut search_paths = None;
+            if kind == LoadKind::RequireResolve
+                && !lookup_paths
+                && !erased
+                && !specifiers.as_ref().is_some_and(|requests| {
+                    requests.iter().all(|request| {
+                        request.starts_with("node:") || super::bare_builtin(request)
+                    })
+                })
+            {
+                let mut captured = capture_search_options(node, text, &strings);
+                if captured.is_none() && !strings_discovered {
+                    strings = ConstStringBindings::discover(tree.root_node(), text, language, budget)?;
+                    strings_discovered = true;
+                    captured = capture_search_options(node, text, &strings);
+                }
+                if let Some(roots) = captured {
+                    if roots.as_ref().is_some_and(|roots| roots.iter().any(|root| root.importer_relative))
+                        && !match directory_origin_stable {
+                            Some(stable) => stable,
+                            None => {
+                                let stable = stable_search_directory_origin(tree.root_node(), text, budget)?;
+                                directory_origin_stable = Some(stable);
+                                stable
+                            }
+                        }
+                    {
+                        issue = Some(("REQUIRE_RESOLVE_OPTIONS",
+                            "search directories require unchanged module-owned dirname origins"));
+                        specifiers = None;
+                    } else {
+                        search_paths = roots;
+                    }
+                } else {
+                    issue = Some(("REQUIRE_RESOLVE_OPTIONS",
+                        "require.resolve options require a bounded literal paths array with captured strings or module dirname origins"));
+                    specifiers = None;
+                }
+            }
             let unresolved = specifiers.is_none();
             // A finite choice is a set of potential routes at the same source
             // site, not a prediction of the branch that execution will take.
@@ -2421,14 +2539,36 @@ fn scan(
                 .map(Some)
                 .chain(unresolved.then_some(None))
             {
-                budget.site()?;
-                loads.push(Load {
-                    site: site.clone(),
-                    kind,
-                    specifier,
-                    import_attributes: attributes.clone(),
-                    type_only: erased,
-                });
+                // The engine probes relative options.paths lazily, one root
+                // per metadata callback. Bare packages use the ordered vector.
+                // Core modules bypass options inspection in the engine.
+                let roots = if specifier.as_deref().is_some_and(|request| {
+                    request.starts_with("node:") || super::bare_builtin(request)
+                }) {
+                    None
+                } else {
+                    search_paths.as_ref()
+                };
+                let singleton_roots = specifier.as_deref()
+                    .is_some_and(super::commonjs_relative_request)
+                    && roots.is_some_and(|roots| !roots.is_empty());
+                let count = if singleton_roots { roots.unwrap().len() } else { 1 };
+                for index in 0..count {
+                    let selected = roots.map(|roots| {
+                        if singleton_roots { &roots[index..index + 1] } else { roots.as_slice() }
+                    });
+                    budget.site()?;
+                    budget.search_paths(selected)?;
+                    loads.push(Load {
+                        site: site.clone(),
+                        kind,
+                        specifier: specifier.clone(),
+                        import_attributes: attributes.clone(),
+                        type_only: erased,
+                        search_paths: selected.map(<[SearchRoot]>::to_vec),
+                        lookup_paths,
+                    });
+                }
             }
         }
         if let Some((code, message)) = issue {
@@ -2453,6 +2593,167 @@ fn scan(
             }
             type_context.pop();
             enum_context.pop();
+        }
+    }
+}
+
+/// Capture only literal option containers. The engine evaluates getters,
+/// spreads and arbitrary arrays at runtime; those need authority this frozen
+/// graph cannot establish. Each supported root has exactly one string value.
+fn capture_search_options(
+    call: Node<'_>,
+    source: &str,
+    strings: &ConstStringBindings<'_>,
+) -> Option<Option<Vec<SearchRoot>>> {
+    let arguments = call.child_by_field_name("arguments")?;
+    let mut cursor = arguments.walk();
+    let mut arguments = arguments
+        .named_children(&mut cursor)
+        .filter(|node| node.kind() != "comment");
+    arguments.next()?;
+    let Some(options) = arguments.next() else {
+        return Some(None);
+    };
+    if arguments.next().is_some() {
+        return None;
+    }
+    let options = runtime_operand(options);
+    if options.kind() != "object" {
+        return None;
+    }
+    let mut cursor = options.walk();
+    let mut members = options
+        .named_children(&mut cursor)
+        .filter(|node| node.kind() != "comment");
+    let Some(pair) = members.next() else {
+        return Some(None);
+    };
+    if members.next().is_some() || pair.kind() != "pair" {
+        return None;
+    }
+    let key = pair.child_by_field_name("key")?;
+    if !(key.kind() == "property_identifier"
+        && key.utf8_text(source.as_bytes()) == Ok("paths"))
+        && literal(key, source).as_deref() != Some("paths")
+    {
+        return None;
+    }
+    let array = runtime_operand(pair.child_by_field_name("value")?);
+    if array.kind() != "array" {
+        return None;
+    }
+    let mut roots = Vec::new();
+    let mut cursor = array.walk();
+    let mut expect_value = true;
+    let mut bytes = 0_usize;
+    for child in array.children(&mut cursor) {
+        match child.kind() {
+            "[" | "]" | "comment" => {}
+            "," if !expect_value => expect_value = true,
+            "," => return None, // Elisions are runtime undefined, not roots.
+            _ if !expect_value || !child.is_named() => return None,
+            _ => {
+                if roots.len() >= super::MAX_COMMONJS_SEARCH_PATHS {
+                    return None;
+                }
+                let root = search_root(child, source, strings)?;
+                bytes = bytes.checked_add(root.text.len())?;
+                if bytes > super::MAX_COMMONJS_SEARCH_PATHS * super::MAX_PATH {
+                    return None;
+                }
+                roots.push(root);
+                expect_value = false;
+            }
+        }
+    }
+    Some(Some(roots))
+}
+
+fn search_root(
+    node: Node<'_>,
+    source: &str,
+    strings: &ConstStringBindings<'_>,
+) -> Option<SearchRoot> {
+    let node = runtime_operand(node);
+    let directory_origin = |node: Node<'_>| {
+        let node = runtime_operand(node);
+        (node.kind() == "identifier" && node.utf8_text(source.as_bytes()) == Ok("__dirname"))
+            || (named_member(node, "dirname", source)
+                && node.child_by_field_name("object").is_some_and(|object| {
+                    let object = runtime_operand(object);
+                    object.kind() == "meta_property" && keyword(object, "import")
+                }))
+    };
+    if directory_origin(node) {
+        return Some(SearchRoot {
+            importer_relative: true,
+            text: String::new(),
+        });
+    }
+    if node.kind() == "binary_expression"
+        && node.child_by_field_name("operator")
+            .is_some_and(|operator| operator.utf8_text(source.as_bytes()) == Ok("+"))
+        && node.child_by_field_name("left").is_some_and(directory_origin)
+    {
+        let values = request_literals(node.child_by_field_name("right")?, source, strings)?;
+        let [suffix] = values.as_slice() else {
+            return None;
+        };
+        if !suffix.is_empty() && !suffix.starts_with('/') {
+            return None;
+        }
+        return Some(SearchRoot {
+            importer_relative: true,
+            text: suffix.trim_start_matches('/').to_owned(),
+        });
+    }
+    let values = request_literals(node, source, strings)?;
+    let [value] = values.as_slice() else {
+        return None;
+    };
+    (value.len() <= super::MAX_PATH).then(|| SearchRoot {
+        importer_relative: false,
+        text: value.clone(),
+    })
+}
+
+/// A dirname origin is trusted only if every binding/write is absent. Reject
+/// wrapper arguments too: sloppy CommonJS arguments can alias __dirname.
+/// import.meta mutation/escape is independently rejected by the main scanner.
+fn stable_search_directory_origin(
+    root: Node<'_>,
+    source: &str,
+    budget: &mut Budget,
+) -> Result<bool> {
+    let mut cursor = root.walk();
+    loop {
+        budget.ast_nodes = budget.ast_nodes.checked_add(1).ok_or_else(limit)?;
+        if budget.ast_nodes > MAX_AST_NODES {
+            return Err(limit());
+        }
+        let node = cursor.node();
+        if matches!(
+            node.kind(),
+            "identifier" | "shorthand_property_identifier" | "shorthand_property_identifier_pattern"
+        ) {
+            let name = &source[node.byte_range()];
+            if name.contains('\\')
+                || (name == "__dirname" && !immutable_filename_use(node))
+                || (name == "arguments" && commonjs_wrapper_arguments(node))
+            {
+                return Ok(false);
+            }
+        }
+        if cursor.goto_first_child() {
+            continue;
+        }
+        loop {
+            if cursor.goto_next_sibling() {
+                break;
+            }
+            if !cursor.goto_parent() {
+                return Ok(true);
+            }
         }
     }
 }
@@ -2598,7 +2899,7 @@ fn direct_callee(mut node: Node<'_>, source: &str) -> bool {
                 .is_some_and(|f| f.id() == node.id());
         }
         if wrapper_operand(p).is_some_and(|operand| operand.id() == node.id())
-            || (is_require_resolve(p, source)
+            || ((is_require_resolve(p, source) || is_require_lookup_paths(p, source))
                 && p.child_by_field_name("object")
                     .is_some_and(|object| object.id() == node.id()))
         {
@@ -2896,6 +3197,13 @@ fn direct_import_meta_resolve_use(mut node: Node<'_>, source: &str) -> bool {
 /// CommonJS conditions while preserving a separate resolution-only route.
 /// Target bytes and filesystem observations are retained without treating an
 /// asset's contents as executable source or granting a subsequent require.
+fn is_require_lookup_paths(node: Node<'_>, source: &str) -> bool {
+    let node = runtime_operand(node);
+    named_member(node, "paths", source)
+        && node.child_by_field_name("object")
+            .is_some_and(|object| is_require_resolve(object, source))
+}
+
 fn is_require_resolve(node: Node<'_>, source: &str) -> bool {
     let node = runtime_operand(node);
     if !matches!(node.kind(), "member_expression" | "subscript_expression") {
@@ -4130,6 +4438,7 @@ if (false) { import.meta.resolve('./unused.node'); }
             sites: 17,
             ast_nodes: 31,
             evidence_bytes: MAX_EVIDENCE_BYTES - bytes,
+            ..Budget::default()
         };
         exact.retain(&value).unwrap();
         assert_eq!(exact.evidence_bytes, MAX_EVIDENCE_BYTES);
@@ -4143,6 +4452,7 @@ if (false) { import.meta.resolve('./unused.node'); }
                 sites: 17,
                 ast_nodes: 31,
                 evidence_bytes: before,
+                ..Budget::default()
             };
             assert_eq!(
                 budget.retain(&value).unwrap_err().code,
@@ -4173,6 +4483,7 @@ if (false) { import.meta.resolve('./unused.node'); }
             sites: 17,
             ast_nodes: 31,
             evidence_bytes: 53,
+            ..Budget::default()
         };
         let error = budget.retain(&FailingValue).unwrap_err();
         assert_eq!(error.code, "ERR_MODULE_CAPTURE");

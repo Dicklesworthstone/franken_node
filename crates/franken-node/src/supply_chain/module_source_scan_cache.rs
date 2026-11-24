@@ -15,6 +15,7 @@ struct CachedScan {
     result: Scan,
     sites: usize,
     ast_nodes: usize,
+    search_path_bytes: usize,
 }
 
 #[derive(Default)]
@@ -61,17 +62,24 @@ impl ScanCache {
                 .ast_nodes
                 .checked_add(cached.ast_nodes)
                 .ok_or_else(limit)?;
-            if sites > super::MAX_SITES || ast_nodes > super::MAX_AST_NODES {
+            let search_path_bytes = budget.search_path_bytes
+                .checked_add(cached.search_path_bytes).ok_or_else(limit)?;
+            if sites > super::MAX_SITES
+                || ast_nodes > super::MAX_AST_NODES
+                || search_path_bytes > super::MAX_EVIDENCE_BYTES
+            {
                 return Err(limit());
             }
-            // Charge before cloning. A failed admission leaves both counters
+            // Charge before cloning. A failed admission leaves all counters
             // untouched, never publishes partial syntax, and cannot wrap.
             budget.sites = sites;
             budget.ast_nodes = ast_nodes;
+            budget.search_path_bytes = search_path_bytes;
             return Ok(cached.result.clone());
         }
         let sites_before = budget.sites;
         let ast_nodes_before = budget.ast_nodes;
+        let search_path_bytes_before = budget.search_path_bytes;
         #[cfg(test)]
         {
             self.scans += 1;
@@ -88,6 +96,7 @@ impl ScanCache {
                     result: result.clone(),
                     sites: budget.sites - sites_before,
                     ast_nodes: budget.ast_nodes - ast_nodes_before,
+                    search_path_bytes: budget.search_path_bytes - search_path_bytes_before,
                 },
             );
         }
@@ -200,6 +209,10 @@ mod tests {
                 "import {createRequire} from 'node:module'; const local=createRequire(import.meta.url); const alias=local; const target='./one.cjs'; alias(target);",
                 SourceLanguage::JavaScript,
             ),
+            (
+                "require.resolve('package', {paths:['one','two']}); require.resolve('./relative', {paths:[__dirname, __dirname + '/other']}); require.resolve.paths('package');",
+                SourceLanguage::JavaScript,
+            ),
             ("{\"text\":\"require('not-a-load')\"}", SourceLanguage::Json),
             ("{bad json}", SourceLanguage::Json),
             ("export interface T {}", SourceLanguage::Declaration),
@@ -218,6 +231,7 @@ mod tests {
                 assert_eq!(actual, expected, "{text}");
                 assert_eq!(cached_budget.sites, direct_budget.sites, "{text}");
                 assert_eq!(cached_budget.ast_nodes, direct_budget.ast_nodes, "{text}");
+                assert_eq!(cached_budget.search_path_bytes, direct_budget.search_path_bytes, "{text}");
             }
             assert_eq!(cache.scans, 1, "{text}");
         }
@@ -278,6 +292,7 @@ mod tests {
                 sites,
                 ast_nodes,
                 evidence_bytes: 123,
+                search_path_bytes: 0,
             };
             let error = cache
                 .scan(
@@ -293,6 +308,30 @@ mod tests {
                 (budget.sites, budget.ast_nodes, budget.evidence_bytes),
                 (sites, ast_nodes, 123)
             );
+        }
+    }
+
+    #[test]
+    fn cached_search_vectors_pay_the_same_budget_before_cloning() {
+        let source = source("require.resolve('pkg',{paths:['one','two']});");
+        let mut parser = Parser::new();
+        let mut cache = variants("shared.cjs");
+        let mut initial = Budget::default();
+        cache.scan(&mut parser, "shared.cjs", &source, SourceLanguage::JavaScript, &mut initial)
+            .unwrap();
+        assert!(initial.search_path_bytes > 0);
+        for bytes in [super::super::MAX_EVIDENCE_BYTES, usize::MAX] {
+            let mut budget = Budget {
+                sites: 3,
+                ast_nodes: 5,
+                evidence_bytes: 7,
+                search_path_bytes: bytes,
+            };
+            assert_eq!(cache.scan(&mut parser, "shared.cjs", &source,
+                SourceLanguage::JavaScript, &mut budget).unwrap_err().code,
+                "ERR_MODULE_GRAPH_LIMIT");
+            assert_eq!((budget.sites, budget.ast_nodes, budget.evidence_bytes, budget.search_path_bytes),
+                (3, 5, 7, bytes));
         }
     }
 

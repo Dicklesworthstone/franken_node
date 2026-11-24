@@ -4882,6 +4882,23 @@ one pass.
   branch; it does not execute conditions or predict the branch that will run.
   Mutable, shadowed, forward-referenced and otherwise unproved bindings remain
   refused, and these expressions grant no access to uncaptured modules.
+  Captured CommonJS loaders also support `require.resolve(request, { paths:
+  ['./plugins', __dirname + '/fallback'] })`. The literal array can contain up
+  to 32 roots, each proved from an immutable string or this
+  module's unchanged `__dirname`/`import.meta.dirname` with an optional slash
+  suffix. Search order is retained; package self-references and private imports
+  keep the original caller's package scope. Literal `{}` retains ordinary
+  lookup, while `paths: []` disables ordinary directory search. Mutable option
+  containers, computed properties, spreads and array holes remain refused.
+  `require.resolve.paths(request)` exposes only the captured project's lookup
+  directories and returns `null` for supported builtins. Directory metadata
+  relocates with the execution root during replay and does not grant loading
+  the reported files. Host-global folders and `NODE_PATH` remain outside this
+  authority. Literal directory strings are relative to the admitted project
+  root. Package export denials stop explicit-root search. A relative
+  explicit-root lookup that encounters an invalid package `main` is refused
+  during capture: the pinned engine cannot yet preserve that terminal missing
+  module error across its per-root probes.
   ESM packages can construct a captured loader with
   `createRequire(fileURLToPath(import.meta.url))`. Named, renamed, default and
   namespace imports from `url` or `node:url` are supported, as are earlier

@@ -7,7 +7,7 @@
 //! engine consumers must authorize every lookup through ModulePolicyHook.
 
 use super::{
-    CapturedModuleGraph, EdgeState, ImportAttributes, LoadKind, ModuleId, ResolutionError,
+    CapturedModuleGraph, CommonJsSearch, EdgeState, ImportAttributes, LoadKind, ModuleId, ResolutionError,
     ResolutionUrl, SourceLanguage, error,
 };
 use serde::Serialize;
@@ -21,7 +21,23 @@ const BUILTIN_ID_DOMAIN: &[u8] = b"franken-node/sealed-native-builtin/v1\0";
 const URL_ID_DOMAIN: &[u8] = b"franken-node/sealed-resolution-url/v1\0";
 type ImporterRoutes =
     BTreeMap<RequestStyle, BTreeMap<String, BTreeMap<ImportAttributes, RegisteredTarget>>>;
+type ExplicitResolutionRoutes =
+    BTreeMap<String, BTreeMap<String, BTreeMap<Vec<String>, RegisteredTarget>>>;
+type LookupPathRoutes = BTreeMap<String, BTreeMap<String, LookupPathTarget>>;
 static EMPTY_IMPORT_ATTRIBUTES: ImportAttributes = ImportAttributes::new();
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LookupPathTarget {
+    Builtin { id: String },
+    Directories,
+}
+
+/// Directory disclosure and builtin null are separate from filename lookup.
+/// Neither variant grants executable source-delivery authority.
+pub enum RegisteredLookupPaths<'a> {
+    Builtin(&'a RegisteredResolution),
+    Directories(Vec<String>),
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -278,6 +294,8 @@ pub struct PinnedModuleRegistry {
     // elsewhere in the graph.
     resolutions: BTreeMap<String, RegisteredResolution>,
     resolution_routes: BTreeMap<String, BTreeMap<String, RegisteredTarget>>,
+    explicit_resolution_routes: ExplicitResolutionRoutes,
+    lookup_path_routes: LookupPathRoutes,
     url_resolutions: BTreeMap<String, RegisteredUrlResolution>,
     url_resolution_routes: BTreeMap<String, BTreeMap<String, RegisteredTarget>>,
 }
@@ -346,6 +364,7 @@ impl PinnedModuleRegistry {
         let mut missing_builtin_resolutions =
             BTreeMap::<(ModuleId, String), ResolutionError>::new();
         let mut has_missing_routes = false;
+        let mut has_lookup_path_routes = false;
         let incomplete = || {
             error(
                 "ERR_MODULE_REGISTRY_INCOMPLETE",
@@ -356,6 +375,30 @@ impl PinnedModuleRegistry {
             return Err(incomplete());
         }
         for edge in &report.edges {
+            if let Some(search) = &edge.commonjs_search {
+                if edge.kind != LoadKind::RequireResolve
+                    || edge.state == EdgeState::TypeOnly
+                    || !edge.import_attributes.is_empty()
+                {
+                    return Err(invalid_graph());
+                }
+                match search {
+                    CommonJsSearch::Paths { paths } => {
+                        super::super::validate_search_paths(paths)?;
+                    }
+                    CommonJsSearch::LookupPaths => {
+                        if edge.target.is_some()
+                            || edge.resolved_url.is_some()
+                            || !edge.mappings.is_empty()
+                            || !matches!(edge.state, EdgeState::Resolved | EdgeState::RuntimeRequired)
+                            || (edge.state == EdgeState::Resolved && edge.error.is_some())
+                        {
+                            return Err(invalid_graph());
+                        }
+                        has_lookup_path_routes = true;
+                    }
+                }
+            }
             super::import_attributes::validate(&edge.import_attributes)?;
             if !edge.import_attributes.is_empty()
                 && !matches!(
@@ -385,6 +428,25 @@ impl PinnedModuleRegistry {
                 {
                     let request = edge.specifier.as_deref().ok_or_else(incomplete)?;
                     let style = RequestStyle::for_load(edge.kind);
+                    if matches!(edge.commonjs_search.as_ref(), Some(CommonJsSearch::LookupPaths)) {
+                        match native_builtin(request, style) {
+                            Ok(Some(name)) => {
+                                builtin_targets.insert(
+                                    (edge.importer.clone(), style, request.to_owned()),
+                                    (native_builtin_id(&report.input_hash, name), name),
+                                );
+                            }
+                            // A source-only registry cannot classify builtin names.
+                            // Only an engine-confirmed unknown reserved name has
+                            // ordinary directories instead of builtin null.
+                            Ok(None) => return Err(incomplete()),
+                            Err(failure)
+                                if request.starts_with("node:")
+                                    && failure.code == "MODULE_NOT_FOUND" => {}
+                            Err(failure) => return Err(failure),
+                        }
+                        continue;
+                    }
                     let provider = if request.starts_with('#') {
                         // Capture has already selected this exact imports
                         // target and bound its manifest, conditions and branch
@@ -464,7 +526,11 @@ impl PinnedModuleRegistry {
         }
         // The captured report remains truthful: runtime requirements are not
         // source files and never make its fully_resolved flag true.
-        if !report.fully_resolved && builtin_targets.is_empty() && !has_missing_routes {
+        if !report.fully_resolved
+            && builtin_targets.is_empty()
+            && !has_missing_routes
+            && !has_lookup_path_routes
+        {
             return Err(incomplete());
         }
         Ok(ValidatedSourceClosure {
@@ -625,6 +691,8 @@ impl PinnedModuleRegistry {
         }
         let mut routes = BTreeMap::<String, ImporterRoutes>::new();
         let mut resolution_routes = BTreeMap::<String, BTreeMap<String, RegisteredTarget>>::new();
+        let mut explicit_resolution_routes = ExplicitResolutionRoutes::new();
+        let mut lookup_path_routes = LookupPathRoutes::new();
         let mut url_resolution_routes =
             BTreeMap::<String, BTreeMap<String, RegisteredTarget>>::new();
         let mut route_count = 0;
@@ -640,6 +708,25 @@ impl PinnedModuleRegistry {
             let importer = identities.get(&edge.importer).ok_or_else(invalid_graph)?;
             let specifier = edge.specifier.as_ref().ok_or_else(invalid_graph)?;
             let style = RequestStyle::for_load(edge.kind);
+            if matches!(edge.commonjs_search.as_ref(), Some(CommonJsSearch::LookupPaths)) {
+                if !modules.contains_key(importer) {
+                    return Err(invalid_graph());
+                }
+                let target = match builtin_targets.get(&(edge.importer.clone(), style, specifier.clone())) {
+                    Some((id, _)) => LookupPathTarget::Builtin { id: id.clone() },
+                    None => LookupPathTarget::Directories,
+                };
+                let requests = lookup_path_routes.entry(importer.clone()).or_default();
+                if let Some(previous) = requests.get(specifier) {
+                    if previous != &target {
+                        return Err(invalid_graph());
+                    }
+                    continue;
+                }
+                resolution_route_count += 1;
+                requests.insert(specifier.clone(), target);
+                continue;
+            }
             if style == RequestStyle::ImportMetaResolve {
                 if !modules.contains_key(importer) {
                     return Err(invalid_graph());
@@ -706,6 +793,22 @@ impl PinnedModuleRegistry {
                 }
                 if !modules.contains_key(importer) {
                     return Err(invalid_graph());
+                }
+                if let Some(CommonJsSearch::Paths { paths }) = &edge.commonjs_search {
+                    let by_paths = explicit_resolution_routes
+                        .entry(importer.clone()).or_default()
+                        .entry(specifier.clone()).or_default();
+                    if let Some(previous) = by_paths.get(paths) {
+                        if previous != &target {
+                            return Err(invalid_graph());
+                        }
+                        continue;
+                    }
+                    missing_resolution_routes +=
+                        usize::from(matches!(target, RegisteredTarget::Missing { .. }));
+                    resolution_route_count += 1;
+                    by_paths.insert(paths.clone(), target);
+                    continue;
                 }
                 let by_specifier = resolution_routes.entry(importer.clone()).or_default();
                 if let Some(previous) = by_specifier.get(specifier) {
@@ -778,6 +881,8 @@ impl PinnedModuleRegistry {
             routes,
             resolutions,
             resolution_routes,
+            explicit_resolution_routes,
+            lookup_path_routes,
             url_resolutions,
             url_resolution_routes,
         })
@@ -883,6 +988,80 @@ impl PinnedModuleRegistry {
             RegisteredTarget::Module { id } => self.resolutions.get(id).ok_or_else(invalid_graph),
             RegisteredTarget::Missing { error } => Err(error.clone()),
         }
+    }
+
+    /// Explicit search roots retain their order and remain a distinct authority
+    /// from ordinary require.resolve, including an empty root vector.
+    pub fn lookup_resolution_from_paths(
+        &self,
+        referrer: Option<&str>,
+        specifier: &str,
+        paths: &[String],
+    ) -> Result<&RegisteredResolution> {
+        validate_specifier(specifier)?;
+        super::super::validate_search_paths(paths)?;
+        let importer = self.metadata_importer(referrer)?;
+        let target = self.explicit_resolution_routes
+            .get(importer)
+            .and_then(|requests| requests.get(specifier))
+            .and_then(|requests| requests.get(paths))
+            .ok_or_else(|| error(
+                "ERR_MODULE_REGISTRY_ROUTE",
+                "ordered filename search roots were not captured for this importer",
+            ))?;
+        match target {
+            RegisteredTarget::Module { id } => self.resolutions.get(id).ok_or_else(invalid_graph),
+            RegisteredTarget::Missing { error } => Err(error.clone()),
+        }
+    }
+
+    /// Return only captured directory metadata. Enumeration cannot authorize
+    /// an ordinary filename lookup, a new root vector, or a module load.
+    pub fn lookup_paths(
+        &self,
+        referrer: Option<&str>,
+        specifier: &str,
+    ) -> Result<RegisteredLookupPaths<'_>> {
+        validate_specifier(specifier)?;
+        let importer = self.metadata_importer(referrer)?;
+        let target = self.lookup_path_routes
+            .get(importer)
+            .and_then(|requests| requests.get(specifier))
+            .ok_or_else(|| error(
+                "ERR_MODULE_REGISTRY_ROUTE",
+                "lookup directories were not captured for this importer",
+            ))?;
+        match target {
+            LookupPathTarget::Builtin { id } => self.resolutions.get(id)
+                .map(RegisteredLookupPaths::Builtin).ok_or_else(invalid_graph),
+            LookupPathTarget::Directories => {
+                let module = self.modules.get(importer).ok_or_else(invalid_graph)?;
+                Ok(RegisteredLookupPaths::Directories(
+                    super::super::commonjs_lookup_paths(
+                        super::parent(&module.origin.path),
+                        specifier,
+                    )?,
+                ))
+            }
+        }
+    }
+
+    pub fn has_commonjs_search_routes(&self) -> bool {
+        !self.explicit_resolution_routes.is_empty() || !self.lookup_path_routes.is_empty()
+    }
+
+    fn metadata_importer<'a>(&self, referrer: Option<&'a str>) -> Result<&'a str> {
+        let importer = referrer.ok_or_else(|| error(
+            "ERR_MODULE_REGISTRY_ENTRY",
+            "CommonJS metadata requires a captured source referrer",
+        ))?;
+        if !self.modules.contains_key(importer) {
+            return Err(error(
+                "ERR_MODULE_REGISTRY_REFERRER",
+                "referrer does not belong to this sealed graph",
+            ));
+        }
+        Ok(importer)
     }
 
     /// Data lookup only. This never confers an execution/capability permit.

@@ -10,7 +10,7 @@
 //! every dependency route; dynamic JSON options require a separate contract.
 
 use super::super::{
-    Budget, EdgeState, ImportAttributes, LoadKind, ModuleId, SourceGraphReport, SourceLanguage,
+    Budget, CommonJsSearch, EdgeState, ImportAttributes, LoadKind, ModuleId, SourceGraphReport, SourceLanguage,
     SourceModule, error, scan,
 };
 use super::{CaptureError, ModuleKind, RegisteredModule, RequestStyle};
@@ -25,7 +25,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 type Result<T> = std::result::Result<T, CaptureError>;
-type Routes = BTreeSet<(String, RequestStyle, ImportAttributes)>;
+type Routes = BTreeSet<(String, RequestStyle, ImportAttributes, Option<CommonJsSearch>)>;
 const MAX_PREPARED_SOURCE_BYTES: usize = 32 * 1024 * 1024;
 
 /// Source-free engine preparation evidence. A report identifies an original
@@ -223,8 +223,14 @@ impl SourcePreparer {
                 if load.type_only {
                     return Err(invalid_preparation());
                 }
+                let commonjs_search = load.commonjs_search(&module.id)?;
                 let specifier = load.specifier.ok_or_else(invalid_preparation)?;
-                routes.insert((specifier, request_style(load.kind), load.import_attributes));
+                routes.insert((
+                    specifier,
+                    request_style(load.kind),
+                    load.import_attributes,
+                    commonjs_search,
+                ));
             }
             routes
         };
@@ -344,6 +350,7 @@ fn expected_routes(report: &SourceGraphReport) -> Result<ExpectedRoutes> {
             specifier.clone(),
             request_style(edge.kind),
             edge.import_attributes.clone(),
+            edge.commonjs_search.clone(),
         ));
         if matches!(
             edge.kind,

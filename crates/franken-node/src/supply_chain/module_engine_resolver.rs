@@ -14,7 +14,8 @@ pub use preparation::detect_kind_with_options;
 use preparation::{PreparedSources, SourcePreparer};
 
 use super::registry::{
-    ModuleKind, PinnedModuleRegistry, RegisteredModule, RegisteredTarget, RegistrySummary,
+    ModuleKind, PinnedModuleRegistry, RegisteredLookupPaths, RegisteredModule,
+    RegisteredResolution, RegisteredTarget, RegistrySummary,
     RequestStyle, ResolutionKind,
 };
 use super::{CapturedModuleGraph, ResolutionError as CaptureError, ResolutionUrl, SourceLanguage};
@@ -33,7 +34,7 @@ use frankenengine_engine::module_resolver::{
 };
 use frankenengine_engine::parser::ParserOptions;
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 
@@ -281,6 +282,7 @@ impl CapturedEngineResolver {
             .resolutions()
             .any(|target| target.kind() == ResolutionKind::File)
             || self.registry.url_resolutions().next().is_some()
+            || self.registry.has_commonjs_search_routes()
         {
             return Ok(false);
         }
@@ -427,10 +429,105 @@ impl CapturedEngineResolver {
         }
         Ok(ExecutionModuleResolver::new(
             self.registry.entrypoint(),
-            Arc::clone(self) as Arc<dyn ModuleResolver + Send + Sync>,
+            Arc::new(RootedCapturedEngineResolver {
+                inner: Arc::clone(self),
+                root: project_root.to_owned(),
+            }) as Arc<dyn ModuleResolver + Send + Sync>,
             policy,
         )
         .with_source_locations(locations))
+    }
+
+    fn filename_metadata(&self, target: &RegisteredResolution) -> ModuleMetadata {
+        ModuleMetadata {
+            id: target.id().to_owned(),
+            target: ModuleMetadataTarget::Filename,
+            required_capabilities: BTreeSet::from([RuntimeCapability::ModuleLoad]),
+            provenance: ModuleProvenance {
+                kind: match target.kind() {
+                    ResolutionKind::File => ModuleSourceKind::Workspace,
+                    ResolutionKind::Builtin => ModuleSourceKind::BuiltIn,
+                },
+                origin: match target.kind() {
+                    ResolutionKind::File => format!(
+                        "franken-node-source-graph:{}",
+                        self.registry.summary().graph_input_hash
+                    ),
+                    ResolutionKind::Builtin => target.origin().path.clone(),
+                },
+            },
+        }
+    }
+
+    fn validate_commonjs_metadata(
+        &self,
+        request: &ModuleRequest,
+        context: &ResolutionContext,
+    ) -> ResolutionResult<()> {
+        self.validate_request(request, context)?;
+        if request.style != ImportStyle::Require || !request.import_attributes.is_empty() {
+            return Err(denied(
+                ResolutionErrorCode::UnsupportedSpecifier,
+                "CommonJS search metadata requires an attribute-free require request",
+                request, context, None,
+            ));
+        }
+        Ok(())
+    }
+
+    fn lookup_paths_at_root(
+        &self,
+        request: &ModuleRequest,
+        context: &ResolutionContext,
+        policy: &dyn ModulePolicyHook,
+        root: Option<&Path>,
+    ) -> ResolutionResult<Option<Vec<String>>> {
+        self.validate_commonjs_metadata(request, context)?;
+        let selected = self.registry
+            .lookup_paths(request.referrer.as_deref(), &request.specifier)
+            .map_err(|error| registry_error(error, request, context))?;
+        let directories = match selected {
+            RegisteredLookupPaths::Builtin(target) => {
+                metadata_outcome(request, self.filename_metadata(target), context, policy)?;
+                return Ok(None);
+            }
+            RegisteredLookupPaths::Directories(paths) => paths,
+        };
+        let mut result = Vec::with_capacity(directories.len());
+        for directory in directories {
+            let directory = match root {
+                Some(root) => {
+                    let path = if directory.is_empty() {
+                        root.to_owned()
+                    } else {
+                        root.join(directory)
+                    };
+                    path.to_str().ok_or_else(|| denied(
+                        ResolutionErrorCode::UnsupportedSpecifier,
+                        "lookup directory cannot be represented as a guest string",
+                        request, context, None,
+                    ))?.to_owned()
+                }
+                None => directory,
+            };
+            let metadata = ModuleMetadata {
+                id: directory.clone(),
+                target: ModuleMetadataTarget::Filename,
+                required_capabilities: BTreeSet::from([RuntimeCapability::ModuleLoad]),
+                provenance: ModuleProvenance {
+                    kind: ModuleSourceKind::Workspace,
+                    origin: format!(
+                        "franken-node-source-graph:{}",
+                        self.registry.summary().graph_input_hash
+                    ),
+                },
+            };
+            // Authorize the actual string before disclosure. A denial returns
+            // no partially authorized list, including on repeated requests.
+            metadata_outcome(request, metadata, context, policy)?;
+            result.push(directory);
+        }
+        Ok(Some(result))
     }
 
     fn validate_request(
@@ -658,24 +755,7 @@ impl ModuleResolver for CapturedEngineResolver {
                     .registry
                     .lookup_resolution(request.referrer.as_deref(), &request.specifier)
                     .map_err(|error| registry_error(error, request, context))?;
-                ModuleMetadata {
-                    id: target.id().to_owned(),
-                    target: ModuleMetadataTarget::Filename,
-                    required_capabilities: BTreeSet::from([RuntimeCapability::ModuleLoad]),
-                    provenance: ModuleProvenance {
-                        kind: match target.kind() {
-                            ResolutionKind::File => ModuleSourceKind::Workspace,
-                            ResolutionKind::Builtin => ModuleSourceKind::BuiltIn,
-                        },
-                        origin: match target.kind() {
-                            ResolutionKind::File => format!(
-                                "franken-node-source-graph:{}",
-                                self.registry.summary().graph_input_hash
-                            ),
-                            ResolutionKind::Builtin => target.origin().path.clone(),
-                        },
-                    },
-                }
+                self.filename_metadata(target)
             }
             ImportStyle::Import => {
                 let target = self
@@ -703,29 +783,37 @@ impl ModuleResolver for CapturedEngineResolver {
                 }
             }
         };
-        // Metadata disclosure is a separate policy operation. No executable
-        // record, source copy, source hash, preparation or evaluation cache is
-        // consulted, and every repeated request receives a fresh decision.
-        policy
-            .authorize_metadata(request, &metadata, context)
-            .map_err(|failure| {
-                denied(
-                    ResolutionErrorCode::PolicyDenied,
-                    &format!("{}: {}", failure.code.stable_code(), failure.message),
-                    request,
-                    context,
-                    Some(&metadata.id),
-                )
-            })?;
-        Ok(MetadataResolutionOutcome {
-            module: ResolvedModuleMetadata {
-                request_specifier: request.specifier.clone(),
-                canonical_specifier: metadata.id.clone(),
-                metadata,
-                probe_sequence: Vec::new(),
-            },
-            event: event(context, "allow", ""),
-        })
+        metadata_outcome(request, metadata, context, policy)
+    }
+
+    fn resolve_require_metadata_from_paths(
+        &self,
+        request: &ModuleRequest,
+        paths: &[String],
+        context: &ResolutionContext,
+        policy: &dyn ModulePolicyHook,
+    ) -> ResolutionResult<MetadataResolutionOutcome> {
+        self.validate_commonjs_metadata(request, context)?;
+        // The engine ignores options for recognized builtins. Source capture
+        // records that ordinary metadata route, never a search-root fallback.
+        if request.specifier.starts_with("node:")
+            || node_builtin_specifier(&request.specifier).is_some()
+        {
+            return self.resolve_metadata(request, context, policy);
+        }
+        let target = self.registry
+            .lookup_resolution_from_paths(request.referrer.as_deref(), &request.specifier, paths)
+            .map_err(|error| registry_error(error, request, context))?;
+        metadata_outcome(request, self.filename_metadata(target), context, policy)
+    }
+
+    fn require_lookup_paths(
+        &self,
+        request: &ModuleRequest,
+        context: &ResolutionContext,
+        policy: &dyn ModulePolicyHook,
+    ) -> ResolutionResult<Option<Vec<String>>> {
+        self.lookup_paths_at_root(request, context, policy, None)
     }
 
     fn resolve_shared(
@@ -845,6 +933,123 @@ impl ModuleResolver for CapturedEngineResolver {
         // not an ESM instantiation/evaluation order or a linkage certificate.
         Ok(outcomes)
     }
+}
+
+/// Per-execution path presentation, independent of the immutable registry.
+/// One resolver/capsule may run under different roots concurrently. This
+/// adapter does no filesystem lookup and never changes a captured caller.
+struct RootedCapturedEngineResolver {
+    inner: Arc<CapturedEngineResolver>,
+    root: PathBuf,
+}
+
+impl RootedCapturedEngineResolver {
+    fn captured_paths(
+        &self,
+        request: &ModuleRequest,
+        paths: &[String],
+        context: &ResolutionContext,
+    ) -> ResolutionResult<Vec<String>> {
+        let invalid = || denied(
+            ResolutionErrorCode::UnsupportedSpecifier,
+            "search directories must remain inside the captured project",
+            request, context, None,
+        );
+        if paths.len() > super::super::MAX_COMMONJS_SEARCH_PATHS {
+            return Err(invalid());
+        }
+        paths.iter().map(|hint| {
+            if hint.len() > 2 * super::super::MAX_PATH {
+                return Err(invalid());
+            }
+            let path = Path::new(hint);
+            let relative = if path.is_absolute() {
+                path.strip_prefix(&self.root).map_err(|_| invalid())?
+                    .to_str().ok_or_else(invalid)?
+            } else {
+                hint.as_str()
+            };
+            // Check every parent step: escaping and then re-entering the
+            // project cannot manufacture captured authority.
+            super::super::normalize("", relative)
+                .map_err(|error| registry_error(error, request, context))
+        }).collect()
+    }
+}
+
+impl ModuleResolver for RootedCapturedEngineResolver {
+    fn resolve(
+        &self, request: &ModuleRequest, context: &ResolutionContext, policy: &dyn ModulePolicyHook,
+    ) -> ResolutionResult<ResolutionOutcome> {
+        self.inner.resolve(request, context, policy)
+    }
+
+    fn resolve_shared(
+        &self, request: &ModuleRequest, context: &ResolutionContext, policy: &dyn ModulePolicyHook,
+    ) -> ResolutionResult<SharedResolutionOutcome> {
+        self.inner.resolve_shared(request, context, policy)
+    }
+
+    fn resolve_metadata(
+        &self, request: &ModuleRequest, context: &ResolutionContext, policy: &dyn ModulePolicyHook,
+    ) -> ResolutionResult<MetadataResolutionOutcome> {
+        self.inner.resolve_metadata(request, context, policy)
+    }
+
+    fn resolve_require_metadata_from_paths(
+        &self,
+        request: &ModuleRequest,
+        paths: &[String],
+        context: &ResolutionContext,
+        policy: &dyn ModulePolicyHook,
+    ) -> ResolutionResult<MetadataResolutionOutcome> {
+        self.inner.validate_commonjs_metadata(request, context)?;
+        if request.specifier.starts_with("node:")
+            || node_builtin_specifier(&request.specifier).is_some()
+        {
+            return self.inner.resolve_metadata(request, context, policy);
+        }
+        let paths = self.captured_paths(request, paths, context)?;
+        self.inner.resolve_require_metadata_from_paths(request, &paths, context, policy)
+    }
+
+    fn require_lookup_paths(
+        &self, request: &ModuleRequest, context: &ResolutionContext, policy: &dyn ModulePolicyHook,
+    ) -> ResolutionResult<Option<Vec<String>>> {
+        self.inner.lookup_paths_at_root(request, context, policy, Some(&self.root))
+    }
+
+    fn resolve_chain(
+        &self, request: &ModuleRequest, context: &ResolutionContext, policy: &dyn ModulePolicyHook,
+    ) -> ResolutionResult<Vec<ResolutionOutcome>> {
+        self.inner.resolve_chain(request, context, policy)
+    }
+}
+
+fn metadata_outcome(
+    request: &ModuleRequest,
+    metadata: ModuleMetadata,
+    context: &ResolutionContext,
+    policy: &dyn ModulePolicyHook,
+) -> ResolutionResult<MetadataResolutionOutcome> {
+    // A fresh metadata policy operation: no executable record, source
+    // preparation, evaluation cache or filesystem is consulted.
+    policy.authorize_metadata(request, &metadata, context).map_err(|failure| {
+        denied(
+            ResolutionErrorCode::PolicyDenied,
+            &format!("{}: {}", failure.code.stable_code(), failure.message),
+            request, context, Some(&metadata.id),
+        )
+    })?;
+    Ok(MetadataResolutionOutcome {
+        module: ResolvedModuleMetadata {
+            request_specifier: request.specifier.clone(),
+            canonical_specifier: metadata.id.clone(),
+            metadata,
+            probe_sequence: Vec::new(),
+        },
+        event: event(context, "allow", ""),
+    })
 }
 
 fn lowering_only_cjs_builtin_specifier(specifier: &str) -> Option<&'static str> {

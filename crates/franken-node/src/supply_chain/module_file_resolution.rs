@@ -965,6 +965,74 @@ impl Resolver {
         self.package(directory, request, mode, lookup, depth)
     }
 
+    /// CommonJS metadata search with a separately retained original caller.
+    /// Node's options.paths replaces lookup roots, not the owner of imports
+    /// and self exports. Global folders remain outside captured authority.
+    /// Spec: https://nodejs.org/api/modules.html#requireresolverequest-options
+    fn request_from_paths(
+        &mut self,
+        directory: &str,
+        request: &str,
+        paths: &[String],
+    ) -> Result<(String, String)> {
+        validate_request(request)?;
+        validate_search_paths(paths)?;
+        let mode = ResolutionMode::Require;
+        if request.starts_with("node:") || bare_builtin(request) {
+            return self.request(directory, request, mode, 0);
+        }
+        if commonjs_relative_request(request) {
+            for directory in paths {
+                let path = normalize(directory, request)?;
+                let selected = if request.ends_with('/')
+                    || matches!(request.rsplit('/').next(), Some("." | ".."))
+                {
+                    self.directory(&path, mode)
+                } else {
+                    self.legacy(&path, mode)
+                };
+                match selected {
+                    Ok(Some(path)) => return Ok((path, String::new())),
+                    Ok(None) => {}
+                    Err(failure) if failure.code == "MODULE_NOT_FOUND" => {
+                        // The pinned interpreter probes relative roots one at
+                        // a time and treats MODULE_NOT_FOUND as a search miss.
+                        // A selected broken package main is terminal in Node;
+                        // refuse sealing rather than permit a later-root bypass.
+                        return Err(error(
+                            "ERR_REQUIRE_RESOLVE_SEARCH_TERMINAL",
+                            "relative search encountered a terminal missing package main",
+                        ));
+                    }
+                    Err(failure) => return Err(failure),
+                }
+            }
+            return Err(mode.missing(request));
+        }
+        let scope = self.scope(directory)?;
+        if request.starts_with('#')
+            && let Some((scope, manifest)) = &scope
+            && manifest.imports
+        {
+            return self.mapping(scope, manifest, MapKind::Imports, request, mode, 0);
+        }
+        let (name, subpath) = package_parts(request, true)?;
+        if let Some((scope, manifest)) = scope
+            && manifest.name.as_deref() == Some(name)
+            && manifest.exports
+        {
+            return self.mapping(&scope, &manifest, MapKind::Exports, &subpath, mode, 0);
+        }
+        for path in paths {
+            if let Some(target) =
+                self.package_from_ancestors(path, request, mode, PackageLookup::CommonJs, 0)?
+            {
+                return Ok(target);
+            }
+        }
+        Err(mode.missing(request))
+    }
+
     fn package(
         &mut self,
         directory: &str,
@@ -1025,6 +1093,25 @@ impl Resolver {
         {
             return self.mapping(&scope, &manifest, MapKind::Exports, &subpath, mode, depth);
         }
+        self.package_from_ancestors(directory, request, mode, lookup, depth)?
+            .ok_or_else(|| mode.missing(request))
+    }
+
+    /// Search only the requested node_modules ancestry. An explicit search
+    /// directory is not a replacement package owner for private imports or
+    /// package self references.
+    fn package_from_ancestors(
+        &mut self,
+        directory: &str,
+        request: &str,
+        mode: ResolutionMode,
+        lookup: PackageLookup,
+        depth: usize,
+    ) -> Result<Option<(String, String)>> {
+        let (name, subpath) = package_parts(
+            request,
+            mode == ResolutionMode::Require && lookup == PackageLookup::CommonJs,
+        )?;
         let mut ancestor = directory;
         loop {
             if ancestor.rsplit('/').next() != Some("node_modules") {
@@ -1040,7 +1127,7 @@ impl Resolver {
                             &subpath,
                             mode,
                             depth,
-                        );
+                        ).map(Some);
                     }
                     if lookup == PackageLookup::PackageUrl {
                         if subpath == "." {
@@ -1049,7 +1136,8 @@ impl Resolver {
                             return self
                                 .directory(&package, mode)?
                                 .map(|p| (p, String::new()))
-                                .ok_or_else(|| mode.missing(request));
+                                .ok_or_else(|| mode.missing(request))
+                                .map(Some);
                         }
                         let (path, suffix) = module_url_path(&package, &subpath)?;
                         if path != package && !path.starts_with(&format!("{package}/")) {
@@ -1058,7 +1146,7 @@ impl Resolver {
                                 "package subpath escapes its package",
                             ));
                         }
-                        return self.exact(&path, suffix, mode);
+                        return self.exact(&path, suffix, mode).map(Some);
                     }
                 }
                 if lookup == PackageLookup::CommonJs {
@@ -1078,12 +1166,12 @@ impl Resolver {
                         self.legacy(&path, mode)?
                     };
                     if let Some(found) = found {
-                        return Ok((found, String::new()));
+                        return Ok(Some((found, String::new())));
                     }
                 }
             }
             if ancestor.is_empty() {
-                return Err(mode.missing(request));
+                return Ok(None);
             }
             ancestor = parent(ancestor);
         }
@@ -1366,6 +1454,55 @@ fn join(parent: &str, child: &str) -> String {
         format!("{parent}/{child}")
     }
 }
+pub(super) const MAX_COMMONJS_SEARCH_PATHS: usize = 32;
+
+pub(super) fn commonjs_relative_request(request: &str) -> bool {
+    matches!(request, "." | "..") || request.starts_with("./") || request.starts_with("../")
+}
+
+/// Canonical project-relative roots only. Empty denotes the admitted project
+/// directory; it never denotes a process-global or ambient working directory.
+pub(super) fn validate_search_paths(paths: &[String]) -> Result<()> {
+    if paths.len() > MAX_COMMONJS_SEARCH_PATHS {
+        return Err(limit());
+    }
+    let mut bytes = 0_usize;
+    for path in paths {
+        bytes = bytes.checked_add(path.len()).ok_or_else(limit)?;
+        if bytes > MAX_COMMONJS_SEARCH_PATHS * MAX_PATH {
+            return Err(limit());
+        }
+        if !path.is_empty() {
+            validate_path(path)?;
+        }
+    }
+    Ok(())
+}
+
+/// Pure lookup-directory metadata. No existence probe or executable route is
+/// created, and project ancestry stops before any host/global search folder.
+pub(super) fn commonjs_lookup_paths(directory: &str, request: &str) -> Result<Vec<String>> {
+    validate_request(request)?;
+    if !directory.is_empty() {
+        validate_path(directory)?;
+    }
+    if commonjs_relative_request(request) {
+        return Ok(vec![directory.to_owned()]);
+    }
+    let mut paths = Vec::new();
+    let mut ancestor = directory;
+    loop {
+        if ancestor.rsplit('/').next() != Some("node_modules") {
+            paths.push(join(ancestor, "node_modules"));
+        }
+        if ancestor.is_empty() {
+            break;
+        }
+        ancestor = parent(ancestor);
+    }
+    Ok(paths)
+}
+
 fn validate_request(request: &str) -> Result<()> {
     if request.is_empty()
         || request.len() > MAX_PATH
