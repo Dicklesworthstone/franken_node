@@ -668,6 +668,30 @@ pub(crate) fn supervise_with_observer(
     .map(|(completion, _)| completion)
 }
 
+/// Observe bounded output while retaining a live operator admission check.
+/// Lockstep uses the same owned child, nonblocking pipes and cleanup protocol
+/// as migration, with its own combined stdout/stderr budget. The control is
+/// checked before spawn, during execution and while inherited pipes drain.
+pub(crate) fn supervise_with_observer_guarded(
+    command: &mut Command,
+    timeout: Duration,
+    drain_timeout: Duration,
+    control: &dyn Fn() -> Result<()>,
+    observe: impl FnMut(Stream, &[u8]) -> io::Result<()>,
+) -> Result<Completion> {
+    supervise_with_input_controlled(
+        command,
+        timeout,
+        drain_timeout,
+        InputTransport::Null,
+        |_| Ok(()),
+        observe,
+        None,
+        Some(control),
+    )
+    .map(|(completion, _)| completion)
+}
+
 /// Supervise a caller-bounded redirected input with the same child ownership,
 /// nonblocking output and cleanup as migration smoke execution. The absolute
 /// deadline is the caller's original budget, including request preparation.

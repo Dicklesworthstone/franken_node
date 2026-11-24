@@ -7,15 +7,23 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions, TryLockError};
-use std::io::{ErrorKind, Read, Write};
-#[cfg(unix)]
+#[cfg(any(test, not(target_os = "linux")))]
+use std::io::ErrorKind;
+use std::io::{Read, Write};
+#[cfg(all(unix, not(target_os = "linux")))]
 use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+#[cfg(not(target_os = "linux"))]
+use std::process::Child;
+#[cfg(any(test, not(target_os = "linux")))]
+use std::process::Stdio;
+use std::process::{Command, Output};
+#[cfg(any(test, not(target_os = "linux")))]
 use std::sync::{
-    Arc, Mutex, OnceLock,
+    Arc,
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -23,9 +31,11 @@ use crate::push_bounded;
 
 // Security: bounds for push_bounded to prevent memory exhaustion
 const MAX_COMBINED_OUTPUT_BYTES: usize = 16_777_216; // 16MB limit per runtime execution
+const MAX_RAW_STRACE_BYTES: usize = 16_777_216;
 const MAX_LOCKSTEP_CORPUS_CASES: usize = 256;
 const MAX_SANITIZED_STRACE_LINES: usize = 65_536; // 64K syscall lines max
 const MAX_THREAD_HANDLES: usize = 64; // Maximum concurrent runtime threads
+#[cfg(any(test, not(target_os = "linux")))]
 const PIPE_READ_CHUNK_BYTES: usize = 64 * 1024;
 const DIVERGENCE_FIXTURE_LOCK_FILE: &str = ".lockstep-fixtures.lock";
 const DIVERGENCE_FIXTURE_LOCK_RETRY_BACKOFF_MILLIS: [u64; 3] = [100, 200, 400];
@@ -104,7 +114,8 @@ pub struct LockstepHarness {
 
 #[derive(Debug)]
 /// One lockstep leg's captured execution. `comparison` carries the bytes the
-/// cross-runtime oracle equates (guest stdout/stderr + exit code);
+/// cross-runtime oracle equates (length-framed guest stdout/stderr and normal
+/// exit code, under a versioned domain);
 /// `syscall_audit` carries the sanitized strace boundary trace, preserved as
 /// audit evidence in divergence fixtures but never compared (bd-zi9hj —
 /// traces are runtime-implementation artifacts and differ across engines by
@@ -114,9 +125,11 @@ struct RuntimeLegOutput {
     syscall_audit: Vec<u8>,
 }
 
+#[cfg(any(test, not(target_os = "linux")))]
 struct PipeDrainResult {
     bytes: Vec<u8>,
     cap_reached: bool,
+    error: Option<String>,
 }
 
 impl LockstepHarness {
@@ -989,135 +1002,18 @@ impl LockstepHarness {
         } else {
             cmd.arg(&runtime_target);
         }
-        Self::isolate_child_process_group(&mut cmd);
-
         // Both the caller's project and the resolved per-runtime entrypoint
         // remain authoritative. Temporary files and reference runtimes do not
         // exempt guest execution from persisted operator containment.
-        enforce_scopes()?;
-        let mut child = cmd
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .with_context(|| {
-                format!(
-                    "Failed to spawn strace on runtime (is strace installed?): {}",
-                    runtime
-                )
-            })?;
-
-        // Drain stdout and stderr in background threads to prevent pipe buffer deadlock
-        let mut stdout_handle = child.stdout.take().ok_or_else(|| {
-            anyhow::anyhow!("runtime {runtime} stdout pipe unavailable despite Stdio::piped()")
+        let output = Self::execute_command_guarded(
+            &mut cmd,
+            crate::config::timeouts::LOCKSTEP_RUNTIME_TIMEOUT,
+            crate::config::timeouts::LOCKSTEP_PIPE_DRAIN_JOIN_TIMEOUT,
+            &enforce_scopes,
+        )
+        .with_context(|| {
+            format!("lockstep runtime {runtime} did not complete a comparable execution")
         })?;
-        let mut stderr_handle = child.stderr.take().ok_or_else(|| {
-            anyhow::anyhow!("runtime {runtime} stderr pipe unavailable despite Stdio::piped()")
-        })?;
-
-        let captured_output_bytes = Arc::new(AtomicUsize::new(0));
-        let output_cap_reached = Arc::new(AtomicBool::new(false));
-
-        let stdout_total = Arc::clone(&captured_output_bytes);
-        let stdout_cap_reached = Arc::clone(&output_cap_reached);
-        let stdout_thread = thread::spawn(move || {
-            Self::drain_pipe_bounded(
-                &mut stdout_handle,
-                "stdout",
-                stdout_total,
-                stdout_cap_reached,
-            )
-        });
-
-        let stderr_total = Arc::clone(&captured_output_bytes);
-        let stderr_cap_reached = Arc::clone(&output_cap_reached);
-        let stderr_thread = thread::spawn(move || {
-            Self::drain_pipe_bounded(
-                &mut stderr_handle,
-                "stderr",
-                stderr_total,
-                stderr_cap_reached,
-            )
-        });
-
-        let timeout = crate::config::timeouts::LOCKSTEP_RUNTIME_TIMEOUT;
-        let start = Instant::now();
-
-        let mut is_timeout = false;
-        let mut is_output_cap_reached = false;
-        let mut containment_error = None;
-        let mut exit_code = -1;
-        loop {
-            if let Err(error) = enforce_scopes() {
-                Self::terminate_runtime_tree(&mut child);
-                containment_error = Some(error);
-                break;
-            }
-            if output_cap_reached.load(Ordering::Acquire) {
-                Self::terminate_runtime_tree(&mut child);
-                is_output_cap_reached = true;
-                break;
-            }
-            if let Some(status) = child.try_wait()? {
-                exit_code = status.code().unwrap_or(-1);
-                break;
-            }
-            if Self::has_timed_out(start.elapsed(), timeout) {
-                Self::terminate_runtime_tree(&mut child);
-                is_timeout = true;
-                break;
-            }
-            thread::sleep(crate::config::timeouts::LOCKSTEP_RUNTIME_POLL_INTERVAL);
-        }
-
-        let drain_timeout = crate::config::timeouts::LOCKSTEP_PIPE_DRAIN_JOIN_TIMEOUT;
-        let stdout_result = Self::join_pipe_drain(stdout_thread, "stdout", drain_timeout);
-        let stderr_result = Self::join_pipe_drain(stderr_thread, "stderr", drain_timeout);
-
-        if let Some(error) = containment_error {
-            return Err(error).context("lockstep runtime stopped by operator containment");
-        }
-
-        if is_output_cap_reached
-            || stdout_result.cap_reached
-            || stderr_result.cap_reached
-            || output_cap_reached.load(Ordering::Acquire)
-        {
-            anyhow::bail!(
-                "runtime output cap reached for {runtime}; captured at most {MAX_COMBINED_OUTPUT_BYTES} bytes"
-            );
-        }
-
-        let mut comparison = Vec::new();
-        extend_bounded(
-            &mut comparison,
-            &stdout_result.bytes,
-            MAX_COMBINED_OUTPUT_BYTES,
-        );
-        extend_bounded(
-            &mut comparison,
-            b"\n--- STDERR ---\n",
-            MAX_COMBINED_OUTPUT_BYTES,
-        );
-        extend_bounded(
-            &mut comparison,
-            &stderr_result.bytes,
-            MAX_COMBINED_OUTPUT_BYTES,
-        );
-        extend_bounded(
-            &mut comparison,
-            b"\n--- EXIT CODE ---\n",
-            MAX_COMBINED_OUTPUT_BYTES,
-        );
-        if is_timeout {
-            extend_bounded(&mut comparison, b"TIMEOUT", MAX_COMBINED_OUTPUT_BYTES);
-        } else {
-            extend_bounded(
-                &mut comparison,
-                exit_code.to_string().as_bytes(),
-                MAX_COMBINED_OUTPUT_BYTES,
-            );
-        }
-
         // bd-zi9hj: the sanitized strace boundary trace is captured as audit
         // evidence (attached to divergence fixtures) but deliberately kept
         // OUT of the compared bytes. Syscall traces are runtime-
@@ -1127,6 +1023,8 @@ impl LockstepHarness {
         // construction (empirically: node-vs-bun on `console.log("hello")`
         // produced block_release from the trace section alone).
         let strace_content = Self::read_strace_output(strace_output_file.path(), runtime)?;
+        Self::validate_trace_completion(&strace_content, &output, runtime)?;
+        let comparison = Self::comparison_payload(&output)?;
         let syscall_audit = Self::sanitize_strace_output(&strace_content);
 
         Ok(RuntimeLegOutput {
@@ -1135,11 +1033,260 @@ impl LockstepHarness {
         })
     }
 
+    /// A tracer can exit normally with code 1 without ever executing the
+    /// runtime (missing executable, denied ptrace, or failed tracer setup).
+    /// Its stderr must not be mistaken for an intentional guest failure. The
+    /// configured `strace -f -e trace=file,network -o ...` protocol records a
+    /// successful initial exec and a normal terminal record for the same PID.
+    /// Requiring both also rejects interrupted/partial traces. Syscall contents
+    /// remain audit evidence, not part of cross-runtime behavior equivalence.
+    fn validate_trace_completion(raw: &[u8], output: &Output, runtime: &str) -> Result<()> {
+        let trace = std::str::from_utf8(raw).context("lockstep tracer emitted invalid UTF-8")?;
+        let mut records = trace.lines().filter(|line| !line.trim().is_empty());
+        let first = records.next().with_context(|| {
+            format!("lockstep tracer did not observe runtime {runtime} execution; check strace and ptrace availability")
+        })?;
+        let (leader, mut entry) = Self::trace_record(first);
+        loop {
+            let Some((call, result)) = entry.rsplit_once(" = ") else {
+                anyhow::bail!(
+                    "lockstep tracer did not record a successful runtime {runtime} exec; execution is not comparable"
+                );
+            };
+            anyhow::ensure!(
+                call.starts_with("execve(") || call.starts_with("execveat("),
+                "lockstep tracer did not record a successful runtime {runtime} exec; execution is not comparable"
+            );
+            if result.trim() == "0" {
+                break;
+            }
+            // Executable search can attempt several paths. Permit only
+            // failed exec attempts by this same leader before admission;
+            // arbitrary application activity cannot stand in for its exec.
+            anyhow::ensure!(
+                result.trim_start().starts_with("-1 "),
+                "lockstep tracer recorded an incomplete runtime {runtime} exec"
+            );
+            let next = records.next().with_context(|| {
+                format!("lockstep tracer did not record a successful runtime {runtime} exec")
+            })?;
+            let (pid, event) = Self::trace_record(next);
+            anyhow::ensure!(
+                pid == leader,
+                "lockstep tracer changed runtime {runtime} leader before successful exec"
+            );
+            entry = event;
+        }
+        let exit_code = output
+            .status
+            .code()
+            .context("lockstep runtime has no normal exit status")?;
+        let expected = format!("+++ exited with {exit_code} +++");
+        let mut terminal = None;
+        for record in records {
+            let (pid, event) = Self::trace_record(record);
+            if pid == leader && event.starts_with("+++ ") {
+                anyhow::ensure!(
+                    terminal.is_none(),
+                    "lockstep tracer repeated runtime {runtime} termination"
+                );
+                terminal = Some(event);
+            }
+        }
+        anyhow::ensure!(
+            terminal == Some(expected.as_str()),
+            "lockstep tracer did not observe runtime {runtime} normal exit {exit_code}; tracer failure or incomplete execution is not comparable"
+        );
+        Ok(())
+    }
+
+    fn trace_record(line: &str) -> (Option<&str>, &str) {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("[pid ")
+            && let Some((pid, event)) = rest.split_once(']')
+            && !pid.trim().is_empty()
+            && pid.trim().bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return (Some(pid.trim()), event.trim_start());
+        }
+        if let Some((pid, event)) = line.split_once(char::is_whitespace)
+            && !pid.is_empty()
+            && pid.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return (Some(pid), event.trim_start());
+        }
+        (None, line)
+    }
+
+    /// Binary framing keeps guest-controlled bytes separate from each other
+    /// and from the exit status. Delimiters can occur in ordinary stdout or
+    /// stderr; concatenating them admitted different behaviors as one result.
+    /// The cap applies to guest bytes, so framing never evicts their prefix.
+    fn comparison_payload(output: &Output) -> Result<Vec<u8>> {
+        let exit_code = output
+            .status
+            .code()
+            .context("lockstep runtime terminated without a normal exit status")?;
+        let length = output
+            .stdout
+            .len()
+            .checked_add(output.stderr.len())
+            .context("lockstep output length overflow")?;
+        anyhow::ensure!(
+            length < MAX_COMBINED_OUTPUT_BYTES,
+            "runtime output cap reached; comparison requires complete bounded output"
+        );
+        let mut comparison = b"franken-node/lockstep-observation/v2\0".to_vec();
+        for bytes in [&output.stdout, &output.stderr] {
+            comparison.extend_from_slice(&(bytes.len() as u64).to_be_bytes());
+            comparison.extend_from_slice(bytes);
+        }
+        comparison.extend_from_slice(&exit_code.to_be_bytes());
+        Ok(comparison)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn execute_command_guarded(
+        command: &mut Command,
+        timeout: Duration,
+        drain_timeout: Duration,
+        control: &dyn Fn() -> Result<()>,
+    ) -> Result<Output> {
+        use crate::migration::smoke_supervisor::{self, StopReason, Stream};
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let completion = smoke_supervisor::supervise_with_observer_guarded(
+            command,
+            timeout,
+            drain_timeout,
+            control,
+            |stream, bytes| {
+                let remaining = MAX_COMBINED_OUTPUT_BYTES
+                    .saturating_sub(stdout.len().saturating_add(stderr.len()));
+                if bytes.len() >= remaining {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "lockstep runtime output cap reached; partial streams are not comparable",
+                    ));
+                }
+                match stream {
+                    Stream::Stdout => stdout.extend_from_slice(bytes),
+                    Stream::Stderr => stderr.extend_from_slice(bytes),
+                }
+                Ok(())
+            },
+        )?;
+        // A pair of timeouts is not evidence of equivalent guest behavior.
+        // The supervisor already killed/reaped its owned group on every path.
+        match completion.reason {
+            StopReason::RuntimeTimeout => anyhow::bail!(
+                "lockstep runtime timed out after {}ms; incomplete executions are not comparable",
+                timeout.as_millis()
+            ),
+            StopReason::PipeTimeout => anyhow::bail!(
+                "lockstep output pipes did not finish within {}ms; incomplete streams are not comparable",
+                drain_timeout.as_millis()
+            ),
+            StopReason::Exited => {}
+        }
+        control().context("lockstep runtime stopped by operator containment")?;
+        anyhow::ensure!(
+            completion.status.code().is_some(),
+            "lockstep runtime terminated without a normal exit status"
+        );
+        Ok(Output {
+            status: completion.status,
+            stdout,
+            stderr,
+        })
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn execute_command_guarded(
+        command: &mut Command,
+        timeout: Duration,
+        drain_timeout: Duration,
+        control: &dyn Fn() -> Result<()>,
+    ) -> Result<Output> {
+        anyhow::ensure!(
+            !timeout.is_zero() && !drain_timeout.is_zero(),
+            "lockstep time budgets must be positive"
+        );
+        control()?;
+        Self::isolate_child_process_group(command);
+        let mut child = command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .context("failed launching lockstep runtime")?;
+        let pipes = child.stdout.take().zip(child.stderr.take());
+        let Some((mut stdout_pipe, mut stderr_pipe)) = pipes else {
+            Self::terminate_runtime_tree(&mut child);
+            anyhow::bail!("lockstep runtime output pipes unavailable");
+        };
+        let total = Arc::new(AtomicUsize::new(0));
+        let cap = Arc::new(AtomicBool::new(false));
+        let stdout_total = Arc::clone(&total);
+        let stdout_cap = Arc::clone(&cap);
+        let stdout_reader = thread::spawn(move || {
+            Self::drain_pipe_bounded(&mut stdout_pipe, "stdout", stdout_total, stdout_cap)
+        });
+        let stderr_cap = Arc::clone(&cap);
+        let stderr_reader = thread::spawn(move || {
+            Self::drain_pipe_bounded(&mut stderr_pipe, "stderr", total, stderr_cap)
+        });
+        let started = Instant::now();
+        let status = (|| -> Result<_> {
+            loop {
+                control().context("lockstep runtime stopped by operator containment")?;
+                anyhow::ensure!(
+                    !cap.load(Ordering::Acquire),
+                    "lockstep runtime output cap reached"
+                );
+                if let Some(status) = child.try_wait().context("poll lockstep runtime")? {
+                    return Ok(status);
+                }
+                anyhow::ensure!(
+                    !Self::has_timed_out(started.elapsed(), timeout),
+                    "lockstep runtime timed out; incomplete executions are not comparable"
+                );
+                thread::sleep(crate::config::timeouts::LOCKSTEP_RUNTIME_POLL_INTERVAL);
+            }
+        })();
+        if status.is_err() {
+            Self::terminate_runtime_tree(&mut child);
+        }
+        // Join both readers before propagating either failure. The non-Linux
+        // fallback retains bounded joins; their errors never enter the oracle.
+        let stdout = Self::join_pipe_drain(stdout_reader, "stdout", drain_timeout);
+        let stderr = Self::join_pipe_drain(stderr_reader, "stderr", drain_timeout);
+        let status = status?;
+        let stdout = stdout?;
+        let stderr = stderr?;
+        control()?;
+        anyhow::ensure!(
+            !stdout.cap_reached && !stderr.cap_reached && !cap.load(Ordering::Acquire),
+            "lockstep runtime output cap reached"
+        );
+        anyhow::ensure!(
+            status.code().is_some(),
+            "lockstep runtime terminated without a normal exit status"
+        );
+        Ok(Output {
+            status,
+            stdout: stdout.bytes,
+            stderr: stderr.bytes,
+        })
+    }
+
+    #[cfg(any(test, not(target_os = "linux")))]
     fn has_timed_out(elapsed: Duration, timeout: Duration) -> bool {
         elapsed >= timeout
     }
 
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "linux")))]
     fn isolate_child_process_group(cmd: &mut Command) {
         cmd.process_group(0);
     }
@@ -1147,6 +1294,7 @@ impl LockstepHarness {
     #[cfg(not(unix))]
     fn isolate_child_process_group(_cmd: &mut Command) {}
 
+    #[cfg(not(target_os = "linux"))]
     fn terminate_runtime_tree(child: &mut Child) {
         #[cfg(unix)]
         Self::terminate_process_group(child.id());
@@ -1154,7 +1302,7 @@ impl LockstepHarness {
         let _ = child.wait();
     }
 
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "linux")))]
     fn terminate_process_group(child_pid: u32) {
         let process_group = format!("-{child_pid}");
         let _ = Command::new("kill")
@@ -1170,11 +1318,12 @@ impl LockstepHarness {
             .status();
     }
 
+    #[cfg(any(test, not(target_os = "linux")))]
     fn join_pipe_drain(
         handle: thread::JoinHandle<PipeDrainResult>,
         label: &str,
         timeout: Duration,
-    ) -> PipeDrainResult {
+    ) -> Result<PipeDrainResult> {
         let start = Instant::now();
         while !handle.is_finished() {
             if Self::has_timed_out(start.elapsed(), timeout) {
@@ -1184,7 +1333,8 @@ impl LockstepHarness {
                 let grace_start = Instant::now();
                 while !handle.is_finished() {
                     if Self::has_timed_out(grace_start.elapsed(), grace_timeout) {
-                        // Detach the blocked reader thread and return a bounded timeout marker.
+                        // Keep the legacy non-Linux join bounded, but never
+                        // present an infrastructure timeout as guest output.
                         tracing::warn!(
                             stream = label,
                             timeout_ms = timeout.as_millis(),
@@ -1192,10 +1342,9 @@ impl LockstepHarness {
                             "pipe drain thread detached after bounded timeout"
                         );
                         drop(handle);
-                        return PipeDrainResult {
-                            bytes: format!("__pipe_drain_timeout:{label}").into_bytes(),
-                            cap_reached: false,
-                        };
+                        anyhow::bail!(
+                            "lockstep {label} pipe drain timed out; incomplete streams are not comparable"
+                        );
                     }
                     thread::sleep(crate::config::timeouts::LOCKSTEP_PIPE_DRAIN_JOIN_POLL);
                 }
@@ -1203,12 +1352,18 @@ impl LockstepHarness {
             }
             thread::sleep(crate::config::timeouts::LOCKSTEP_PIPE_DRAIN_JOIN_POLL);
         }
-        handle.join().unwrap_or_else(|_| PipeDrainResult {
-            bytes: format!("__thread_panic:{label}").into_bytes(),
-            cap_reached: false,
-        })
+        let result = handle
+            .join()
+            .map_err(|_| anyhow::anyhow!("lockstep {label} pipe reader panicked"))?;
+        if let Some(error) = &result.error {
+            anyhow::bail!(
+                "lockstep {label} pipe read failed: {error}; partial streams are not comparable"
+            );
+        }
+        Ok(result)
     }
 
+    #[cfg(any(test, not(target_os = "linux")))]
     fn drain_pipe_bounded<R: Read>(
         reader: &mut R,
         label: &str,
@@ -1218,6 +1373,7 @@ impl LockstepHarness {
         let mut captured = Vec::new();
         let mut chunk = [0_u8; PIPE_READ_CHUNK_BYTES];
         let mut cap_reached = false;
+        let mut error = None;
 
         loop {
             match reader.read(&mut chunk) {
@@ -1242,7 +1398,7 @@ impl LockstepHarness {
                 }
                 Err(e) if e.kind() == ErrorKind::Interrupted => continue,
                 Err(e) => {
-                    eprintln!("lockstep_harness: {label} read error (partial data retained): {e}");
+                    error = Some(format!("{label}: {e}"));
                     break;
                 }
             }
@@ -1251,9 +1407,11 @@ impl LockstepHarness {
         PipeDrainResult {
             bytes: captured,
             cap_reached,
+            error,
         }
     }
 
+    #[cfg(any(test, not(target_os = "linux")))]
     fn reserve_output_bytes(
         captured_output_bytes: &AtomicUsize,
         requested_bytes: usize,
@@ -1284,12 +1442,22 @@ impl LockstepHarness {
     }
 
     fn read_strace_output(path: &Path, runtime: &str) -> Result<Vec<u8>> {
-        std::fs::read(path).with_context(|| {
+        let context = || {
             format!(
                 "strace output missing or unreadable for runtime {runtime}: {}",
                 path.display()
             )
-        })
+        };
+        let file = File::open(path).with_context(&context)?;
+        let mut bytes = Vec::new();
+        file.take((MAX_RAW_STRACE_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)
+            .with_context(context)?;
+        anyhow::ensure!(
+            bytes.len() <= MAX_RAW_STRACE_BYTES,
+            "lockstep strace output cap reached for runtime {runtime}; truncated trace evidence is not comparable"
+        );
+        Ok(bytes)
     }
 
     /// Strips out PIDs, memory addresses, and timestamps from strace logs
@@ -1481,8 +1649,10 @@ mod tests {
         let handle = thread::spawn(|| PipeDrainResult {
             bytes: b"drained".to_vec(),
             cap_reached: false,
+            error: None,
         });
-        let output = LockstepHarness::join_pipe_drain(handle, "stdout", Duration::from_secs(1));
+        let output = LockstepHarness::join_pipe_drain(handle, "stdout", Duration::from_secs(1))
+            .expect("complete stream");
         assert_eq!(output.bytes, b"drained".to_vec());
         assert!(!output.cap_reached);
     }
@@ -1495,20 +1665,22 @@ mod tests {
             PipeDrainResult {
                 bytes: b"late-output".to_vec(),
                 cap_reached: false,
+                error: None,
             }
         });
 
         let start = Instant::now();
-        let output = LockstepHarness::join_pipe_drain(handle, "stderr", Duration::from_millis(30));
+        let error = LockstepHarness::join_pipe_drain(handle, "stderr", Duration::from_millis(30))
+            .err()
+            .expect("incomplete stream must fail");
 
-        assert_eq!(output.bytes, b"__pipe_drain_timeout:stderr".to_vec());
-        assert!(!output.cap_reached);
+        assert!(error.to_string().contains("stderr pipe drain timed out"));
         assert!(start.elapsed() < Duration::from_secs(1));
         drop(sender);
     }
 
     #[test]
-    fn pipe_drain_timeout_detaches_thread_and_allows_late_exit() {
+    fn fallback_pipe_drain_timeout_is_an_error_even_if_the_thread_later_exits() {
         let (sender, receiver) = std::sync::mpsc::channel::<()>();
         let exited = Arc::new(AtomicBool::new(false));
         let exited_clone = Arc::clone(&exited);
@@ -1518,16 +1690,18 @@ mod tests {
             PipeDrainResult {
                 bytes: b"late-output".to_vec(),
                 cap_reached: false,
+                error: None,
             }
         });
 
-        let output = LockstepHarness::join_pipe_drain(handle, "stdout", Duration::from_millis(30));
+        let error = LockstepHarness::join_pipe_drain(handle, "stdout", Duration::from_millis(30))
+            .err()
+            .expect("incomplete stream must fail");
 
-        assert_eq!(output.bytes, b"__pipe_drain_timeout:stdout".to_vec());
-        assert!(!output.cap_reached);
+        assert!(error.to_string().contains("stdout pipe drain timed out"));
         assert!(
             !exited.load(Ordering::Acquire),
-            "thread should still be blocked when timeout marker is returned"
+            "thread should still be blocked when the timeout is refused"
         );
 
         sender.send(()).expect("unblock detached thread");
@@ -1563,6 +1737,278 @@ mod tests {
             MAX_COMBINED_OUTPUT_BYTES
         );
         assert_eq!(output.bytes.len(), MAX_COMBINED_OUTPUT_BYTES);
+    }
+
+    #[test]
+    fn pipe_read_failure_and_reader_panic_never_become_comparable_output() {
+        struct BrokenPipe(bool);
+        impl Read for BrokenPipe {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                if !self.0 {
+                    buffer[..7].copy_from_slice(b"partial");
+                    self.0 = true;
+                    Ok(7)
+                } else {
+                    Err(std::io::Error::other("injected read failure"))
+                }
+            }
+        }
+        let handle = thread::spawn(|| {
+            LockstepHarness::drain_pipe_bounded(
+                &mut BrokenPipe(false),
+                "stdout",
+                Arc::new(AtomicUsize::new(0)),
+                Arc::new(AtomicBool::new(false)),
+            )
+        });
+        let error = LockstepHarness::join_pipe_drain(handle, "stdout", Duration::from_secs(1))
+            .err()
+            .expect("partial read must fail");
+        assert!(error.to_string().contains("injected read failure"));
+        let handle = thread::spawn(|| -> PipeDrainResult { panic!("injected reader panic") });
+        let error = LockstepHarness::join_pipe_drain(handle, "stderr", Duration::from_secs(1))
+            .err()
+            .expect("reader panic must fail");
+        assert!(error.to_string().contains("stderr pipe reader panicked"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn comparison_framing_separates_streams_and_normal_exit_status() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let first = Output {
+            status: std::process::ExitStatus::from_raw(0),
+            stdout: b"a\n--- STDERR ---\nb".to_vec(),
+            stderr: b"c".to_vec(),
+        };
+        let second = Output {
+            status: first.status,
+            stdout: b"a".to_vec(),
+            stderr: b"b\n--- STDERR ---\nc".to_vec(),
+        };
+        // These different observations collided under the old delimiter.
+        let old = |output: &Output| {
+            [
+                output.stdout.as_slice(),
+                b"\n--- STDERR ---\n",
+                output.stderr.as_slice(),
+            ]
+            .concat()
+        };
+        assert_eq!(old(&first), old(&second));
+        assert_ne!(
+            LockstepHarness::comparison_payload(&first).unwrap(),
+            LockstepHarness::comparison_payload(&second).unwrap()
+        );
+        let intentional_failure = Output {
+            status: std::process::ExitStatus::from_raw(7 << 8),
+            stdout: first.stdout.clone(),
+            stderr: first.stderr.clone(),
+        };
+        let failed = LockstepHarness::comparison_payload(&intentional_failure).unwrap();
+        assert_ne!(LockstepHarness::comparison_payload(&first).unwrap(), failed);
+        assert_eq!(
+            failed,
+            LockstepHarness::comparison_payload(&intentional_failure).unwrap()
+        );
+        let signalled = Output {
+            status: std::process::ExitStatus::from_raw(9),
+            ..intentional_failure
+        };
+        assert!(LockstepHarness::comparison_payload(&signalled).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn comparison_framing_retains_every_guest_byte_near_the_output_bound() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let mut first = Output {
+            status: std::process::ExitStatus::from_raw(0),
+            stdout: vec![b'a'; MAX_COMBINED_OUTPUT_BYTES - 2],
+            stderr: vec![0xff],
+        };
+        let framed = LockstepHarness::comparison_payload(&first).unwrap();
+        let domain = b"franken-node/lockstep-observation/v2\0";
+        assert!(framed.starts_with(domain));
+        assert_eq!(
+            &framed[domain.len()..domain.len() + 8],
+            &(first.stdout.len() as u64).to_be_bytes()
+        );
+        assert_eq!(
+            &framed[domain.len() + 8..domain.len() + 8 + first.stdout.len()],
+            first.stdout.as_slice()
+        );
+        first.stdout[0] = b'b';
+        assert_ne!(framed, LockstepHarness::comparison_payload(&first).unwrap());
+        first.stderr.push(0);
+        assert!(LockstepHarness::comparison_payload(&first).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn trace_admission_accepts_completed_runtime_exec_and_intentional_nonzero_exit() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let output = Output {
+            status: std::process::ExitStatus::from_raw(7 << 8),
+            stdout: Vec::new(),
+            stderr: b"intentional guest error".to_vec(),
+        };
+        for prefix in ["", "42 ", "[pid    42] "] {
+            let trace = format!(
+                "{prefix}execve(\"/runtime\", [\"runtime\"], 0x1) = 0\n{prefix}+++ exited with 7 +++\n"
+            );
+            LockstepHarness::validate_trace_completion(trace.as_bytes(), &output, "runtime")
+                .unwrap_or_else(|error| panic!("prefix {prefix:?}: {error:#}"));
+        }
+        let lookup_then_exec = b"42 execve(\"/missing/runtime\", [], 0x1) = -1 ENOENT (No such file or directory)\n42 execveat(3, \"runtime\", [], 0x1, 0) = 0\n43 +++ exited with 0 +++\n42 +++ exited with 7 +++\n";
+        LockstepHarness::validate_trace_completion(lookup_then_exec, &output, "runtime").unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn trace_admission_rejects_tracer_failures_and_unproven_leader_completion() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let output = Output {
+            status: std::process::ExitStatus::from_raw(1 << 8),
+            stdout: Vec::new(),
+            stderr: b"strace: ptrace: Operation not permitted".to_vec(),
+        };
+        for (label, trace) in [
+            ("denied ptrace", ""),
+            (
+                "failed exec",
+                "42 execve(\"/missing\", [], 0x1) = -1 ENOENT (No such file or directory)\n42 +++ exited with 1 +++\n",
+            ),
+            ("missing exit", "42 execve(\"/runtime\", [], 0x1) = 0\n"),
+            (
+                "child exit cannot substitute for leader",
+                "42 execve(\"/runtime\", [], 0x1) = 0\n43 +++ exited with 1 +++\n",
+            ),
+            (
+                "exit status mismatch",
+                "42 execve(\"/runtime\", [], 0x1) = 0\n42 +++ exited with 0 +++\n",
+            ),
+            (
+                "signalled guest",
+                "42 execve(\"/runtime\", [], 0x1) = 0\n42 +++ killed by SIGTERM +++\n",
+            ),
+            (
+                "missing initial exec",
+                "42 openat(3, \"file\", O_RDONLY) = 4\n42 +++ exited with 1 +++\n",
+            ),
+            (
+                "leader changed before exec",
+                "42 execve(\"/missing\", [], 0x1) = -1 ENOENT (No such file or directory)\n43 execve(\"/runtime\", [], 0x1) = 0\n42 +++ exited with 1 +++\n",
+            ),
+            (
+                "application activity before exec",
+                "42 execve(\"/missing\", [], 0x1) = -1 ENOENT (No such file or directory)\n42 openat(3, \"file\", O_RDONLY) = 4\n42 execve(\"/runtime\", [], 0x1) = 0\n42 +++ exited with 1 +++\n",
+            ),
+            (
+                "repeated exit",
+                "42 execve(\"/runtime\", [], 0x1) = 0\n42 +++ exited with 1 +++\n42 +++ exited with 1 +++\n",
+            ),
+        ] {
+            assert!(
+                LockstepHarness::validate_trace_completion(trace.as_bytes(), &output, "runtime")
+                    .is_err(),
+                "{label} must not become comparable guest behavior"
+            );
+        }
+        assert!(LockstepHarness::validate_trace_completion(&[0xff], &output, "runtime").is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    fn shell_command(source: &str) -> Command {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", source]);
+        command
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn guarded_supervisor_preserves_bytes_and_intentional_nonzero_guest_exit() {
+        let output = LockstepHarness::execute_command_guarded(
+            &mut shell_command("printf 'hello'; printf 'error' >&2; exit 7"),
+            Duration::from_secs(3),
+            Duration::from_millis(100),
+            &|| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(output.stdout, b"hello");
+        assert_eq!(output.stderr, b"error");
+        assert_eq!(output.status.code(), Some(7));
+        assert!(LockstepHarness::comparison_payload(&output).is_ok());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn guarded_supervisor_refuses_output_cap_and_signalled_runtime() {
+        let error = LockstepHarness::execute_command_guarded(
+            &mut shell_command(&format!(
+                "head -c {} /dev/zero",
+                MAX_COMBINED_OUTPUT_BYTES + 1
+            )),
+            Duration::from_secs(5),
+            Duration::from_millis(100),
+            &|| Ok(()),
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("runtime output cap reached"));
+        let error = LockstepHarness::execute_command_guarded(
+            &mut shell_command("kill -TERM \"$$\""),
+            Duration::from_secs(3),
+            Duration::from_millis(100),
+            &|| Ok(()),
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("without a normal exit status"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn identical_runtime_and_inherited_pipe_timeouts_fail_closed() {
+        for _ in 0..2 {
+            let error = LockstepHarness::execute_command_guarded(
+                &mut shell_command("exec /bin/sleep 60"),
+                Duration::from_millis(80),
+                Duration::from_millis(20),
+                &|| Ok(()),
+            )
+            .unwrap_err();
+            assert!(format!("{error:#}").contains("runtime timed out"));
+            let error = LockstepHarness::execute_command_guarded(
+                &mut shell_command("/bin/sleep 60 & exit 0"),
+                Duration::from_secs(3),
+                Duration::from_millis(20),
+                &|| Ok(()),
+            )
+            .unwrap_err();
+            assert!(format!("{error:#}").contains("output pipes did not finish"));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn silent_runtime_rechecks_live_containment_before_returning_evidence() {
+        let checks = std::cell::Cell::new(0usize);
+        let error = LockstepHarness::execute_command_guarded(
+            &mut shell_command("exec /bin/sleep 60"),
+            Duration::from_secs(3),
+            Duration::from_millis(20),
+            &|| {
+                checks.set(checks.get() + 1);
+                anyhow::ensure!(checks.get() <= 4, "injected live containment");
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("injected live containment"));
+        assert!(checks.get() > 4);
     }
 
     #[cfg(unix)]
@@ -1612,14 +2058,16 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn execute_runtime_errors_when_output_cap_is_reached() {
-        if Command::new("strace")
-            .arg("-V")
+        if !Command::new("strace")
+            .args(["-o", "/dev/null", "/bin/true"])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
-            .is_err()
+            .is_ok_and(|status| status.success())
         {
-            eprintln!("skipping output cap test because strace is unavailable");
+            eprintln!(
+                "skipping traced output cap test because strace execution is unavailable or ptrace is restricted; direct supervisor cap coverage remains enabled"
+            );
             return;
         }
 
@@ -1650,7 +2098,7 @@ mod tests {
         .expect_err("runtime output should hit cap");
 
         assert!(
-            err.to_string().contains("runtime output cap reached"),
+            format!("{err:#}").contains("runtime output cap reached"),
             "unexpected error: {err:#}"
         );
         assert!(start.elapsed() < Duration::from_secs(5));
@@ -1722,6 +2170,18 @@ mod tests {
         let contents =
             LockstepHarness::read_strace_output(temp_file.path(), "node").expect("read strace");
         assert!(contents.starts_with(b"open("));
+    }
+
+    #[test]
+    fn read_strace_output_rejects_oversized_trace_without_accepting_its_prefix() {
+        let temp_file = tempfile::NamedTempFile::new().expect("tempfile");
+        temp_file
+            .as_file()
+            .set_len((MAX_RAW_STRACE_BYTES + 1) as u64)
+            .expect("create sparse oversized trace");
+        let error = LockstepHarness::read_strace_output(temp_file.path(), "runtime")
+            .expect_err("bounded trace reads must reject truncated evidence");
+        assert!(error.to_string().contains("strace output cap reached"));
     }
 
     #[test]
