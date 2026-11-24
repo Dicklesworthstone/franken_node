@@ -28,6 +28,7 @@ MAX_INPUT_BYTES = 64 * 1024 * 1024
 MAX_NATIVE_SESSION_INPUT_BYTES = 96 * 1024 * 1024
 MAX_FLEET_QUIESCENCE_INPUT_BYTES = 8 * 1024 * 1024
 MAX_FLEET_QUIESCENCE_POLICY_BYTES = 1024 * 1024
+MAX_SIGNED_SESSION_POLICY_BYTES = 256 * 1024
 MAX_RESPONSE_BYTES = 64 * 1024 + 1
 EvidenceFormat = Literal[
     "incident-bundle", "native-session-forensics", "capsule", "signed-bundle", "signed-session", "resolution-receipt",
@@ -71,7 +72,11 @@ class Verification(TypedDict):
     facts: dict[str, Any]
 
 
-class SignedSessionFacts(TypedDict):
+class _SignedSessionPolicyBinding(TypedDict, total=False):
+    trusted_session_policy_sha256: str
+
+
+class SignedSessionFacts(_SignedSessionPolicyBinding):
     """Authentic recorded decisions; a verified signature does not imply pass."""
 
     session_id: str
@@ -833,6 +838,115 @@ def _ltv_policy_matches(facts: dict[str, Any], data: bytes) -> bool:
         return False
 
 
+def _read_session_policy(path: Any) -> tuple[str, bytes, dict[str, Any]]:
+    """Read independent caller policy without exposing its path or contents."""
+    try:
+        filename = os.fspath(path)
+        if not isinstance(filename, str) or not filename or "\0" in filename:
+            raise ValueError("invalid policy path")
+        descriptor = os.open(
+            filename,
+            os.O_RDONLY
+            | getattr(os, "O_NONBLOCK", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOCTTY", 0),
+        )
+        try:
+            source = os.fdopen(descriptor, "rb")
+        except (OSError, TypeError, ValueError):
+            os.close(descriptor)
+            raise
+        with source:
+            metadata = os.fstat(source.fileno())
+            if not stat.S_ISREG(metadata.st_mode):
+                raise ValueError("policy is not a regular file")
+            if metadata.st_size > MAX_SIGNED_SESSION_POLICY_BYTES:
+                raise VerifierError(
+                    "SESSION_POLICY_TOO_LARGE", "trusted session policy exceeds its byte bound"
+                )
+            raw = source.read(MAX_SIGNED_SESSION_POLICY_BYTES + 1)
+        if len(raw) > MAX_SIGNED_SESSION_POLICY_BYTES:
+            raise VerifierError(
+                "SESSION_POLICY_TOO_LARGE", "trusted session policy exceeds its byte bound"
+            )
+    except VerifierError:
+        raise
+    except (OSError, TypeError, UnicodeError, ValueError):
+        raise VerifierError(
+            "SESSION_POLICY_IO", "cannot read a bounded regular trusted session policy"
+        ) from None
+
+    try:
+        policy = json.loads(raw.decode("utf-8"), object_pairs_hook=_object)
+    except (UnicodeError, ValueError, RecursionError):
+        raise VerifierError(
+            "SESSION_POLICY_INVALID", "trusted session policy contains invalid or ambiguous JSON"
+        ) from None
+    valid = (
+        isinstance(policy, dict)
+        and set(policy) == {"schema_version", "session_id", "verifier_identity", "steps"}
+        and policy["schema_version"] == "franken-verifier/signed-session-policy/v1"
+        and isinstance(policy["session_id"], str)
+        and re.fullmatch(r"[A-Za-z0-9._-]{1,255}", policy["session_id"]) is not None
+        and isinstance(policy["verifier_identity"], str)
+        and re.fullmatch(r"verifier://[A-Za-z0-9._-]{1,255}", policy["verifier_identity"]) is not None
+        and isinstance(policy["steps"], list)
+        and len(policy["steps"]) <= 1024
+    )
+    if valid:
+        for step in policy["steps"]:
+            if not (
+                isinstance(step, dict)
+                and set(step) == {"operation", "artifact_binding_hash", "verdict"}
+                and isinstance(step["operation"], str)
+                and step["operation"] in {
+                    "claim", "migration_artifact", "trust_state",
+                    "long_term_validation", "workflow", "workflow_execution",
+                }
+                and isinstance(step["artifact_binding_hash"], str)
+                and re.fullmatch(r"[0-9a-f]{64}", step["artifact_binding_hash"]) is not None
+                and isinstance(step["verdict"], str)
+                and step["verdict"] in {"pass", "fail", "inconclusive"}
+            ):
+                valid = False
+                break
+    if not valid:
+        raise VerifierError(
+            "SESSION_POLICY_INVALID", "trusted session policy has an invalid contract"
+        ) from None
+    return filename, raw, policy
+
+
+def _session_policy_facts_valid(
+    facts: Any,
+    anchor: str,
+    policy_input: tuple[str, bytes, dict[str, Any]],
+) -> bool:
+    """Accept facts bound to exactly the policy admitted before dispatch."""
+    if not isinstance(facts, dict):
+        return False
+    _, raw, policy = policy_input
+    if facts.get("trusted_session_policy_sha256") != hashlib.sha256(raw).hexdigest():
+        return False
+    session_facts = dict(facts)
+    session_facts.pop("trusted_session_policy_sha256")
+    if not _facts_valid(session_facts, "signed-session", anchor, None, None):
+        return False
+    expected_verdict = (
+        "inconclusive"
+        if not policy["steps"]
+        else "pass"
+        if all(step["verdict"] == "pass" for step in policy["steps"])
+        else "fail"
+    )
+    return (
+        facts["session_id"] == policy["session_id"]
+        and facts["verifier_identity"] == policy["verifier_identity"]
+        and facts["step_count"] == len(policy["steps"])
+        and facts["final_verdict"] == expected_verdict
+    )
+
+
 def _read_fleet_policy(path: Any) -> tuple[str, bytes, dict[str, Any]]:
     """Read a bounded caller-owned policy, independently of candidate evidence."""
     try:
@@ -1102,6 +1216,7 @@ def verify_artifact(
     verifier: str | os.PathLike[str],
     format: EvidenceFormat = "incident-bundle",
     trusted_fleet_policy: str | os.PathLike[str] | None = None,
+    trusted_session_policy_path: str | os.PathLike[str] | None = None,
     trusted_coordinator_id: str | None = None,
     trusted_coordinator_public_key_hex: str | None = None,
     trusted_incident_public_key_hex: str | None = None,
@@ -1153,6 +1268,13 @@ def verify_artifact(
     Pins use ``sha256:`` plus 64 lowercase hex digits. The source-artifact pin
     names raw capsule bytes, not input transport bytes or the capsule domain
     digest. A graph pin matches an authenticated claim without reconstructing it.
+    For signed sessions, optional ``trusted_session_policy_path`` binds the
+    authenticated transcript to an independently requested identity, exact
+    ordered operations, artifact commitments and recorded verdicts. A matched
+    failing or empty session retains its fail or inconclusive outcome. The
+    returned policy hash commits exact file bytes, including whitespace; it
+    neither re-executes steps nor establishes freshness. Use a unique caller-
+    chosen session ID when an older audit must not satisfy the request.
     The supplied executable is part of the caller's trusted verifier
     distribution. It is never inferred from an artifact or run through a shell.
     Fleet observations require ``trusted_public_key_hex=None`` and a separately
@@ -1172,6 +1294,11 @@ def verify_artifact(
                    MAX_FLEET_QUIESCENCE_INPUT_BYTES if format in ("fleet-quiescence-observations", "fleet-epoch-commit") else MAX_INPUT_BYTES)
     if len(data) > input_limit:
         raise VerifierError("INPUT_TOO_LARGE", f"evidence exceeds {input_limit // (1024 * 1024)} MiB")
+    session_policy = None
+    if trusted_session_policy_path is not None:
+        if format != "signed-session":
+            raise VerifierError("INPUT_INVALID", "session policy applies only to signed-session")
+        session_policy = _read_session_policy(trusted_session_policy_path)
     fleet_policy = None
     coordinator = None
     if format == "fleet-epoch-commit":
@@ -1256,6 +1383,8 @@ def verify_artifact(
             args.extend(["--trusted-coordinator-id", coordinator[0], "--trusted-coordinator-key-hex", coordinator[1]])
     else:
         args.extend(["--trusted-key-hex", anchor])
+    if session_policy is not None:
+        args.extend(["--trusted-session-policy", session_policy[0]])
     if incident_anchor is not None:
         args.extend(["--trusted-incident-key-hex", incident_anchor,
                      "--expected-baseline-integrity-hash", expected_baseline_integrity_hash])
@@ -1305,6 +1434,8 @@ def verify_artifact(
             or result.get("artifact_sha256") != hashlib.sha256(data).hexdigest()
             or not (_fleet_facts_valid(result.get("facts"), fleet_policy[1], fleet_policy[2], data, coordinator)
                     if fleet_policy is not None else
+                    _session_policy_facts_valid(result.get("facts"), anchor, session_policy)
+                    if session_policy is not None else
                     _facts_valid(result.get("facts"), format, anchor, run_anchor, runtime_anchor,
                                  revocation_anchor, provenance_anchor, evaluation_time, max_revocation_age_secs,
                                  incident_anchor, expected_baseline_integrity_hash))

@@ -3,12 +3,14 @@ import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { isIP } from "node:net";
 import { open, stat } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
 
 export const PROTOCOL = "franken-verifier-cli/v1";
 export const MAX_INPUT_BYTES = 64 * 1024 * 1024;
 export const MAX_NATIVE_SESSION_INPUT_BYTES = 96 * 1024 * 1024;
 export const MAX_FLEET_QUIESCENCE_INPUT_BYTES = 8 * 1024 * 1024;
 export const MAX_FLEET_QUIESCENCE_POLICY_BYTES = 1024 * 1024;
+export const MAX_SIGNED_SESSION_POLICY_BYTES = 256 * 1024;
 const MAX_RESPONSE_BYTES = 64 * 1024 + 1;
 const SCOPES = Object.freeze({
   "incident-bundle": "authenticated_recorded_incident",
@@ -346,6 +348,111 @@ function ltvPolicyMatches(facts, bytes) {
   }
 }
 
+// JSON.parse accepts duplicate object members. The source is already valid
+// JSON; this bounded token walk rejects duplicate decoded keys at every depth,
+// including escaped-equivalent spellings, without reserializing policy bytes.
+function sessionPolicyJson(source) {
+  const policy = JSON.parse(source);
+  const stack = [];
+  for (let index = 0; index < source.length; index++) {
+    const character = source[index];
+    if (character === '"') {
+      const start = index;
+      for (index++; index < source.length; index++) {
+        if (source[index] === "\\") index++;
+        else if (source[index] === '"') break;
+      }
+      let colon = index + 1;
+      while (/[ \t\r\n]/u.test(source[colon] ?? "")) colon++;
+      if (source[colon] === ":") {
+        const names = stack.at(-1);
+        const name = JSON.parse(source.slice(start, index + 1));
+        if (!(names instanceof Set) || names.has(name)) throw new Error("ambiguous policy");
+        names.add(name);
+      }
+    } else if (character === "{") {
+      stack.push(new Set());
+    } else if (character === "[") {
+      stack.push(null);
+    } else if (character === "}" || character === "]") {
+      stack.pop();
+    }
+  }
+  return policy;
+}
+
+async function readSessionPolicy(path) {
+  let file;
+  try {
+    if (typeof path !== "string" || path.length === 0 || path.includes("\0")) {
+      throw new VerifierError("SESSION_POLICY_IO", "cannot read the trusted session policy file");
+    }
+    const flags = fsConstants.O_RDONLY | (fsConstants.O_NONBLOCK ?? 0)
+      | (fsConstants.O_CLOEXEC ?? 0) | (fsConstants.O_NOCTTY ?? 0);
+    file = await open(path, flags);
+    const metadata = await file.stat();
+    if (!metadata.isFile()) throw new VerifierError("SESSION_POLICY_IO", "session policy must be a regular file");
+    if (metadata.size > MAX_SIGNED_SESSION_POLICY_BYTES) {
+      throw new VerifierError("SESSION_POLICY_TOO_LARGE", "trusted session policy exceeds its byte bound");
+    }
+    const buffer = Buffer.alloc(MAX_SIGNED_SESSION_POLICY_BYTES + 1);
+    let offset = 0;
+    while (offset < buffer.length) {
+      const { bytesRead } = await file.read(buffer, offset, buffer.length - offset, null);
+      if (bytesRead === 0) break;
+      offset += bytesRead;
+    }
+    if (offset > MAX_SIGNED_SESSION_POLICY_BYTES) {
+      throw new VerifierError("SESSION_POLICY_TOO_LARGE", "trusted session policy exceeds its byte bound");
+    }
+    const bytes = buffer.subarray(0, offset);
+    let policy;
+    try {
+      // Preserve a BOM so JSON.parse refuses it as the Rust parser does.
+      policy = sessionPolicyJson(new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes));
+    } catch {
+      throw new VerifierError("SESSION_POLICY_INVALID", "trusted session policy contains invalid or ambiguous JSON");
+    }
+    if (!keys(policy, ["schema_version", "session_id", "verifier_identity", "steps"])
+        || policy.schema_version !== "franken-verifier/signed-session-policy/v1"
+        || typeof policy.session_id !== "string" || policy.session_id.trim() !== policy.session_id
+        || !/^[A-Za-z0-9._-]{1,255}$/u.test(policy.session_id)
+        || typeof policy.verifier_identity !== "string" || policy.verifier_identity.trim() !== policy.verifier_identity
+        || !/^verifier:\/\/[A-Za-z0-9._-]{1,255}$/u.test(policy.verifier_identity)
+        || !Array.isArray(policy.steps) || policy.steps.length > 1024
+        || policy.steps.some((step) => !keys(step, ["operation", "artifact_binding_hash", "verdict"])
+          || !["claim", "migration_artifact", "trust_state", "long_term_validation", "workflow", "workflow_execution"].includes(step.operation)
+          || !hex(step.artifact_binding_hash, 64) || step.artifact_binding_hash !== step.artifact_binding_hash.toLowerCase()
+          || !["pass", "fail", "inconclusive"].includes(step.verdict))) {
+      throw new VerifierError("SESSION_POLICY_INVALID", "trusted session policy has an invalid contract");
+    }
+    return { path, bytes, policy };
+  } catch (error) {
+    if (error instanceof VerifierError) throw error;
+    throw new VerifierError("SESSION_POLICY_IO", "cannot read the trusted session policy file");
+  } finally {
+    if (file !== undefined) {
+      try { await file.close(); }
+      catch { throw new VerifierError("SESSION_POLICY_IO", "cannot close the trusted session policy file"); }
+    }
+  }
+}
+
+function sessionPolicyFactsValid(facts, anchor, input) {
+  if (!object(facts)
+      || facts.trusted_session_policy_sha256 !== createHash("sha256").update(input.bytes).digest("hex")) return false;
+  const sessionFacts = { ...facts };
+  delete sessionFacts.trusted_session_policy_sha256;
+  if (!factsValid(sessionFacts, "signed-session", anchor, undefined, undefined)) return false;
+  const { policy } = input;
+  const verdict = policy.steps.length === 0 ? "inconclusive"
+    : policy.steps.every((step) => step.verdict === "pass") ? "pass" : "fail";
+  return facts.session_id === policy.session_id
+    && facts.verifier_identity === policy.verifier_identity
+    && facts.step_count === policy.steps.length
+    && facts.final_verdict === verdict;
+}
+
 async function readFleetPolicy(path) {
   let file;
   try {
@@ -610,7 +717,7 @@ function factsValid(facts, format, anchor, runAnchor, runtimeAnchor,
 export async function verifyArtifact(data, trustedPublicKeyHex, options) {
   const { verifier, format = "incident-bundle", trustedRunPublicKeyHex, trustedRuntimePublicKeyHex,
     trustedIncidentPublicKeyHex, expectedBaselineIntegrityHash,
-    trustedFleetPolicy, trustedCoordinatorId, trustedCoordinatorPublicKeyHex,
+    trustedFleetPolicy, trustedSessionPolicyPath, trustedCoordinatorId, trustedCoordinatorPublicKeyHex,
     trustedRevocationPublicKeyHex, trustedProvenancePublicKeyHex, evaluationTime, maxRevocationAgeSecs,
     expectedManifestSha256, expectedSourceArtifactSha256, expectedGraphInputHash,
     signatureHex, timeoutMs = 10_000 } = options ?? {};
@@ -622,6 +729,11 @@ export async function verifyArtifact(data, trustedPublicKeyHex, options) {
   // Retain the invocation's bytes before policy I/O yields to the caller,
   // which may reuse or mutate its original Uint8Array in the meantime.
   const bytes = Buffer.from(data);
+  let sessionPolicy;
+  if (trustedSessionPolicyPath !== undefined) {
+    if (format !== "signed-session") throw new VerifierError("INPUT_INVALID", "session policy applies only to signed-session");
+    sessionPolicy = await readSessionPolicy(trustedSessionPolicyPath);
+  }
   let fleetPolicy;
   let coordinator;
   if (format === "fleet-epoch-commit") {
@@ -690,6 +802,7 @@ export async function verifyArtifact(data, trustedPublicKeyHex, options) {
   const args = ["verify", "--format", format];
   if (fleetPolicy !== undefined) args.push("--trusted-fleet-policy", fleetPolicy.path);
   else args.push("--trusted-key-hex", anchor);
+  if (sessionPolicy !== undefined) args.push("--trusted-session-policy", sessionPolicy.path);
   if (coordinator !== undefined) args.push("--trusted-coordinator-id", coordinator.id, "--trusted-coordinator-key-hex", coordinator.key);
   if (incidentAnchor !== undefined) args.push("--trusted-incident-key-hex", incidentAnchor,
     "--expected-baseline-integrity-hash", expectedBaselineIntegrityHash);
@@ -735,6 +848,7 @@ export async function verifyArtifact(data, trustedPublicKeyHex, options) {
           || result.verdict !== "verified" || result.format !== format || result.scope !== scope
           || result.artifact_sha256 !== createHash("sha256").update(bytes).digest("hex")
           || !(fleetPolicy !== undefined ? fleetFactsValid(result.facts, fleetPolicy, bytes, coordinator)
+            : sessionPolicy !== undefined ? sessionPolicyFactsValid(result.facts, anchor, sessionPolicy)
             : factsValid(result.facts, format, anchor, runAnchor, runtimeAnchor,
               revocationAnchor, provenanceAnchor, evaluationTime, maxRevocationAgeSecs,
               incidentAnchor, expectedBaselineIntegrityHash))

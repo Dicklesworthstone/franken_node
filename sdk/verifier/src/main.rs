@@ -42,8 +42,9 @@ use frankenengine_verifier_sdk::resolution::{
 };
 use frankenengine_verifier_sdk::{
     FN_LTV_HYBRID_SURVIVED_ALGO_DEATH, LongTermVerificationEvidence, LongTermWitnessTrustAnchor,
+    MAX_SIGNED_SESSION_POLICY_BYTES, SignedSessionPolicy, SignedSessionPolicyError,
     SignedSessionTranscript, VerificationVerdict, VerifierSdk, VerifierSdkError,
-    long_term_verification_audit_events,
+    long_term_verification_audit_events, parse_signed_session_policy,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -59,7 +60,7 @@ const COUNTERFACTUAL_PROMOTION_INPUT_SCHEMA: &str =
 const LTV_INPUT_SCHEMA: &str = "franken-verifier/ltv-evidence-input/v1";
 const LTV_WITNESS_ANCHOR_DOMAIN: &[u8] = b"franken-verifier/ltv-witness-anchor/v1:";
 const MAX_LTV_WITNESS_ANCHOR_BYTES: usize = 64 * 1024;
-const USAGE: &str = "franken-verifier verify --format incident-bundle|native-session-forensics|capsule|signed-bundle|signed-session|resolution-receipt|publisher-source|publisher-source-trust|counterfactual-receipt|counterfactual-incident|counterfactual-promotion|ltv-evidence --trusted-key-hex HEX [--trusted-run-key-hex HEX [--trusted-runtime-key-hex HEX]] [--signature-hex HEX] [--trusted-incident-key-hex HEX --expected-baseline-integrity-hash HEX] [--trusted-revocation-key-hex HEX --evaluation-time RFC3339 --max-revocation-age-secs SECONDS [--trusted-provenance-key-hex HEX]] [--expected-manifest-sha256 sha256:HEX [--expected-source-artifact-sha256 sha256:HEX] [--expected-graph-input-hash sha256:HEX]] < artifact; fleet observations: franken-verifier verify --format fleet-quiescence-observations --trusted-fleet-policy FILE < artifact; committed fleet epoch: franken-verifier verify --format fleet-epoch-commit --trusted-fleet-policy FILE --trusted-coordinator-id ID --trusted-coordinator-key-hex HEX < artifact";
+const USAGE: &str = "franken-verifier verify --format incident-bundle|native-session-forensics|capsule|signed-bundle|signed-session|resolution-receipt|publisher-source|publisher-source-trust|counterfactual-receipt|counterfactual-incident|counterfactual-promotion|ltv-evidence --trusted-key-hex HEX [--trusted-session-policy FILE] [--trusted-run-key-hex HEX [--trusted-runtime-key-hex HEX]] [--signature-hex HEX] [--trusted-incident-key-hex HEX --expected-baseline-integrity-hash HEX] [--trusted-revocation-key-hex HEX --evaluation-time RFC3339 --max-revocation-age-secs SECONDS [--trusted-provenance-key-hex HEX]] [--expected-manifest-sha256 sha256:HEX [--expected-source-artifact-sha256 sha256:HEX] [--expected-graph-input-hash sha256:HEX]] < artifact; fleet observations: franken-verifier verify --format fleet-quiescence-observations --trusted-fleet-policy FILE < artifact; committed fleet epoch: franken-verifier verify --format fleet-epoch-commit --trusted-fleet-policy FILE --trusted-coordinator-id ID --trusted-coordinator-key-hex HEX < artifact";
 
 #[derive(Debug)]
 struct PublisherTrustRequest {
@@ -79,6 +80,7 @@ struct Request {
     counterfactual_incident: Option<CounterfactualIncidentRequest>,
     publisher_trust: Option<PublisherTrustRequest>,
     expected_publisher_identity: Option<PublisherSourceExpectedIdentity>,
+    session_policy: Option<SessionPolicyRequest>,
     fleet_policy: Option<FleetPolicyRequest>,
 }
 
@@ -129,6 +131,69 @@ fn read_fleet_policy(path: &str) -> Result<FleetPolicyRequest, Failure> {
         input_sha256: hex::encode(Sha256::digest(&bytes)),
         coordinator: None,
     })
+}
+
+// The caller's requested workflow contains private identities and artifact
+// commitments. Neither Debug output nor policy errors may expose those fields.
+struct SessionPolicyRequest {
+    policy: SignedSessionPolicy,
+    input_sha256: String,
+}
+
+impl std::fmt::Debug for SessionPolicyRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("SessionPolicyRequest { policy: [redacted] }")
+    }
+}
+
+fn read_session_policy(path: &str) -> Result<SessionPolicyRequest, Failure> {
+    let io_error = || {
+        failure(
+            "SESSION_POLICY_IO",
+            "cannot read the trusted session policy file",
+        )
+    };
+    if !std::fs::metadata(path).map_err(|_| io_error())?.is_file() {
+        return Err(io_error());
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    // A path may be replaced between metadata and open. A FIFO must not turn
+    // this offline verifier into an unbounded read before handle validation.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_CLOEXEC);
+    }
+    let file = options.open(path).map_err(|_| io_error())?;
+    if !file.metadata().map_err(|_| io_error())?.is_file() {
+        return Err(io_error());
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_SIGNED_SESSION_POLICY_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| io_error())?;
+    let policy = parse_signed_session_policy(&bytes).map_err(|error| session_policy_failure(&error))?;
+    Ok(SessionPolicyRequest {
+        policy,
+        input_sha256: hex::encode(Sha256::digest(&bytes)),
+    })
+}
+
+fn signed_session_failure(error: &VerifierSdkError) -> Failure {
+    match error {
+        VerifierSdkError::Bundle(BundleError::Ed25519SignatureInvalid) => {
+            failure("SIGNATURE_INVALID", "session signature does not verify")
+        }
+        _ => failure("EVIDENCE_INVALID", "signed session verification failed"),
+    }
+}
+
+fn session_policy_failure(error: &SignedSessionPolicyError) -> Failure {
+    match error {
+        SignedSessionPolicyError::Verification(source) => signed_session_failure(source),
+        _ => failure(error.code(), "trusted session policy was not satisfied"),
+    }
 }
 
 #[derive(Debug)]
@@ -199,6 +264,7 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
         (None, None, None);
     let (mut incident_anchor, mut expected_baseline) = (None, None);
     let mut fleet_policy_path = None;
+    let mut session_policy_path = None;
     let (mut coordinator_id, mut coordinator_key) = (None, None);
     let (options, remainder) = args[1..].as_chunks::<2>();
     for option in options {
@@ -218,6 +284,7 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
             "--expected-source-artifact-sha256" => &mut expected_source_artifact,
             "--expected-graph-input-hash" => &mut expected_graph,
             "--trusted-fleet-policy" => &mut fleet_policy_path,
+            "--trusted-session-policy" => &mut session_policy_path,
             "--trusted-coordinator-id" => &mut coordinator_id,
             "--trusted-coordinator-key-hex" => &mut coordinator_key,
             _ => return Err(usage()),
@@ -248,6 +315,9 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
             | "fleet-epoch-commit"
     ) {
         return Err(failure("UNSUPPORTED_FORMAT", "unsupported evidence format"));
+    }
+    if session_policy_path.is_some() && format != "signed-session" {
+        return Err(usage());
     }
     let (anchor, fleet_policy) = if matches!(
         format.as_str(),
@@ -491,6 +561,10 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
     } else {
         None
     };
+    let session_policy = session_policy_path
+        .as_deref()
+        .map(read_session_policy)
+        .transpose()?;
     Ok(Request {
         format,
         anchor,
@@ -500,6 +574,7 @@ fn arguments(args: &[String]) -> Result<Request, Failure> {
         counterfactual_incident,
         publisher_trust,
         expected_publisher_identity,
+        session_policy,
         fleet_policy,
     })
 }
@@ -789,28 +864,35 @@ fn verify(request: &Request, bytes: &[u8]) -> Result<Value, Failure> {
                     "expected a lowercase 64-byte session signature",
                 ));
             }
-            VerifierSdk::verify_signed_session(trusted_key, &transcript).map_err(|error| {
-                match error {
-                    VerifierSdkError::Bundle(BundleError::Ed25519SignatureInvalid) => {
-                        failure("SIGNATURE_INVALID", "session signature does not verify")
-                    }
-                    _ => failure("EVIDENCE_INVALID", "signed session verification failed"),
-                }
-            })?;
+            if let Some(policy) = &request.session_policy {
+                VerifierSdk::verify_signed_session_with_policy(
+                    trusted_key,
+                    &transcript,
+                    &policy.policy,
+                )
+                .map_err(|error| session_policy_failure(&error))?;
+            } else {
+                VerifierSdk::verify_signed_session(trusted_key, &transcript)
+                    .map_err(|error| signed_session_failure(&error))?;
+            }
             // Authenticate the signer's recorded decisions, without re-executing
             // the steps or claiming independent verification of their keyed tags.
             // Keep per-step artifacts and timestamps out of the public response.
-            Ok(
-                json!({"scope": "authenticated_verification_session", "facts": {
-                    "session_id": transcript.session_id,
-                    "verifier_identity": transcript.verifier_identity,
-                    "created_at": transcript.created_at,
-                    "final_verdict": transcript.final_verdict,
-                    "step_count": transcript.steps.len(),
-                    "transcript_hash": transcript.transcript_hash,
-                    "signer_public_key_hex": anchor,
-                }}),
-            )
+            let mut facts = json!({
+                "session_id": transcript.session_id,
+                "verifier_identity": transcript.verifier_identity,
+                "created_at": transcript.created_at,
+                "final_verdict": transcript.final_verdict,
+                "step_count": transcript.steps.len(),
+                "transcript_hash": transcript.transcript_hash,
+                "signer_public_key_hex": anchor,
+            });
+            if let Some(policy) = &request.session_policy {
+                // Bind exactly the bytes parsed and matched above. This lets a
+                // language client detect a policy file replaced after its read.
+                facts["trusted_session_policy_sha256"] = json!(policy.input_sha256);
+            }
+            Ok(json!({"scope": "authenticated_verification_session", "facts": facts}))
         }
         "native-session-forensics" => {
             let verified = verify_native_session_forensics(bytes, trusted_key)
@@ -1363,6 +1445,28 @@ mod tests {
     }
 
     #[test]
+    fn cli_session_policy_is_format_scoped_and_duplicate_options_are_refused() {
+        struct Unreadable;
+        impl Read for Unreadable {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                panic!("invalid arguments must not consume candidate evidence");
+            }
+        }
+        let mut wrong_format = args("capsule", ANCHOR);
+        wrong_format.extend(["--trusted-session-policy".into(), "never-opened.json".into()]);
+        assert_eq!(run(&wrong_format, &mut Unreadable).unwrap_err().code, "USAGE");
+
+        let mut duplicate = args("signed-session", ANCHOR);
+        duplicate.extend([
+            "--trusted-session-policy".into(),
+            "first-not-opened.json".into(),
+            "--trusted-session-policy".into(),
+            "second-not-opened.json".into(),
+        ]);
+        assert_eq!(run(&duplicate, &mut Unreadable).unwrap_err().code, "USAGE");
+    }
+
+    #[test]
     fn cli_fleet_requires_separate_enrollment_and_a_regular_policy_file() {
         let base = ["verify", "--format", "fleet-quiescence-observations"]
             .map(str::to_owned)
@@ -1404,6 +1508,7 @@ mod tests {
             counterfactual_incident: None,
             publisher_trust: None,
             expected_publisher_identity: None,
+            session_policy: None,
             fleet_policy: Some(FleetPolicyRequest {
                 policy: parse_fleet_quiescence_policy(&policy_bytes).unwrap(),
                 input_sha256: input_sha256.clone(),

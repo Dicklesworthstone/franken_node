@@ -771,6 +771,30 @@ pub fn parse_signed_session_policy(
     }
     let value = incident_bundle::decode_evidence_json(bytes)
         .map_err(|_| SignedSessionPolicyError::Invalid)?;
+    // Serde's derived structs and unit enums also accept array and map
+    // representations. The public JSON policy schema requires objects with
+    // string operations and verdicts, consistently across all language clients.
+    let object = value
+        .as_object()
+        .ok_or(SignedSessionPolicyError::Invalid)?;
+    let steps = object
+        .get("steps")
+        .and_then(serde_json::Value::as_array)
+        .ok_or(SignedSessionPolicyError::Invalid)?;
+    for step in steps {
+        let step = step
+            .as_object()
+            .ok_or(SignedSessionPolicyError::Invalid)?;
+        if !step
+            .get("operation")
+            .is_some_and(serde_json::Value::is_string)
+            || !step
+                .get("verdict")
+                .is_some_and(serde_json::Value::is_string)
+        {
+            return Err(SignedSessionPolicyError::Invalid);
+        }
+    }
     let policy: SignedSessionPolicy =
         serde_json::from_value(value).map_err(|_| SignedSessionPolicyError::Invalid)?;
     policy.validate()?;
@@ -9775,13 +9799,28 @@ mod signed_session_policy_tests {
         for (field, value) in [
             ("operation", json!("unknown")),
             ("operation", json!(1)),
+            ("operation", json!({"trust_state": null})),
             ("verdict", json!("verified")),
             ("verdict", Value::Null),
+            ("verdict", json!({"pass": null})),
         ] {
             let mut malformed = original.clone();
             malformed["steps"][0][field] = value;
             cases.push(malformed);
         }
+        cases.push(json!([
+            expected.schema_version,
+            expected.session_id,
+            expected.verifier_identity,
+            expected.steps,
+        ]));
+        let mut array_step = original.clone();
+        array_step["steps"][0] = json!([
+            "trust_state",
+            original["steps"][0]["artifact_binding_hash"],
+            "pass",
+        ]);
+        cases.push(array_step);
         for candidate in cases {
             assert_eq!(
                 parse_signed_session_policy(&serde_json::to_vec(&candidate).unwrap()),

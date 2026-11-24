@@ -5,6 +5,8 @@ export interface VerifierOptions {
   format?: Exclude<EvidenceFormat, "fleet-quiescence-observations" | "fleet-epoch-commit" | "counterfactual-incident" | "counterfactual-promotion">;
   /** Independent original receipt authority, only for incident verification formats. Missing proof fails. */
   trustedRunPublicKeyHex?: string;
+  /** Independent exact workflow policy file; signed-session only. Does not establish freshness or re-execute steps. */
+  trustedSessionPolicyPath?: string;
   /** Independent product root; requires original-run trust and portable session evidence. */
   trustedRuntimePublicKeyHex?: string;
   /** Independent revocation authority; required only for publisher-source-trust. */
@@ -349,6 +351,8 @@ export interface LtvEvidenceFacts {
 }
 /** Authenticated recorded decisions, without re-executing the session's steps. */
 export interface SignedSessionFacts {
+  /** SHA-256 of the exact independent policy file bytes, present only when a policy was supplied and matched. */
+  trusted_session_policy_sha256?: string;
   session_id: string;
   verifier_identity: string;
   created_at: string;
@@ -392,6 +396,7 @@ export const MAX_INPUT_BYTES: number;
 export const MAX_NATIVE_SESSION_INPUT_BYTES: number;
 export const MAX_FLEET_QUIESCENCE_INPUT_BYTES: number;
 export const MAX_FLEET_QUIESCENCE_POLICY_BYTES: number;
+export const MAX_SIGNED_SESSION_POLICY_BYTES: number;
 export function verifyArtifact(data: Uint8Array, trustedPublicKeyHex: string, options: VerifierOptions): Promise<Verification>;
 export function verifyArtifact(data: Uint8Array, trustedPublicKeyHex: string, options: CounterfactualIncidentOptions): Promise<Verification>;
 export function verifyArtifact(data: Uint8Array, trustedPublicKeyHex: string, options: CounterfactualPromotionOptions): Promise<Verification>;
