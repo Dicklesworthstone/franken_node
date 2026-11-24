@@ -1296,9 +1296,27 @@ impl NativeSessionDrainAttestation {
     }
 
     pub fn validate_freshness(&self, now: DateTime<Utc>) -> Result<(), FleetTransportError> {
+        self.validate_freshness_with_limit(now, MAX_NATIVE_DRAIN_ATTESTATION_AGE)
+    }
+
+    /// A transport heartbeat cannot renew a supervisor's signed observation.
+    /// Bound its age by both the consuming operation's freshness contract and
+    /// the protocol ceiling, preserving fractional-second expiry boundaries.
+    pub fn validate_freshness_with_limit(
+        &self,
+        now: DateTime<Utc>,
+        maximum_age: Duration,
+    ) -> Result<(), FleetTransportError> {
+        if maximum_age.is_zero() {
+            return Err(FleetTransportError::stale_state(
+                "native supervisor observation freshness must be positive",
+            ));
+        }
+        let threshold =
+            chrono::TimeDelta::from_std(maximum_age.min(MAX_NATIVE_DRAIN_ATTESTATION_AGE))
+                .map_err(|error| FleetTransportError::stale_state(error.to_string()))?;
         if self.observed_at > now
-            || now.signed_duration_since(self.observed_at)
-                >= chrono::Duration::seconds(MAX_NATIVE_DRAIN_ATTESTATION_AGE.as_secs() as i64)
+            || now.signed_duration_since(self.observed_at) >= threshold
         {
             return Err(FleetTransportError::stale_state(
                 "native supervisor drain attestation is future-dated or expired; obtain a fresh supervisor observation",
@@ -1653,6 +1671,8 @@ pub enum FleetNativeDrainReadiness {
     NoApplicableActions,
     FutureHeartbeat,
     StaleHeartbeat,
+    FutureSupervisorObservation,
+    StaleSupervisorObservation,
     DrainSnapshotMismatch,
     IndeterminateSessions,
     PendingSessions,
@@ -1815,7 +1835,23 @@ pub fn fleet_native_drain_evidence(
             Some(node) if now.signed_duration_since(node.last_seen) >= stale_threshold => {
                 FleetNativeDrainReadiness::StaleHeartbeat
             }
-            Some(node) => native_drain_readiness(node, &expected_actions),
+            Some(node) => match node
+                .native_session_drain
+                .as_ref()
+                .and_then(|drain| drain.supervisor_attestation.as_ref())
+            {
+                Some(attestation) if attestation.observed_at > now => {
+                    FleetNativeDrainReadiness::FutureSupervisorObservation
+                }
+                Some(attestation)
+                    if attestation
+                        .validate_freshness_with_limit(now, stale_after)
+                        .is_err() =>
+                {
+                    FleetNativeDrainReadiness::StaleSupervisorObservation
+                }
+                _ => native_drain_readiness(node, &expected_actions),
+            },
         };
         nodes.push(FleetNativeDrainNodeEvidence {
             zone_id,
@@ -2046,6 +2082,8 @@ fn native_session_hold_readiness(
             | FleetNativeDrainReadiness::NoApplicableActions
             | FleetNativeDrainReadiness::FutureHeartbeat
             | FleetNativeDrainReadiness::StaleHeartbeat
+            | FleetNativeDrainReadiness::FutureSupervisorObservation
+            | FleetNativeDrainReadiness::StaleSupervisorObservation
     ) {
         return node.reason;
     }
@@ -2272,6 +2310,13 @@ impl FleetGuardedPolicyReceipt {
                 native_session_drain: node.native_session_drain.clone(),
             };
             validate_node_status(&status)?;
+            if let Some(attestation) = status
+                .native_session_drain
+                .as_ref()
+                .and_then(|drain| drain.supervisor_attestation.as_ref())
+            {
+                attestation.validate_freshness_with_limit(self.accepted_at, evidence.stale_after)?;
+            }
             if node.zone_id == "all" {
                 return Err(FleetTransportError::serialization(
                     "guarded policy receipt requires concrete participant zones",
@@ -5092,7 +5137,7 @@ pub fn certify_fleet_epoch_quiescence(
             };
             if let Err(err) = attestation
                 .verify(drain, &node.node_id, &node.zone_id, root)
-                .and_then(|()| attestation.validate_freshness(now))
+                .and_then(|()| attestation.validate_freshness_with_limit(now, stale_after))
             {
                 abort_detail = Some(format!(
                     "participant `{}/{}` supervisor attestation failed verification: {err}",
@@ -5764,6 +5809,109 @@ mod tests {
         next.generation += 1;
         next.drain_id = "01900000-0000-7000-8000-000000000002".into();
         next.validate_successor_of(&signed).unwrap();
+    }
+
+    #[test]
+    fn supervisor_freshness_honors_fractional_limits_and_protocol_ceiling() {
+        let root = SigningKey::from_bytes(&[40; 32]);
+        let observed = DateTime::from_timestamp(1_800_000_000, 0).unwrap();
+        let (_, node) = signed_supervisor_fixture(&root, observed);
+        let signed = node
+            .native_session_drain
+            .unwrap()
+            .supervisor_attestation
+            .unwrap();
+        for (age_nanos, maximum_age, accepted) in [
+            (0, Duration::from_nanos(1), true),
+            (1, Duration::from_nanos(1), false),
+            (-1, Duration::from_secs(30), false),
+            (0, Duration::ZERO, false),
+            (30_000_000_000, Duration::new(30, 1), true),
+            (30_000_000_001, Duration::new(30, 1), false),
+            (299_999_999_999, Duration::from_secs(3600), true),
+            (300_000_000_000, Duration::from_secs(3600), false),
+        ] {
+            assert_eq!(
+                signed
+                    .validate_freshness_with_limit(
+                        observed + chrono::Duration::nanoseconds(age_nanos),
+                        maximum_age,
+                    )
+                    .is_ok(),
+                accepted,
+                "age={age_nanos}ns maximum={maximum_age:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn fresh_heartbeats_cannot_renew_signed_drain_or_maintenance_evidence() {
+        let root = SigningKey::from_bytes(&[40; 32]);
+        let now = DateTime::from_timestamp(1_800_000_000, 0).unwrap();
+        let required = std::collections::BTreeSet::from([("zone-a".into(), "node-a".into())]);
+        for (age_nanos, expected) in [
+            (0, super::FleetNativeDrainReadiness::Ready),
+            (29_999_999_999, super::FleetNativeDrainReadiness::Ready),
+            (
+                30_000_000_000,
+                super::FleetNativeDrainReadiness::StaleSupervisorObservation,
+            ),
+            (
+                120_000_000_000,
+                super::FleetNativeDrainReadiness::StaleSupervisorObservation,
+            ),
+            (
+                -1,
+                super::FleetNativeDrainReadiness::FutureSupervisorObservation,
+            ),
+        ] {
+            let (hold, mut node) =
+                signed_supervisor_fixture(&root, now - chrono::Duration::nanoseconds(age_nanos));
+            // HTTP ingestion stamps a fresh coordinator heartbeat even when
+            // the sender reuses an otherwise authentic supervisor signature.
+            node.last_seen = now;
+            let drain = node.native_session_drain.as_ref().unwrap();
+            drain
+                .supervisor_attestation
+                .as_ref()
+                .unwrap()
+                .verify(drain, "node-a", "zone-a", &root.verifying_key())
+                .unwrap();
+            let state = FleetSharedState {
+                schema_version: FLEET_SHARED_STATE_SCHEMA.into(),
+                actions: vec![hold.clone()],
+                nodes: vec![node],
+            };
+            let ordinary = super::fleet_native_drain_evidence(
+                &state,
+                &required,
+                now,
+                Duration::from_secs(30),
+            )
+            .unwrap();
+            let held = super::fleet_native_session_hold_evidence(
+                &state,
+                &hold.action_id,
+                super::FleetNativeSessionHoldTarget::Held,
+                &required,
+                now,
+                Duration::from_secs(30),
+            )
+            .unwrap();
+            let fresh = expected == super::FleetNativeDrainReadiness::Ready;
+            assert_eq!(held.nodes[0].reason, expected, "age={age_nanos}ns");
+            assert_eq!(held.complete, fresh, "age={age_nanos}ns");
+            assert_eq!(
+                ordinary.nodes[0].reason,
+                if fresh {
+                    super::FleetNativeDrainReadiness::AdmissionFenced
+                } else {
+                    expected
+                },
+                "age={age_nanos}ns"
+            );
+            assert!(!held.fleet_quiescence_certified);
+        }
     }
 
     #[test]
@@ -9114,6 +9262,64 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    #[test]
+    fn epoch_barrier_cannot_certify_a_replayed_observation_with_a_fresh_heartbeat() {
+        use crate::control_plane::control_epoch::EpochSigningKey;
+        use crate::control_plane::epoch_transition_barrier::BarrierConfig;
+        use crate::runtime::epoch_transition::ProductEpochCoordinator;
+
+        let root = SigningKey::from_bytes(&[41; 32]);
+        let observed = DateTime::from_timestamp(1_800_000_000, 0).unwrap();
+        let roots = std::collections::BTreeMap::from([(
+            ("zone-a".to_string(), "node-a".to_string()),
+            root.verifying_key(),
+        )]);
+        for age_nanos in [29_999_999_999, 30_000_000_000, 120_000_000_000] {
+            let now = observed + chrono::Duration::nanoseconds(age_nanos);
+            let (hold, mut node) = signed_supervisor_fixture(&root, observed);
+            node.last_seen = now;
+            let state = FleetSharedState {
+                schema_version: FLEET_SHARED_STATE_SCHEMA.to_string(),
+                actions: vec![hold],
+                nodes: vec![node],
+            };
+            let mut coordinator = ProductEpochCoordinator::new(
+                7,
+                2,
+                BarrierConfig::default(),
+                EpochSigningKey::new(b"signed-observation-freshness-key").unwrap(),
+            );
+            let result = super::certify_fleet_epoch_quiescence(
+                &mut coordinator,
+                &state,
+                &roots,
+                super::FleetEpochBarrierParams {
+                    initiator: "operator",
+                    reason: "require the requested supervisor observation freshness",
+                    now,
+                    stale_after: Duration::from_secs(30),
+                    trace_id: "replayed-supervisor-clock",
+                },
+            );
+            if age_nanos < 30_000_000_000 {
+                let (evidence, certificate) = result.unwrap();
+                assert!(evidence.fleet_quiescence_certified);
+                assert_eq!(certificate.committed_epoch, 8);
+                assert_eq!(coordinator.current_epoch(), 8);
+            } else {
+                assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("aborted before commit")
+                );
+                assert_eq!(coordinator.current_epoch(), 7);
+                assert_eq!(coordinator.abort_manager().abort_events().len(), 1);
+                assert!(coordinator.last_signed_transition().is_none());
+            }
+        }
     }
 
     #[test]

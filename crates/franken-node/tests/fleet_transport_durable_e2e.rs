@@ -316,6 +316,116 @@ fn guarded_policy_requires_exact_held_scope_and_current_fresh_participants() {
 }
 
 #[test]
+fn guarded_policy_signed_observation_expiry_survives_heartbeat_and_receipt_refresh() {
+    use ed25519_dalek::{Signer, SigningKey};
+    use frankenengine_node::control_plane::fleet_transport::{
+        NATIVE_SESSION_DRAIN_ATTESTATION_SCHEMA, NativeSessionDrainAttestation,
+    };
+
+    let sign = |node_id: &str,
+                zone_id: &str,
+                drain: &mut NativeSessionDrainCheckpoint,
+                observed_at: DateTime<Utc>| {
+        let key = SigningKey::from_bytes(&[if node_id == "node-a" { 61 } else { 62 }; 32]);
+        let mut attestation = NativeSessionDrainAttestation {
+            schema_version: NATIVE_SESSION_DRAIN_ATTESTATION_SCHEMA.into(),
+            node_id: node_id.into(),
+            zone_id: zone_id.into(),
+            drain_id: "01900000-0000-7000-8000-000000000001".into(),
+            generation: 1,
+            project_root_sha256: "c7".repeat(32),
+            observed_at,
+            product_root_key_id: format!("ed25519:{}", hex::encode(key.verifying_key().as_bytes())),
+            checkpoint_sha256: drain.observation_sha256().unwrap(),
+            signature_hex: String::new(),
+        };
+        attestation.signature_hex =
+            hex::encode(key.sign(&attestation.signing_payload().unwrap()).to_bytes());
+        drain.supervisor_attestation = Some(attestation);
+        drain
+            .supervisor_attestation
+            .as_ref()
+            .unwrap()
+            .verify(drain, node_id, zone_id, &key.verifying_key())
+            .unwrap();
+    };
+    let (mut state, observed_at) = maintenance_state();
+    for node in &mut state.nodes {
+        if node.zone_id == "zone-a" {
+            sign(
+                &node.node_id,
+                &node.zone_id,
+                node.native_session_drain.as_mut().unwrap(),
+                observed_at,
+            );
+        }
+    }
+    let request = guarded_policy_request(&state, "guarded-signed-freshness");
+    let mut receipt = FleetGuardedPolicyReceipt {
+        schema_version: FLEET_GUARDED_POLICY_RECEIPT_SCHEMA.to_owned(),
+        action: request.action.clone(),
+        guard: request.guard.clone(),
+        evidence: validate_guarded_fleet_policy_publication(
+            &request,
+            &state,
+            observed_at,
+            Duration::from_secs(20),
+        )
+        .unwrap(),
+        accepted_at: observed_at,
+        observation_scope: FleetGuardedPolicyObservationScope::LocalSupervisorObservations,
+        already_published: false,
+        fleet_quiescence_certified: false,
+    };
+    receipt.validate().unwrap();
+
+    // The coordinator's effective 20s bound is stricter than the requested
+    // 30s window. Replaying valid signatures cannot borrow new heartbeat time.
+    let expired_at = observed_at + chrono::TimeDelta::seconds(20);
+    for node in &mut state.nodes {
+        if node.zone_id == "zone-a" {
+            node.last_seen = expired_at;
+        }
+    }
+    assert!(
+        validate_guarded_fleet_policy_publication(
+            &request,
+            &state,
+            expired_at,
+            Duration::from_secs(20),
+        )
+        .is_err()
+    );
+    receipt.accepted_at = expired_at;
+    receipt.evidence.observed_at = expired_at;
+    for node in &mut receipt.evidence.nodes {
+        node.last_seen = Some(expired_at);
+    }
+    let encoded = serde_json::to_vec(&receipt).unwrap();
+    let mut receipt: FleetGuardedPolicyReceipt = serde_json::from_slice(&encoded).unwrap();
+    assert!(
+        receipt
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("future-dated or expired")
+    );
+
+    // A new signed observation from each original supervisor restores the
+    // useful positive path; all timestamps and population bindings still agree.
+    for node in &mut receipt.evidence.nodes {
+        sign(
+            &node.node_id,
+            &node.zone_id,
+            node.native_session_drain.as_mut().unwrap(),
+            expired_at,
+        );
+    }
+    receipt.validate().unwrap();
+    assert!(!receipt.fleet_quiescence_certified);
+}
+
+#[test]
 fn guarded_policy_receipt_rejects_contradictory_evidence_and_bounded_payload_overflow() {
     let (state, now) = maintenance_state();
     let request = guarded_policy_request(&state, "guarded-policy");

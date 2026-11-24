@@ -252,7 +252,7 @@ impl FleetHttpEpochBarrierResponse {
                 FleetTransportError::serialization("invalid epoch-barrier supervisor key")
             })?;
             attestation.verify(drain, &node.node_id, &node.zone_id, &root)?;
-            attestation.validate_freshness(evidence.observed_at)?;
+            attestation.validate_freshness_with_limit(evidence.observed_at, evidence.stale_after)?;
         }
         if let Some(proof) = &self.commit_proof {
             proof.verify_integrity(evidence, certificate)?;
@@ -987,6 +987,46 @@ mod tests {
         response.validate_for_request(&request).unwrap();
         assert_eq!(response.certificate.pre_epoch, 7);
         assert_eq!(response.certificate.committed_epoch, 8);
+    }
+
+    #[test]
+    fn epoch_response_does_not_renew_signed_observations_with_fresh_heartbeats() {
+        use ed25519_dalek::{Signer, SigningKey};
+
+        let (mut request, mut response) = certified_epoch_response();
+        let observed = response.evidence.observed_at;
+        let now = observed + chrono::Duration::seconds(30);
+        response.evidence.observed_at = now;
+        response.certificate.certified_at = now;
+        response.evidence.nodes[0].last_seen = Some(now);
+
+        // The existing signed population remains cryptographically valid and
+        // below the protocol's 300s ceiling, but violates this 30s request.
+        let error = response.validate_for_request(&request).unwrap_err();
+        assert!(error.to_string().contains("future-dated or expired"));
+
+        request.stale_after = Duration::new(30, 1);
+        response.evidence.stale_after = request.stale_after;
+        response.validate_for_request(&request).unwrap();
+        response.evidence.observed_at += chrono::Duration::nanoseconds(1);
+        response.certificate.certified_at = response.evidence.observed_at;
+        response.evidence.nodes[0].last_seen = Some(response.evidence.observed_at);
+        assert!(response.validate_for_request(&request).is_err());
+
+        // A genuinely new supervisor observation, signed by the same enrolled
+        // authority, restores useful certification without changing the gate.
+        let drain = response.evidence.nodes[0]
+            .native_session_drain
+            .as_mut()
+            .unwrap();
+        let attestation = drain.supervisor_attestation.as_mut().unwrap();
+        attestation.observed_at = response.evidence.observed_at;
+        attestation.signature_hex = hex::encode(
+            SigningKey::from_bytes(&[73; 32])
+                .sign(&attestation.signing_payload().unwrap())
+                .to_bytes(),
+        );
+        response.validate_for_request(&request).unwrap();
     }
 
     #[test]
