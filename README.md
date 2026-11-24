@@ -762,6 +762,14 @@ profile**, not the packaging profile:
 | `balanced` | Default for most teams | Reasonable freshness windows, revocation gates on risky and dangerous classes, captured Node/Bun/native agreement required for runtime migration validation |
 | `legacy-risky` | Constrained migration windows on legacy codebases | Permits insecure compatibility behaviors when explicitly enabled by policy. Not a long-term mode. |
 
+To run a command shipped by a local npm package, select the package directory
+and the exact command name, for example
+`franken-node run ./tools/formatter --package-bin format -- --version`.
+The runtime reads the package's `bin` map or its single-string shorthand
+(using the unscoped package name), keeps that directory as the project root,
+and rechecks the manifest and selected file at execution admission. A missing
+command or file is an error. Signed registry artifacts supply their own entrypoint.
+
 Native execution also applies the following independent resource limits:
 
 | Profile | Instructions per `run` | Source bytes per module | Tokens per module | Parser recursion depth |

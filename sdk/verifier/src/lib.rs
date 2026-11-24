@@ -1455,6 +1455,10 @@ impl VerifierSdk {
 
     /// Verify workflow execution with multi-stage signature validation.
     ///
+    /// The binding commits the workflow ID, exact sorted stage names and count,
+    /// each bundle's integrity hash, and its independently selected signer key.
+    /// Fields are length-prefixed under the v2 workflow commitment domain.
+    ///
     /// # Examples
     ///
     /// ```rust,ignore
@@ -1483,9 +1487,19 @@ impl VerifierSdk {
         }
 
         let mut assertions = Vec::new();
-        let mut all_integrity_hashes: Vec<String> = Vec::new();
+        // Commit the full requested workflow, not just a concatenation of
+        // artifact hashes. V1 omitted stage names and selected authorities and
+        // allowed workflow IDs to absorb a stage hash at the string boundary.
+        let mut workflow_hasher = Sha256::new();
+        workflow_hasher.update(b"frankenengine-verifier-sdk:workflow-integrity:v2:");
+        update_workflow_binding_field(&mut workflow_hasher, workflow_id.as_bytes());
+        workflow_hasher.update(
+            u64::try_from(stages.len())
+                .unwrap_or(u64::MAX)
+                .to_le_bytes(),
+        );
 
-        // Verify each workflow stage
+        // Verify each workflow stage in the BTreeMap's deterministic name order.
         for (stage_name, (bundle_bytes, verifying_key, signature_bytes)) in stages {
             // Structural validation
             let verified = bundle::verify(bundle_bytes).map_err(|e| {
@@ -1509,7 +1523,12 @@ impl VerifierSdk {
                 },
             )?;
 
-            all_integrity_hashes.push(verified.integrity_hash.clone());
+            update_workflow_binding_field(&mut workflow_hasher, stage_name.as_bytes());
+            update_workflow_binding_field(
+                &mut workflow_hasher,
+                verified.integrity_hash.as_bytes(),
+            );
+            update_workflow_binding_field(&mut workflow_hasher, verifying_key.as_bytes());
 
             assertions.push(AssertionResult {
                 assertion: format!("workflow_stage_{}_verified", stage_name),
@@ -1521,14 +1540,7 @@ impl VerifierSdk {
             });
         }
 
-        // Compute workflow integrity hash from all stage hashes
-        let mut hasher = sha2::Sha256::new();
-        hasher.update(b"frankenengine-verifier-sdk:workflow-integrity:v1:");
-        hasher.update(workflow_id.as_bytes());
-        for hash in &all_integrity_hashes {
-            hasher.update(hash.as_bytes());
-        }
-        let workflow_integrity_hash = hex::encode(hasher.finalize());
+        let workflow_integrity_hash = hex::encode(workflow_hasher.finalize());
 
         assertions.push(AssertionResult {
             assertion: "workflow_execution_verified".to_string(),
@@ -1781,6 +1793,9 @@ impl VerifierSdk {
     /// bytes carrying a detached Ed25519 signature (`bundle::sign_bundle`) from
     /// a key the caller trusts.
     ///
+    /// The result's binding commits the selected workflow, the bundle integrity
+    /// hash and the selected signer key; it is not the bare bundle hash.
+    ///
     /// A bundle's `integrity_hash` is an unkeyed digest that anyone can
     /// recompute for a forged bundle, so the workflow passes only once the
     /// signature verifies under `verifying_key`.
@@ -1822,6 +1837,16 @@ impl VerifierSdk {
             ValidationWorkflow::ComplianceAudit => "compliance_audit",
         };
 
+        let mut workflow_hasher = Sha256::new();
+        workflow_hasher.update(b"frankenengine-verifier-sdk:validation-workflow-integrity:v1:");
+        update_workflow_binding_field(&mut workflow_hasher, workflow_name.as_bytes());
+        update_workflow_binding_field(
+            &mut workflow_hasher,
+            verified.integrity_hash.as_bytes(),
+        );
+        update_workflow_binding_field(&mut workflow_hasher, verifying_key.as_bytes());
+        let workflow_binding_hash = hex::encode(workflow_hasher.finalize());
+
         self.build_result(
             VerificationOperation::Workflow,
             VerificationVerdict::Pass,
@@ -1833,7 +1858,7 @@ impl VerifierSdk {
                     workflow_name, verified.bundle_id
                 ),
             }],
-            verified.integrity_hash,
+            workflow_binding_hash,
         )
     }
 
@@ -2844,6 +2869,15 @@ fn session_step_signature(
     envelope.extend_from_slice(&payload);
     let mac_key = derive_session_hmac_key(signing_key);
     Ok(hex::encode(hmac_sha256(&mac_key, &envelope)))
+}
+
+fn update_workflow_binding_field(hasher: &mut Sha256, bytes: &[u8]) {
+    hasher.update(
+        u64::try_from(bytes.len())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
+    hasher.update(bytes);
 }
 
 fn push_length_prefixed(buffer: &mut Vec<u8>, bytes: &[u8]) {
@@ -9805,6 +9839,127 @@ mod signed_session_policy_tests {
         ] {
             assert!(!format!("{error:?}: {error}").contains(PRIVATE));
         }
+    }
+
+    fn signed_workflow_stage(seed: u8) -> (Vec<u8>, VerifyingKey, Vec<u8>) {
+        let bundle: crate::bundle::ReplayBundle = serde_json::from_slice(BUNDLE).unwrap();
+        let bytes = crate::bundle::serialize(&bundle).unwrap();
+        let signer = SigningKey::from_bytes(&[seed; 32]);
+        let signature = crate::bundle::sign_bundle(&signer, &bundle).to_bytes().to_vec();
+        (bytes, signer.verifying_key(), signature)
+    }
+
+    #[test]
+    fn workflow_commitment_frames_identity_and_stage_population_before_session_binding() {
+        let sdk = VerifierSdk::with_signing_key(
+            "verifier://facade-test",
+            SigningKey::from_bytes(&[91_u8; 32]),
+        );
+        let stage = signed_workflow_stage(71);
+        let artifact_hash = crate::bundle::verify(&stage.0).unwrap().integrity_hash;
+        let two = BTreeMap::from([
+            ("first".to_owned(), stage.clone()),
+            ("second".to_owned(), stage.clone()),
+        ]);
+        let one = BTreeMap::from([("first".to_owned(), stage)]);
+        // V1 hashes identical bytes for these distinct requests:
+        // "audit" || H || H == ("audit" || H) || H.
+        let expected_result = sdk.verify_workflow_execution("audit", &two).unwrap();
+        let other_result = sdk
+            .verify_workflow_execution(&format!("audit{artifact_hash}"), &one)
+            .unwrap();
+        assert_eq!(expected_result.verdict, VerificationVerdict::Pass);
+        assert_eq!(other_result.verdict, VerificationVerdict::Pass);
+        assert_ne!(expected_result.artifact_binding_hash, other_result.artifact_binding_hash);
+
+        let policy = SignedSessionPolicy {
+            schema_version: SIGNED_SESSION_POLICY_SCHEMA_VERSION.into(),
+            session_id: "requested-workflow".into(),
+            verifier_identity: "verifier://facade-test".into(),
+            steps: vec![SignedSessionStepPolicy {
+                operation: VerificationOperation::WorkflowExecution,
+                artifact_binding_hash: expected_result.artifact_binding_hash.clone(),
+                verdict: VerificationVerdict::Pass,
+            }],
+        };
+        for (result, matches) in [(&expected_result, true), (&other_result, false)] {
+            let mut session = sdk.create_session("requested-workflow").unwrap();
+            sdk.record_session_step(&mut session, result).unwrap();
+            sdk.seal_session(&mut session).unwrap();
+            let transcript = sdk.export_signed_session(&session).unwrap();
+            VerifierSdk::verify_signed_session(&sdk.verifying_key(), &transcript).unwrap();
+            let outcome = VerifierSdk::verify_signed_session_with_policy(
+                &sdk.verifying_key(), &transcript, &policy,
+            );
+            if matches {
+                outcome.unwrap();
+            } else {
+                assert_eq!(outcome, Err(SignedSessionPolicyError::Mismatch));
+            }
+        }
+    }
+
+    #[test]
+    fn workflow_commitments_bind_names_and_signers_but_ignore_map_insertion_order() {
+        let sdk = VerifierSdk::new("verifier://facade-test");
+        let first = signed_workflow_stage(71);
+        let second = signed_workflow_stage(72);
+        assert_eq!(first.0, second.0);
+        let baseline = BTreeMap::from([("security-audit".to_owned(), first.clone())]);
+        let renamed = BTreeMap::from([("release-check".to_owned(), first.clone())]);
+        let other_signer = BTreeMap::from([("security-audit".to_owned(), second.clone())]);
+        let original = sdk.verify_workflow_execution("audit", &baseline).unwrap();
+        for candidate in [&renamed, &other_signer] {
+            let verified = sdk.verify_workflow_execution("audit", candidate).unwrap();
+            assert_eq!(verified.verdict, VerificationVerdict::Pass);
+            assert_ne!(original.artifact_binding_hash, verified.artifact_binding_hash);
+        }
+
+        let mut forward = BTreeMap::new();
+        forward.insert("a".to_owned(), first.clone());
+        forward.insert("b".to_owned(), second.clone());
+        let mut backward = BTreeMap::new();
+        backward.insert("b".to_owned(), second);
+        backward.insert("a".to_owned(), first);
+        assert_eq!(
+            sdk.verify_workflow_execution("audit", &forward).unwrap().artifact_binding_hash,
+            sdk.verify_workflow_execution("audit", &backward).unwrap().artifact_binding_hash,
+        );
+        let mut invalid = baseline;
+        invalid.get_mut("security-audit").unwrap().2[0] ^= 1;
+        assert!(matches!(
+            sdk.verify_workflow_execution("audit", &invalid),
+            Err(VerifierSdkError::WorkflowStageValidationFailed { .. }),
+        ));
+    }
+
+    #[test]
+    fn documented_workflow_commitments_bind_the_selected_mode_and_authority() {
+        let sdk = VerifierSdk::new("verifier://facade-test");
+        let (bytes, key, signature) = signed_workflow_stage(71);
+        let mut bindings = BTreeSet::new();
+        for workflow in [
+            ValidationWorkflow::ReleaseValidation,
+            ValidationWorkflow::IncidentValidation,
+            ValidationWorkflow::ComplianceAudit,
+        ] {
+            let result = sdk.execute_workflow(workflow, &bytes, &key, &signature).unwrap();
+            assert_eq!(result.verdict, VerificationVerdict::Pass);
+            assert_eq!(
+                result.artifact_binding_hash,
+                sdk.execute_workflow(workflow, &bytes, &key, &signature)
+                    .unwrap().artifact_binding_hash,
+            );
+            bindings.insert(result.artifact_binding_hash);
+        }
+        assert_eq!(bindings.len(), 3);
+        let (other_bytes, other_key, other_signature) = signed_workflow_stage(72);
+        let other = sdk.execute_workflow(
+            ValidationWorkflow::IncidentValidation,
+            &other_bytes, &other_key, &other_signature,
+        ).unwrap();
+        assert_eq!(other.verdict, VerificationVerdict::Pass);
+        assert!(!bindings.contains(&other.artifact_binding_hash));
     }
 
 }

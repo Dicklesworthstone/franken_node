@@ -286,6 +286,10 @@ pub struct RunArgs {
     #[arg(default_value = "", value_parser = parse_safe_content_pathbuf)]
     pub app_path: PathBuf,
 
+    /// Run the named package.json bin from a local package directory.
+    #[arg(long, value_name = "NAME")]
+    pub package_bin: Option<String>,
+
     /// Override the configured runtime profile. When omitted, use
     /// FRANKEN_NODE_PROFILE, the config file's profile, or balanced by default.
     #[arg(long)]

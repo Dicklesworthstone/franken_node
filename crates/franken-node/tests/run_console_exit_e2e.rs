@@ -761,6 +761,39 @@ fn default_run_executes_fixture_js_through_embedded_engine_without_degraded_fall
     let _workspace = dir;
 }
 
+#[test]
+fn run_named_package_bin_dispatches_the_declared_command() {
+    let project = profile_selection_workspace(Some("balanced"));
+    std::fs::write(
+        project.path().join("package.json"),
+        r#"{"name":"local-cli","main":"app.js","bin":{"format":"format.cjs"}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        project.path().join("format.cjs"),
+        "console.log('format-bin');",
+    )
+    .unwrap();
+    let output = Command::new(franken_node_bin())
+        .args(["run", ".", "--package-bin", "format", "--console-only"])
+        .env_remove("FRANKEN_NODE_PROFILE")
+        .current_dir(project.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"format-bin\n");
+    let (outcome, failure) = run_workspace_json(
+        project.path(),
+        &["run", ".", "--package-bin", "absent", "--json"],
+    );
+    assert_ne!(outcome.exit_code, Some(0));
+    assert_eq!(failure["schema_version"], "franken-node/run-error-cli/v1");
+}
+
 fn profile_selection_workspace(profile: Option<&str>) -> tempfile::TempDir {
     let dir = tempfile::TempDir::new().expect("profile-selection workspace");
     std::fs::write(
