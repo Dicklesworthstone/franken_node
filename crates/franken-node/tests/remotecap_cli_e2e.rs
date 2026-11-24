@@ -201,7 +201,7 @@ fn remotecap_issue_is_not_blocked_by_an_aged_local_revocation_list() {
         .assert()
         .success();
 
-    let state_path = workspace.path().join(".franken-node/remotecap/state.json");
+    let state_path = workspace.path().join(".franken-node/remotecap/state.db");
     let hour_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3_600);
     fs::File::options()
         .write(true)
@@ -302,6 +302,179 @@ fn remotecap_lifecycle_issue_use_revoke_uses_real_subprocesses() {
         !stderr.contains("Error: REMOTECAP_REVOKED"),
         "--json must not append a second human Error line after the JSON report: {stderr}"
     );
+}
+
+#[test]
+fn concurrent_revoke_processes_preserve_every_denial() {
+    let workspace = setup_test_workspace();
+    let mut token_paths = Vec::new();
+    let mut token_ids = std::collections::BTreeSet::new();
+    for index in 0..8 {
+        // Issued IDs bind trace identity and timestamps. Give each request a
+        // different trace so this test cannot accidentally revoke one token
+        // eight times when all issuances happen within the same clock second.
+        let output = remotecap_cmd()
+            .args([
+                "issue",
+                "--scope",
+                "network_egress",
+                "--endpoint",
+                "https://api.example.com",
+                "--ttl",
+                "1h",
+                "--operator-approved",
+                "--trace-id",
+                &format!("parallel-revocation-{index}"),
+                "--json",
+            ])
+            .current_dir(workspace.path())
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let issue: Value = serde_json::from_slice(&output).unwrap();
+        assert!(token_ids.insert(issue["token"]["token_id"].as_str().unwrap().to_owned()));
+        let token_path = workspace.path().join(format!("capability-{index}.json"));
+        write_json(&token_path, &issue["token"]);
+        token_paths.push(token_path);
+    }
+
+    let state_directory = workspace.path().join(".franken-node/remotecap");
+    fs::create_dir_all(&state_directory).unwrap();
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(state_directory.join("state.db.lock"))
+        .unwrap();
+    lock.lock().unwrap();
+    let mut children = Vec::new();
+    for token_path in &token_paths {
+        children.push(
+            std::process::Command::new(BINARY_UNDER_TEST)
+                .args(["remotecap", "revoke", "--token-file"])
+                .arg(token_path)
+                .arg("--json")
+                .current_dir(workspace.path())
+                .env("FRANKEN_NODE_REMOTECAP_KEY", "remotecap-cli-e2e-key")
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .expect("spawn independent revocation process"),
+        );
+    }
+    // Hold every writer at the same cross-process authority boundary, then
+    // let them race the first import and subsequent append transactions.
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    for child in &mut children {
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "revocation must not acknowledge while another process owns the authority lock"
+        );
+    }
+    lock.unlock().unwrap();
+    for child in children {
+        let output = child.wait_with_output().expect("wait for revocation");
+        assert!(
+            output.status.success(),
+            "concurrent revoke failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["revoked"], true);
+    }
+    assert!(state_directory.join("state.db").is_file());
+    assert!(state_directory.join("state.db.authority").is_file());
+    for token_path in token_paths {
+        for command in ["verify", "use"] {
+            let output = remotecap_cmd()
+                .args([command, "--token-file"])
+                .arg(&token_path)
+                .args([
+                    "--operation",
+                    "network_egress",
+                    "--endpoint",
+                    "https://api.example.com/v1/status",
+                    "--json",
+                ])
+                .current_dir(workspace.path())
+                .assert()
+                .failure()
+                .get_output()
+                .stdout
+                .clone();
+            let denial: Value = serde_json::from_slice(&output).unwrap();
+            assert_eq!(denial["ok"], false);
+            assert!(
+                denial["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("REMOTECAP_REVOKED"),
+                "a successful concurrent revoke must remain denied by later independent {command} processes: {denial}"
+            );
+        }
+    }
+}
+
+#[test]
+fn missing_or_corrupt_revocation_database_denies_cli_authorization() {
+    let workspace = setup_test_workspace();
+    let issue = issue_token(&workspace);
+    let token_path = workspace.path().join("capability.json");
+    write_json(&token_path, &issue["token"]);
+    let state_path = workspace.path().join(".franken-node/remotecap/state.json");
+    fs::create_dir_all(state_path.parent().unwrap()).unwrap();
+    // Retain a valid, stale empty JSON source to detect accidental fallback.
+    fs::write(&state_path, br#"{"revoked_token_ids":[]}"#).unwrap();
+    remotecap_cmd()
+        .args(["revoke", "--token-file"])
+        .arg(&token_path)
+        .arg("--json")
+        .current_dir(workspace.path())
+        .assert()
+        .success();
+    fs::rename(
+        state_path.with_extension("db"),
+        state_path.with_extension("db.saved"),
+    )
+    .unwrap();
+
+    for corrupt in [false, true] {
+        if corrupt {
+            fs::write(state_path.with_extension("db"), b"corrupt database").unwrap();
+        }
+        for command in ["verify", "use", "revoke"] {
+            let mut invocation = remotecap_cmd();
+            invocation
+                .args([command, "--token-file"])
+                .arg(&token_path)
+                .arg("--json")
+                .current_dir(workspace.path());
+            if command != "revoke" {
+                invocation.args([
+                    "--operation",
+                    "network_egress",
+                    "--endpoint",
+                    "https://api.example.com/v1/status",
+                ]);
+            }
+            let output = invocation
+                .assert()
+                .failure()
+                .get_output()
+                .stdout
+                .clone();
+            let report: Value = serde_json::from_slice(&output).unwrap();
+            assert_eq!(report["command"], format!("remotecap.{command}"));
+            assert_eq!(report["ok"], false);
+            assert!(report.get("authorized").is_none());
+            assert!(report.get("revoked").is_none());
+        }
+    }
+    assert_eq!(fs::read(&state_path).unwrap(), br#"{"revoked_token_ids":[]}"#);
 }
 
 #[test]

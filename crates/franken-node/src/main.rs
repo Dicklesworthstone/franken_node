@@ -9052,8 +9052,36 @@ fn parse_remote_operation(token: &str) -> Result<RemoteOperation> {
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct RemoteCapCliState {
     revoked_token_ids: BTreeSet<String>,
+}
+
+const REMOTECAP_STATE_SCHEMA: &str = "franken-node/remotecap-revocations/v1";
+const MAX_REMOTECAP_REVOKED_TOKENS: usize = 65_536;
+
+impl RemoteCapCliState {
+    fn validate(&self) -> Result<()> {
+        anyhow::ensure!(
+            self.revoked_token_ids.len() <= MAX_REMOTECAP_REVOKED_TOKENS,
+            "RemoteCap revocation state capacity exceeded; existing revocations must be retained"
+        );
+        for token_id in &self.revoked_token_ids {
+            validate_remotecap_revoked_token_id(token_id)?;
+        }
+        Ok(())
+    }
+}
+
+fn validate_remotecap_revoked_token_id(token_id: &str) -> Result<()> {
+    anyhow::ensure!(
+        token_id.len() == 64
+            && token_id
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+        "RemoteCap revocation state contains a noncanonical token ID"
+    );
+    Ok(())
 }
 
 fn remotecap_cli_state_path() -> PathBuf {
@@ -9082,12 +9110,34 @@ fn load_remotecap_cli_state() -> Result<RemoteCapCliState> {
 }
 
 fn load_remotecap_cli_state_from(path: &Path) -> Result<RemoteCapCliState> {
-    // Prevent DoS via oversized state files - 4 MiB should be sufficient for CLI state
+    if !remotecap_cli_authority_started(path)? {
+        let legacy = load_legacy_remotecap_cli_state(path)?;
+        // A first revocation may publish its authority while the legacy file
+        // is being read. Never return that stale JSON after observing takeover.
+        if !remotecap_cli_authority_started(path)? {
+            return Ok(legacy);
+        }
+    }
+    let _lock = lock_remotecap_cli_state(path)?;
+    require_remotecap_cli_authority(path)?;
+    let connection = open_remotecap_cli_database(path)?;
+    read_remotecap_cli_database(&connection)
+}
+
+fn load_legacy_remotecap_cli_state(path: &Path) -> Result<RemoteCapCliState> {
     const MAX_CLI_STATE_BYTES: u64 = 4 << 20; // 4 MiB
 
     match crate::bounded_read(path, MAX_CLI_STATE_BYTES) {
-        Ok(raw) => serde_json::from_slice(&raw)
-            .with_context(|| format!("failed parsing remotecap state {}", path.display())),
+        Ok(raw) => {
+            anyhow::ensure!(
+                raw.iter().find(|byte| !byte.is_ascii_whitespace()) == Some(&b'{'),
+                "RemoteCap CLI state must be a JSON object"
+            );
+            let state: RemoteCapCliState = serde_json::from_slice(&raw)
+                .with_context(|| format!("failed parsing remotecap state {}", path.display()))?;
+            state.validate()?;
+            Ok(state)
+        }
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
             Ok(RemoteCapCliState::default())
         }
@@ -9105,15 +9155,455 @@ fn load_remotecap_cli_state_from(path: &Path) -> Result<RemoteCapCliState> {
     }
 }
 
-fn store_remotecap_cli_state(state: &RemoteCapCliState) -> Result<()> {
-    let path = remotecap_cli_state_path();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed creating {}", parent.display()))?;
+fn remotecap_cli_regular_file_exists(path: &Path) -> Result<bool> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            anyhow::ensure!(
+                metadata.file_type().is_file(),
+                "RemoteCap authority must be a regular file: {}",
+                path.display()
+            );
+            Ok(true)
+        }
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(source) => Err(source)
+            .with_context(|| format!("failed inspecting RemoteCap authority {}", path.display())),
     }
-    let rendered = serde_json::to_vec_pretty(state)?;
-    std::fs::write(&path, rendered)
-        .with_context(|| format!("failed writing remotecap state {}", path.display()))
+}
+
+fn remotecap_cli_authority_started(path: &Path) -> Result<bool> {
+    let database_exists = remotecap_cli_regular_file_exists(&path.with_extension("db"))?;
+    let marker_exists = remotecap_cli_regular_file_exists(&path.with_extension("db.authority"))?;
+    Ok(database_exists || marker_exists)
+}
+
+fn require_remotecap_cli_authority(path: &Path) -> Result<()> {
+    anyhow::ensure!(
+        remotecap_cli_regular_file_exists(&path.with_extension("db"))?
+            && remotecap_cli_regular_file_exists(&path.with_extension("db.authority"))?,
+        "RemoteCap revocation authority is incomplete; restore the committed database before authorizing remote operations"
+    );
+    let marker = crate::bounded_read(&path.with_extension("db.authority"), 128)
+        .context("failed reading RemoteCap revocation authority marker")?;
+    anyhow::ensure!(
+        marker == REMOTECAP_STATE_SCHEMA.as_bytes(),
+        "RemoteCap revocation authority marker is invalid"
+    );
+    Ok(())
+}
+
+fn lock_remotecap_cli_state(path: &Path) -> Result<std::fs::File> {
+    let parent = normalized_directory(path.parent().unwrap_or_else(|| Path::new(".")));
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("failed creating {}", parent.display()))?;
+    let lock_path = path.with_extension("db.lock");
+    remotecap_cli_regular_file_exists(&lock_path)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let file = options
+        .open(&lock_path)
+        .context("failed opening RemoteCap revocation authority lock")?;
+    let started = std::time::Instant::now();
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                anyhow::ensure!(
+                    started.elapsed() < std::time::Duration::from_secs(5),
+                    "timed out acquiring RemoteCap revocation authority lock"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(std::fs::TryLockError::Error(source)) => {
+                return Err(source).context("failed locking RemoteCap revocation authority");
+            }
+        }
+    }
+}
+
+fn open_remotecap_cli_database(path: &Path) -> Result<fsqlite::Connection> {
+    let database_path = path.with_extension("db");
+    let database_path = database_path
+        .to_str()
+        .context("RemoteCap revocation database path is not UTF-8")?;
+    let connection = fsqlite::Connection::open(database_path)
+        .context("failed opening RemoteCap revocation database")?;
+    for pragma in [
+        "PRAGMA busy_timeout=5000;",
+        "PRAGMA journal_mode=WAL;",
+        "PRAGMA synchronous=FULL;",
+    ] {
+        connection
+            .query(pragma)
+            .context("failed configuring durable RemoteCap revocation database")?;
+    }
+    Ok(connection)
+}
+
+fn read_remotecap_cli_database(connection: &fsqlite::Connection) -> Result<RemoteCapCliState> {
+    use fsqlite::SqliteValue;
+
+    let metadata = connection
+        .query("SELECT singleton, schema_version, legacy_import_complete FROM remotecap_meta LIMIT 2;")
+        .context("failed reading RemoteCap revocation database metadata")?;
+    anyhow::ensure!(
+        metadata.len() == 1
+            && matches!(metadata[0].values(), [SqliteValue::Integer(1), SqliteValue::Text(schema), SqliteValue::Integer(1)] if schema.as_bytes() == REMOTECAP_STATE_SCHEMA.as_bytes()),
+        "RemoteCap revocation database schema or committed legacy import is invalid"
+    );
+    let rows = connection
+        .query(&format!(
+            "SELECT token_id FROM remotecap_revocations LIMIT {};",
+            MAX_REMOTECAP_REVOKED_TOKENS + 1
+        ))
+        .context("failed reading RemoteCap revocations")?;
+    anyhow::ensure!(
+        rows.len() <= MAX_REMOTECAP_REVOKED_TOKENS,
+        "RemoteCap revocation state capacity exceeded; existing revocations must be retained"
+    );
+    let mut state = RemoteCapCliState::default();
+    for row in rows {
+        let Some(SqliteValue::Text(token_id)) = row.values().first() else {
+            anyhow::bail!("RemoteCap revocation database contains an invalid token ID");
+        };
+        validate_remotecap_revoked_token_id(token_id)?;
+        anyhow::ensure!(
+            state.revoked_token_ids.insert(token_id.to_string()),
+            "RemoteCap revocation database contains duplicate token IDs"
+        );
+    }
+    Ok(state)
+}
+
+/// Append one revocation while holding the cross-process lock from initial
+/// authority inspection through the explicit WAL/FULL transaction commit.
+/// Revocations are never evicted and stale whole-state snapshots are never
+/// written back. The legacy JSON is retained only as a one-time import source.
+fn revoke_remotecap_cli_token_at(path: &Path, token_id: &str) -> Result<()> {
+    use fsqlite::SqliteValue;
+    use fsqlite::compat::TransactionExt as _;
+
+    validate_remotecap_revoked_token_id(token_id)?;
+    let _lock = lock_remotecap_cli_state(path)?;
+    let legacy = if remotecap_cli_authority_started(path)? {
+        require_remotecap_cli_authority(path)?;
+        None
+    } else {
+        let mut state = load_legacy_remotecap_cli_state(path)?;
+        state.revoked_token_ids.insert(token_id.to_owned());
+        state.validate()?;
+        // The state directory itself may have been created by the lock
+        // helper. Persist every containing directory entry before the first
+        // authority marker, so a successful revoke cannot lose the entire
+        // new state directory across a filesystem crash.
+        #[cfg(unix)]
+        for ancestor in path.ancestors().skip(1) {
+            sync_directory(normalized_directory(ancestor))?;
+        }
+        // Publish and sync this before creating the database. A crash during
+        // first import must leave unavailable authority, never an empty or
+        // stale legacy fallback. The marker is never rewritten or removed.
+        write_private_file(
+            &path.with_extension("db.authority"),
+            REMOTECAP_STATE_SCHEMA.as_bytes(),
+            false,
+        )?;
+        Some(state)
+    };
+    let connection = open_remotecap_cli_database(path)?;
+    if legacy.is_none() {
+        let mut state = read_remotecap_cli_database(&connection)?;
+        state.revoked_token_ids.insert(token_id.to_owned());
+        state.validate()?;
+    }
+    let mut tx = connection
+        .transaction()
+        .context("failed starting RemoteCap revocation transaction")?;
+    if let Some(state) = legacy {
+        tx.execute_batch(
+            "CREATE TABLE remotecap_meta (
+                singleton INTEGER PRIMARY KEY,
+                schema_version TEXT NOT NULL,
+                legacy_import_complete INTEGER NOT NULL
+            );
+            CREATE TABLE remotecap_revocations (
+                token_id TEXT PRIMARY KEY NOT NULL
+            );",
+        )
+        .context("failed creating RemoteCap revocation schema")?;
+        tx.execute_with_params(
+            "INSERT INTO remotecap_meta(singleton, schema_version, legacy_import_complete) VALUES (1, ?1, 1);",
+            &[SqliteValue::Text(REMOTECAP_STATE_SCHEMA.into())],
+        )
+        .context("failed recording RemoteCap legacy import")?;
+        for imported_id in state.revoked_token_ids {
+            tx.execute_with_params(
+                "INSERT INTO remotecap_revocations(token_id) VALUES (?1);",
+                &[SqliteValue::Text(imported_id.into())],
+            )
+            .context("failed importing RemoteCap revocations")?;
+        }
+    } else {
+        tx.execute_with_params(
+            "INSERT INTO remotecap_revocations(token_id) VALUES (?1) ON CONFLICT(token_id) DO NOTHING;",
+            &[SqliteValue::Text(token_id.into())],
+        )
+        .context("failed appending RemoteCap revocation")?;
+    }
+    tx.commit()
+        .context("failed committing RemoteCap revocation")?;
+    #[cfg(unix)]
+    sync_directory(normalized_directory(
+        path.parent().unwrap_or_else(|| Path::new(".")),
+    ))?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod remotecap_revocation_store_tests {
+    use super::*;
+    use fsqlite::compat::TransactionExt as _;
+
+    fn token_id(number: u64) -> String {
+        format!("{number:064x}")
+    }
+
+    #[test]
+    fn imports_legacy_once_and_retains_every_committed_revocation() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.json");
+        let legacy = RemoteCapCliState {
+            revoked_token_ids: BTreeSet::from([token_id(1), token_id(2)]),
+        };
+        let original = serde_json::to_vec(&legacy).unwrap();
+        std::fs::write(&path, &original).unwrap();
+        assert_eq!(
+            load_remotecap_cli_state_from(&path)
+                .unwrap()
+                .revoked_token_ids,
+            legacy.revoked_token_ids
+        );
+
+        revoke_remotecap_cli_token_at(&path, &token_id(3)).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        // An old importer or damaged leftover JSON can never roll authority
+        // back after the database transaction has committed.
+        std::fs::write(&path, b"not valid legacy JSON anymore").unwrap();
+        revoke_remotecap_cli_token_at(&path, &token_id(4)).unwrap();
+        revoke_remotecap_cli_token_at(&path, &token_id(4)).unwrap();
+        assert_eq!(
+            load_remotecap_cli_state_from(&path)
+                .unwrap()
+                .revoked_token_ids,
+            BTreeSet::from([token_id(1), token_id(2), token_id(3), token_id(4)])
+        );
+    }
+
+    #[test]
+    fn missing_or_corrupt_initialized_database_never_falls_back_to_json() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.json");
+        std::fs::write(&path, br#"{"revoked_token_ids":[]}"#).unwrap();
+        revoke_remotecap_cli_token_at(&path, &token_id(1)).unwrap();
+        std::fs::rename(path.with_extension("db"), path.with_extension("db.saved")).unwrap();
+
+        assert!(load_remotecap_cli_state_from(&path).is_err());
+        assert!(revoke_remotecap_cli_token_at(&path, &token_id(2)).is_err());
+        assert!(!path.with_extension("db").exists());
+
+        std::fs::write(path.with_extension("db"), b"corrupt database").unwrap();
+        assert!(load_remotecap_cli_state_from(&path).is_err());
+        assert!(revoke_remotecap_cli_token_at(&path, &token_id(2)).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), br#"{"revoked_token_ids":[]}"#);
+    }
+
+    #[test]
+    fn interrupted_initial_import_is_unavailable_instead_of_empty() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.json");
+        write_private_file(
+            &path.with_extension("db.authority"),
+            REMOTECAP_STATE_SCHEMA.as_bytes(),
+            false,
+        )
+        .unwrap();
+        assert!(load_remotecap_cli_state_from(&path).is_err());
+        assert!(revoke_remotecap_cli_token_at(&path, &token_id(1)).is_err());
+        assert!(!path.with_extension("db").exists());
+
+        // A database file without the committed schema/import row is also
+        // incomplete, even if opening the SQLite file itself succeeds.
+        drop(open_remotecap_cli_database(&path).unwrap());
+        assert!(load_remotecap_cli_state_from(&path).is_err());
+        assert!(revoke_remotecap_cli_token_at(&path, &token_id(1)).is_err());
+    }
+
+    #[test]
+    fn malformed_legacy_state_is_not_repaired_or_imported() {
+        for malformed in [
+            r#"{"revoked_token_ids":[],"revoked_token_ids":[]}"#,
+            r#"{"revoked_token_ids":[],"unrecognized":true}"#,
+            r#"[[]]"#,
+            r#"{"revoked_token_ids":["not-an-issued-token-id"]}"#,
+            r#"{"revoked_token_ids":null}"#,
+            r#"{}"#,
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("state.json");
+            std::fs::write(&path, malformed).unwrap();
+            assert!(load_remotecap_cli_state_from(&path).is_err());
+            assert!(revoke_remotecap_cli_token_at(&path, &token_id(1)).is_err());
+            assert!(!remotecap_cli_authority_started(&path).unwrap());
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), malformed);
+        }
+    }
+
+    #[test]
+    fn rolled_back_append_preserves_previous_durable_revocations() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.json");
+        revoke_remotecap_cli_token_at(&path, &token_id(1)).unwrap();
+        {
+            let _lock = lock_remotecap_cli_state(&path).unwrap();
+            let connection = open_remotecap_cli_database(&path).unwrap();
+            let tx = connection.transaction().unwrap();
+            tx.execute_with_params(
+                "INSERT INTO remotecap_revocations(token_id) VALUES (?1);",
+                &[fsqlite::SqliteValue::Text(token_id(2).into())],
+            )
+            .unwrap();
+            // Drop without commit emulates an interrupted operation before
+            // its durability boundary; no CLI success could have been emitted.
+        }
+        assert_eq!(
+            load_remotecap_cli_state_from(&path)
+                .unwrap()
+                .revoked_token_ids,
+            BTreeSet::from([token_id(1)])
+        );
+        revoke_remotecap_cli_token_at(&path, &token_id(3)).unwrap();
+        assert_eq!(
+            load_remotecap_cli_state_from(&path)
+                .unwrap()
+                .revoked_token_ids,
+            BTreeSet::from([token_id(1), token_id(3)])
+        );
+    }
+
+    #[test]
+    fn invalid_authority_marker_and_unmarked_database_fail_closed() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.json");
+        revoke_remotecap_cli_token_at(&path, &token_id(1)).unwrap();
+        std::fs::write(path.with_extension("db.authority"), b"unknown schema").unwrap();
+        assert!(load_remotecap_cli_state_from(&path).is_err());
+        assert!(revoke_remotecap_cli_token_at(&path, &token_id(2)).is_err());
+        std::fs::rename(
+            path.with_extension("db.authority"),
+            path.with_extension("db.authority.saved"),
+        )
+        .unwrap();
+        assert!(load_remotecap_cli_state_from(&path).is_err());
+        assert!(revoke_remotecap_cli_token_at(&path, &token_id(2)).is_err());
+    }
+
+    #[test]
+    fn independent_processes_commit_and_recover_revocations() {
+        const CHILD_PATH: &str = "FRANKEN_NODE_TEST_REVOCATION_STORE_PATH";
+        const CHILD_ID: &str = "FRANKEN_NODE_TEST_REVOCATION_STORE_ID";
+        const CHILD_MODE: &str = "FRANKEN_NODE_TEST_REVOCATION_STORE_MODE";
+        if let Some(path) = std::env::var_os(CHILD_PATH) {
+            let path = PathBuf::from(path);
+            let id = std::env::var(CHILD_ID).unwrap();
+            if std::env::var(CHILD_MODE).unwrap() == "commit" {
+                revoke_remotecap_cli_token_at(&path, &id).unwrap();
+                std::process::exit(71);
+            }
+            let _lock = lock_remotecap_cli_state(&path).unwrap();
+            let connection = open_remotecap_cli_database(&path).unwrap();
+            let tx = connection.transaction().unwrap();
+            tx.execute_with_params(
+                "INSERT INTO remotecap_revocations(token_id) VALUES (?1);",
+                &[fsqlite::SqliteValue::Text(id.into())],
+            )
+            .unwrap();
+            // Exit without dropping the transaction, connection or lock. The
+            // next process must recover committed history without this append.
+            std::process::exit(72);
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.json");
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&RemoteCapCliState {
+                revoked_token_ids: BTreeSet::from([token_id(1)]),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let test_name = format!(
+            "{}::independent_processes_commit_and_recover_revocations",
+            module_path!().split_once("::").unwrap().1
+        );
+        let executable = std::env::current_exe().unwrap();
+        let child_command = |id: u64, mode: &str| {
+            let mut command = std::process::Command::new(&executable);
+            command
+                .args(["--exact", &test_name, "--nocapture"])
+                .env(CHILD_PATH, &path)
+                .env(CHILD_ID, token_id(id))
+                .env(CHILD_MODE, mode)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped());
+            command
+        };
+        let lock = lock_remotecap_cli_state(&path).unwrap();
+        let mut children: Vec<_> = (2..=9)
+            .map(|id| child_command(id, "commit").spawn().unwrap())
+            .collect();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        for child in &mut children {
+            assert!(child.try_wait().unwrap().is_none());
+        }
+        drop(lock);
+        for child in children {
+            let result = child.wait_with_output().unwrap();
+            assert_eq!(
+                result.status.code(),
+                Some(71),
+                "concurrent child failed: {}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+        }
+        let expected: BTreeSet<_> = (1..=9).map(token_id).collect();
+        assert_eq!(
+            load_remotecap_cli_state_from(&path)
+                .unwrap()
+                .revoked_token_ids,
+            expected
+        );
+        let interrupted = child_command(10, "interrupt").output().unwrap();
+        assert_eq!(interrupted.status.code(), Some(72));
+        assert_eq!(
+            load_remotecap_cli_state_from(&path)
+                .unwrap()
+                .revoked_token_ids,
+            expected
+        );
+        revoke_remotecap_cli_token_at(&path, &token_id(11)).unwrap();
+        assert!(
+            load_remotecap_cli_state_from(&path)
+                .unwrap()
+                .revoked_token_ids
+                .contains(&token_id(11))
+        );
+    }
 }
 
 fn read_remotecap_token(path: &Path) -> Result<RemoteCap> {
@@ -24163,12 +24653,7 @@ fn handle_remotecap_revoke(args: &RemoteCapRevokeArgs) -> Result<()> {
     };
     let audit_event = gate.revoke(&cap, now_epoch_secs, &args.trace_id);
 
-    let mut state = match load_remotecap_cli_state() {
-        Ok(state) => state,
-        Err(err) => return remotecap_fail("remotecap.revoke", args.json, err),
-    };
-    state.revoked_token_ids.insert(cap.token_id().to_string());
-    if let Err(err) = store_remotecap_cli_state(&state) {
+    if let Err(err) = revoke_remotecap_cli_token_at(&remotecap_cli_state_path(), cap.token_id()) {
         return remotecap_fail("remotecap.revoke", args.json, err);
     }
 
